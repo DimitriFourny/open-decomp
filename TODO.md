@@ -19,18 +19,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 ### Metadata, presentation, and durable annotations
 
-- [ ] **T22 — Implement C-like pseudocode emission and instruction mappings**
-  - Depends on: T20, T21.
-  - Owns: `src/emitters/c/`, emitter interface implementation and behavioral mapping tests.
-  - Work: Port useful emission/presentation/runtime-helper behavior into the first emitter. Handle precedence, declarations, signedness/widths, identifiers, structures/signatures, labels, and helper explanations. Emit text plus statement/span-to-IR/instruction mappings and explicit reconstruction/coverage diagnostics. Formatting must not perform semantic analysis.
-  - Acceptance: Both target corpora yield readable C-like output with correct expression grouping and observable semantics. Mappings still identify original instructions after simplification; names are escaped without losing original identities. Outputs do not claim to be original or necessarily recompilable C. Tests assert semantics/mappings, not incidental wording. Contributes A07.
-
-- [ ] **T23 — Implement transactional annotation edits and revision semantics**
-  - Depends on: T05, T20.
-  - Owns: `src/project/annotations/`, revision/conflict/invalidation contract tests.
-  - Work: Implement atomic name, note, type/structure, and signature edits using stable IDs and `expected_revision`. Store author/origin, evidence references, and assertion status; support retraction/removal without deleting immutable binary facts. Produce conservative dependency invalidation signals and preserve edit history.
-  - Acceptance: A successful batch advances revision once; a stale or invalid batch makes no partial edits. Names/types/notes and provenance survive reopen. Retraction removes the assertion from subsequent analysis rather than leaving stale inferred facts, and function-ID changes do not silently reattach notes to unrelated entities. Contributes A08.
-
 ### Worker execution, service, and MCP integration
 
 - [ ] **T25 — Integrate the complete decompilation pipeline and revision-aware cache**
@@ -93,9 +81,32 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Acceptance: The complete investigation workflow works for the selected target with evidence-backed semantics, and existing targets remain correct. Public tools require no architecture-specific command fork.
 
 ## Doing
+- [ ] **T22 — Implement C-like pseudocode emission and instruction mappings**
+  - Depends on: T20, T21.
+  - Owns: `src/emitters/c/`, emitter interface implementation and behavioral mapping tests.
+  - Work: Port useful emission/presentation/runtime-helper behavior into the first emitter. Handle precedence, declarations, signedness/widths, identifiers, structures/signatures, labels, and helper explanations. Emit text plus statement/span-to-IR/instruction mappings and explicit reconstruction/coverage diagnostics. Formatting must not perform semantic analysis.
+  - Acceptance: Both target corpora yield readable C-like output with correct expression grouping and observable semantics. Mappings still identify original instructions after simplification; names are escaped without losing original identities. Outputs do not claim to be original or necessarily recompilable C. Tests assert semantics/mappings, not incidental wording. Contributes A07.
+  - Owner: CEmitter (astra-worker).
+
+- [ ] **T23 — Implement transactional annotation edits and revision semantics**
+  - Depends on: T05, T20.
+  - Owns: `src/project/annotations/`, revision/conflict/invalidation contract tests.
+  - Work: Implement atomic name, note, type/structure, and signature edits using stable IDs and `expected_revision`. Store author/origin, evidence references, and assertion status; support retraction/removal without deleting immutable binary facts. Produce conservative dependency invalidation signals and preserve edit history.
+  - Acceptance: A successful batch advances revision once; a stale or invalid batch makes no partial edits. Names/types/notes and provenance survive reopen. Retraction removes the assertion from subsequent analysis rather than leaving stale inferred facts, and function-ID changes do not silently reattach notes to unrelated entities. Contributes A08.
+  - Owner: AnnotationService (sol-worker).
+
+
 
 
 ## Done
+- [x] **C02 — Allow revision-scoped artifact reuse by cache-hit jobs**
+  - Depends on: T05, T24, T26; integration prerequisite for T25.
+  - Owns: Existing store artifact/job validation and focused persistence regressions.
+  - Work: Permit a cache-hit job to reference an already published artifact from the same project/input snapshot, without duplicating artifact bytes or relaxing publication, identity, revision or terminal-state checks.
+  - Acceptance: Producer and cache-hit job retain the same artifact across reopen; unpublished, forged, foreign-project and wrong-revision references fail without changing the job.
+  - Owner: Coordinator.
+  - Evidence: Source-runtime PE discovery/artifact publication reproduced the rejected cache-hit reference before the fix and preserved the same artifact in both completed jobs after reopen afterward. All 8 store tests and focused strict contract/store typechecking passed, including forged/unpublished/project/revision and cancellation boundaries. Paths: `src/project/store/index.ts`, `test/project/store/store.test.ts`.
+
 - [x] **T20 — Implement recovered types and constraint/evidence handling**
   - Depends on: T17, T18, T19.
   - Owns: `src/analysis/types/`, type-recovery behavior tests.

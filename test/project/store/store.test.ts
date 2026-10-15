@@ -112,6 +112,40 @@ test('artifact publication binds job/project/revision and cancellation cannot pu
   assert.equal(Buffer.from((await state.store.readArtifact(args)).bytes_hex, 'hex').toString(), 'return ');
 });
 
+test('cache-hit jobs reuse published artifacts without losing scope or terminal-state checks', async t => {
+  const { state, raw, sha256, sliceId, fn } = await project(t);
+  const producer: Job = { id: newIdentity('job'), project_id: state.store.project_id, input_revision: 1, operation: 'function_decompile', state: 'running', progress: { phase: 'publish', completed: 0, total: 1 }, artifacts: [], diagnostics: [], published_revision: null };
+  const cache: CacheIdentity = { image_sha256: sha256, slice_id: sliceId, function_id: fn.id, target: { format: 'pe', architecture: 'x86_64', abi: 'windows-x64', endian: 'little', address_bits: 64, features: [] }, versions: { backend: 'cache-reference-test', loader: null, decoder: null, lifter: null, analysis: null, abi: null, emitter: null }, evidence_revision: 1, annotation_revision: 1, options: DEFAULT_ANALYSIS_OPTIONS, budget: DEFAULT_BUDGET };
+  state.store.saveJob(producer);
+  const publication = await state.store.publishArtifact({ job_id: producer.id, expected_revision: 1, media_type: 'application/octet-stream', bytes: raw, cache });
+  assert.equal(publication.state, 'published');
+  if (publication.state !== 'published') assert.fail('Publication failed');
+  const artifact = publication.artifact;
+  const hit: Job = { ...producer, id: newIdentity('job'), progress: { phase: 'cache', completed: 1, total: 1 } };
+  state.store.saveJob(hit);
+  for (const invalid of [
+    { ...artifact, id: newIdentity('artifact') },
+    { ...artifact, sha256: '0'.repeat(64) },
+    { ...artifact, project_id: newIdentity('project') },
+    { ...artifact, revision: 0 },
+  ]) {
+    assert.throws(() => state.store.saveJob({ ...hit, state: 'completed', artifacts: [invalid], published_revision: 1 }));
+    assert.deepEqual(state.store.readJob(hit.id), hit);
+  }
+  state.store.saveJob({ ...hit, state: 'completed', artifacts: [artifact], published_revision: 1 });
+  const cancelled: Job = { ...producer, id: newIdentity('job'), state: 'cancelled' };
+  state.store.saveJob(cancelled);
+  assert.throws(() => state.store.saveJob({ ...cancelled, state: 'completed', artifacts: [artifact], published_revision: 1 }), { code: 'invalid_input' });
+  assert.equal(state.store.readJob(cancelled.id)?.state, 'cancelled');
+  await state.store.close(); state.store = SqliteProjectStore.open(state.path, 'resume');
+  const durable = state.store.readJob(hit.id);
+  assert.equal(durable?.state, 'completed'); assert.deepEqual(durable?.artifacts, [artifact]);
+  assert.deepEqual(state.store.readJob(producer.id)?.artifacts, durable.artifacts);
+  assert.deepEqual(state.store.findArtifact(cache), artifact);
+  const bytes = await state.store.readArtifact(artifactReadArgsSchema.parse({ project_id: state.store.project_id, revision: 1, artifact_id: durable.artifacts[0]!.id, offset: '0x0', length: 2 }));
+  assert.equal(bytes.bytes_hex, '90c3');
+});
+
 test('newer schema rejection leaves database bytes untouched and an active store excludes a second writer', async t => {
   const { state } = await project(t);
   assert.throws(() => SqliteProjectStore.open(state.path, 'resume'), error => error instanceof Error && 'errcode' in error && error.errcode === 5);

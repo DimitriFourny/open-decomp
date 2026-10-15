@@ -506,7 +506,9 @@ export class SqliteProjectStore implements ProjectStore {
     if (prior && ['completed', 'cancelled', 'failed', 'stale'].includes(prior.state) && prior.state !== job.state) fail('invalid_input', 'Terminal job cannot restart');
     if (prior?.state === 'running' && job.state === 'queued') fail('invalid_input', 'Running job cannot return to queue');
     for (const artifact of job.artifacts) {
-      const row = this.#db.prepare('SELECT payload FROM artifacts WHERE id=? AND job_id=?').get(artifact.id, job.id);
+      // Cache-hit jobs may reuse publication from another job in this input snapshot.
+      // encodeJob enforces project/revision scope; the published metadata must match.
+      const row = this.#db.prepare('SELECT payload FROM artifacts WHERE id=?').get(artifact.id);
       if (!row || fingerprint(encodeArtifact(decodeStored<Artifact>(row['payload']))) !== fingerprint(encodeArtifact(artifact))) fail('invalid_input', 'Job artifact has not been published');
     }
     this.#db.prepare('INSERT OR REPLACE INTO jobs VALUES (?,?)').run(job.id, encodeStored(job));
