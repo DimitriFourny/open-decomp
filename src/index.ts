@@ -29,3 +29,5 @@ export { recoverLibraryContracts, type LibraryContract, type LibraryContracts, t
 export { recoverRuntimeMetadata, type RuntimeRecord, type RuntimeMetadata, type RuntimeKind } from './metadata/runtime/index.js';
 export * as TypeAnalysis from './analysis/types/index.js';
 export { QueryService, type QueryCallOptions } from './service/queries/index.js';
+export { CEmitter, emitC, type CEmissionInput, type CEmissionResult } from './emitters/c/index.js';
+export { AnnotationService, createTrustedSemanticCatalog, resolveDurableSubject, type AnnotationCommitHook, type AnnotationSubject, type ActiveAnnotationView, type TrustedSemanticCatalog } from './project/annotations/index.js';

@@ -81,24 +81,28 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Acceptance: The complete investigation workflow works for the selected target with evidence-backed semantics, and existing targets remain correct. Public tools require no architecture-specific command fork.
 
 ## Doing
-- [ ] **T22 — Implement C-like pseudocode emission and instruction mappings**
+
+
+
+## Done
+- [x] **T22 — Implement C-like pseudocode emission and instruction mappings**
   - Depends on: T20, T21.
   - Owns: `src/emitters/c/`, emitter interface implementation and behavioral mapping tests.
   - Work: Port useful emission/presentation/runtime-helper behavior into the first emitter. Handle precedence, declarations, signedness/widths, identifiers, structures/signatures, labels, and helper explanations. Emit text plus statement/span-to-IR/instruction mappings and explicit reconstruction/coverage diagnostics. Formatting must not perform semantic analysis.
   - Acceptance: Both target corpora yield readable C-like output with correct expression grouping and observable semantics. Mappings still identify original instructions after simplification; names are escaped without losing original identities. Outputs do not claim to be original or necessarily recompilable C. Tests assert semantics/mappings, not incidental wording. Contributes A07.
   - Owner: CEmitter (astra-worker).
+  - Integrated: `src/emitters/c/`, `test/emitters/c/`, public exports and core documentation. Explicit finite-width machine-state pseudocode, separate source evidence, escaped identities/notes, simultaneous edge copies, physical effects and bounded UTF-16 instruction mappings.
+  - Verified: macOS Node 24.22.0 full check 589/589, strict typecheck and build; compiled emission for arithmetic/memory/stack/vector on both targets within default budgets, with codec round-trips and every surviving statement/control mapped to original instructions. Independent emitted-text execution covers arithmetic, memory, loops, switches, call slices and faults; undefined x86 AF remains indeterminate. Full physical-state output is deliberately explicit and can be verbose.
 
-- [ ] **T23 — Implement transactional annotation edits and revision semantics**
+- [x] **T23 — Implement transactional annotation edits and revision semantics**
   - Depends on: T05, T20.
   - Owns: `src/project/annotations/`, revision/conflict/invalidation contract tests.
   - Work: Implement atomic name, note, type/structure, and signature edits using stable IDs and `expected_revision`. Store author/origin, evidence references, and assertion status; support retraction/removal without deleting immutable binary facts. Produce conservative dependency invalidation signals and preserve edit history.
   - Acceptance: A successful batch advances revision once; a stale or invalid batch makes no partial edits. Names/types/notes and provenance survive reopen. Retraction removes the assertion from subsequent analysis rather than leaving stale inferred facts, and function-ID changes do not silently reattach notes to unrelated entities. Contributes A08.
   - Owner: AnnotationService (sol-worker).
+  - Integrated: `src/project/annotations/`, `test/project/annotations/`, public exports and core documentation. Trusted snapshot-bound semantic catalogs, atomic edits/evidence/job hooks, scoped reachable type declarations, immutable assertion identities and retained removal/retraction history.
+  - Verified: 10 annotation regressions within the 589/589 full check. Compiled Mach-O and PE lifecycles import → assert types/signature/name/note → reopen → reject stale edit → recover complete ABI → emit renamed/noted output → retract/remove → reopen. No assertion enters immutable fact tables; unrelated function type declarations do not leak into the selected function.
 
-
-
-
-## Done
 - [x] **C02 — Allow revision-scoped artifact reuse by cache-hit jobs**
   - Depends on: T05, T24, T26; integration prerequisite for T25.
   - Owns: Existing store artifact/job validation and focused persistence regressions.
@@ -268,6 +272,7 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Acceptance: Windows x86-64 executes the decoder/behavior checks and compiled API smoke; later T29/T31 checks run against the completed application. No emulation-only claim substitutes for guest Windows execution.
   - Owner: WindowsVM (sol-worker).
   - Evidence: Frozen 36f3fb2 passed on Windows 10 Enterprise LTSC 10.0.19044.3324, official Node 24.22.0 win32/x64: unmodified npm run check (175 tests, typecheck/build), explicit four-process full suite, and compiled PE/ARM64 decoding smoke. QEMU 11.1.2 TCG, qemu64, one vCPU, 4096 MiB RAM; no network or host shares. Initial max/four-vCPU native crashes remain recorded; exact emulator defect is unproven. Raw exits/results are in ignored `.local/windows/evidence/guest-serial.log` and `results.json`; retained launch/refresh/rerun scripts support T29/T31. This is foundation compatibility evidence, not completed-application acceptance or native performance.
+  - Follow-up: Frozen `beda23a` ran 561 checks on the same Windows guest: 557 passed, zero assertion failures, four outer-watchdog cancellations, zero skips; iced-x86 21/21, compiled build and cross-target decode smoke passed. Extended only the four observed test watchdogs, preserving production deadlines and the 200 ms blocked-worker assertion; all 16 affected macOS cases passed. Corrected Windows rerun is pending. Raw run: ignored `milestone-beda23a.json` / guest serial log; not release acceptance.
 
 - [x] **T09 — Integrate the iced-x86 WASM decoder adapter**
   - Depends on: T02, T03.

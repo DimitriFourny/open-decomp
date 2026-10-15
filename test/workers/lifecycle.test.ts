@@ -25,7 +25,7 @@ async function setup(t: TestContext, options: Partial<WorkerPoolOptions> = {}) {
   return { root, pool };
 }
 
-test('real Mach-O and PE imports run in persistent children and survive close/reopen', { timeout: 30000 }, async t => {
+test('real Mach-O and PE imports run in persistent children and survive close/reopen', { timeout: 120000 }, async t => {
   const { root, pool } = await setup(t);
   for (const [index, source] of [macho, pe].entries()) {
     const path = join(root, `project-${index}`);
@@ -49,7 +49,7 @@ test('real Mach-O and PE imports run in persistent children and survive close/re
   }
 });
 
-test('canonical authorization, worker capacity and exclusive ownership reject conflicting callers', { timeout: 30000 }, async t => {
+test('canonical authorization, worker capacity and exclusive ownership reject conflicting callers', { timeout: 120000 }, async t => {
   const { root, pool } = await setup(t, { max_workers: 1 });
   await assert.rejects(pool.open({ path: join(root, '..', 'unauthorized-project'), mode: 'create' }), { code: 'permission_denied' });
   const project = await pool.open({ path: join(root, 'project'), mode: 'create' });
@@ -161,7 +161,7 @@ test('pre-aborted submissions and actual loader work budgets do not publish imag
   assert.equal(project.snapshot.revision, 0);
 });
 
-test('forced owner death releases SQLite locks and durable completed jobs on every host', { timeout: 30000 }, async t => {
+test('forced owner death releases SQLite locks and durable completed jobs on every host', { timeout: 120000 }, async t => {
   const { root, pool } = await setup(t);
   const path = join(root, 'project');
   const project = await pool.open({ path, mode: 'create' });

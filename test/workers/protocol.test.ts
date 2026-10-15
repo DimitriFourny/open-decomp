@@ -29,7 +29,7 @@ test('coarse command schemas reject extra code, SQL, lifecycle dispatch and malf
   assert.equal(eventSchema.safeParse({ kind: 'job', id, job: { state: 'completed' } }).success, false);
 });
 
-test('the real child process exits on an oversized frame rather than allocating the claimed payload', { timeout: 10000 }, async t => {
+test('the real child process exits on an oversized frame rather than allocating the claimed payload', { timeout: 30000 }, async t => {
   const source = import.meta.url.endsWith('.ts');
   const entry = new URL(source ? '../../src/workers/entry.ts' : '../../src/workers/entry.js', import.meta.url);
   const child = spawn(process.execPath, [...(source ? ['--import', 'tsx'] : []), fileURLToPath(entry)], { stdio: ['pipe', 'pipe', 'pipe'] });
