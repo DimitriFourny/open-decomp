@@ -4,7 +4,7 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 ### Assignment and integration rules
 
-- A task is ready only when every task in its `Depends on` field is integrated and in `Done`. `None` means no prerequisite.
+- A task is ready when its dependency implementations are integrated and verified. Ordinarily dependencies are in `Done`; a task blocked solely on unavailable host verification may be consumed as an integrated interface, but stays in `Doing` with that blocker. This scheduling exception never waives acceptance or permits release completion without the missing host run.
 - On assignment, move the block to `Doing` and add `Owner`. On completion, record changed paths and verification evidence before moving it to `Done`. Keep blockers explicit.
 - Give each subagent PLAN.md, its full task block, and the completed dependency contracts. The agent owns investigation and implementation within that slice; it must not invent a second interface or edit sibling-owned modules without coordination.
 - One integration owner controls `src/core/` contracts, dependency manifests, shared fixture manifests, and cross-slice integration. Request contract changes rather than silently changing another task's assumptions.
@@ -16,18 +16,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 ### Foundation and contracts
 
 ### Independent loading, decoding, storage, and ABI slices
-
-- [ ] **T10 — Implement the Darwin ARM64 ABI profile**
-  - Depends on: T04.
-  - Owns: `src/abi/darwin-arm64/`, Darwin ABI behavior tests.
-  - Work: Extract Darwin-specific argument/return rules, preserved registers, stack alignment/arguments, scalar floating-point and supported aggregate rules, variadic behavior, and target data layout from the existing implementation and ABI evidence. Define conservative call clobbers and unsupported-contract diagnostics. Keep library-name lookup outside the ABI profile.
-  - Acceptance: Fixtures establish integer/FP parameters and returns, stack arguments, preserved/clobbered state, variadic stack handling, and supported aggregate boundaries. Unknown signatures do not acquire argument counts from names. Existing applicable Darwin behavior remains represented without generic passes inspecting ARM register names. Contributes A04/A06.
-
-- [ ] **T11 — Implement the Windows x64 ABI profile**
-  - Depends on: T04.
-  - Owns: `src/abi/windows-x64/`, Windows ABI behavior tests.
-  - Work: Implement parameter/return locations, shadow space, stack alignment/arguments, volatile/nonvolatile integer and SIMD state, scalar floating-point and supported aggregate rules, variadic behavior, and LLP64 data layout. Connect unwind metadata as evidence rather than an unconditional function/signature oracle. Explicitly reject or mark unsupported alternative conventions.
-  - Acceptance: Compiler fixtures exercise register and stack parameters, shadow-space handling, FP/variadic cases, structure-return boundaries, and preserved registers. Windows `long` and pointer widths are distinct and correct. Unknown calls retain conservative memory/register effects. Contributes A05/A06.
 
 ### Homemade lifting and shared analysis
 
@@ -42,12 +30,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Owns: `src/lifters/x86_64/`, x86 semantic regressions.
   - Work: Lift the agreed corpus's integer/control-flow, effective-address, stack/load/store, scalar FP/common SIMD, and call instructions. Implement subregister writes, zero extension, implicit operands, flags/conditions, sign/zero extension, and relevant prefix behavior from architectural semantics. Preserve trap/undefined/unknown distinctions and declare unsupported instruction families honestly.
   - Acceptance: Semantic oracles cover AL/AH/AX/EAX/RAX interactions, arithmetic/carry/overflow, shifts with edge counts, MUL/DIV effects, conditional branches/moves, RIP-relative accesses, stack operations, and FP/vector corpus cases. Metadata about reads/writes is not used as a substitute for instruction semantics. Contributes A05/A06.
-
-- [ ] **T14 — Implement function discovery and control-flow graph construction**
-  - Depends on: T04, T06, T07, T08, T09.
-  - Owns: `src/analysis/discovery/`, `src/analysis/cfg/`, discovery/CFG tests.
-  - Work: Seed discovery from entry points, exports/symbols, trustworthy loader metadata, and discovered calls; traverse bounded code regions using structured decoder flow. Preserve noncontiguous ranges, data-in-code, tail calls, returns, invalid bytes, and unresolved indirect transfers. Attach function-boundary evidence and define deterministic identity changes for splits/merges.
-  - Acceptance: Stripped and symbol-bearing fixtures produce expected reachable blocks/edges without linear-sweeping known data into functions. Loops, shared tails, gaps, jump-table candidates, unresolved edges, and conflicting boundary evidence remain navigable and explicit. Contributes A03.
 
 - [ ] **T15 — Build strings, cross-reference indexes, and bounded target recovery**
   - Depends on: T14.
@@ -68,12 +50,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Acceptance: Both target corpora recover expected call arguments and stack objects without conflating Windows shadow space with locals or Darwin rules. Unknown/unsupported contracts do not invent signatures or initialized arguments; escapes and writes inhibit unsafe transformations. Contributes A04/A05/A06.
 
 ### Metadata, presentation, and durable annotations
-
-- [ ] **T18 — Port Mach-O DWARF and debug-location evidence**
-  - Depends on: T06.
-  - Owns: `src/metadata/dwarf/`, `src/metadata/debug/`, DWARF regression tests.
-  - Work: Reuse `debug-info.ts`, `dwarf*.ts`, and applicable `decompiler-debug.ts` behavior without browser coupling. Import supported signatures/types, line/source mappings, scoped variable locations, and inline-scope evidence from local authorized debug inputs. Validate image/debug identity; keep display names separate from structural contracts and unsupported encodings explicit.
-  - Acceptance: Existing applicable debug regressions retain supported signatures, scoped storage names, and source mappings. Conflicting/mismatched debug files do not silently alter semantics. Missing debug information leaves native analysis usable. No symbol-server access occurs automatically. Contributes A04/A06.
 
 - [ ] **T19 — Integrate symbol names, runtime metadata, and library contracts**
   - Depends on: T06, T07, T10, T11.
@@ -106,12 +82,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Acceptance: A successful batch advances revision once; a stale or invalid batch makes no partial edits. Names/types/notes and provenance survive reopen. Retraction removes the assertion from subsequent analysis rather than leaving stale inferred facts, and function-ID changes do not silently reattach notes to unrelated entities. Contributes A08.
 
 ### Worker execution, service, and MCP integration
-
-- [ ] **T24 — Implement bounded project workers and job lifecycle**
-  - Depends on: T05, T06, T07.
-  - Owns: `src/workers/`, worker lifecycle/resource behavior tests.
-  - Work: Run real project import/load/store work in persistent bounded child processes. Implement typed coarse-grained IPC, project write ownership, job IDs/states, progress, cancellation, queue limits, deadlines, and crash recovery. Keep synchronous SQLite and CPU work off the MCP event loop; avoid serializing whole IR graphs per instruction/request.
-  - Acceptance: Actual Mach-O/PE imports execute through workers and survive close/resume. Cancellation, queued-work limits, forced worker failure, and interrupted writes produce explicit states without corrupting the project. Completed/cancelled races have deterministic outcomes, and the host remains responsive. Contributes A08/A10.
 
 - [ ] **T25 — Integrate the complete decompilation pipeline and revision-aware cache**
   - Depends on: T15, T22, T23, T24.
@@ -180,40 +150,41 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 ## Doing
 
-- [ ] **T04 — Implement typed semantic IR, provenance, and invariant verification**
-  - Depends on: T02, T03.
-  - Owns: `src/ir/`, IR behavior/invariant tests.
-  - Work: Implement discriminated semantic nodes, typed builders, bit-vector widths, register slices, float/vector types, memory/effect ordering, flags, calls, branches, and unknown-effect boundaries. Define register-form lifting and shared SSA/CFG interfaces, stable value/block identities, and source provenance. Provide validation and semantic fixture evaluation for supported primitives; do not use C-expression strings as IR.
-  - Acceptance: The verifier rejects incompatible widths, invalid value/block references, broken control-flow arity, and illegal effect ordering. Semantic checks exercise wrapping, extension, signed operations, register slices, and memory effects. Provenance survives replacement/combination of nodes, and unsupported effects cannot be mistaken for a no-op or established trap.
-  - Owner: SemanticIR (astra-worker).
+- [ ] **T10 — Implement the Darwin ARM64 ABI profile**
+  - Depends on: T04.
+  - Owns: `src/abi/darwin-arm64/`, Darwin ABI behavior tests.
+  - Work: Extract Darwin-specific argument/return rules, preserved registers, stack alignment/arguments, scalar floating-point and supported aggregate rules, variadic behavior, and target data layout from the existing implementation and ABI evidence. Define conservative call clobbers and unsupported-contract diagnostics. Keep library-name lookup outside the ABI profile.
+  - Acceptance: Fixtures establish integer/FP parameters and returns, stack arguments, preserved/clobbered state, variadic stack handling, and supported aggregate boundaries. Unknown signatures do not acquire argument counts from names. Existing applicable Darwin behavior remains represented without generic passes inspecting ARM register names. Contributes A04/A06.
+  - Owner: DarwinABI (sol-worker).
 
-- [ ] **T05 — Implement durable project storage and immutable image import**
-  - Depends on: T03.
-  - Owns: `src/project/store/`, schema migrations, project-store behavior tests.
-  - Work: Implement SQLite persistence behind the store contract using the pinned runtime's `node:sqlite` API. Import one immutable project-owned snapshot per content identity, record selected slices, and store entities/evidence/revisions/artifact metadata losslessly. Add transactional mutation primitives, versioned migrations, conservative project locking, and atomic artifact publication. Do not expose arbitrary SQL.
-  - Acceptance: Import, close, and reopen preserve identity and facts; changed input bytes produce a new identity without overwriting the old image. Full-width addresses survive persistence. Interrupted transactions/artifact writes do not publish partial state; newer unsupported schema versions fail without modifying the project.
+- [ ] **T11 — Implement the Windows x64 ABI profile**
+  - Depends on: T04.
+  - Owns: `src/abi/windows-x64/`, Windows ABI behavior tests.
+  - Work: Implement parameter/return locations, shadow space, stack alignment/arguments, volatile/nonvolatile integer and SIMD state, scalar floating-point and supported aggregate rules, variadic behavior, and LLP64 data layout. Connect unwind metadata as evidence rather than an unconditional function/signature oracle. Explicitly reject or mark unsupported alternative conventions.
+  - Acceptance: Compiler fixtures exercise register and stack parameters, shadow-space handling, FP/variadic cases, structure-return boundaries, and preserved registers. Windows `long` and pointer widths are distinct and correct. Unknown calls retain conservative memory/register effects. Contributes A05/A06.
+  - Owner: WindowsABI (sol-worker).
+
+- [ ] **T14 — Implement function discovery and control-flow graph construction**
+  - Depends on: T04, T06, T07, T08, T09.
+  - Owns: `src/analysis/discovery/`, `src/analysis/cfg/`, discovery/CFG tests.
+  - Work: Seed discovery from entry points, exports/symbols, trustworthy loader metadata, and discovered calls; traverse bounded code regions using structured decoder flow. Preserve noncontiguous ranges, data-in-code, tail calls, returns, invalid bytes, and unresolved indirect transfers. Attach function-boundary evidence and define deterministic identity changes for splits/merges.
+  - Acceptance: Stripped and symbol-bearing fixtures produce expected reachable blocks/edges without linear-sweeping known data into functions. Loops, shared tails, gaps, jump-table candidates, unresolved edges, and conflicting boundary evidence remain navigable and explicit. Contributes A03.
+  - Owner: DiscoveryCFG (astra-worker).
+
+- [ ] **T18 — Port Mach-O DWARF and debug-location evidence**
+  - Depends on: T06.
+  - Owns: `src/metadata/dwarf/`, `src/metadata/debug/`, DWARF regression tests.
+  - Work: Reuse `debug-info.ts`, `dwarf*.ts`, and applicable `decompiler-debug.ts` behavior without browser coupling. Import supported signatures/types, line/source mappings, scoped variable locations, and inline-scope evidence from local authorized debug inputs. Validate image/debug identity; keep display names separate from structural contracts and unsupported encodings explicit.
+  - Acceptance: Existing applicable debug regressions retain supported signatures, scoped storage names, and source mappings. Conflicting/mismatched debug files do not silently alter semantics. Missing debug information leaves native analysis usable. No symbol-server access occurs automatically. Contributes A04/A06.
+  - Owner: DebugEvidence (astra-worker).
+
+- [ ] **T24 — Implement bounded project workers and job lifecycle**
+  - Depends on: T05, T06, T07.
+  - Owns: `src/workers/`, worker lifecycle/resource behavior tests.
+  - Work: Run real project import/load/store work in persistent bounded child processes. Implement typed coarse-grained IPC, project write ownership, job IDs/states, progress, cancellation, queue limits, deadlines, and crash recovery. Keep synchronous SQLite and CPU work off the MCP event loop; avoid serializing whole IR graphs per instruction/request.
+  - Acceptance: Actual Mach-O/PE imports execute through workers and survive close/resume. Cancellation, queued-work limits, forced worker failure, and interrupted writes produce explicit states without corrupting the project. Completed/cancelled races have deterministic outcomes, and the host remains responsive. Contributes A08/A10.
   - Owner: Coordinator.
 
-- [ ] **T06 — Port Mach-O ARM64 loading and address mapping**
-  - Depends on: T02, T03.
-  - Owns: `src/loaders/macho/`, Mach-O loader tests.
-  - Work: Reuse applicable behavior from `executable.ts`, `dyld.ts`, `imports.ts`, `image-memory.ts`, and `address.ts` in the existing project. Support thin/fat containers and explicit ARM64 slice selection; expose headers/load commands, segments/sections, entry points, symbols, imports/exports, relocations/bindings/fixups, function starts, unwind hints, and data-in-code boundaries. Preserve loader evidence and unsupported-format diagnostics. Remove browser/UI coupling.
-  - Acceptance: Fixture metadata and VA/file translations match independently established expectations, including zero-filled memory and nontrivial image bases. Ambiguous slices, truncated commands, invalid ranges, and unsupported subtype/features are explicit. The loader never decodes embedded data simply because its section is executable. Contributes A01.
-  - Owner: MachOLoader (sol-worker).
-
-- [ ] **T07 — Implement PE32+ x86-64 loading and address mapping**
-  - Depends on: T02, T03.
-  - Owns: `src/loaders/pe/`, PE loader tests.
-  - Work: Parse DOS/PE/COFF/optional headers, sections/data directories, image mapping and entry point, imports including ordinal/delay imports, exports including forwarders, base relocations, exception/unwind records, TLS metadata, and debug-directory references. Retain raw offsets and evidence. Identify managed/unsupported inputs without pretending their bodies are supported native code.
-  - Acceptance: Native EXE/DLL fixtures expose correct headers/imports/exports and distinguish RVA, VA, and file offsets; virtual zero-fill and file-backed bounds are correct. Malformed counts/ranges, missing directory data, and unsupported machine types fail or report partial data explicitly. No target DLL is loaded. Contributes A01.
-  - Owner: PELoader (sol-worker).
-
-- [ ] **T08 — Integrate and pin the a64js decoder adapter**
-  - Depends on: T02, T03.
-  - Owns: `src/decoders/arm64/`, `vendor/a64js/`, ARM64 decoder conformance fixtures.
-  - Work: Import a pinned source snapshot from the existing a64js checkout with provenance and license notices, not a runtime `../` import. Adapt structured decoding to the shared contract while preserving canonical encodings/fields, widths, SP/ZR, aliases, relative addresses, availability, and invalid/undefined distinctions. Migrate justified decoder completion behavior from the existing adapter with regression coverage. Keep formatting optional.
-  - Acceptance: Real ARM64 byte ranges decode through the new adapter with expected instruction identities/operands, including authentication-related and feature-gated cases from the corpus. Trailing bytes and address gaps remain explicit. Compare selected cases with an independent decoder where available and adjudicate differences; do not claim complete conformance from recognition counts. Contributes A02/A04.
-  - Owner: ArmDecoder (sol-worker).
 
 - [ ] **T09 — Integrate the iced-x86 WASM decoder adapter**
   - Depends on: T02, T03.
@@ -221,6 +192,8 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Work: Pin the official package and adapt structured instruction identities, sizes, operands, effective addresses, prefixes, widths, implicit register/memory effects, flags metadata, and control flow. Decode bounded buffers, reuse wrappers where practical, and free all WASM-owned objects. Keep native decoder details available to the x86 lifter without exposing them as public API dependencies.
   - Acceptance: Exercise RIP-relative addressing, direct/indirect branches, partial-register writes, implicit MUL/DIV operands, flag reads/writes/undefined flags, and truncated/invalid encodings. Repeat decoding without accumulating unreleased WASM objects. The adapter runs on both planned hosts without building a native addon. Contributes A02.
   - Owner: X86Decoder (sol-worker).
+  - Evidence: Implementation and macOS verification integrated: `src/decoders/x86_64/`, official iced-x86 1.21.0 WASM; lifecycle/boundary tests passed. Compiled PE → decoder smoke produced LEA, ADD, XOR, RET for the real arithmetic fixture. CMOV32 false-condition upper-half clearing was checked against architectural pseudocode; 64-bit conditional writes remain distinct.
+  - Blocker: Windows x86-64 host execution is not available yet. Do not mark this acceptance or T29/T31 complete by inference. No Git remote or SSH host is configured; QEMU is installed but no Windows image/license has been supplied.
 
 
 ## Done
@@ -248,4 +221,44 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Acceptance: Contract checks distinguish VA/RVA/file offsets, reject unsafe numeric addresses, round-trip full-width unsigned values, and separate empty/partial/unsupported/failed/cancelled results. Schemas cover all planned tools and revision-bound cursors without MCP types leaking into the core. Architecture-specific decoder information is not flattened into assembly text or a least-common-denominator operand type.
   - Owner: CoreContracts (astra-worker), integrated by coordinator.
   - Evidence: Node 24.22.0 strict typecheck, all 34 foundation tests, build, and compiled-core smoke passed. Smoke read a real Mach-O header, translated the fixture function VA to file offset 1396, distinguished zero-fill, validated an import request, and exported all 13 tool schemas. Coordinator fixed Zod branded reverse-codec typing and generic result narrowing without weakening validation.
+
+- [x] **T04 — Implement typed semantic IR, provenance, and invariant verification**
+  - Depends on: T02, T03.
+  - Owns: `src/ir/`, IR behavior/invariant tests.
+  - Work: Implement discriminated semantic nodes, typed builders, bit-vector widths, register slices, float/vector types, memory/effect ordering, flags, calls, branches, and unknown-effect boundaries. Define register-form lifting and shared SSA/CFG interfaces, stable value/block identities, and source provenance. Provide validation and semantic fixture evaluation for supported primitives; do not use C-expression strings as IR.
+  - Acceptance: The verifier rejects incompatible widths, invalid value/block references, broken control-flow arity, and illegal effect ordering. Semantic checks exercise wrapping, extension, signed operations, register slices, and memory effects. Provenance survives replacement/combination of nodes, and unsupported effects cannot be mistaken for a no-op or established trap.
+  - Owner: SemanticIR (astra-worker).
+  - Evidence: `src/ir/`, `test/ir/`; strict typecheck/build and 175-test integrated suite passed on Node 24.22.0. Compiled public API smoke evaluated uint64 wrapping plus ordered memory store/load to exactly `1`; fixture semantic programs matched the independent source oracle. No target code execution occurs in service code.
+
+- [x] **T05 — Implement durable project storage and immutable image import**
+  - Depends on: T03.
+  - Owns: `src/project/store/`, schema migrations, project-store behavior tests.
+  - Work: Implement SQLite persistence behind the store contract using the pinned runtime's `node:sqlite` API. Import one immutable project-owned snapshot per content identity, record selected slices, and store entities/evidence/revisions/artifact metadata losslessly. Add transactional mutation primitives, versioned migrations, conservative project locking, and atomic artifact publication. Do not expose arbitrary SQL.
+  - Acceptance: Import, close, and reopen preserve identity and facts; changed input bytes produce a new identity without overwriting the old image. Full-width addresses survive persistence. Interrupted transactions/artifact writes do not publish partial state; newer unsupported schema versions fail without modifying the project.
+  - Owner: Coordinator.
+  - Evidence: `src/project/store/`, store/core operation regressions; import/reopen, full-width addresses, history, stale cursors, cancelled/stale artifact publication, exclusive locking, schema-version nonmutation, and actual process-exit rollback passed. Compiled PE import → persist metadata/evidence → close/reopen → export query recovered `fixture_arithmetic` at `0x180001030` and file offset `1072`.
+
+- [x] **T06 — Port Mach-O ARM64 loading and address mapping**
+  - Depends on: T02, T03.
+  - Owns: `src/loaders/macho/`, Mach-O loader tests.
+  - Work: Reuse applicable behavior from `executable.ts`, `dyld.ts`, `imports.ts`, `image-memory.ts`, and `address.ts` in the existing project. Support thin/fat containers and explicit ARM64 slice selection; expose headers/load commands, segments/sections, entry points, symbols, imports/exports, relocations/bindings/fixups, function starts, unwind hints, and data-in-code boundaries. Preserve loader evidence and unsupported-format diagnostics. Remove browser/UI coupling.
+  - Acceptance: Fixture metadata and VA/file translations match independently established expectations, including zero-filled memory and nontrivial image bases. Ambiguous slices, truncated commands, invalid ranges, and unsupported subtype/features are explicit. The loader never decodes embedded data simply because its section is executable. Contributes A01.
+  - Owner: MachOLoader (sol-worker).
+  - Evidence: `src/loaders/macho/`, loader regressions; actual API smoke loaded four thin fixtures and the universal ARM slice at container offset `0x8000`, retained entry `0x100000a8c`, bindings/fixups/unwind hints, and zero-fill. Independent LLVM binding inspection confirmed the dylibs have no imports; executable-only `_puts` expectations were corrected.
+
+- [x] **T07 — Implement PE32+ x86-64 loading and address mapping**
+  - Depends on: T02, T03.
+  - Owns: `src/loaders/pe/`, PE loader tests.
+  - Work: Parse DOS/PE/COFF/optional headers, sections/data directories, image mapping and entry point, imports including ordinal/delay imports, exports including forwarders, base relocations, exception/unwind records, TLS metadata, and debug-directory references. Retain raw offsets and evidence. Identify managed/unsupported inputs without pretending their bodies are supported native code.
+  - Acceptance: Native EXE/DLL fixtures expose correct headers/imports/exports and distinguish RVA, VA, and file offsets; virtual zero-fill and file-backed bounds are correct. Malformed counts/ranges, missing directory data, and unsupported machine types fail or report partial data explicitly. No target DLL is loaded. Contributes A01.
+  - Owner: PELoader (sol-worker).
+  - Evidence: `src/loaders/pe/`, loader regressions; actual DLL/EXE smoke reported 19 DLL exports, 2 EXE imports, preferred VAs, zero-fill, relocation and unwind metadata. Non-RSDS CodeView records are diagnosed without an invented PDB identity. Integrated malformed/count/unwind/cancellation tests passed.
+
+- [x] **T08 — Integrate and pin the a64js decoder adapter**
+  - Depends on: T02, T03.
+  - Owns: `src/decoders/arm64/`, `vendor/a64js/`, ARM64 decoder conformance fixtures.
+  - Work: Import a pinned source snapshot from the existing a64js checkout with provenance and license notices, not a runtime `../` import. Adapt structured decoding to the shared contract while preserving canonical encodings/fields, widths, SP/ZR, aliases, relative addresses, availability, and invalid/undefined distinctions. Migrate justified decoder completion behavior from the existing adapter with regression coverage. Keep formatting optional.
+  - Acceptance: Real ARM64 byte ranges decode through the new adapter with expected instruction identities/operands, including authentication-related and feature-gated cases from the corpus. Trailing bytes and address gaps remain explicit. Compare selected cases with an independent decoder where available and adjudicate differences; do not claim complete conformance from recognition counts. Contributes A02/A04.
+  - Owner: ArmDecoder (sol-worker).
+  - Evidence: `src/decoders/arm64/`, `vendor/a64js/`, conformance tests; snapshot `aa0e547ca5313779c87e1e52d75687b12e985615` with MIT/provenance hashes. Actual Mach-O → decoder smoke decoded five arithmetic instructions including the migrated logical completion. Alias/SP/ZR, PAuth, feature gating, gaps, width and split-backing tests passed.
 

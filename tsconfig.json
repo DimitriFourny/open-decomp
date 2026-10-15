@@ -11,12 +11,14 @@
     "verbatimModuleSyntax": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
+    "allowJs": true,
+    "checkJs": false,
     "declaration": true,
     "sourceMap": true,
     "rootDir": ".",
     "outDir": "dist",
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "vendor/**/*.ts"],
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "vendor/**/*.ts", "vendor/**/*.js"],
   "exclude": ["node_modules", "dist", "vendor/**/test", "vendor/**/tools"]
 }

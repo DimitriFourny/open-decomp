@@ -1,0 +1,94 @@
+# x86-64 decoder
+
+`X86Decoder` implements the core `Decoder` contract using the pinned official
+`iced-x86@1.21.0` Node/WASM package. There is no native addon and no assembly-text
+semantic input. Import it from `src/decoders/x86_64/index.ts` (use `.js` in TS
+imports). `new X86Decoder({ formatting: false })` avoids presentation work;
+formatting-enabled instances provide Intel syntax through `format()` for their
+own successfully decoded instruction objects. Presentation strings have weak
+ownership and are never parsed back into operands.
+
+## Coordinates and bounds
+
+Requests accept VA, RVA, or backed container-file ranges. They are canonicalized
+to VA, sorted, and merged before decoding; overlapping requested ranges do not
+produce duplicate instructions. Instruction/flow/relative-memory addresses are
+static VAs. Ordinary instruction byte references use container-file ranges. If an
+instruction crosses adjacent VA mappings with noncontiguous file backing, its
+byte reference is instead an explicit VA range: no contiguous file range is
+invented. Decoding gathers those mappings across the boundary, never across a
+hole, zero-fill, or loader data hint.
+
+The input copy supplied to WASM is bounded to 64 KiB plus the 14-byte maximum
+instruction lookahead. Instruction objects are overwritten through `decodeOut`.
+Every request charges the shared operation context and checks cancellation.
+Instruction-budget exhaustion preserves undecoded backed ranges as `budget`
+gaps; context work/deadline/cancellation errors propagate after cleanup. Known
+data produces `data` gaps, holes/virtual zero-fill produce `unmapped` gaps, and a
+short final encoding produces a `truncated` gap. Invalid encodings remain invalid
+instructions with null payload and unknown flow, never proven traps. Actual UD
+instructions have trap flow. Linear bounded region decoding does not claim to
+perform function discovery; consumers traverse the shared `DecodedFlow` union.
+
+## Metadata conventions
+
+- `encoding` is the exact structured opcode variant, not merely the mnemonic.
+  Register/operand identities contain no iced numeric enum values.
+- `prefixes.bytes` contains the encoded prefix bytes in order, including
+  duplicates/ignored legacy prefixes and VEX/EVEX/XOP/MVEX bytes. Effective REX is
+  null if a later legacy prefix invalidates its position. Effective semantic
+  lock/repeat/segment/mask/rounding fields remain separate.
+- Registers use ISA-qualified names and root slices. EAX writes zero-extend RAX;
+  AH has offset 8 and preserves the rest of RAX. Legacy XMM writes preserve upper
+  vector bits; VEX/EVEX vector writes carry the root zero-extension rule.
+- Explicit operands preserve access direction and immediate encoded/effective
+  widths. `encoded_bits: 0` distinguishes implied constants such as shift-by-one
+  from an actual encoded immediate byte. Sign-extended immediate values are
+  unsigned effective-width machine bits. Relative operands preserve the signed
+  encoded displacement and target.
+- `memory` describes accessed locations, including implicit stack/string effects;
+  explicit operands also retain address-only expressions such as LEA. An
+  `access_bits` value of zero means address-only, unknown, or variable-sized, not
+  a fabricated one-byte access. `operand_bits` zero means no known operand-size
+  class; it is not the size of a whole state-save block.
+- `flags` uses actual architectural RFLAGS positions (CF 0, PF 2, AF 4, ZF 6,
+  SF 7, IF 9, DF 10, OF 11, AC 18, UIF 25). `preserved` is the complement of
+  modified flags within that tracked set, not a claim about reserved bits.
+  `fpu_flags` is separate: actual x87 status-word C0 8, C1 9, C2 10, C3 14.
+  Null means no applicable x87 condition-code metadata. Native iced flag masks
+  are explicitly translated rather than mistaken for architectural bit numbers.
+- An empty requested feature list does not restrict decoding. A nonempty list is
+  an explicit availability set of the structured CPUID feature names exposed in
+  `required_features`; missing requirements mark `feature_disabled` while keeping
+  the structured encoding available.
+
+Instruction-info effects are dependency metadata, not lifter semantics. In
+particular, decoder-reported aggregate state-save effects and feature metadata do
+not constitute a complete semantic implementation of those instructions.
+
+## Ownership
+
+No WASM-owned instruction, info, opcode, constant-offset, used-register, or
+used-memory wrapper escapes adaptation. Per-request instruction/factory objects
+are reused and freed in `finally`; each returned info/usage object is freed even
+when adaptation throws. Each bounded-buffer decoder is freed on success or
+failure. The optional formatter is instance-owned. `dispose()` frees it once,
+is idempotent, and makes subsequent `decode`/`format` calls fail explicitly.
+
+## Coordinator verification
+
+These commands exercise the actual adapter and checked-in compiler-produced PE
+function bytes, not pre-rendered library output:
+
+```sh
+node --import tsx --test --test-name-pattern='PE corpus' test/decoders/x86_64/decoder.test.ts
+node --import tsx --test --test-name-pattern='repeated decode' test/decoders/x86_64/lifetimes.test.ts
+node --import tsx --test 'test/decoders/x86_64/*.test.ts'
+```
+
+The repeated-decode scenario instruments actual WASM wrapper `free()` methods
+while calling their originals. It checks one reusable instruction/factory per
+request, every info/usage/offset/opcode wrapper, formatter ownership, cleanup on a
+real shared-context work limit, and successful reuse after that failure. It does
+not infer leaks from process RSS or WASM high-water memory, which need not shrink
+when allocations are released.

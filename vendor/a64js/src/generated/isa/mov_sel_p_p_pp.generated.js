@@ -1,0 +1,78 @@
+export const ENCODINGS = [
+    {
+        "instructionId": "mov_sel_p_p_pp",
+        "encodingId": "movm_p_p_p__sel_p_p_pp_",
+        "mnemonic": "SEL",
+        "className": "SVE",
+        "fileName": "mov_sel_p_p_pp.xml",
+        "mask": 4293968400,
+        "value": 620773904,
+        "bitCount": 16,
+        "fields": [
+            {
+                "name": "op",
+                "lsb": 23,
+                "width": 1
+            },
+            {
+                "name": "S",
+                "lsb": 22,
+                "width": 1
+            },
+            {
+                "name": "Pm",
+                "lsb": 16,
+                "width": 4
+            },
+            {
+                "name": "Pg",
+                "lsb": 10,
+                "width": 4
+            },
+            {
+                "name": "o2",
+                "lsb": 9,
+                "width": 1
+            },
+            {
+                "name": "Pn",
+                "lsb": 5,
+                "width": 4
+            },
+            {
+                "name": "o3",
+                "lsb": 4,
+                "width": 1
+            },
+            {
+                "name": "Pd",
+                "lsb": 0,
+                "width": 4
+            }
+        ],
+        "features": [
+            "FEAT_SVE || FEAT_SME"
+        ],
+        "featureGuards": [],
+        "guards": [
+            {
+                "all": [
+                    {
+                        "kind": "feature",
+                        "feature": "FEAT_SVE",
+                        "implemented": false
+                    },
+                    {
+                        "kind": "feature",
+                        "feature": "FEAT_SME",
+                        "implemented": false
+                    }
+                ],
+                "outcome": "undefined"
+            }
+        ],
+        "canonicalEncodingId": "sel_p_p_pp_",
+        "canonicalFileName": "sel_p_p_pp.xml",
+        "operandFamilyId": "sve-select-predicate"
+    }
+];

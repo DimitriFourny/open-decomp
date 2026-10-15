@@ -26,7 +26,7 @@ test('discovery can distinguish unresolved control flow from a proven trap witho
 });
 
 test('ARM canonical identity and fields remain structured independently of display aliases', () => {
-  const arm = { architecture: 'arm64', encoding: 'ADD_32_addsub_imm', canonical_encoding: 'ADD_32_addsub_imm', alias: null, word: '0x11000400', fields: { sf: '0x0', imm12: '0x1', Rn: '0x0', Rd: '0x0' }, operands: [{ kind: 'immediate', value: { negative: false, magnitude: '0x1' }, width_bits: 12 }], availability: 'available', required_features: [], registers: [] };
+  const arm = { architecture: 'arm64', encoding: 'ADD_32_addsub_imm', canonical_encoding: 'ADD_32_addsub_imm', alias: null, word: '0x11000400', fields: { sf: '0x0', imm12: '0x1', Rn: '0x0', Rd: '0x0' }, operands: [{ kind: 'immediate', value: { negative: false, magnitude: '0x1' }, width_bits: 12 }], availability: 'available', behavior: 'instruction', required_features: [], registers: [] };
   assert.equal(armPayloadSchema.parse(arm).fields['imm12'], '0x1');
   assert.equal(armPayloadSchema.safeParse({ ...arm, word: '0x100000000' }).success, false);
   assert.equal(armPayloadSchema.safeParse({ ...arm, operands: ['w0, w0, #1'] }).success, false);
@@ -41,10 +41,10 @@ test('x86 carries relative addressing, implicit register effects and flags witho
   const register = { ...root, id: 'x86_64:rax', width_bits: 64, write_rule: 'replace_root' };
   const payload = {
     architecture: 'x86_64', encoding: 'Mov_r64_rm64', mnemonic: 'mov', operand_bits: 64, address_bits: 64,
-    prefixes: { lock: false, rep: false, repne: false, rex: 0x48, segment: null, encoding: 'legacy', mask: null, zeroing: false, rounding: 'none', suppress_exceptions: false },
+    prefixes: { bytes: [0x48], lock: false, rep: false, repne: false, rex: 0x48, segment: null, encoding: 'legacy', mask: null, zeroing: false, rounding: 'none', suppress_exceptions: false },
     operands: [{ kind: 'register', register, access: 'write' }, { kind: 'memory', memory: { segment: null, base: null, index: null, scale: 1, displacement: { negative: true, magnitude: '0x20' }, address_bits: 64, access_bits: 64, rip_relative_target: { ...address, value: '0xfe7' }, broadcast: false, access: 'read' } }],
     registers: [{ register, access: 'write', implicit: false }], memory: [],
-    flags: { read: '0x0', written: '0x0', cleared: '0x0', set: '0x0', undefined: '0x0', preserved: '0xffff' }, required_features: [], privileged: false,
+    flags: { read: '0x0', written: '0x0', cleared: '0x0', set: '0x0', undefined: '0x0', preserved: '0xffff' }, fpu_flags: null, required_features: [], privileged: false,
   };
   const parsed = x86PayloadSchema.parse(payload);
   assert.equal(parsed.operands[1]?.kind, 'memory');

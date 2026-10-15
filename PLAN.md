@@ -28,7 +28,7 @@ A successful investigation can open a binary, inspect its structure, search impo
 | Later remote access | MCP Streamable HTTP | Same service contracts, with authentication, authorization, origin checks, and resource limits. Not a requirement for the first local release. |
 | LLVM / Capstone | Optional development-time comparison tools | Useful independent decoder checks. Neither is an initial runtime dependency; assembly text is never parsed into semantic instructions. |
 
-Full TypeScript refers to code we maintain. iced-x86's Rust implementation compiled to WASM, Node, and SQLite are external dependencies, not a requirement to maintain a mixed-language application.
+Full TypeScript refers to first-party code we maintain. iced-x86's Rust implementation compiled to WASM, Node, and SQLite are external dependencies, not a requirement to maintain a mixed-language application. The pinned a64js dependency is a generated ESM snapshot with typed declarations: provenance records its original TypeScript hashes, transformed JavaScript hashes, revision, license, and TypeScript 5.9.3 transformation. `allowJs` copies this vendor runtime into the distribution; first-party TypeScript remains strictly checked.
 
 ## 3. Initial targets and explicit boundaries
 
@@ -181,6 +181,8 @@ Each emitter returns text plus mappings from output spans/statements to stable s
 ## 8. Persistence, annotation edits, and caching
 
 SQLite stores project metadata, image identities, indexes, evidence, annotations, revisions, and artifact metadata. Large derived artifacts can be immutable files referenced by the database. The database schema and artifact formats are versioned; unsupported newer versions fail explicitly without overwriting the project.
+
+The initial store uses `project.sqlite`, content-addressed files under `images/`, and opaque artifact-ID files under `artifacts/`. SQLite exclusive locking gives one active owner and releases on process exit; WAL transactions preserve the last committed revision after an interrupted worker. Versioned tagged records preserve unsigned machine integers and distinguish them from hexadecimal-looking user text. Image imports are limited to 512 MiB, individual metadata records to 16 MiB, artifacts to 64 MiB, and artifact read pages to 1 MiB. These are enforced bounds, not measured performance claims.
 
 One active worker owns writes for a project. Apply annotation batches transactionally with an `expected_revision` precondition. A successful edit increments the revision; a conflict returns current revision information without partial edits. Support names, notes, signatures, types/structures, and explicit hypothesis status. Deleting or retracting an assertion must also invalidate dependent analysis.
 

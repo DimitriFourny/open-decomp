@@ -1,0 +1,53 @@
+export const ENCODINGS = [
+    {
+        "instructionId": "STLRH",
+        "encodingId": "STLRH_SL32_ldstord",
+        "mnemonic": "STLRH",
+        "className": "No offset",
+        "fileName": "stlrh.xml",
+        "mask": 4292902912,
+        "value": 1216380928,
+        "bitCount": 12,
+        "fields": [
+            {
+                "name": "size",
+                "lsb": 30,
+                "width": 2
+            },
+            {
+                "name": "L",
+                "lsb": 22,
+                "width": 1
+            },
+            {
+                "name": "Rs",
+                "lsb": 16,
+                "width": 5
+            },
+            {
+                "name": "o0",
+                "lsb": 15,
+                "width": 1
+            },
+            {
+                "name": "Rt2",
+                "lsb": 10,
+                "width": 5
+            },
+            {
+                "name": "Rn",
+                "lsb": 5,
+                "width": 5
+            },
+            {
+                "name": "Rt",
+                "lsb": 0,
+                "width": 5
+            }
+        ],
+        "features": [],
+        "featureGuards": [],
+        "guards": [],
+        "operandFamilyId": "stlr"
+    }
+];

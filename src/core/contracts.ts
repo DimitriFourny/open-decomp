@@ -2,7 +2,7 @@ import type { z } from 'zod';
 import type { Address, AddressRange, ImmutableBytes } from './addresses.js';
 import type { Budget, Target, Diagnostic, Evidence, Artifact, artifactReadArgsSchema, artifactReadResultSchema, capabilitySchema, coverageSchema, versionsSchema, analysisOptionsSchema } from './primitives.js';
 import type { LoadedImage, ImageSlice, Signature, Annotation, AnnotationEdit, RecoveredType, FunctionRecord, StringRecord, ReferenceRecord, SymbolRecord, ImportRecord, ExportRecord, lineageSchema } from './model.js';
-import type { DecodedInstruction, DecodeGap, Arm64Payload, X86Payload, RegisterDescriptor } from './decoder.js';
+import type { DecodedInstruction, DecodeGap, Arm64Payload, X86Payload, RegisterDescriptor, CFGBlock } from './decoder.js';
 import type { ToolName, ToolArgs, ToolResult, Job, Emission } from './tools.js';
 
 export interface OperationContext {
@@ -33,10 +33,20 @@ export interface Decoder extends ComponentIdentity {
   format?(instruction: DecodedInstruction): { readonly mnemonic: string; readonly operands: string };
   dispose(): void;
 }
+/** Discovery owns block boundaries. Calls are reference edges, not intraprocedural successors. */
+export interface FunctionGraph {
+  readonly function: FunctionRecord;
+  readonly slice_id: string;
+  readonly blocks: readonly CFGBlock[];
+  readonly instructions: readonly DecodedInstruction[];
+  readonly gaps: readonly DecodeGap[];
+  readonly coverage: z.infer<typeof coverageSchema>;
+  readonly diagnostics: readonly Diagnostic[];
+}
 /** T04 supplies RegisterIR. Core does not define semantic operations or strings masquerading as IR. */
 export interface Lifter<RegisterIR> extends ComponentIdentity {
   readonly architecture: Target['architecture'];
-  lift(instructions: readonly DecodedInstruction[], abi: AbiProfile, context: OperationContext): {
+  lift(graph: FunctionGraph, abi: AbiProfile, context: OperationContext): {
     readonly ir: RegisterIR; readonly coverage: z.infer<typeof coverageSchema>; readonly diagnostics: readonly Diagnostic[];
   };
 }
@@ -117,6 +127,7 @@ export interface StoreTransaction {
   putSignature(functionId: string, signature: Signature): void;
   putLineage(change: z.infer<typeof lineageSchema>): void;
   putRecord<K extends keyof StoredRecordKinds>(imageId: string, kind: K, record: StoredRecordKinds[K]): void;
+  setIndexState(imageId: string, kind: keyof StoredRecordKinds, state: 'complete' | 'partial' | 'not_started'): void;
   setAnnotation(annotation: Annotation): void;
   removeAnnotation(id: string): void;
 }
@@ -134,6 +145,9 @@ export interface ProjectStore {
   applyAnnotations(batch: AnnotationBatch): MutationResult;
   readAnnotations(entityId: string, revision: number): readonly Annotation[];
   readEvidence(ids: readonly string[], revision: number): readonly Evidence[];
+  readType(id: string, revision: number): { readonly definition: RecoveredType; readonly evidence_ids: readonly string[] } | null;
+  readSignature(functionId: string, revision: number): Signature | null;
+  readLineage(entityId: string, revision: number): readonly z.infer<typeof lineageSchema>[];
   findArtifact(identity: CacheIdentity): Artifact | null;
   /** Atomic publication verifies the job is not cancelled and the input revision is still current. */
   publishArtifact(input: { readonly job_id: string; readonly expected_revision: number; readonly media_type: string; readonly bytes: Uint8Array; readonly cache: CacheIdentity }): Promise<{ readonly state: 'published'; readonly artifact: Artifact } | { readonly state: 'stale' | 'cancelled'; readonly current_revision: number }>;
