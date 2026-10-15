@@ -10,3 +10,5 @@ export { WindowsX64Abi, windowsX64Abi } from './abi/windows-x64/index.js';
 export { discoverFunctions, type DiscoveryInput, type DiscoveryResult } from './analysis/discovery/index.js';
 export * as DWARF from './metadata/dwarf/index.js';
 export { recoverDebugInfo, debugContextAt, variableLocationsAt, type DebugRecovery, type ExternalDebugInput } from './metadata/debug/index.js';
+export { ProjectWorkerPool, ProjectWorker, type JobTicket, type JobOutcome, type WorkRequest, type WorkerSnapshot } from './workers/index.js';
+export { runProjectWorker, type WorkerHandler } from './workers/runtime.js';

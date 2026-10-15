@@ -279,7 +279,7 @@ All A01–A12 are required for the first local release. Future emitter, remote t
 
 ## 13. Execution rules for the backlog
 
-Each TODO item identifies dependencies, owned paths, work, and observable acceptance. Dependencies refer to completed integrated work, not merely a branch or an agent's claim. A task is ready only when all its listed dependencies are done.
+Each TODO item identifies dependencies, owned paths, work, and observable acceptance. Dependencies refer to integrated, verified implementation, not merely a branch or an agent's claim. Ordinarily dependencies must be `Done`; an integrated interface blocked solely on unavailable host verification may be consumed while its task remains `Doing` with the blocker recorded. This scheduling exception never waives host acceptance or release requirements.
 
 Move the entire task block from `Todo` to `Doing` when assigned, recording the owner. Move it to `Done` only after integration and the stated verification, recording evidence and any intentional limitations. Preserve stable task IDs and dependency references.
 

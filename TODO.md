@@ -156,14 +156,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Owner: Coordinator.
 
 
-- [ ] **T24 — Implement bounded project workers and job lifecycle**
-  - Depends on: T05, T06, T07.
-  - Owns: `src/workers/`, worker lifecycle/resource behavior tests.
-  - Work: Run real project import/load/store work in persistent bounded child processes. Implement typed coarse-grained IPC, project write ownership, job IDs/states, progress, cancellation, queue limits, deadlines, and crash recovery. Keep synchronous SQLite and CPU work off the MCP event loop; avoid serializing whole IR graphs per instruction/request.
-  - Acceptance: Actual Mach-O/PE imports execute through workers and survive close/resume. Cancellation, queued-work limits, forced worker failure, and interrupted writes produce explicit states without corrupting the project. Completed/cancelled races have deterministic outcomes, and the host remains responsive. Contributes A08/A10.
-  - Owner: WorkerRuntime (astra-worker).
-
-
 - [ ] **V01 — Provision the supplied Windows ISO and run Windows acceptance**
   - Depends on: Integrated component milestone; full release checks follow T28.
   - Owns: Isolated VM and test artifacts under ignored `.local/windows/`.
@@ -245,7 +237,7 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Work: Import a pinned source snapshot from the existing a64js checkout with provenance and license notices, not a runtime `../` import. Adapt structured decoding to the shared contract while preserving canonical encodings/fields, widths, SP/ZR, aliases, relative addresses, availability, and invalid/undefined distinctions. Migrate justified decoder completion behavior from the existing adapter with regression coverage. Keep formatting optional.
   - Acceptance: Real ARM64 byte ranges decode through the new adapter with expected instruction identities/operands, including authentication-related and feature-gated cases from the corpus. Trailing bytes and address gaps remain explicit. Compare selected cases with an independent decoder where available and adjudicate differences; do not claim complete conformance from recognition counts. Contributes A02/A04.
   - Owner: ArmDecoder (sol-worker).
-  - Evidence: `src/decoders/arm64/`, `vendor/a64js/`, conformance tests; snapshot `aa0e547ca5313779c87e1e52d75687b12e985615` with MIT/provenance hashes. Actual Mach-O → decoder smoke decoded five arithmetic instructions including the migrated logical completion. Alias/SP/ZR, PAuth, feature gating, gaps, width and split-backing tests passed.
+  - Evidence: `src/decoders/arm64/`, `vendor/a64js/`, conformance tests; snapshot `aa0e547ca5313779c87e1e52d75687b12e985615` with MIT/provenance hashes. Actual Mach-O → decoder smoke decoded five arithmetic instructions including the migrated logical completion. Alias/SP/ZR, PAuth, feature gating, gaps, width and split-backing tests passed. Loader profiles use canonical FP/AdvSIMD feature keys and ARM64e enables FEAT_PAuth; a reproduced PACIASP feature-disabled error now decodes as an instruction, with subtype regressions passing in the 307-test integration run.
 
 - [x] **T10 — Implement the Darwin ARM64 ABI profile**
   - Depends on: T04.
@@ -278,4 +270,13 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Acceptance: Existing applicable debug regressions retain supported signatures, scoped storage names, and source mappings. Conflicting/mismatched debug files do not silently alter semantics. Missing debug information leaves native analysis usable. No symbol-server access occurs automatically. Contributes A04/A06.
   - Owner: DebugEvidence (astra-worker).
   - Evidence: `src/metadata/dwarf/`, `src/metadata/debug/`, test-local Clang/dwarfdump fixture and regressions; Node 24 smoke recovered 4 functions, 8 core types, 9 variables, 17 source rows and 2 inline scopes. Unsupported entry-value location opcode 0xa3 remains diagnosed. Known structure fields survive missing alignment as null; UUID/CPU/content conflicts are rejected.
+
+- [x] **T24 — Implement bounded project workers and job lifecycle**
+  - Depends on: T05, T06, T07.
+  - Owns: `src/workers/`, worker lifecycle/resource behavior tests.
+  - Work: Run real project import/load/store work in persistent bounded child processes. Implement typed coarse-grained IPC, project write ownership, job IDs/states, progress, cancellation, queue limits, deadlines, and crash recovery. Keep synchronous SQLite and CPU work off the MCP event loop; avoid serializing whole IR graphs per instruction/request.
+  - Acceptance: Actual Mach-O/PE imports execute through workers and survive close/resume. Cancellation, queued-work limits, forced worker failure, and interrupted writes produce explicit states without corrupting the project. Completed/cancelled races have deterministic outcomes, and the host remains responsive. Contributes A08/A10.
+  - Owner: WorkerRuntime (astra-worker).
+  - Evidence: `src/workers/`, lifecycle/protocol tests and public exports; Node 24.22.0 full typecheck, 307 tests and compiled build passed. Actual compiled API imported the PE DLL in a child, durably completed at revision 2, then closed/resumed with identical image identity and completed job. Tests cover real import boundaries, forced termination, deadlines, queue limits, ownership, cancellation/publication races and oversized IPC. Process isolation is not an OS filesystem sandbox; Windows-specific execution remains V01/T29 work.
+
 
