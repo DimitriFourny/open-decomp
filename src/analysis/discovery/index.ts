@@ -82,6 +82,7 @@ export function discoverFunctions(input: DiscoveryInput, context: OperationConte
   const queue: Address[] = [];
   const queued = new Set<bigint>();
   const data: DataRegion[] = [];
+  const objectAddresses = new Set<bigint>();
   const jumpTables: JumpTableCandidate[] = [];
   const boundaryClaims: DiscoveryBoundaryClaim[] = [];
   const va = (value: bigint): Address => ({ image_id: image.id, space: 'va', value });
@@ -130,6 +131,11 @@ export function discoverFunctions(input: DiscoveryInput, context: OperationConte
     const address = normalize(source);
     // Data exports and pointer storage are not callable just because they have names.
     if (!executable(address) && rule !== 'asserted function' && rule !== 'image entry') return;
+    if ((rule === 'executable export candidate' || rule === 'executable symbol candidate')
+      && (objectAddresses.has(address.value) || data.some(item => {
+        context.checkpoint(1);
+        return address.value >= item.range.start.value && address.value < item.range.start.value + item.range.size;
+      }))) return;
     const id = derive(rule, address, parents);
     let item = seeds.get(address.value);
     if (!item) {
@@ -148,8 +154,11 @@ export function discoverFunctions(input: DiscoveryInput, context: OperationConte
       if (hint.encoding === 'jump_table') jumpTables.push({ instruction_id: null, address: range.start, range, status: 'candidate', evidence_ids: hint.evidence_ids });
     }
   }
-  for (const symbol of image.symbols) if (symbol.kind === 'object' && symbol.address && symbol.size && symbol.size > 0n) {
-    for (const range of ranges({ start: symbol.address, size: symbol.size })) data.push({ range, evidence_ids: symbol.evidence_ids });
+  for (const symbol of image.symbols) {
+    context.checkpoint(1);
+    if (symbol.kind !== 'object' || !symbol.address) continue;
+    objectAddresses.add(normalize(symbol.address).value);
+    if (symbol.size && symbol.size > 0n) for (const range of ranges({ start: symbol.address, size: symbol.size })) data.push({ range, evidence_ids: symbol.evidence_ids });
   }
   data.sort((a, b) => a.range.start.value < b.range.start.value ? -1 : a.range.start.value > b.range.start.value ? 1 : 0);
   for (const entry of image.entry_points) seed(entry, 'image entry', [], true);
@@ -333,7 +342,7 @@ export function discoverFunctions(input: DiscoveryInput, context: OperationConte
       if (flow.kind === 'call') { kind = 'call'; target = flow.target; }
       else if (flow.kind === 'branch') { kind = !flow.conditional && flow.target.value !== graph.function.entry.value && byEntry.has(flow.target.value) ? 'tail_call' : 'branch'; target = flow.target; }
       else if (flow.kind === 'indirect_branch' || flow.kind === 'unknown') kind = 'unknown';
-      if (kind !== null) references.push({ id: entityIdentity(image.selected_slice_id, 'reference', { function: graph.function.id, instruction: instruction.id, kind }), from: instruction.address, from_function: graph.function.id, to: target,
+      if (kind !== null) references.push({ id: entityIdentity(image.selected_slice_id, 'reference', { function: graph.function.id, instruction: instruction.id, kind }), from: instruction.address, from_function: graph.function.id, from_instruction: instruction.id, target_role: target ? 'code' : 'unknown', to: target,
         to_entity: target ? byEntry.get(target.value) ?? null : null, kind, status: target ? 'established' : 'unresolved', evidence_ids: instructionEvidence.get(instruction.id) ?? [] });
     }
   }

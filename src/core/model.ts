@@ -90,6 +90,7 @@ export const lineageSchema = z.strictObject({ revision: revisionSchema, reason: 
 export const stringRecordSchema = z.strictObject({ id: entityIdSchema, address: addressSchema, byte_length: hexU64Schema, encoding: z.enum(['utf8', 'utf16le', 'ascii']), text: z.string().max(1_048_576), status: z.enum(['candidate', 'referenced']), terminated: z.boolean(), evidence_ids: evidenceRefsSchema });
 export const referenceSchema = z.strictObject({
   id: entityIdSchema, from: addressSchema, from_function: entityIdSchema.nullable(), to: addressSchema.nullable(), to_entity: entityIdSchema.nullable(),
+  from_instruction: entityIdSchema.nullable(), target_role: z.enum(['code', 'data', 'import_slot', 'callable_stub', 'unknown']),
   kind: z.enum(['call', 'tail_call', 'branch', 'read', 'write', 'address', 'unknown']), status: z.enum(['candidate', 'established', 'unresolved']), evidence_ids: evidenceRefsSchema,
 });
 export type FunctionRecord = Internal<z.infer<typeof functionSchema>>;

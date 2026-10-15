@@ -75,7 +75,8 @@ test('effect rewiring, reordering, stale edge tokens and SSA register operations
   rejected(replaceInstructions(program, [...nodes.slice(0, -1), { ...load, effect_in: block.effect_parameter }]), 'effect_order');
   rejected({ ...program, blocks: [{ ...block, terminator: { ...block.terminator, effect: block.effect_parameter } }] }, 'effect_order');
   const reg = builder('ssa-reg'); const c = reg.block('entry'); c.return([c.readRegister(register('rax', 64, 0, 'replace_root'))]);
-  rejected({ ...reg.finish(c, [i64]), form: 'ssa' }, 'register');
+  const registerProgram = reg.finish(c, [i64]);
+  rejected({ ...registerProgram, form: 'ssa', register_states: registerProgram.blocks.map(block => ({ block: block.id, entry: [], exit: [] })) }, 'register');
   const stale = builder('stale-edge'); const entry = stale.block('entry'), exit = stale.block('exit');
   const edge = entry.edge(exit); entry.writeRegister(register('eax', 32, 0, 'zero_extend_root'), entry.constant(i32, 1n)); entry.terminate({ kind: 'jump', edge }); exit.return();
   assert.throws(() => stale.finish(entry), IRValidationError);

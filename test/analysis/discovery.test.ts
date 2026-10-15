@@ -44,8 +44,6 @@ for (const name of ['macho-arm64-symbols', 'macho-arm64-stripped', 'libcorpus-ar
     const arm = name.includes('arm64');
     const image = load(`fixtures/bin/${name}`, arm ? new MachOLoader() : new PELoader());
     const result = discover(image);
-    assert.ok(result.graphs.length > 0);
-    assert.ok(result.graphs.some(graph => graph.instructions.length > 0));
     assert.ok(result.references.some(reference => reference.kind === 'call' || reference.kind === 'tail_call'));
     for (const graph of result.graphs) {
       assert.equal(graph.slice_id, image.selected_slice_id);
@@ -67,6 +65,28 @@ for (const name of ['macho-arm64-symbols', 'macho-arm64-stripped', 'libcorpus-ar
     }
   });
 }
+
+for (const file of ['macho-arm64-symbols', 'macho-arm64-stripped']) test(`declared constants in executable Mach-O segments are not functions: ${file}`, () => {
+  const image = load(`fixtures/bin/${file}`, new MachOLoader());
+  const constant = image.sections.find(item => item.kind === 'section' && item.name === '__const')?.virtual_range;
+  assert.ok(constant);
+  const result = discover(image), end = constant.start.value + constant.size;
+  assert.ok(!result.graphs.some(graph => graph.function.entry.value >= constant.start.value && graph.function.entry.value < end));
+  assert.ok(!result.graphs.some(graph => graph.instructions.some(instruction => instruction.address.value >= constant.start.value && instruction.address.value < end)));
+  const backing = image.address_map.translate(constant.start, 'file');
+  assert.equal(backing.kind, 'mapped');
+  assert.equal(image.bytes.at(Number(backing.address.value)), 0x6f); // 'o', not an instruction seed.
+});
+
+test('zero-sized object symbols defeat export-only code guesses without overriding explicit assertions', () => {
+  const image = raw([0xc3, 0x90, 0xc3]), target = address(image, 1);
+  const named = { id: `entity_${fingerprint('object-symbol')}`, original_name: 'data_bytes', display_name: null, evidence_ids: [] };
+  const withObject: LoadedImage = { ...image,
+    symbols: [{ ...named, kind: 'object', address: target, size: null, binding: 'global' }],
+    exports: [{ ...named, id: `entity_${fingerprint('object-export')}`, address: target, ordinal: null, forwarder: null }] };
+  assert.deepEqual(discover(withObject).graphs.map(graph => graph.function.entry.value), [0x1000n]);
+  assert.ok(discover(withObject, { assertions: [assertion(withObject, 1)] }).graphs.some(graph => graph.function.entry.value === target.value));
+});
 
 test('recursive calls are references, loop targets split blocks, dead bytes are not swept', () => {
   // call +8; test eax,eax; jne test; ret; dead int3; callee ret

@@ -99,6 +99,26 @@ test('explicit trusted call oracle returns values, mutates memory and invalidate
   assert.equal(evaluated.registers.get('x86_64:rax')!.known & 255n, 0n);
 });
 
+test('physical call oracles preserve nonvolatile slices without inventing formal parameters', () => {
+  const ir = builder('physical-call'), b = ir.block('entry');
+  const rax = register('rax', 64, 0, 'replace_root'), al = register('al', 8);
+  b.writeRegister(rax, b.constant(i64, 0x1234n));
+  b.call({ kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } }, [], [], { registers: [al], flags: [], memory: 'unknown_read_write' });
+  b.return([b.readRegister(rax)]);
+  const program = ir.finish(b, [i64]), call = program.blocks[0]!.instructions.find(node => node.kind === 'call')!;
+  const evaluated = evaluateIR(program, { calls: new Map([[call.id, input => ({ results: [], writes: [], register_writes: [{ register: al, bits: input.readRegister(rax) + 1n }] })]]) });
+  assert.deepEqual(returned(evaluated), [0x1235n]);
+  assert.throws(() => evaluateIR(program, { calls: new Map([[call.id, () => ({ results: [], writes: [], register_writes: [{ register: rax, bits: 7n }] })]]) }), /clobber contract/);
+});
+
+test('an oracle zero-extending write cannot alter upper bits outside a partial clobber', () => {
+  const ir = builder('oracle-zero-extension'), b = ir.block('entry'), eax = register('eax', 32, 0, 'zero_extend_root');
+  b.call({ kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } }, [], [], { registers: [eax], flags: [], memory: 'unknown_read_write' });
+  b.return();
+  const program = ir.finish(b), call = program.blocks[0]!.instructions.find(node => node.kind === 'call')!;
+  assert.throws(() => evaluateIR(program, { calls: new Map([[call.id, () => ({ results: [], writes: [], register_writes: [{ register: eax, bits: 7n }] })]]) }), /clobber contract/);
+});
+
 test('switch arms and fallback select exact values; missing arity is rejected', () => {
   const ir = builder('switch'); const b = ir.block('entry', [i32]), one = ir.block('one'), other = ir.block('other');
   b.terminate({ kind: 'switch', value: b.parameters[0]!, cases: [{ bits: 1n, edge: b.edge(one) }], otherwise: b.edge(other) });

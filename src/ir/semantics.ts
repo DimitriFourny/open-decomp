@@ -79,6 +79,18 @@ export function evaluateExpression(type: DataType, expression: Expression, get: 
     const condition = get(expression.condition);
     return condition.kind === 'bits' ? get(condition.bits === 0n ? expression.when_false : expression.when_true) : condition;
   }
+  if (expression.kind === 'concat') {
+    let result = 0n, offset = 0;
+    let unknown: RuntimeValue | undefined;
+    for (const value of expression.values) {
+      const part = get(value);
+      if (part.kind === 'undefined') return part;
+      if (part.kind === 'unknown') unknown ??= part;
+      else if (part.kind === 'bits' && !unknown) result |= part.bits << BigInt(offset);
+      offset += bitWidth(value.type);
+    }
+    return unknown ?? bits(result, width);
+  }
   const operands = expressionOperands(expression).map(get);
   const indeterminate = operands.find(value => value.kind !== 'bits');
   if (indeterminate) return indeterminate;

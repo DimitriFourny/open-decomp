@@ -1,7 +1,7 @@
 import { entityIdSchema, evidenceIdSchema, machineAddressSchema, machineRangeSchema, registerSchema } from '../core/index.js';
 import type { CallClobbers, RegisterDescriptor } from '../core/index.js';
 import { bitWidth, expressionOperands, sameType, successors, validType } from './model.js';
-import type { DataType, Effect, Expression, FunctionIR, IRType, Origin, Value } from './model.js';
+import type { DataType, Effect, Expression, FunctionIR, IRType, Origin, RegisterBinding, Value } from './model.js';
 
 export interface IRProblem { readonly code: 'identity' | 'type' | 'reference' | 'control_flow' | 'effect_order' | 'provenance' | 'register' | 'semantic'; readonly node: string; readonly message: string }
 export class IRValidationError extends Error {
@@ -42,6 +42,8 @@ export function expressionProblems(type: DataType, e: Expression): readonly stri
     }
     case 'extract': require(integer(type) && integer(e.value.type) && Number.isInteger(e.offset) && e.offset >= 0 && e.offset + bitWidth(type) <= bitWidth(e.value.type), 'Invalid bit extraction'); break;
     case 'insert': equal(type, e.base.type); require(integer(type) && integer(e.value.type) && Number.isInteger(e.offset) && e.offset >= 0 && e.offset + bitWidth(e.value.type) <= bitWidth(type), 'Invalid bit insertion'); break;
+    case 'concat':
+      require(integer(type) && e.values.length > 0 && e.values.every(value => integer(value.type)) && e.values.reduce((sum, value) => sum + bitWidth(value.type), 0) === bitWidth(type), 'Concatenation requires nonempty integer slices with exact total width'); break;
     case 'select': require(boolean(e.condition.type), 'Select condition is not i1'); equal(type, e.when_true.type); equal(type, e.when_false.type); break;
     case 'flag': require(boolean(type) && boolean(e.carry.type) && integer(e.left.type), 'Flag requires integer inputs and i1 carry/result'); equal(e.left.type, e.right.type); break;
     case 'float': require(type.kind === 'float', 'Float operation requires float type'); equal(type, e.left.type); equal(type, e.right.type); break;
@@ -89,8 +91,8 @@ export function verifyIR(ir: FunctionIR): readonly IRProblem[] {
   };
   const registerRoots = new Map<string, number>();
   const registers = new Map<string, RegisterDescriptor>();
-  const register = (r: RegisterDescriptor, node: string): void => {
-    if (!registerSchema.safeParse(r).success) report('register', node, 'Invalid core register descriptor');
+  const register = (r: RegisterDescriptor, node: string): boolean => {
+    if (!registerSchema.safeParse(r).success) { report('register', node, 'Invalid core register descriptor'); return false; }
     if (r.write_rule === 'replace_root' && (r.offset_bits !== 0 || r.width_bits !== r.root_width_bits)) report('register', node, 'replace_root must cover the root');
     if (r.write_rule === 'zero_extend_root' && r.offset_bits !== 0) report('register', node, 'zero_extend_root must start at bit zero');
     if (registerRoots.has(r.root) && registerRoots.get(r.root) !== r.root_width_bits) report('register', node, 'Conflicting root widths');
@@ -98,12 +100,33 @@ export function verifyIR(ir: FunctionIR): readonly IRProblem[] {
     const previous = registers.get(r.id);
     if (previous && (Object.keys(r) as (keyof RegisterDescriptor)[]).some(key => previous[key] !== r[key])) report('register', node, 'Conflicting register descriptors');
     registers.set(r.id, r);
+    return true;
   };
   const clobbers = (c: CallClobbers, node: string): void => { for (const r of [...c.registers, ...c.flags]) register(r, node); };
   origin(ir);
   const blocks = new Map(ir.blocks.map(block => [block.id, block]));
   if (!blocks.has(ir.entry)) report('control_flow', ir.id, 'Entry block does not exist');
   for (const type of ir.returns) if (!validType(type)) report('type', ir.id, 'Invalid return type');
+  const stateRows = ir.form === 'ssa' ? ir.register_states : [];
+  const states = new Map(stateRows.map(state => [state.block, state]));
+  if (ir.form === 'ssa' && (states.size !== stateRows.length || states.size !== blocks.size || stateRows.some(state => !blocks.has(state.block)))) report('register', ir.id, 'SSA requires exactly one architectural-state row per block');
+  const masks = (bindings: readonly RegisterBinding[], node: string): Map<string, bigint> => {
+    const result = new Map<string, bigint>();
+    for (const binding of bindings) {
+      const r = binding.register;
+      if (!register(r, node)) continue;
+      if (r.write_rule !== 'preserve_other_bits' || r.role === 'zero') report('register', node, 'SSA bindings must preserve disjoint physical register slices');
+      if (binding.value.type.kind !== 'integer' || bitWidth(binding.value.type) !== r.width_bits) report('type', node, 'SSA register binding requires an equal-width integer value');
+      const mask = ((1n << BigInt(r.width_bits)) - 1n) << BigInt(r.offset_bits), previous = result.get(r.root) ?? 0n;
+      if ((previous & mask) !== 0n) report('register', node, 'Overlapping SSA register bindings');
+      result.set(r.root, previous | mask);
+    }
+    return result;
+  };
+  const sameMasks = (actual: ReadonlyMap<string, bigint>, expected: ReadonlyMap<string, bigint>, node: string): void => {
+    if (actual.size !== expected.size || [...expected].some(([root, mask]) => actual.get(root) !== mask)) report('register', node, 'SSA architectural-state coverage mismatch');
+  };
+  const tracked = masks(states.get(ir.entry)?.entry ?? [], ir.id);
   for (const block of ir.blocks) {
     origin(block);
     const local = new Map<string, IRType>();
@@ -123,11 +146,27 @@ export function verifyIR(ir: FunctionIR): readonly IRProblem[] {
     define(block.effect_parameter);
     if (block.effect_parameter.type.kind !== 'effect') report('effect_order', block.id, 'Block needs an effect parameter');
     let effect = block.effect_parameter;
+    const state = states.get(block.id);
+    if (state) {
+      sameMasks(masks(state.entry, block.id), tracked, block.id);
+      const parameters = new Set(block.parameters.map(parameter => parameter.id)), assigned = new Set<string>();
+      for (const binding of state.entry) {
+        reference(binding.value, block.id);
+        if (!parameters.has(binding.value.id) || assigned.has(binding.value.id)) report('register', block.id, 'SSA entry bindings require distinct block parameters');
+        assigned.add(binding.value.id);
+      }
+    }
     for (const instruction of block.instructions) {
       origin(instruction);
       if ('effect_in' in instruction) {
         reference(instruction.effect_in, instruction.id);
         if (instruction.effect_in.id !== effect.id || instruction.effect_in.type.kind !== 'effect' || instruction.effect_out.type.kind !== 'effect') report('effect_order', instruction.id, 'State access must consume current effect and produce a new effect');
+      }
+      if ('register_inputs' in instruction) {
+        if (ir.form === 'register' && (instruction.register_inputs.length || ('register_outputs' in instruction && instruction.register_outputs.length))) report('register', instruction.id, 'Register-form boundaries cannot contain SSA bindings');
+        const inputMasks = masks(instruction.register_inputs, instruction.id);
+        if (ir.form === 'ssa') sameMasks(inputMasks, tracked, instruction.id);
+        for (const binding of instruction.register_inputs) reference(binding.value, instruction.id);
       }
       switch (instruction.kind) {
         case 'assign':
@@ -163,7 +202,21 @@ export function verifyIR(ir: FunctionIR): readonly IRProblem[] {
           if (instruction.reason.trim().length === 0) report('semantic', instruction.id, 'Unknown effect needs a reason');
           clobbers(instruction.clobbers, instruction.id); break;
       }
+      if (instruction.kind === 'call' || instruction.kind === 'unknown_effect') {
+        const outputMasks = masks(instruction.register_outputs, instruction.id), expected = new Map<string, bigint>();
+        if (ir.form === 'ssa') for (const r of [...instruction.clobbers.registers, ...instruction.clobbers.flags]) {
+          if (!registerSchema.safeParse(r).success) continue;
+          const mask = (((1n << BigInt(r.width_bits)) - 1n) << BigInt(r.offset_bits)) & (tracked.get(r.root) ?? 0n);
+          if (mask) expected.set(r.root, (expected.get(r.root) ?? 0n) | mask);
+        }
+        sameMasks(outputMasks, expected, instruction.id);
+        for (const binding of instruction.register_outputs) define(binding.value);
+      }
       if ('effect_out' in instruction) { define(instruction.effect_out); effect = instruction.effect_out; }
+    }
+    if (state) {
+      sameMasks(masks(state.exit, block.id), tracked, block.id);
+      for (const binding of state.exit) reference(binding.value, block.id);
     }
     const t = block.terminator;
     origin(t); reference(t.effect, t.id);

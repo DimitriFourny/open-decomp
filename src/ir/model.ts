@@ -33,6 +33,7 @@ export type Expression =
   | { readonly kind: 'cast'; readonly op: CastOp; readonly value: Value }
   | { readonly kind: 'extract'; readonly value: Value; readonly offset: number }
   | { readonly kind: 'insert'; readonly base: Value; readonly value: Value; readonly offset: number }
+  | { readonly kind: 'concat'; readonly values: readonly Value[] }
   | { readonly kind: 'select'; readonly condition: Value; readonly when_true: Value; readonly when_false: Value }
   | { readonly kind: 'flag'; readonly op: 'add' | 'sub'; readonly flag: ArithmeticFlag; readonly left: Value; readonly right: Value; readonly carry: Value }
   | { readonly kind: 'float'; readonly op: FloatOp; readonly left: Value; readonly right: Value }
@@ -47,14 +48,20 @@ export type Expression =
 export interface EffectOrder { readonly effect_in: Effect; readonly effect_out: Effect }
 export interface MemoryAccess { readonly endian: 'little' | 'big'; readonly alignment: number; readonly volatile: boolean }
 export type CallTarget = { readonly kind: 'direct'; readonly address: Address } | { readonly kind: 'indirect'; readonly value: Value };
+/** SSA architectural state is partitioned into disjoint slices; bindings preserve other root bits. */
+export interface RegisterBinding { readonly register: RegisterDescriptor; readonly value: Value }
+export interface RegisterInputs { readonly register_inputs: readonly RegisterBinding[] }
+export interface RegisterBoundary extends RegisterInputs {
+  readonly register_outputs: readonly RegisterBinding[];
+}
 export type Instruction =
   | (Origin & { readonly kind: 'assign'; readonly result: Value; readonly expression: Expression })
   | (Origin & EffectOrder & { readonly kind: 'read_register'; readonly result: Value; readonly register: RegisterDescriptor })
   | (Origin & EffectOrder & { readonly kind: 'write_register'; readonly register: RegisterDescriptor; readonly value: Value })
-  | (Origin & EffectOrder & { readonly kind: 'load'; readonly result: Value; readonly address: Value; readonly access: MemoryAccess })
-  | (Origin & EffectOrder & { readonly kind: 'store'; readonly address: Value; readonly value: Value; readonly access: MemoryAccess })
-  | (Origin & EffectOrder & { readonly kind: 'call'; readonly target: CallTarget; readonly arguments: readonly Value[]; readonly results: readonly Value[]; readonly clobbers: CallClobbers; readonly contract_evidence: readonly Evidence['id'][] })
-  | (Origin & EffectOrder & { readonly kind: 'unknown_effect'; readonly reason: string; readonly clobbers: CallClobbers });
+  | (Origin & EffectOrder & RegisterInputs & { readonly kind: 'load'; readonly result: Value; readonly address: Value; readonly access: MemoryAccess })
+  | (Origin & EffectOrder & RegisterInputs & { readonly kind: 'store'; readonly address: Value; readonly value: Value; readonly access: MemoryAccess })
+  | (Origin & EffectOrder & RegisterBoundary & { readonly kind: 'call'; readonly target: CallTarget; readonly arguments: readonly Value[]; readonly results: readonly Value[]; readonly clobbers: CallClobbers; readonly contract_evidence: readonly Evidence['id'][] })
+  | (Origin & EffectOrder & RegisterBoundary & { readonly kind: 'unknown_effect'; readonly reason: string; readonly clobbers: CallClobbers });
 /** Each edge passes all data parameters simultaneously and the final effect token. */
 export interface Edge { readonly target: EntityId; readonly arguments: readonly Value[]; readonly effect: Effect }
 export type Terminator = Origin & { readonly effect: Effect } & (
@@ -72,15 +79,19 @@ export interface BasicBlock extends Origin {
   readonly instructions: readonly Instruction[];
   readonly terminator: Terminator;
 }
-export interface FunctionIR extends Origin {
-  readonly form: 'register' | 'ssa';
+interface FunctionBody extends Origin {
   readonly entry: EntityId;
   readonly returns: readonly DataType[];
   readonly blocks: readonly BasicBlock[];
 }
 /** Lifter<RegisterIR> is the core integration boundary. */
-export interface RegisterIR extends FunctionIR { readonly form: 'register' }
-export interface SSAForm extends FunctionIR { readonly form: 'ssa' }
+export interface RegisterIR extends FunctionBody { readonly form: 'register' }
+export interface SSAForm extends FunctionBody {
+  readonly form: 'ssa';
+  /** One row per block. Entry bindings reference parameters; exit bindings are observable DCE roots. */
+  readonly register_states: readonly { readonly block: EntityId; readonly entry: readonly RegisterBinding[]; readonly exit: readonly RegisterBinding[] }[];
+}
+export type FunctionIR = RegisterIR | SSAForm;
 /** T16 supplies construction/optimization; no SSA algorithm is hidden in the lifter. */
 export interface SSAConstruction {
   construct(input: RegisterIR, checkpoint: (work: number) => void): SSAForm;
@@ -119,6 +130,7 @@ export function expressionOperands(expression: Expression): readonly Value[] {
     case 'integer': case 'compare': case 'float': case 'float_compare': case 'vector_integer': case 'vector_float': return [expression.left, expression.right];
     case 'integer_unary': case 'cast': case 'extract': case 'float_unary': return [expression.value];
     case 'insert': return [expression.base, expression.value];
+    case 'concat': return expression.values;
     case 'select': return [expression.condition, expression.when_true, expression.when_false];
     case 'flag': return [expression.left, expression.right, expression.carry];
     case 'vector': return expression.lanes;

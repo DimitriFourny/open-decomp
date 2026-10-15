@@ -19,6 +19,8 @@
  * indeterminate('undefined'|'unknown') followed by a register write distinguishes
  * undefined from unknown flags. Full-register/zero-extension writes follow the
  * core descriptor; narrower preserving writes retain the other root bits.
+ * concat assembles integer slices low-bits-first; any undefined slice dominates
+ * unknown slices, preserving architectural read semantics after SSA partitioning.
  *
  * FP32/64 operations use IEEE nearest-even with gradual underflow, no fused
  * operations and no floating-environment exception state. Arithmetic NaNs are
@@ -34,10 +36,15 @@
  * loop backedges; each block has its own effect parameter. Data references are
  * block-local: cross-block values MUST pass through typed block parameters.
  * This region-SSA convention makes joins/unreachable blocks unambiguous without
- * a dominance solver. T16 implements SSAConstruction, eliminates architectural
- * register operations, and preserves the effect chain. SSA-form calls expose
- * results and ABI clobbers, but cannot implicitly make clobbered register values
- * available. Unknown effects are mandatory boundaries, never no-ops or traps.
+ * a dominance solver. SSA construction eliminates architectural register nodes
+ * while retaining the effect chain and explicit disjoint register-slice state.
+ * Each block's register_states entry binds physical inputs to parameters; exit
+ * bindings remain observable roots even with no reconstructed formal returns.
+ * Calls/unknown effects expose register_inputs/register_outputs independently
+ * of source arguments/results. Loads/stores snapshot register_inputs so a fault
+ * preserves earlier physical writes. Bindings use preserve_other_bits; partial
+ * unknown clobbers must not erase unaffected slices. Unknown effects remain
+ * mandatory boundaries, never no-ops or traps.
  *
  * Identity uses core entityIdentity(slice, kind, birth); block births are stable
  * caller-owned keys. Builder node IDs are stable for deterministic emission.
@@ -45,7 +52,9 @@
  * instruction/range/evidence origins. verifyIR/assertValidIR are public pass
  * boundaries. evaluateIR is a bounded offline trusted-fixture oracle, not a
  * service path for execution of user binaries. It never loads or invokes native
- * code; explicit test-owned call oracles are keyed by exact call node ID.
+ * code; explicit test-owned call oracles are keyed by exact call node ID. Their
+ * readRegister/register_writes bridge physical callee state without inventing
+ * signatures; writes are limited to declared clobbers and applied afterward.
  */
 export * from './model.js';
 export * from './provenance.js';

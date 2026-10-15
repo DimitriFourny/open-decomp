@@ -1,4 +1,5 @@
 import type { EntityId, OperationContext, RegisterDescriptor } from '../core/index.js';
+import { registerSchema } from '../core/index.js';
 import { bitWidth } from './model.js';
 import type { Edge, FunctionIR, MemoryAccess, Value } from './model.js';
 import { assertValidIR } from './verify.js';
@@ -54,8 +55,18 @@ export class OracleMemory {
   }
 }
 export interface RegisterState { readonly bits: bigint; readonly known: bigint; readonly undefined: bigint; readonly width: number }
-export interface TrustedCallInput { readonly target: bigint; readonly arguments: readonly bigint[]; readMemory(address: bigint, width: number): bigint }
-export interface TrustedCallOutput { readonly results: readonly bigint[]; readonly writes: readonly { readonly address: bigint; readonly width: number; readonly bits: bigint }[] }
+export interface TrustedCallInput {
+  readonly target: bigint; readonly arguments: readonly bigint[];
+  readMemory(address: bigint, width: number): bigint;
+  /** Physical callee-entry state; does not invent a production source-level signature. */
+  readRegister(register: RegisterDescriptor): bigint;
+}
+export interface TrustedCallOutput {
+  readonly results: readonly bigint[];
+  readonly writes: readonly { readonly address: bigint; readonly width: number; readonly bits: bigint }[];
+  /** Applied after invalidating declared clobbers; writes outside that contract are rejected. */
+  readonly register_writes?: readonly { readonly register: RegisterDescriptor; readonly bits: bigint }[];
+}
 /** Test-owned semantic functions, keyed by exact call node ID, never resolved by a symbol name. */
 export type TrustedCall = (input: TrustedCallInput) => TrustedCallOutput;
 export interface EvaluationOptions {
@@ -91,6 +102,8 @@ export function evaluateIR(ir: FunctionIR, options: EvaluationOptions = {}): Eva
   const memory = new OracleMemory(options.memory);
   const registers = new Map<string, RegisterState>();
   const rootWidths = new Map<string, number>();
+  const states = new Map(ir.form === 'ssa' ? ir.register_states.map(state => [state.block, state] as const) : []);
+  for (const state of states.values()) for (const binding of state.entry) rootWidths.set(binding.register.root, binding.register.root_width_bits);
   for (const block of ir.blocks) for (const instruction of block.instructions) {
     if (instruction.kind === 'read_register' || instruction.kind === 'write_register') rootWidths.set(instruction.register.root, instruction.register.root_width_bits);
     if (instruction.kind === 'call' || instruction.kind === 'unknown_effect') for (const register of [...instruction.clobbers.registers, ...instruction.clobbers.flags]) rootWidths.set(register.root, register.root_width_bits);
@@ -123,12 +136,17 @@ export function evaluateIR(ir: FunctionIR, options: EvaluationOptions = {}): Eva
   };
   const blocks = new Map(ir.blocks.map(block => [block.id, block]));
   let block = blocks.get(ir.entry)!;
-  let incoming: readonly RuntimeValue[] = (options.arguments ?? []).map((value, index) => {
-    const parameter = block.parameters[index];
-    if (!parameter) throw new TypeError('Too many entry arguments');
+  const entryBindings = new Map(states.get(block.id)?.entry.map(binding => [binding.value.id, binding] as const) ?? []);
+  const args = options.arguments ?? [];
+  let argumentIndex = 0;
+  let incoming: readonly RuntimeValue[] = block.parameters.map(parameter => {
+    const binding = entryBindings.get(parameter.id);
+    if (binding) return readRegister(binding.register);
+    const value = args[argumentIndex++];
+    if (value === undefined) throw new TypeError('Entry argument arity mismatch');
     return bits(value, bitWidth(parameter.type));
   });
-  if (incoming.length !== block.parameters.length) throw new TypeError('Entry argument arity mismatch');
+  if (argumentIndex !== args.length) throw new TypeError('Entry argument arity mismatch');
   let steps = 0, node = block.id;
   const trace: string[] = [];
   const finish = (status: EvaluationResult['status'], reason: string | null, values: readonly RuntimeValue[] = []): EvaluationResult => ({ status, reason, values, node, steps, registers: new Map(registers), memory: memory.snapshot(), effect_trace: [...trace] });
@@ -152,6 +170,7 @@ export function evaluateIR(ir: FunctionIR, options: EvaluationOptions = {}): Eva
         return found;
       };
       for (const instruction of block.instructions) {
+        if ('register_inputs' in instruction) for (const binding of instruction.register_inputs) writeRegister(binding.register, get(binding.value));
         step(instruction.id);
         if ('effect_in' in instruction) trace.push(instruction.id);
         switch (instruction.kind) {
@@ -166,20 +185,42 @@ export function evaluateIR(ir: FunctionIR, options: EvaluationOptions = {}): Eva
             if (!call) throw new EvaluationBoundary('unknown', 'No explicit trusted fixture oracle for call');
             const target = instruction.target.kind === 'direct' ? instruction.target.address.value : observe(get(instruction.target.value));
             const args = instruction.arguments.map(value => observe(get(value)));
-            const output = call({ target, arguments: args, readMemory: (address, width) => {
+            const output = call({ target, arguments: args, readRegister: register => {
+              registerSchema.parse(register);
+              if (register.role !== 'zero' && rootWidths.get(register.root) !== register.root_width_bits) throw new TypeError('Trusted call read references untracked physical state');
+              return observe(readRegister(register));
+            }, readMemory: (address, width) => {
               if (instruction.clobbers.memory === 'none') throw new TypeError('Trusted call read violates memory contract');
               return memory.read(address, width);
             } });
             if (output.results.length !== instruction.results.length) throw new TypeError('Trusted call result arity mismatch');
             if (output.writes.length > 0 && instruction.clobbers.memory !== 'unknown_read_write') throw new TypeError('Trusted call write violates memory contract');
+            const allowed = new Map<string, bigint>();
+            for (const register of [...instruction.clobbers.registers, ...instruction.clobbers.flags]) {
+              const mask = ((1n << BigInt(register.width_bits)) - 1n) << BigInt(register.offset_bits);
+              allowed.set(register.root, (allowed.get(register.root) ?? 0n) | mask);
+            }
+            for (const { register } of output.register_writes ?? []) {
+              registerSchema.parse(register);
+              if (rootWidths.get(register.root) !== register.root_width_bits || register.role === 'zero' || register.write_rule === 'discard'
+                || (register.write_rule === 'replace_root' && (register.offset_bits !== 0 || register.width_bits !== register.root_width_bits))
+                || (register.write_rule === 'zero_extend_root' && register.offset_bits !== 0)) throw new TypeError('Invalid trusted call register write');
+              const mask = register.write_rule === 'preserve_other_bits'
+                ? ((1n << BigInt(register.width_bits)) - 1n) << BigInt(register.offset_bits)
+                : (1n << BigInt(register.root_width_bits)) - 1n;
+              if ((mask & (allowed.get(register.root) ?? 0n)) !== mask) throw new TypeError('Trusted call register write violates clobber contract');
+            }
             for (const write of output.writes) memory.write(write.address, write.width, write.bits);
             // Clobbers describe overwritten slices, not architectural zero-extending writes.
             for (const register of [...instruction.clobbers.registers, ...instruction.clobbers.flags]) writeRegister({ ...register, write_rule: 'preserve_other_bits' }, { kind: 'unknown', reason: 'Call clobber' });
+            for (const write of output.register_writes ?? []) writeRegister(write.register, bits(write.bits, write.register.width_bits));
+            for (const binding of instruction.register_outputs) values.set(binding.value.id, readRegister(binding.register));
             instruction.results.forEach((result, index) => values.set(result.id, bits(output.results[index]!, bitWidth(result.type))));
             break;
           }
         }
       }
+      for (const binding of states.get(block.id)?.exit ?? []) writeRegister(binding.register, get(binding.value));
       const terminator = block.terminator;
       step(terminator.id);
       let edge: Edge;

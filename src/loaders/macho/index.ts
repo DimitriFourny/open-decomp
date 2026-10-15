@@ -141,6 +141,10 @@ function parseImage(s: State, input: Parameters<Loader['load']>[0], slices: read
         if (flags & 0x80000400 && !zero && (sectionVa % 4n || sectionSize % 4n || sectionOffset % 4)) malformed('ARM64 instruction section is not four-byte aligned');
         s.rawSections.push({ id: sectionId, name: sectionName, va: sectionVa, size: sectionSize, offset: sectionOffset, flags, first: r.u32(q + 68), stride: r.u32(q + 72), relocOffset, relocCount, evidence: sectionProof });
         s.sections.push({ id: sectionId, name: sectionName, segment_id: id, kind: 'section', virtual_range: { start: s.va(sectionVa), size: sectionSize }, file_range: zero ? null : s.file(sectionOffset, safe(sectionSize)), permissions, flags: BigInt(flags), evidence_ids: sectionProof });
+        // Executable segment permissions also cover constants and runtime metadata.
+        // Section instruction attributes (or a stub section type) establish code;
+        // the remaining declared sections are data, even inside __TEXT.
+        if (sectionSize && !(flags & 0x80000400) && type !== 8) s.hints.push({ kind: 'data', range: { start: s.va(sectionVa), size: sectionSize }, encoding: 'bytes', evidence_ids: sectionProof });
       }
       // Segment mappings are split only where a declared zero-fill section overrides file backing.
       // Sections remain metadata, never a second overlapping set of maps.

@@ -17,14 +17,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 ### Independent loading, decoding, storage, and ABI slices
 
-### Homemade lifting and shared analysis
-
-- [ ] **T17 — Implement shared stack recovery and ABI-aware call analysis**
-  - Depends on: T10, T11, T12, T13, T16.
-  - Owns: `src/analysis/stack/`, `src/analysis/calls/`.
-  - Work: Port useful `stack.js`/`calls.js` behavior into architecture-independent passes consuming ABI profiles and typed effects. Recover stack slots/frames, parameters, outgoing arguments, returns, nonreturning calls, and supported indirect/variadic calls. Preserve escaped stack addresses, dynamic stack changes, call-time initialization evidence, and uncertainty.
-  - Acceptance: Both target corpora recover expected call arguments and stack objects without conflating Windows shadow space with locals or Darwin rules. Unknown/unsupported contracts do not invent signatures or initialized arguments; escapes and writes inhibit unsafe transformations. Contributes A04/A05/A06.
-
 ### Metadata, presentation, and durable annotations
 
 - [ ] **T20 — Implement recovered types and constraint/evidence handling**
@@ -32,12 +24,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Owns: `src/analysis/types/`, type-recovery behavior tests.
   - Work: Port type recovery onto typed IR and combine memory access shapes, ABI rules, debug types, library contracts, and explicit annotations. Represent pointers, arrays, structures/fields, signatures, and scalar/vector types within supported semantics. Separate machine widths from reconstructed source types, and track why each constraint exists.
   - Acceptance: Structure/field and signature recovery improves fixture decompilation while respecting offsets, widths, aliases, and both data layouts. Conflicting evidence is surfaced, user assertions remain labeled, and names or isolated casts cannot establish object sizes/types without evidence. Contributes A06/A08.
-
-- [ ] **T21 — Implement emitter-neutral control-flow structuring**
-  - Depends on: T16.
-  - Owns: `src/presentation/`, structured-control-flow tests.
-  - Work: Port CFG simplification/structuring into a presentation model for sequences, conditionals, loops, switches where established, calls, returns, and explicit labeled transfers. Preserve irreducible flow, exceptional/unknown boundaries, stable statement identity, and semantic source mappings. The model must contain no C syntax strings.
-  - Acceptance: Structured output represents the same paths and side effects as the input CFG on reducible and irreducible fixtures. Unknown edges and unsupported semantics remain visible; inability to form a loop/if does not trigger invented control flow. Contributes A06/A07.
 
 - [ ] **T22 — Implement C-like pseudocode emission and instruction mappings**
   - Depends on: T20, T21.
@@ -120,33 +106,19 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 ## Doing
 
-- [ ] **T12 — Port ARM64 instruction semantics to typed IR**
-  - Depends on: T04, T08, T10, T14.
-  - Owns: `src/lifters/arm64/`, ARM64 semantic regressions.
-  - Work: Migrate supported behavior from the existing `lift.js` into typed nodes, not a C-string compatibility layer. Cover the agreed corpus's integer/control-flow, loads/stores, stack, scalar FP/common vector, flags, and call behavior. Preserve width/SP/ZR rules and explicit pointer-authentication abstraction diagnostics. Inventory unsupported families and conservatively bound them.
-  - Acceptance: Applicable baseline functions retain semantic behavior and instruction provenance. Boundary checks cover carry/overflow, signed shifts/division, W-register writes, writeback, and indirect/authenticated transfers. Unsupported instructions are neither silently dropped nor converted to invented guaranteed traps. Contributes A04/A06.
-  - Owner: ArmLifter (astra-worker).
+- [ ] **T17 — Implement shared stack recovery and ABI-aware call analysis**
+  - Depends on: T10, T11, T12, T13, T16.
+  - Owns: `src/analysis/stack/`, `src/analysis/calls/`.
+  - Work: Port useful `stack.js`/`calls.js` behavior into architecture-independent passes consuming ABI profiles and typed effects. Recover stack slots/frames, parameters, outgoing arguments, returns, nonreturning calls, and supported indirect/variadic calls. Preserve escaped stack addresses, dynamic stack changes, call-time initialization evidence, and uncertainty.
+  - Acceptance: Both target corpora recover expected call arguments and stack objects without conflating Windows shadow space with locals or Darwin rules. Unknown/unsupported contracts do not invent signatures or initialized arguments; escapes and writes inhibit unsafe transformations. Contributes A04/A05/A06.
+  - Owner: StackCalls (astra-worker).
 
-- [ ] **T13 — Implement x86-64 instruction semantics in typed IR**
-  - Depends on: T04, T09, T11, T14.
-  - Owns: `src/lifters/x86_64/`, x86 semantic regressions.
-  - Work: Lift the agreed corpus's integer/control-flow, effective-address, stack/load/store, scalar FP/common SIMD, and call instructions. Implement subregister writes, zero extension, implicit operands, flags/conditions, sign/zero extension, and relevant prefix behavior from architectural semantics. Preserve trap/undefined/unknown distinctions and declare unsupported instruction families honestly.
-  - Acceptance: Semantic oracles cover AL/AH/AX/EAX/RAX interactions, arithmetic/carry/overflow, shifts with edge counts, MUL/DIV effects, conditional branches/moves, RIP-relative accesses, stack operations, and FP/vector corpus cases. Metadata about reads/writes is not used as a substitute for instruction semantics. Contributes A05/A06.
-  - Owner: X86Lifter (astra-worker).
-
-- [ ] **T15 — Build strings, cross-reference indexes, and bounded target recovery**
-  - Depends on: T14.
-  - Owns: `src/analysis/strings/`, `src/analysis/references/`, `src/analysis/targets/`.
-  - Work: Reuse applicable string/reference/value-recovery behavior and extend it to PE/x86. Index code/data references, calls, imports/stubs/IAT slots, referenced strings, and supported jump-table/indirect-target patterns. Track candidate versus established references, read/write kinds, origin instruction, and unresolved edges. Keep search/pagination deterministic.
-  - Acceptance: Starting from a known fixture string or imported routine locates the expected referencing function on both targets. Direct and supported indirect targets have evidence; unknown targets are not omitted or invented. Bounded searches distinguish incomplete indexing from an empty result. Contributes A03.
-  - Owner: NavigationIndexes (sol-worker).
-
-- [ ] **T16 — Implement SSA construction and shared value/effect analysis**
-  - Depends on: T04, T14.
-  - Owns: `src/analysis/ssa/`, `src/analysis/values/`, `src/analysis/effects/`.
-  - Work: Build SSA over lifted register-form CFGs, including joins/loops and explicit effect ordering. Port comparison recovery, propagation, expression simplification, branch threading, and dead-assignment elimination to typed nodes. Use bounded worklists/fixed points and conservative alias/call effects. Maintain provenance and diagnostics through rewrites.
-  - Acceptance: Semantic checks cover joins, loops, signed/unsigned distinctions, overflow/wrapping, flag dependencies, unknown calls, aliased stores/loads, and unreachable blocks. Eliminating a value never eliminates a required side effect, and analysis budgets yield explicit partial results. Contributes A06.
-  - Owner: SSAAnalysis (astra-worker).
+- [ ] **T21 — Implement emitter-neutral control-flow structuring**
+  - Depends on: T16.
+  - Owns: `src/presentation/`, structured-control-flow tests.
+  - Work: Port CFG simplification/structuring into a presentation model for sequences, conditionals, loops, switches where established, calls, returns, and explicit labeled transfers. Preserve irreducible flow, exceptional/unknown boundaries, stable statement identity, and semantic source mappings. The model must contain no C syntax strings.
+  - Acceptance: Structured output represents the same paths and side effects as the input CFG on reducible and irreducible fixtures. Unknown edges and unsupported semantics remain visible; inability to form a loop/if does not trigger invented control flow. Contributes A06/A07.
+  - Owner: ControlStructuring (astra-worker).
 
 - [ ] **T19 — Integrate symbol names, runtime metadata, and library contracts**
   - Depends on: T06, T07, T10, T11.
@@ -162,6 +134,7 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Work: Install `/Users/df0/Downloads/tiny10 x64 23h2.iso` into a fresh QEMU disk; expose no host home folder or credentials. Use a read-only project snapshot and pinned Node runtime. Record real Windows command results and retain a way to rerun the final release matrix.
   - Acceptance: Windows x86-64 executes the decoder/behavior checks and compiled API smoke; later T29/T31 checks run against the completed application. No emulation-only claim substitutes for guest Windows execution.
   - Owner: WindowsVM (sol-worker).
+  - Status: Guest provisioning reached the frozen 36f3fb2 foundation checks. The default parallel suite has native child exits 0xC0000005; it is not accepted. Bounded sequential/crash investigation is in progress. This is Windows compatibility under x86 emulation, not native-host performance evidence.
 
 - [ ] **T09 — Integrate the iced-x86 WASM decoder adapter**
   - Depends on: T02, T03.
@@ -261,7 +234,7 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Work: Seed discovery from entry points, exports/symbols, trustworthy loader metadata, and discovered calls; traverse bounded code regions using structured decoder flow. Preserve noncontiguous ranges, data-in-code, tail calls, returns, invalid bytes, and unresolved indirect transfers. Attach function-boundary evidence and define deterministic identity changes for splits/merges.
   - Acceptance: Stripped and symbol-bearing fixtures produce expected reachable blocks/edges without linear-sweeping known data into functions. Loops, shared tails, gaps, jump-table candidates, unresolved edges, and conflicting boundary evidence remain navigable and explicit. Contributes A03.
   - Owner: DiscoveryCFG (astra-worker).
-  - Evidence: `src/analysis/discovery/`, `src/analysis/cfg/`, discovery tests; real API smoke found 20/19 functions in symbol-bearing/stripped Mach-O and 16 in each PE DLL, retaining arithmetic returns and explicit partial coverage for unresolved flow. Focused tests cover noncontiguous/shared tails, block splitting, calls, data exclusion, lineage and resource limits.
+  - Evidence: `src/analysis/discovery/`, `src/analysis/cfg/`, discovery tests; compiled API smoke now finds 19 functions in the symbol-bearing Mach-O and 16 in the PE DLL, retaining arithmetic returns and explicit partial coverage for unresolved flow. T12–T16 integration fixed export-only guesses into Mach-O constants inside executable segments; symbol-bearing/stripped section data and zero-sized object symbols are covered without overriding explicit assertions. Shared tails, block splitting, calls, lineage and resource limits remain exercised.
 
 - [x] **T18 — Port Mach-O DWARF and debug-location evidence**
   - Depends on: T06.
@@ -279,4 +252,36 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Owner: WorkerRuntime (astra-worker).
   - Evidence: `src/workers/`, lifecycle/protocol tests and public exports; Node 24.22.0 full typecheck, 307 tests and compiled build passed. Actual compiled API imported the PE DLL in a child, durably completed at revision 2, then closed/resumed with identical image identity and completed job. Tests cover real import boundaries, forced termination, deadlines, queue limits, ownership, cancellation/publication races and oversized IPC. Process isolation is not an OS filesystem sandbox; Windows-specific execution remains V01/T29 work.
 
+
+- [x] **T12 — Port ARM64 instruction semantics to typed IR**
+  - Depends on: T04, T08, T10, T14.
+  - Owns: `src/lifters/arm64/`, ARM64 semantic regressions.
+  - Work: Migrate supported behavior from the existing `lift.js` into typed nodes, not a C-string compatibility layer. Cover the agreed corpus's integer/control-flow, loads/stores, stack, scalar FP/common vector, flags, and call behavior. Preserve width/SP/ZR rules and explicit pointer-authentication abstraction diagnostics. Inventory unsupported families and conservatively bound them.
+  - Acceptance: Applicable baseline functions retain semantic behavior and instruction provenance. Boundary checks cover carry/overflow, signed shifts/division, W-register writes, writeback, and indirect/authenticated transfers. Unsupported instructions are neither silently dropped nor converted to invented guaranteed traps. Contributes A04/A06.
+  - Owner: ArmLifter (astra-worker).
+  - Evidence: `src/lifters/arm64/`, semantic/corpus tests; Node 24.22.0 integration passed 452 tests, strict checking and build. All 24 real-byte semantic cases passed. Compiled load → discover → lift → SSA → simplify produced the arithmetic result 0x5a unchanged. FPCR guards, canonical-NaN/FPSR abstractions and logical pointer authentication remain explicit; unsupported families are documented in the module.
+
+- [x] **T13 — Implement x86-64 instruction semantics in typed IR**
+  - Depends on: T04, T09, T11, T14.
+  - Owns: `src/lifters/x86_64/`, x86 semantic regressions.
+  - Work: Lift the agreed corpus's integer/control-flow, effective-address, stack/load/store, scalar FP/common SIMD, and call instructions. Implement subregister writes, zero extension, implicit operands, flags/conditions, sign/zero extension, and relevant prefix behavior from architectural semantics. Preserve trap/undefined/unknown distinctions and declare unsupported instruction families honestly.
+  - Acceptance: Semantic oracles cover AL/AH/AX/EAX/RAX interactions, arithmetic/carry/overflow, shifts with edge counts, MUL/DIV effects, conditional branches/moves, RIP-relative accesses, stack operations, and FP/vector corpus cases. Metadata about reads/writes is not used as a substitute for instruction semantics. Contributes A05/A06.
+  - Owner: X86Lifter (astra-worker).
+  - Evidence: `src/lifters/x86_64/`, semantic/corpus tests; the 452-test integration includes all 24 PE semantic cases and the full decoded fixture_check success path. Compiled arithmetic remained 0x5a through SSA/simplification. Partial-register/flags/division/stack cases passed; MXCSR status descriptors now agree with the ABI. FP control guards and unsupported families remain explicit. Windows-host acceptance is still separate.
+
+- [x] **T15 — Build strings, cross-reference indexes, and bounded target recovery**
+  - Depends on: T14.
+  - Owns: `src/analysis/strings/`, `src/analysis/references/`, `src/analysis/targets/`.
+  - Work: Reuse applicable string/reference/value-recovery behavior and extend it to PE/x86. Index code/data references, calls, imports/stubs/IAT slots, referenced strings, and supported jump-table/indirect-target patterns. Track candidate versus established references, read/write kinds, origin instruction, and unresolved edges. Keep search/pagination deterministic.
+  - Acceptance: Starting from a known fixture string or imported routine locates the expected referencing function on both targets. Direct and supported indirect targets have evidence; unknown targets are not omitted or invented. Bounded searches distinguish incomplete indexing from an empty result. Contributes A03.
+  - Owner: NavigationIndexes (sol-worker).
+  - Evidence: `src/analysis/{strings,references,targets}/`, navigation tests; full Node 24 checks passed. Compiled Mach-O and PE navigation each linked the known string to fixture_string. Real callable-stub/IAT cases, source-instruction IDs, candidate versus established targets, bounded jump tables and cursor invalidation passed. Pointer storage is not a callable entry; unresolved edges remain visible.
+
+- [x] **T16 — Implement SSA construction and shared value/effect analysis**
+  - Depends on: T04, T14.
+  - Owns: `src/analysis/ssa/`, `src/analysis/values/`, `src/analysis/effects/`.
+  - Work: Build SSA over lifted register-form CFGs, including joins/loops and explicit effect ordering. Port comparison recovery, propagation, expression simplification, branch threading, and dead-assignment elimination to typed nodes. Use bounded worklists/fixed points and conservative alias/call effects. Maintain provenance and diagnostics through rewrites.
+  - Acceptance: Semantic checks cover joins, loops, signed/unsigned distinctions, overflow/wrapping, flag dependencies, unknown calls, aliased stores/loads, and unreachable blocks. Eliminating a value never eliminates a required side effect, and analysis budgets yield explicit partial results. Contributes A06.
+  - Owner: SSAAnalysis (astra-worker).
+  - Evidence: `src/analysis/{ssa,values,effects}/`, IR state-binding/oracle integration and behavior tests; 452 tests/check/build passed. Compiled cross-target arithmetic preserved results before/after SSA and simplification. Disjoint register cells, pre-fault/call snapshots, observable exit roots, partial clobbers, joins/loops/irreducible flow, alias barriers, undefined-dominant concatenation, provenance and bounded partial results are exercised.
 

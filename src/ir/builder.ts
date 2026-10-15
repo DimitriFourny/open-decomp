@@ -20,7 +20,10 @@ export class IRBuilder<Form extends FunctionIR['form'] = 'register'> {
   }
   finish(entry: BlockBuilder, returns: readonly DataType[] = []): Form extends 'ssa' ? SSAForm : RegisterIR {
     const blocks = this.#blocks.map(block => block.finish());
-    const ir: FunctionIR = { id: this.function_id, form: this.form, provenance: mergeProvenance(this.provenance, ...blocks.map(block => block.provenance)), entry: entry.id, returns, blocks };
+    const body = { id: this.function_id, provenance: mergeProvenance(this.provenance, ...blocks.map(block => block.provenance)), entry: entry.id, returns, blocks };
+    const ir: FunctionIR = this.form === 'ssa'
+      ? { ...body, form: 'ssa', register_states: blocks.map(block => ({ block: block.id, entry: [], exit: [] })) }
+      : { ...body, form: 'register' };
     assertValidIR(ir);
     return ir as Form extends 'ssa' ? SSAForm : RegisterIR;
   }
@@ -67,6 +70,7 @@ export class BlockBuilder {
   cast(op: CastOp, type: DataType, value: Value): Value { return this.assign(type, { kind: 'cast', op, value }); }
   extract(value: Value, offset: number, bits: number): Value { return this.assign(integer(bits), { kind: 'extract', value, offset }); }
   insert(base: Value, value: Value, offset: number): Value { return this.assign(base.type, { kind: 'insert', base, value, offset }); }
+  concat(values: readonly Value[]): Value { return this.assign(integer(values.reduce((sum, value) => sum + bitWidth(value.type), 0)), { kind: 'concat', values }); }
   select(condition: Value, when_true: Value, when_false: Value): Value { return this.assign(when_true.type, { kind: 'select', condition, when_true, when_false }); }
   flag(op: 'add' | 'sub', flag: ArithmeticFlag, left: Value, right: Value, carry: Value): Value { return this.assign(integer(1), { kind: 'flag', op, flag, left, right, carry }); }
   fp(op: FloatOp, left: Value, right: Value): Value { return this.assign(left.type, { kind: 'float', op, left, right }); }
@@ -89,19 +93,19 @@ export class BlockBuilder {
   }
   load(type: DataType, address: Value, access: MemoryAccess = { endian: 'little', alignment: 1, volatile: false }): Value {
     const result: Value = { id: this.#identity('value'), type };
-    this.#instructions.push({ kind: 'load', id: this.#identity('instruction'), provenance: this.#source, result, address, access, ...this.#order() });
+    this.#instructions.push({ kind: 'load', id: this.#identity('instruction'), provenance: this.#source, result, address, access, register_inputs: [], ...this.#order() });
     return result;
   }
   store(address: Value, value: Value, access: MemoryAccess = { endian: 'little', alignment: 1, volatile: false }): void {
-    this.#instructions.push({ kind: 'store', id: this.#identity('instruction'), provenance: this.#source, address, value, access, ...this.#order() });
+    this.#instructions.push({ kind: 'store', id: this.#identity('instruction'), provenance: this.#source, address, value, access, register_inputs: [], ...this.#order() });
   }
   call(target: CallTarget, args: readonly Value[], returns: readonly DataType[], clobbers: CallClobbers, contract_evidence: readonly string[] = []): readonly Value[] {
     const results = returns.map(type => ({ id: this.#identity('value'), type }));
-    this.#instructions.push({ kind: 'call', id: this.#identity('instruction'), provenance: this.#source, target, arguments: args, results, clobbers, contract_evidence, ...this.#order() });
+    this.#instructions.push({ kind: 'call', id: this.#identity('instruction'), provenance: this.#source, target, arguments: args, results, clobbers, contract_evidence, register_inputs: [], register_outputs: [], ...this.#order() });
     return results;
   }
   unknown(reason: string, clobbers: CallClobbers): void {
-    this.#instructions.push({ kind: 'unknown_effect', id: this.#identity('instruction'), provenance: this.#source, reason, clobbers, ...this.#order() });
+    this.#instructions.push({ kind: 'unknown_effect', id: this.#identity('instruction'), provenance: this.#source, reason, clobbers, register_inputs: [], register_outputs: [], ...this.#order() });
   }
   edge(target: BlockBuilder | EntityId, args: readonly Value[] = []): Edge { return { target: typeof target === 'string' ? target : target.id, arguments: args, effect: this.#effect }; }
   /** Raw typed terminator API supports switches and unresolved/indirect boundaries as well. */
