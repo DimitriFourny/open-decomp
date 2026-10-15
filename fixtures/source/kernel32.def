@@ -1,0 +1,5 @@
+; SPDX-License-Identifier: MIT
+; Import-library declaration only; no Microsoft code is redistributed.
+LIBRARY KERNEL32.dll
+EXPORTS
+  ExitProcess

@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "integerEncoding": "Integer arguments/results are decimal strings; unsigned operations wrap at declared width.",
+  "cases": [
+    {"function":"fixture_arithmetic","family":"integer","arguments":["3","4"],"result":"90"},
+    {"function":"fixture_arithmetic","family":"integer","arguments":["4294967295","1"],"result":"87"},
+    {"function":"fixture_maximum","family":"control-flow","arguments":["-7","3"],"result":"3"},
+    {"function":"fixture_maximum","family":"control-flow","arguments":["-2","-8"],"result":"-2"},
+    {"function":"fixture_loop","family":"memory","arguments":[["1","7","19","4294967295"],"0"],"result":"0"},
+    {"function":"fixture_loop","family":"memory","arguments":[["1","7","19","4294967295"],"4"],"result":"26"},
+    {"function":"fixture_stack","family":"stack","arguments":["35"],"result":"42"},
+    {"function":"fixture_stack","family":"stack","arguments":["4294967295"],"result":"6"},
+    {"function":"fixture_memory","family":"memory","arguments":["18446744073709551615","1"],"result":"0","memoryAfter":"0"},
+    {"function":"fixture_memory","family":"memory","arguments":["0","42"],"result":"42","memoryAfter":"42"},
+    {"function":"fixture_direct","family":"direct-call","arguments":["5"],"result":"106"},
+    {"function":"fixture_indirect","family":"indirect-call","arguments":["fixture_stack","35"],"result":"43"},
+    {"function":"fixture_divide","family":"integer","arguments":["-13","5"],"result":"-2"},
+    {"function":"fixture_divide","family":"integer","arguments":["13","-5"],"result":"-2"},
+    {"function":"fixture_width","family":"integer","arguments":["4294967295","1","0"],"result":"4294967296"},
+    {"function":"fixture_width","family":"integer","arguments":["4294967295","1","32"],"result":"1"},
+    {"function":"fixture_width","family":"integer","arguments":["4294967295","1","64"],"result":"4294967296"},
+    {"function":"fixture_stack_args","family":"stack-call","arguments":["1","2","3","4","5","6","7","8","9","10"],"result":"385"},
+    {"function":"fixture_float","family":"scalar-float","arguments":["4","3"],"result":"7.5"},
+    {"function":"fixture_float","family":"scalar-float","arguments":["-2","0.5"],"result":"-2.75"},
+    {"function":"fixture_vector","family":"vector-float","arguments":[["1","-2","0.5","8"],["3","4","-1","0.25"]],"result":["5","0","0","16.25"]},
+    {"function":"fixture_vector_integer","family":"vector-integer","arguments":[["0","1","4294967295","2147483648"],["1","2","1","2147483648"]],"result":["84","86","85","85"]},
+    {"function":"fixture_variadic","family":"variadic-call","arguments":["3","1","2.5","-0.5"],"result":"3"},
+    {"function":"fixture_string","family":"data-reference","arguments":[],"result":"open-decomp trusted fixture v1"}
+  ],
+  "trustedExecution": {"successExitCode":0,"failureCodes":{"1":"arithmetic","2":"maximum","3":"loop","4":"stack","5":"memory","6":"calls","7":"signed division","8":"width/shift","9":"ten arguments","10":"scalar float","11":"float vector","12":"integer vector","13":"variadic float","14":"string reference"}},
+  "exclusions": ["C signed division by zero and INT_MIN/-1", "NaN payloads, floating exceptions and rounding-mode changes", "advanced vector extensions", "pointer authentication (not enabled by these compiler targets)"]
+}

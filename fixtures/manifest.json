@@ -1,0 +1,2594 @@
+{
+  "schemaVersion": 1,
+  "license": "MIT",
+  "sourceFiles": [
+    {
+      "path": "fixtures/source/corpus.h",
+      "sha256": "f8a1b44dc60c7991633b5d3c4f0254569c92b9f006f12ca29c521079903469ec"
+    },
+    {
+      "path": "fixtures/source/corpus.c",
+      "sha256": "1585f825365918ad5044fd40fca359722ca2ebb0631065ece62c6f84b1c7c467"
+    },
+    {
+      "path": "fixtures/source/check.c",
+      "sha256": "ab14d124a05a4bab3f190f5700bcad2622fbfd1f2468da89d56ef356af2b7d5c"
+    },
+    {
+      "path": "fixtures/source/kernel32.def",
+      "sha256": "e898bee89378caf618da378a734834ec6d04507ecaa8866c5eacd886625ca3f1"
+    },
+    {
+      "path": "fixtures/source/library-runner.c",
+      "sha256": "b332e06f85e7876f0ab847f1187f76460cfba7141903bc8327b28d6f680c7ea3"
+    },
+    {
+      "path": "fixtures/expected.json",
+      "sha256": "811ba83f014d2afd2953e420320570600c06d986c9a274d711966b7a16a4e8b5"
+    },
+    {
+      "path": "fixtures/inventory.json",
+      "sha256": "f16a8f36413065f2c1c1e9aa8499b13c29e87200c2a1c45e7b729dda099e6829"
+    },
+    {
+      "path": "fixtures/loader-expectations.json",
+      "sha256": "a5421151ab68398cda08f221f613cf19e8bacd10eb44aca0e7b6249e6a3a7f1b"
+    },
+    {
+      "path": "fixtures/LICENSE",
+      "sha256": "827ed8318a4bbf9d67c5eef7524164ab34b0636f4c99cbce0e471524370f1cdc"
+    },
+    {
+      "path": "scripts/fixtures/generate.ts",
+      "sha256": "822e02ceaf83aa0a0a9eb15c395769bb6dec875843e985252a7a2a9357fd5892"
+    },
+    {
+      "path": "scripts/fixtures/inspect.ts",
+      "sha256": "d29337ca2f69e06e4d715d1c763464269ce2368dda37bec92497384693033b3e"
+    },
+    {
+      "path": "scripts/fixtures/capture-arm64.ts",
+      "sha256": "564c120116f03a33d73b37c1700bfced124ff97560301520de8c1fd295c54239"
+    },
+    {
+      "path": "scripts/fixtures/execute-trusted.ts",
+      "sha256": "4bb4712d7661c7638c9612d67ea73a8a8087e766bd66d92600afc60f4bf70d44"
+    }
+  ],
+  "tools": {
+    "clang": "Apple clang version 21.0.0 (clang-2100.3.34.2)\nTarget: arm64-apple-darwin27.0.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+    "lld": "Homebrew LLD 23.1.3",
+    "appleLinker": "@(#)PROGRAM:ld PROJECT:ld-27037.1\nBUILD 21:17:51 Aug 25 2026\nconfigured to support archs: armv6 armv7 armv7s arm64 arm64e arm64_32 i386 x86_64 x86_64h armv6m armv7k armv7m armv7em armv8m.main armv8.1m.main\nLTO support using: LLVM version 21.0.0 (static support for 30, runtime is 30)\nTAPI support using: Apple TAPI version 21.0.0 (tapi-2100.3.8.1)",
+    "objcopy": "llvm-objcopy, compatible with GNU objcopy\nHomebrew LLVM version 23.1.3\n  Optimized build.",
+    "readobj": "Homebrew LLVM version 23.1.3\n  Optimized build.",
+    "objdump": "Homebrew LLVM version 23.1.3\n  Optimized build.\n\n\n  Registered Targets:\n    aarch64     - AArch64 (little endian)\n    aarch64_32  - AArch64 (little endian ILP32)\n    aarch64_be  - AArch64 (big endian)\n    amdgcn      - legacy name for amdgpu\n    amdgpu      - AMDGPU gfx6+\n    arm         - ARM\n    arm64       - ARM64 (little endian)\n    arm64_32    - ARM64 (little endian ILP32)\n    armeb       - ARM (big endian)\n    avr         - Atmel AVR Microcontroller\n    bpf         - BPF (host endian)\n    bpfeb       - BPF (big endian)\n    bpfel       - BPF (little endian)\n    hexagon     - Hexagon\n    lanai       - Lanai\n    loongarch32 - 32-bit LoongArch\n    loongarch64 - 64-bit LoongArch\n    mips        - MIPS (32-bit big endian)\n    mips64      - MIPS (64-bit big endian)\n    mips64el    - MIPS (64-bit little endian)\n    mipsel      - MIPS (32-bit little endian)\n    msp430      - MSP430 [experimental]\n    nvptx       - NVIDIA PTX 32-bit\n    nvptx64     - NVIDIA PTX 64-bit\n    ppc32       - PowerPC 32\n    ppc32le     - PowerPC 32 LE\n    ppc64       - PowerPC 64\n    ppc64le     - PowerPC 64 LE\n    r600        - AMD GPUs HD2XXX-HD6XXX\n    riscv32     - 32-bit RISC-V\n    riscv32be   - 32-bit big endian RISC-V\n    riscv64     - 64-bit RISC-V\n    riscv64be   - 64-bit big endian RISC-V\n    sparc       - Sparc\n    sparcel     - Sparc LE\n    sparcv9     - Sparc V9\n    spirv       - SPIR-V Logical\n    spirv32     - SPIR-V 32-bit\n    spirv64     - SPIR-V 64-bit\n    systemz     - SystemZ\n    thumb       - Thumb\n    thumbeb     - Thumb (big endian)\n    ve          - VE\n    wasm32      - WebAssembly 32-bit\n    wasm64      - WebAssembly 64-bit\n    x86         - 32-bit X86: Pentium-Pro and above\n    x86-64      - 64-bit X86: EM64T and AMD64\n    xcore       - XCore",
+    "node": "v26.11.1",
+    "sdk": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+    "toolHashes": [
+      {
+        "path": "/usr/bin/ld",
+        "sha256": "34129c71a01a74f7f3b2443521519b2e5447553fa187f5fcafaaf8c42cc192e2"
+      },
+      {
+        "path": "/usr/bin/strip",
+        "sha256": "34129c71a01a74f7f3b2443521519b2e5447553fa187f5fcafaaf8c42cc192e2"
+      },
+      {
+        "path": "/usr/bin/lipo",
+        "sha256": "34129c71a01a74f7f3b2443521519b2e5447553fa187f5fcafaaf8c42cc192e2"
+      },
+      {
+        "path": "/opt/homebrew/opt/llvm/bin/llvm-dlltool",
+        "sha256": "23eb85adbfff81cf51765b828a264763085454f1796acf857b8c0db5a7772bab"
+      }
+    ]
+  },
+  "commands": [
+    {
+      "executable": "/usr/bin/clang",
+      "arguments": [
+        "-target",
+        "arm64-apple-macos13.0",
+        "-std=c11",
+        "-O1",
+        "-g",
+        "-ffp-contract=off",
+        "-fno-vectorize",
+        "-fno-slp-vectorize",
+        "-fno-stack-protector",
+        "-fno-builtin",
+        "-ffile-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-fdebug-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-DFIXTURE_MAIN",
+        "fixtures/source/corpus.c",
+        "fixtures/source/check.c",
+        "-o",
+        "fixtures/bin/macho-arm64-symbols"
+      ]
+    },
+    {
+      "executable": "/usr/bin/clang",
+      "arguments": [
+        "-target",
+        "arm64-apple-macos13.0",
+        "-std=c11",
+        "-O1",
+        "-g",
+        "-ffp-contract=off",
+        "-fno-vectorize",
+        "-fno-slp-vectorize",
+        "-fno-stack-protector",
+        "-fno-builtin",
+        "-ffile-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-fdebug-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-dynamiclib",
+        "fixtures/source/corpus.c",
+        "fixtures/source/check.c",
+        "-Wl,-install_name,@rpath/libcorpus.dylib",
+        "-o",
+        "fixtures/bin/libcorpus-arm64-symbols.dylib"
+      ]
+    },
+    {
+      "executable": "/usr/bin/strip",
+      "arguments": [
+        "fixtures/bin/macho-arm64-stripped"
+      ]
+    },
+    {
+      "executable": "/usr/bin/strip",
+      "arguments": [
+        "-S",
+        "-x",
+        "fixtures/bin/libcorpus-arm64-stripped.dylib"
+      ]
+    },
+    {
+      "executable": "/usr/bin/clang",
+      "arguments": [
+        "-target",
+        "x86_64-apple-macos13.0",
+        "-std=c11",
+        "-O1",
+        "-g",
+        "-ffp-contract=off",
+        "-fno-vectorize",
+        "-fno-slp-vectorize",
+        "-fno-stack-protector",
+        "-fno-builtin",
+        "-ffile-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-fdebug-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-DFIXTURE_MAIN",
+        "fixtures/source/corpus.c",
+        "fixtures/source/check.c",
+        "-o",
+        "fixtures/.build/macho-x86_64"
+      ]
+    },
+    {
+      "executable": "/usr/bin/lipo",
+      "arguments": [
+        "-create",
+        "fixtures/bin/macho-arm64-symbols",
+        "fixtures/.build/macho-x86_64",
+        "-output",
+        "fixtures/bin/macho-universal"
+      ]
+    },
+    {
+      "executable": "/usr/bin/clang",
+      "arguments": [
+        "--target=x86_64-pc-windows-msvc",
+        "-std=c11",
+        "-O1",
+        "-g",
+        "-ffp-contract=off",
+        "-fno-vectorize",
+        "-fno-slp-vectorize",
+        "-fno-stack-protector",
+        "-fno-builtin",
+        "-ffile-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-fdebug-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-gdwarf",
+        "-c",
+        "fixtures/source/corpus.c",
+        "-o",
+        "fixtures/.build/corpus.obj"
+      ]
+    },
+    {
+      "executable": "/usr/bin/clang",
+      "arguments": [
+        "--target=x86_64-pc-windows-msvc",
+        "-std=c11",
+        "-O1",
+        "-g",
+        "-ffp-contract=off",
+        "-fno-vectorize",
+        "-fno-slp-vectorize",
+        "-fno-stack-protector",
+        "-fno-builtin",
+        "-ffile-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-fdebug-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-gdwarf",
+        "-c",
+        "fixtures/source/check.c",
+        "-o",
+        "fixtures/.build/check-library.obj"
+      ]
+    },
+    {
+      "executable": "lld-link",
+      "arguments": [
+        "/dll",
+        "/noentry",
+        "/nodefaultlib",
+        "/machine:x64",
+        "/timestamp:0",
+        "/debug:dwarf",
+        "/base:0x180000000",
+        "/out:fixtures/bin/corpus-symbols.dll",
+        "/implib:fixtures/.build/corpus.lib",
+        "fixtures/.build/corpus.obj",
+        "fixtures/.build/check-library.obj"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-dlltool",
+      "arguments": [
+        "-m",
+        "i386:x86-64",
+        "-d",
+        "fixtures/source/kernel32.def",
+        "-l",
+        "fixtures/.build/kernel32.lib"
+      ]
+    },
+    {
+      "executable": "/usr/bin/clang",
+      "arguments": [
+        "--target=x86_64-pc-windows-msvc",
+        "-std=c11",
+        "-O1",
+        "-g",
+        "-ffp-contract=off",
+        "-fno-vectorize",
+        "-fno-slp-vectorize",
+        "-fno-stack-protector",
+        "-fno-builtin",
+        "-ffile-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-fdebug-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-gdwarf",
+        "-c",
+        "-DFIXTURE_IMPORT",
+        "-DFIXTURE_WINDOWS_ENTRY",
+        "fixtures/source/check.c",
+        "-o",
+        "fixtures/.build/entry.obj"
+      ]
+    },
+    {
+      "executable": "lld-link",
+      "arguments": [
+        "/nodefaultlib",
+        "/machine:x64",
+        "/subsystem:console",
+        "/entry:fixture_entry",
+        "/timestamp:0",
+        "/debug:dwarf",
+        "/base:0x140000000",
+        "/out:fixtures/bin/pe-x86_64-symbols.exe",
+        "fixtures/.build/entry.obj",
+        "fixtures/.build/corpus.lib",
+        "fixtures/.build/kernel32.lib"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objcopy",
+      "arguments": [
+        "--strip-debug",
+        "fixtures/bin/corpus-symbols.dll",
+        "fixtures/bin/corpus-stripped.dll"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objcopy",
+      "arguments": [
+        "--strip-debug",
+        "fixtures/bin/pe-x86_64-symbols.exe",
+        "fixtures/bin/pe-x86_64-stripped.exe"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-readobj",
+      "arguments": [
+        "--file-headers",
+        "--sections",
+        "--symbols",
+        "--macho-segment",
+        "--macho-dysymtab",
+        "--macho-indirect-symbols",
+        "--coff-imports",
+        "--coff-exports",
+        "--coff-basereloc",
+        "--coff-debug-directory",
+        "--unwind",
+        "fixtures/bin/macho-arm64-symbols"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+      "arguments": [
+        "--disassemble",
+        "fixtures/bin/macho-arm64-symbols"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-readobj",
+      "arguments": [
+        "--file-headers",
+        "--sections",
+        "--symbols",
+        "--macho-segment",
+        "--macho-dysymtab",
+        "--macho-indirect-symbols",
+        "--coff-imports",
+        "--coff-exports",
+        "--coff-basereloc",
+        "--coff-debug-directory",
+        "--unwind",
+        "fixtures/bin/macho-arm64-stripped"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+      "arguments": [
+        "--disassemble",
+        "fixtures/bin/macho-arm64-stripped"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-readobj",
+      "arguments": [
+        "--file-headers",
+        "--sections",
+        "--symbols",
+        "--macho-segment",
+        "--macho-dysymtab",
+        "--macho-indirect-symbols",
+        "--coff-imports",
+        "--coff-exports",
+        "--coff-basereloc",
+        "--coff-debug-directory",
+        "--unwind",
+        "fixtures/bin/libcorpus-arm64-symbols.dylib"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+      "arguments": [
+        "--disassemble",
+        "fixtures/bin/libcorpus-arm64-symbols.dylib"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-readobj",
+      "arguments": [
+        "--file-headers",
+        "--sections",
+        "--symbols",
+        "--macho-segment",
+        "--macho-dysymtab",
+        "--macho-indirect-symbols",
+        "--coff-imports",
+        "--coff-exports",
+        "--coff-basereloc",
+        "--coff-debug-directory",
+        "--unwind",
+        "fixtures/bin/libcorpus-arm64-stripped.dylib"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+      "arguments": [
+        "--disassemble",
+        "fixtures/bin/libcorpus-arm64-stripped.dylib"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-readobj",
+      "arguments": [
+        "--file-headers",
+        "--sections",
+        "--symbols",
+        "--macho-segment",
+        "--macho-dysymtab",
+        "--macho-indirect-symbols",
+        "--coff-imports",
+        "--coff-exports",
+        "--coff-basereloc",
+        "--coff-debug-directory",
+        "--unwind",
+        "fixtures/bin/macho-universal"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+      "arguments": [
+        "--disassemble",
+        "fixtures/bin/macho-universal"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-readobj",
+      "arguments": [
+        "--file-headers",
+        "--sections",
+        "--symbols",
+        "--macho-segment",
+        "--macho-dysymtab",
+        "--macho-indirect-symbols",
+        "--coff-imports",
+        "--coff-exports",
+        "--coff-basereloc",
+        "--coff-debug-directory",
+        "--unwind",
+        "fixtures/bin/corpus-symbols.dll"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+      "arguments": [
+        "--disassemble",
+        "fixtures/bin/corpus-symbols.dll"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-readobj",
+      "arguments": [
+        "--file-headers",
+        "--sections",
+        "--symbols",
+        "--macho-segment",
+        "--macho-dysymtab",
+        "--macho-indirect-symbols",
+        "--coff-imports",
+        "--coff-exports",
+        "--coff-basereloc",
+        "--coff-debug-directory",
+        "--unwind",
+        "fixtures/bin/corpus-stripped.dll"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+      "arguments": [
+        "--disassemble",
+        "fixtures/bin/corpus-stripped.dll"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-readobj",
+      "arguments": [
+        "--file-headers",
+        "--sections",
+        "--symbols",
+        "--macho-segment",
+        "--macho-dysymtab",
+        "--macho-indirect-symbols",
+        "--coff-imports",
+        "--coff-exports",
+        "--coff-basereloc",
+        "--coff-debug-directory",
+        "--unwind",
+        "fixtures/bin/pe-x86_64-symbols.exe"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+      "arguments": [
+        "--disassemble",
+        "fixtures/bin/pe-x86_64-symbols.exe"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-readobj",
+      "arguments": [
+        "--file-headers",
+        "--sections",
+        "--symbols",
+        "--macho-segment",
+        "--macho-dysymtab",
+        "--macho-indirect-symbols",
+        "--coff-imports",
+        "--coff-exports",
+        "--coff-basereloc",
+        "--coff-debug-directory",
+        "--unwind",
+        "fixtures/bin/pe-x86_64-stripped.exe"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+      "arguments": [
+        "--disassemble",
+        "fixtures/bin/pe-x86_64-stripped.exe"
+      ]
+    }
+  ],
+  "images": [
+    {
+      "path": "fixtures/bin/macho-arm64-symbols",
+      "size": 52368,
+      "sha256": "82680f1eaabe35cd05149ae943022b4abd51eea715cc642d861de404c86c9adf",
+      "facts": {
+        "format": "macho",
+        "architecture": "arm64",
+        "kind": "executable",
+        "imageBase": "0x100000000",
+        "entryAddress": "0x100000a8c",
+        "mappings": [
+          {
+            "name": "__PAGEZERO",
+            "address": "0x0",
+            "virtualSize": 4294967296,
+            "fileOffset": 0,
+            "fileSize": 0
+          },
+          {
+            "name": "__TEXT",
+            "address": "0x100000000",
+            "virtualSize": 16384,
+            "fileOffset": 0,
+            "fileSize": 16384
+          },
+          {
+            "name": "__DATA_CONST",
+            "address": "0x100004000",
+            "virtualSize": 16384,
+            "fileOffset": 16384,
+            "fileSize": 16384
+          },
+          {
+            "name": "__DATA",
+            "address": "0x100008000",
+            "virtualSize": 16384,
+            "fileOffset": 32768,
+            "fileSize": 16384
+          },
+          {
+            "name": "__LINKEDIT",
+            "address": "0x10000c000",
+            "virtualSize": 16384,
+            "fileOffset": 49152,
+            "fileSize": 3216
+          }
+        ],
+        "functions": [
+          {
+            "name": "_fixture_stack",
+            "address": "0x100000548",
+            "fileOffset": 1352,
+            "size": 44
+          },
+          {
+            "name": "_fixture_arithmetic",
+            "address": "0x100000574",
+            "fileOffset": 1396,
+            "size": 20
+          },
+          {
+            "name": "_fixture_maximum",
+            "address": "0x100000588",
+            "fileOffset": 1416,
+            "size": 12
+          },
+          {
+            "name": "_fixture_loop",
+            "address": "0x100000594",
+            "fileOffset": 1428,
+            "size": 44
+          },
+          {
+            "name": "_fixture_memory",
+            "address": "0x1000005c0",
+            "fileOffset": 1472,
+            "size": 20
+          },
+          {
+            "name": "_fixture_direct",
+            "address": "0x1000005d4",
+            "fileOffset": 1492,
+            "size": 52
+          },
+          {
+            "name": "_fixture_indirect",
+            "address": "0x100000608",
+            "fileOffset": 1544,
+            "size": 32
+          },
+          {
+            "name": "_fixture_divide",
+            "address": "0x100000628",
+            "fileOffset": 1576,
+            "size": 8
+          },
+          {
+            "name": "_fixture_width",
+            "address": "0x100000630",
+            "fileOffset": 1584,
+            "size": 16
+          },
+          {
+            "name": "_fixture_stack_args",
+            "address": "0x100000640",
+            "fileOffset": 1600,
+            "size": 68
+          },
+          {
+            "name": "_fixture_float",
+            "address": "0x100000684",
+            "fileOffset": 1668,
+            "size": 24
+          },
+          {
+            "name": "_fixture_vector",
+            "address": "0x10000069c",
+            "fileOffset": 1692,
+            "size": 24
+          },
+          {
+            "name": "_fixture_vector_integer",
+            "address": "0x1000006b4",
+            "fileOffset": 1716,
+            "size": 28
+          },
+          {
+            "name": "_fixture_variadic",
+            "address": "0x1000006d0",
+            "fileOffset": 1744,
+            "size": 56
+          },
+          {
+            "name": "_fixture_string",
+            "address": "0x100000708",
+            "fileOffset": 1800,
+            "size": 12
+          },
+          {
+            "name": "_fixture_check",
+            "address": "0x100000714",
+            "fileOffset": 1812,
+            "size": 888
+          },
+          {
+            "name": "_main",
+            "address": "0x100000a8c",
+            "fileOffset": 2700,
+            "size": 48
+          }
+        ],
+        "symbols": [
+          "__mh_execute_header",
+          "_fixture_arithmetic",
+          "_fixture_callback",
+          "_fixture_check",
+          "_fixture_direct",
+          "_fixture_divide",
+          "_fixture_float",
+          "_fixture_indirect",
+          "_fixture_loop",
+          "_fixture_maximum",
+          "_fixture_memory",
+          "_fixture_message",
+          "_fixture_stack",
+          "_fixture_stack_args",
+          "_fixture_string",
+          "_fixture_variadic",
+          "_fixture_vector",
+          "_fixture_vector_integer",
+          "_fixture_width",
+          "_fixture_zero_fill",
+          "_main",
+          "_puts"
+        ],
+        "imports": [
+          "_puts"
+        ],
+        "exports": [
+          "__mh_execute_header",
+          "_fixture_arithmetic",
+          "_fixture_callback",
+          "_fixture_check",
+          "_fixture_direct",
+          "_fixture_divide",
+          "_fixture_float",
+          "_fixture_indirect",
+          "_fixture_loop",
+          "_fixture_maximum",
+          "_fixture_memory",
+          "_fixture_message",
+          "_fixture_stack",
+          "_fixture_stack_args",
+          "_fixture_string",
+          "_fixture_variadic",
+          "_fixture_vector",
+          "_fixture_vector_integer",
+          "_fixture_width",
+          "_fixture_zero_fill",
+          "_main"
+        ],
+        "directories": []
+      },
+      "slices": [],
+      "metadataPath": "fixtures/metadata/macho-arm64-symbols.txt",
+      "metadataSha256": "42c2fa30f4c2916fbc413dab7f1a19e00e586849757dd12277165a62ba099be4",
+      "disassemblyPath": "fixtures/metadata/macho-arm64-symbols.disassembly.txt",
+      "disassemblySha256": "29fcd13901c3ced2a8d96988681b1f6ec2023bbc98ab24be2492fbfb4054f40c",
+      "symbolState": "symbol-bearing"
+    },
+    {
+      "path": "fixtures/bin/macho-arm64-stripped",
+      "size": 50296,
+      "sha256": "a69d8a15a84227d731b9ff40c5003ea6fe48625f50b6b06fcb81c39d95a64087",
+      "facts": {
+        "format": "macho",
+        "architecture": "arm64",
+        "kind": "executable",
+        "imageBase": "0x100000000",
+        "entryAddress": "0x100000a8c",
+        "mappings": [
+          {
+            "name": "__PAGEZERO",
+            "address": "0x0",
+            "virtualSize": 4294967296,
+            "fileOffset": 0,
+            "fileSize": 0
+          },
+          {
+            "name": "__TEXT",
+            "address": "0x100000000",
+            "virtualSize": 16384,
+            "fileOffset": 0,
+            "fileSize": 16384
+          },
+          {
+            "name": "__DATA_CONST",
+            "address": "0x100004000",
+            "virtualSize": 16384,
+            "fileOffset": 16384,
+            "fileSize": 16384
+          },
+          {
+            "name": "__DATA",
+            "address": "0x100008000",
+            "virtualSize": 16384,
+            "fileOffset": 32768,
+            "fileSize": 16384
+          },
+          {
+            "name": "__LINKEDIT",
+            "address": "0x10000c000",
+            "virtualSize": 16384,
+            "fileOffset": 49152,
+            "fileSize": 1144
+          }
+        ],
+        "functions": [],
+        "symbols": [
+          "__mh_execute_header",
+          "_puts"
+        ],
+        "imports": [
+          "_puts"
+        ],
+        "exports": [
+          "__mh_execute_header"
+        ],
+        "directories": []
+      },
+      "slices": [],
+      "metadataPath": "fixtures/metadata/macho-arm64-stripped.txt",
+      "metadataSha256": "dc48f0abadfe978fc2e8c836e717fae9408ee883f21e8e5c3bc4df8ca6fdbbbf",
+      "disassemblyPath": "fixtures/metadata/macho-arm64-stripped.disassembly.txt",
+      "disassemblySha256": "bbe523493f8842a212e61349d76b448af0fce360338c4e30a11a5792f1217323",
+      "symbolState": "debug-stripped"
+    },
+    {
+      "path": "fixtures/bin/libcorpus-arm64-symbols.dylib",
+      "size": 35632,
+      "sha256": "131a5c491011d5c978db888634621f5a5a4050dedf44b6965a73657dc4424db6",
+      "facts": {
+        "format": "macho",
+        "architecture": "arm64",
+        "kind": "library",
+        "imageBase": "0x0",
+        "entryAddress": null,
+        "mappings": [
+          {
+            "name": "__TEXT",
+            "address": "0x0",
+            "virtualSize": 16384,
+            "fileOffset": 0,
+            "fileSize": 16384
+          },
+          {
+            "name": "__DATA",
+            "address": "0x4000",
+            "virtualSize": 16384,
+            "fileOffset": 16384,
+            "fileSize": 16384
+          },
+          {
+            "name": "__LINKEDIT",
+            "address": "0x8000",
+            "virtualSize": 16384,
+            "fileOffset": 32768,
+            "fileSize": 2864
+          }
+        ],
+        "functions": [
+          {
+            "name": "_fixture_stack",
+            "address": "0x410",
+            "fileOffset": 1040,
+            "size": 44
+          },
+          {
+            "name": "_fixture_arithmetic",
+            "address": "0x43c",
+            "fileOffset": 1084,
+            "size": 20
+          },
+          {
+            "name": "_fixture_maximum",
+            "address": "0x450",
+            "fileOffset": 1104,
+            "size": 12
+          },
+          {
+            "name": "_fixture_loop",
+            "address": "0x45c",
+            "fileOffset": 1116,
+            "size": 44
+          },
+          {
+            "name": "_fixture_memory",
+            "address": "0x488",
+            "fileOffset": 1160,
+            "size": 20
+          },
+          {
+            "name": "_fixture_direct",
+            "address": "0x49c",
+            "fileOffset": 1180,
+            "size": 52
+          },
+          {
+            "name": "_fixture_indirect",
+            "address": "0x4d0",
+            "fileOffset": 1232,
+            "size": 32
+          },
+          {
+            "name": "_fixture_divide",
+            "address": "0x4f0",
+            "fileOffset": 1264,
+            "size": 8
+          },
+          {
+            "name": "_fixture_width",
+            "address": "0x4f8",
+            "fileOffset": 1272,
+            "size": 16
+          },
+          {
+            "name": "_fixture_stack_args",
+            "address": "0x508",
+            "fileOffset": 1288,
+            "size": 68
+          },
+          {
+            "name": "_fixture_float",
+            "address": "0x54c",
+            "fileOffset": 1356,
+            "size": 24
+          },
+          {
+            "name": "_fixture_vector",
+            "address": "0x564",
+            "fileOffset": 1380,
+            "size": 24
+          },
+          {
+            "name": "_fixture_vector_integer",
+            "address": "0x57c",
+            "fileOffset": 1404,
+            "size": 28
+          },
+          {
+            "name": "_fixture_variadic",
+            "address": "0x598",
+            "fileOffset": 1432,
+            "size": 56
+          },
+          {
+            "name": "_fixture_string",
+            "address": "0x5d0",
+            "fileOffset": 1488,
+            "size": 12
+          },
+          {
+            "name": "_fixture_check",
+            "address": "0x5dc",
+            "fileOffset": 1500,
+            "size": 888
+          }
+        ],
+        "symbols": [
+          "_fixture_arithmetic",
+          "_fixture_callback",
+          "_fixture_check",
+          "_fixture_direct",
+          "_fixture_divide",
+          "_fixture_float",
+          "_fixture_indirect",
+          "_fixture_loop",
+          "_fixture_maximum",
+          "_fixture_memory",
+          "_fixture_message",
+          "_fixture_stack",
+          "_fixture_stack_args",
+          "_fixture_string",
+          "_fixture_variadic",
+          "_fixture_vector",
+          "_fixture_vector_integer",
+          "_fixture_width",
+          "_fixture_zero_fill"
+        ],
+        "imports": [],
+        "exports": [
+          "_fixture_arithmetic",
+          "_fixture_callback",
+          "_fixture_check",
+          "_fixture_direct",
+          "_fixture_divide",
+          "_fixture_float",
+          "_fixture_indirect",
+          "_fixture_loop",
+          "_fixture_maximum",
+          "_fixture_memory",
+          "_fixture_message",
+          "_fixture_stack",
+          "_fixture_stack_args",
+          "_fixture_string",
+          "_fixture_variadic",
+          "_fixture_vector",
+          "_fixture_vector_integer",
+          "_fixture_width",
+          "_fixture_zero_fill"
+        ],
+        "directories": []
+      },
+      "slices": [],
+      "metadataPath": "fixtures/metadata/libcorpus-arm64-symbols.dylib.txt",
+      "metadataSha256": "47a31f31b1b1812ed2c4b7ed9323a52f0d180d3ba3010c93954383524b44c7fd",
+      "disassemblyPath": "fixtures/metadata/libcorpus-arm64-symbols.dylib.disassembly.txt",
+      "disassemblySha256": "a617554e73c979aa7e8d3fe9c5457e85a393a0b8415ad049eedf8ba44d9b578f",
+      "symbolState": "symbol-bearing"
+    },
+    {
+      "path": "fixtures/bin/libcorpus-arm64-stripped.dylib",
+      "size": 34256,
+      "sha256": "0d6e9efe8843fe085fa28b149ca25eabb87c9ee4e9510a096d953a52f34995c4",
+      "facts": {
+        "format": "macho",
+        "architecture": "arm64",
+        "kind": "library",
+        "imageBase": "0x0",
+        "entryAddress": null,
+        "mappings": [
+          {
+            "name": "__TEXT",
+            "address": "0x0",
+            "virtualSize": 16384,
+            "fileOffset": 0,
+            "fileSize": 16384
+          },
+          {
+            "name": "__DATA",
+            "address": "0x4000",
+            "virtualSize": 16384,
+            "fileOffset": 16384,
+            "fileSize": 16384
+          },
+          {
+            "name": "__LINKEDIT",
+            "address": "0x8000",
+            "virtualSize": 16384,
+            "fileOffset": 32768,
+            "fileSize": 1488
+          }
+        ],
+        "functions": [
+          {
+            "name": "_fixture_stack",
+            "address": "0x410",
+            "fileOffset": 1040,
+            "size": 44
+          },
+          {
+            "name": "_fixture_arithmetic",
+            "address": "0x43c",
+            "fileOffset": 1084,
+            "size": 20
+          },
+          {
+            "name": "_fixture_maximum",
+            "address": "0x450",
+            "fileOffset": 1104,
+            "size": 12
+          },
+          {
+            "name": "_fixture_loop",
+            "address": "0x45c",
+            "fileOffset": 1116,
+            "size": 44
+          },
+          {
+            "name": "_fixture_memory",
+            "address": "0x488",
+            "fileOffset": 1160,
+            "size": 20
+          },
+          {
+            "name": "_fixture_direct",
+            "address": "0x49c",
+            "fileOffset": 1180,
+            "size": 52
+          },
+          {
+            "name": "_fixture_indirect",
+            "address": "0x4d0",
+            "fileOffset": 1232,
+            "size": 32
+          },
+          {
+            "name": "_fixture_divide",
+            "address": "0x4f0",
+            "fileOffset": 1264,
+            "size": 8
+          },
+          {
+            "name": "_fixture_width",
+            "address": "0x4f8",
+            "fileOffset": 1272,
+            "size": 16
+          },
+          {
+            "name": "_fixture_stack_args",
+            "address": "0x508",
+            "fileOffset": 1288,
+            "size": 68
+          },
+          {
+            "name": "_fixture_float",
+            "address": "0x54c",
+            "fileOffset": 1356,
+            "size": 24
+          },
+          {
+            "name": "_fixture_vector",
+            "address": "0x564",
+            "fileOffset": 1380,
+            "size": 24
+          },
+          {
+            "name": "_fixture_vector_integer",
+            "address": "0x57c",
+            "fileOffset": 1404,
+            "size": 28
+          },
+          {
+            "name": "_fixture_variadic",
+            "address": "0x598",
+            "fileOffset": 1432,
+            "size": 56
+          },
+          {
+            "name": "_fixture_string",
+            "address": "0x5d0",
+            "fileOffset": 1488,
+            "size": 12
+          },
+          {
+            "name": "_fixture_check",
+            "address": "0x5dc",
+            "fileOffset": 1500,
+            "size": 888
+          }
+        ],
+        "symbols": [
+          "_fixture_arithmetic",
+          "_fixture_callback",
+          "_fixture_check",
+          "_fixture_direct",
+          "_fixture_divide",
+          "_fixture_float",
+          "_fixture_indirect",
+          "_fixture_loop",
+          "_fixture_maximum",
+          "_fixture_memory",
+          "_fixture_message",
+          "_fixture_stack",
+          "_fixture_stack_args",
+          "_fixture_string",
+          "_fixture_variadic",
+          "_fixture_vector",
+          "_fixture_vector_integer",
+          "_fixture_width",
+          "_fixture_zero_fill"
+        ],
+        "imports": [],
+        "exports": [
+          "_fixture_arithmetic",
+          "_fixture_callback",
+          "_fixture_check",
+          "_fixture_direct",
+          "_fixture_divide",
+          "_fixture_float",
+          "_fixture_indirect",
+          "_fixture_loop",
+          "_fixture_maximum",
+          "_fixture_memory",
+          "_fixture_message",
+          "_fixture_stack",
+          "_fixture_stack_args",
+          "_fixture_string",
+          "_fixture_variadic",
+          "_fixture_vector",
+          "_fixture_vector_integer",
+          "_fixture_width",
+          "_fixture_zero_fill"
+        ],
+        "directories": []
+      },
+      "slices": [],
+      "metadataPath": "fixtures/metadata/libcorpus-arm64-stripped.dylib.txt",
+      "metadataSha256": "777660f8844acf3f0dd71809fbe179002b8f4c73ee89e66325c74f64848c65e2",
+      "disassemblyPath": "fixtures/metadata/libcorpus-arm64-stripped.dylib.disassembly.txt",
+      "disassemblySha256": "6c602188c02160bd203912806d6e827f341980616b60f2c36eebb531eb567ed0",
+      "symbolState": "debug-stripped"
+    },
+    {
+      "path": "fixtures/bin/macho-universal",
+      "size": 85136,
+      "sha256": "ed1697a2728355b696ff66b68e36a86ae74e1607149ec519d584db8b9fa7131f",
+      "facts": null,
+      "slices": [
+        {
+          "architecture": "x86_64",
+          "offset": 4096,
+          "size": 14960,
+          "sha256": "9d9cef0bdeb3ef48ec65b0da07de2479166371a6203357d746d870ffd468afa6"
+        },
+        {
+          "architecture": "arm64",
+          "offset": 32768,
+          "size": 52368,
+          "sha256": "82680f1eaabe35cd05149ae943022b4abd51eea715cc642d861de404c86c9adf"
+        }
+      ],
+      "metadataPath": "fixtures/metadata/macho-universal.txt",
+      "metadataSha256": "05d1658acde3a1063c12b8b03d63fbbfabd00199e2190c1a0b7d4b33ed25321b",
+      "disassemblyPath": "fixtures/metadata/macho-universal.disassembly.txt",
+      "disassemblySha256": "189ff9345a26bcdb0af7476aa4ea67e905f35e0da365243f9a8908537de0053f",
+      "symbolState": "symbol-bearing"
+    },
+    {
+      "path": "fixtures/bin/corpus-symbols.dll",
+      "size": 13312,
+      "sha256": "ce6d13815457147570cd3975b1b2d8a2e9872b03a603bc0b7b32dc3f62ffecf3",
+      "facts": {
+        "format": "pe",
+        "architecture": "x86_64",
+        "kind": "library",
+        "imageBase": "0x180000000",
+        "entryAddress": null,
+        "mappings": [
+          {
+            "name": ".text",
+            "address": "0x180001000",
+            "virtualSize": 1594,
+            "fileOffset": 1024,
+            "fileSize": 2048
+          },
+          {
+            "name": ".rdata",
+            "address": "0x180002000",
+            "virtualSize": 884,
+            "fileOffset": 3072,
+            "fileSize": 1024
+          },
+          {
+            "name": ".data",
+            "address": "0x180003000",
+            "virtualSize": 532,
+            "fileOffset": 4096,
+            "fileSize": 512
+          },
+          {
+            "name": ".pdata",
+            "address": "0x180004000",
+            "virtualSize": 72,
+            "fileOffset": 4608,
+            "fileSize": 512
+          },
+          {
+            "name": ".reloc",
+            "address": "0x180005000",
+            "virtualSize": 12,
+            "fileOffset": 5120,
+            "fileSize": 512
+          },
+          {
+            "name": ".debug_abbrev",
+            "address": "0x180006000",
+            "virtualSize": 423,
+            "fileOffset": 5632,
+            "fileSize": 512
+          },
+          {
+            "name": ".debug_info",
+            "address": "0x180007000",
+            "virtualSize": 1762,
+            "fileOffset": 6144,
+            "fileSize": 2048
+          },
+          {
+            "name": ".debug_line",
+            "address": "0x180008000",
+            "virtualSize": 869,
+            "fileOffset": 8192,
+            "fileSize": 1024
+          },
+          {
+            "name": ".debug_loc",
+            "address": "0x180009000",
+            "virtualSize": 1407,
+            "fileOffset": 9216,
+            "fileSize": 1536
+          },
+          {
+            "name": ".debug_str",
+            "address": "0x18000a000",
+            "virtualSize": 752,
+            "fileOffset": 10752,
+            "fileSize": 1024
+          }
+        ],
+        "functions": [
+          {
+            "name": "fixture_stack",
+            "address": "0x180001000",
+            "fileOffset": 1024,
+            "size": 48
+          },
+          {
+            "name": "fixture_arithmetic",
+            "address": "0x180001030",
+            "fileOffset": 1072,
+            "size": 16
+          },
+          {
+            "name": "fixture_maximum",
+            "address": "0x180001040",
+            "fileOffset": 1088,
+            "size": 16
+          },
+          {
+            "name": "fixture_loop",
+            "address": "0x180001050",
+            "fileOffset": 1104,
+            "size": 32
+          },
+          {
+            "name": "fixture_memory",
+            "address": "0x180001070",
+            "fileOffset": 1136,
+            "size": 16
+          },
+          {
+            "name": "fixture_direct",
+            "address": "0x180001080",
+            "fileOffset": 1152,
+            "size": 48
+          },
+          {
+            "name": "fixture_indirect",
+            "address": "0x1800010b0",
+            "fileOffset": 1200,
+            "size": 32
+          },
+          {
+            "name": "fixture_divide",
+            "address": "0x1800010d0",
+            "fileOffset": 1232,
+            "size": 16
+          },
+          {
+            "name": "fixture_width",
+            "address": "0x1800010e0",
+            "fileOffset": 1248,
+            "size": 16
+          },
+          {
+            "name": "fixture_stack_args",
+            "address": "0x1800010f0",
+            "fileOffset": 1264,
+            "size": 96
+          },
+          {
+            "name": "fixture_float",
+            "address": "0x180001150",
+            "fileOffset": 1360,
+            "size": 32
+          },
+          {
+            "name": "fixture_vector",
+            "address": "0x180001170",
+            "fileOffset": 1392,
+            "size": 32
+          },
+          {
+            "name": "fixture_vector_integer",
+            "address": "0x180001190",
+            "fileOffset": 1424,
+            "size": 32
+          },
+          {
+            "name": "fixture_variadic",
+            "address": "0x1800011b0",
+            "fileOffset": 1456,
+            "size": 80
+          },
+          {
+            "name": "fixture_string",
+            "address": "0x180001200",
+            "fileOffset": 1536,
+            "size": 16
+          },
+          {
+            "name": "fixture_check",
+            "address": "0x180001210",
+            "fileOffset": 1552,
+            "size": 1066
+          }
+        ],
+        "symbols": [
+          "__real@3fe0000000000000",
+          "__real@3ff0000000000000",
+          "__real@3ff8000000000000",
+          "__real@4004000000000000",
+          "__real@4008000000000000",
+          "__real@4010000000000000",
+          "__real@401e000000000000",
+          "__real@40a00000",
+          "__real@41820000",
+          "__real@bfe0000000000000",
+          "__real@c000000000000000",
+          "__real@c006000000000000",
+          "__xmm@00000055000000550000005500000055",
+          "_fltused",
+          "fixture_arithmetic",
+          "fixture_callback",
+          "fixture_check",
+          "fixture_direct",
+          "fixture_divide",
+          "fixture_float",
+          "fixture_indirect",
+          "fixture_loop",
+          "fixture_maximum",
+          "fixture_memory",
+          "fixture_message",
+          "fixture_stack",
+          "fixture_stack_args",
+          "fixture_string",
+          "fixture_variadic",
+          "fixture_vector",
+          "fixture_vector_integer",
+          "fixture_width",
+          "fixture_zero_fill"
+        ],
+        "imports": [],
+        "exports": [
+          "fixture_arithmetic",
+          "fixture_callback",
+          "fixture_check",
+          "fixture_direct",
+          "fixture_divide",
+          "fixture_float",
+          "fixture_indirect",
+          "fixture_loop",
+          "fixture_maximum",
+          "fixture_memory",
+          "fixture_message",
+          "fixture_stack",
+          "fixture_stack_args",
+          "fixture_string",
+          "fixture_variadic",
+          "fixture_vector",
+          "fixture_vector_integer",
+          "fixture_width",
+          "fixture_zero_fill"
+        ],
+        "directories": [
+          {
+            "index": 0,
+            "rva": 8461,
+            "size": 555
+          },
+          {
+            "index": 1,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 2,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 3,
+            "rva": 16384,
+            "size": 72
+          },
+          {
+            "index": 4,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 5,
+            "rva": 20480,
+            "size": 12
+          },
+          {
+            "index": 6,
+            "rva": 8408,
+            "size": 28
+          },
+          {
+            "index": 7,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 8,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 9,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 10,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 11,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 12,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 13,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 14,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 15,
+            "rva": 0,
+            "size": 0
+          }
+        ]
+      },
+      "slices": [],
+      "metadataPath": "fixtures/metadata/corpus-symbols.dll.txt",
+      "metadataSha256": "53cab41828dfce07a21a221d8934e15481c57f9f5a50d60c4f91be629243d21e",
+      "disassemblyPath": "fixtures/metadata/corpus-symbols.dll.disassembly.txt",
+      "disassemblySha256": "b8344f7994098493b2955ff8c962be2427f6c5210b78964307f19a92e89d3a10",
+      "symbolState": "symbol-bearing"
+    },
+    {
+      "path": "fixtures/bin/corpus-stripped.dll",
+      "size": 7168,
+      "sha256": "74ec74d983d647ee8ef3540f5e92c002f06f328b82ad9c44395197193b976337",
+      "facts": {
+        "format": "pe",
+        "architecture": "x86_64",
+        "kind": "library",
+        "imageBase": "0x180000000",
+        "entryAddress": null,
+        "mappings": [
+          {
+            "name": ".text",
+            "address": "0x180001000",
+            "virtualSize": 1594,
+            "fileOffset": 1024,
+            "fileSize": 2048
+          },
+          {
+            "name": ".rdata",
+            "address": "0x180002000",
+            "virtualSize": 884,
+            "fileOffset": 3072,
+            "fileSize": 1024
+          },
+          {
+            "name": ".data",
+            "address": "0x180003000",
+            "virtualSize": 532,
+            "fileOffset": 4096,
+            "fileSize": 512
+          },
+          {
+            "name": ".pdata",
+            "address": "0x180004000",
+            "virtualSize": 72,
+            "fileOffset": 4608,
+            "fileSize": 512
+          },
+          {
+            "name": ".reloc",
+            "address": "0x180005000",
+            "virtualSize": 12,
+            "fileOffset": 5120,
+            "fileSize": 512
+          }
+        ],
+        "functions": [
+          {
+            "name": "fixture_stack",
+            "address": "0x180001000",
+            "fileOffset": 1024,
+            "size": 48
+          },
+          {
+            "name": "fixture_arithmetic",
+            "address": "0x180001030",
+            "fileOffset": 1072,
+            "size": 16
+          },
+          {
+            "name": "fixture_maximum",
+            "address": "0x180001040",
+            "fileOffset": 1088,
+            "size": 16
+          },
+          {
+            "name": "fixture_loop",
+            "address": "0x180001050",
+            "fileOffset": 1104,
+            "size": 32
+          },
+          {
+            "name": "fixture_memory",
+            "address": "0x180001070",
+            "fileOffset": 1136,
+            "size": 16
+          },
+          {
+            "name": "fixture_direct",
+            "address": "0x180001080",
+            "fileOffset": 1152,
+            "size": 48
+          },
+          {
+            "name": "fixture_indirect",
+            "address": "0x1800010b0",
+            "fileOffset": 1200,
+            "size": 32
+          },
+          {
+            "name": "fixture_divide",
+            "address": "0x1800010d0",
+            "fileOffset": 1232,
+            "size": 16
+          },
+          {
+            "name": "fixture_width",
+            "address": "0x1800010e0",
+            "fileOffset": 1248,
+            "size": 16
+          },
+          {
+            "name": "fixture_stack_args",
+            "address": "0x1800010f0",
+            "fileOffset": 1264,
+            "size": 96
+          },
+          {
+            "name": "fixture_float",
+            "address": "0x180001150",
+            "fileOffset": 1360,
+            "size": 32
+          },
+          {
+            "name": "fixture_vector",
+            "address": "0x180001170",
+            "fileOffset": 1392,
+            "size": 32
+          },
+          {
+            "name": "fixture_vector_integer",
+            "address": "0x180001190",
+            "fileOffset": 1424,
+            "size": 32
+          },
+          {
+            "name": "fixture_variadic",
+            "address": "0x1800011b0",
+            "fileOffset": 1456,
+            "size": 80
+          },
+          {
+            "name": "fixture_string",
+            "address": "0x180001200",
+            "fileOffset": 1536,
+            "size": 16
+          },
+          {
+            "name": "fixture_check",
+            "address": "0x180001210",
+            "fileOffset": 1552,
+            "size": 1066
+          }
+        ],
+        "symbols": [
+          "__real@3fe0000000000000",
+          "__real@3ff0000000000000",
+          "__real@3ff8000000000000",
+          "__real@4004000000000000",
+          "__real@4008000000000000",
+          "__real@4010000000000000",
+          "__real@401e000000000000",
+          "__real@40a00000",
+          "__real@41820000",
+          "__real@bfe0000000000000",
+          "__real@c000000000000000",
+          "__real@c006000000000000",
+          "__xmm@00000055000000550000005500000055",
+          "_fltused",
+          "fixture_arithmetic",
+          "fixture_callback",
+          "fixture_check",
+          "fixture_direct",
+          "fixture_divide",
+          "fixture_float",
+          "fixture_indirect",
+          "fixture_loop",
+          "fixture_maximum",
+          "fixture_memory",
+          "fixture_message",
+          "fixture_stack",
+          "fixture_stack_args",
+          "fixture_string",
+          "fixture_variadic",
+          "fixture_vector",
+          "fixture_vector_integer",
+          "fixture_width",
+          "fixture_zero_fill"
+        ],
+        "imports": [],
+        "exports": [
+          "fixture_arithmetic",
+          "fixture_callback",
+          "fixture_check",
+          "fixture_direct",
+          "fixture_divide",
+          "fixture_float",
+          "fixture_indirect",
+          "fixture_loop",
+          "fixture_maximum",
+          "fixture_memory",
+          "fixture_message",
+          "fixture_stack",
+          "fixture_stack_args",
+          "fixture_string",
+          "fixture_variadic",
+          "fixture_vector",
+          "fixture_vector_integer",
+          "fixture_width",
+          "fixture_zero_fill"
+        ],
+        "directories": [
+          {
+            "index": 0,
+            "rva": 8461,
+            "size": 555
+          },
+          {
+            "index": 1,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 2,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 3,
+            "rva": 16384,
+            "size": 72
+          },
+          {
+            "index": 4,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 5,
+            "rva": 20480,
+            "size": 12
+          },
+          {
+            "index": 6,
+            "rva": 8408,
+            "size": 28
+          },
+          {
+            "index": 7,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 8,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 9,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 10,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 11,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 12,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 13,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 14,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 15,
+            "rva": 0,
+            "size": 0
+          }
+        ]
+      },
+      "slices": [],
+      "metadataPath": "fixtures/metadata/corpus-stripped.dll.txt",
+      "metadataSha256": "f869db560c4c37f88e1b376b057106dd7ee57e6983b3f819a9723d63a46e2b3c",
+      "disassemblyPath": "fixtures/metadata/corpus-stripped.dll.disassembly.txt",
+      "disassemblySha256": "d1fddecdec38536aa48e79bf126d943087f384fcf910de24047703f6877e8708",
+      "symbolState": "debug-stripped"
+    },
+    {
+      "path": "fixtures/bin/pe-x86_64-symbols.exe",
+      "size": 5120,
+      "sha256": "20101d88848a721a77b8847a8e7e66ec8cf98ee95246731ea1cabbebd2e44a31",
+      "facts": {
+        "format": "pe",
+        "architecture": "x86_64",
+        "kind": "executable",
+        "imageBase": "0x140000000",
+        "entryAddress": "0x140001000",
+        "mappings": [
+          {
+            "name": ".text",
+            "address": "0x140001000",
+            "virtualSize": 54,
+            "fileOffset": 1024,
+            "fileSize": 512
+          },
+          {
+            "name": ".rdata",
+            "address": "0x140002000",
+            "virtualSize": 256,
+            "fileOffset": 1536,
+            "fileSize": 512
+          },
+          {
+            "name": ".data",
+            "address": "0x140003000",
+            "virtualSize": 4,
+            "fileOffset": 0,
+            "fileSize": 0
+          },
+          {
+            "name": ".pdata",
+            "address": "0x140004000",
+            "virtualSize": 12,
+            "fileOffset": 2048,
+            "fileSize": 512
+          },
+          {
+            "name": ".debug_abbrev",
+            "address": "0x140005000",
+            "virtualSize": 69,
+            "fileOffset": 2560,
+            "fileSize": 512
+          },
+          {
+            "name": ".debug_info",
+            "address": "0x140006000",
+            "virtualSize": 99,
+            "fileOffset": 3072,
+            "fileSize": 512
+          },
+          {
+            "name": ".debug_line",
+            "address": "0x140007000",
+            "virtualSize": 86,
+            "fileOffset": 3584,
+            "fileSize": 512
+          },
+          {
+            "name": ".debug_str",
+            "address": "0x140008000",
+            "virtualSize": 113,
+            "fileOffset": 4096,
+            "fileSize": 512
+          }
+        ],
+        "functions": [],
+        "symbols": [
+          "__imp_ExitProcess",
+          "__imp_fixture_check",
+          "_fltused",
+          "fixture_entry"
+        ],
+        "imports": [
+          "KERNEL32.dll!ExitProcess",
+          "corpus-symbols.dll!fixture_check"
+        ],
+        "exports": [],
+        "directories": [
+          {
+            "index": 0,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 1,
+            "rva": 8248,
+            "size": 60
+          },
+          {
+            "index": 2,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 3,
+            "rva": 16384,
+            "size": 12
+          },
+          {
+            "index": 4,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 5,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 6,
+            "rva": 8192,
+            "size": 28
+          },
+          {
+            "index": 7,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 8,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 9,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 10,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 11,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 12,
+            "rva": 8344,
+            "size": 32
+          },
+          {
+            "index": 13,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 14,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 15,
+            "rva": 0,
+            "size": 0
+          }
+        ]
+      },
+      "slices": [],
+      "metadataPath": "fixtures/metadata/pe-x86_64-symbols.exe.txt",
+      "metadataSha256": "e4cb9d9eb93a9dd80e9b7d5bc0629d79c007d48a0fcbe454d59004f82c6c6fc9",
+      "disassemblyPath": "fixtures/metadata/pe-x86_64-symbols.exe.disassembly.txt",
+      "disassemblySha256": "974030d5a9acb155470db19041cbfb54736d6a31f47aef930039ffe16c3143dd",
+      "symbolState": "symbol-bearing"
+    },
+    {
+      "path": "fixtures/bin/pe-x86_64-stripped.exe",
+      "size": 3072,
+      "sha256": "4c9b3762fdb78d18e3e9ae2515fac27b4b07973eac30801cfe631930f1e156c5",
+      "facts": {
+        "format": "pe",
+        "architecture": "x86_64",
+        "kind": "executable",
+        "imageBase": "0x140000000",
+        "entryAddress": "0x140001000",
+        "mappings": [
+          {
+            "name": ".text",
+            "address": "0x140001000",
+            "virtualSize": 54,
+            "fileOffset": 1024,
+            "fileSize": 512
+          },
+          {
+            "name": ".rdata",
+            "address": "0x140002000",
+            "virtualSize": 256,
+            "fileOffset": 1536,
+            "fileSize": 512
+          },
+          {
+            "name": ".data",
+            "address": "0x140003000",
+            "virtualSize": 4,
+            "fileOffset": 0,
+            "fileSize": 0
+          },
+          {
+            "name": ".pdata",
+            "address": "0x140004000",
+            "virtualSize": 12,
+            "fileOffset": 2048,
+            "fileSize": 512
+          }
+        ],
+        "functions": [],
+        "symbols": [
+          "__imp_ExitProcess",
+          "__imp_fixture_check",
+          "_fltused",
+          "fixture_entry"
+        ],
+        "imports": [
+          "KERNEL32.dll!ExitProcess",
+          "corpus-symbols.dll!fixture_check"
+        ],
+        "exports": [],
+        "directories": [
+          {
+            "index": 0,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 1,
+            "rva": 8248,
+            "size": 60
+          },
+          {
+            "index": 2,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 3,
+            "rva": 16384,
+            "size": 12
+          },
+          {
+            "index": 4,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 5,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 6,
+            "rva": 8192,
+            "size": 28
+          },
+          {
+            "index": 7,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 8,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 9,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 10,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 11,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 12,
+            "rva": 8344,
+            "size": 32
+          },
+          {
+            "index": 13,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 14,
+            "rva": 0,
+            "size": 0
+          },
+          {
+            "index": 15,
+            "rva": 0,
+            "size": 0
+          }
+        ]
+      },
+      "slices": [],
+      "metadataPath": "fixtures/metadata/pe-x86_64-stripped.exe.txt",
+      "metadataSha256": "a0a33eb7122afa51f3f6d51cd81d689bfb5fa6068de1bce0ea4df56b6ed31538",
+      "disassemblyPath": "fixtures/metadata/pe-x86_64-stripped.exe.disassembly.txt",
+      "disassemblySha256": "db63608b573f0524d6ca11fbed5457e37c1219449c11bdc69c7598f4dbf5535f",
+      "symbolState": "debug-stripped"
+    }
+  ],
+  "codeRanges": [
+    {
+      "path": "fixtures/code/arm64/fixture_stack.bin",
+      "sha256": "63429cc81d109227ca0f7b262dd806d59204005c45d6b521205a1129d697208e",
+      "size": 44,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_stack",
+      "address": "0x100000548",
+      "fileOffset": 1352,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/arm64/fixture_arithmetic.bin",
+      "sha256": "67cecb3d264e9edc6518f2171f71f1706e7409202a81add8a8a0fd2a17bcac3d",
+      "size": 20,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_arithmetic",
+      "address": "0x100000574",
+      "fileOffset": 1396,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/arm64/fixture_maximum.bin",
+      "sha256": "75ce965a5267975e60f3c071f7f4ce53319b35fd129c81470841c2dd01b41860",
+      "size": 12,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_maximum",
+      "address": "0x100000588",
+      "fileOffset": 1416,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/arm64/fixture_loop.bin",
+      "sha256": "37879e5895e2369f298d516661eee756f2c6653b5084c5c45e1d3dcbe54334fe",
+      "size": 44,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_loop",
+      "address": "0x100000594",
+      "fileOffset": 1428,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/arm64/fixture_memory.bin",
+      "sha256": "2c1edd28e2e037abc0cab36ec7e61244db3a60abf9cd358292ff4916308ff540",
+      "size": 20,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_memory",
+      "address": "0x1000005c0",
+      "fileOffset": 1472,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/arm64/fixture_direct.bin",
+      "sha256": "dce52badcbd51ed5cec6732768c77462e4ffdd60184b07ce6a0f5c0f723ddce4",
+      "size": 52,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_direct",
+      "address": "0x1000005d4",
+      "fileOffset": 1492,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/arm64/fixture_indirect.bin",
+      "sha256": "89c46b585fb3b29458411928f7e0a4073f0ff364ff81144b0cdf904113ad786a",
+      "size": 32,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_indirect",
+      "address": "0x100000608",
+      "fileOffset": 1544,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/arm64/fixture_divide.bin",
+      "sha256": "065c4934aff0fab76215cd99c057ef207a683841544016502c170a28db4d52ff",
+      "size": 8,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_divide",
+      "address": "0x100000628",
+      "fileOffset": 1576,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/arm64/fixture_width.bin",
+      "sha256": "fc3da30a08f266099700a0ae3225264cb6db42ff7c2fad5decbf33b92e79cf82",
+      "size": 16,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_width",
+      "address": "0x100000630",
+      "fileOffset": 1584,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/arm64/fixture_stack_args.bin",
+      "sha256": "6a3ce3be7c260f90215bfa343424a2201200b9cec29ca750ca96c11b2c7cc652",
+      "size": 68,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_stack_args",
+      "address": "0x100000640",
+      "fileOffset": 1600,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/arm64/fixture_float.bin",
+      "sha256": "c1c0abc83249d2d1076d5c07f0001a00455c821a069573e071eff2e5a722eeb2",
+      "size": 24,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_float",
+      "address": "0x100000684",
+      "fileOffset": 1668,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/arm64/fixture_vector.bin",
+      "sha256": "7daf0746b6df56a4971e495974663e6c1fe6fa2af0e5ce90f28100ff38127ca1",
+      "size": 24,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_vector",
+      "address": "0x10000069c",
+      "fileOffset": 1692,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/arm64/fixture_vector_integer.bin",
+      "sha256": "4efb9ef7c601917800076561734de8142fda1fc27ed1da2ac1128d500164bf03",
+      "size": 28,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_vector_integer",
+      "address": "0x1000006b4",
+      "fileOffset": 1716,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/arm64/fixture_variadic.bin",
+      "sha256": "644f3337bc5840c21713a856f0ba094a4d829f7866a65b8aff60492b6f3f3029",
+      "size": 56,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_variadic",
+      "address": "0x1000006d0",
+      "fileOffset": 1744,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/arm64/fixture_string.bin",
+      "sha256": "79ce87dd9d7ea86ed2b051f45b2f7b13950f08bfb5d1ef006e430bf2be2a22a8",
+      "size": 12,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_string",
+      "address": "0x100000708",
+      "fileOffset": 1800,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/arm64/fixture_check.bin",
+      "sha256": "c4b448f9e5ee8291fc2fe15e8b178ff9bd78fa33c1c1d30757fcbb9576937d98",
+      "size": 888,
+      "architecture": "arm64",
+      "image": "fixtures/bin/macho-arm64-symbols",
+      "symbol": "_fixture_check",
+      "address": "0x100000714",
+      "fileOffset": 1812,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_stack.bin",
+      "sha256": "3abc568bc842a9d9b9e89316a6eab4d9c02745da6313e7075b049656a19ffadc",
+      "size": 48,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_stack",
+      "address": "0x180001000",
+      "fileOffset": 1024,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_arithmetic.bin",
+      "sha256": "b4e83113d8ce0cc757cb60f6226bb5d2884ae38aef22b97f5d1a91f1574a1040",
+      "size": 16,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_arithmetic",
+      "address": "0x180001030",
+      "fileOffset": 1072,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_maximum.bin",
+      "sha256": "9c4103e790b7d374be9e70540bea318ddd39950fcc2695447ce537502058ecdb",
+      "size": 16,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_maximum",
+      "address": "0x180001040",
+      "fileOffset": 1088,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_loop.bin",
+      "sha256": "ffa430f552c820fb2762229e0df7821d262314e21add1b98b7bd280a6cad1ed1",
+      "size": 32,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_loop",
+      "address": "0x180001050",
+      "fileOffset": 1104,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_memory.bin",
+      "sha256": "9884a1cf0163e5fcaaece7c68f6f96abef3fc1b50572819872024fef307cef67",
+      "size": 16,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_memory",
+      "address": "0x180001070",
+      "fileOffset": 1136,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_direct.bin",
+      "sha256": "8e4a549c6fc80da36664fb30cb5070e66d5918e1a43170f10abcdc17afb63c60",
+      "size": 48,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_direct",
+      "address": "0x180001080",
+      "fileOffset": 1152,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_indirect.bin",
+      "sha256": "49fb3ac1b7187dfee929f3d57bacf189ecc4713e6aa53c6b259fc737438e1902",
+      "size": 32,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_indirect",
+      "address": "0x1800010b0",
+      "fileOffset": 1200,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_divide.bin",
+      "sha256": "e181f8d4e9d167b8ae02cf947906da9075ab27cf6705959c97f25866b3612b3d",
+      "size": 16,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_divide",
+      "address": "0x1800010d0",
+      "fileOffset": 1232,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_width.bin",
+      "sha256": "ddbbc3868af1795effabe078619a5292a99f57d07f352b88ed057f9377e600bc",
+      "size": 16,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_width",
+      "address": "0x1800010e0",
+      "fileOffset": 1248,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_stack_args.bin",
+      "sha256": "b5f549dfab4a8c428badc63294ae209143452212cada212bfe01e8bb54f2343e",
+      "size": 96,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_stack_args",
+      "address": "0x1800010f0",
+      "fileOffset": 1264,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_float.bin",
+      "sha256": "63209dd0f0070f2bb013c602bbf45ce9c7acf9794dbff5351dab21eb0aedd264",
+      "size": 32,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_float",
+      "address": "0x180001150",
+      "fileOffset": 1360,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_vector.bin",
+      "sha256": "1a5d015ee8d8def0580d7f5aea13853942ddcb9483c2b6d02db8005adda808cb",
+      "size": 32,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_vector",
+      "address": "0x180001170",
+      "fileOffset": 1392,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_vector_integer.bin",
+      "sha256": "9be10074b4a376bc1da300845ddaae7997938df3e102f449fb729693f383a548",
+      "size": 32,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_vector_integer",
+      "address": "0x180001190",
+      "fileOffset": 1424,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_variadic.bin",
+      "sha256": "3697523e8deac2843b25ac81e426a81ea9d7abeeba28302a036b87bc2f10eea6",
+      "size": 80,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_variadic",
+      "address": "0x1800011b0",
+      "fileOffset": 1456,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_string.bin",
+      "sha256": "b68453b73ac8308d882be39c33fa182b21d249b5f42488563f874f66f49b5342",
+      "size": 16,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_string",
+      "address": "0x180001200",
+      "fileOffset": 1536,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    },
+    {
+      "path": "fixtures/code/x86_64/fixture_check.bin",
+      "sha256": "5ff7b470112b4b180137a1635bf0fe1e576ddbe776386acf460eb2f6681c6ac7",
+      "size": 1066,
+      "architecture": "x86_64",
+      "image": "fixtures/bin/corpus-symbols.dll",
+      "symbol": "fixture_check",
+      "address": "0x180001210",
+      "fileOffset": 1552,
+      "boundaryEvidence": "Compiler text symbol to next text symbol; final symbol to text section end. Includes compiler alignment padding, not a proven instruction-only extent."
+    }
+  ],
+  "malformed": [
+    {
+      "path": "fixtures/malformed/empty.bin",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source": "fixtures/bin/macho-arm64-symbols",
+      "mutation": "truncate to zero bytes",
+      "expected": "reject: truncated container"
+    },
+    {
+      "path": "fixtures/malformed/macho-header-truncated.bin",
+      "size": 31,
+      "sha256": "28efcf08bf2586eae7466460c7b233449bd6458d792e8a2494680268b0c944b8",
+      "source": "fixtures/bin/macho-arm64-symbols",
+      "mutation": "truncate to 31 bytes",
+      "expected": "reject: incomplete mach_header_64"
+    },
+    {
+      "path": "fixtures/malformed/macho-command-overrun.bin",
+      "size": 52368,
+      "sha256": "f465614e9e605f2251be5a55d842ef0343c852267f16e73fffd57a806c668b56",
+      "source": "fixtures/bin/macho-arm64-symbols",
+      "mutation": "first load command cmdsize = 0xfffffff8",
+      "expected": "reject: load command exceeds file"
+    },
+    {
+      "path": "fixtures/malformed/macho-command-zero.bin",
+      "size": 52368,
+      "sha256": "18665d5f8206b0fa33729baf14f124f0b7770d905f399d1c0008f307af4d1ba7",
+      "source": "fixtures/bin/macho-arm64-symbols",
+      "mutation": "first load command cmdsize = 0",
+      "expected": "reject: nonadvancing load command"
+    },
+    {
+      "path": "fixtures/malformed/macho-unsupported-cpu.bin",
+      "size": 52368,
+      "sha256": "e8763c964158c5621d8270bfbc9e0da52727b77787c5ca72b057ebed0da52c54",
+      "source": "fixtures/bin/macho-arm64-symbols",
+      "mutation": "cputype = 18 (PowerPC)",
+      "expected": "unsupported architecture, never infer host ARM64"
+    },
+    {
+      "path": "fixtures/malformed/fat-slice-overrun.bin",
+      "size": 85136,
+      "sha256": "3bda84669dfd733b21e1ebc2098431c323b67a032fd39f3eab34e8b8f980af22",
+      "source": "fixtures/bin/macho-universal",
+      "mutation": "first slice offset = 0xfffff000",
+      "expected": "reject: slice outside container"
+    },
+    {
+      "path": "fixtures/malformed/pe-dos-truncated.bin",
+      "size": 63,
+      "sha256": "c36dd653cf43815bebc9e59a56a06f047b3b5f198ccd3597813870b0ce9b00f2",
+      "source": "fixtures/bin/pe-x86_64-symbols.exe",
+      "mutation": "truncate to 63 bytes",
+      "expected": "reject: incomplete DOS header"
+    },
+    {
+      "path": "fixtures/malformed/pe-header-overrun.bin",
+      "size": 5120,
+      "sha256": "a4dec0c94ad623a2afcda2c8ddd86bdb63627a6d5d327efa43183de893b2c39a",
+      "source": "fixtures/bin/pe-x86_64-symbols.exe",
+      "mutation": "e_lfanew = 0xfffffff0",
+      "expected": "reject: PE header outside file"
+    },
+    {
+      "path": "fixtures/malformed/pe-section-overrun.bin",
+      "size": 5120,
+      "sha256": "f40a2b3c3c8798283d638694f612c24c93bcfedc3bf46b3f0985ac6c7a169b24",
+      "source": "fixtures/bin/pe-x86_64-symbols.exe",
+      "mutation": "first section PointerToRawData = 0xfffffff0",
+      "expected": "reject: raw section outside file"
+    },
+    {
+      "path": "fixtures/malformed/pe-directory-overrun.bin",
+      "size": 5120,
+      "sha256": "ebd057fb2ecd57a1dc11b852980befb3eb83e3f364806d17e09fecbf91865e8d",
+      "source": "fixtures/bin/pe-x86_64-symbols.exe",
+      "mutation": "import directory RVA = 0xfffff000",
+      "expected": "reject or explicit unmapped import directory diagnostic"
+    },
+    {
+      "path": "fixtures/malformed/pe-unsupported-machine.bin",
+      "size": 5120,
+      "sha256": "21ac7ace411a2d9d3e94604dae60241ffabb794cf0cbecf4712729aba7a61fd2",
+      "source": "fixtures/bin/pe-x86_64-symbols.exe",
+      "mutation": "COFF machine = 0x1c4 (ARMNT)",
+      "expected": "unsupported machine, never infer x86-64"
+    },
+    {
+      "path": "fixtures/malformed/arm64-trailing-byte.bin",
+      "size": 19,
+      "sha256": "284d4edb84c0c2e6a19039ce2ff3a345e4a42c704f2f34456c010561af3a50cd",
+      "source": "fixtures/code/arm64/fixture_arithmetic.bin",
+      "mutation": "remove final byte from compiler function",
+      "expected": "decoder: trailing 3-byte incomplete instruction"
+    },
+    {
+      "path": "fixtures/malformed/x86-call-truncated.bin",
+      "size": 3,
+      "sha256": "ccb2c7f61ca24b0ae3ead22b3dd09e3f82a7da3b18d55cddc81634b4f298d623",
+      "source": "fixtures/code/x86_64/fixture_direct.bin",
+      "mutation": "take bytes [8,11) of compiler CALL rel32 at function+8",
+      "expected": "decoder: 3-byte truncated 5-byte CALL rel32"
+    }
+  ],
+  "expected": "fixtures/expected.json",
+  "inventory": "fixtures/inventory.json",
+  "loaderExpectations": "fixtures/loader-expectations.json",
+  "baseline": "fixtures/baseline/arm64.json",
+  "documentation": "fixtures/README.md",
+  "licenseFile": "fixtures/LICENSE",
+  "rebuild": "node --import tsx scripts/fixtures/generate.ts",
+  "notes": [
+    "Real compiler/linker output; malformed files are explicitly mutated copies, never called real compiler output.",
+    "Symbol ranges include compiler alignment padding; not a recovered instruction-only function-size oracle.",
+    "PE exports survive debug stripping; symbol-bearing files carry DWARF, stripped files do not.",
+    "No sibling checkout or compiler is required to consume prebuilt bytes.",
+    "Legacy double/vector semantics, ten-argument signatures and raw indirect call contracts have explicit gaps; see inventory and baseline."
+  ]
+}

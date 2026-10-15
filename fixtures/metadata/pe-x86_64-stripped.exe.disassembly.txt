@@ -1,0 +1,32 @@
+
+fixtures/bin/pe-x86_64-stripped.exe:	file format coff-x86-64
+
+Disassembly of section .text:
+
+0000000140001000 <fixture_entry>:
+140001000: 48 83 ec 28                 	subq	$0x28, %rsp
+140001004: ff 15 8e 10 00 00           	callq	*0x108e(%rip)           # 0x140002098 <__imp_fixture_check>
+14000100a: 89 c1                       	movl	%eax, %ecx
+14000100c: 48 83 c4 28                 	addq	$0x28, %rsp
+140001010: 48 ff 25 91 10 00 00        	jmpq	*0x1091(%rip)           # 0x1400020a8 <__imp_ExitProcess>
+140001017: cc                          	int3
+140001018: cc                          	int3
+140001019: cc                          	int3
+14000101a: cc                          	int3
+14000101b: cc                          	int3
+14000101c: cc                          	int3
+14000101d: cc                          	int3
+14000101e: cc                          	int3
+14000101f: cc                          	int3
+140001020: ff 25 72 10 00 00           	jmpq	*0x1072(%rip)           # 0x140002098 <__imp_fixture_check>
+140001026: cc                          	int3
+140001027: cc                          	int3
+140001028: cc                          	int3
+140001029: cc                          	int3
+14000102a: cc                          	int3
+14000102b: cc                          	int3
+14000102c: cc                          	int3
+14000102d: cc                          	int3
+14000102e: cc                          	int3
+14000102f: cc                          	int3
+140001030: ff 25 72 10 00 00           	jmpq	*0x1072(%rip)           # 0x1400020a8 <__imp_ExitProcess>

@@ -1,0 +1,366 @@
+
+File: fixtures/bin/libcorpus-arm64-stripped.dylib
+Format: Mach-O arm64
+Arch: aarch64
+AddressSize: 64bit
+MachHeader {
+  Magic: Magic64 (0xFEEDFACF)
+  CpuType: Arm64 (0x100000C)
+  CpuSubType: CPU_SUBTYPE_ARM64_ALL (0x0)
+  FileType: DynamicLibrary (0x6)
+  NumOfLoadCommands: 15
+  SizeOfLoadCommands: 976
+  Flags [ (0x100085)
+    MH_DYLDLINK (0x4)
+    MH_NOUNDEFS (0x1)
+    MH_NO_REEXPORTED_DYLIBS (0x100000)
+    MH_TWOLEVEL (0x80)
+  ]
+  Reserved: 0x0
+}
+Sections [
+  Section {
+    Index: 0
+    Name: __text (5F 5F 74 65 78 74 00 00 00 00 00 00 00 00 00 00)
+    Segment: __TEXT (5F 5F 54 45 58 54 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x410
+    Size: 0x544
+    Offset: 1040
+    Alignment: 2
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: Regular (0x0)
+    Attributes [ (0x800004)
+      PureInstructions (0x800000)
+      SomeInstructions (0x4)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 1
+    Name: __const (5F 5F 63 6F 6E 73 74 00 00 00 00 00 00 00 00 00)
+    Segment: __TEXT (5F 5F 54 45 58 54 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x960
+    Size: 0x70
+    Offset: 2400
+    Alignment: 4
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: Regular (0x0)
+    Attributes [ (0x0)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 2
+    Name: __unwind_info (5F 5F 75 6E 77 69 6E 64 5F 69 6E 66 6F 00 00 00)
+    Segment: __TEXT (5F 5F 54 45 58 54 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x9D0
+    Size: 0x80
+    Offset: 2512
+    Alignment: 2
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: Regular (0x0)
+    Attributes [ (0x0)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 3
+    Name: __data (5F 5F 64 61 74 61 00 00 00 00 00 00 00 00 00 00)
+    Segment: __DATA (5F 5F 44 41 54 41 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x4000
+    Size: 0x8
+    Offset: 16384
+    Alignment: 3
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: Regular (0x0)
+    Attributes [ (0x0)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 4
+    Name: __common (5F 5F 63 6F 6D 6D 6F 6E 00 00 00 00 00 00 00 00)
+    Segment: __DATA (5F 5F 44 41 54 41 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x4008
+    Size: 0x200
+    Offset: 0
+    Alignment: 3
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: ZeroFill (0x1)
+    Attributes [ (0x0)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+]
+UnwindInfo not implemented.
+Symbols [
+  Symbol {
+    Name: _fixture_arithmetic (4)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x43C
+  }
+  Symbol {
+    Name: _fixture_callback (24)
+    Extern
+    Type: Section (0xE)
+    Section: __data (0x4)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x4000
+  }
+  Symbol {
+    Name: _fixture_check (42)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x5DC
+  }
+  Symbol {
+    Name: _fixture_direct (57)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x49C
+  }
+  Symbol {
+    Name: _fixture_divide (73)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x4F0
+  }
+  Symbol {
+    Name: _fixture_float (89)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x54C
+  }
+  Symbol {
+    Name: _fixture_indirect (104)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x4D0
+  }
+  Symbol {
+    Name: _fixture_loop (122)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x45C
+  }
+  Symbol {
+    Name: _fixture_maximum (136)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x450
+  }
+  Symbol {
+    Name: _fixture_memory (153)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x488
+  }
+  Symbol {
+    Name: _fixture_message (169)
+    Extern
+    Type: Section (0xE)
+    Section: __const (0x2)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x960
+  }
+  Symbol {
+    Name: _fixture_stack (186)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x410
+  }
+  Symbol {
+    Name: _fixture_stack_args (201)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x508
+  }
+  Symbol {
+    Name: _fixture_string (221)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x5D0
+  }
+  Symbol {
+    Name: _fixture_variadic (237)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x598
+  }
+  Symbol {
+    Name: _fixture_vector (255)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x564
+  }
+  Symbol {
+    Name: _fixture_vector_integer (271)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x57C
+  }
+  Symbol {
+    Name: _fixture_width (295)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x4F8
+  }
+  Symbol {
+    Name: _fixture_zero_fill (310)
+    Extern
+    Type: Section (0xE)
+    Section: __common (0x5)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x4008
+  }
+]
+Indirect Symbols {
+  Number: 0
+  Symbols [
+  ]
+}
+Segment {
+  Cmd: LC_SEGMENT_64
+  Name: __TEXT
+  Size: 312
+  vmaddr: 0x0
+  vmsize: 0x4000
+  fileoff: 0
+  filesize: 16384
+  maxprot: r-x
+  initprot: r-x
+  nsects: 3
+  flags: 0x0
+}
+Segment {
+  Cmd: LC_SEGMENT_64
+  Name: __DATA
+  Size: 232
+  vmaddr: 0x4000
+  vmsize: 0x4000
+  fileoff: 16384
+  filesize: 16384
+  maxprot: rw-
+  initprot: rw-
+  nsects: 2
+  flags: 0x0
+}
+Segment {
+  Cmd: LC_SEGMENT_64
+  Name: __LINKEDIT
+  Size: 72
+  vmaddr: 0x8000
+  vmsize: 0x4000
+  fileoff: 32768
+  filesize: 1488
+  maxprot: r--
+  initprot: r--
+  nsects: 0
+  flags: 0x0
+}
+Dysymtab {
+  ilocalsym: 0
+  nlocalsym: 0
+  iextdefsym: 0
+  nextdefsym: 19
+  iundefsym: 19
+  nundefsym: 0
+  tocoff: 0
+  ntoc: 0
+  modtaboff: 0
+  nmodtab: 0
+  extrefsymoff: 0
+  nextrefsyms: 0
+  indirectsymoff: 0
+  nindirectsyms: 0
+  extreloff: 0
+  nextrel: 0
+  locreloff: 0
+  nlocrel: 0
+}

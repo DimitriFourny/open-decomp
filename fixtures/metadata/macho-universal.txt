@@ -1,0 +1,2376 @@
+
+File: fixtures/bin/macho-universal
+Format: Mach-O 64-bit x86-64
+Arch: x86_64
+AddressSize: 64bit
+MachHeader {
+  Magic: Magic64 (0xFEEDFACF)
+  CpuType: X86-64 (0x1000007)
+  CpuSubType: CPU_SUBTYPE_X86_64_ALL (0x3)
+  FileType: Executable (0x2)
+  NumOfLoadCommands: 17
+  SizeOfLoadCommands: 1272
+  Flags [ (0x200085)
+    MH_DYLDLINK (0x4)
+    MH_NOUNDEFS (0x1)
+    MH_PIE (0x200000)
+    MH_TWOLEVEL (0x80)
+  ]
+  Reserved: 0x0
+}
+Sections [
+  Section {
+    Index: 0
+    Name: __text (5F 5F 74 65 78 74 00 00 00 00 00 00 00 00 00 00)
+    Segment: __TEXT (5F 5F 54 45 58 54 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x100000560
+    Size: 0x677
+    Offset: 1376
+    Alignment: 4
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: Regular (0x0)
+    Attributes [ (0x800004)
+      PureInstructions (0x800000)
+      SomeInstructions (0x4)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 1
+    Name: __stubs (5F 5F 73 74 75 62 73 00 00 00 00 00 00 00 00 00)
+    Segment: __TEXT (5F 5F 54 45 58 54 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x100000BD8
+    Size: 0x6
+    Offset: 3032
+    Alignment: 1
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: SymbolStubs (0x8)
+    Attributes [ (0x800004)
+      PureInstructions (0x800000)
+      SomeInstructions (0x4)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x6
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 2
+    Name: __const (5F 5F 63 6F 6E 73 74 00 00 00 00 00 00 00 00 00)
+    Segment: __TEXT (5F 5F 54 45 58 54 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x100000BE0
+    Size: 0xE0
+    Offset: 3040
+    Alignment: 4
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: Regular (0x0)
+    Attributes [ (0x0)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 3
+    Name: __unwind_info (5F 5F 75 6E 77 69 6E 64 5F 69 6E 66 6F 00 00 00)
+    Segment: __TEXT (5F 5F 54 45 58 54 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x100000CC0
+    Size: 0x78
+    Offset: 3264
+    Alignment: 2
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: Regular (0x0)
+    Attributes [ (0x0)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 4
+    Name: __got (5F 5F 67 6F 74 00 00 00 00 00 00 00 00 00 00 00)
+    Segment: __DATA_CONST (5F 5F 44 41 54 41 5F 43 4F 4E 53 54 00 00 00 00)
+    Address: 0x100001000
+    Size: 0x8
+    Offset: 4096
+    Alignment: 3
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: NonLazySymbolPointers (0x6)
+    Attributes [ (0x0)
+    ]
+    Reserved1: 0x1
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 5
+    Name: __data (5F 5F 64 61 74 61 00 00 00 00 00 00 00 00 00 00)
+    Segment: __DATA (5F 5F 44 41 54 41 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x100002000
+    Size: 0x8
+    Offset: 8192
+    Alignment: 3
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: Regular (0x0)
+    Attributes [ (0x0)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 6
+    Name: __common (5F 5F 63 6F 6D 6D 6F 6E 00 00 00 00 00 00 00 00)
+    Segment: __DATA (5F 5F 44 41 54 41 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x100002010
+    Size: 0x200
+    Offset: 0
+    Alignment: 4
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: ZeroFill (0x1)
+    Attributes [ (0x0)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+]
+UnwindInfo not implemented.
+Symbols [
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x64)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: ./fixtures/source/ (359)
+    Type: SymDebugTable (0x64)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: corpus.c (378)
+    Type: SymDebugTable (0x64)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: /var/folders/pr/b1h1pv9502gd_lzq6gwyh2_40000gn/T/corpus-27145b.o (387)
+    Type: SymDebugTable (0x66)
+    Section:  (0x3)
+    RefType: ReferenceFlagUndefinedLazy (0x1)
+    Flags [ (0x0)
+    ]
+    Value: 0x6AD102F0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000560
+  }
+  Symbol {
+    Name: _fixture_stack (204)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000560
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x20
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000560
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000580
+  }
+  Symbol {
+    Name: _fixture_arithmetic (22)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000580
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x10
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000580
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000590
+  }
+  Symbol {
+    Name: _fixture_maximum (154)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000590
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x10
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000590
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005A0
+  }
+  Symbol {
+    Name: _fixture_loop (140)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005A0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x30
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005A0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005D0
+  }
+  Symbol {
+    Name: _fixture_memory (171)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005D0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x10
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005D0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005E0
+  }
+  Symbol {
+    Name: _fixture_direct (75)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005E0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x30
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005E0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000610
+  }
+  Symbol {
+    Name: _fixture_indirect (122)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000610
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x10
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000610
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000620
+  }
+  Symbol {
+    Name: _fixture_divide (91)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000620
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x10
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000620
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000630
+  }
+  Symbol {
+    Name: _fixture_width (313)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000630
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x20
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000630
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000650
+  }
+  Symbol {
+    Name: _fixture_stack_args (219)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000650
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x50
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000650
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006A0
+  }
+  Symbol {
+    Name: _fixture_float (107)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006A0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x20
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006A0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006C0
+  }
+  Symbol {
+    Name: _fixture_vector (273)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006C0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x20
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006C0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006E0
+  }
+  Symbol {
+    Name: _fixture_vector_integer (289)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006E0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x20
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006E0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000700
+  }
+  Symbol {
+    Name: _fixture_variadic (255)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000700
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0xD0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000700
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000007D0
+  }
+  Symbol {
+    Name: _fixture_string (239)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000007D0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0xD
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000007D0
+  }
+  Symbol {
+    Name: _fixture_message (187)
+    Type: SymDebugTable (0x20)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: _fixture_callback (42)
+    Type: SymDebugTable (0x20)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: _fixture_zero_fill (328)
+    Type: SymDebugTable (0x20)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x64)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: ./fixtures/source/ (452)
+    Type: SymDebugTable (0x64)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: check.c (471)
+    Type: SymDebugTable (0x64)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: /var/folders/pr/b1h1pv9502gd_lzq6gwyh2_40000gn/T/check-a9fa0c.o (479)
+    Type: SymDebugTable (0x66)
+    Section:  (0x3)
+    RefType: ReferenceFlagUndefinedLazy (0x1)
+    Flags [ (0x0)
+    ]
+    Value: 0x6AD102F0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000007E0
+  }
+  Symbol {
+    Name: _fixture_check (60)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000007E0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x3D0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000007E0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000BB0
+  }
+  Symbol {
+    Name: _main (347)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000BB0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x27
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000BB0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x64)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: __mh_execute_header (2)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x10)
+      ReferencedDynamically (0x10)
+    ]
+    Value: 0x100000000
+  }
+  Symbol {
+    Name: _fixture_arithmetic (22)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000580
+  }
+  Symbol {
+    Name: _fixture_callback (42)
+    Extern
+    Type: Section (0xE)
+    Section: __data (0x6)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100002000
+  }
+  Symbol {
+    Name: _fixture_check (60)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000007E0
+  }
+  Symbol {
+    Name: _fixture_direct (75)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005E0
+  }
+  Symbol {
+    Name: _fixture_divide (91)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000620
+  }
+  Symbol {
+    Name: _fixture_float (107)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006A0
+  }
+  Symbol {
+    Name: _fixture_indirect (122)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000610
+  }
+  Symbol {
+    Name: _fixture_loop (140)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005A0
+  }
+  Symbol {
+    Name: _fixture_maximum (154)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000590
+  }
+  Symbol {
+    Name: _fixture_memory (171)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005D0
+  }
+  Symbol {
+    Name: _fixture_message (187)
+    Extern
+    Type: Section (0xE)
+    Section: __const (0x3)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000C00
+  }
+  Symbol {
+    Name: _fixture_stack (204)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000560
+  }
+  Symbol {
+    Name: _fixture_stack_args (219)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000650
+  }
+  Symbol {
+    Name: _fixture_string (239)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000007D0
+  }
+  Symbol {
+    Name: _fixture_variadic (255)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000700
+  }
+  Symbol {
+    Name: _fixture_vector (273)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006C0
+  }
+  Symbol {
+    Name: _fixture_vector_integer (289)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006E0
+  }
+  Symbol {
+    Name: _fixture_width (313)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000630
+  }
+  Symbol {
+    Name: _fixture_zero_fill (328)
+    Extern
+    Type: Section (0xE)
+    Section: __common (0x7)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100002010
+  }
+  Symbol {
+    Name: _main (347)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000BB0
+  }
+  Symbol {
+    Name: _puts (353)
+    Extern
+    Type: Undef (0x0)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x100)
+      SymbolResolver (0x100)
+    ]
+    Value: 0x0
+  }
+]
+Indirect Symbols {
+  Number: 2
+  Symbols [
+    Entry {
+      Entry Index: 0
+      Symbol Index: 0x65
+    }
+    Entry {
+      Entry Index: 1
+      Symbol Index: 0x65
+    }
+  ]
+}
+Segment {
+  Cmd: LC_SEGMENT_64
+  Name: __PAGEZERO
+  Size: 72
+  vmaddr: 0x0
+  vmsize: 0x100000000
+  fileoff: 0
+  filesize: 0
+  maxprot: ---
+  initprot: ---
+  nsects: 0
+  flags: 0x0
+}
+Segment {
+  Cmd: LC_SEGMENT_64
+  Name: __TEXT
+  Size: 392
+  vmaddr: 0x100000000
+  vmsize: 0x1000
+  fileoff: 0
+  filesize: 4096
+  maxprot: r-x
+  initprot: r-x
+  nsects: 4
+  flags: 0x0
+}
+Segment {
+  Cmd: LC_SEGMENT_64
+  Name: __DATA_CONST
+  Size: 152
+  vmaddr: 0x100001000
+  vmsize: 0x1000
+  fileoff: 4096
+  filesize: 4096
+  maxprot: rw-
+  initprot: rw-
+  nsects: 1
+  flags: 0x10
+}
+Segment {
+  Cmd: LC_SEGMENT_64
+  Name: __DATA
+  Size: 232
+  vmaddr: 0x100002000
+  vmsize: 0x1000
+  fileoff: 8192
+  filesize: 4096
+  maxprot: rw-
+  initprot: rw-
+  nsects: 2
+  flags: 0x0
+}
+Segment {
+  Cmd: LC_SEGMENT_64
+  Name: __LINKEDIT
+  Size: 72
+  vmaddr: 0x100003000
+  vmsize: 0x1000
+  fileoff: 12288
+  filesize: 2672
+  maxprot: r--
+  initprot: r--
+  nsects: 0
+  flags: 0x0
+}
+Dysymtab {
+  ilocalsym: 0
+  nlocalsym: 80
+  iextdefsym: 80
+  nextdefsym: 21
+  iundefsym: 101
+  nundefsym: 1
+  tocoff: 0
+  ntoc: 0
+  modtaboff: 0
+  nmodtab: 0
+  extrefsymoff: 0
+  nextrefsyms: 0
+  indirectsymoff: 14408
+  nindirectsyms: 2
+  extreloff: 0
+  nextrel: 0
+  locreloff: 0
+  nlocrel: 0
+}
+
+File: fixtures/bin/macho-universal
+Format: Mach-O arm64
+Arch: aarch64
+AddressSize: 64bit
+MachHeader {
+  Magic: Magic64 (0xFEEDFACF)
+  CpuType: Arm64 (0x100000C)
+  CpuSubType: CPU_SUBTYPE_ARM64_ALL (0x0)
+  FileType: Executable (0x2)
+  NumOfLoadCommands: 18
+  SizeOfLoadCommands: 1288
+  Flags [ (0x200085)
+    MH_DYLDLINK (0x4)
+    MH_NOUNDEFS (0x1)
+    MH_PIE (0x200000)
+    MH_TWOLEVEL (0x80)
+  ]
+  Reserved: 0x0
+}
+Sections [
+  Section {
+    Index: 0
+    Name: __text (5F 5F 74 65 78 74 00 00 00 00 00 00 00 00 00 00)
+    Segment: __TEXT (5F 5F 54 45 58 54 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x100000548
+    Size: 0x574
+    Offset: 1352
+    Alignment: 2
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: Regular (0x0)
+    Attributes [ (0x800004)
+      PureInstructions (0x800000)
+      SomeInstructions (0x4)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 1
+    Name: __stubs (5F 5F 73 74 75 62 73 00 00 00 00 00 00 00 00 00)
+    Segment: __TEXT (5F 5F 54 45 58 54 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x100000ABC
+    Size: 0xC
+    Offset: 2748
+    Alignment: 2
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: SymbolStubs (0x8)
+    Attributes [ (0x800004)
+      PureInstructions (0x800000)
+      SomeInstructions (0x4)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0xC
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 2
+    Name: __const (5F 5F 63 6F 6E 73 74 00 00 00 00 00 00 00 00 00)
+    Segment: __TEXT (5F 5F 54 45 58 54 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x100000AD0
+    Size: 0x70
+    Offset: 2768
+    Alignment: 4
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: Regular (0x0)
+    Attributes [ (0x0)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 3
+    Name: __unwind_info (5F 5F 75 6E 77 69 6E 64 5F 69 6E 66 6F 00 00 00)
+    Segment: __TEXT (5F 5F 54 45 58 54 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x100000B40
+    Size: 0x80
+    Offset: 2880
+    Alignment: 2
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: Regular (0x0)
+    Attributes [ (0x0)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 4
+    Name: __got (5F 5F 67 6F 74 00 00 00 00 00 00 00 00 00 00 00)
+    Segment: __DATA_CONST (5F 5F 44 41 54 41 5F 43 4F 4E 53 54 00 00 00 00)
+    Address: 0x100004000
+    Size: 0x8
+    Offset: 16384
+    Alignment: 3
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: NonLazySymbolPointers (0x6)
+    Attributes [ (0x0)
+    ]
+    Reserved1: 0x1
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 5
+    Name: __data (5F 5F 64 61 74 61 00 00 00 00 00 00 00 00 00 00)
+    Segment: __DATA (5F 5F 44 41 54 41 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x100008000
+    Size: 0x8
+    Offset: 32768
+    Alignment: 3
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: Regular (0x0)
+    Attributes [ (0x0)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+  Section {
+    Index: 6
+    Name: __common (5F 5F 63 6F 6D 6D 6F 6E 00 00 00 00 00 00 00 00)
+    Segment: __DATA (5F 5F 44 41 54 41 00 00 00 00 00 00 00 00 00 00)
+    Address: 0x100008008
+    Size: 0x200
+    Offset: 0
+    Alignment: 3
+    RelocationOffset: 0x0
+    RelocationCount: 0
+    Type: ZeroFill (0x1)
+    Attributes [ (0x0)
+    ]
+    Reserved1: 0x0
+    Reserved2: 0x0
+    Reserved3: 0x0
+  }
+]
+UnwindInfo not implemented.
+Symbols [
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x64)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: ./fixtures/source/ (359)
+    Type: SymDebugTable (0x64)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: corpus.c (378)
+    Type: SymDebugTable (0x64)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: /var/folders/pr/b1h1pv9502gd_lzq6gwyh2_40000gn/T/corpus-f6c2e1.o (387)
+    Type: SymDebugTable (0x66)
+    Section:  (0x0)
+    RefType: ReferenceFlagUndefinedLazy (0x1)
+    Flags [ (0x0)
+    ]
+    Value: 0x6AD102F0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000548
+  }
+  Symbol {
+    Name: _fixture_stack (204)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000548
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x2C
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000548
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000574
+  }
+  Symbol {
+    Name: _fixture_arithmetic (22)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000574
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x14
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000574
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000588
+  }
+  Symbol {
+    Name: _fixture_maximum (154)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000588
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0xC
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000588
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000594
+  }
+  Symbol {
+    Name: _fixture_loop (140)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000594
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x2C
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000594
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005C0
+  }
+  Symbol {
+    Name: _fixture_memory (171)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005C0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x14
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005C0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005D4
+  }
+  Symbol {
+    Name: _fixture_direct (75)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005D4
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x34
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005D4
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000608
+  }
+  Symbol {
+    Name: _fixture_indirect (122)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000608
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x20
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000608
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000628
+  }
+  Symbol {
+    Name: _fixture_divide (91)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000628
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x8
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000628
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000630
+  }
+  Symbol {
+    Name: _fixture_width (313)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000630
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x10
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000630
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000640
+  }
+  Symbol {
+    Name: _fixture_stack_args (219)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000640
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x44
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000640
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000684
+  }
+  Symbol {
+    Name: _fixture_float (107)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000684
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x18
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000684
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x10000069C
+  }
+  Symbol {
+    Name: _fixture_vector (273)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x10000069C
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x18
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x10000069C
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006B4
+  }
+  Symbol {
+    Name: _fixture_vector_integer (289)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006B4
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1C
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006B4
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006D0
+  }
+  Symbol {
+    Name: _fixture_variadic (255)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006D0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x38
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006D0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000708
+  }
+  Symbol {
+    Name: _fixture_string (239)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000708
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0xC
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000708
+  }
+  Symbol {
+    Name: _fixture_message (187)
+    Type: SymDebugTable (0x20)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: _fixture_callback (42)
+    Type: SymDebugTable (0x20)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: _fixture_zero_fill (328)
+    Type: SymDebugTable (0x20)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x64)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: ./fixtures/source/ (452)
+    Type: SymDebugTable (0x64)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: check.c (471)
+    Type: SymDebugTable (0x64)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: /var/folders/pr/b1h1pv9502gd_lzq6gwyh2_40000gn/T/check-a1f009.o (479)
+    Type: SymDebugTable (0x66)
+    Section:  (0x0)
+    RefType: ReferenceFlagUndefinedLazy (0x1)
+    Flags [ (0x0)
+    ]
+    Value: 0x6AD102F0
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000714
+  }
+  Symbol {
+    Name: _fixture_check (60)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000714
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x378
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000714
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x2E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000A8C
+  }
+  Symbol {
+    Name: _main (347)
+    Type: SymDebugTable (0x24)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000A8C
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x24)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x30
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x4E)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000A8C
+  }
+  Symbol {
+    Name:  (1)
+    Type: SymDebugTable (0x64)
+    Section:  (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x0
+  }
+  Symbol {
+    Name: __mh_execute_header (2)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x10)
+      ReferencedDynamically (0x10)
+    ]
+    Value: 0x100000000
+  }
+  Symbol {
+    Name: _fixture_arithmetic (22)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000574
+  }
+  Symbol {
+    Name: _fixture_callback (42)
+    Extern
+    Type: Section (0xE)
+    Section: __data (0x6)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100008000
+  }
+  Symbol {
+    Name: _fixture_check (60)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000714
+  }
+  Symbol {
+    Name: _fixture_direct (75)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005D4
+  }
+  Symbol {
+    Name: _fixture_divide (91)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000628
+  }
+  Symbol {
+    Name: _fixture_float (107)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000684
+  }
+  Symbol {
+    Name: _fixture_indirect (122)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000608
+  }
+  Symbol {
+    Name: _fixture_loop (140)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000594
+  }
+  Symbol {
+    Name: _fixture_maximum (154)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000588
+  }
+  Symbol {
+    Name: _fixture_memory (171)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000005C0
+  }
+  Symbol {
+    Name: _fixture_message (187)
+    Extern
+    Type: Section (0xE)
+    Section: __const (0x3)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000AD0
+  }
+  Symbol {
+    Name: _fixture_stack (204)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000548
+  }
+  Symbol {
+    Name: _fixture_stack_args (219)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000640
+  }
+  Symbol {
+    Name: _fixture_string (239)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000708
+  }
+  Symbol {
+    Name: _fixture_variadic (255)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006D0
+  }
+  Symbol {
+    Name: _fixture_vector (273)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x10000069C
+  }
+  Symbol {
+    Name: _fixture_vector_integer (289)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x1000006B4
+  }
+  Symbol {
+    Name: _fixture_width (313)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000630
+  }
+  Symbol {
+    Name: _fixture_zero_fill (328)
+    Extern
+    Type: Section (0xE)
+    Section: __common (0x7)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100008008
+  }
+  Symbol {
+    Name: _main (347)
+    Extern
+    Type: Section (0xE)
+    Section: __text (0x1)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x0)
+    ]
+    Value: 0x100000A8C
+  }
+  Symbol {
+    Name: _puts (353)
+    Extern
+    Type: Undef (0x0)
+    Section:  (0x0)
+    RefType: UndefinedNonLazy (0x0)
+    Flags [ (0x100)
+      SymbolResolver (0x100)
+    ]
+    Value: 0x0
+  }
+]
+Indirect Symbols {
+  Number: 2
+  Symbols [
+    Entry {
+      Entry Index: 0
+      Symbol Index: 0x65
+    }
+    Entry {
+      Entry Index: 1
+      Symbol Index: 0x65
+    }
+  ]
+}
+Segment {
+  Cmd: LC_SEGMENT_64
+  Name: __PAGEZERO
+  Size: 72
+  vmaddr: 0x0
+  vmsize: 0x100000000
+  fileoff: 0
+  filesize: 0
+  maxprot: ---
+  initprot: ---
+  nsects: 0
+  flags: 0x0
+}
+Segment {
+  Cmd: LC_SEGMENT_64
+  Name: __TEXT
+  Size: 392
+  vmaddr: 0x100000000
+  vmsize: 0x4000
+  fileoff: 0
+  filesize: 16384
+  maxprot: r-x
+  initprot: r-x
+  nsects: 4
+  flags: 0x0
+}
+Segment {
+  Cmd: LC_SEGMENT_64
+  Name: __DATA_CONST
+  Size: 152
+  vmaddr: 0x100004000
+  vmsize: 0x4000
+  fileoff: 16384
+  filesize: 16384
+  maxprot: rw-
+  initprot: rw-
+  nsects: 1
+  flags: 0x10
+}
+Segment {
+  Cmd: LC_SEGMENT_64
+  Name: __DATA
+  Size: 232
+  vmaddr: 0x100008000
+  vmsize: 0x4000
+  fileoff: 32768
+  filesize: 16384
+  maxprot: rw-
+  initprot: rw-
+  nsects: 2
+  flags: 0x0
+}
+Segment {
+  Cmd: LC_SEGMENT_64
+  Name: __LINKEDIT
+  Size: 72
+  vmaddr: 0x10000C000
+  vmsize: 0x4000
+  fileoff: 49152
+  filesize: 3216
+  maxprot: r--
+  initprot: r--
+  nsects: 0
+  flags: 0x0
+}
+Dysymtab {
+  ilocalsym: 0
+  nlocalsym: 80
+  iextdefsym: 80
+  nextdefsym: 21
+  iundefsym: 101
+  nundefsym: 1
+  tocoff: 0
+  ntoc: 0
+  modtaboff: 0
+  nmodtab: 0
+  extrefsymoff: 0
+  nextrefsyms: 0
+  indirectsymoff: 51272
+  nindirectsyms: 2
+  extreloff: 0
+  nextrel: 0
+  locreloff: 0
+  nlocrel: 0
+}

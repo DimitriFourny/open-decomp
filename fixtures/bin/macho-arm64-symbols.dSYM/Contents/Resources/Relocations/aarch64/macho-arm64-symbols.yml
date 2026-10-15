@@ -1,0 +1,28 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     'fixtures/bin/macho-arm64-symbols'
+relocations:
+  - { offset: 0x26, size: 0x8, addend: 0x0, symName: _fixture_stack, symObjAddr: 0x0, symBinAddr: 0x100000548, symSize: 0x2C }
+  - { offset: 0x3F, size: 0x8, addend: 0x0, symName: _fixture_message, symObjAddr: 0x1CC, symBinAddr: 0x100000AD0, symSize: 0x0 }
+  - { offset: 0x73, size: 0x8, addend: 0x0, symName: _fixture_callback, symObjAddr: 0x1F0, symBinAddr: 0x100008000, symSize: 0x0 }
+  - { offset: 0xBA, size: 0x8, addend: 0x0, symName: _fixture_zero_fill, symBinAddr: 0x100008008, symSize: 0x0 }
+  - { offset: 0xE6, size: 0x8, addend: 0x0, symName: _fixture_stack, symObjAddr: 0x0, symBinAddr: 0x100000548, symSize: 0x2C }
+  - { offset: 0x127, size: 0x8, addend: 0x0, symName: _fixture_arithmetic, symObjAddr: 0x2C, symBinAddr: 0x100000574, symSize: 0x14 }
+  - { offset: 0x15D, size: 0x8, addend: 0x0, symName: _fixture_maximum, symObjAddr: 0x40, symBinAddr: 0x100000588, symSize: 0xC }
+  - { offset: 0x193, size: 0x8, addend: 0x0, symName: _fixture_loop, symObjAddr: 0x4C, symBinAddr: 0x100000594, symSize: 0x2C }
+  - { offset: 0x1D7, size: 0x8, addend: 0x0, symName: _fixture_loop, symObjAddr: 0x4C, symBinAddr: 0x100000594, symSize: 0x2C }
+  - { offset: 0x1F5, size: 0x8, addend: 0x0, symName: _fixture_memory, symObjAddr: 0x78, symBinAddr: 0x1000005C0, symSize: 0x14 }
+  - { offset: 0x22B, size: 0x8, addend: 0x0, symName: _fixture_direct, symObjAddr: 0x8C, symBinAddr: 0x1000005D4, symSize: 0x34 }
+  - { offset: 0x282, size: 0x8, addend: 0x0, symName: _fixture_indirect, symObjAddr: 0xC0, symBinAddr: 0x100000608, symSize: 0x20 }
+  - { offset: 0x2CD, size: 0x8, addend: 0x0, symName: _fixture_divide, symObjAddr: 0xE0, symBinAddr: 0x100000628, symSize: 0x8 }
+  - { offset: 0x303, size: 0x8, addend: 0x0, symName: _fixture_width, symObjAddr: 0xE8, symBinAddr: 0x100000630, symSize: 0x10 }
+  - { offset: 0x346, size: 0x8, addend: 0x0, symName: _fixture_stack_args, symObjAddr: 0xF8, symBinAddr: 0x100000640, symSize: 0x44 }
+  - { offset: 0x3E6, size: 0x8, addend: 0x0, symName: _fixture_float, symObjAddr: 0x13C, symBinAddr: 0x100000684, symSize: 0x18 }
+  - { offset: 0x41E, size: 0x8, addend: 0x0, symName: _fixture_vector, symObjAddr: 0x154, symBinAddr: 0x10000069C, symSize: 0x18 }
+  - { offset: 0x488, size: 0x8, addend: 0x0, symName: _fixture_vector_integer, symObjAddr: 0x16C, symBinAddr: 0x1000006B4, symSize: 0x1C }
+  - { offset: 0x4F2, size: 0x8, addend: 0x0, symName: _fixture_variadic, symObjAddr: 0x188, symBinAddr: 0x1000006D0, symSize: 0x38 }
+  - { offset: 0x556, size: 0x8, addend: 0x0, symName: _fixture_string, symObjAddr: 0x1C0, symBinAddr: 0x100000708, symSize: 0xC }
+  - { offset: 0x62B, size: 0x8, addend: 0x0, symName: _fixture_check, symObjAddr: 0x0, symBinAddr: 0x100000714, symSize: 0x378 }
+  - { offset: 0x638, size: 0x8, addend: 0x0, symName: _fixture_check, symObjAddr: 0x0, symBinAddr: 0x100000714, symSize: 0x378 }
+  - { offset: 0xAE1, size: 0x8, addend: 0x0, symName: _main, symObjAddr: 0x378, symBinAddr: 0x100000A8C, symSize: 0x30 }
+...
