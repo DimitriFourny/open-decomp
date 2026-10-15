@@ -106,45 +106,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 ## Doing
 
-- [ ] **T17 — Implement shared stack recovery and ABI-aware call analysis**
-  - Depends on: T10, T11, T12, T13, T16.
-  - Owns: `src/analysis/stack/`, `src/analysis/calls/`.
-  - Work: Port useful `stack.js`/`calls.js` behavior into architecture-independent passes consuming ABI profiles and typed effects. Recover stack slots/frames, parameters, outgoing arguments, returns, nonreturning calls, and supported indirect/variadic calls. Preserve escaped stack addresses, dynamic stack changes, call-time initialization evidence, and uncertainty.
-  - Acceptance: Both target corpora recover expected call arguments and stack objects without conflating Windows shadow space with locals or Darwin rules. Unknown/unsupported contracts do not invent signatures or initialized arguments; escapes and writes inhibit unsafe transformations. Contributes A04/A05/A06.
-  - Owner: StackCalls (astra-worker).
-
-- [ ] **T21 — Implement emitter-neutral control-flow structuring**
-  - Depends on: T16.
-  - Owns: `src/presentation/`, structured-control-flow tests.
-  - Work: Port CFG simplification/structuring into a presentation model for sequences, conditionals, loops, switches where established, calls, returns, and explicit labeled transfers. Preserve irreducible flow, exceptional/unknown boundaries, stable statement identity, and semantic source mappings. The model must contain no C syntax strings.
-  - Acceptance: Structured output represents the same paths and side effects as the input CFG on reducible and irreducible fixtures. Unknown edges and unsupported semantics remain visible; inability to form a loop/if does not trigger invented control flow. Contributes A06/A07.
-  - Owner: ControlStructuring (astra-worker).
-
-- [ ] **T19 — Integrate symbol names, runtime metadata, and library contracts**
-  - Depends on: T06, T07, T10, T11.
-  - Owns: `src/metadata/symbols/`, `src/metadata/runtime/`, `src/metadata/library-contracts/`, `src/metadata/codeview/`.
-  - Work: Preserve original names and add supported demangling/display names; migrate applicable Mach-O runtime metadata and library prototype evidence. Expose PE CodeView/PDB identity references without claiming unimplemented PDB type recovery. Provide structured, ABI-specific library contracts with provenance; distinguish imported callable entries from pointer-storage slots and display declarations.
-  - Acceptance: Native names remain addressable after demangling/renaming. Supported runtime metadata improves navigation without implying full Swift/Objective-C/C++ reconstruction. Pointer imports and names alone do not create function signatures; conflicting contracts are retained as conflicts. Contributes A01/A03/A06.
-  - Owner: Coordinator.
-
-
-- [ ] **V01 — Provision the supplied Windows ISO and run Windows acceptance**
-  - Depends on: Integrated component milestone; full release checks follow T28.
-  - Owns: Isolated VM and test artifacts under ignored `.local/windows/`.
-  - Work: Install `/Users/df0/Downloads/tiny10 x64 23h2.iso` into a fresh QEMU disk; expose no host home folder or credentials. Use a read-only project snapshot and pinned Node runtime. Record real Windows command results and retain a way to rerun the final release matrix.
-  - Acceptance: Windows x86-64 executes the decoder/behavior checks and compiled API smoke; later T29/T31 checks run against the completed application. No emulation-only claim substitutes for guest Windows execution.
-  - Owner: WindowsVM (sol-worker).
-  - Status: Guest provisioning reached the frozen 36f3fb2 foundation checks. The default parallel suite has native child exits 0xC0000005; it is not accepted. Bounded sequential/crash investigation is in progress. This is Windows compatibility under x86 emulation, not native-host performance evidence.
-
-- [ ] **T09 — Integrate the iced-x86 WASM decoder adapter**
-  - Depends on: T02, T03.
-  - Owns: `src/decoders/x86_64/`, x86 decoder conformance tests; request dependency-manifest changes through the integration owner.
-  - Work: Pin the official package and adapt structured instruction identities, sizes, operands, effective addresses, prefixes, widths, implicit register/memory effects, flags metadata, and control flow. Decode bounded buffers, reuse wrappers where practical, and free all WASM-owned objects. Keep native decoder details available to the x86 lifter without exposing them as public API dependencies.
-  - Acceptance: Exercise RIP-relative addressing, direct/indirect branches, partial-register writes, implicit MUL/DIV operands, flag reads/writes/undefined flags, and truncated/invalid encodings. Repeat decoding without accumulating unreleased WASM objects. The adapter runs on both planned hosts without building a native addon. Contributes A02.
-  - Owner: X86Decoder (sol-worker).
-  - Evidence: Implementation and macOS verification integrated: `src/decoders/x86_64/`, official iced-x86 1.21.0 WASM; lifecycle/boundary tests passed. Compiled PE → decoder smoke produced LEA, ADD, XOR, RET for the real arithmetic fixture. CMOV32 false-condition upper-half clearing was checked against architectural pseudocode; 64-bit conditional writes remain distinct.
-  - Blocker: Windows execution awaits V01. User selected a local VM and supplied `/Users/df0/Downloads/tiny10 x64 23h2.iso`; QEMU is installed. Do not mark Windows acceptance or T29/T31 complete until actual guest checks pass.
-
 
 ## Done
 
@@ -284,4 +245,46 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Acceptance: Semantic checks cover joins, loops, signed/unsigned distinctions, overflow/wrapping, flag dependencies, unknown calls, aliased stores/loads, and unreachable blocks. Eliminating a value never eliminates a required side effect, and analysis budgets yield explicit partial results. Contributes A06.
   - Owner: SSAAnalysis (astra-worker).
   - Evidence: `src/analysis/{ssa,values,effects}/`, IR state-binding/oracle integration and behavior tests; 452 tests/check/build passed. Compiled cross-target arithmetic preserved results before/after SSA and simplification. Disjoint register cells, pre-fault/call snapshots, observable exit roots, partial clobbers, joins/loops/irreducible flow, alias barriers, undefined-dominant concatenation, provenance and bounded partial results are exercised.
+
+- [x] **V01 — Provision the supplied Windows ISO and run Windows acceptance**
+  - Depends on: Integrated component milestone; full release checks follow T28.
+  - Owns: Isolated VM and test artifacts under ignored `.local/windows/`.
+  - Work: Install `/Users/df0/Downloads/tiny10 x64 23h2.iso` into a fresh QEMU disk; expose no host home folder or credentials. Use a read-only project snapshot and pinned Node runtime. Record real Windows command results and retain a way to rerun the final release matrix.
+  - Acceptance: Windows x86-64 executes the decoder/behavior checks and compiled API smoke; later T29/T31 checks run against the completed application. No emulation-only claim substitutes for guest Windows execution.
+  - Owner: WindowsVM (sol-worker).
+  - Evidence: Frozen 36f3fb2 passed on Windows 10 Enterprise LTSC 10.0.19044.3324, official Node 24.22.0 win32/x64: unmodified npm run check (175 tests, typecheck/build), explicit four-process full suite, and compiled PE/ARM64 decoding smoke. QEMU 11.1.2 TCG, qemu64, one vCPU, 4096 MiB RAM; no network or host shares. Initial max/four-vCPU native crashes remain recorded; exact emulator defect is unproven. Raw exits/results are in ignored `.local/windows/evidence/guest-serial.log` and `results.json`; retained launch/refresh/rerun scripts support T29/T31. This is foundation compatibility evidence, not completed-application acceptance or native performance.
+
+- [x] **T09 — Integrate the iced-x86 WASM decoder adapter**
+  - Depends on: T02, T03.
+  - Owns: `src/decoders/x86_64/`, x86 decoder conformance tests; request dependency-manifest changes through the integration owner.
+  - Work: Pin the official package and adapt structured instruction identities, sizes, operands, effective addresses, prefixes, widths, implicit register/memory effects, flags metadata, and control flow. Decode bounded buffers, reuse wrappers where practical, and free all WASM-owned objects. Keep native decoder details available to the x86 lifter without exposing them as public API dependencies.
+  - Acceptance: Exercise RIP-relative addressing, direct/indirect branches, partial-register writes, implicit MUL/DIV operands, flag reads/writes/undefined flags, and truncated/invalid encodings. Repeat decoding without accumulating unreleased WASM objects. The adapter runs on both planned hosts without building a native addon. Contributes A02.
+  - Owner: X86Decoder (sol-worker).
+  - Evidence: Implementation and macOS verification integrated: `src/decoders/x86_64/`, official iced-x86 1.21.0 WASM; lifecycle/boundary tests passed. Compiled PE → decoder smoke produced LEA, ADD, XOR, RET for the real arithmetic fixture. CMOV32 false-condition upper-half clearing was checked against architectural pseudocode; 64-bit conditional writes remain distinct.
+  - Windows evidence: V01 ran the unchanged frozen foundation suite, including iced conformance/ownership tests, on Node 24.22.0 Windows x64 without a native addon. All 175 tests and compiled cross-target decoder smoke passed. Full completed-application acceptance remains T29/T31.
+
+
+- [x] **T17 — Implement shared stack recovery and ABI-aware call analysis**
+  - Depends on: T10, T11, T12, T13, T16.
+  - Owns: `src/analysis/stack/`, `src/analysis/calls/`.
+  - Work: Port useful `stack.js`/`calls.js` behavior into architecture-independent passes consuming ABI profiles and typed effects. Recover stack slots/frames, parameters, outgoing arguments, returns, nonreturning calls, and supported indirect/variadic calls. Preserve escaped stack addresses, dynamic stack changes, call-time initialization evidence, and uncertainty.
+  - Acceptance: Both target corpora recover expected call arguments and stack objects without conflating Windows shadow space with locals or Darwin rules. Unknown/unsupported contracts do not invent signatures or initialized arguments; escapes and writes inhibit unsafe transformations. Contributes A04/A05/A06.
+  - Owner: StackCalls (astra-worker).
+  - Evidence: `src/analysis/{stack,calls}/` and behavior/corpus tests; Node 24.22.0 strict checks, 522 tests and build passed. Compiled Mach-O/PE APIs recovered the local at entry-SP−16 and all ten outgoing constants 1–10; Windows shadow space remained 32 bytes versus Darwin zero. Regressions cover exact callee-entry +40, unknown arity, partial initialization, aliases, dynamic frames, distinct outgoing/return escapes, variadic/indirect contracts, conflicts and bounded uncertainty.
+
+- [x] **T21 — Implement emitter-neutral control-flow structuring**
+  - Depends on: T16.
+  - Owns: `src/presentation/`, structured-control-flow tests.
+  - Work: Port CFG simplification/structuring into a presentation model for sequences, conditionals, loops, switches where established, calls, returns, and explicit labeled transfers. Preserve irreducible flow, exceptional/unknown boundaries, stable statement identity, and semantic source mappings. The model must contain no C syntax strings.
+  - Acceptance: Structured output represents the same paths and side effects as the input CFG on reducible and irreducible fixtures. Unknown edges and unsupported semantics remain visible; inability to form a loop/if does not trigger invented control flow. Contributes A06/A07.
+  - Owner: ControlStructuring (astra-worker).
+  - Evidence: `src/presentation/`, semantic region-lowering tests; integrated 522-test checks/build passed. Compiled real loops on both targets structured five blocks and retained results 0/26 after lowering the actual presentation representation. Reducible/irreducible flow, simultaneous copies, unknown boundaries and mapping identities are exercised. Coordinator corrected reverse-topological region reduction and flattened-sequence depth accounting; the 64-block depth-bound regression passes.
+
+- [x] **T19 — Integrate symbol names, runtime metadata, and library contracts**
+  - Depends on: T06, T07, T10, T11.
+  - Owns: `src/metadata/symbols/`, `src/metadata/runtime/`, `src/metadata/library-contracts/`, `src/metadata/codeview/`.
+  - Work: Preserve original names and add supported demangling/display names; migrate applicable Mach-O runtime metadata and library prototype evidence. Expose PE CodeView/PDB identity references without claiming unimplemented PDB type recovery. Provide structured, ABI-specific library contracts with provenance; distinguish imported callable entries from pointer-storage slots and display declarations.
+  - Acceptance: Native names remain addressable after demangling/renaming. Supported runtime metadata improves navigation without implying full Swift/Objective-C/C++ reconstruction. Pointer imports and names alone do not create function signatures; conflicting contracts are retained as conflicts. Contributes A01/A03/A06.
+  - Owner: Coordinator.
+  - Evidence: `src/metadata/{symbols,runtime,library-contracts,codeview}/`, real compiler fixtures with recipes/hashes and boundary tests; integrated 522-test checks/build passed. Compiled APIs recovered 25 Objective-C and 32 Swift records, all three mangling styles, the LLVM-confirmed RSDS GUID/age, and actual puts/ExitProcess contracts. Tests retain native identities, NB10 identity semantics, conflicting references/contracts, LP64/LLP64 widths, inert paths, per-field relative offsets, symbolic-string embedded NULs, section/encryption/fixup bounds and non-code IMP rejection. Swift calling conventions stay unsupported; runtime names do not imply full source layouts or PDB type recovery.
 

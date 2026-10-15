@@ -4,8 +4,8 @@ Copyright (c) 2026 Open Decomp contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of the original fixture source code, build and test recipes, fixture data,
-and compiled fixture binaries in this directory and the corresponding
-scripts/fixtures/ and test/fixtures/ files (the "Software"), to deal in the
+and compiled fixture binaries in this directory and test/metadata/fixtures/,
+and the corresponding scripts/fixtures/ and test/fixtures/ files (the "Software"), to deal in the
 Software without restriction, including without limitation the rights
 to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is

@@ -18,6 +18,7 @@ A successful investigation can open a binary, inspect its structure, search impo
 | Runtime and development | Node.js 24 LTS, npm lockfile, TypeScript compiler; `tsx` for development and `node:test` for tests | Pin tested tool versions. Compile distributable code; do not require a sibling checkout at runtime. |
 | ARM64 decoder | a64js | Preserve its canonical encoding identity, fields, operands, and feature/validity information. Pin and record the imported revision. |
 | x86-64 decoder | iced-x86 official JavaScript/WebAssembly package | Structured operands, implicit register effects, flags metadata, control flow, and TypeScript declarations. Pin the package version. |
+| Name demangling | Pinned local WASM engines for Itanium C++, Microsoft C++, and Swift | Display-only decoration; preserve native names and identities. Demangled text never establishes an ABI signature or object layout. |
 | Decompiler | Our own TypeScript implementation | Port useful existing behavior into a typed semantic IR and architecture-independent analyses. No Ghidra or other external decompiler backend. |
 | First output syntax | C-like pseudocode | Readable reconstruction, not recovered original source and not a promise of recompilable C. |
 | Output extensibility | Separate emitter interface and structured presentation model | A Python-like or other syntax can be added without rewriting decoding, lifting, or analysis. |
@@ -26,9 +27,11 @@ A successful investigation can open a binary, inspect its structure, search impo
 | Persistent projects | SQLite, immutable imported images, versioned derived artifacts | Keep facts and annotations durable; derived caches remain disposable. Use the bundled `node:sqlite` API behind a store interface under the pinned Node runtime. |
 | Heavy work | Bounded project worker processes | Parsing, analysis, and synchronous SQLite operations stay off the MCP event loop. A process boundary is fault containment, not by itself a security sandbox. |
 | Later remote access | MCP Streamable HTTP | Same service contracts, with authentication, authorization, origin checks, and resource limits. Not a requirement for the first local release. |
-| LLVM / Capstone | Optional development-time comparison tools | Useful independent decoder checks. Neither is an initial runtime dependency; assembly text is never parsed into semantic instructions. |
+| LLVM / Capstone disassemblers | Optional development-time comparison tools | Useful independent decoder checks. Neither is an initial runtime decoder dependency; assembly text is never parsed into semantic instructions. |
 
 Full TypeScript refers to first-party code we maintain. iced-x86's Rust implementation compiled to WASM, Node, and SQLite are external dependencies, not a requirement to maintain a mixed-language application. The pinned a64js dependency is a generated ESM snapshot with typed declarations: provenance records its original TypeScript hashes, transformed JavaScript hashes, revision, license, and TypeScript 5.9.3 transformation. `allowJs` copies this vendor runtime into the distribution; first-party TypeScript remains strictly checked.
+
+Demangler pins are `gecko-profiler-demangle` 0.4.0, `llvm-msvc-demangle` 0.2.0, and `swift-demangle-wasm` 1.0.2. Load only their fixed installed assets, never a target-selected module or runtime library. Distribution must retain package licenses and third-party notices: MIT/Apache-2.0 for Gecko; MIT wrappers plus LLVM/Swift Apache-2.0 WITH LLVM-exception and applicable runtime notices for the other engines. Input/output/cache bounds and worker deadlines contain untrusted names.
 
 ## 3. Initial targets and explicit boundaries
 
