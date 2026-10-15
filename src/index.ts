@@ -5,3 +5,8 @@ export { MachOLoader, machoLoader } from './loaders/macho/index.js';
 export { PELoader, peLoader } from './loaders/pe/index.js';
 export { Arm64Decoder } from './decoders/arm64/index.js';
 export { X86Decoder } from './decoders/x86_64/index.js';
+export { DarwinArm64Abi, darwinArm64Abi } from './abi/darwin-arm64/index.js';
+export { WindowsX64Abi, windowsX64Abi } from './abi/windows-x64/index.js';
+export { discoverFunctions, type DiscoveryInput, type DiscoveryResult } from './analysis/discovery/index.js';
+export * as DWARF from './metadata/dwarf/index.js';
+export { recoverDebugInfo, debugContextAt, variableLocationsAt, type DebugRecovery, type ExternalDebugInput } from './metadata/debug/index.js';

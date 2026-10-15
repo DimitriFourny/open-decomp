@@ -134,3 +134,22 @@ test('process exit during SQLite mutation rolls back and releases the project lo
   assert.deepEqual(state.store.queryRecords({ kind: 'function', image_id: imageId, revision: 1, limit: 10 }).items, []);
   assert.equal(state.store.transaction(1, tx => { tx.putRecord(imageId, 'function', fn); }).state, 'committed');
 });
+
+test('job recovery pagination survives reopen and rejects cursors after project mutation', async t => {
+  const { state, imageId, fn } = await project(t);
+  const jobs: Job[] = ['queued', 'running', 'cancelled'].map((stateName, index) => ({
+    id: `job_${String(index + 1).padStart(64, '0')}`, project_id: state.store.project_id, input_revision: 1,
+    operation: 'function_decompile', state: stateName as 'queued' | 'running' | 'cancelled',
+    progress: { phase: 'analysis', completed: 0, total: null }, artifacts: [], diagnostics: [], published_revision: null,
+  }));
+  for (const job of jobs) state.store.saveJob(job);
+  await state.store.close(); state.store = SqliteProjectStore.open(state.path, 'resume');
+  const first = state.store.listJobs({ limit: 2 });
+  assert.deepEqual(first.items, jobs.slice(0, 2));
+  assert.ok(first.next_cursor);
+  const last = state.store.listJobs({ limit: 2, cursor: first.next_cursor });
+  assert.deepEqual(last.items, jobs.slice(2));
+  assert.equal(last.next_cursor, null);
+  state.store.transaction(1, tx => { tx.putRecord(imageId, 'function', fn); });
+  assert.throws(() => state.store.listJobs({ limit: 2, cursor: first.next_cursor! }), { code: 'stale_cursor' });
+});

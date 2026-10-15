@@ -1,0 +1,105 @@
+
+<fixture>/abi.dll:	file format coff-x86-64
+
+Disassembly of section .text:
+
+0000000180001000 <abi_mixed>:
+180001000:     	movl	%ecx, %eax
+180001002:     	cvtsi2sd	%rax, %xmm0
+180001007:     	addsd	%xmm1, %xmm0
+18000100b:     	movl	%r8d, %eax
+18000100e:     	xorps	%xmm1, %xmm1
+180001011:     	cvtsi2sd	%rax, %xmm1
+180001016:     	cvtss2sd	%xmm3, %xmm2
+18000101a:     	addsd	%xmm0, %xmm1
+18000101e:     	movsd	0x28(%rsp), %xmm3
+180001024:     	unpcklps	0xfd5(%rip), %xmm3      # xmm3 = xmm3[0],mem[0],xmm3[1],mem[1]
+                                                # 0x180002000
+18000102b:     	addsd	%xmm1, %xmm2
+18000102f:     	subpd	0xfd9(%rip), %xmm3      # 0x180002010
+180001037:     	movapd	%xmm3, %xmm0
+18000103b:     	unpckhpd	%xmm3, %xmm0            # xmm0 = xmm0[1],xmm3[1]
+18000103f:     	addsd	%xmm3, %xmm0
+180001043:     	addsd	%xmm2, %xmm0
+180001047:     	retq
+180001048:     	nopl	(%rax,%rax)
+
+0000000180001050 <abi_ret8>:
+180001050:     	shlq	$0x20, %rdx
+180001054:     	movl	%ecx, %eax
+180001056:     	orq	%rdx, %rax
+180001059:     	retq
+18000105a:     	nopw	(%rax,%rax)
+
+0000000180001060 <abi_sret12>:
+180001060:     	movq	%rcx, %rax
+180001063:     	cvttsd2si	%xmm2, %rcx
+180001068:     	movl	%edx, (%rax)
+18000106a:     	cvttss2si	0x28(%rsp), %rdx
+180001071:     	addl	%r9d, %ecx
+180001074:     	movl	%ecx, 0x4(%rax)
+180001077:     	movl	%edx, 0x8(%rax)
+18000107a:     	retq
+18000107b:     	nopl	(%rax,%rax)
+
+0000000180001080 <abi_sret16>:
+180001080:     	movq	%rcx, %rax
+180001083:     	movq	%rdx, (%rcx)
+180001086:     	movq	%r8, 0x8(%rcx)
+18000108a:     	retq
+18000108b:     	nopl	(%rax,%rax)
+
+0000000180001090 <abi_aggregate>:
+180001090:     	movq	%rdx, %r8
+180001093:     	shrq	$0x20, %r8
+180001097:     	movzbl	(%rcx), %eax
+18000109a:     	addl	%edx, %eax
+18000109c:     	addl	%r8d, %eax
+18000109f:     	retq
+
+00000001800010a0 <abi_vector>:
+1800010a0:     	movaps	(%rcx), %xmm0
+1800010a3:     	addps	0xf76(%rip), %xmm0      # 0x180002020
+1800010aa:     	retq
+1800010ab:     	nopl	(%rax,%rax)
+
+00000001800010b0 <abi_vector64>:
+1800010b0:     	movdqa	(%rcx), %xmm0
+1800010b4:     	paddd	0xf74(%rip), %xmm0      # 0x180002030
+1800010bc:     	retq
+1800010bd:     	nopl	(%rax)
+
+00000001800010c0 <abi_variadic>:
+1800010c0:     	pushq	%rax
+1800010c1:     	movq	%rdx, 0x18(%rsp)
+1800010c6:     	movq	%r8, 0x20(%rsp)
+1800010cb:     	movl	%ecx, %eax
+1800010cd:     	cvtsi2sd	%rax, %xmm0
+1800010d2:     	movq	%r9, 0x28(%rsp)
+1800010d7:     	addsd	0x18(%rsp), %xmm0
+1800010dd:     	popq	%rax
+1800010de:     	retq
+1800010df:     	nop
+
+00000001800010e0 <abi_call_variadic>:
+1800010e0:     	subq	$0x28, %rsp
+1800010e4:     	movq	0xf54(%rip), %xmm1      # 0x180002040
+1800010ec:     	movl	$0x1, %ecx
+1800010f1:     	movq	%xmm1, %rdx
+1800010f6:     	callq	0x1800010c0 <abi_variadic>
+1800010fb:     	nop
+1800010fc:     	addq	$0x28, %rsp
+180001100:     	retq
+180001101:     	nopw	%cs:(%rax,%rax)
+
+0000000180001110 <abi_preserve>:
+180001110:     	subq	$0x38, %rsp
+180001114:     	movaps	%xmm6, 0x20(%rsp)
+180001119:     	movapd	%xmm0, %xmm6
+18000111d:     	addsd	%xmm1, %xmm6
+180001121:     	callq	*%r8
+180001124:     	addsd	%xmm6, %xmm6
+180001128:     	movapd	%xmm6, %xmm0
+18000112c:     	movaps	0x20(%rsp), %xmm6
+180001131:     	addq	$0x38, %rsp
+180001135:     	retq

@@ -1,0 +1,24 @@
+{
+  "license": "MIT (full grant in debug.c)",
+  "source": "debug.c",
+  "target": "arm64-apple-macos13",
+  "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
+  "dsymutil": "Apple LLVM version 21.0.0",
+  "recipe_cwd": "test/metadata/debug/fixtures",
+  "recipe": [
+    "xcrun clang -target arm64-apple-macos13 -g -gdwarf-4 -O1 -fno-omit-frame-pointer -fstandalone-debug -fdebug-prefix-map=\"${PWD%/test/metadata/debug/fixtures}\"=/open_decomp -c debug.c -o debug.o",
+    "xcrun clang -target arm64-apple-macos13 -dynamiclib debug.o -o debug-image.dylib",
+    "xcrun dsymutil --flat debug-image.dylib -o debug-image.dwarf",
+    "rm debug.o"
+  ],
+  "notes": [
+    "Static compiler/linker fixture; never executed.",
+    "Linker UUID and build paths may change on rebuild; hashes identify the checked-in pair.",
+    "DWARF4 linked dSYM, not debug-map-only nlist symbols."
+  ],
+  "sha256": {
+    "debug.c": "0cd553436251363a1e4734af52852423ba9057b14d5ea77bd8fbf57d9c8d8912",
+    "debug-image.dylib": "46f6cc4cc343a17d8152cc7836d28a5330a16c8cf875dcaecbdf233936bd5d9e",
+    "debug-image.dwarf": "88a92172787e53192678698b9094ef4b9d0d0717ad29790f69594495889e494d"
+  }
+}

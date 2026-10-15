@@ -65,7 +65,7 @@ export type AbiType =
   | { readonly kind: 'float'; readonly bits: 16 | 32 | 64 | 128 }
   | { readonly kind: 'pointer' }
   | { readonly kind: 'vector'; readonly element: 'integer' | 'float'; readonly element_bits: number; readonly lanes: number }
-  | { readonly kind: 'aggregate'; readonly size: bigint; readonly alignment: number; readonly fields: readonly { readonly offset: bigint; readonly type: AbiType }[] }
+  | { readonly kind: 'aggregate'; readonly size: bigint; readonly alignment: number; readonly fields: readonly { readonly offset: bigint; readonly type: AbiType }[]; readonly trivial_for_abi?: boolean }
   | { readonly kind: 'unknown'; readonly size: bigint | null };
 export type AbiLocation =
   | { readonly kind: 'register'; readonly register: RegisterDescriptor; readonly value_offset_bits: number; readonly width_bits: number }
@@ -83,11 +83,21 @@ export interface AbiCallLayout {
   readonly clobbers: CallClobbers; readonly diagnostics: readonly Diagnostic[];
   readonly state: 'complete' | 'partial' | 'unsupported';
 }
+/** Explicit ABI input. Omitted convention/prototyped flags mean the ordinary prototyped C ABI. */
+export interface AbiSignature {
+  readonly returns: AbiType;
+  /** null preserves an unknown argument count; an empty list is a known zero-argument list. */
+  readonly parameters: readonly AbiType[] | null;
+  readonly variadic: boolean;
+  readonly fixed_parameter_count: number;
+  readonly calling_convention?: 'default' | 'vectorcall' | 'member_function' | 'unknown';
+  readonly prototyped?: boolean;
+}
 export interface AbiProfile extends ComponentIdentity {
   readonly id: Target['abi']; readonly architecture: Target['architecture']; readonly layout: DataLayout;
   readonly stack_pointer: RegisterDescriptor; readonly preserved: readonly RegisterDescriptor[];
   readonly unknown_call_clobbers: CallClobbers;
-  classifyCall(signature: { readonly returns: AbiType; readonly parameters: readonly AbiType[]; readonly variadic: boolean; readonly fixed_parameter_count: number }): AbiCallLayout;
+  classifyCall(signature: AbiSignature): AbiCallLayout;
 }
 export interface Emitter<Presentation> extends ComponentIdentity {
   readonly language: 'c-like';
@@ -154,6 +164,8 @@ export interface ProjectStore {
   readArtifact(input: z.infer<typeof artifactReadArgsSchema>): Promise<z.infer<typeof artifactReadResultSchema>>;
   saveJob(job: Job): void;
   readJob(jobId: string): Job | null;
+  /** Live job lifecycle view in stable ID order; cursors bind the current project revision. */
+  listJobs(query: { readonly limit: number; readonly cursor?: string }): { readonly items: readonly Job[]; readonly next_cursor: string | null };
   close(): Promise<void>;
 }
 export interface StoreFactory {

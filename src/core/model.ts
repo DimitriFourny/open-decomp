@@ -74,7 +74,7 @@ export const typeDefinitionSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('pointer'), to: entityIdSchema, bits: z.literal(64) }),
   z.strictObject({ kind: z.literal('array'), element: entityIdSchema, count: hexU64Schema.nullable() }),
   z.strictObject({ kind: z.literal('vector'), element: entityIdSchema, lanes: z.number().int().min(1).max(256) }),
-  z.strictObject({ kind: z.literal('structure'), size: hexU64Schema.nullable(), alignment: z.number().int().min(1).max(65536), fields: z.array(z.strictObject({ id: entityIdSchema, name: z.string().max(1024), offset: hexU64Schema, type_id: entityIdSchema })).max(10000) }),
+  z.strictObject({ kind: z.literal('structure'), size: hexU64Schema.nullable(), alignment: z.number().int().min(1).max(65536).nullable(), fields: z.array(z.strictObject({ id: entityIdSchema, name: z.string().max(1024), offset: hexU64Schema, type_id: entityIdSchema })).max(10000) }),
 ]);
 export const signatureSchema = z.strictObject({
   abi: z.enum(['darwin-arm64', 'windows-x64']), return_type: entityIdSchema,

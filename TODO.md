@@ -19,30 +19,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 ### Homemade lifting and shared analysis
 
-- [ ] **T12 — Port ARM64 instruction semantics to typed IR**
-  - Depends on: T04, T08, T10.
-  - Owns: `src/lifters/arm64/`, ARM64 semantic regressions.
-  - Work: Migrate supported behavior from the existing `lift.js` into typed nodes, not a C-string compatibility layer. Cover the agreed corpus's integer/control-flow, loads/stores, stack, scalar FP/common vector, flags, and call behavior. Preserve width/SP/ZR rules and explicit pointer-authentication abstraction diagnostics. Inventory unsupported families and conservatively bound them.
-  - Acceptance: Applicable baseline functions retain semantic behavior and instruction provenance. Boundary checks cover carry/overflow, signed shifts/division, W-register writes, writeback, and indirect/authenticated transfers. Unsupported instructions are neither silently dropped nor converted to invented guaranteed traps. Contributes A04/A06.
-
-- [ ] **T13 — Implement x86-64 instruction semantics in typed IR**
-  - Depends on: T04, T09, T11.
-  - Owns: `src/lifters/x86_64/`, x86 semantic regressions.
-  - Work: Lift the agreed corpus's integer/control-flow, effective-address, stack/load/store, scalar FP/common SIMD, and call instructions. Implement subregister writes, zero extension, implicit operands, flags/conditions, sign/zero extension, and relevant prefix behavior from architectural semantics. Preserve trap/undefined/unknown distinctions and declare unsupported instruction families honestly.
-  - Acceptance: Semantic oracles cover AL/AH/AX/EAX/RAX interactions, arithmetic/carry/overflow, shifts with edge counts, MUL/DIV effects, conditional branches/moves, RIP-relative accesses, stack operations, and FP/vector corpus cases. Metadata about reads/writes is not used as a substitute for instruction semantics. Contributes A05/A06.
-
-- [ ] **T15 — Build strings, cross-reference indexes, and bounded target recovery**
-  - Depends on: T14.
-  - Owns: `src/analysis/strings/`, `src/analysis/references/`, `src/analysis/targets/`.
-  - Work: Reuse applicable string/reference/value-recovery behavior and extend it to PE/x86. Index code/data references, calls, imports/stubs/IAT slots, referenced strings, and supported jump-table/indirect-target patterns. Track candidate versus established references, read/write kinds, origin instruction, and unresolved edges. Keep search/pagination deterministic.
-  - Acceptance: Starting from a known fixture string or imported routine locates the expected referencing function on both targets. Direct and supported indirect targets have evidence; unknown targets are not omitted or invented. Bounded searches distinguish incomplete indexing from an empty result. Contributes A03.
-
-- [ ] **T16 — Implement SSA construction and shared value/effect analysis**
-  - Depends on: T04, T14.
-  - Owns: `src/analysis/ssa/`, `src/analysis/values/`, `src/analysis/effects/`.
-  - Work: Build SSA over lifted register-form CFGs, including joins/loops and explicit effect ordering. Port comparison recovery, propagation, expression simplification, branch threading, and dead-assignment elimination to typed nodes. Use bounded worklists/fixed points and conservative alias/call effects. Maintain provenance and diagnostics through rewrites.
-  - Acceptance: Semantic checks cover joins, loops, signed/unsigned distinctions, overflow/wrapping, flag dependencies, unknown calls, aliased stores/loads, and unreachable blocks. Eliminating a value never eliminates a required side effect, and analysis budgets yield explicit partial results. Contributes A06.
-
 - [ ] **T17 — Implement shared stack recovery and ABI-aware call analysis**
   - Depends on: T10, T11, T12, T13, T16.
   - Owns: `src/analysis/stack/`, `src/analysis/calls/`.
@@ -50,12 +26,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Acceptance: Both target corpora recover expected call arguments and stack objects without conflating Windows shadow space with locals or Darwin rules. Unknown/unsupported contracts do not invent signatures or initialized arguments; escapes and writes inhibit unsafe transformations. Contributes A04/A05/A06.
 
 ### Metadata, presentation, and durable annotations
-
-- [ ] **T19 — Integrate symbol names, runtime metadata, and library contracts**
-  - Depends on: T06, T07, T10, T11.
-  - Owns: `src/metadata/symbols/`, `src/metadata/runtime/`, `src/metadata/library-contracts/`, `src/metadata/codeview/`.
-  - Work: Preserve original names and add supported demangling/display names; migrate applicable Mach-O runtime metadata and library prototype evidence. Expose PE CodeView/PDB identity references without claiming unimplemented PDB type recovery. Provide structured, ABI-specific library contracts with provenance; distinguish imported callable entries from pointer-storage slots and display declarations.
-  - Acceptance: Native names remain addressable after demangling/renaming. Supported runtime metadata improves navigation without implying full Swift/Objective-C/C++ reconstruction. Pointer imports and names alone do not create function signatures; conflicting contracts are retained as conflicts. Contributes A01/A03/A06.
 
 - [ ] **T20 — Implement recovered types and constraint/evidence handling**
   - Depends on: T17, T18, T19.
@@ -150,41 +120,56 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 ## Doing
 
-- [ ] **T10 — Implement the Darwin ARM64 ABI profile**
-  - Depends on: T04.
-  - Owns: `src/abi/darwin-arm64/`, Darwin ABI behavior tests.
-  - Work: Extract Darwin-specific argument/return rules, preserved registers, stack alignment/arguments, scalar floating-point and supported aggregate rules, variadic behavior, and target data layout from the existing implementation and ABI evidence. Define conservative call clobbers and unsupported-contract diagnostics. Keep library-name lookup outside the ABI profile.
-  - Acceptance: Fixtures establish integer/FP parameters and returns, stack arguments, preserved/clobbered state, variadic stack handling, and supported aggregate boundaries. Unknown signatures do not acquire argument counts from names. Existing applicable Darwin behavior remains represented without generic passes inspecting ARM register names. Contributes A04/A06.
-  - Owner: DarwinABI (sol-worker).
+- [ ] **T12 — Port ARM64 instruction semantics to typed IR**
+  - Depends on: T04, T08, T10, T14.
+  - Owns: `src/lifters/arm64/`, ARM64 semantic regressions.
+  - Work: Migrate supported behavior from the existing `lift.js` into typed nodes, not a C-string compatibility layer. Cover the agreed corpus's integer/control-flow, loads/stores, stack, scalar FP/common vector, flags, and call behavior. Preserve width/SP/ZR rules and explicit pointer-authentication abstraction diagnostics. Inventory unsupported families and conservatively bound them.
+  - Acceptance: Applicable baseline functions retain semantic behavior and instruction provenance. Boundary checks cover carry/overflow, signed shifts/division, W-register writes, writeback, and indirect/authenticated transfers. Unsupported instructions are neither silently dropped nor converted to invented guaranteed traps. Contributes A04/A06.
+  - Owner: ArmLifter (astra-worker).
 
-- [ ] **T11 — Implement the Windows x64 ABI profile**
-  - Depends on: T04.
-  - Owns: `src/abi/windows-x64/`, Windows ABI behavior tests.
-  - Work: Implement parameter/return locations, shadow space, stack alignment/arguments, volatile/nonvolatile integer and SIMD state, scalar floating-point and supported aggregate rules, variadic behavior, and LLP64 data layout. Connect unwind metadata as evidence rather than an unconditional function/signature oracle. Explicitly reject or mark unsupported alternative conventions.
-  - Acceptance: Compiler fixtures exercise register and stack parameters, shadow-space handling, FP/variadic cases, structure-return boundaries, and preserved registers. Windows `long` and pointer widths are distinct and correct. Unknown calls retain conservative memory/register effects. Contributes A05/A06.
-  - Owner: WindowsABI (sol-worker).
+- [ ] **T13 — Implement x86-64 instruction semantics in typed IR**
+  - Depends on: T04, T09, T11, T14.
+  - Owns: `src/lifters/x86_64/`, x86 semantic regressions.
+  - Work: Lift the agreed corpus's integer/control-flow, effective-address, stack/load/store, scalar FP/common SIMD, and call instructions. Implement subregister writes, zero extension, implicit operands, flags/conditions, sign/zero extension, and relevant prefix behavior from architectural semantics. Preserve trap/undefined/unknown distinctions and declare unsupported instruction families honestly.
+  - Acceptance: Semantic oracles cover AL/AH/AX/EAX/RAX interactions, arithmetic/carry/overflow, shifts with edge counts, MUL/DIV effects, conditional branches/moves, RIP-relative accesses, stack operations, and FP/vector corpus cases. Metadata about reads/writes is not used as a substitute for instruction semantics. Contributes A05/A06.
+  - Owner: X86Lifter (astra-worker).
 
-- [ ] **T14 — Implement function discovery and control-flow graph construction**
-  - Depends on: T04, T06, T07, T08, T09.
-  - Owns: `src/analysis/discovery/`, `src/analysis/cfg/`, discovery/CFG tests.
-  - Work: Seed discovery from entry points, exports/symbols, trustworthy loader metadata, and discovered calls; traverse bounded code regions using structured decoder flow. Preserve noncontiguous ranges, data-in-code, tail calls, returns, invalid bytes, and unresolved indirect transfers. Attach function-boundary evidence and define deterministic identity changes for splits/merges.
-  - Acceptance: Stripped and symbol-bearing fixtures produce expected reachable blocks/edges without linear-sweeping known data into functions. Loops, shared tails, gaps, jump-table candidates, unresolved edges, and conflicting boundary evidence remain navigable and explicit. Contributes A03.
-  - Owner: DiscoveryCFG (astra-worker).
+- [ ] **T15 — Build strings, cross-reference indexes, and bounded target recovery**
+  - Depends on: T14.
+  - Owns: `src/analysis/strings/`, `src/analysis/references/`, `src/analysis/targets/`.
+  - Work: Reuse applicable string/reference/value-recovery behavior and extend it to PE/x86. Index code/data references, calls, imports/stubs/IAT slots, referenced strings, and supported jump-table/indirect-target patterns. Track candidate versus established references, read/write kinds, origin instruction, and unresolved edges. Keep search/pagination deterministic.
+  - Acceptance: Starting from a known fixture string or imported routine locates the expected referencing function on both targets. Direct and supported indirect targets have evidence; unknown targets are not omitted or invented. Bounded searches distinguish incomplete indexing from an empty result. Contributes A03.
+  - Owner: NavigationIndexes (sol-worker).
 
-- [ ] **T18 — Port Mach-O DWARF and debug-location evidence**
-  - Depends on: T06.
-  - Owns: `src/metadata/dwarf/`, `src/metadata/debug/`, DWARF regression tests.
-  - Work: Reuse `debug-info.ts`, `dwarf*.ts`, and applicable `decompiler-debug.ts` behavior without browser coupling. Import supported signatures/types, line/source mappings, scoped variable locations, and inline-scope evidence from local authorized debug inputs. Validate image/debug identity; keep display names separate from structural contracts and unsupported encodings explicit.
-  - Acceptance: Existing applicable debug regressions retain supported signatures, scoped storage names, and source mappings. Conflicting/mismatched debug files do not silently alter semantics. Missing debug information leaves native analysis usable. No symbol-server access occurs automatically. Contributes A04/A06.
-  - Owner: DebugEvidence (astra-worker).
+- [ ] **T16 — Implement SSA construction and shared value/effect analysis**
+  - Depends on: T04, T14.
+  - Owns: `src/analysis/ssa/`, `src/analysis/values/`, `src/analysis/effects/`.
+  - Work: Build SSA over lifted register-form CFGs, including joins/loops and explicit effect ordering. Port comparison recovery, propagation, expression simplification, branch threading, and dead-assignment elimination to typed nodes. Use bounded worklists/fixed points and conservative alias/call effects. Maintain provenance and diagnostics through rewrites.
+  - Acceptance: Semantic checks cover joins, loops, signed/unsigned distinctions, overflow/wrapping, flag dependencies, unknown calls, aliased stores/loads, and unreachable blocks. Eliminating a value never eliminates a required side effect, and analysis budgets yield explicit partial results. Contributes A06.
+  - Owner: SSAAnalysis (astra-worker).
+
+- [ ] **T19 — Integrate symbol names, runtime metadata, and library contracts**
+  - Depends on: T06, T07, T10, T11.
+  - Owns: `src/metadata/symbols/`, `src/metadata/runtime/`, `src/metadata/library-contracts/`, `src/metadata/codeview/`.
+  - Work: Preserve original names and add supported demangling/display names; migrate applicable Mach-O runtime metadata and library prototype evidence. Expose PE CodeView/PDB identity references without claiming unimplemented PDB type recovery. Provide structured, ABI-specific library contracts with provenance; distinguish imported callable entries from pointer-storage slots and display declarations.
+  - Acceptance: Native names remain addressable after demangling/renaming. Supported runtime metadata improves navigation without implying full Swift/Objective-C/C++ reconstruction. Pointer imports and names alone do not create function signatures; conflicting contracts are retained as conflicts. Contributes A01/A03/A06.
+  - Owner: Coordinator.
+
 
 - [ ] **T24 — Implement bounded project workers and job lifecycle**
   - Depends on: T05, T06, T07.
   - Owns: `src/workers/`, worker lifecycle/resource behavior tests.
   - Work: Run real project import/load/store work in persistent bounded child processes. Implement typed coarse-grained IPC, project write ownership, job IDs/states, progress, cancellation, queue limits, deadlines, and crash recovery. Keep synchronous SQLite and CPU work off the MCP event loop; avoid serializing whole IR graphs per instruction/request.
   - Acceptance: Actual Mach-O/PE imports execute through workers and survive close/resume. Cancellation, queued-work limits, forced worker failure, and interrupted writes produce explicit states without corrupting the project. Completed/cancelled races have deterministic outcomes, and the host remains responsive. Contributes A08/A10.
-  - Owner: Coordinator.
+  - Owner: WorkerRuntime (astra-worker).
 
+
+- [ ] **V01 — Provision the supplied Windows ISO and run Windows acceptance**
+  - Depends on: Integrated component milestone; full release checks follow T28.
+  - Owns: Isolated VM and test artifacts under ignored `.local/windows/`.
+  - Work: Install `/Users/df0/Downloads/tiny10 x64 23h2.iso` into a fresh QEMU disk; expose no host home folder or credentials. Use a read-only project snapshot and pinned Node runtime. Record real Windows command results and retain a way to rerun the final release matrix.
+  - Acceptance: Windows x86-64 executes the decoder/behavior checks and compiled API smoke; later T29/T31 checks run against the completed application. No emulation-only claim substitutes for guest Windows execution.
+  - Owner: WindowsVM (sol-worker).
 
 - [ ] **T09 — Integrate the iced-x86 WASM decoder adapter**
   - Depends on: T02, T03.
@@ -193,7 +178,7 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Acceptance: Exercise RIP-relative addressing, direct/indirect branches, partial-register writes, implicit MUL/DIV operands, flag reads/writes/undefined flags, and truncated/invalid encodings. Repeat decoding without accumulating unreleased WASM objects. The adapter runs on both planned hosts without building a native addon. Contributes A02.
   - Owner: X86Decoder (sol-worker).
   - Evidence: Implementation and macOS verification integrated: `src/decoders/x86_64/`, official iced-x86 1.21.0 WASM; lifecycle/boundary tests passed. Compiled PE → decoder smoke produced LEA, ADD, XOR, RET for the real arithmetic fixture. CMOV32 false-condition upper-half clearing was checked against architectural pseudocode; 64-bit conditional writes remain distinct.
-  - Blocker: Windows x86-64 host execution is not available yet. Do not mark this acceptance or T29/T31 complete by inference. No Git remote or SSH host is configured; QEMU is installed but no Windows image/license has been supplied.
+  - Blocker: Windows execution awaits V01. User selected a local VM and supplied `/Users/df0/Downloads/tiny10 x64 23h2.iso`; QEMU is installed. Do not mark Windows acceptance or T29/T31 complete until actual guest checks pass.
 
 
 ## Done
@@ -261,4 +246,36 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Acceptance: Real ARM64 byte ranges decode through the new adapter with expected instruction identities/operands, including authentication-related and feature-gated cases from the corpus. Trailing bytes and address gaps remain explicit. Compare selected cases with an independent decoder where available and adjudicate differences; do not claim complete conformance from recognition counts. Contributes A02/A04.
   - Owner: ArmDecoder (sol-worker).
   - Evidence: `src/decoders/arm64/`, `vendor/a64js/`, conformance tests; snapshot `aa0e547ca5313779c87e1e52d75687b12e985615` with MIT/provenance hashes. Actual Mach-O → decoder smoke decoded five arithmetic instructions including the migrated logical completion. Alias/SP/ZR, PAuth, feature gating, gaps, width and split-backing tests passed.
+
+- [x] **T10 — Implement the Darwin ARM64 ABI profile**
+  - Depends on: T04.
+  - Owns: `src/abi/darwin-arm64/`, Darwin ABI behavior tests.
+  - Work: Extract Darwin-specific argument/return rules, preserved registers, stack alignment/arguments, scalar floating-point and supported aggregate rules, variadic behavior, and target data layout from the existing implementation and ABI evidence. Define conservative call clobbers and unsupported-contract diagnostics. Keep library-name lookup outside the ABI profile.
+  - Acceptance: Fixtures establish integer/FP parameters and returns, stack arguments, preserved/clobbered state, variadic stack handling, and supported aggregate boundaries. Unknown signatures do not acquire argument counts from names. Existing applicable Darwin behavior remains represented without generic passes inspecting ARM register names. Contributes A04/A06.
+  - Owner: DarwinABI (sol-worker).
+  - Evidence: `src/abi/darwin-arm64/` and behavior tests; completed-component strict check and 122 focused tests passed on Node 24.22.0. Actual API smoke confirmed integer/FP layouts and callee-entry stack offsets 0/8 for arguments 9/10. Unknown counts, nontrivial/foreign conventions, HFA/HVA boundaries and partial SIMD preservation remain explicit.
+
+- [x] **T11 — Implement the Windows x64 ABI profile**
+  - Depends on: T04.
+  - Owns: `src/abi/windows-x64/`, Windows ABI behavior tests.
+  - Work: Implement parameter/return locations, shadow space, stack alignment/arguments, volatile/nonvolatile integer and SIMD state, scalar floating-point and supported aggregate rules, variadic behavior, and LLP64 data layout. Connect unwind metadata as evidence rather than an unconditional function/signature oracle. Explicitly reject or mark unsupported alternative conventions.
+  - Acceptance: Compiler fixtures exercise register and stack parameters, shadow-space handling, FP/variadic cases, structure-return boundaries, and preserved registers. Windows `long` and pointer widths are distinct and correct. Unknown calls retain conservative memory/register effects. Contributes A05/A06.
+  - Owner: WindowsABI (sol-worker).
+  - Evidence: `src/abi/windows-x64/`, ABI tests and compiler-produced test-local PE fixture; focused Node 24 checks passed. Actual API smoke confirmed fifth-argument offset 40 and shadow space 32; compiler bytes establish mixed slots, aggregate returns, variadic duplication and SIMD preservation. This is ABI evidence on macOS, not a Windows-host pass.
+
+- [x] **T14 — Implement function discovery and control-flow graph construction**
+  - Depends on: T04, T06, T07, T08, T09.
+  - Owns: `src/analysis/discovery/`, `src/analysis/cfg/`, discovery/CFG tests.
+  - Work: Seed discovery from entry points, exports/symbols, trustworthy loader metadata, and discovered calls; traverse bounded code regions using structured decoder flow. Preserve noncontiguous ranges, data-in-code, tail calls, returns, invalid bytes, and unresolved indirect transfers. Attach function-boundary evidence and define deterministic identity changes for splits/merges.
+  - Acceptance: Stripped and symbol-bearing fixtures produce expected reachable blocks/edges without linear-sweeping known data into functions. Loops, shared tails, gaps, jump-table candidates, unresolved edges, and conflicting boundary evidence remain navigable and explicit. Contributes A03.
+  - Owner: DiscoveryCFG (astra-worker).
+  - Evidence: `src/analysis/discovery/`, `src/analysis/cfg/`, discovery tests; real API smoke found 20/19 functions in symbol-bearing/stripped Mach-O and 16 in each PE DLL, retaining arithmetic returns and explicit partial coverage for unresolved flow. Focused tests cover noncontiguous/shared tails, block splitting, calls, data exclusion, lineage and resource limits.
+
+- [x] **T18 — Port Mach-O DWARF and debug-location evidence**
+  - Depends on: T06.
+  - Owns: `src/metadata/dwarf/`, `src/metadata/debug/`, DWARF regression tests.
+  - Work: Reuse `debug-info.ts`, `dwarf*.ts`, and applicable `decompiler-debug.ts` behavior without browser coupling. Import supported signatures/types, line/source mappings, scoped variable locations, and inline-scope evidence from local authorized debug inputs. Validate image/debug identity; keep display names separate from structural contracts and unsupported encodings explicit.
+  - Acceptance: Existing applicable debug regressions retain supported signatures, scoped storage names, and source mappings. Conflicting/mismatched debug files do not silently alter semantics. Missing debug information leaves native analysis usable. No symbol-server access occurs automatically. Contributes A04/A06.
+  - Owner: DebugEvidence (astra-worker).
+  - Evidence: `src/metadata/dwarf/`, `src/metadata/debug/`, test-local Clang/dwarfdump fixture and regressions; Node 24 smoke recovered 4 functions, 8 core types, 9 variables, 17 source rows and 2 inline scopes. Unsupported entry-value location opcode 0xa3 remains diagnosed. Known structure fields survive missing alignment as null; UUID/CPU/content conflicts are rejected.
 

@@ -9,7 +9,7 @@ import {
   contentHash, decodeCursor, digestSchema, encodeAnnotation, encodeAnnotationEdit, encodeArtifact,
   encodeCursor, encodeDiagnostic, encodeEvidence, encodeJob, encodeTypeDefinition, entityIdSchema,
   evidenceIdSchema, exportSchema, fingerprint, functionSchema, headerSchema, imageIdSchema,
-  imageIdentity, imageSummarySchema, importSchema, lineageSchema, mappingSchema, newIdentity,
+  imageIdentity, imageSummarySchema, importSchema, jobIdSchema, lineageSchema, mappingSchema, newIdentity,
   nextRevision, projectIdSchema, referenceSchema, relocationSchema, revisionSchema, sectionSchema,
   signatureSchema, sliceIdSchema, stringRecordSchema, symbolSchema, hintSchema,
   type Address, type Annotation, type AnnotationBatch, type Artifact, type CacheIdentity,
@@ -456,11 +456,25 @@ export class SqliteProjectStore implements ProjectStore {
     this.#db.prepare('INSERT OR REPLACE INTO jobs VALUES (?,?)').run(job.id, encodeStored(job));
   }
   readJob(jobId: string): Job | null {
-    this.#current();
+    this.#current(); jobIdSchema.parse(jobId);
     const row = this.#db.prepare('SELECT payload FROM jobs WHERE id=?').get(jobId);
     if (!row) return null;
     const job = decodeStored<Job>(row['payload']); encodeJob(job);
     return job;
+  }
+  listJobs(query: { readonly limit: number; readonly cursor?: string }): { items: readonly Job[]; next_cursor: string | null } {
+    const revision = this.#current();
+    if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 1000) fail('invalid_input', 'Invalid job page limit');
+    const binding = { project_id: this.project_id, revision, operation: 'jobs', query_hash: fingerprint({ limit: query.limit }) };
+    const cursor = query.cursor ? decodeCursor(query.cursor, binding) : null;
+    if (cursor && (cursor.after.length !== 1 || !jobIdSchema.safeParse(cursor.after[0]).success)) fail('invalid_cursor', 'Job cursor has an invalid key');
+    const rows = this.#db.prepare('SELECT payload FROM jobs WHERE id>? ORDER BY id LIMIT ?').all(cursor?.after[0] ?? '', query.limit + 1);
+    const more = rows.length > query.limit;
+    const items = (more ? rows.slice(0, query.limit) : rows).map(row => {
+      const job = decodeStored<Job>(row['payload']); encodeJob(job);
+      return job;
+    });
+    return { items, next_cursor: more ? encodeCursor({ ...binding, version: 1, after: [items.at(-1)!.id] }) : null };
   }
   async close(): Promise<void> {
     if (this.#closed) return;
