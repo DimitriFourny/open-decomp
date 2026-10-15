@@ -1,6 +1,6 @@
 ## Todo
 
-The design contract is [PLAN.md](PLAN.md). All tasks below are planned, not implemented. Task IDs are stable; move whole task blocks between the three board sections rather than duplicating them.
+The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task blocks between the three board sections rather than duplicating them. Git commits record integrated work and verification milestones.
 
 ### Assignment and integration rules
 
@@ -14,24 +14,6 @@ The design contract is [PLAN.md](PLAN.md). All tasks below are planned, not impl
 - Initial concurrency: after T01, T02 and T03 can proceed independently. After their contracts/fixtures land, store, loader, and decoder slices can proceed independently; ABI and lifter tasks follow the IR contract. Use the dependency graph, not task-number order, to schedule subsequent waves.
 
 ### Foundation and contracts
-
-- [ ] **T01 — Establish the TypeScript project and runnable development toolchain**
-  - Depends on: None.
-  - Owns: `package.json`, lockfile, TypeScript configuration, development/build scripts, initial `src/` and `test/` layout.
-  - Work: Set up strict TypeScript, ESM, pinned Node 24 LTS tooling, npm, compiled distribution, `tsx` development execution, and `node:test`. Enable strict optional/indexed-access handling. Establish commands for build, type checking, behavior tests, and smoke clients without creating fake analysis endpoints. Keep first-party implementation TypeScript.
-  - Acceptance: A clean checkout installs reproducibly and compiles/runs a real TypeScript module and test client under the pinned runtime. Production imports resolve from built output rather than the source checkout. No dependency on files outside this repository is required by the toolchain.
-
-- [ ] **T02 — Establish redistributable fixtures and the ARM64 behavioral baseline**
-  - Depends on: T01.
-  - Owns: `fixtures/`, fixture manifest/build recipes, `test/fixtures/`, baseline migration checks.
-  - Work: Inspect the existing `../disass_arm/test/` behavior coverage and capture applicable ARM64 results before migration. Provide small real Mach-O ARM64 and PE32+ x86-64 executables/libraries, stripped and symbol-bearing variants, an ARM64 fat-container case, and malformed/boundary fixtures. Record source, tool versions, flags, hashes, expected semantics, and redistribution terms. Include integer/control-flow, stack/calls, memory, scalar floating-point, and common vector examples; build the exact semantic inventory used by later lifters. Supply an isolated test-only semantic oracle/evaluator strategy, never target execution in the service.
-  - Acceptance: A fixture manifest resolves every input and expected behavior; rebuilding or verifying checked-in fixtures is documented. The existing ARM64 decompiler has been exercised directly on the applicable corpus with recorded capabilities/gaps. Tests can run without private binaries, network access, or an installed cross-compiler when prebuilt fixtures are provided.
-
-- [ ] **T03 — Define shared identities, addresses, evidence, and service contracts**
-  - Depends on: T01.
-  - Owns: `src/core/`, shared schema definitions, contract fixtures.
-  - Work: Define project/image/slice/entity IDs; address spaces and validated translation inputs; target/ABI/features; structured diagnostics; evidence origins; capability/completeness states; revision and job identities; query paging and artifact references. Define loader, architecture-specific decoder payload, ABI, emitter, store, worker-command, and service-operation boundaries. Publish the exact arguments/results for the tools listed in PLAN.md, with reusable runtime schema validation and lossless bigint wire codecs.
-  - Acceptance: Contract checks distinguish VA/RVA/file offsets, reject unsafe numeric addresses, round-trip full-width unsigned values, and separate empty/partial/unsupported/failed/cancelled results. Schemas cover all planned tools and revision-bound cursors without MCP types leaking into the core. Architecture-specific decoder information is not flattened into assembly text or a least-common-denominator operand type.
 
 - [ ] **T04 — Implement typed semantic IR, provenance, and invariant verification**
   - Depends on: T02, T03.
@@ -234,8 +216,27 @@ The design contract is [PLAN.md](PLAN.md). All tasks below are planned, not impl
 
 ## Doing
 
-No implementation tasks are currently assigned.
+- [ ] **T02 — Establish redistributable fixtures and the ARM64 behavioral baseline**
+  - Depends on: T01.
+  - Owns: `fixtures/`, fixture manifest/build recipes, `test/fixtures/`, baseline migration checks.
+  - Work: Inspect the existing `../disass_arm/test/` behavior coverage and capture applicable ARM64 results before migration. Provide small real Mach-O ARM64 and PE32+ x86-64 executables/libraries, stripped and symbol-bearing variants, an ARM64 fat-container case, and malformed/boundary fixtures. Record source, tool versions, flags, hashes, expected semantics, and redistribution terms. Include integer/control-flow, stack/calls, memory, scalar floating-point, and common vector examples; build the exact semantic inventory used by later lifters. Supply an isolated test-only semantic oracle/evaluator strategy, never target execution in the service.
+  - Acceptance: A fixture manifest resolves every input and expected behavior; rebuilding or verifying checked-in fixtures is documented. The existing ARM64 decompiler has been exercised directly on the applicable corpus with recorded capabilities/gaps. Tests can run without private binaries, network access, or an installed cross-compiler when prebuilt fixtures are provided.
+  - Owner: FixtureBaseline (sol-worker).
+
+- [ ] **T03 — Define shared identities, addresses, evidence, and service contracts**
+  - Depends on: T01.
+  - Owns: `src/core/`, shared schema definitions, contract fixtures.
+  - Work: Define project/image/slice/entity IDs; address spaces and validated translation inputs; target/ABI/features; structured diagnostics; evidence origins; capability/completeness states; revision and job identities; query paging and artifact references. Define loader, architecture-specific decoder payload, ABI, emitter, store, worker-command, and service-operation boundaries. Publish the exact arguments/results for the tools listed in PLAN.md, with reusable runtime schema validation and lossless bigint wire codecs.
+  - Acceptance: Contract checks distinguish VA/RVA/file offsets, reject unsafe numeric addresses, round-trip full-width unsigned values, and separate empty/partial/unsupported/failed/cancelled results. Schemas cover all planned tools and revision-bound cursors without MCP types leaking into the core. Architecture-specific decoder information is not flattened into assembly text or a least-common-denominator operand type.
+  - Owner: CoreContracts (astra-worker), integrated by coordinator.
+
 
 ## Done
 
-No implementation tasks have been completed.
+- [x] **T01 — Establish the TypeScript project and runnable development toolchain**
+  - Depends on: None.
+  - Owns: `package.json`, lockfile, TypeScript configuration, development/build scripts, initial `src/` and `test/` layout.
+  - Work: Set up strict TypeScript, ESM, pinned Node 24 LTS tooling, npm, compiled distribution, `tsx` development execution, and `node:test`. Enable strict optional/indexed-access handling. Establish commands for build, type checking, behavior tests, and smoke clients without creating fake analysis endpoints. Keep first-party implementation TypeScript.
+  - Acceptance: A clean checkout installs reproducibly and compiles/runs a real TypeScript module and test client under the pinned runtime. Production imports resolve from built output rather than the source checkout. No dependency on files outside this repository is required by the toolchain.
+  - Owner: Coordinator.
+  - Evidence: Node v24.22.0; reproducible `npm ci`, strict typecheck, two integer-boundary tests, and compiled build passed. Compiled smoke decoded a binary uint64 and preserved `0x20000000000001` through the public codec. Paths: package/config files, `src/core/integers.ts`, `src/index.ts`, `test/core/integers.test.ts`, `scripts/smoke.ts`.

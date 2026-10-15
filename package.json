@@ -1,0 +1,33 @@
+{
+  "name": "open-decomp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless native binary analysis and homemade decompilation for LLM clients",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "files": [
+    "dist/src",
+    "vendor",
+    "PLAN.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "check": "npm run typecheck && npm test && npm run build",
+    "smoke": "node dist/scripts/smoke.js"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  }
+}
