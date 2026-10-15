@@ -80,6 +80,7 @@ test('keyset pages are snapshot-bound and do not turn an unfinished empty index 
   assert.deepEqual([...first.items, ...last.items].map(item => item.id), [fn.id, second.id].sort());
   assert.equal(last.next_cursor, null);
   assert.throws(() => state.store.queryRecords({ ...query, cursor: first.next_cursor!, text: 'second' }), { code: 'stale_cursor' });
+  assert.throws(() => state.store.queryRecords({ ...query, cursor: first.next_cursor!, ids: [] }), { code: 'stale_cursor' });
   assert.equal(state.store.transaction(2, tx => { tx.setIndexState(imageId, 'function', 'complete'); }).state, 'committed');
   assert.throws(() => state.store.queryRecords({ ...query, revision: 3, cursor: first.next_cursor! }), { code: 'stale_cursor' });
   assert.equal(state.store.queryRecords({ ...query, revision: 3, text: 'absent' }).index_state, 'complete');

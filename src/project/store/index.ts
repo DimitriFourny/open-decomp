@@ -4,7 +4,7 @@ import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, open
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import {
-  AddressMap, ImmutableBytes, OperationError, SCHEMA_VERSION, addressSchema, annotationIdSchema, artifactIdSchema,
+  AddressMap, ImmutableBytes, OperationError, SCHEMA_VERSION, addressSchema, annotationIdSchema, annotationSchema, artifactIdSchema,
   artifactReadArgsSchema, artifactReadResultSchema, cacheIdentityKey, cacheIdentitySchema,
   contentHash, decodeCursor, digestSchema, encodeAnnotation, encodeAnnotationEdit, encodeArtifact,
   encodeCursor, encodeDiagnostic, encodeEvidence, encodeJob, encodeTypeDefinition, entityIdSchema,
@@ -12,13 +12,16 @@ import {
   imageIdentity, imageSummarySchema, importSchema, jobIdSchema, lineageSchema, mappingSchema, newIdentity,
   nextRevision, projectIdSchema, referenceSchema, relocationSchema, revisionSchema, sectionSchema,
   signatureSchema, sliceIdSchema, stringRecordSchema, symbolSchema, hintSchema,
-  type Address, type Annotation, type AnnotationBatch, type Artifact, type CacheIdentity,
+  type Address, type Annotation, type AnnotationBatch, type AnnotationQuery, type AnnotationHistoryQuery, type AnnotationHistoryEntry, type Artifact, type CacheIdentity,
   type Diagnostic, type Evidence, type Job, type LoadedImage, type MutationResult, type ProjectSnapshot,
   type ProjectStore, type RecordQuery, type RecoveredType, type Signature, type StoreFactory,
   type StoredRecordKinds, type StoreTransaction,
 } from '../../core/index.js';
 import { decodeStored, encodeStored, wireValue } from './encoding.js';
 
+// Persistence migrations are independent of the public wire/artifact schema version.
+const STORE_SCHEMA_VERSION = 2;
+const annotationActorSchema = annotationSchema.pick({ author: true, origin: true });
 const MAX_IMAGE_BYTES = 512 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const RECORD_SCHEMAS = { function: functionSchema, string: stringRecordSchema, reference: referenceSchema, symbol: symbolSchema, import: importSchema, export: exportSchema } as const;
@@ -124,12 +127,17 @@ export class SqliteProjectStore implements ProjectStore {
       const probe = new DatabaseSync(databasePath, { readOnly: true });
       try {
         const version = numberField(probe.prepare('PRAGMA user_version').get(), 'user_version');
-        if (version !== SCHEMA_VERSION) fail('unsupported_version', `Unsupported project schema ${version}`);
+        if (version < 1 || version > STORE_SCHEMA_VERSION) fail('unsupported_version', `Unsupported project schema ${version}`);
       } finally { probe.close(); }
     }
     const db = new DatabaseSync(databasePath, { timeout: 1000 });
     try {
-      db.exec('PRAGMA locking_mode=EXCLUSIVE; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; BEGIN EXCLUSIVE; COMMIT;');
+      db.exec('PRAGMA locking_mode=EXCLUSIVE; PRAGMA foreign_keys=ON; BEGIN EXCLUSIVE;');
+      const version = numberField(db.prepare('PRAGMA user_version').get(), 'user_version');
+      if (mode === 'resume' && (version < 1 || version > STORE_SCHEMA_VERSION)) {
+        db.exec('ROLLBACK'); fail('unsupported_version', `Unsupported project schema ${version}`);
+      }
+      db.exec('COMMIT; PRAGMA journal_mode=WAL;');
       if (mode === 'create') {
         db.exec(`BEGIN IMMEDIATE;
           CREATE TABLE metadata(singleton INTEGER PRIMARY KEY CHECK(singleton=1), project_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>=0)) STRICT;
@@ -145,11 +153,16 @@ export class SqliteProjectStore implements ProjectStore {
           CREATE TABLE lineage(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, payload BLOB NOT NULL) STRICT;
           CREATE TABLE annotations(id TEXT NOT NULL, entity_id TEXT NOT NULL, revision INTEGER NOT NULL, payload BLOB, PRIMARY KEY(id,revision)) STRICT;
           CREATE INDEX annotations_entity ON annotations(entity_id,id,revision);
+          CREATE TABLE annotation_removals(id TEXT NOT NULL, revision INTEGER NOT NULL, author TEXT NOT NULL, origin TEXT NOT NULL CHECK(origin IN ('user','llm')), PRIMARY KEY(id,revision), FOREIGN KEY(id,revision) REFERENCES annotations(id,revision)) STRICT;
           CREATE TABLE jobs(id TEXT PRIMARY KEY, payload BLOB NOT NULL) STRICT;
           CREATE TABLE artifacts(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, job_id TEXT NOT NULL, cache_key TEXT NOT NULL UNIQUE, payload BLOB NOT NULL) STRICT;
-          PRAGMA user_version=1;`);
+          PRAGMA user_version=${STORE_SCHEMA_VERSION};`);
         db.prepare('INSERT INTO metadata VALUES (1,?,0)').run(newIdentity('project'));
         db.exec('COMMIT');
+      } else if (version === 1) {
+        db.exec(`BEGIN IMMEDIATE;
+          CREATE TABLE annotation_removals(id TEXT NOT NULL, revision INTEGER NOT NULL, author TEXT NOT NULL, origin TEXT NOT NULL CHECK(origin IN ('user','llm')), PRIMARY KEY(id,revision), FOREIGN KEY(id,revision) REFERENCES annotations(id,revision)) STRICT;
+          PRAGMA user_version=${STORE_SCHEMA_VERSION}; COMMIT;`);
       }
       directory(join(root, 'images'), mode === 'create');
       directory(join(root, 'artifacts'), mode === 'create');
@@ -180,7 +193,7 @@ export class SqliteProjectStore implements ProjectStore {
   snapshot(revision = this.#current()): ProjectSnapshot {
     this.#revision(revision);
     const images = this.#db.prepare('SELECT i.image_id,i.sha256,s.slice_id FROM images i JOIN image_imports s USING(image_id) WHERE s.revision<=? ORDER BY i.image_id,s.slice_id').all(revision);
-    return { project_id: this.project_id, revision, schema_version: SCHEMA_VERSION, images: images.map(row => ({ image_id: imageIdSchema.parse(row['image_id']), sha256: digestSchema.parse(row['sha256']), selected_slice_id: sliceIdSchema.parse(row['slice_id']) })) };
+    return { project_id: this.project_id, revision, schema_version: STORE_SCHEMA_VERSION, images: images.map(row => ({ image_id: imageIdSchema.parse(row['image_id']), sha256: digestSchema.parse(row['sha256']), selected_slice_id: sliceIdSchema.parse(row['slice_id']) })) };
   }
 
   async importImage(input: { bytes: ImmutableBytes; sha256: string; selected_slice_id: string }): Promise<{ image_id: string; existing: boolean }> {
@@ -217,9 +230,9 @@ export class SqliteProjectStore implements ProjectStore {
     return new ImmutableBytes(bytes);
   }
 
-  readLoadedImage(imageId: string, sliceId: string): LoadedImage {
-    this.#current(); imageIdSchema.parse(imageId); sliceIdSchema.parse(sliceId);
-    const row = this.#db.prepare('SELECT payload FROM loaded_images WHERE image_id=? AND slice_id=? ORDER BY revision DESC LIMIT 1').get(imageId, sliceId);
+  readLoadedImage(imageId: string, sliceId: string, revision = this.#current()): LoadedImage {
+    this.#revision(revision); imageIdSchema.parse(imageId); sliceIdSchema.parse(sliceId);
+    const row = this.#db.prepare('SELECT payload FROM loaded_images WHERE image_id=? AND slice_id=? AND revision<=? ORDER BY revision DESC LIMIT 1').get(imageId, sliceId, revision);
     if (!row) fail('not_found', 'Image has not been loaded for this slice');
     const metadata = decodeStored<ImageMetadata>(row['payload']);
     if (metadata.id !== imageId || metadata.selected_slice_id !== sliceId) fail('invalid_input', 'Stored image identity mismatch');
@@ -240,7 +253,7 @@ export class SqliteProjectStore implements ProjectStore {
     if (query.ids && query.ids.length > 1000) fail('resource_limit', 'Too many requested identities');
     for (const id of query.ids ?? []) entityIdSchema.parse(id);
     if (query.address && query.address.image_id !== query.image_id) fail('invalid_address', 'Query address belongs to another image');
-    const queryHash = fingerprint({ image: query.image_id, kind: query.kind, ids: [...(query.ids ?? [])].sort(), text: query.text ?? null, address: query.address ? { ...query.address } : null, limit: query.limit });
+    const queryHash = fingerprint({ image: query.image_id, kind: query.kind, ids: query.ids === undefined ? null : [...new Set(query.ids)].sort(), text: query.text ?? null, address: query.address ? { ...query.address } : null, limit: query.limit });
     const binding = { project_id: this.project_id, revision: query.revision, operation: 'records', query_hash: queryHash };
     const cursor = query.cursor ? decodeCursor(query.cursor, binding) : null;
     if (cursor && (cursor.after.length !== 1 || !entityIdSchema.safeParse(cursor.after[0]).success)) fail('invalid_cursor', 'Record cursor has an invalid key');
@@ -316,11 +329,12 @@ export class SqliteProjectStore implements ProjectStore {
         this.#db.prepare('INSERT OR REPLACE INTO annotations VALUES (?,?,?,?)').run(annotation.id, annotation.entity_id, revision, encodeStored(annotation));
         changed.push(annotation);
       },
-      removeAnnotation: id => {
-        guard(); annotationIdSchema.parse(id);
+      removeAnnotation: (id, actor) => {
+        guard(); annotationIdSchema.parse(id); annotationActorSchema.parse(actor);
         const prior = this.#latest('annotations', id, current);
         if (!prior || prior['payload'] === null) fail('not_found', 'Annotation does not exist');
         this.#db.prepare('INSERT OR REPLACE INTO annotations VALUES (?,?,?,NULL)').run(id, stringField(prior, 'entity_id'), revision);
+        this.#db.prepare('INSERT OR REPLACE INTO annotation_removals VALUES (?,?,?,?)').run(id, revision, actor.author, actor.origin);
         removed.push(id);
       },
     };
@@ -347,7 +361,7 @@ export class SqliteProjectStore implements ProjectStore {
       const revision = nextRevision(batch.expected_revision);
       for (const edit of batch.edits) {
         if (edit.operation === 'set') tx.setAnnotation({ id: edit.id, entity_id: edit.entity_id, value: edit.value, status: edit.status, evidence_ids: edit.evidence_ids, author: batch.author, origin: batch.origin, revision });
-        else if (edit.operation === 'remove') tx.removeAnnotation(edit.id);
+        else if (edit.operation === 'remove') tx.removeAnnotation(edit.id, { author: batch.author, origin: batch.origin });
         else {
           const row = this.#latest('annotations', edit.id, batch.expected_revision);
           if (!row || row['payload'] === null) fail('not_found', 'Annotation does not exist');
@@ -363,6 +377,48 @@ export class SqliteProjectStore implements ProjectStore {
     const rows = this.#db.prepare('SELECT a.payload FROM annotations a WHERE a.entity_id=? AND a.revision<=? AND a.revision=(SELECT MAX(v.revision) FROM annotations v WHERE v.id=a.id AND v.revision<=?) AND a.payload IS NOT NULL ORDER BY a.id LIMIT 10001').all(entityId, revision, revision);
     if (rows.length > 10000) fail('resource_limit', 'Too many annotations for one entity');
     return rows.map(row => { const value = decodeStored<Annotation>(row['payload']); encodeAnnotation(value); return value; });
+  }
+  queryAnnotations(query: AnnotationQuery): { items: readonly Annotation[]; next_cursor: string | null } {
+    this.#revision(query.revision);
+    if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 1000) fail('invalid_input', 'Invalid annotation page limit');
+    if ((query.ids?.length ?? 0) > 1000 || (query.entity_ids?.length ?? 0) > 1000) fail('resource_limit', 'Too many annotation query identities');
+    for (const id of query.ids ?? []) annotationIdSchema.parse(id);
+    for (const id of query.entity_ids ?? []) entityIdSchema.parse(id);
+    const ids = query.ids === undefined ? null : [...new Set(query.ids)].sort(), entities = query.entity_ids === undefined ? null : [...new Set(query.entity_ids)].sort();
+    const binding = { project_id: this.project_id, revision: query.revision, operation: 'annotations', query_hash: fingerprint([ids, entities, query.limit]) };
+    const cursor = query.cursor ? decodeCursor(query.cursor, binding) : null;
+    if (cursor && (cursor.after.length !== 1 || !annotationIdSchema.safeParse(cursor.after[0]).success)) fail('invalid_cursor', 'Annotation cursor has an invalid key');
+    const params: SQLInputValue[] = [query.revision, query.revision, cursor?.after[0] ?? ''];
+    let sql = 'SELECT a.payload FROM annotations a WHERE a.revision<=? AND a.revision=(SELECT MAX(v.revision) FROM annotations v WHERE v.id=a.id AND v.revision<=?) AND a.id>? AND a.payload IS NOT NULL';
+    for (const [column, values] of [['id', ids], ['entity_id', entities]] as const) if (values !== null) {
+      if (values.length === 0) sql += ' AND 0';
+      else { sql += ` AND a.${column} IN (${values.map(() => '?').join(',')})`; params.push(...values); }
+    }
+    sql += ' ORDER BY a.id LIMIT ?'; params.push(query.limit + 1);
+    const rows = this.#db.prepare(sql).all(...params), more = rows.length > query.limit;
+    const items = (more ? rows.slice(0, query.limit) : rows).map(row => { const value = decodeStored<Annotation>(row['payload']); encodeAnnotation(value); return value; });
+    return { items, next_cursor: more ? encodeCursor({ ...binding, version: 1, after: [items.at(-1)!.id] }) : null };
+  }
+  queryAnnotationHistory(query: AnnotationHistoryQuery): { items: readonly AnnotationHistoryEntry[]; next_cursor: string | null } {
+    this.#revision(query.revision); annotationIdSchema.parse(query.id);
+    if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 1000) fail('invalid_input', 'Invalid annotation history page limit');
+    const binding = { project_id: this.project_id, revision: query.revision, operation: 'annotation_history', query_hash: fingerprint([query.id, query.limit]) };
+    const cursor = query.cursor ? decodeCursor(query.cursor, binding) : null;
+    const after = cursor ? Number(cursor.after[0]) : 0;
+    if (cursor && (cursor.after.length !== 1 || !/^(0|[1-9][0-9]*)$/.test(cursor.after[0]!) || !Number.isSafeInteger(after) || after > query.revision)) fail('invalid_cursor', 'Annotation history cursor has an invalid revision');
+    const rows = this.#db.prepare('SELECT a.*, r.author AS removal_author, r.origin AS removal_origin FROM annotations a LEFT JOIN annotation_removals r ON a.id=r.id AND a.revision=r.revision WHERE a.id=? AND a.revision<=? AND a.revision>? ORDER BY a.revision LIMIT ?').all(query.id, query.revision, after, query.limit + 1);
+    const more = rows.length > query.limit;
+    const items: AnnotationHistoryEntry[] = (more ? rows.slice(0, query.limit) : rows).map(row => {
+      const id = annotationIdSchema.parse(row['id']), entity_id = entityIdSchema.parse(row['entity_id']), revision = numberField(row, 'revision');
+      if (row['payload'] === null) {
+        const actor = row['removal_author'] === null ? null : annotationActorSchema.parse({ author: row['removal_author'], origin: row['removal_origin'] });
+        return { id, entity_id, revision, operation: 'remove', annotation: null, actor };
+      }
+      const annotation = decodeStored<Annotation>(row['payload']); encodeAnnotation(annotation);
+      if (annotation.id !== id || annotation.entity_id !== entity_id || annotation.revision !== revision) fail('invalid_input', 'Persisted annotation history identity mismatch');
+      return { id, entity_id, revision, operation: annotation.status === 'retracted' ? 'retract' : 'set', annotation, actor: { author: annotation.author, origin: annotation.origin } };
+    });
+    return { items, next_cursor: more ? encodeCursor({ ...binding, version: 1, after: [String(items.at(-1)!.revision)] }) : null };
   }
   readEvidence(ids: readonly string[], revision: number): readonly Evidence[] {
     this.#revision(revision);

@@ -19,12 +19,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 ### Metadata, presentation, and durable annotations
 
-- [ ] **T20 — Implement recovered types and constraint/evidence handling**
-  - Depends on: T17, T18, T19.
-  - Owns: `src/analysis/types/`, type-recovery behavior tests.
-  - Work: Port type recovery onto typed IR and combine memory access shapes, ABI rules, debug types, library contracts, and explicit annotations. Represent pointers, arrays, structures/fields, signatures, and scalar/vector types within supported semantics. Separate machine widths from reconstructed source types, and track why each constraint exists.
-  - Acceptance: Structure/field and signature recovery improves fixture decompilation while respecting offsets, widths, aliases, and both data layouts. Conflicting evidence is surfaced, user assertions remain labeled, and names or isolated casts cannot establish object sizes/types without evidence. Contributes A06/A08.
-
 - [ ] **T22 — Implement C-like pseudocode emission and instruction mappings**
   - Depends on: T20, T21.
   - Owns: `src/emitters/c/`, emitter interface implementation and behavioral mapping tests.
@@ -44,12 +38,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Owns: `src/service/analysis/`, `src/project/cache/`, pipeline integration cases.
   - Work: Connect loaders, discovery, architecture lifters, ABI/metadata evidence, shared passes, presentation, and emission into real per-function analysis jobs. Implement completeness reporting and caches keyed by input identity, versions, features/ABI, analysis policy, revisions, and emitter options. Publish results atomically and prevent old-revision jobs from becoming current after edits.
   - Acceptance: The service decompiles real functions for both targets without using an external decompiler. Repeated requests use valid cached results; annotation edits/retractions and option/version changes invalidate them. Cancellation/crashes never publish partial artifacts as complete. ARM64 behavior no longer relies on a legacy C-string pipeline or sibling runtime import. Contributes A04–A08.
-
-- [ ] **T26 — Implement bounded project inspection and navigation services**
-  - Depends on: T15, T18, T19, T24.
-  - Owns: `src/service/queries/`, query/result and artifact-access behavior tests.
-  - Work: Implement project open/close, binary-info views, symbol/string/function searches, function metadata/disassembly/CFG views, references, and bounded byte/typed reads. Add deterministic ordering, server-side filtering, revision-bound cursors, and project-scoped artifact retrieval. Reuse loader address translation and indexes; do not introduce a second program model.
-  - Acceptance: A direct client navigates from import/string to referencing function and reads correct headers, disassembly, CFG, and bytes on both targets. Pagination covers results without duplication/omission at a fixed revision and rejects stale cursors. Unmapped/zero-filled data, incomplete indexes, and truncation are explicit. Contributes A01/A03/A08.
 
 - [ ] **T27 — Expose the complete local MCP tool surface**
   - Depends on: T23, T25, T26.
@@ -106,6 +94,20 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 ## Doing
 
+- [ ] **T20 — Implement recovered types and constraint/evidence handling**
+  - Depends on: T17, T18, T19.
+  - Owns: `src/analysis/types/`, type-recovery behavior tests.
+  - Work: Port type recovery onto typed IR and combine memory access shapes, ABI rules, debug types, library contracts, and explicit annotations. Represent pointers, arrays, structures/fields, signatures, and scalar/vector types within supported semantics. Separate machine widths from reconstructed source types, and track why each constraint exists.
+  - Acceptance: Structure/field and signature recovery improves fixture decompilation while respecting offsets, widths, aliases, and both data layouts. Conflicting evidence is surfaced, user assertions remain labeled, and names or isolated casts cannot establish object sizes/types without evidence. Contributes A06/A08.
+  - Owner: TypeRecovery (astra-worker).
+
+
+- [ ] **T26 — Implement bounded project inspection and navigation services**
+  - Depends on: T15, T18, T19, T24.
+  - Owns: `src/service/queries/`, query/result and artifact-access behavior tests.
+  - Work: Implement project open/close, binary-info views, symbol/string/function searches, function metadata/disassembly/CFG views, references, and bounded byte/typed reads. Add deterministic ordering, server-side filtering, revision-bound cursors, and project-scoped artifact retrieval. Reuse loader address translation and indexes; do not introduce a second program model.
+  - Acceptance: A direct client navigates from import/string to referencing function and reads correct headers, disassembly, CFG, and bytes on both targets. Pagination covers results without duplication/omission at a fixed revision and rejects stale cursors. Unmapped/zero-filled data, incomplete indexes, and truncation are explicit. Contributes A01/A03/A08.
+  - Owner: ProjectQueries (sol-worker).
 
 ## Done
 
@@ -287,4 +289,12 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Acceptance: Native names remain addressable after demangling/renaming. Supported runtime metadata improves navigation without implying full Swift/Objective-C/C++ reconstruction. Pointer imports and names alone do not create function signatures; conflicting contracts are retained as conflicts. Contributes A01/A03/A06.
   - Owner: Coordinator.
   - Evidence: `src/metadata/{symbols,runtime,library-contracts,codeview}/`, real compiler fixtures with recipes/hashes and boundary tests; integrated 522-test checks/build passed. Compiled APIs recovered 25 Objective-C and 32 Swift records, all three mangling styles, the LLVM-confirmed RSDS GUID/age, and actual puts/ExitProcess contracts. Tests retain native identities, NB10 identity semantics, conflicting references/contracts, LP64/LLP64 widths, inert paths, per-field relative offsets, symbolic-string embedded NULs, section/encryption/fixup bounds and non-code IMP rejection. Swift calling conventions stay unsupported; runtime names do not imply full source layouts or PDB type recovery.
+
+- [x] **C01 — Complete revision-safe metadata reads and annotation history storage**
+  - Depends on: T05; shared prerequisite for T23/T26.
+  - Owns: Core store contracts, `src/project/store/`, storage regressions.
+  - Work: Prevent historical reads from exposing later loader publications; add bounded snapshot annotation/history queries and durable removal authorship with a transactional schema migration.
+  - Acceptance: Historical facts remain snapshot-bound, annotation pages/history preserve identity and provenance across reopen/migration, and invalid batches/cursors do not mutate state.
+  - Owner: Coordinator.
+  - Evidence: Focused strict typecheck and all ten store/history regressions passed on Node 24.22.0. The actual API probe changed a future-metadata leak to not_found at the pre-publication revision. A project created by compiled 00f5e15 migrated from persistence schema 1 to 2, retained old snapshots and a wire-schema-1 artifact, and preserved new set/retract/remove actors across reopen; old removal actors remain null. Empty versus omitted ID-filter cursor collisions are rejected. Full combined wave verification follows T20/T26.
 

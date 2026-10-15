@@ -116,6 +116,20 @@ export interface ProjectSnapshot {
 export interface AnnotationBatch {
   readonly expected_revision: number; readonly author: string; readonly origin: 'user' | 'llm'; readonly edits: readonly AnnotationEdit[];
 }
+export type AnnotationActor = Pick<Annotation, 'author' | 'origin'>;
+export interface AnnotationQuery {
+  readonly revision: number; readonly ids?: readonly string[]; readonly entity_ids?: readonly string[];
+  readonly limit: number; readonly cursor?: string;
+}
+export interface AnnotationHistoryQuery {
+  readonly id: string; readonly revision: number; readonly limit: number; readonly cursor?: string;
+}
+export interface AnnotationHistoryEntry {
+  readonly id: string; readonly entity_id: string; readonly revision: number;
+  readonly operation: 'set' | 'retract' | 'remove'; readonly annotation: Annotation | null;
+  /** Schema-1 removal actors were not recorded; migration must not invent them. */
+  readonly actor: AnnotationActor | null;
+}
 export type MutationResult =
   | { readonly state: 'committed'; readonly previous_revision: number; readonly revision: number; readonly annotations: readonly Annotation[]; readonly removed: readonly string[]; readonly invalidate_before_revision: number }
   | { readonly state: 'conflict'; readonly expected_revision: number; readonly current_revision: number }
@@ -139,14 +153,14 @@ export interface StoreTransaction {
   putRecord<K extends keyof StoredRecordKinds>(imageId: string, kind: K, record: StoredRecordKinds[K]): void;
   setIndexState(imageId: string, kind: keyof StoredRecordKinds, state: 'complete' | 'partial' | 'not_started'): void;
   setAnnotation(annotation: Annotation): void;
-  removeAnnotation(id: string): void;
+  removeAnnotation(id: string, actor: AnnotationActor): void;
 }
 export interface ProjectStore {
   readonly project_id: string;
   snapshot(revision?: number): ProjectSnapshot;
   importImage(input: { readonly bytes: ImmutableBytes; readonly sha256: string; readonly selected_slice_id: string }): Promise<{ readonly image_id: string; readonly existing: boolean }>;
   readImage(imageId: string): ImmutableBytes;
-  readLoadedImage(imageId: string, sliceId: string): LoadedImage;
+  readLoadedImage(imageId: string, sliceId: string, revision?: number): LoadedImage;
   queryRecords<K extends keyof StoredRecordKinds>(query: RecordQuery<K>): {
     readonly items: readonly StoredRecordKinds[K][]; readonly next_cursor: string | null; readonly index_state: 'complete' | 'partial' | 'not_started';
   };
@@ -154,6 +168,9 @@ export interface ProjectStore {
   transaction(expectedRevision: number, mutate: (transaction: StoreTransaction) => void): MutationResult;
   applyAnnotations(batch: AnnotationBatch): MutationResult;
   readAnnotations(entityId: string, revision: number): readonly Annotation[];
+  /** Latest nonremoved versions at the requested snapshot, including retracted assertions. */
+  queryAnnotations(query: AnnotationQuery): { readonly items: readonly Annotation[]; readonly next_cursor: string | null };
+  queryAnnotationHistory(query: AnnotationHistoryQuery): { readonly items: readonly AnnotationHistoryEntry[]; readonly next_cursor: string | null };
   readEvidence(ids: readonly string[], revision: number): readonly Evidence[];
   readType(id: string, revision: number): { readonly definition: RecoveredType; readonly evidence_ids: readonly string[] } | null;
   readSignature(functionId: string, revision: number): Signature | null;
