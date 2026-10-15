@@ -27,3 +27,5 @@ export { demangleName, decorateImageNames, type NamePresentation, type NamedImag
 export { recoverCodeViewReferences, type CodeViewReference, type CodeViewReferences, type PdbIdentity } from './metadata/codeview/index.js';
 export { recoverLibraryContracts, type LibraryContract, type LibraryContracts, type LibraryType } from './metadata/library-contracts/index.js';
 export { recoverRuntimeMetadata, type RuntimeRecord, type RuntimeMetadata, type RuntimeKind } from './metadata/runtime/index.js';
+export * as TypeAnalysis from './analysis/types/index.js';
+export { QueryService, type QueryCallOptions } from './service/queries/index.js';

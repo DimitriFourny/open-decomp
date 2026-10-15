@@ -1,2 +1,3 @@
 import { runProjectWorker } from './runtime.js';
-runProjectWorker();
+import { queryWorkerHandler } from '../service/queries/handler.js';
+runProjectWorker(queryWorkerHandler);

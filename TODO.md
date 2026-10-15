@@ -94,22 +94,24 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 ## Doing
 
-- [ ] **T20 — Implement recovered types and constraint/evidence handling**
+
+## Done
+- [x] **T20 — Implement recovered types and constraint/evidence handling**
   - Depends on: T17, T18, T19.
   - Owns: `src/analysis/types/`, type-recovery behavior tests.
   - Work: Port type recovery onto typed IR and combine memory access shapes, ABI rules, debug types, library contracts, and explicit annotations. Represent pointers, arrays, structures/fields, signatures, and scalar/vector types within supported semantics. Separate machine widths from reconstructed source types, and track why each constraint exists.
   - Acceptance: Structure/field and signature recovery improves fixture decompilation while respecting offsets, widths, aliases, and both data layouts. Conflicting evidence is surfaced, user assertions remain labeled, and names or isolated casts cannot establish object sizes/types without evidence. Contributes A06/A08.
   - Owner: TypeRecovery (astra-worker).
+  - Evidence: `src/analysis/types/`, real-corpus and constraint regressions; Node 24.22.0 strict typecheck/build and all 561 integrated tests passed. Compiled APIs recovered asserted 64-bit read/write fields, signed stack offsets and four-lane vector access shapes from both target binaries without changing SSA. Coordinator fixed finite-width pointer displacement wrapping and kept observed stack extents distinct from frame allocation.
 
-
-- [ ] **T26 — Implement bounded project inspection and navigation services**
+- [x] **T26 — Implement bounded project inspection and navigation services**
   - Depends on: T15, T18, T19, T24.
   - Owns: `src/service/queries/`, query/result and artifact-access behavior tests.
   - Work: Implement project open/close, binary-info views, symbol/string/function searches, function metadata/disassembly/CFG views, references, and bounded byte/typed reads. Add deterministic ordering, server-side filtering, revision-bound cursors, and project-scoped artifact retrieval. Reuse loader address translation and indexes; do not introduce a second program model.
   - Acceptance: A direct client navigates from import/string to referencing function and reads correct headers, disassembly, CFG, and bytes on both targets. Pagination covers results without duplication/omission at a fixed revision and rejects stale cursors. Unmapped/zero-filled data, incomplete indexes, and truncation are explicit. Contributes A01/A03/A08.
   - Owner: ProjectQueries (sol-worker).
+  - Evidence: `src/service/queries/`, worker integration and direct-child tests; all 561 tests passed with no skips on macOS. Compiled clients followed native imports/strings to exact instructions, CFGs and bytes on both targets, paged 19 ARM64 and 16 x64 functions, and preserved identities on reopen. Integration corrected coalesced unwind-region ownership and added portable real-child cancellation/crash gates. Windows re-verification remains part of the release matrix; the earlier 00f5e15 run exposed the now-corrected fixture-license hash.
 
-## Done
 
 - [x] **T01 — Establish the TypeScript project and runnable development toolchain**
   - Depends on: None.

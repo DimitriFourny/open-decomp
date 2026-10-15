@@ -1,3 +1,4 @@
+import type { LoadedImage, StoreTransaction } from '../core/index.js';
 import { constants, openSync, fstatSync, readSync, closeSync, realpathSync, existsSync } from 'node:fs';
 import { dirname, basename, join } from 'node:path';
 import { ImmutableBytes, OperationError, contentHash, createOperationContext, encodeDiagnostic, encodeJob, imageIdentity, type Diagnostic, type Job, type OperationContext, type ProjectStore, type ToolArgs, type ToolName, type ToolResult, toolSchemas } from '../core/index.js';
@@ -12,6 +13,9 @@ import { commandSchema, eventSchema, FrameDecoder, frame, MAX_IMAGES, type Comma
  * No module names, executable source or SQL are accepted over the transport. */
 export interface WorkerHandler {
   execute<K extends ToolName>(operation: K, args: ToolArgs<K>, scope: { readonly store: ProjectStore; readonly context: OperationContext; readonly job_id: string }): Promise<ToolResult<K>>;
+  /** Async preparation runs before publication; returned writes run synchronously in
+   * the same transaction as immutable loader facts. A failed preparation publishes none. */
+  prepareImport?(image: LoadedImage, scope: { readonly store: ProjectStore; readonly context: OperationContext; readonly revision: number }): Promise<(tx: StoreTransaction) => void>;
 }
 export function workerDiagnostic(error: unknown): Diagnostic {
   return error instanceof OperationError ? error.diagnostic : { code: 'internal_error', severity: 'error', message: (error instanceof Error ? error.message : String(error)).slice(0, 8192), evidence_ids: [] };
@@ -86,6 +90,11 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
     }
     const db = requireStore();
     if (command.kind === 'snapshot') { await send({ kind: 'opened', id: command.id, snapshot: await describeProject(db) }); return; }
+    if (command.kind === 'artifact_read') {
+      // Reserve envelope overhead below the transport's 2 MiB cap (hex doubles bytes).
+      const result = await db.readArtifact({ ...command.args, length: Math.min(command.args.length, 512 * 1024) });
+      await send({ kind: 'artifact', id: command.id, result }); return;
+    }
     if (command.kind === 'close') {
       if (admitted.size) fail('invalid_input', 'Cannot close with admitted jobs');
       await db.close(); store = undefined; stopping = true;
@@ -159,8 +168,10 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
           await send({ kind: 'progress', id: job.id, job: encodeJob(job) });
           observer?.phase?.('image_snapshot', job);
           context.checkpoint(0);
+          const publishPrepared = await handler?.prepareImport?.(image, { store: db, context, revision: db.snapshot().revision + 1 });
+          context.checkpoint(0);
           const completed: Job = { ...job, state: 'completed', progress: { phase: 'complete', completed: 1, total: 1 } };
-          const mutation = db.transaction(db.snapshot().revision, tx => { tx.putImage(image); db.saveJob(completed); });
+          const mutation = db.transaction(db.snapshot().revision, tx => { tx.putImage(image); publishPrepared?.(tx); db.saveJob(completed); });
           if (mutation.state !== 'committed') fail('internal_error', 'Loaded image metadata transaction did not commit');
           job = completed;
           await send({ kind: 'progress', id: job.id, job: encodeJob(job) });

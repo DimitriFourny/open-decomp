@@ -1,2 +1,3 @@
 import { runProjectWorker } from '../../src/workers/runtime.js';
-runProjectWorker(undefined, { phase(phase) { if (phase === 'image_snapshot') process.kill(process.pid, 'SIGSTOP'); } });
+import { pauseWorker } from './gate.js';
+runProjectWorker(undefined, { phase(phase, job) { if (phase === 'image_snapshot') pauseWorker(job.id); } });

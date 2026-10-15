@@ -171,7 +171,9 @@ export function discoverFunctions(input: DiscoveryInput, context: OperationConte
   for (const hint of image.hints) {
     context.checkpoint(1);
     if (hint.kind === 'function') seed(hint.address, 'loader function start', hint.evidence_ids, true, null, hint.size && hint.size > 0n ? ranges({ start: hint.address, size: hint.size }) : []);
-    if (hint.kind === 'unwind') seed(hint.range.start, 'unwind region candidate', hint.evidence_ids, false, null, ranges(hint.range));
+    // Unwind coverage can coalesce adjacent functions (notably Mach-O compact
+    // unwind). Its start is a candidate, not a claim that one function owns the range.
+    if (hint.kind === 'unwind') seed(hint.range.start, 'unwind region candidate', hint.evidence_ids, false);
   }
   for (const assertion of input.assertions ?? []) {
     context.checkpoint(1);

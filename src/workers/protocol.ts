@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { budgetSchema, diagnosticSchema, imageIdSchema, jobIdSchema, jobSchema, projectIdSchema, revisionSchema, sliceIdSchema, toolNameSchema, toolSchemas, type ToolArgs } from '../core/index.js';
+import { artifactReadArgsSchema, artifactReadResultSchema, budgetSchema, diagnosticSchema, imageIdSchema, jobIdSchema, jobSchema, projectIdSchema, revisionSchema, sliceIdSchema, toolNameSchema, toolSchemas, type ToolArgs } from '../core/index.js';
 
 export const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 export const MAX_IMAGES = 256;
@@ -18,6 +18,9 @@ export type ExecuteRequest = { [K in WorkerOperation]: { kind: 'execute'; operat
 export type WorkRequest = ImportRequest | ExecuteRequest;
 export const snapshotSchema = z.strictObject({ project_id: projectIdSchema, revision: revisionSchema, schema_version: revisionSchema, images: z.array(z.strictObject({ image_id: imageIdSchema, sha256: z.string().regex(/^[a-f0-9]{64}$/), selected_slice_id: sliceIdSchema, state: z.enum(['loaded', 'snapshot_without_metadata']) })).max(MAX_IMAGES) });
 export type WorkerSnapshot = z.output<typeof snapshotSchema>;
+export type ArtifactReadInput = z.input<typeof artifactReadArgsSchema>;
+export type ArtifactReadArgs = z.output<typeof artifactReadArgsSchema>;
+export type ArtifactReadResult = z.output<typeof artifactReadResultSchema>;
 export const commandSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('open'), id: jobIdSchema, path: pathSchema, mode: z.enum(['create', 'resume']), max_queued: z.number().int().min(0).max(1024), interrupted: z.strictObject({ id: jobIdSchema, reason: z.enum(['cancelled', 'deadline']) }).optional() }),
   z.strictObject({ kind: z.literal('admit'), id: jobIdSchema, request: requestSchema, deadline: z.number().int().nonnegative() }),
@@ -25,6 +28,7 @@ export const commandSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('cancel'), id: jobIdSchema }),
   z.strictObject({ kind: z.literal('status'), id: jobIdSchema, job_id: jobIdSchema }),
   z.strictObject({ kind: z.literal('snapshot'), id: jobIdSchema }),
+  z.strictObject({ kind: z.literal('artifact_read'), id: jobIdSchema, args: artifactReadArgsSchema }),
   z.strictObject({ kind: z.literal('close'), id: jobIdSchema }),
 ]);
 export type Command = z.output<typeof commandSchema>;
@@ -33,6 +37,7 @@ export const eventSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('job'), id: jobIdSchema, job: jobSchema, result: z.unknown().optional() }),
   z.strictObject({ kind: z.literal('progress'), id: jobIdSchema, job: jobSchema }),
   z.strictObject({ kind: z.literal('closed'), id: jobIdSchema }),
+  z.strictObject({ kind: z.literal('artifact'), id: jobIdSchema, result: artifactReadResultSchema }),
   z.strictObject({ kind: z.literal('error'), id: jobIdSchema, diagnostic: diagnosticSchema }),
 ]);
 export type WorkerEvent = z.output<typeof eventSchema>;

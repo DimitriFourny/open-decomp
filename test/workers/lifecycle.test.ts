@@ -4,10 +4,9 @@ import { mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { DEFAULT_BUDGET, type WireJob } from '../../src/core/index.js';
+import { DEFAULT_BUDGET, toolSchemas, type WireJob } from '../../src/core/index.js';
 import { ProjectWorkerPool, type WorkerPoolOptions } from '../../src/workers/index.js';
+import { resumeWorker, waitForWorkerPause } from './gate.js';
 
 const fixtureRoot = fileURLToPath(new URL('../../fixtures/bin/', import.meta.url));
 const macho = join(fixtureRoot, 'macho-arm64-symbols');
@@ -18,14 +17,6 @@ function phaseWait(phase: string) {
   let resolve!: (job: WireJob) => void;
   const promise = new Promise<WireJob>(yes => { resolve = yes; });
   return { promise, onProgress: (job: WireJob) => { if (job.progress.phase === phase) resolve(job); } };
-}
-const execFileAsync = promisify(execFile);
-async function waitStopped(pid: number): Promise<void> {
-  // Observe the kernel stop state, rather than guessing when SIGSTOP has taken effect.
-  for (;;) {
-    const { stdout } = await execFileAsync('ps', ['-o', 'stat=', '-p', String(pid)]);
-    if (stdout.trim().startsWith('T')) return;
-  }
 }
 async function setup(t: TestContext, options: Partial<WorkerPoolOptions> = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-workers-')));
@@ -74,12 +65,13 @@ test('canonical authorization, worker capacity and exclusive ownership reject co
   await project.close();
 });
 
-test('forced process death after image snapshot preserves explicit incomplete metadata and never retries', { skip: !unix, timeout: 30000 }, async t => {
+test('forced process death after image snapshot preserves explicit incomplete metadata and never retries', { timeout: 30000 }, async t => {
   const { root, pool } = await setup(t, { entry_point: new URL('./pause-snapshot.ts', import.meta.url) });
   const project = await pool.open({ path: join(root, 'project'), mode: 'create' });
   const boundary = phaseWait('image_snapshot');
   const ticket = await project.submit(importRequest(macho), boundary);
   await boundary.promise;
+  await waitForWorkerPause(ticket.id, t);
   const originalPid = project.pid!; process.kill(originalPid, 'SIGKILL');
   const result = await ticket.result;
   assert.equal(result.job.state, 'failed'); assert.equal(result.job.diagnostics[0]?.code, 'worker_failed');
@@ -99,12 +91,13 @@ test('forced process death after image snapshot preserves explicit incomplete me
   await resumed.close();
 });
 
-test('cancellation before publication terminates an unresponsive child and is durable', { skip: !unix, timeout: 30000 }, async t => {
+test('cancellation before publication terminates an unresponsive child and is durable', { timeout: 30000 }, async t => {
   const { root, pool } = await setup(t, { entry_point: new URL('./pause-running.ts', import.meta.url) });
   const project = await pool.open({ path: join(root, 'project'), mode: 'create' });
   const boundary = phaseWait('running');
   const ticket = await project.submit(importRequest(pe), boundary);
   await boundary.promise;
+  await waitForWorkerPause(ticket.id, t);
   const pid = project.pid;
   const result = await ticket.cancel();
   assert.equal(result.job.state, 'cancelled'); assert.notEqual(project.pid, pid);
@@ -112,28 +105,29 @@ test('cancellation before publication terminates an unresponsive child and is du
   assert.equal((await project.inspectJob(ticket.id)).state, 'cancelled');
 });
 
-test('durable publication wins cancellation even when the final response is lost', { skip: !unix, timeout: 30000 }, async t => {
+test('durable publication wins cancellation even when the final response is lost', { timeout: 30000 }, async t => {
   const { root, pool } = await setup(t, { entry_point: new URL('./pause-published.ts', import.meta.url) });
   const project = await pool.open({ path: join(root, 'project'), mode: 'create' });
   const boundary = phaseWait('complete');
   const ticket = await project.submit(importRequest(pe), boundary);
   await boundary.promise;
+  await waitForWorkerPause(ticket.id, t);
   const result = await ticket.cancel();
   assert.equal(result.job.state, 'completed'); assert.equal((await project.inspectJob(ticket.id)).state, 'completed');
   assert.equal(project.snapshot.revision, 2); assert.equal(project.snapshot.images[0]?.state, 'loaded');
 });
 
-test('bounded queued admission, queued cancellation and shutdown reject operate on real imports', { skip: !unix, timeout: 30000 }, async t => {
+test('bounded queued admission, queued cancellation and shutdown reject operate on real imports', { timeout: 30000 }, async t => {
   const { root, pool } = await setup(t, { max_queued: 1, entry_point: new URL('./pause-running.ts', import.meta.url) });
   const project = await pool.open({ path: join(root, 'project'), mode: 'create' });
   const boundary = phaseWait('running');
   const first = await project.submit(importRequest(macho), boundary); await boundary.promise;
-  await waitStopped(project.pid!);
+  await waitForWorkerPause(first.id, t);
   const queued = await project.submit(importRequest(pe));
   const cancelled = queued.cancel();
   await assert.rejects(project.submit(importRequest(pe)), { code: 'resource_limit' });
   await assert.rejects(project.close('reject'), { code: 'invalid_input' });
-  process.kill(project.pid!, 'SIGCONT');
+  await resumeWorker(first.id);
   assert.equal((await first.result).job.state, 'completed');
   assert.equal((await cancelled).job.state, 'cancelled');
   assert.equal((await queued.accepted).state, 'queued');
@@ -141,7 +135,7 @@ test('bounded queued admission, queued cancellation and shutdown reject operate 
   await project.close('wait');
 });
 
-test('host heartbeat continues while a blocked child hits its enforced deadline', { skip: !unix, timeout: 30000 }, async t => {
+test('host heartbeat continues while a blocked child hits its enforced deadline', { timeout: 30000 }, async t => {
   const { root, pool } = await setup(t, { entry_point: new URL('./pause-running.ts', import.meta.url) });
   const project = await pool.open({ path: join(root, 'project'), mode: 'create' });
   let heartbeats = 0;
@@ -149,6 +143,7 @@ test('host heartbeat continues while a blocked child hits its enforced deadline'
   const heartbeat = setInterval(() => { heartbeats++; }, 5);
   try {
     const ticket = await project.submit({ ...importRequest(macho), budget: { ...DEFAULT_BUDGET, deadline_ms: 200 } });
+    await waitForWorkerPause(ticket.id, t);
     const result = await ticket.result;
     assert.equal(result.job.state, 'failed'); assert.equal(result.job.diagnostics[0]?.code, 'resource_limit');
     assert.ok(heartbeats >= 2); assert.equal(project.snapshot.revision, 0);
@@ -181,13 +176,14 @@ test('forced owner death releases SQLite locks and durable completed jobs on eve
   await resumed.close();
 });
 
-test('cancel shutdown reaps a blocked owner and preserves the terminal job on resume', { skip: !unix, timeout: 30000 }, async t => {
+test('cancel shutdown reaps a blocked owner and preserves the terminal job on resume', { timeout: 30000 }, async t => {
   const { root, pool } = await setup(t, { entry_point: new URL('./pause-running.ts', import.meta.url) });
   const path = join(root, 'project');
   const project = await pool.open({ path, mode: 'create' });
   const boundary = phaseWait('running');
   const ticket = await project.submit(importRequest(pe), boundary);
   await boundary.promise;
+  await waitForWorkerPause(ticket.id, t);
   await project.close('cancel');
   assert.equal((await ticket.result).job.state, 'cancelled');
   const resumed = await pool.open({ path, mode: 'resume' });
@@ -196,7 +192,7 @@ test('cancel shutdown reaps a blocked owner and preserves the terminal job on re
   await resumed.close();
 });
 
-test('unregistered query handlers fail explicitly instead of inventing backend results', { timeout: 30000 }, async t => {
+test('default static query handler returns real loaded image facts', { timeout: 30000 }, async t => {
   const { root, pool } = await setup(t);
   const project = await pool.open({ path: join(root, 'project'), mode: 'create' });
   const imported = await project.submit(importRequest(pe));
@@ -208,8 +204,11 @@ test('unregistered query handlers fail explicitly instead of inventing backend r
   });
   const outcome = await ticket.result;
   assert.equal(outcome.job.input_revision, 2);
-  assert.equal(outcome.job.state, 'failed');
-  assert.equal(outcome.job.diagnostics[0]?.code, 'unavailable_semantics');
-  assert.equal(outcome.result, undefined);
+  assert.equal(outcome.job.state, 'completed');
+  const result = toolSchemas.binary_info.output.parse(outcome.result);
+  assert.equal(result.state, 'complete');
+  if (!('data' in result) || result.data.view !== 'summary') assert.fail('Expected a real image summary');
+  assert.equal(result.data.image.id, image.image_id);
+  assert.equal(result.data.image.target.format, 'pe');
   await Promise.all([project.close(), project.close()]);
 });

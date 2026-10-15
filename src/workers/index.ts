@@ -2,9 +2,9 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { realpath, lstat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { OperationError, budgetSchema, decodeDiagnostic, newIdentity, toolSchemas, type Diagnostic, type WireJob, type ToolResult } from '../core/index.js';
-import { commandSchema, eventSchema, FrameDecoder, frame, requestSchema, snapshotSchema, type Command, type WorkRequest, type WorkerEvent, type WorkerOperation, type WorkerSnapshot } from './protocol.js';
-export type { WorkRequest, ImportRequest, ExecuteRequest, WorkerOperation, WorkerSnapshot } from './protocol.js';
+import { OperationError, artifactReadArgsSchema, budgetSchema, decodeDiagnostic, newIdentity, toolSchemas, type Diagnostic, type WireJob, type ToolResult } from '../core/index.js';
+import { commandSchema, eventSchema, FrameDecoder, frame, requestSchema, snapshotSchema, type ArtifactReadInput, type ArtifactReadResult, type Command, type WorkRequest, type WorkerEvent, type WorkerOperation, type WorkerSnapshot } from './protocol.js';
+export type { ArtifactReadInput, ArtifactReadArgs, ArtifactReadResult, WorkRequest, ImportRequest, ExecuteRequest, WorkerOperation, WorkerSnapshot } from './protocol.js';
 export type { WorkerHandler } from './runtime.js';
 
 export interface WorkerPoolOptions {
@@ -44,6 +44,7 @@ function deferred<T>(): Deferred<T> {
 type PendingJob = {
   id: string; request: WorkRequest; admitted: boolean; running: boolean; cancelled: boolean;
   accepted: Deferred<WireJob>; outcome: Deferred<JobOutcome>;
+  latest: WireJob | undefined;
   timer: NodeJS.Timeout; cleanup: () => void;
   onProgress: ((job: WireJob) => void) | undefined;
 };
@@ -139,7 +140,7 @@ export class ProjectWorker {
       const event = eventSchema.parse(value);
       if (event.kind === 'progress') {
         const job = this.#jobs.get(event.id);
-        if (job) job.onProgress?.(event.job);
+        if (job) { job.latest = event.job; job.onProgress?.(structuredClone(event.job)); }
         return;
       }
       const request = this.#requests.get(event.id);
@@ -191,11 +192,11 @@ export class ProjectWorker {
       const deadline = Date.now() + budgetSchema.parse(request.budget).deadline_ms;
       const timer = setTimeout(() => { void this.#interrupt(id, 'deadline').catch(() => {}); }, request.budget.deadline_ms);
       const onAbort = (): void => { void this.#interrupt(id, 'cancelled').catch(() => {}); };
-      const job: PendingJob = { id, request, admitted: false, running: false, cancelled: false, accepted, outcome, timer, cleanup: () => options.signal?.removeEventListener('abort', onAbort), onProgress: options.onProgress };
+      const job: PendingJob = { id, request, admitted: false, running: false, cancelled: false, latest: undefined, accepted, outcome, timer, cleanup: () => options.signal?.removeEventListener('abort', onAbort), onProgress: options.onProgress };
       this.#jobs.set(id, job); options.signal?.addEventListener('abort', onAbort, { once: true });
       void this.#rpc({ kind: 'admit', id, request, deadline }).then(event => {
         if (event.kind !== 'job') throw failure('worker_failed', 'Invalid admission acknowledgement');
-        job.admitted = true; accepted.resolve(event.job);
+        job.admitted = true; job.latest = structuredClone(event.job); accepted.resolve(event.job);
         this.#pump();
       }).catch(error => { if (!this.#recovering) this.#finishError(job, error); });
       return { id, accepted: accepted.promise, result: outcome.promise, cancel: () => this.#interrupt(id, 'cancelled').then(() => outcome.promise) };
@@ -251,10 +252,31 @@ export class ProjectWorker {
     })().finally(() => { this.#recovering = undefined; this.#pump(); });
     return this.#recovering;
   }
+  /** Active observations are last acknowledged durable child states, not invented host
+   * progress. This remains responsive while the owner is in synchronous analysis. */
   async inspectJob(id: string): Promise<WireJob> {
     if (this.#recovering) await this.#recovering;
+    const pending = this.#jobs.get(id);
+    if (pending) return structuredClone(pending.latest ?? await pending.accepted.promise);
     const event = await this.#rpc({ kind: 'status', id: newIdentity('job'), job_id: id });
     if (event.kind !== 'job') throw failure('worker_failed', 'Invalid job inspection acknowledgement'); return event.job;
+  }
+  /** Cancels admitted work through the existing durable lifecycle, never a second queue. */
+  async cancelJob(id: string): Promise<WireJob> {
+    const pending = this.#jobs.get(id);
+    if (pending) { await this.#interrupt(id, 'cancelled'); return (await pending.outcome.promise).job; }
+    return this.inspectJob(id);
+  }
+  /** Artifact identities are resolved only by this project's child/store. Hex output is
+   * capped below the IPC frame limit; next_offset permits bounded continuation. */
+  async readArtifact(input: ArtifactReadInput): Promise<ArtifactReadResult> {
+    const args = artifactReadArgsSchema.parse(input);
+    if (this.#closed || this.#closing) throw failure('invalid_input', 'Project is closing');
+    if (args.project_id !== this.snapshot.project_id) throw failure('permission_denied', 'Artifact belongs to another project');
+    if (this.#recovering) await this.#recovering;
+    const event = await this.#rpc({ kind: 'artifact_read', id: newIdentity('job'), args });
+    if (event.kind !== 'artifact') throw failure('worker_failed', 'Invalid artifact acknowledgement');
+    return event.result;
   }
   async refresh(): Promise<WorkerSnapshot> {
     if (this.#recovering) await this.#recovering;

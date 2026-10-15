@@ -36,7 +36,7 @@
     },
     {
       "path": "fixtures/LICENSE",
-      "sha256": "827ed8318a4bbf9d67c5eef7524164ab34b0636f4c99cbce0e471524370f1cdc"
+      "sha256": "75adae7f35019e9a6bb54d507b52adfc094623b4df10d92e1471bdc7d71ab369"
     },
     {
       "path": "scripts/fixtures/generate.ts",
