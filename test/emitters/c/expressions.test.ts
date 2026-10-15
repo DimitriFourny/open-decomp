@@ -74,6 +74,8 @@ test('undefined integer division and indeterminate branch conditions do not beco
         : entry.indeterminate(i8, mode, 'not established');
     entry.branch(entry.compare('eq', value, entry.constant(i8, 0n)), entry.edge(yes), entry.edge(no));
     yes.return([yes.constant(i8, 1n)]); no.return([no.constant(i8, 2n)]);
-    assert.equal(execute(emit(b.finish(entry, [i8])).emission.text).exit, 'unknown');
+    const output = emit(b.finish(entry, [i8]));
+    assert.equal(execute(output.emission.text).exit, 'unknown');
+    assert.equal(output.diagnostics.some(diagnostic => diagnostic.code === 'unavailable_semantics'), mode === 'unknown');
   }
 });

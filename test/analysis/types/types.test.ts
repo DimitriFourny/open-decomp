@@ -262,6 +262,54 @@ test('out-of-scope annotation definitions cannot contaminate an in-scope type gr
   assert.ok(result.diagnostics.some(item => item.code === 'unavailable_semantics'));
 });
 
+test('declared type and field subjects retain conflicting assertions while function anchors declare types', () => {
+  const abi = targets[0]!, ir = builder('type-declaration-subjects'), b = ir.block('entry'); b.return();
+  const program = ssa(ir.finish(b)), original = structuredClone(program), types = sourceTypes(abi);
+  const definition = types.find(type => type.id === ids.object)!.definition;
+  assert.equal(definition.kind, 'structure'); if (definition.kind !== 'structure') throw new Error('Expected structure');
+  const field = definition.fields.find(member => member.type_id === ids.int)!.id;
+  const declared = entityIdentity(slice, 'source-type', 'function-scoped-declaration');
+  const annotations: Annotation[] = [
+    { id: `annotation_${'5'.repeat(64)}`, entity_id: ids.object, author: 'analyst', origin: 'user', status: 'asserted', revision: 3, evidence_ids: [], value: { kind: 'type', type_id: ids.object, definition: { ...definition, size: 24n } } },
+    { id: `annotation_${'6'.repeat(64)}`, entity_id: field, author: 'analyst', origin: 'user', status: 'asserted', revision: 3, evidence_ids: [], value: { kind: 'type', type_id: ids.float, definition: { kind: 'float', bits: 32 } } },
+    { id: `annotation_${'7'.repeat(64)}`, entity_id: program.id, author: 'analyst', origin: 'user', status: 'asserted', revision: 3, evidence_ids: [], value: { kind: 'type', type_id: declared, definition: { kind: 'pointer', bits: 64, to: ids.object } } },
+  ];
+  const options = { ...baseOptions, types }, baseline = recoverTypes(program, abi, createOperationContext(), options);
+  const result = recoverTypes(program, abi, createOperationContext(), { ...options, annotations });
+  assert.ok(result.subjects.includes(ids.object)); assert.ok(result.subjects.includes(field));
+  assert.deepEqual(new Set(result.types.filter(type => type.id === ids.object).map(type => type.definition.kind === 'structure' ? type.definition.size : null)), new Set([16n, 24n]));
+  const alternatives = result.associations.filter(association => association.subject_id === field);
+  assert.deepEqual(new Set(alternatives.map(association => association.type_id)), new Set([ids.int, ids.float]));
+  assert.ok(alternatives.every(association => association.status === 'conflicting'));
+  assert.ok(result.conflicts.some(conflict => conflict.subject_id === field && conflict.reason === 'incompatible_types'));
+  assert.ok(result.conflicts.some(conflict => conflict.subject_id === ids.object && conflict.reason === 'incompatible_types'));
+  assert.ok(result.types.some(type => type.id === declared && type.source === 'user' && type.status === 'asserted'));
+  assert.equal(result.associations.some(association => association.subject_id === program.id), false);
+  assert.equal(result.diagnostics.some(diagnostic => diagnostic.code === 'unavailable_semantics'), false);
+  const { work: _baselineWork, ...before } = baseline;
+  const { work: _retractedWork, ...after } = recoverTypes(program, abi, createOperationContext(), { ...options, annotations: annotations.map(annotation => ({ ...annotation, status: 'retracted' })) });
+  assert.deepEqual(after, before); assert.deepEqual(program, original);
+});
+
+for (const abi of targets) test(`${abi.id}: a supplied call declaration preserves source identity only at its matching call`, () => {
+  const ir = builder(`type-paired-call-${abi.id}`), b = ir.block('entry');
+  b.writeRegister(parameterRegister(abi), b.constant(i64, 0x4000n));
+  b.call({ kind: 'direct', address: target }, [], [], abi.unknown_call_clobbers);
+  b.call({ kind: 'direct', address: target }, [], [], abi.unknown_call_clobbers); b.return();
+  const program = ssa(ir.finish(b)), original = structuredClone(program);
+  const calls = program.blocks.flatMap(block => block.instructions).filter(node => node.kind === 'call');
+  const sig = signature(abi), declaration: SuppliedSignature = { id: 'paired-source-contract', subject_id: calls[0]!.id, signature: sig, source: 'user', status: 'asserted', evidence_ids: [] };
+  const abiSignature: AbiSignature = { returns: { kind: 'integer', bits: abi.layout.long_bits, signed: true }, parameters: [{ kind: 'pointer' }], variadic: false, fixed_parameter_count: 1 };
+  const result = recoverTypes(program, abi, createOperationContext(), { ...baseOptions, types: sourceTypes(abi), signatures: [declaration], contracts: [{ id: declaration.id, target: { kind: 'address', address: target }, signature: abiSignature, evidence_ids: [] }] });
+  const first = result.signatures.filter(signature => signature.subject_id === calls[0]!.id);
+  assert.deepEqual(first, [{ ...declaration, abi_state: 'complete' }]);
+  assert.equal(result.conflicts.some(conflict => conflict.subject_id === calls[0]!.id), false);
+  const second = result.signatures.find(signature => signature.subject_id === calls[1]!.id)!;
+  assert.equal(second.source, 'analysis'); assert.equal(second.status, 'established');
+  assert.notEqual(second.signature.parameters[0]!.type_id, ids.pointer);
+  assert.deepEqual(program, original);
+});
+
 for (const [op, count, expected] of [['add', 2, -2n], ['add', 3, 0x7ffffffffffffffdn], ['sub', 2, 2n]] as const) test(`pointer shape ${op} offsets wrap at machine width after ${count} operations`, () => {
   const abi = targets[0]!, ir = builder(`type-wrapping-offset-${op}-${count}`), b = ir.block('entry');
   const pointer = b.indeterminate(i64, 'unknown', 'pointer'), step = b.constant(i64, 0x7fffffffffffffffn);

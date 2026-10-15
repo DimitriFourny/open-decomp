@@ -211,7 +211,17 @@ export class ProjectWorker {
       if (event.kind !== 'job') throw failure('worker_failed', 'Invalid terminal acknowledgement');
       if (['queued', 'running'].includes(event.job.state)) throw failure('worker_failed', 'Worker returned a nonterminal job');
       let result: JobOutcome['result'];
-      if (event.result !== undefined) result = job.request.kind === 'import' ? snapshotSchema.parse(event.result) : toolSchemas[job.request.operation].output.parse(event.result);
+      if (event.result !== undefined) {
+        if (job.request.kind === 'import') result = snapshotSchema.parse(event.result);
+        else if (job.request.operation === 'annotations_apply') {
+          const mutation = toolSchemas.annotations_apply.output.parse(event.result);
+          if (event.job.state === 'completed' && mutation.state === 'complete' && this.#snapshot) {
+            if (mutation.project_id !== this.#snapshot.project_id || mutation.data.previous_revision !== job.request.args.expected_revision) throw failure('worker_failed', 'Annotation completion does not match its admitted snapshot');
+            this.#snapshot = { ...this.#snapshot, revision: Math.max(this.#snapshot.revision, mutation.data.revision) };
+          }
+          result = mutation;
+        } else result = toolSchemas[job.request.operation].output.parse(event.result);
+      }
       if (job.request.kind === 'import' && result !== undefined) this.#snapshot = snapshotSchema.parse(result);
       this.#finish(job, { job: event.job, ...(result === undefined ? {} : { result }) });
     }).catch(error => { if (!this.#recovering) this.#finishError(job, error); });

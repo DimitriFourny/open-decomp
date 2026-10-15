@@ -43,6 +43,7 @@ export function recoverTypes(input: SSAForm, abi: AbiProfile, context: Operation
     const values = new Map<string, Value>(), nodes = new Map<string, Instruction>();
     const subjects = new Set<string>([input.id]);
     const typeSubjects = new Set<string>();
+    const declaredFieldTypes = new Map<string, TypeBinding[]>();
     const transfers = new Map<string, Transfer[]>();
     const compositions = new Map<string, Extract<Instruction, { kind: 'assign' }>[]>();
     const stackOffsets = new Map<string, bigint>();
@@ -99,8 +100,15 @@ export function recoverTypes(input: SSAForm, abi: AbiProfile, context: Operation
       budget.charge(record.definition.kind === 'structure' ? record.definition.fields.length + 1 : 1);
       if (record.evidence_ids.length > 1000 || record.definition.kind === 'structure' && record.definition.fields.length > 10000) budget.charge(budget.limit + 1);
       const existing = records.get(record.id) ?? [];
-      if (!existing.some(item => typeKey(item.definition) === typeKey(record.definition) && item.source === record.source && item.status === record.status && item.evidence_ids.join() === record.evidence_ids.join())) existing.push(record);
-      records.set(record.id, existing);
+      if (existing.some(item => typeKey(item.definition) === typeKey(record.definition) && item.source === record.source && item.status === record.status && item.evidence_ids.join() === record.evidence_ids.join())) return;
+      existing.push(record); records.set(record.id, existing);
+      subjects.add(record.id); typeSubjects.add(record.id);
+      if (record.definition.kind === 'structure') for (const field of record.definition.fields) {
+        subjects.add(field.id); typeSubjects.add(field.id);
+        const alternatives = declaredFieldTypes.get(field.id) ?? [];
+        alternatives.push({ subject_id: field.id, type_id: field.type_id, source: record.source, status: record.status, evidence_ids: record.evidence_ids });
+        declaredFieldTypes.set(field.id, alternatives);
+      }
     };
     const generated = (definition: RecoveredType, proof: readonly string[]): string => {
       const type_id = id('type', typeKey(definition));
@@ -140,6 +148,9 @@ export function recoverTypes(input: SSAForm, abi: AbiProfile, context: Operation
       const proof = reason('supplied source assertion', annotation.id, annotation.evidence_ids, { author: annotation.author, agent: annotation.origin, status: annotation.status });
       if (annotation.value.kind === 'type') {
         const record: SuppliedTypeRecord = { id: annotation.value.type_id, definition: annotation.value.definition, source: annotation.origin, status: annotation.status, evidence_ids: [proof] };
+        // A function anchor declares a source type in scope; it does not give the
+        // function itself a scalar machine type.
+        if (annotation.entity_id === input.id) { addType(record); continue; }
         if (typeSubjects.has(annotation.entity_id)) addType(record);
         else deferredTypes.push({ record, subject_id: annotation.entity_id });
         bindings.push({ subject_id: annotation.entity_id, type_id: annotation.value.type_id, source: annotation.origin, status: annotation.status, evidence_ids: [proof] });
@@ -149,12 +160,18 @@ export function recoverTypes(input: SSAForm, abi: AbiProfile, context: Operation
     const functionContracts: SuppliedFunctionContract[] = [...(options.function_contracts ?? [])];
     const callContracts: SuppliedCallContract[] = [...(options.contracts ?? [])];
     const declarationByContract = new Map<string, SuppliedSignature>();
+    const callDeclarations = new Map<string, SuppliedSignature[]>();
+    const consumedCallDeclarations = new Set<SuppliedSignature>();
     for (const declaration of suppliedSignatures) {
       budget.charge();
       if (declaration.signature.abi !== abi.id) { diagnostics.push({ code: 'conflicting_evidence', severity: 'warning', message: 'Source signature belongs to a different target ABI', entity_id: declaration.subject_id, evidence_ids: [...declaration.evidence_ids] }); continue; }
       if (declaration.subject_id === input.id && declaration.status !== 'hypothesis' && declaration.status !== 'candidate') {
         functionContracts.push({ id: declaration.id, signature: sourceAbi(declaration.signature), noreturn: declaration.signature.noreturn, evidence_ids: declaration.evidence_ids });
         declarationByContract.set(declaration.id, declaration);
+      }
+      else if (nodes.get(declaration.subject_id)?.kind === 'call' && declaration.status !== 'hypothesis' && declaration.status !== 'candidate') {
+        const key = `${declaration.subject_id}:${declaration.id}`, alternatives = callDeclarations.get(key) ?? [];
+        alternatives.push(declaration); callDeclarations.set(key, alternatives);
       }
     }
     for (const contract of options.library?.contracts ?? []) {
@@ -236,9 +253,9 @@ export function recoverTypes(input: SSAForm, abi: AbiProfile, context: Operation
         associate({ subject_id, type_id, source: declaration.source, status: declaration.status, evidence_ids: [proof] }, offset, width);
       }
     };
-    const consume = (observation: ContractObservation, subject_id: string): void => {
+    const consume = (observation: ContractObservation, subject_id: string, supplied?: SuppliedSignature): void => {
       budget.charge();
-      let declaration = declarationByContract.get(observation.contract.id);
+      let declaration = supplied ?? declarationByContract.get(observation.contract.id);
       if (!declaration) {
         const signature = observation.contract.signature;
         // Core Signature cannot encode unknown count. Keep it solely in calls.
@@ -262,7 +279,13 @@ export function recoverTypes(input: SSAForm, abi: AbiProfile, context: Operation
       if (observation.hidden_result) bindLocation(observation.hidden_result, current.signature.return_type, current, subject_id, before);
     };
     for (const observation of calls.function_contracts) consume(observation, input.id);
-    for (const call of calls.calls) for (const observation of call.contracts) consume(observation, call.node_id);
+    for (const call of calls.calls) for (const observation of call.contracts) {
+      const declarations = callDeclarations.get(`${call.node_id}:${observation.contract.id}`);
+      if (declarations) for (const declaration of declarations) {
+        consume(observation, call.node_id, declaration); consumedCallDeclarations.add(declaration);
+      }
+      else consume(observation, call.node_id);
+    }
     // Call-local annotations are intentionally not promoted into target-global
     // contracts. Classify once and inspect the exact call's physical snapshots.
     for (const declaration of suppliedSignatures) {
@@ -272,7 +295,7 @@ export function recoverTypes(input: SSAForm, abi: AbiProfile, context: Operation
       if (declaration.subject_id !== input.id && node?.kind !== 'call') {
         diagnostics.push({ code: 'unavailable_semantics', severity: 'warning', message: 'Signature subject is outside this function/call scope', entity_id: declaration.subject_id, evidence_ids: [...declaration.evidence_ids] }); continue;
       }
-      if (declaration.subject_id === input.id && declarationByContract.has(declaration.id)) continue;
+      if (declaration.subject_id === input.id && declarationByContract.has(declaration.id) || consumedCallDeclarations.has(declaration)) continue;
       const layout = abi.classifyCall(sourceAbi(declaration.signature));
       signatures.push({ ...declaration, abi_state: layout.state });
       if (node?.kind !== 'call' || declaration.status === 'hypothesis' || declaration.status === 'candidate') continue;
@@ -384,12 +407,6 @@ export function recoverTypes(input: SSAForm, abi: AbiProfile, context: Operation
         conflicts.push({ subject_id: shapeId, alternatives: [a.id, b.id], evidence_ids: [...a.evidence_ids, ...b.evidence_ids], reason: 'overlapping_accesses' });
       }
     }
-    for (const deferred of deferredTypes) if (typeSubjects.has(deferred.subject_id)) addType(deferred.record);
-    for (const binding of bindings) {
-      budget.charge();
-      if (!typeSubjects.has(binding.subject_id) || !records.has(binding.type_id)) { diagnostics.push({ code: 'unavailable_semantics', severity: 'warning', message: 'Type binding has an unavailable exact subject or type ID', entity_id: binding.subject_id, evidence_ids: [...binding.evidence_ids] }); continue; }
-      associate(binding);
-    }
     // Machine signedness is an operation-use constraint, not a rewritten value.
     for (const node of nodes.values()) if (node.kind === 'assign') {
       budget.charge(); const e = node.expression;
@@ -401,6 +418,20 @@ export function recoverTypes(input: SSAForm, abi: AbiProfile, context: Operation
         const proof = reason('machine signedness use', node.id, node.provenance.evidence_ids);
         for (const operand of expressionOperands(e)) associate({ subject_id: operand.id, type_id: machineType(operand.type, [proof], e.op.startsWith('s') || e.op === 'ashr'), source: 'analysis', status: 'candidate', evidence_ids: [proof] });
       }
+    }
+    for (const deferred of deferredTypes) if (typeSubjects.has(deferred.subject_id)) addType(deferred.record);
+    const constrainedDeclarations = new Set<string>();
+    for (const binding of bindings) {
+      budget.charge();
+      if (!typeSubjects.has(binding.subject_id) || !records.has(binding.type_id)) { diagnostics.push({ code: 'unavailable_semantics', severity: 'warning', message: 'Type binding has an unavailable exact subject or type ID', entity_id: binding.subject_id, evidence_ids: [...binding.evidence_ids] }); continue; }
+      // Retain the declared source view when a type/field itself is annotated;
+      // contradictory overrides are alternatives, not silent replacements.
+      if (!constrainedDeclarations.has(binding.subject_id)) {
+        constrainedDeclarations.add(binding.subject_id);
+        for (const declaration of records.get(binding.subject_id) ?? []) associate({ subject_id: binding.subject_id, type_id: binding.subject_id, source: declaration.source, status: declaration.status, evidence_ids: declaration.evidence_ids });
+        for (const declaration of declaredFieldTypes.get(binding.subject_id) ?? []) associate(declaration);
+      }
+      associate(binding);
     }
     // Forward transport and exact concatenation of source-relative fragments.
     // The worklist identity bounds cycles; no type flows backward into unrelated

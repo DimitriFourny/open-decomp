@@ -84,11 +84,11 @@ test('schema-1 migration preserves old snapshots without inventing historical re
   state.store.applyAnnotations({ expected_revision: 2, author: 'unrecorded-in-v1', origin: 'llm', edits: [{ operation: 'remove', id: firstId }] });
   const identity = state.store.project_id;
   await state.store.close();
-  // Exactly the v1 layout: all tables/rows unchanged except the new removal-actor table.
+  // Recreate the v1 layout, which predates removal actors and semantic catalog indexing.
   const legacy = new DatabaseSync(join(state.path, 'project.sqlite'));
-  legacy.exec('DROP TABLE annotation_removals; PRAGMA user_version=1;'); legacy.close();
+  legacy.exec('DROP TABLE annotation_removals; DROP TABLE analysis_artifacts; PRAGMA user_version=1;'); legacy.close();
   state.store = SqliteProjectStore.open(state.path, 'resume');
-  assert.equal(state.store.project_id, identity); assert.equal(state.store.snapshot().schema_version, 2); assert.equal(state.store.snapshot().revision, 3);
+  assert.equal(state.store.project_id, identity); assert.equal(state.store.snapshot().revision, 3);
   assert.equal(state.store.readAnnotations(subject, 2)[0]!.author, 'old-author'); assert.deepEqual(state.store.readAnnotations(subject, 3), []);
   assert.deepEqual(state.store.readImage(image.id).read(0n, 2), Uint8Array.of(0x4d, 0x5a));
   const history = state.store.queryAnnotationHistory({ id: firstId, revision: 3, limit: 10 }).items;

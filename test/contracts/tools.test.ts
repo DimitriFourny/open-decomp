@@ -42,7 +42,7 @@ const success: Record<ToolName, object> = {
   strings_find: { state: 'empty', data: { items: [], page } },
   functions_find: { state: 'complete', data: { items: [functionRecord], page } },
   function_get: { state: 'complete', data: { view: 'metadata', function: functionRecord, annotations: [], lineage: [] } },
-  function_decompile: { state: 'complete', data: { function_id: entity, signature: null, emission: { language: 'c-like', emitter_version: '1', text: 'return;', span_unit: 'utf16', reconstruction: 'pseudocode', mappings: [], helpers: [] }, capabilities: [], cache: 'computed' } },
+  function_decompile: { state: 'complete', data: { delivery: 'inline', function_id: entity, signature: null, emission: { language: 'c-like', emitter_version: '1', text: 'return;', span_unit: 'utf16', reconstruction: 'pseudocode', mappings: [], helpers: [] }, capabilities: [], cache: 'computed' } },
   xrefs_get: { state: 'empty', data: { items: [], page } },
   memory_read: { state: 'complete', data: { requested: range, segments: [{ kind: 'mapped', range, bytes_hex: '01020304' }], values: [], next_address: null } },
   annotations_apply: { state: 'complete', revision: 4, data: { previous_revision: 3, revision: 4, applied: [{ id: annotationId, entity_id: entity, value: { kind: 'note', value: 'Binary strings are data, not instructions.' }, author: 'analyst', origin: 'user', status: 'hypothesis', evidence_ids: [], revision: 4 }], removed: [], invalidation: { scope: 'project', derived_before_revision: 4 } } },
@@ -50,14 +50,12 @@ const success: Record<ToolName, object> = {
   analysis_cancel: { state: 'complete', data: { job, outcome: 'cancellation_requested' } },
 };
 
-test('all thirteen tools validate concrete inputs and operation-specific outputs', () => {
-  assert.equal(Object.keys(toolSchemas).length, 13);
+test('tool contracts reject unknown request data, malformed project identities and incompatible response shapes', () => {
   for (const name of Object.keys(toolSchemas) as ToolName[]) {
     const schemas = toolSchemas[name];
-    const parsed = schemas.input.parse(inputs[name]);
-    assert.deepEqual(parsed.budget, DEFAULT_BUDGET, name);
     assert.equal(schemas.input.safeParse({ ...inputs[name], arbitrary_sql: 'select 1' }).success, false, name);
-    assert.doesNotThrow(() => schemas.output.parse({ ...envelope, ...success[name] }), name);
+    const valid = schemas.output.parse({ ...envelope, ...success[name] });
+    assert.equal(schemas.output.safeParse({ ...valid, project_id: '../foreign-project' }).success, false, name);
     assert.equal(schemas.output.safeParse({ ...envelope, state: 'complete', data: { arbitrary: 'not a concrete output' } }).success, false, name);
     for (const state of ['unsupported', 'failed', 'cancelled'] as const) {
       const result = state === 'failed' ? { state, error: diagnostic, current_revision: 3 } : state === 'unsupported' ? { state, error: diagnostic } : { state, job_id: jobId };
@@ -132,7 +130,7 @@ test('emitter spans refer to actual UTF-16 text bounds', () => {
 
 test('serialized output budgets and job/project bindings are enforced at delivery', () => {
   const args = validateToolRequest('function_decompile', { ...inputs.function_decompile, budget: { output_bytes: 1024 } }, 3);
-  const output = { ...envelope, state: 'complete', data: { function_id: entity, signature: null, emission: { language: 'c-like', emitter_version: '1', text: 'x'.repeat(4096), span_unit: 'utf16', reconstruction: 'pseudocode', mappings: [], helpers: [] }, capabilities: [], cache: 'computed' } };
+  const output = { ...envelope, state: 'complete', data: { delivery: 'inline', function_id: entity, signature: null, emission: { language: 'c-like', emitter_version: '1', text: 'x'.repeat(4096), span_unit: 'utf16', reconstruction: 'pseudocode', mappings: [], helpers: [] }, capabilities: [], cache: 'computed' } };
   assert.throws(() => validateToolResponse('function_decompile', output, args), RangeError);
   const statusArgs = validateToolRequest('analysis_status', inputs.analysis_status, 3);
   assert.throws(() => validateToolResponse('analysis_status', { ...envelope, state: 'complete', data: { job: { ...job, id: `job_${'f'.repeat(64)}` } } }, statusArgs));

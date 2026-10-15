@@ -18,7 +18,7 @@ export interface ActiveAnnotationView {
 }
 
 /** Trusted synchronous composition hook; throwing rolls back annotations, evidence and the caller's durable job save. */
-export type AnnotationCommitHook = (transaction: StoreTransaction, result: Extract<MutationResult, { state: 'committed' }>) => void;
+export type AnnotationCommitHook = (transaction: StoreTransaction, result: Extract<MutationResult, { state: 'committed' }>, evidence: readonly Evidence[]) => void;
 
 function reject(code: Diagnostic['code'], message: string): never {
   throw new OperationError({ code, severity: 'error', message, evidence_ids: [] });
@@ -174,7 +174,7 @@ export class AnnotationService {
         for (const id of removed) { context.checkpoint(1); tx.removeAnnotation(id, { author: batch.author, origin: batch.origin }); }
         if (onCommit) {
           if (onCommit.constructor.name === 'AsyncFunction') reject('invalid_input', 'Annotation commit hooks must be synchronous');
-          const returned: unknown = onCommit(tx, { state: 'committed', previous_revision: current, revision, annotations: prepared, removed, invalidate_before_revision: revision });
+          const returned: unknown = onCommit(tx, { state: 'committed', previous_revision: current, revision, annotations: prepared, removed, invalidate_before_revision: revision }, evidence);
           if (returned !== null && typeof returned === 'object' && 'then' in returned) reject('invalid_input', 'Annotation commit hooks must be synchronous');
         }
         context.checkpoint(0);

@@ -20,7 +20,7 @@ import {
 import { decodeStored, encodeStored, wireValue } from './encoding.js';
 
 // Persistence migrations are independent of the public wire/artifact schema version.
-const STORE_SCHEMA_VERSION = 2;
+const STORE_SCHEMA_VERSION = 3;
 const annotationActorSchema = annotationSchema.pick({ author: true, origin: true });
 const MAX_IMAGE_BYTES = 512 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
@@ -156,13 +156,17 @@ export class SqliteProjectStore implements ProjectStore {
           CREATE TABLE annotation_removals(id TEXT NOT NULL, revision INTEGER NOT NULL, author TEXT NOT NULL, origin TEXT NOT NULL CHECK(origin IN ('user','llm')), PRIMARY KEY(id,revision), FOREIGN KEY(id,revision) REFERENCES annotations(id,revision)) STRICT;
           CREATE TABLE jobs(id TEXT PRIMARY KEY, payload BLOB NOT NULL) STRICT;
           CREATE TABLE artifacts(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, job_id TEXT NOT NULL, cache_key TEXT NOT NULL UNIQUE, payload BLOB NOT NULL) STRICT;
+          CREATE TABLE analysis_artifacts(revision INTEGER NOT NULL, analysis_id TEXT NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(revision,analysis_id,artifact_id)) STRICT;
           PRAGMA user_version=${STORE_SCHEMA_VERSION};`);
         db.prepare('INSERT INTO metadata VALUES (1,?,0)').run(newIdentity('project'));
         db.exec('COMMIT');
-      } else if (version === 1) {
-        db.exec(`BEGIN IMMEDIATE;
-          CREATE TABLE annotation_removals(id TEXT NOT NULL, revision INTEGER NOT NULL, author TEXT NOT NULL, origin TEXT NOT NULL CHECK(origin IN ('user','llm')), PRIMARY KEY(id,revision), FOREIGN KEY(id,revision) REFERENCES annotations(id,revision)) STRICT;
-          PRAGMA user_version=${STORE_SCHEMA_VERSION}; COMMIT;`);
+      } else if (version < STORE_SCHEMA_VERSION) {
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          if (version === 1) db.exec("CREATE TABLE annotation_removals(id TEXT NOT NULL, revision INTEGER NOT NULL, author TEXT NOT NULL, origin TEXT NOT NULL CHECK(origin IN ('user','llm')), PRIMARY KEY(id,revision), FOREIGN KEY(id,revision) REFERENCES annotations(id,revision)) STRICT;");
+          db.exec(`CREATE TABLE analysis_artifacts(revision INTEGER NOT NULL, analysis_id TEXT NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(revision,analysis_id,artifact_id)) STRICT;
+            PRAGMA user_version=${STORE_SCHEMA_VERSION}; COMMIT;`);
+        } catch (error) { db.exec('ROLLBACK'); throw error; }
       }
       directory(join(root, 'images'), mode === 'create');
       directory(join(root, 'artifacts'), mode === 'create');
@@ -458,7 +462,45 @@ export class SqliteProjectStore implements ProjectStore {
     return artifact;
   }
 
-  async publishArtifact(input: { job_id: string; expected_revision: number; media_type: string; bytes: Uint8Array; cache: CacheIdentity }): Promise<{ state: 'published'; artifact: Artifact } | { state: 'stale' | 'cancelled'; current_revision: number }> {
+  findAnalysisArtifacts(query: { readonly revision: number; readonly ids: readonly string[]; readonly limit: number; readonly cursor?: string }): { items: readonly Artifact[]; next_cursor: string | null } {
+    this.#revision(query.revision);
+    if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 1000) fail('invalid_input', 'Invalid analysis artifact page limit');
+    if (query.ids.length > 1000) fail('resource_limit', 'Too many analysis query identities');
+    const ids = [...new Set(query.ids)].sort();
+    for (const id of ids) z.union([entityIdSchema, evidenceIdSchema]).parse(id);
+    const binding = { project_id: this.project_id, revision: query.revision, operation: 'analysis_artifacts', query_hash: fingerprint([ids, query.limit]) };
+    const cursor = query.cursor ? decodeCursor(query.cursor, binding) : null;
+    if (cursor && (cursor.after.length !== 1 || !artifactIdSchema.safeParse(cursor.after[0]).success)) fail('invalid_cursor', 'Analysis artifact cursor has an invalid key');
+    if (ids.length === 0) return { items: [], next_cursor: null };
+    // Bound index work per requested ID, rather than sorting every historical
+    // option/version variant matching a large multi-ID catalog query.
+    const lookup = this.#db.prepare('SELECT artifact_id FROM analysis_artifacts WHERE revision=? AND analysis_id=? AND artifact_id>? ORDER BY artifact_id LIMIT ?');
+    let candidates: string[] = [];
+    for (const id of ids) {
+      const matches = lookup.all(query.revision, id, cursor?.after[0] ?? '', query.limit + 1).map(row => stringField(row, 'artifact_id'));
+      const merged: string[] = [];
+      let left = 0, right = 0;
+      while (merged.length <= query.limit && (left < candidates.length || right < matches.length)) {
+        const a = candidates[left], b = matches[right];
+        if (a !== undefined && (b === undefined || a < b)) { merged.push(a); left++; }
+        else if (b !== undefined && (a === undefined || b < a)) { merged.push(b); right++; }
+        else { merged.push(a!); left++; right++; }
+      }
+      candidates = merged;
+    }
+    const more = candidates.length > query.limit;
+    const artifactLookup = this.#db.prepare('SELECT payload FROM artifacts WHERE id=?');
+    const items = candidates.slice(0, query.limit).map(id => {
+      const row = artifactLookup.get(id);
+      if (!row) fail('invalid_input', 'Analysis index references an unpublished artifact');
+      const artifact = decodeStored<Artifact>(row['payload']); encodeArtifact(artifact);
+      if (artifact.id !== id || artifact.project_id !== this.project_id || artifact.revision !== query.revision) fail('invalid_input', 'Analysis artifact index scope mismatch');
+      return artifact;
+    });
+    return { items, next_cursor: more ? encodeCursor({ ...binding, version: 1, after: [items.at(-1)!.id] }) : null };
+  }
+
+  async publishArtifact(input: { job_id: string; expected_revision: number; media_type: string; bytes: Uint8Array; cache: CacheIdentity; analysis_ids?: readonly string[] }): Promise<{ state: 'published'; artifact: Artifact } | { state: 'stale' | 'cancelled'; current_revision: number }> {
     const current = this.#current(); revisionSchema.parse(input.expected_revision);
     if (this.#transaction) fail('invalid_input', 'Artifact publication cannot nest in a transaction');
     if (current !== input.expected_revision) return { state: 'stale', current_revision: current };
@@ -470,6 +512,9 @@ export class SqliteProjectStore implements ProjectStore {
     if (input.bytes.length > MAX_ARTIFACT_BYTES) fail('resource_limit', 'Artifact exceeds 64 MiB limit');
     cacheIdentitySchema.parse(input.cache);
     if (input.cache.annotation_revision !== current || input.cache.evidence_revision !== current) fail('stale_revision', 'Artifact cache identity is stale');
+    if ((input.analysis_ids?.length ?? 0) > 100000) fail('resource_limit', 'Too many analysis artifact identities');
+    const analysisIds = [...new Set(input.analysis_ids ?? [])];
+    for (const id of analysisIds) z.union([entityIdSchema, evidenceIdSchema]).parse(id);
     const artifact: Artifact = { id: newIdentity('artifact'), project_id: this.project_id, revision: current, media_type: input.media_type, size: BigInt(input.bytes.length), sha256: contentHash(input.bytes), schema_version: SCHEMA_VERSION };
     encodeArtifact(artifact);
     const path = this.#storagePath('artifacts', artifact.id);
@@ -477,10 +522,24 @@ export class SqliteProjectStore implements ProjectStore {
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       this.#db.prepare('INSERT INTO artifacts VALUES (?,?,?,?,?)').run(artifact.id, current, job.id, cacheIdentityKey(input.cache), encodeStored(artifact));
-      this.saveJob({ ...job, state: 'completed', artifacts: [artifact], published_revision: current });
+      const index = this.#db.prepare('INSERT INTO analysis_artifacts VALUES (?,?,?)');
+      for (const id of analysisIds) index.run(current, id, artifact.id);
+      this.saveJob({ ...job, state: 'completed', progress: { phase: 'complete', completed: 1, total: 1 }, artifacts: [artifact], published_revision: current });
       this.#db.exec('COMMIT');
     } catch (error) { this.#db.exec('ROLLBACK'); unlinkSync(path); throw error; }
     return { state: 'published', artifact };
+  }
+
+  readArtifactBytes(input: Artifact): Uint8Array {
+    this.#revision(input.revision); encodeArtifact(input);
+    if (input.project_id !== this.project_id) fail('permission_denied', 'Artifact belongs to another project');
+    const row = this.#db.prepare('SELECT payload FROM artifacts WHERE id=?').get(input.id);
+    if (!row) fail('not_found', 'Artifact does not exist');
+    const artifact = decodeStored<Artifact>(row['payload']); encodeArtifact(artifact);
+    if (fingerprint(encodeArtifact(input)) !== fingerprint(encodeArtifact(artifact))) fail('invalid_input', 'Artifact handle does not match published metadata');
+    const bytes = checkedFile(this.#storagePath('artifacts', artifactIdSchema.parse(artifact.id)), MAX_ARTIFACT_BYTES);
+    if (BigInt(bytes.length) !== artifact.size || contentHash(bytes) !== artifact.sha256) fail('invalid_input', 'Artifact integrity check failed');
+    return bytes;
   }
 
   async readArtifact(input: z.infer<typeof artifactReadArgsSchema>): Promise<z.infer<typeof artifactReadResultSchema>> {
@@ -490,8 +549,7 @@ export class SqliteProjectStore implements ProjectStore {
     if (!row) fail('not_found', 'Artifact does not exist');
     const artifact = decodeStored<Artifact>(row['payload']); encodeArtifact(artifact);
     if (artifact.revision !== args.revision) fail('stale_revision', 'Artifact belongs to another revision');
-    const bytes = checkedFile(this.#storagePath('artifacts', artifactIdSchema.parse(artifact.id)), MAX_ARTIFACT_BYTES);
-    if (BigInt(bytes.length) !== artifact.size || contentHash(bytes) !== artifact.sha256) fail('invalid_input', 'Artifact integrity check failed');
+    const bytes = this.readArtifactBytes(artifact);
     const offset = BigInt(args.offset);
     if (offset > artifact.size) fail('invalid_address', 'Artifact offset exceeds its size');
     const end = Math.min(bytes.length, Number(offset) + args.length);

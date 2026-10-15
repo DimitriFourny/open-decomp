@@ -8,13 +8,13 @@ import { wireValue } from '../../project/store/encoding.js';
 import { MAX_FRAME_BYTES } from '../../workers/protocol.js';
 import { prepareQueryImport } from './prepare.js';
 import { queryEnvelope, queryFailure } from './shared.js';
-import { reconstructFunctionGraph } from './graphs.js';
+import { loadImage, records, loadFunctionScope, loadFunctionGraph, type IndexState } from './scope.js';
+import { executeDecompilation, executeAnnotations } from '../analysis/index.js';
 
 type PageArgs = { project_id: string; revision: number; budget: OperationContext['budget']; page: { limit: number; cursor?: string | undefined } };
 type Paging = { readonly binding: CursorBinding; readonly after: string };
 type Scope = { readonly store: ProjectStore; readonly context: OperationContext; readonly job_id: string; readonly paging?: Paging };
 type Query = { readonly text: string; readonly match: 'exact' | 'prefix' | 'contains'; readonly case_sensitive: boolean };
-type IndexState = 'complete' | 'partial' | 'not_started';
 function matches(query: Query, ...values: readonly (string | null)[]): boolean {
   if (query.text === '' && query.match !== 'exact') return true;
   const text = query.case_sensitive ? query.text : query.text.toLowerCase();
@@ -23,35 +23,6 @@ function matches(query: Query, ...values: readonly (string | null)[]): boolean {
     const candidate = query.case_sensitive ? value : value.toLowerCase();
     return query.match === 'exact' ? candidate === text : query.match === 'prefix' ? candidate.startsWith(text) : candidate.includes(text);
   });
-}
-// Immutable metadata only; annotation presentation always reads the requested revision.
-// Four entries of at most 16 MiB bound retained bytes to 64 MiB per child.
-const imageCache = new Map<string, LoadedImage>();
-function loadImage(store: ProjectStore, revision: number, id: string): LoadedImage {
-  const slices = store.snapshot(revision).images.filter(item => item.image_id === id);
-  if (!slices.length) queryFailure('not_found', 'Image is absent from the requested snapshot');
-  if (slices.length !== 1) queryFailure('ambiguous_slice', 'Image-only query cannot select among multiple imported slices');
-  const key = `${store.project_id}:${revision}:${id}`;
-  const cached = imageCache.get(key);
-  if (cached) return cached;
-  const image = store.readLoadedImage(id, slices[0]!.selected_slice_id, revision);
-  if (image.bytes.length <= 16 * 1024 * 1024) {
-    if (imageCache.size >= 4) imageCache.delete(imageCache.keys().next().value!);
-    imageCache.set(key, image);
-  }
-  return image;
-}
-function records<K extends keyof StoredRecordKinds>(scope: Scope, revision: number, image_id: string, kind: K): { items: StoredRecordKinds[K][]; state: IndexState } {
-  const items: StoredRecordKinds[K][] = [];
-  let cursor: string | undefined;
-  let state: IndexState = 'not_started';
-  do {
-    scope.context.checkpoint(1);
-    const page = scope.store.queryRecords({ kind, image_id, revision, limit: 1000, ...(cursor ? { cursor } : {}) });
-    for (const item of page.items) { scope.context.checkpoint(1); items.push(item); }
-    state = page.index_state; cursor = page.next_cursor ?? undefined;
-  } while (cursor);
-  return { items, state };
 }
 function addressKey(address: Address | null, id: string): string { return `${address ? address.value.toString(16).padStart(16, '0') : '~~~~~~~~~~~~~~~~'}:${id}`; }
 function virtual(image: LoadedImage, address: Address): Address {
@@ -158,8 +129,8 @@ function encodeInstruction(instruction: unknown): unknown {
   return visit(instruction);
 }
 
-/** Composable trusted child handler: unsupported mutation/decompiler operations are not
- * emulated. T25 can delegate this subset and provide its own static implementation. */
+/** Statically composed child service; CPU work and durable mutations stay with
+ * the owning project process, never the protocol host. */
 export const queryWorkerHandler: WorkerHandler = {
   prepareImport: prepareQueryImport,
   async execute<K extends ToolName>(operation: K, input: ToolArgs<K>, scope: Scope): Promise<ToolResult<K>> {
@@ -173,6 +144,8 @@ async function dispatch(operation: ToolName, input: unknown, suppliedScope: Scop
   const parsed = toolSchemas[operation].input.parse(input);
   const common = parsed as { project_id: string; revision: number; budget: OperationContext['budget'] };
   if (common.project_id !== suppliedScope.store.project_id) queryFailure('permission_denied', 'Query belongs to another project');
+  if (operation === 'function_decompile') return executeDecompilation(parsed as ToolArgs<'function_decompile'>, suppliedScope);
+  if (operation === 'annotations_apply') return executeAnnotations(parsed as ToolArgs<'annotations_apply'>, suppliedScope);
   const scope: Scope = 'page' in parsed ? { ...suppliedScope, paging: pageState(operation, parsed) } : suppliedScope;
   scope.store.snapshot(common.revision); scope.context.checkpoint(0);
   const envelope = queryEnvelope(common.project_id, common.revision, common.budget);
@@ -227,25 +200,19 @@ async function dispatch(operation: ToolName, input: unknown, suppliedScope: Scop
     }
     case 'function_get': {
       const args = toolSchemas.function_get.input.parse(input);
-      for (const stored of scope.store.snapshot(args.revision).images) {
-        const image = loadImage(scope.store, args.revision, stored.image_id), all = records(scope, args.revision, image.id, 'function');
-        const fn = all.items.find(item => item.id === args.function_id);
-        if (!fn) continue;
-        if (args.view === 'metadata') {
-          const annotations = scope.store.readAnnotations(fn.id, args.revision);
-          const assertedNames = new Set(annotations.flatMap(item => item.status === 'asserted' && item.value.kind === 'name' ? [item.value.value] : []));
-          const data = { view: 'metadata', function: wireValue({ ...presentName(scope, args.revision, fn), signature: scope.store.readSignature(fn.id, args.revision) ?? fn.signature }), annotations: wireValue(annotations), lineage: scope.store.readLineage(fn.id, args.revision) };
-          return { ...envelope, evidence: resultEvidence(scope, args.revision, data), diagnostics: assertedNames.size > 1 ? [{ code: 'conflicting_evidence', severity: 'warning', message: 'Incompatible active asserted names remain separate annotations', entity_id: fn.id, evidence_ids: [] }] : [], state: 'complete', data };
-        }
-        const navigationImage = { ...image, symbols: records(scope, args.revision, image.id, 'symbol').items, imports: records(scope, args.revision, image.id, 'import').items, exports: records(scope, args.revision, image.id, 'export').items };
-        const graph = reconstructFunctionGraph({ project_id: scope.store.project_id, revision: args.revision, image: navigationImage, function: fn, functions: all.items }, scope.context);
-        const state = graph.coverage.state === 'complete' ? 'complete' : 'partial';
-        const partialReason = graph.gaps.some(gap => gap.reason === 'budget') ? 'budget' : 'incomplete_index';
-        const details = { coverage: [graph.coverage], diagnostics: graph.diagnostics.map(encodeDiagnostic) };
-        if (args.view === 'disassembly') return paginate(scope, operation, args, graph.instructions.map(item => encodeInstruction(item) as { id: string; address: { value: string } }), state, item => `${BigInt(item.address.value).toString(16).padStart(16, '0')}:${item.id}`, { view: args.view, function_id: fn.id, gaps: wireValue(graph.gaps.map(({ range, reason }) => ({ range, reason }))) }, 'address_id', partialReason, details);
-        return paginate(scope, operation, args, graph.blocks, state, item => addressKey(item.ranges[0]!.start, item.id), { view: args.view, function_id: fn.id }, 'address_id', partialReason, details);
+      const loaded = loadFunctionScope(scope, args.revision, args.function_id), fn = loaded.function;
+      if (args.view === 'metadata') {
+        const annotations = scope.store.readAnnotations(fn.id, args.revision);
+        const assertedNames = new Set(annotations.flatMap(item => item.status === 'asserted' && item.value.kind === 'name' ? [item.value.value] : []));
+        const data = { view: 'metadata', function: wireValue({ ...presentName(scope, args.revision, fn), signature: scope.store.readSignature(fn.id, args.revision) ?? fn.signature }), annotations: wireValue(annotations), lineage: scope.store.readLineage(fn.id, args.revision) };
+        return { ...envelope, evidence: resultEvidence(scope, args.revision, data), diagnostics: assertedNames.size > 1 ? [{ code: 'conflicting_evidence', severity: 'warning', message: 'Incompatible active asserted names remain separate annotations', entity_id: fn.id, evidence_ids: [] }] : [], state: 'complete', data };
       }
-      return queryFailure('not_found', 'Function is absent from the requested snapshot');
+      const graph = loadFunctionGraph(scope, args.revision, loaded);
+      const state = graph.coverage.state === 'complete' ? 'complete' : 'partial';
+      const partialReason = graph.gaps.some(gap => gap.reason === 'budget') ? 'budget' : 'incomplete_index';
+      const details = { coverage: [graph.coverage], diagnostics: graph.diagnostics.map(encodeDiagnostic) };
+      if (args.view === 'disassembly') return paginate(scope, operation, args, graph.instructions.map(item => encodeInstruction(item) as { id: string; address: { value: string } }), state, item => `${BigInt(item.address.value).toString(16).padStart(16, '0')}:${item.id}`, { view: args.view, function_id: fn.id, gaps: wireValue(graph.gaps.map(({ range, reason }) => ({ range, reason }))) }, 'address_id', partialReason, details);
+      return paginate(scope, operation, args, graph.blocks, state, item => addressKey(item.ranges[0]!.start, item.id), { view: args.view, function_id: fn.id }, 'address_id', partialReason, details);
     }
     case 'xrefs_get': {
       const args = toolSchemas.xrefs_get.input.parse(input);

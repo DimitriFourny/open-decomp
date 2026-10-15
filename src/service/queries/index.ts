@@ -5,9 +5,8 @@ import type { ArtifactReadInput, ArtifactReadResult, JobOutcome, JobTicket, Proj
 import { queryEnvelope, queryFailure } from './shared.js';
 
 export interface QueryCallOptions { readonly signal?: AbortSignal; readonly onProgress?: (job: WireJob) => void }
-/** The lifecycle/navigation subset of the eventual AnalysisService. All image parsing,
- * decoding, indexing and store access happens in its project's persistent child.
- * Mutations and decompilation must be supplied by later real static handlers, not mocks.
+/** The host facade for project navigation, analysis and annotation jobs. All image
+ * parsing, decoding, semantic work and store access stays in persistent children.
  * Paths are host-authorized before admission; target-selected names are never paths.
  * Compiled clients import dist/src/service/queries/index.js; the default worker resolves
  * its sibling compiled entry.js automatically (no tsx/runtime source dependency). */
@@ -58,15 +57,19 @@ export class QueryService {
         result = { ...queryEnvelope(close.project_id, close.revision, close.budget), state: 'complete', data: { closed: true, persisted_revision: snapshot.revision } };
       } else if (operation === 'analysis_status' || operation === 'analysis_cancel') {
         const status = toolSchemas.analysis_status.input.parse(args), project = this.#project(status.project_id);
-        if (status.revision > project.snapshot.revision && status.revision > (await project.refresh()).revision) queryFailure('stale_revision', 'Job control revision is in the future');
+        if (status.revision > project.snapshot.revision) queryFailure('stale_revision', 'Job control revision is in the future');
         const job = operation === 'analysis_status' ? await project.inspectJob(status.job_id) : await project.cancelJob(status.job_id);
         const outcome = job.state === 'cancelled' ? 'cancelled' : ['queued', 'running'].includes(job.state) ? 'cancellation_requested' : 'already_finished';
         result = { ...queryEnvelope(status.project_id, status.revision, status.budget), state: 'complete', data: { job, ...(operation === 'analysis_cancel' ? { outcome } : {}) } };
       } else {
         const ticket = await this.submit(operation as WorkerOperation, args as ToolInput<WorkerOperation>, options);
         const outcome = await ticket.result;
-        requireCompleted(outcome);
-        if (outcome.result === undefined) queryFailure('not_found', 'Completed job has no transient query result; submit the read-only query again');
+        if (outcome.result === undefined) {
+          requireCompleted(outcome);
+          queryFailure('not_found', operation === 'annotations_apply'
+            ? 'Annotation job committed, but its response was lost; inspect the saved revision and annotation IDs instead of retrying the mutation'
+            : 'Completed job has no transient query result; submit the read-only query again');
+        }
         result = outcome.result;
       }
       const parsed = toolSchemas[operation].output.parse(result) as ToolResult<K>;

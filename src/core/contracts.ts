@@ -176,9 +176,15 @@ export interface ProjectStore {
   readSignature(functionId: string, revision: number): Signature | null;
   readLineage(entityId: string, revision: number): readonly z.infer<typeof lineageSchema>[];
   findArtifact(identity: CacheIdentity): Artifact | null;
+  /** Exact-snapshot lookup of published analysis catalogs by semantic/type/evidence IDs.
+   * An old catalog is not authorization to annotate an entity in a newer revision. */
+  findAnalysisArtifacts(query: { readonly revision: number; readonly ids: readonly string[]; readonly limit: number; readonly cursor?: string }): { readonly items: readonly Artifact[]; readonly next_cursor: string | null };
   /** Atomic publication verifies the job is not cancelled and the input revision is still current. */
-  publishArtifact(input: { readonly job_id: string; readonly expected_revision: number; readonly media_type: string; readonly bytes: Uint8Array; readonly cache: CacheIdentity }): Promise<{ readonly state: 'published'; readonly artifact: Artifact } | { readonly state: 'stale' | 'cancelled'; readonly current_revision: number }>;
+  publishArtifact(input: { readonly job_id: string; readonly expected_revision: number; readonly media_type: string; readonly bytes: Uint8Array; readonly cache: CacheIdentity; readonly analysis_ids?: readonly string[] }): Promise<{ readonly state: 'published'; readonly artifact: Artifact } | { readonly state: 'stale' | 'cancelled'; readonly current_revision: number }>;
   readArtifact(input: z.infer<typeof artifactReadArgsSchema>): Promise<z.infer<typeof artifactReadResultSchema>>;
+  /** Trusted worker-only whole-artifact read: verifies the exact handle and hashes once,
+   * avoiding hex round-trips and repeated full-file hashing for analysis caches. */
+  readArtifactBytes(artifact: Artifact): Uint8Array;
   saveJob(job: Job): void;
   readJob(jobId: string): Job | null;
   /** Live job lifecycle view in stable ID order; cursors bind the current project revision. */

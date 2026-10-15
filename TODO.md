@@ -21,12 +21,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 ### Worker execution, service, and MCP integration
 
-- [ ] **T25 — Integrate the complete decompilation pipeline and revision-aware cache**
-  - Depends on: T15, T22, T23, T24.
-  - Owns: `src/service/analysis/`, `src/project/cache/`, pipeline integration cases.
-  - Work: Connect loaders, discovery, architecture lifters, ABI/metadata evidence, shared passes, presentation, and emission into real per-function analysis jobs. Implement completeness reporting and caches keyed by input identity, versions, features/ABI, analysis policy, revisions, and emitter options. Publish results atomically and prevent old-revision jobs from becoming current after edits.
-  - Acceptance: The service decompiles real functions for both targets without using an external decompiler. Repeated requests use valid cached results; annotation edits/retractions and option/version changes invalidate them. Cancellation/crashes never publish partial artifacts as complete. ARM64 behavior no longer relies on a legacy C-string pipeline or sibling runtime import. Contributes A04–A08.
-
 - [ ] **T27 — Expose the complete local MCP tool surface**
   - Depends on: T23, T25, T26.
   - Owns: `src/mcp/`, compiled server entry point, deterministic stdio smoke client.
@@ -84,7 +78,17 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 
 
+
 ## Done
+- [x] **T25 — Integrate the complete decompilation pipeline and revision-aware cache**
+  - Depends on: T15, T22, T23, T24.
+  - Owns: `src/service/analysis/`, `src/project/cache/`, pipeline integration cases.
+  - Work: Connect loaders, discovery, architecture lifters, ABI/metadata evidence, shared passes, presentation, and emission into real per-function analysis jobs. Implement completeness reporting and caches keyed by input identity, versions, features/ABI, analysis policy, revisions, and emitter options. Publish results atomically and prevent old-revision jobs from becoming current after edits.
+  - Acceptance: The service decompiles real functions for both targets without using an external decompiler. Repeated requests use valid cached results; annotation edits/retractions and option/version changes invalidate them. Cancellation/crashes never publish partial artifacts as complete. ARM64 behavior no longer relies on a legacy C-string pipeline or sibling runtime import. Contributes A04–A08.
+  - Owner: Pipeline (astra-worker: service analysis/annotation composition), AnalysisCache (sol-worker: cache/store/catalog persistence), Coordinator (shared contracts, child routing and integration).
+  - Decision: Large decompilations use an explicit artifact delivery variant, not an empty/truncated emission masquerading as complete. Published semantic catalogs are indexed at the exact project revision; after an edit, reanalyze before adding annotations to derived-only IDs.
+  - Implemented: Real analysis/annotation handlers, explicit inline/artifact wire delivery, schema-3 transactional cache/catalog publication and migrations, exact-revision/component-version authorization, complete proof closure, original-budget cache identity, and host mutation-revision propagation. Source type/field/function declarations and exact call-local provenance retain their identities; undefined values remain distinct from unsupported semantics.
+  - Verification: Node 24.22.0 strict typecheck, **617/617 tests**, and compiled build passed. Compiled `QueryService` children completed Mach-O arm64 and PE x86-64 open/search/xref/decompile/cache-hit/annotate/reanalyze/retract/artifact-read/cancel/close/reopen workflows at revisions 2→3→4. Source runtime probes demonstrated and corrected lost type subjects, false call-signature conflicts and stale host revision propagation. Real stopped-owner tests cover future-revision rejection and commit-before-response loss without mutation retry.
 - [x] **T22 — Implement C-like pseudocode emission and instruction mappings**
   - Depends on: T20, T21.
   - Owns: `src/emitters/c/`, emitter interface implementation and behavioral mapping tests.

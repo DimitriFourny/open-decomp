@@ -202,7 +202,7 @@ class Renderer {
       for (const operand of expressionOperands(node.expression)) { this.context.checkpoint(1); ids.push(operand.id); }
       ids.push(node.result.id);
       text = `${this.value(node.result)} = ${expressionText(node.expression, node.result.type, this.writer, this.value)};`;
-      if (node.expression.kind === 'indeterminate') this.report('unavailable_semantics', 'An indeterminate machine value is retained explicitly.', node.id, node.provenance.evidence_ids);
+      if (node.expression.kind === 'indeterminate' && node.expression.state === 'unknown') this.report('unavailable_semantics', 'An unknown machine value is retained explicitly.', node.id, node.provenance.evidence_ids);
     } else {
       ids.push(node.effect_in.id, node.effect_out.id);
       const effect = this.effect(node.effect_in), output = this.effect(node.effect_out);

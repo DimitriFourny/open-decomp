@@ -187,7 +187,16 @@ export const symbolsFindResultSchema = resultSchema(z.strictObject({ items: z.ar
 export const stringsFindResultSchema = resultSchema(z.strictObject({ items: z.array(stringRecordSchema).max(1000), page: pageInfoSchema }));
 export const functionsFindResultSchema = resultSchema(z.strictObject({ items: z.array(functionSchema).max(1000), page: pageInfoSchema }));
 export const functionGetResultSchema = resultSchema(functionGetDataSchema);
-export const functionDecompileResultSchema = resultSchema(z.strictObject({ function_id: entityIdSchema, signature: signatureSchema.nullable(), emission: emissionSchema, capabilities: z.array(capabilitySchema).max(1000), cache: z.enum(['hit', 'computed']) }));
+export const functionDecompileResultSchema = resultSchema(z.discriminatedUnion('delivery', [
+  z.strictObject({ delivery: z.literal('inline'), function_id: entityIdSchema, signature: signatureSchema.nullable(), emission: emissionSchema, capabilities: z.array(capabilitySchema).max(1000), cache: z.enum(['hit', 'computed']) }),
+  z.strictObject({ delivery: z.literal('artifact'), function_id: entityIdSchema, artifact_id: artifactSchema.shape.id, cache: z.enum(['hit', 'computed']) }),
+])).superRefine((result, context) => {
+  if (!('data' in result)) return;
+  const data = result.data;
+  if (data.delivery === 'artifact' && (result.state !== 'partial' || result.reason !== 'output_limit' || !result.artifacts.some(artifact => artifact.id === data.artifact_id))) {
+    context.addIssue({ code: 'custom', message: 'Artifact-only decompilation requires an output-limited partial result and its published artifact' });
+  }
+});
 export const xrefsGetResultSchema = resultSchema(z.strictObject({ items: z.array(referenceSchema).max(1000), page: pageInfoSchema }));
 export const memoryReadResultSchema = resultSchema(memoryDataSchema);
 export const annotationsApplyResultSchema = resultSchema(z.strictObject({ previous_revision: revisionSchema, revision: revisionSchema, applied: z.array(annotationSchema).max(1000), removed: z.array(z.string().regex(/^annotation_[0-9a-f]{64}$/)).max(1000), invalidation: z.strictObject({ scope: z.literal('project'), derived_before_revision: revisionSchema }) }).superRefine((data, context) => {

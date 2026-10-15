@@ -3,7 +3,7 @@ import { test, type TestContext } from 'node:test';
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { DEFAULT_BUDGET, type ResultEnvelope, type ToolInput } from '../../src/core/index.js';
+import { DEFAULT_BUDGET, newIdentity, type ResultEnvelope, type ToolInput } from '../../src/core/index.js';
 import { QueryService } from '../../src/service/queries/index.js';
 import type { WorkerPoolOptions } from '../../src/workers/index.js';
 import { runtimeBytes } from '../metadata/fixture.js';
@@ -194,15 +194,24 @@ test('real child memory reads preserve full-width typed bits, zero-fill, holes a
   assert.equal(prefix, raw.subarray(0, Number(BigInt(data(bounded).next_address!.value))).toString('hex'));
 });
 
-test('direct-client status/cancel and close policies remain responsive with a stopped real owner', { timeout: 60000 }, async t => {
+test('committed annotation revisions and future-revision rejection keep job controls responsive with a stopped owner', { timeout: 120000 }, async t => {
   const { root, service } = await setup(t, { entry_point: new URL(import.meta.url.endsWith('.ts') ? './pause-query.ts' : './pause-query.js', import.meta.url), cancel_grace_ms: 10 });
   const opened = await service.execute('project_open', { source: { kind: 'import', input_path: join(fixtures, 'pe-x86_64-symbols.exe'), project_path: join(root, 'project') } });
   const scope = { project_id: opened.project_id!, revision: opened.revision!, image_id: data(opened).image.id };
+  const sections = data(await service.execute('binary_info', { ...scope, view: 'sections' }));
+  assert.ok(sections.view === 'sections');
+  const edited = data(await service.execute('annotations_apply', { project_id: scope.project_id, expected_revision: scope.revision, author: 'control-regression', origin: 'user', edits: [
+    { operation: 'set', id: newIdentity('annotation'), entity_id: sections.items[0]!.id, value: { kind: 'note', value: 'A committed edit must be visible to host-side controls' }, status: 'asserted', evidence_ids: [] },
+  ] }));
+  scope.revision = edited.revision;
   let started!: () => void;
   const running = new Promise<void>(resolve => { started = resolve; });
   const ticket = await service.submit('functions_find', scope, { onProgress: job => { if (job.state === 'running') started(); } });
   await running;
   await waitForWorkerPause(ticket.id, t);
+  const future = await service.execute('analysis_status', { project_id: scope.project_id, revision: scope.revision + 1, job_id: ticket.id });
+  assert.ok(future.state === 'failed'); assert.equal(future.error.code, 'stale_revision');
+  assert.equal(future.current_revision, scope.revision);
   const status = data(await service.execute('analysis_status', { project_id: scope.project_id, revision: scope.revision, job_id: ticket.id }));
   assert.equal(status.job.state, 'running');
   const reject = await service.execute('project_close', { project_id: scope.project_id, revision: scope.revision, running_jobs: 'reject' });
@@ -218,6 +227,34 @@ test('direct-client status/cancel and close policies remain responsive with a st
   const closed = data(await service.execute('project_close', { project_id: scope.project_id, revision: scope.revision, running_jobs: 'cancel' }));
   assert.equal(closed.closed, true); assert.equal(closed.persisted_revision, scope.revision);
   assert.equal((await second.result).job.state, 'cancelled');
+});
+
+test('lost annotation responses preserve one committed revision and never retry the mutation', { timeout: 120000 }, async t => {
+  const { root, service } = await setup(t, { entry_point: new URL(import.meta.url.endsWith('.ts') ? './pause-annotation.ts' : './pause-annotation.js', import.meta.url), cancel_grace_ms: 10 });
+  const project_path = join(root, 'project');
+  const opened = await service.execute('project_open', { source: { kind: 'import', input_path: join(fixtures, 'pe-x86_64-symbols.exe'), project_path } });
+  const scope = { project_id: opened.project_id!, revision: opened.revision! };
+  const fn = data(await service.execute('functions_find', { ...scope, image_id: data(opened).image.id })).items[0]!;
+  const id = newIdentity('annotation');
+  let started!: (job: string) => void;
+  const running = new Promise<string>(resolve => { started = resolve; });
+  const response = service.execute('annotations_apply', { project_id: scope.project_id, expected_revision: scope.revision, author: 'lost-response-regression', origin: 'user', edits: [
+    { operation: 'set', id, entity_id: fn.id, value: { kind: 'note', value: 'Committed exactly once' }, status: 'asserted', evidence_ids: [] },
+  ] }, { onProgress: job => { if (job.progress.phase === 'annotations') started(job.id); } });
+  const job_id = await running;
+  await waitForWorkerPause(job_id, t);
+  const cancelled = data(await service.execute('analysis_cancel', { ...scope, job_id }));
+  assert.equal(cancelled.job.state, 'completed'); assert.equal(cancelled.outcome, 'already_finished');
+  const lost = await response;
+  assert.ok(lost.state === 'failed'); assert.equal(lost.error.code, 'not_found');
+  assert.equal(lost.current_revision, scope.revision + 1);
+  const current = data(await service.execute('function_get', { ...scope, revision: scope.revision + 1, function_id: fn.id, view: 'metadata' }));
+  assert.ok(current.view === 'metadata');
+  assert.deepEqual(current.annotations.filter(annotation => annotation.id === id).map(annotation => annotation.value), [{ kind: 'note', value: 'Committed exactly once' }]);
+  const historical = data(await service.execute('function_get', { ...scope, function_id: fn.id, view: 'metadata' }));
+  assert.ok(historical.view === 'metadata'); assert.equal(historical.annotations.some(annotation => annotation.id === id), false);
+  const closed = data(await service.execute('project_close', { ...scope, revision: scope.revision + 1 }));
+  assert.equal(closed.persisted_revision, scope.revision + 1);
 });
 
 for (const [file, fragment] of [['objc-cxx.dylib', 'fixture::bar'], ['metadata.dll', 'fixture::bar'], ['swift.dylib', 'FixtureMetadata.metadataSum']] as const) test(`real child metadata ${file}: native and decorated names remain searchable`, { timeout: 60000 }, async t => {
