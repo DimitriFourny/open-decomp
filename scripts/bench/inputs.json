@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "reviewedOn": "2026-10-16",
+  "purpose": "Developer-only external inputs for the existing pipeline benchmark, not bundled application fixtures or execution targets. SQLite adds moderate-sized real programs; it does not replace the retained Node limit/failure evidence.",
+  "preparation": {
+    "command": "node --import tsx scripts/bench/fetch-inputs.ts",
+    "workingDirectory": "repository root",
+    "runtime": "Node.js 24 with the repository development dependencies installed (tsx); no additional dependency",
+    "hosts": ["macOS arm64", "Windows x86-64"],
+    "macosExtractor": { "executable": "/usr/bin/unzip", "arguments": ["-p", "<verified-archive-absolute-path>", "<pinned-member>"] },
+    "windowsExtractor": { "executable": "%SystemRoot%\\System32\\tar.exe", "arguments": ["-xOf", "<verified-archive-absolute-path>", "<pinned-member>"], "prerequisite": "Windows inbox bsdtar with ZIP support (current Windows 10/11); SystemRoot must identify the Windows installation." },
+    "bounds": { "downloadDeadlineMsPerArchive": 120000, "extractionDeadlineMsPerArchive": 30000, "maximumArchiveBytes": 8388608, "maximumBinaryBytes": 8388608, "redirects": "rejected", "retries": 0 },
+    "behavior": "Uses only these reviewed pins, verifies exact archive size/SHA3-256/SHA256 before extraction, extracts only the named sqlite3 member to bounded stdout, verifies exact binary size/SHA256 and format/ISA headers, and publishes under ignored .local/benchmark-inputs. Existing cached archives must match pins or setup fails explicitly. Never runs downloaded programs, changes executable permissions, or removes quarantine attributes. Both target formats are prepared on either supported host.",
+    "benchmarkArguments": ["--large-macho", ".local/benchmark-inputs/sqlite-3.54.0/macos-arm64/sqlite3", "--large-pe", ".local/benchmark-inputs/sqlite-3.54.0/windows-x64/sqlite3.exe"],
+    "benchmarkCommand": "node dist/scripts/bench/pipeline.js --fixtures fixtures/bin --large-macho .local/benchmark-inputs/sqlite-3.54.0/macos-arm64/sqlite3 --large-pe .local/benchmark-inputs/sqlite-3.54.0/windows-x64/sqlite3.exe",
+    "measurementStatus": "Input preparation and metadata inspection only; no SQLite product benchmark or successful-stage result is claimed here."
+  },
+  "provenance": {
+    "publisher": "SQLite project",
+    "version": "3.54.0",
+    "releaseDate": "2026-10-09",
+    "downloadPage": "https://sqlite.org/download.html",
+    "downloadMetadata": "Raw HTML comment headed 'Download product data for scripts to read', CSV columns PRODUCT,VERSION,RELATIVE-URL,SIZE-IN-BYTES,SHA3-HASH. URLs below resolve the exact published relative URLs against https://sqlite.org/; setup does not discover latest releases at runtime.",
+    "releasePage": "https://sqlite.org/releaselog/3_54_0.html",
+    "publishedSourceId": "2026-10-09 15:46:58 be8d059e9a49089ab2dce5ed26dd87aaf598fdc5fbe0b107c0dd758464bcd5e3",
+    "sourceIdScope": "Published release identity, not a claim that the downloaded executables were rebuilt or their embedded source IDs executed/verified.",
+    "licensePage": "https://sqlite.org/copyright.html",
+    "licenseFacts": [
+      "SQLite authors dedicate SQLite code and documentation to the public domain; the primary copyright page permits copying, modification, publication, use, compilation, sale and distribution of original SQLite source or compiled binaries for any purpose.",
+      "The copyright page distinguishes deliverable SQLite code/documentation from build scripts such as autoconf-generated configure scripts, which can have other licenses.",
+      "The public-domain dedication is not a purchased warranty of title; the publisher offers a separate warranty where organizational or jurisdictional requirements need one.",
+      "This records SQLite's stated provenance, not an independent license audit of every linked platform runtime or other tool in the archive. Only sqlite3/sqlite3.exe is selected; no external binary is included in the npm/application artifact.",
+      "The download page identifies the macOS binaries as unsigned. Its instructions for executing them/removing quarantine are intentionally not followed by this static-analysis preparation."
+    ]
+  },
+  "inputs": [
+    {
+      "id": "sqlite-3.54.0-macos-arm64",
+      "archive": {
+        "url": "https://sqlite.org/2026/sqlite-tools-osx-arm64-3540000.zip",
+        "filename": "sqlite-tools-osx-arm64-3540000.zip",
+        "sizeBytes": 4537513,
+        "sha3_256": "272ee0d6cdc2a28f258d65d37fbb0d184b556e5dd8db684b82c49dda87e0a2c3",
+        "sha256": "e2683856665411665bb2a7979ba3ae52613530dff039cad584aed97cefc8ada9",
+        "observedMembers": ["sqldiff", "sqlite3", "sqlite3_analyzer", "sqlite3_rsync"]
+      },
+      "binary": {
+        "member": "sqlite3",
+        "path": ".local/benchmark-inputs/sqlite-3.54.0/macos-arm64/sqlite3",
+        "sizeBytes": 2069752,
+        "sha256": "8b694b0185a1d1130ccaeefa4e9969566788fb8460d478d21caee384327a9409",
+        "format": "macho",
+        "architecture": "arm64",
+        "headerFacts": { "magicLE": "0xfeedfacf", "cpuType": "0x0100000c", "fileType": "0x2" },
+        "fileIdentification": "Mach-O 64-bit executable arm64"
+      }
+    },
+    {
+      "id": "sqlite-3.54.0-windows-x64",
+      "archive": {
+        "url": "https://sqlite.org/2026/sqlite-tools-win-x64-3540000.zip",
+        "filename": "sqlite-tools-win-x64-3540000.zip",
+        "sizeBytes": 6982216,
+        "sha3_256": "8d1ccff873455c7f83c6e03ee253e81406d0e432ca9e7247ed6183929a824b33",
+        "sha256": "63cb06e952a83fd140139b008ed5b47496608161c62f8cd17bc96e8beb1de029",
+        "observedMembers": ["sqldiff.exe", "sqlite3_analyzer.exe", "sqlite3_rsync.exe", "sqlite3.exe"]
+      },
+      "binary": {
+        "member": "sqlite3.exe",
+        "path": ".local/benchmark-inputs/sqlite-3.54.0/windows-x64/sqlite3.exe",
+        "sizeBytes": 4295168,
+        "sha256": "1d4dbbc37396c5de744e1a732540b8bc83cd89888f47e86365b726e5a813c5e7",
+        "format": "pe",
+        "architecture": "x86_64",
+        "headerFacts": { "dosSignature": "MZ", "peSignatureHex": "50450000", "coffMachine": "0x8664", "optionalHeaderMagic": "0x20b" },
+        "fileIdentification": "PE32+ executable (console) x86-64, for MS Windows"
+      }
+    }
+  ],
+  "inspection": {
+    "observedDownloadCommands": [
+      "curl --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 120 --max-filesize 4537513 --output .local/benchmark-inputs/archives/sqlite-tools-osx-arm64-3540000.zip https://sqlite.org/2026/sqlite-tools-osx-arm64-3540000.zip",
+      "curl --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 120 --max-filesize 6982216 --output .local/benchmark-inputs/archives/sqlite-tools-win-x64-3540000.zip https://sqlite.org/2026/sqlite-tools-win-x64-3540000.zip"
+    ],
+    "archiveVerificationCommand": "openssl dgst -sha3-256 .local/benchmark-inputs/archives/sqlite-tools-osx-arm64-3540000.zip .local/benchmark-inputs/archives/sqlite-tools-win-x64-3540000.zip",
+    "extractionCommands": [
+      "/usr/bin/unzip -p .local/benchmark-inputs/archives/sqlite-tools-osx-arm64-3540000.zip sqlite3",
+      "/usr/bin/unzip -p .local/benchmark-inputs/archives/sqlite-tools-win-x64-3540000.zip sqlite3.exe"
+    ],
+    "extractionOutput": "Captured as bytes and written only to the recorded binary paths; no target execution.",
+    "identityCommand": "file .local/benchmark-inputs/sqlite-3.54.0/macos-arm64/sqlite3 .local/benchmark-inputs/sqlite-3.54.0/windows-x64/sqlite3.exe",
+    "hashMethod": "SHA3-256 independently matched using OpenSSL and Python hashlib; archive/binary SHA256 and exact byte lengths recorded from Python hashlib and binary reads. Header fields were read as little-endian integers; no application loader or target code was run."
+  },
+  "retainedNodeBaseline": {
+    "runtimeVersion": "24.22.0",
+    "evidence": ".local/performance/macos-pipeline-attempt-1.jsonl",
+    "policy": "Keep these actual oversize/failure observations intact; SQLite is an additional workload, not a fix or replacement for the Node evidence. Do not loosen parser/global limits to make Node pass.",
+    "macho": {
+      "sizeBytes": 122503472,
+      "sha256": "b468fb9c67427c9d3aec07ee1105e63020923a631a9a2a00beb71a7ba3768bfd",
+      "observedFailure": "Default and raised import profiles fail resource_limit: Symbol count exceeds 100,000."
+    },
+    "pe": {
+      "path": ".local/benchmark-inputs/windows/node.exe",
+      "sizeBytes": 93882184,
+      "sha256": "ba93f9a70bd86fce3ebbb39ec758501458453467aa92a34a0a3602d1e3fc2b9c",
+      "observedFailure": "Default import exhausts work at 1,000,001/1,000,000; raised import fails malformed_image: PE reference is outside a suitable mapped region (485.142084 ms), with no image published and revision 0. This is the pre-fix baseline, not a claim about current loader behavior."
+    }
+  }
+}

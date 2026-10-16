@@ -379,7 +379,8 @@ class Parser extends Reader {
         switch (op) {
           case 0: case 2: slots = 1; break;
           case 1: if (info > 1) this.fail('Invalid UWOP_ALLOC_LARGE OpInfo', code); slots = info === 0 ? 2 : 3; break;
-          case 3: if (info !== 0 || !(frame & 15)) this.fail('Invalid UWOP_SET_FPREG', code); slots = 1; break;
+          // SET_FPREG takes its register/offset from the header; OpInfo is reserved and ignored by Windows-compatible unwinders.
+          case 3: if (!(frame & 15)) this.fail('Invalid UWOP_SET_FPREG', code); slots = 1; break;
           case 4: case 8: slots = 2; break;
           case 5: case 9: slots = 3; break;
           case 10: if (info > 1) this.fail('Invalid UWOP_PUSH_MACHFRAME OpInfo', code); slots = 1; break;
@@ -388,7 +389,11 @@ class Parser extends Reader {
         if (slot + slots > count) this.fail('UNWIND_CODE operand slots exceed CountOfCodes', code);
         slot += slots;
       }
-      const handler = flags & 3 ? this.memory(BigInt(this.u32(p + BigInt(tail))), 1n, true) : null;
+      // The handler RVA is metadata, not proof of statically executable code.
+      const handler = flags & 3 ? this.memory(BigInt(this.u32(p + BigInt(tail))), 1n) : null;
+      if (handler && !this.mappings.some(m => handler.value >= m.va && handler.value < m.va + m.file_size && m.permissions.includes('execute'))) {
+        this.unsupported('unwind:handler-code-unavailable', 'Unwind handler reference is retained, but its target lacks executable file backing; no handler code is inferred', p + BigInt(tail));
+      }
       const evidence_ids = [...evidence, ...this.fact(p, BigInt(length), 'AMD64 UNWIND_INFO v1; language-specific handler payload not interpreted')];
       this.hints.push({ kind: 'unwind', range: this.range('va', this.base + begin, end - begin), encoding: 'PE_AMD64_UNWIND_INFO_V1', record: this.range('file', p, BigInt(length)), handler, evidence_ids });
       if (handler) this.unsupported('unwind:language-handler', 'Language-specific exception handler payload is not interpreted', p + BigInt(tail));
@@ -501,7 +506,7 @@ class Parser extends Reader {
 
 export class PELoader implements Loader {
   readonly name = 'open-decomp-pe';
-  readonly version = '1.0.0';
+  readonly version = '1.0.1';
   readonly format = 'pe' as const;
   inspect(bytes: ImmutableBytes, imageId: string, context: OperationContext): { readonly slices: readonly ImageSlice[]; readonly diagnostics: readonly Diagnostic[] } {
     const reader = new Reader(bytes, imageId, context), h = reader.basic();

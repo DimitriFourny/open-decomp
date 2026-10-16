@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { z } from 'zod';
 import {
-  AddressMap, ImmutableBytes, contentHash, createOperationContext, imageIdentity, sliceIdentity,
+  AddressMap, ImmutableBytes, OperationError, contentHash, createOperationContext, imageIdentity, sliceIdentity,
   type AddressRange, type Arm64Payload, type DecodedInstruction, type LoadedImage, type LoaderHint,
 } from '../../../src/core/index.js';
 import { Arm64Decoder } from '../../../src/decoders/arm64/index.js';
@@ -240,6 +240,40 @@ test('trailing bytes, disconnected regions, zero-fill, known data and instructio
   const limited = decoder.decode({ image: input, regions: [{ start: { image_id: input.id, space: 'file', value: 8n }, size: 12n }], mode: 'a64', features: [] }, createOperationContext({ budget: { instructions: 1 } }));
   assert.equal(limited.instructions.length, 1); assert.equal(limited.gaps[0]?.reason, 'budget'); assert.equal(limited.gaps[0]?.range.size, 8n);
   decoder.dispose();
+});
+
+test('prepared data boundaries survive failed preparation, changing windows and same-byte snapshots', () => {
+  const base = image(words([0xd65f03c0, 0xd65f03c0, 0xd65f03c0]), 0x1000n, 8n);
+  const entry = { image_id: base.id, space: 'va' as const, value: 0x1000n };
+  const input: LoadedImage = { ...base, hints: [
+    ...Array.from({ length: 128 }, () => ({ kind: 'function' as const, address: entry, size: null, evidence_ids: [] })),
+    { kind: 'data', range: { start: { ...entry, space: 'file', value: 12n }, size: 4n }, encoding: 'literal_pool', evidence_ids: [] },
+  ] };
+  const request = { image: input, mode: 'a64' as const, features: [], regions: [{ start: entry, size: 4n }] };
+  const decoder = new Arm64Decoder();
+  try {
+    assert.throws(() => decoder.decode(request, createOperationContext({ budget: { work: 16 } })),
+      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit');
+    const first = decoder.decode(request, createOperationContext({ budget: { work: 1_000 } }));
+    assert.equal(first.instructions[0]?.flow.kind, 'return');
+    const whole = { ...request, regions: [{ start: entry, size: 12n }] };
+    const result = decoder.decode(whole, createOperationContext({ budget: { work: 1_000 } }));
+    assert.deepEqual(result.instructions.map(instruction => instruction.address.value), [0x1000n, 0x1008n]);
+    assert.deepEqual(result.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]), [['data', 0x1004n, 4n]]);
+    assert.equal(result.coverage.state, 'partial');
+    assert.deepEqual(result.instructions[0], first.instructions[0]);
+    const limited = decoder.decode(whole, createOperationContext({ budget: { instructions: 1 } }));
+    assert.ok(limited.gaps.some(gap => gap.reason === 'budget'));
+    assert.equal(limited.instructions.length, 1);
+    const controller = new AbortController(); controller.abort();
+    assert.throws(() => decoder.decode(whole, createOperationContext({ signal: controller.signal })),
+      (error: unknown) => error instanceof OperationError && error.code === 'cancelled');
+    assert.throws(() => decoder.decode(whole, createOperationContext({ budget: { work: 1 } })),
+      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit');
+    const other = decoder.decode({ ...whole, image: { ...input, hints: [] } }, createOperationContext());
+    assert.equal(other.coverage.state, 'complete');
+    assert.deepEqual(other.instructions.map(instruction => instruction.address.value), [0x1000n, 0x1004n, 0x1008n]);
+  } finally { decoder.dispose(); }
 });
 
 test('feature expressions remain atomic at the API and preserve canonical SVE aliases', () => {

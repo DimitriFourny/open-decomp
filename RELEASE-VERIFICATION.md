@@ -2,11 +2,13 @@
 
 ## Current status
 
-T29's macOS candidate passes strict typechecking, **669/669 tests**, compilation and the compiled release scenarios under **Node 24.22.0**. The current Windows snapshot has not yet completed verification; T29 remains in progress. T30 performance measurements and T31 clean-artifact installation/licensing documentation remain separate release gates. This is not a declaration that A01–A12 are complete.
+The current macOS implementation passes strict typechecking, **695/695 tests**, compilation and all **24 compiled release scenarios** under **Node 24.22.0**. The frozen Windows snapshot has not yet completed verification; T29 remains in progress. T30 Windows performance measurements and T31 clean-artifact installation/licensing documentation remain separate release gates. This is not a declaration that A01–A12 are complete.
 
-macOS host: Darwin 27.0.0, arm64, Mac18,5, Apple M6, 12 logical CPUs, 16 GiB RAM. The full regression run reported 66,380.975292 ms; this is verification duration, not a performance SLA.
+macOS host: Darwin 27.0.0, arm64, Mac18,5, Apple M6, 12 logical CPUs, 16 GiB RAM. The latest full regression run reported 67,115.297958 ms; this is verification duration, not a performance SLA.
 
 Windows environment: isolated Windows 10 Enterprise LTSC 19044 x86-64, QEMU TCG, one virtual CPU, 4 GiB RAM. No guest network, shared host filesystem, credentials or target execution. An older frozen commit, `f059a4403a0d800bff071a51c5dfa9dc3793ed57`, passed 589 tests; that result does **not** cover the current candidate. Windows POSIX-signal cases are intentionally inapplicable; EOF, backpressure, worker shutdown and persistence still require execution.
+
+Frozen Windows candidate `c9ffe777e32a7bb8bb9afa5eedbc0008b35ca347` passed compilation, 21 x86 decoder cases and actual compiled decoding of both target formats. Its full check remains under observation. The first host observer reached its 90-minute deadline without a terminal result; a second observer follows the same run, not a rerun. That expiry is neither a product failure nor a pass. Later macOS fixes are not covered by this older Windows snapshot.
 
 ## Reproducing the source-build acceptance
 
@@ -51,3 +53,6 @@ The workflow records whether cancellation wins or the operation already finishes
 The active sibling-API collector and its redundant generated-C files were removed. `fixtures/baseline/arm64.json` remains frozen historical evidence; current fixture generation, independent inspection, source oracles and SQLite schema migrations remain maintained. Fixture recipe hashes and historical instructions were updated. No sibling checkout is required by the current tests, compiled server or release harness.
 
 The added universal-image scenario initially returned `partial/incomplete_index` solely because the **nonselected** Intel slice was unsupported. Mach-O loader 1.0.2 now forms selected-slice capabilities before adding container diagnostics. The ARM64 import/index is complete, the unsupported Intel slice and warning remain visible, and genuine selected metadata loss still yields partial indexes. The compiled scenario and a persistent-service regression both pass after the correction.
+
+Large-input validation then exposed two additional correctness problems. Schema 4 now stores bounded ordered image facts instead of forcing all native metadata into one 16 MiB record; historical migration, replacement, corruption and rollback cases pass. Mach-O loader 1.0.3 preserves explicit header/load-command data ownership and requires section membership for function-symbol classification. The previous apparent SQLite ARM success at `__mh_execute_header` is excluded from useful-function evidence; actual complete discovered code bodies now decompile. PE SQLite also imports and emits selected code under a bounded partial-index profile. The full 24-scenario compiled suite passed again after both corrections.
+

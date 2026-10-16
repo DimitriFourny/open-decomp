@@ -192,7 +192,8 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
           context.checkpoint(0);
           const completed: Job = { ...job, state: 'completed', progress: { phase: 'complete', completed: 1, total: 1 } };
           const mutation = db.transaction(db.snapshot().revision, tx => { tx.putImage(prepared?.image ?? image); prepared?.publish(tx); db.saveJob(completed); });
-          if (mutation.state !== 'committed') fail('internal_error', 'Loaded image metadata transaction did not commit');
+          if (mutation.state === 'conflict') fail('stale_revision', 'Image publication revision changed');
+          if (mutation.state === 'rejected') throw new OperationError(mutation.diagnostics[0] ?? { code: 'internal_error', severity: 'error', message: 'Image publication was rejected without a diagnostic', evidence_ids: [] });
           job = completed;
           await send({ kind: 'progress', id: job.id, job: encodeJob(job) });
           observer?.phase?.('published', job);

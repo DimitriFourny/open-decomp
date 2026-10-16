@@ -53,14 +53,8 @@ function vaRegions(image: LoadedImage, regions: readonly AddressRange[], context
   }
   return { ranges: merged, gaps };
 }
-function segments(image: LoadedImage, ranges: readonly AddressRange[], context: OperationContext): Segment[] {
+function segments(image: LoadedImage, ranges: readonly AddressRange[], data: readonly AddressRange[], context: OperationContext): Segment[] {
   const result: Segment[] = [];
-  const data = image.hints.flatMap(hint => {
-    context.checkpoint(1);
-    if (hint.kind !== 'data') return [];
-    const translated = vaRegions(image, [hint.range], context);
-    return translated.ranges;
-  });
   for (const range of ranges) {
     for (const span of image.address_map.spans(range.start, range.size)) {
       context.checkpoint(1);
@@ -138,6 +132,9 @@ export class Arm64Decoder implements Decoder {
   readonly version = VERSION;
   readonly architecture = 'arm64' as const;
   #disposed = false;
+  // LoadedImage metadata is readonly. Key by the snapshot object, not the image
+  // ID: another snapshot of the same bytes can carry different data boundaries.
+  #dataRanges = new WeakMap<LoadedImage, readonly AddressRange[]>();
 
   decode(request: DecodeRequest, context: OperationContext): DecodeResult {
     if (this.#disposed) throw new Error('ARM64 decoder is disposed');
@@ -147,7 +144,19 @@ export class Arm64Decoder implements Decoder {
     const normalized = vaRegions(request.image, request.regions, context);
     const instructions: DecodedInstruction[] = [];
     const gaps = normalized.gaps;
-    const parts = segments(request.image, normalized.ranges, context);
+    let data = this.#dataRanges.get(request.image);
+    if (data === undefined) {
+      const normalizedData: AddressRange[] = [];
+      for (const hint of request.image.hints) {
+        context.checkpoint(1);
+        if (hint.kind === 'data') normalizedData.push(...vaRegions(request.image, [hint.range], context).ranges);
+      }
+      // Failed/cancelled normalization never installs a partially prepared entry.
+      context.checkpoint(0);
+      this.#dataRanges.set(request.image, normalizedData);
+      data = normalizedData;
+    }
+    const parts = segments(request.image, normalized.ranges, data, context);
     let carriedUntil = 0n;
     for (let partIndex = 0; partIndex < parts.length; partIndex++) {
       const part = parts[partIndex]!;
@@ -219,5 +228,5 @@ export class Arm64Decoder implements Decoder {
     return split === -1 ? { mnemonic: text, operands: '' } : { mnemonic: text.slice(0, split), operands: text.slice(split + 1) };
   }
 
-  dispose(): void { this.#disposed = true; }
+  dispose(): void { this.#disposed = true; this.#dataRanges = new WeakMap(); }
 }

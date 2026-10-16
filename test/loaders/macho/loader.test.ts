@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { createOperationContext, contentHash, imageIdentity, ImmutableBytes, OperationError, type LoadedImage } from '../../../src/core/index.js';
 import { MachOLoader, MachOError } from '../../../src/loaders/macho/index.js';
+import { Arm64Decoder } from '../../../src/decoders/arm64/index.js';
+import { discoverFunctions } from '../../../src/analysis/discovery/index.js';
 
 const loader = new MachOLoader();
 const fixture = readFileSync(new URL('../../../fixtures/bin/macho-arm64-symbols', import.meta.url));
@@ -39,6 +41,130 @@ function fat(thin: Buffer, fat64 = false, little = false): Buffer {
   }
   return bytes;
 }
+
+function symbolImage(symbols: readonly (readonly [string, number])[], extra: readonly Buffer[] = []): Buffer {
+  const table = command(2, 24), strings = Buffer.from(`\0${symbols.map(([name]) => name).join('\0')}\0`);
+  table.writeUInt32LE(2048, 8); table.writeUInt32LE(symbols.length, 12); table.writeUInt32LE(3072, 16); table.writeUInt32LE(strings.length, 20);
+  const bytes = image([table, ...extra]); strings.copy(bytes, 3072);
+  let stringOffset = 1;
+  for (const [index, [name, offset]] of symbols.entries()) {
+    const p = 2048 + index * 16;
+    bytes.writeUInt32LE(stringOffset, p); bytes[p + 4] = 0x0f; bytes[p + 5] = 1; bytes.writeBigUInt64LE(0x100000000n + BigInt(offset), p + 8);
+    stringOffset += Buffer.byteLength(name) + 1;
+  }
+  return bytes;
+}
+function discover(loaded: LoadedImage) {
+  const decoder = new Arm64Decoder();
+  try { return discoverFunctions({ image: loaded, decoder, revision: 0 }, createOperationContext()); }
+  finally { decoder.dispose(); }
+}
+
+test('section-symbol classification requires membership, including exact ends and stub sections', () => {
+  for (const [flags, kind] of [[0x80000400, 'function'], [8, 'function'], [0, 'object']] as const) {
+    const bytes = symbolImage([['_before', 508], ['_first', 512], ['_last', 764], ['_after', 768]]);
+    bytes.writeUInt32LE(flags, 32 + 72 + 64);
+    const loaded = load(bytes), section = loaded.sections.find(record => record.kind === 'section')!;
+    assert.deepEqual(loaded.symbols.map(symbol => symbol.kind), ['unknown', kind, kind, 'unknown']);
+    assert.deepEqual(loaded.exports.map(record => record.address?.value), [508n, 512n, 764n, 768n].map(offset => loaded.image_base + offset));
+    for (const symbol of loaded.symbols) {
+      assert.ok(section.evidence_ids.every(id => symbol.evidence_ids.includes(id)));
+      assert.ok(symbol.evidence_ids.every(id => loaded.evidence.some(proof => proof.id === id)));
+    }
+    bytes.writeBigUInt64LE(0n, 32 + 72 + 40);
+    assert.ok(load(bytes).symbols.every(symbol => symbol.kind === 'unknown'));
+  }
+});
+
+for (const universal of [false, true]) test(`native headers defeat symbol/export code guesses without hiding metadata (${universal ? 'universal' : 'thin'})`, () => {
+  const name = Buffer.from('_trie_metadata\0');
+  const trie = Buffer.from([0, 1, ...name, 3 + name.length, 2, 0, 64, 0]);
+  const thin = symbolImage([['_image_record', 0], ['_command_record', 32], ['_code', 512], ['_alias', 512]], [linkedit(0x80000033, 1024, trie.length)]);
+  trie.copy(thin, 1024);
+  const bytes = universal ? fat(thin) : thin;
+  const inspected = loader.inspect(new ImmutableBytes(bytes), imageIdentity(contentHash(bytes)), createOperationContext());
+  for (const slice of inspected.slices) {
+    const loaded = load(bytes, slice.id), commandEnd = BigInt(32 + thin.readUInt32LE(20));
+    const metadata = loaded.hints.find(hint => hint.kind === 'data' && hint.range.start.space === 'file');
+    assert.ok(metadata?.kind === 'data');
+    assert.deepEqual(metadata.range, { start: { image_id: loaded.id, space: 'file', value: slice.offset }, size: commandEnd });
+    assert.equal(loaded.headers.filter(header => header.kind === 'load_command').length, thin.readUInt32LE(16));
+    for (const id of metadata.evidence_ids) {
+      const proof = loaded.evidence.find(record => record.id === id);
+      assert.ok(proof?.origin.kind === 'binary');
+      assert.deepEqual(proof.origin.range, metadata.range);
+    }
+    assert.deepEqual(loaded.symbols.map(symbol => [symbol.original_name, symbol.address?.value, symbol.kind]), [
+      ['_image_record', loaded.image_base, 'unknown'], ['_command_record', loaded.image_base + 32n, 'unknown'],
+      ['_code', loaded.image_base + 512n, 'function'], ['_alias', loaded.image_base + 512n, 'function'],
+    ]);
+    assert.deepEqual(loaded.exports.map(record => [record.original_name, record.address?.value]), [
+      ['_image_record', loaded.image_base], ['_command_record', loaded.image_base + 32n],
+      ['_code', loaded.image_base + 512n], ['_alias', loaded.image_base + 512n], ['_trie_metadata', loaded.image_base + 64n],
+    ]);
+    assert.ok(loaded.exports.every(record => record.evidence_ids.length > 0 && record.evidence_ids.every(id => loaded.evidence.some(proof => proof.id === id))));
+    const result = discover(loaded);
+    assert.equal(result.graphs.length, 1);
+    assert.equal(result.graphs[0]?.function.entry.value, loaded.image_base + 512n);
+    assert.equal(result.graphs[0]?.function.boundary, 'established');
+    assert.deepEqual(result.graphs[0]?.instructions.map(instruction => instruction.flow.kind), ['return']);
+    const graphProofs = result.graphs[0]!.function.evidence_ids.map(id => result.evidence.find(proof => proof.id === id)!);
+    for (const symbol of loaded.symbols.filter(record => record.kind === 'function')) {
+      assert.ok(graphProofs.some(proof => symbol.evidence_ids.every(id => proof.derived_from.includes(id))));
+    }
+    const decoder = new Arm64Decoder();
+    try {
+      const decoded = decoder.decode({ image: loaded, mode: 'a64', features: loaded.target.features, regions: [
+        { start: { image_id: loaded.id, space: 'va', value: loaded.image_base }, size: commandEnd },
+        { start: { image_id: loaded.id, space: 'va', value: loaded.image_base + 512n }, size: 4n },
+      ] }, createOperationContext());
+      assert.deepEqual(decoded.instructions.map(instruction => instruction.address.value), [loaded.image_base + 512n]);
+      assert.equal(decoded.instructions[0]?.bytes.start.value, slice.offset + 512n);
+      assert.ok(decoded.gaps.length > 0 && decoded.gaps.every(gap => gap.reason === 'data'));
+      const padding = decoder.decode({ image: loaded, mode: 'a64', features: loaded.target.features,
+        regions: [{ start: { image_id: loaded.id, space: 'file', value: slice.offset + commandEnd }, size: 4n }] }, createOperationContext());
+      assert.deepEqual(padding.instructions.map(instruction => instruction.address.value), [loaded.image_base + commandEnd]);
+    } finally { decoder.dispose(); }
+  }
+});
+
+test('header-overlapping code sections, explicit entries and function starts retain honest conflicts', () => {
+  const main = command(0x80000028, 24);
+  const bytes = symbolImage([['_claimed_header', 0], ['_valid_code', 512]], [main, linkedit(38, 1024, 2)]);
+  bytes.writeBigUInt64LE(0x100000000n, 32 + 72 + 32); bytes.writeBigUInt64LE(768n, 32 + 72 + 40); bytes.writeUInt32LE(0, 32 + 72 + 48);
+  bytes.set([32, 0], 1024);
+  const loaded = load(bytes), result = discover(loaded);
+  assert.equal(loaded.symbols[0]?.kind, 'function'); // Preserve the contradictory native section claim.
+  assert.equal(loaded.entry_points[0]?.value, loaded.image_base);
+  assert.ok(loaded.hints.some(hint => hint.kind === 'function' && hint.address.value === loaded.image_base + 32n));
+  for (const offset of [0n, 32n]) {
+    const graph = result.graphs.find(record => record.function.entry.value === loaded.image_base + offset);
+    assert.ok(graph);
+    assert.equal(graph.function.boundary, 'conflicting');
+    assert.equal(graph.coverage.state, 'partial');
+    assert.deepEqual(graph.instructions, []);
+    assert.equal(graph.gaps[0]?.reason, 'data');
+    assert.ok(graph.diagnostics.some(diagnostic => diagnostic.code === 'conflicting_evidence' && diagnostic.evidence_ids.some(id => loaded.hints.some(hint => hint.kind === 'data' && hint.evidence_ids.includes(id)))));
+  }
+  const valid = result.graphs.find(graph => graph.function.entry.value === loaded.image_base + 512n);
+  assert.equal(valid?.function.boundary, 'established');
+  assert.deepEqual(valid?.instructions.map(instruction => instruction.flow.kind), ['return']);
+});
+
+test('native data-in-code conflicts survive header ownership while adjacent entries remain code', () => {
+  const main = command(0x80000028, 24); main.writeBigUInt64LE(516n, 8);
+  const bytes = symbolImage([['_literal_claim', 512], ['_entry_code', 516]], [main, linkedit(38, 1024, 3), linkedit(41, 1040, 8)]);
+  bytes.set([0x80, 4, 0], 1024); bytes.writeUInt32LE(512, 1040); bytes.writeUInt16LE(4, 1044); bytes.writeUInt16LE(1, 1046);
+  bytes.writeUInt32LE(0xd65f03c0, 516);
+  const loaded = load(bytes), result = discover(loaded);
+  const conflict = result.graphs.find(graph => graph.function.entry.value === loaded.image_base + 512n);
+  assert.equal(conflict?.function.boundary, 'conflicting');
+  assert.deepEqual(conflict?.instructions, []);
+  assert.equal(conflict?.gaps[0]?.reason, 'data');
+  const entry = result.graphs.find(graph => graph.function.entry.value === loaded.entry_points[0]?.value);
+  assert.equal(entry?.function.boundary, 'established');
+  assert.deepEqual(entry?.instructions.map(instruction => instruction.flow.kind), ['return']);
+});
 
 for (const path of ['macho-arm64-symbols', 'macho-arm64-stripped', 'libcorpus-arm64-symbols.dylib', 'libcorpus-arm64-stripped.dylib']) test(`real ${path} imports through Loader.load`, () => {
   const loaded = load(readFileSync(new URL(`../../../fixtures/bin/${path}`, import.meta.url)));

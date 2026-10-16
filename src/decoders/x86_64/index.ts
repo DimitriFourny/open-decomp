@@ -27,19 +27,29 @@ function virtualRegions(image: LoadedImage, regions: readonly AddressRange[], co
       context.checkpoint(1);
       const source: Address = { ...region.start, value: cursor };
       const translated = image.address_map.translate(source, 'va');
-      const mapping = image.mappings.find((m) => cursor >= m.file_offset && cursor < m.file_offset + m.file_size);
+      const mapping = image.mappings.find((m) => {
+        context.checkpoint(1);
+        return cursor >= m.file_offset && cursor < m.file_offset + m.file_size;
+      });
       let boundary = end;
       if (mapping) boundary = mapping.file_offset + mapping.file_size < end ? mapping.file_offset + mapping.file_size : end;
-      else for (const m of image.mappings) if (m.file_offset > cursor && m.file_offset < boundary) boundary = m.file_offset;
+      else for (const m of image.mappings) {
+        context.checkpoint(1);
+        if (m.file_offset > cursor && m.file_offset < boundary) boundary = m.file_offset;
+      }
       const size = boundary - cursor;
       if (translated.kind === 'mapped' && translated.address.space === 'va') ranges.push({ start: translated.address, size });
       else holes.push({ range: { start: source, size }, reason: 'unmapped', diagnostics: [diagnostic('unmapped', 'File region has no static virtual address', source)] });
       cursor = boundary;
     }
   }
-  ranges.sort((a, b) => a.start.value < b.start.value ? -1 : a.start.value > b.start.value ? 1 : 0);
+  ranges.sort((a, b) => {
+    context.checkpoint(1);
+    return a.start.value < b.start.value ? -1 : a.start.value > b.start.value ? 1 : 0;
+  });
   const merged: AddressRange[] = [];
   for (const range of ranges) {
+    context.checkpoint(1);
     if (range.size === 0n) continue;
     const last = merged.at(-1);
     if (last && range.start.value <= last.start.value + last.size) {
@@ -49,23 +59,59 @@ function virtualRegions(image: LoadedImage, regions: readonly AddressRange[], co
   }
   return { ranges: merged, holes };
 }
-function parts(image: LoadedImage, range: AddressRange, context: OperationContext): Part[] {
-  const data: AddressRange[] = [];
-  for (const hint of image.hints) if (hint.kind === 'data') {
-    data.push(...virtualRegions(image, [hint.range], context).ranges);
+/** Prepare image-wide data boundaries once, retaining even overlapping hint endpoints. */
+function dataRanges(image: LoadedImage, context: OperationContext): readonly AddressRange[] {
+  const events: { value: bigint; delta: number }[] = [];
+  for (const hint of image.hints) {
+    context.checkpoint(1);
+    if (hint.kind !== 'data') continue;
+    for (const range of virtualRegions(image, [hint.range], context).ranges) {
+      context.checkpoint(1);
+      events.push({ value: range.start.value, delta: 1 }, { value: range.start.value + range.size, delta: -1 });
+    }
   }
+  events.sort((a, b) => {
+    context.checkpoint(1);
+    return a.value < b.value ? -1 : a.value > b.value ? 1 : 0;
+  });
+  const ranges: AddressRange[] = [];
+  let previous: bigint | null = null;
+  let active = 0;
+  for (const event of events) {
+    context.checkpoint(1);
+    if (active > 0 && previous !== null && event.value > previous) {
+      ranges.push({ start: { image_id: image.id, space: 'va', value: previous }, size: event.value - previous });
+    }
+    active += event.delta;
+    previous = event.value;
+  }
+  return ranges;
+}
+function parts(image: LoadedImage, range: AddressRange, data: readonly AddressRange[], context: OperationContext): Part[] {
   const result: Part[] = [];
   for (const span of image.address_map.spans(range.start, range.size)) {
     context.checkpoint(1);
     let cursor = span.range.start.value;
     const end = cursor + span.range.size;
+    // Prepared intervals are ordered and disjoint; skip unrelated image data in O(log n).
+    let low = 0;
+    let high = data.length;
+    while (low < high) {
+      context.checkpoint(1);
+      const middle = low + Math.floor((high - low) / 2);
+      const item = data[middle]!;
+      if (item.start.value + item.size <= cursor) low = middle + 1;
+      else high = middle;
+    }
     while (cursor < end) {
+      context.checkpoint(1);
       let boundary = end;
-      let isData = false;
-      for (const item of data) {
-        const dataEnd = item.start.value + item.size;
-        if (cursor >= item.start.value && cursor < dataEnd) { isData = true; if (dataEnd < boundary) boundary = dataEnd; }
-        else if (item.start.value > cursor && item.start.value < boundary) boundary = item.start.value;
+      const item = data[low];
+      const isData = item !== undefined && cursor >= item.start.value;
+      if (item !== undefined) {
+        const next = isData ? item.start.value + item.size : item.start.value;
+        if (next < boundary) boundary = next;
+        if (isData) low++;
       }
       result.push({ range: { start: { ...range.start, value: cursor }, size: boundary - cursor }, file: span.file_offset === null ? null : span.file_offset + cursor - span.range.start.value,
         reason: isData ? 'data' : span.kind !== 'mapped' ? 'unmapped' : null });
@@ -75,13 +121,17 @@ function parts(image: LoadedImage, range: AddressRange, context: OperationContex
   return result;
 }
 /** Copy at most a bounded window, gathering adjacent VA mappings even with disjoint backing. */
-function windowBytes(image: LoadedImage, run: readonly Part[], offset: bigint, count: number): Uint8Array {
-  const first = run.find((part) => offset >= part.range.start.value && offset < part.range.start.value + part.range.size)!;
+function windowBytes(image: LoadedImage, run: readonly Part[], offset: bigint, count: number, context: OperationContext): Uint8Array {
+  const first = run.find((part) => {
+    context.checkpoint(1);
+    return offset >= part.range.start.value && offset < part.range.start.value + part.range.size;
+  })!;
   const within = offset - first.range.start.value;
   if (within + BigInt(count) <= first.range.size) return image.bytes.read(first.file! + within, count);
   const result = new Uint8Array(count);
   let copied = 0;
   for (const part of run) {
+    context.checkpoint(1);
     const start = offset > part.range.start.value ? offset : part.range.start.value;
     const end = part.range.start.value + part.range.size;
     if (start >= end) continue;
@@ -102,6 +152,9 @@ export class X86Decoder implements Decoder {
   readonly #formatter: Formatter | null;
   readonly #presentation = new WeakMap<DecodedInstruction, { mnemonic: string; operands: string }>();
   #disposed = false;
+  // Metadata is immutable for a LoadedImage snapshot, not for a content identity.
+  // Another snapshot of the same bytes may have different data boundaries.
+  #dataRanges = new WeakMap<LoadedImage, readonly AddressRange[]>();
   constructor(options: X86DecoderOptions = {}) {
     this.#formatter = options.formatting === false ? null : new Formatter(FormatterSyntax.Intel);
   }
@@ -110,6 +163,14 @@ export class X86Decoder implements Decoder {
     if (request.mode !== 'long64' || request.image.target.architecture !== 'x86_64') throw new RangeError('X86Decoder requires an x86-64 long-mode image');
     context.checkpoint(0);
     const normalized = virtualRegions(request.image, request.regions, context);
+    let data = this.#dataRanges.get(request.image);
+    if (data === undefined) {
+      const prepared = dataRanges(request.image, context);
+      // Never publish partially normalized data after failure or cancellation.
+      context.checkpoint(0);
+      this.#dataRanges.set(request.image, prepared);
+      data = prepared;
+    }
     const instructions: DecodedInstruction[] = [];
     const gaps: DecodeGap[] = [...normalized.holes];
     const diagnostics: Diagnostic[] = [];
@@ -119,15 +180,19 @@ export class X86Decoder implements Decoder {
     try {
       factory = new InstructionInfoFactory();
       for (const region of normalized.ranges) {
-        const partition = parts(request.image, region, context);
+        const partition = parts(request.image, region, data, context);
         for (let p = 0; p < partition.length; p++) {
+          context.checkpoint(1);
           const part = partition[p]!;
           if (part.reason !== null) {
             gaps.push({ range: part.range, reason: part.reason, diagnostics: part.reason === 'unmapped' ? [diagnostic('unmapped', 'No backed instruction bytes (hole or virtual zero-fill)', part.range.start)] : [] });
             continue;
           }
           const run: Part[] = [part];
-          while (p + 1 < partition.length && partition[p + 1]!.reason === null) run.push(partition[++p]!);
+          while (p + 1 < partition.length && partition[p + 1]!.reason === null) {
+            context.checkpoint(1);
+            run.push(partition[++p]!);
+          }
           const start = part.range.start;
           const end = run.at(-1)!.range.start.value + run.at(-1)!.range.size;
           let cursor = start.value;
@@ -140,7 +205,7 @@ export class X86Decoder implements Decoder {
             }
             context.checkpoint(1);
             const count = Number(end - cursor < BigInt(WINDOW + 14) ? end - cursor : BigInt(WINDOW + 14));
-            const bytes = windowBytes(request.image, run, cursor, count);
+            const bytes = windowBytes(request.image, run, cursor, count, context);
             const decoder = new IcedDecoder(64, bytes, DecoderOptions.None);
             try {
               decoder.ip = cursor;
@@ -156,11 +221,15 @@ export class X86Decoder implements Decoder {
                   cursor = end;
                   break;
                 }
-                const sourcePart = run.find((item) => address.value >= item.range.start.value && address.value < item.range.start.value + item.range.size)!;
+                const sourcePart = run.find((item) => {
+                  context.checkpoint(1);
+                  return address.value >= item.range.start.value && address.value < item.range.start.value + item.range.size;
+                })!;
                 const fileStart = sourcePart.file! + address.value - sourcePart.range.start.value;
                 let contiguous = true;
                 if (cursor > sourcePart.range.start.value + sourcePart.range.size) {
                   for (const item of run) {
+                    context.checkpoint(1);
                     if (item.range.start.value > address.value && item.range.start.value < cursor &&
                         item.file !== fileStart + item.range.start.value - address.value) contiguous = false;
                   }
@@ -206,6 +275,7 @@ export class X86Decoder implements Decoder {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#dataRanges = new WeakMap();
     this.#formatter?.free();
   }
 }

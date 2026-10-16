@@ -60,6 +60,7 @@ interface Seed {
   established: boolean;
 }
 interface DataRegion { readonly range: AddressRange; readonly evidence_ids: readonly string[] }
+interface ExecutableRange { readonly start: bigint; end: bigint }
 
 /** Discovery is recursive traversal from evidence, never a prologue scan or linear sweep.
  * Complete means the seeded traversal finished, not that every function in the image is known.
@@ -82,6 +83,54 @@ export function discoverFunctions(input: DiscoveryInput, context: OperationConte
   const queue: Address[] = [];
   const queued = new Set<bigint>();
   const data: DataRegion[] = [];
+  // Prefix maxima retain the first overlapping data claim (and its provenance),
+  // including nested claims; a predecessor-only lookup would miss long outer ranges.
+  const dataEnds: bigint[] = [];
+  const dataAfter = (value: bigint): number => {
+    let low = 0, high = dataEnds.length;
+    while (low < high) {
+      context.checkpoint(1);
+      const mid = (low + high) >>> 1;
+      if (dataEnds[mid]! <= value) low = mid + 1; else high = mid;
+    }
+    return low;
+  };
+  const executableRanges: ExecutableRange[] = [];
+  for (const mapping of image.mappings) {
+    context.checkpoint(1);
+    if (mapping.permissions.includes('execute') && mapping.file_size > 0n) executableRanges.push({ start: mapping.va, end: mapping.va + mapping.file_size });
+  }
+  executableRanges.sort((a, b) => {
+    context.checkpoint(1);
+    return a.start < b.start ? -1 : a.start > b.start ? 1 : 0;
+  });
+  let rangeCount = 0;
+  for (const range of executableRanges) {
+    context.checkpoint(1);
+    const previous = executableRanges[rangeCount - 1];
+    if (previous && range.start <= previous.end) {
+      if (range.end > previous.end) previous.end = range.end;
+    } else executableRanges[rangeCount++] = range;
+  }
+  executableRanges.length = rangeCount;
+  const executableEnd = (value: bigint): bigint => {
+    let low = 0, high = executableRanges.length;
+    while (low < high) {
+      context.checkpoint(1);
+      const mid = (low + high) >>> 1;
+      if (executableRanges[mid]!.end <= value) low = mid + 1; else high = mid;
+    }
+    const range = executableRanges[low];
+    return range && range.start <= value ? range.end : value;
+  };
+  // The byte window is lookahead for ONE instruction, not permission to decode
+  // the rest. Delegate all accounting to the original cumulative operation.
+  const decodeContext: OperationContext = {
+    signal: context.signal,
+    budget: { ...context.budget, instructions: 1 },
+    checkpoint: work => context.checkpoint(work),
+    progress: (phase, completed, total) => context.progress(phase, completed, total),
+  };
   const objectAddresses = new Set<bigint>();
   const jumpTables: JumpTableCandidate[] = [];
   const boundaryClaims: DiscoveryBoundaryClaim[] = [];
@@ -113,10 +162,6 @@ export function discoverFunctions(input: DiscoveryInput, context: OperationConte
     }
     return result;
   };
-  const executable = (address: Address): boolean => image.mappings.some(mapping => {
-    context.checkpoint(1);
-    return mapping.permissions.includes('execute') && address.value >= mapping.va && address.value < mapping.va + mapping.file_size;
-  });
   const derive = (rule: string, address: Address, parents: readonly string[]): string => {
     const derived_from = [...new Set(parents)].sort();
     const id = `evidence_${fingerprint([image.selected_slice_id, 'discovery/1', rule, address.value, derived_from])}`;
@@ -130,12 +175,11 @@ export function discoverFunctions(input: DiscoveryInput, context: OperationConte
     context.checkpoint(1);
     const address = normalize(source);
     // Data exports and pointer storage are not callable just because they have names.
-    if (!executable(address) && rule !== 'asserted function' && rule !== 'image entry') return;
-    if ((rule === 'executable export candidate' || rule === 'executable symbol candidate')
-      && (objectAddresses.has(address.value) || data.some(item => {
-        context.checkpoint(1);
-        return address.value >= item.range.start.value && address.value < item.range.start.value + item.range.size;
-      }))) return;
+    if (executableEnd(address.value) <= address.value && rule !== 'asserted function' && rule !== 'image entry') return;
+    if (rule === 'executable export candidate' || rule === 'executable symbol candidate') {
+      const region = data[dataAfter(address.value)];
+      if (objectAddresses.has(address.value) || (region && region.range.start.value <= address.value)) return;
+    }
     const id = derive(rule, address, parents);
     let item = seeds.get(address.value);
     if (!item) {
@@ -150,7 +194,7 @@ export function discoverFunctions(input: DiscoveryInput, context: OperationConte
   for (const hint of image.hints) {
     context.checkpoint(1);
     if (hint.kind === 'data') for (const range of ranges(hint.range)) {
-      data.push({ range, evidence_ids: hint.evidence_ids });
+      if (range.size > 0n) data.push({ range, evidence_ids: hint.evidence_ids });
       if (hint.encoding === 'jump_table') jumpTables.push({ instruction_id: null, address: range.start, range, status: 'candidate', evidence_ids: hint.evidence_ids });
     }
   }
@@ -160,7 +204,16 @@ export function discoverFunctions(input: DiscoveryInput, context: OperationConte
     objectAddresses.add(normalize(symbol.address).value);
     if (symbol.size && symbol.size > 0n) for (const range of ranges({ start: symbol.address, size: symbol.size })) data.push({ range, evidence_ids: symbol.evidence_ids });
   }
-  data.sort((a, b) => a.range.start.value < b.range.start.value ? -1 : a.range.start.value > b.range.start.value ? 1 : 0);
+  data.sort((a, b) => {
+    context.checkpoint(1);
+    return a.range.start.value < b.range.start.value ? -1 : a.range.start.value > b.range.start.value ? 1 : 0;
+  });
+  for (const region of data) {
+    context.checkpoint(1);
+    const end = region.range.start.value + region.range.size;
+    const previous = dataEnds.at(-1) ?? 0n;
+    dataEnds.push(end > previous ? end : previous);
+  }
   for (const entry of image.entry_points) seed(entry, 'image entry', [], true);
   for (const symbol of image.symbols) {
     context.checkpoint(1);
@@ -188,15 +241,14 @@ export function discoverFunctions(input: DiscoveryInput, context: OperationConte
     context.checkpoint(1);
     const address = queue[cursor]!;
     if (decoded.has(address.value) || gaps.has(address.value)) continue;
-    const knownData = data.find(item => {
-      context.checkpoint(1);
-      return address.value >= item.range.start.value && address.value < item.range.start.value + item.range.size;
-    });
+    const nextData = data[dataAfter(address.value)];
+    const knownData = nextData && nextData.range.start.value <= address.value ? nextData : undefined;
     if (knownData) {
       gaps.set(address.value, { range: { start: address, size: knownData.range.start.value + knownData.range.size - address.value }, reason: 'data', diagnostics: [{ code: 'conflicting_evidence', severity: 'warning', message: 'Reachable code target lies in known data', address, evidence_ids: knownData.evidence_ids }] });
       continue;
     }
-    if (!executable(address)) {
+    const backingEnd = executableEnd(address.value);
+    if (backingEnd === address.value) {
       gaps.set(address.value, { range: { start: address, size: 1n }, reason: 'unmapped', diagnostics: [{ code: 'unmapped', severity: 'warning', message: 'Reachable target has no executable file backing', address, evidence_ids: [] }] });
       continue;
     }
@@ -208,13 +260,12 @@ export function discoverFunctions(input: DiscoveryInput, context: OperationConte
     // One bounded decode window; x86 needs up to 15 bytes, ARM exactly four. Never decode
     // across known data or non-executable backing. Adjacent VA mappings may split file backing.
     const maximum = image.target.architecture === 'arm64' ? 4n : 15n;
-    let length = 0n;
-    while (length < maximum && address.value + length < (1n << 64n)) {
-      const at = va(address.value + length);
-      if (!executable(at) || data.some(item => { context.checkpoint(1); return at.value >= item.range.start.value && at.value < item.range.start.value + item.range.size; })) break;
-      length++;
-    }
-    const result = decoder.decode({ image, regions: [{ start: address, size: length }], mode: image.target.architecture === 'arm64' ? 'a64' : 'long64', features: image.target.features }, context);
+    let end = address.value + maximum;
+    if (end > (1n << 64n)) end = 1n << 64n;
+    if (backingEnd < end) end = backingEnd;
+    if (nextData && nextData.range.start.value < end) end = nextData.range.start.value;
+    const length = end - address.value;
+    const result = decoder.decode({ image, regions: [{ start: address, size: length }], mode: image.target.architecture === 'arm64' ? 'a64' : 'long64', features: image.target.features }, decodeContext);
     const instruction = result.instructions.find(item => item.address.value === address.value);
     if (!instruction) {
       const gap = result.gaps.find(item => item.range.start.value === address.value);
@@ -253,7 +304,11 @@ export function discoverFunctions(input: DiscoveryInput, context: OperationConte
   const functionEntries = new Set(seeds.keys());
   const graphs: FunctionGraph[] = [];
   let blockCount = 0;
-  for (const item of [...seeds.values()].sort((a, b) => a.entry.value < b.entry.value ? -1 : a.entry.value > b.entry.value ? 1 : 0)) {
+  const orderedSeeds = [...seeds.values()].sort((a, b) => {
+    context.checkpoint(1);
+    return a.entry.value < b.entry.value ? -1 : a.entry.value > b.entry.value ? 1 : 0;
+  });
+  for (const item of orderedSeeds) {
     context.checkpoint(1);
     const members: DecodedInstruction[] = [];
     const localGaps: DecodeGap[] = [];
@@ -262,10 +317,15 @@ export function discoverFunctions(input: DiscoveryInput, context: OperationConte
     const visited = new Set<bigint>();
     let conflict = false;
     for (const claim of item.claims) {
-      for (const other of seeds.values()) {
+      let low = 0, high = orderedSeeds.length;
+      while (low < high) {
         context.checkpoint(1);
-        if (other.entry.value !== item.entry.value && other.entry.value >= claim.start.value && other.entry.value < claim.start.value + claim.size) conflict = true;
+        const mid = (low + high) >>> 1;
+        if (orderedSeeds[mid]!.entry.value < claim.start.value) low = mid + 1; else high = mid;
       }
+      if (orderedSeeds[low]?.entry.value === item.entry.value) low++;
+      const other = orderedSeeds[low];
+      if (other && other.entry.value < claim.start.value + claim.size) conflict = true;
     }
     for (let cursor = 0; cursor < pending.length; cursor++) {
       context.checkpoint(1);
@@ -306,11 +366,16 @@ export function discoverFunctions(input: DiscoveryInput, context: OperationConte
       const last = functionRanges.at(-1)!;
       envelopes.push({ start: first.start, size: last.start.value + last.size - first.start.value });
     }
-    for (const claim of envelopes) for (const region of data) {
-      context.checkpoint(1);
-      const start = claim.start.value > region.range.start.value ? claim.start.value : region.range.start.value;
-      const end = claim.start.value + claim.size < region.range.start.value + region.range.size ? claim.start.value + claim.size : region.range.start.value + region.range.size;
-      if (start < end && !localGaps.some(gap => gap.reason === 'data' && gap.range.start.value === start)) localGaps.push({ range: { start: va(start), size: end - start }, reason: 'data', diagnostics: [] });
+    for (const claim of envelopes) {
+      const claimEnd = claim.start.value + claim.size;
+      for (let index = dataAfter(claim.start.value); index < data.length; index++) {
+        context.checkpoint(1);
+        const region = data[index]!;
+        if (region.range.start.value >= claimEnd) break;
+        const start = claim.start.value > region.range.start.value ? claim.start.value : region.range.start.value;
+        const end = claimEnd < region.range.start.value + region.range.size ? claimEnd : region.range.start.value + region.range.size;
+        if (start < end && !localGaps.some(gap => gap.reason === 'data' && gap.range.start.value === start)) localGaps.push({ range: { start: va(start), size: end - start }, reason: 'data', diagnostics: [] });
+      }
     }
     if (conflict) localDiagnostics.push({ code: 'conflicting_evidence', severity: 'warning', message: 'Function boundary claims conflict with reachable code or data', address: item.entry, evidence_ids: [...item.evidence] });
     const id = entityIdentity(image.selected_slice_id, 'function', { entry: item.entry.value });

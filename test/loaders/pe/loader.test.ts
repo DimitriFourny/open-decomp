@@ -33,6 +33,18 @@ function putDirectory(b: Buffer, index: number, rva: number, size: number): void
   b.writeUInt32LE(rva, OPTIONAL + 112 + index * 8); b.writeUInt32LE(size, OPTIONAL + 116 + index * 8);
 }
 function file(rva: number): number { return rva - 0x1000 + 0x400; }
+/** Executable protected range and a separately mapped, non-executable handler reference. */
+function unwindHandlerImage(): Buffer {
+  const b = boundaryImage();
+  b.writeUInt16LE(2, 0x86); b.writeUInt32LE(0x1000, SECTION + 8); b.writeUInt32LE(0x1000, SECTION + 16);
+  const data = SECTION + 40;
+  b.write('.rdata', data); b.writeUInt32LE(0x1000, data + 8); b.writeUInt32LE(0x3000, data + 12);
+  b.writeUInt32LE(0xc00, data + 16); b.writeUInt32LE(0x1400, data + 20); b.writeUInt32LE(0x40000040, data + 36);
+  putDirectory(b, 3, 0x1100, 12);
+  b.writeUInt32LE(0x1800, file(0x1100)); b.writeUInt32LE(0x1840, file(0x1104)); b.writeUInt32LE(0x1200, file(0x1108));
+  b[file(0x1200)] = 1 | (1 << 3); b.writeUInt32LE(0x3300, file(0x1204));
+  return b;
+}
 function failure(bytes: Buffer, code: PELoadError['diagnostic']['code'] = 'malformed_image'): void {
   assert.throws(() => load(bytes), (error: unknown) => error instanceof PELoadError && error.diagnostic.code === code);
 }
@@ -151,6 +163,113 @@ test('relocations and unwind handler/chained records retain actual file evidence
   const unwind = image.hints.filter(h => h.kind === 'unwind'); assert.equal(unwind.length, 2);
   assert.equal(unwind[0]?.record.start.value, BigInt(file(0x1300))); assert.equal(unwind[1]?.handler?.value, BASE + 0x1900n);
   assert.ok(image.capabilities.some(c => c.feature === 'unwind:language-handler' && c.status === 'unsupported'));
+});
+
+test('unwind handler references retain non-executable and zero-fill targets without inventing code', () => {
+  for (const [rva, executable, backing] of [[0x3300, false, 'mapped'], [0x3c00, false, 'zero_fill'], [0x3c00, true, 'zero_fill'], [0x3300, true, 'mapped']] as const) {
+    const b = unwindHandlerImage();
+    b.writeUInt32LE(rva, file(0x1204));
+    if (executable) b.writeUInt32LE(0x60000040, SECTION + 40 + 36);
+    const image = load(b), unwind = image.hints.find(h => h.kind === 'unwind');
+    assert.ok(unwind?.kind === 'unwind'); assert.ok(unwind.handler);
+    assert.equal(unwind.handler.space, 'va'); assert.equal(unwind.handler.value, BASE + BigInt(rva));
+    assert.equal(image.address_map.translate(unwind.handler, 'file').kind, backing);
+    assert.deepEqual(image.sections[1]?.permissions, executable ? ['read', 'execute'] : ['read']);
+    assert.deepEqual(image.entry_points, []);
+    assert.deepEqual(image.hints.filter(h => h.kind === 'function').map(h => h.address.value), [BASE + 0x1800n]);
+    assert.equal(unwind.record.start.space, 'file'); assert.equal(unwind.record.start.value, BigInt(file(0x1200))); assert.equal(unwind.record.size, 8n);
+    assert.ok(unwind.evidence_ids.some(id => {
+      const fact = image.evidence.find(e => e.id === id);
+      return fact?.origin.kind === 'binary' && fact.origin.range.start.space === 'file' &&
+        fact.origin.range.start.value === BigInt(file(0x1200)) && fact.origin.range.size === 8n;
+    }));
+    const unavailable = !executable || backing === 'zero_fill';
+    assert.equal(image.capabilities.some(c => c.feature === 'unwind:handler-code-unavailable' && c.status === 'unsupported'), unavailable);
+    assert.equal(image.diagnostics.some(d => d.code === 'unsupported_target' && d.severity === 'warning' && d.address?.space === 'file' && d.address.value === BigInt(file(0x1204))), true);
+    assert.ok(image.capabilities.some(c => c.feature === 'unwind:language-handler' && c.status === 'unsupported'));
+    assert.ok(!image.diagnostics.some(d => d.code === 'malformed_image'));
+  }
+});
+
+test('SET_FPREG ignores reserved OpInfo while retaining header, operand, padding and handler evidence', () => {
+  // MS x64 unwind spec: SET_FPREG uses the header's frame register/offset, not OpInfo.
+  // Both forms occur in compiler-produced PE records: R11/offset 0 and RBP/offset 64.
+  for (const [frame, setOffset] of [[0x0b, 0], [0x45, 21]] as const) {
+    for (let info = 0; info < 16; info++) {
+      const b = unwindHandlerImage();
+      Buffer.from([
+        9, 39, 3, frame,
+        25, 0x34, 0xf3, 0xff, // SAVE_NONVOL operand is not another opcode.
+        setOffset, (info << 4) | 3,
+        0xff, 0xff, // Odd CountOfCodes padding is not another opcode.
+      ]).copy(b, file(0x1200));
+      b.writeUInt32LE(0x3300, file(0x120c));
+      const image = load(b), unwind = image.hints.find(h => h.kind === 'unwind');
+      assert.ok(unwind?.kind === 'unwind');
+      assert.equal(unwind.encoding, 'PE_AMD64_UNWIND_INFO_V1');
+      assert.equal(unwind.range.start.value, BASE + 0x1800n); assert.equal(unwind.range.size, 0x40n);
+      assert.equal(unwind.record.start.space, 'file'); assert.equal(unwind.record.start.value, BigInt(file(0x1200)));
+      assert.equal(unwind.record.size, 16n); assert.equal(unwind.handler?.value, BASE + 0x3300n);
+      assert.ok(unwind.evidence_ids.some(id => {
+        const fact = image.evidence.find(e => e.id === id);
+        return fact?.origin.kind === 'binary' && fact.origin.range.start.space === 'file' &&
+          fact.origin.range.start.value === BigInt(file(0x1200)) && fact.origin.range.size === 16n;
+      }));
+      assert.deepEqual(image.hints.filter(h => h.kind === 'function').map(h => h.address.value), [BASE + 0x1800n]);
+      assert.deepEqual(image.entry_points, []);
+      assert.ok(image.capabilities.some(c => c.feature === 'unwind:handler-code-unavailable' && c.status === 'unsupported'));
+      assert.ok(image.capabilities.some(c => c.feature === 'unwind:language-handler' && c.status === 'unsupported'));
+      assert.ok(!image.diagnostics.some(d => d.code === 'malformed_image'));
+    }
+  }
+});
+
+test('reserved SET_FPREG bits do not relax frame, operand, ordering or mapped-record validation', () => {
+  const mutations: ((b: Buffer) => void)[] = [
+    b => { b[file(0x1203)] = 0; }, // Nonzero OpInfo cannot supply a missing frame register.
+    b => { b[file(0x1203)] = 0x40; }, // A frame offset still needs a frame register.
+    b => { b[file(0x1204)] = 9; }, // Code offset exceeds SizeOfProlog.
+    b => { b[file(0x1204)] = 3; }, // Code offsets must remain descending.
+    b => { b[file(0x1207)] = 0x01; }, // ALLOC_LARGE operand exceeds CountOfCodes.
+    b => { b[file(0x1207)] = 0x21; }, // ALLOC_LARGE OpInfo has defined, bounded semantics.
+    b => { b[file(0x1207)] = 0x2a; }, // PUSH_MACHFRAME OpInfo has defined, bounded semantics.
+    b => { b.copy(b, file(0x1ffc), file(0x1200), file(0x1204)); b.writeUInt32LE(0x1ffc, file(0x1108)); },
+    b => { b.writeUInt32LE(0x2000, file(0x1108)); }, // Unmapped UNWIND_INFO.
+  ];
+  for (const mutation of mutations) {
+    const b = unwindHandlerImage();
+    Buffer.from([9, 8, 2, 0x45, 8, 0x43, 4, 0x32]).copy(b, file(0x1200));
+    b.writeUInt32LE(0x3300, file(0x1208));
+    mutation(b); failure(b);
+  }
+});
+
+test('unknown unwind operations remain explicit rather than borrowing SET_FPREG semantics', () => {
+  for (const op of [6, 7, 11, 15]) {
+    const b = unwindHandlerImage();
+    Buffer.from([1, 8, 2, 0x45, 8, 0x40 | op, 4, 0x43]).copy(b, file(0x1200));
+    const image = load(b);
+    assert.equal(image.hints.filter(h => h.kind === 'unwind').length, 0);
+    assert.deepEqual(image.hints.filter(h => h.kind === 'function').map(h => h.address.value), [BASE + 0x1800n]);
+    assert.ok(image.capabilities.some(c => c.feature === `unwind:opcode:${op}` && c.status === 'unsupported'));
+    assert.ok(image.diagnostics.some(d => d.code === 'unsupported_target' && d.address?.space === 'file' &&
+      d.address.value === BigInt(file(0x1204))));
+  }
+});
+
+test('unwind handler references still reject unmapped targets and truncated metadata', () => {
+  for (const rva of [0x2000, 0x4000, 0xffffffff]) {
+    const b = unwindHandlerImage(); b.writeUInt32LE(rva, file(0x1204)); failure(b);
+  }
+  const b = unwindHandlerImage();
+  b.writeUInt32LE(0x1ffc, file(0x1108)); b[file(0x1ffc)] = 1 | (1 << 3);
+  failure(b); // The header fits, but its required handler RVA crosses the file-backed mapping.
+});
+
+test('non-executable handler metadata does not relax protected code range permissions', () => {
+  const b = unwindHandlerImage();
+  b.writeUInt32LE(0x3300, file(0x1100)); b.writeUInt32LE(0x3340, file(0x1104));
+  failure(b);
 });
 
 test('TLS template and callback VA references are not interpreted as RVAs', () => {

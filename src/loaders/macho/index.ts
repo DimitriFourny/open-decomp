@@ -30,7 +30,7 @@ const SUBTYPES: Record<number, string> = { 0: 'arm64', 1: 'arm64v8', 2: 'arm64e'
  */
 export class MachOLoader implements Loader {
   readonly name = 'open-decomp-macho';
-  readonly version = '1.0.2';
+  readonly version = '1.0.3';
   readonly format = 'macho' as const;
   inspect(bytes: ImmutableBytes, imageId: string, context: OperationContext): { slices: readonly ImageSlice[]; diagnostics: readonly Diagnostic[] } {
     context.checkpoint(1);
@@ -208,6 +208,10 @@ function parseImage(s: State, input: Parameters<Loader['load']>[0], slices: read
     p += size;
   }
   if (p !== commandEnd) malformed('Load commands do not fill sizeofcmds');
+  // Header/load-command bytes are structural data even in an executable segment
+  // or when a symbol/section claims code there. Keep file coordinates so selected
+  // universal slices retain the exact native ownership and binary provenance.
+  s.hints.push({ kind: 'data', range: s.file(0, commandEnd), encoding: 'bytes', evidence_ids: s.proof(0, commandEnd, 'Mach-O header and load commands are structural metadata') });
   const bases = s.segments.filter(segment => segment.offset === 0 && segment.fileSize >= commandEnd);
   if (bases.length !== 1) malformed('Image has no unambiguous header-bearing segment');
   s.imageBase = bases[0]!.va;

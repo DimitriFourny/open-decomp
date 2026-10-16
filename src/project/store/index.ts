@@ -17,16 +17,16 @@ import {
   type ProjectStore, type RecordQuery, type RecoveredType, type Signature, type StoreFactory,
   type StoredRecordKinds, type StoreTransaction,
 } from '../../core/index.js';
-import { decodeStored, encodeStored, wireValue } from './encoding.js';
+import { MAX_RECORD_BYTES, decodeStored, encodeStored, wireValue } from './encoding.js';
+import { IMAGE_METADATA_TABLE, readImageMetadata, writeImageMetadata, type ImageMetadata } from './image-metadata.js';
 
 // Persistence migrations are independent of the public wire/artifact schema version.
-const STORE_SCHEMA_VERSION = 3;
+const STORE_SCHEMA_VERSION = 4;
 const annotationActorSchema = annotationSchema.pick({ author: true, origin: true });
 const MAX_IMAGE_BYTES = 512 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const RECORD_SCHEMAS = { function: functionSchema, string: stringRecordSchema, reference: referenceSchema, symbol: symbolSchema, import: importSchema, export: exportSchema } as const;
 type RecordKind = keyof StoredRecordKinds;
-type ImageMetadata = Omit<LoadedImage, 'bytes' | 'address_map'>;
 type Row = Record<string, unknown>;
 
 function fail(code: Diagnostic['code'], message: string): never {
@@ -144,6 +144,7 @@ export class SqliteProjectStore implements ProjectStore {
           CREATE TABLE images(image_id TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE) STRICT;
           CREATE TABLE image_imports(image_id TEXT NOT NULL REFERENCES images(image_id), slice_id TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(image_id,slice_id)) STRICT;
           CREATE TABLE loaded_images(image_id TEXT NOT NULL, slice_id TEXT NOT NULL, revision INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(image_id,slice_id,revision)) STRICT;
+          ${IMAGE_METADATA_TABLE}
           CREATE TABLE records(kind TEXT NOT NULL, id TEXT NOT NULL, image_id TEXT NOT NULL REFERENCES images(image_id), revision INTEGER NOT NULL, text_value TEXT NOT NULL, address_space TEXT, address_value TEXT, payload BLOB NOT NULL, PRIMARY KEY(kind,id,revision)) STRICT;
           CREATE INDEX records_query ON records(image_id,kind,id,revision);
           CREATE TABLE indexes(image_id TEXT NOT NULL, kind TEXT NOT NULL, revision INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY(image_id,kind,revision)) STRICT;
@@ -164,8 +165,19 @@ export class SqliteProjectStore implements ProjectStore {
         db.exec('BEGIN IMMEDIATE');
         try {
           if (version === 1) db.exec("CREATE TABLE annotation_removals(id TEXT NOT NULL, revision INTEGER NOT NULL, author TEXT NOT NULL, origin TEXT NOT NULL CHECK(origin IN ('user','llm')), PRIMARY KEY(id,revision), FOREIGN KEY(id,revision) REFERENCES annotations(id,revision)) STRICT;");
-          db.exec(`CREATE TABLE analysis_artifacts(revision INTEGER NOT NULL, analysis_id TEXT NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(revision,analysis_id,artifact_id)) STRICT;
-            PRAGMA user_version=${STORE_SCHEMA_VERSION}; COMMIT;`);
+          if (version < 3) db.exec('CREATE TABLE analysis_artifacts(revision INTEGER NOT NULL, analysis_id TEXT NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(revision,analysis_id,artifact_id)) STRICT;');
+          db.exec(IMAGE_METADATA_TABLE);
+          const imageQuery = `SELECT image_id,slice_id,revision,CASE WHEN length(payload)<=${MAX_RECORD_BYTES} THEN payload ELSE NULL END AS payload FROM loaded_images`;
+          const nextImage = db.prepare(`${imageQuery} WHERE (image_id,slice_id,revision)>(?,?,?) ORDER BY image_id,slice_id,revision LIMIT 1`);
+          let row = db.prepare(`${imageQuery} ORDER BY image_id,slice_id,revision LIMIT 1`).get();
+          while (row) {
+            const imageId = stringField(row, 'image_id'), sliceId = stringField(row, 'slice_id'), revision = numberField(row, 'revision');
+            const metadata = decodeStored<ImageMetadata>(row['payload']);
+            if (metadata.id !== imageId || metadata.selected_slice_id !== sliceId) fail('invalid_input', 'Stored image identity mismatch');
+            writeImageMetadata(db, metadata, revision);
+            row = nextImage.get(imageId, sliceId, revision);
+          }
+          db.exec(`PRAGMA user_version=${STORE_SCHEMA_VERSION}; COMMIT;`);
         } catch (error) { db.exec('ROLLBACK'); throw error; }
       }
       directory(join(root, 'images'), mode === 'create');
@@ -236,10 +248,10 @@ export class SqliteProjectStore implements ProjectStore {
 
   readLoadedImage(imageId: string, sliceId: string, revision = this.#current()): LoadedImage {
     this.#revision(revision); imageIdSchema.parse(imageId); sliceIdSchema.parse(sliceId);
-    const row = this.#db.prepare('SELECT payload FROM loaded_images WHERE image_id=? AND slice_id=? AND revision<=? ORDER BY revision DESC LIMIT 1').get(imageId, sliceId, revision);
+    const row = this.#db.prepare(`SELECT revision,CASE WHEN length(payload)<=${MAX_RECORD_BYTES} THEN payload ELSE NULL END AS payload
+      FROM loaded_images WHERE image_id=? AND slice_id=? AND revision<=? ORDER BY revision DESC LIMIT 1`).get(imageId, sliceId, revision);
     if (!row) fail('not_found', 'Image has not been loaded for this slice');
-    const metadata = decodeStored<ImageMetadata>(row['payload']);
-    if (metadata.id !== imageId || metadata.selected_slice_id !== sliceId) fail('invalid_input', 'Stored image identity mismatch');
+    const metadata = readImageMetadata(this.#db, row['payload'], imageId, sliceId, numberField(row, 'revision'));
     const bytes = this.readImage(imageId);
     const slice = metadata.slices.find(item => item.id === sliceId);
     if (!slice) fail('invalid_input', 'Stored image has no selected slice');
@@ -302,7 +314,7 @@ export class SqliteProjectStore implements ProjectStore {
         const imported = this.#db.prepare('SELECT i.sha256 FROM images i JOIN image_imports s USING(image_id) WHERE i.image_id=? AND s.slice_id=?').get(image.id, image.selected_slice_id);
         if (!imported || imported['sha256'] !== image.sha256 || hashImage(image.bytes) !== image.sha256) fail('invalid_input', 'Loaded image must match an imported immutable snapshot');
         const { bytes: _bytes, address_map: _map, ...metadata } = image;
-        this.#db.prepare('INSERT OR REPLACE INTO loaded_images VALUES (?,?,?,?)').run(image.id, image.selected_slice_id, revision, encodeStored(metadata));
+        writeImageMetadata(this.#db, metadata, revision);
       },
       putEvidence: evidence => { encodeEvidence(evidence); if (evidence.revision > revision) fail('stale_revision', 'Evidence is from a future revision'); putVersion('evidence', evidence.id, evidence); },
       putType: (id, definition, evidenceIds) => { entityIdSchema.parse(id); encodeTypeDefinition(definition); evidenceIds.forEach(value => evidenceIdSchema.parse(value)); putVersion('types', id, { definition, evidence_ids: evidenceIds }); },

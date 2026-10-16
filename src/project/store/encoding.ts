@@ -1,4 +1,6 @@
-const MAX_RECORD_BYTES = 16 * 1024 * 1024;
+import { OperationError } from '../../core/index.js';
+
+export const MAX_RECORD_BYTES = 16 * 1024 * 1024;
 const MAX_RECORD_NODES = 1_000_000;
 
 type Atom = null | boolean | string | number;
@@ -8,7 +10,7 @@ type Encoded = Atom | ['bigint', string] | ['array', Encoded[]] | ['object', [st
 export function encodeStored(value: unknown): Uint8Array {
   let nodes = 0;
   function encode(item: unknown, depth: number): Encoded {
-    if (++nodes > MAX_RECORD_NODES || depth > 128) throw new RangeError('Stored record exceeds structural budget');
+    if (++nodes > MAX_RECORD_NODES || depth > 128) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Stored record exceeds structural budget', evidence_ids: [] });
     if (item === null || typeof item === 'string' || typeof item === 'boolean') return item;
     if (typeof item === 'number' && Number.isFinite(item)) return item;
     if (typeof item === 'bigint') return ['bigint', item.toString(10)];
@@ -19,7 +21,7 @@ export function encodeStored(value: unknown): Uint8Array {
     throw new TypeError('Only finite plain domain values may be persisted');
   }
   const buffer = Buffer.from(JSON.stringify({ version: 1, value: encode(value, 0) }), 'utf8');
-  if (buffer.length > MAX_RECORD_BYTES) throw new RangeError('Stored record exceeds byte budget');
+  if (buffer.length > MAX_RECORD_BYTES) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Stored record exceeds byte budget', evidence_ids: [] });
   return buffer;
 }
 

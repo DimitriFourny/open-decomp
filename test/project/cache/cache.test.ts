@@ -10,6 +10,7 @@ import {
   type CacheIdentity, type FunctionRecord, type Job,
 } from '../../../src/core/index.js';
 import { SqliteProjectStore } from '../../../src/project/store/index.js';
+import { encodeStored } from '../../../src/project/store/encoding.js';
 import { readAnnotationCatalog, runCachedDecompilation, type AnalysisComputation } from '../../../src/project/cache/index.js';
 import { fixtureImage } from '../../metadata/fixture.js';
 
@@ -254,7 +255,9 @@ test('schema-2 migration preserves artifacts, jobs, revisions and removal actors
   const snapshot = p.state.store.snapshot();
   await p.state.store.close();
   const db = new DatabaseSync(join(p.state.path, 'project.sqlite'));
-  db.exec('DROP TABLE analysis_artifacts; PRAGMA user_version=2;'); db.close();
+  const { bytes: _bytes, address_map: _map, ...legacyMetadata } = p.image;
+  db.prepare('UPDATE loaded_images SET payload=?').run(encodeStored(legacyMetadata));
+  db.exec('DROP TABLE analysis_artifacts; DROP TABLE loaded_image_records; PRAGMA user_version=2;'); db.close();
   p.state.store = SqliteProjectStore.open(p.state.path, 'resume');
   assert.equal(p.state.store.snapshot().revision, snapshot.revision);
   assert.equal(p.state.store.project_id, snapshot.project_id);

@@ -30,6 +30,14 @@ instructions with null payload and unknown flow, never proven traps. Actual UD
 instructions have trap flow. Linear bounded region decoding does not claim to
 perform function discovery; consumers traverse the shared `DecodedFlow` union.
 
+Fully checked loader data ranges are indexed once per immutable `LoadedImage`
+object and retained in a decoder-owned `WeakMap`. Preparation is charged to the
+original cumulative operation context; failed or cancelled preparation is never
+cached. Requests still normalize their own windows, visit relevant data/backing
+boundaries, and enforce current work/instruction/cancellation limits. Another
+snapshot with the same content hash does not share the prepared metadata.
+`dispose()` drops the preparation cache as well as formatter ownership.
+
 ## Metadata conventions
 
 - `encoding` is the exact structured opcode variant, not merely the mnemonic.
@@ -82,13 +90,14 @@ function bytes, not pre-rendered library output:
 
 ```sh
 node --import tsx --test --test-name-pattern='PE corpus' test/decoders/x86_64/decoder.test.ts
-node --import tsx --test --test-name-pattern='repeated decode' test/decoders/x86_64/lifetimes.test.ts
 node --import tsx --test 'test/decoders/x86_64/*.test.ts'
+npm run build
+node --expose-gc dist/scripts/bench/resources.js --fixtures fixtures/bin --iterations 100
 ```
 
-The repeated-decode scenario instruments actual WASM wrapper `free()` methods
-while calling their originals. It checks one reusable instruction/factory per
-request, every info/usage/offset/opcode wrapper, formatter ownership, cleanup on a
-real shared-context work limit, and successful reuse after that failure. It does
-not infer leaks from process RSS or WASM high-water memory, which need not shrink
-when allocations are released.
+The resource harness repeatedly decodes and formats through real adapters,
+checks bounded worker admission and queues, and measures real IPC, cached
+analysis and close/reopen behavior. Parent post-GC samples and child memory
+boundaries are reported separately from OS process-lifetime RSS high-water.
+Finite observations do not prove absence of leaks; retained WASM/native allocator
+capacity alone is not evidence of live-object retention.

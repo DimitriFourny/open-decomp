@@ -24,19 +24,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 ### Integration, containment, and delivery
 
-
-- [ ] **T30 — Measure end-to-end performance and resource bounds**
-  - Depends on: T29.
-  - Owns: benchmark workloads/harness and performance evidence; coordinate implementation fixes with owning modules.
-  - Work: Measure cold import/indexing, per-function decode/lift/analysis/emission, cached queries, IPC/serialization, and peak memory for representative small/large binaries on recorded hosts. Check bounded concurrency and WASM lifecycle under sustained use. Optimize only measured bottlenecks, preserving semantic regression results; document practical limits and regression methodology.
-  - Acceptance: Reproducible reports distinguish stages, cold/warm behavior, binary sizes, runtime/hardware, and memory. Work/output limits are exercised, sustained jobs do not accumulate unbounded resources, and any claimed improvement has before/after evidence. Do not claim a Rust-vs-JS speed ratio without a comparable implementation. Contributes A12.
-
-- [ ] **T31 — Package and document the first local release**
-  - Depends on: T29, T30.
-  - Owns: distribution scripts/metadata, user/developer documentation, license/provenance notices, final backlog/plan status updates.
-  - Work: Produce the compiled installable application and document local MCP launch/configuration, project lifecycle, tool schemas, annotation/evidence rules, limits, supported semantic families, and troubleshooting. Include decoder revisions/licenses, a64js generated-data provenance review, fixture redistribution notices, update procedures, and benchmark/host verification evidence. Do not bundle separately licensed Arm reference downloads.
-  - Acceptance: Install from the produced artifact in a clean environment on both hosts and complete a real MCP investigation without source-tree/sibling dependencies. All A01–A12 have recorded evidence; documentation distinguishes shipped behavior from future work. No obsolete aliases, duplicate legacy pipeline, or migration-only scaffold remains.
-
 ### Later extensions — not first-release blockers
 
 - [ ] **F01 — Add a Python-like pseudocode emitter**
@@ -64,13 +51,31 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Owns: end-to-end acceptance suite, host verification configuration, release evidence.
   - Work: Execute PLAN.md A01–A11 with real fixtures and the compiled MCP server on macOS arm64 and Windows x86-64. Each host analyzes both target formats without running the target. Include stripped/symbol-bearing cases, persistence, annotation-driven reanalysis, unsupported semantics, malformed files, source mappings, cancellation, and decoder/ABI semantic regressions. Integrate outstanding migration fixes and remove obsolete migration scaffolding.
   - Acceptance: Record actual commands/scenarios and outcomes for the complete matrix; unavailable host execution is an explicit blocker, not an inferred pass. All required behavior works without `../disass_arm`, private inputs, undeclared developer tools, or a public decompiler. Contributes A01–A11.
-  - Owner: ReleaseWorkflows (sol-worker: compiled acceptance scenarios), MigrationAudit (scout: read-only migration/provenance coverage), Coordinator (shared integration, frozen Windows media, both-host execution and recorded evidence).
-  - macOS verification: Node 24.22.0 strict typecheck, **669/669 tests**, build, and all **24 compiled MCP release scenarios** passed. The new universal-image case exposed and fixed nonselected-slice warnings incorrectly making selected ARM64 indexes partial; loader 1.0.2 and persistent-service regressions preserve the warning without false incompleteness. Process-restart/cache/annotation persistence, native variants, malformed imports, repeated bounds and unsupported-effect provenance all ran.
+  - Owner: ReleaseWorkflows (sol-worker: compiled acceptance scenarios), MigrationAudit (scout: read-only migration/provenance coverage), WindowsProgress (sol-worker: event-driven verification evidence), Coordinator (shared integration, frozen Windows media, both-host execution and recorded evidence).
+  - macOS verification: Node 24.22.0 strict typecheck, **695/695 tests**, build, and all **24 compiled MCP release scenarios** passed after the latest native ownership and storage corrections. Selected universal-slice completeness, process-restart/cache/annotation persistence, native variants, malformed imports, repeated bounds and unsupported-effect provenance all ran. RELEASE-VERIFICATION.md distinguishes this implementation from the older frozen Windows candidate.
   - Migration cleanup: Retired the sibling-API collector and redundant captured C files; retained frozen historical JSON, current source oracles/fixture generation and durable-store migrations. Updated recipe hashes and documentation. Evidence and criterion boundaries are in RELEASE-VERIFICATION.md.
-  - Blocker: Current Windows acceptance must run on the newly frozen candidate. Windows f059a44 passed 589 earlier-milestone tests only; that result is not current acceptance. A11 installed packaging remains T31 and A12 measured performance remains T30.
+  - Blocker: Frozen Windows **c9ffe77** passed compilation, 21 decoder tests and actual compiled cross-target decode. Its full check is still running; the first 90-minute observer expired without a terminal result, and a new observer watches the same run without rerunning checks. Future-run progress reporting is being improved. Windows f059a44's 589 earlier-milestone tests are not current acceptance. A11 installed packaging remains T31 and A12 measured performance remains T30.
 
 
 
+
+
+- [ ] **T30 — Measure end-to-end performance and resource bounds**
+  - Depends on: T29.
+  - Owns: benchmark workloads/harness and performance evidence; coordinate implementation fixes with owning modules.
+  - Work: Measure cold import/indexing, per-function decode/lift/analysis/emission, cached queries, IPC/serialization, and peak memory for representative small/large binaries on recorded hosts. Check bounded concurrency and WASM lifecycle under sustained use. Optimize only measured bottlenecks, preserving semantic regression results; document practical limits and regression methodology.
+  - Acceptance: Reproducible reports distinguish stages, cold/warm behavior, binary sizes, runtime/hardware, and memory. Work/output limits are exercised, sustained jobs do not accumulate unbounded resources, and any claimed improvement has before/after evidence. Do not claim a Rust-vs-JS speed ratio without a comparable implementation. Contributes A12.
+  - Owner: PipelineBench (astra-worker: pipeline/worker stages), ResourceBench (sol-worker: sustained WASM, admission and IPC), PELargerImage and PEUnwindCompatibility (astra-worker: real-PE unwind compatibility), BenchmarkInputs (sol-worker: pinned SQLite inputs), ImportScaling and DiscoveryScaling (astra-worker: native-index amplification), X86PreparedRanges (sol-worker: indexed decoder preparation), MachOMetadataOwnership (astra-worker: native code/data ownership), Coordinator (storage integration, representative selection, host execution and evidence).
+  - Scheduling: T29's macOS interfaces and acceptance are verified; only frozen Windows execution remains outstanding. T30 proceeds under the explicit host-verification scheduling exception, without claiming T29 or first-release completion.
+  - macOS verified: **695/695 tests**, build, actual SQLite workflows for both ISAs, 100-batch sustained resource run and all 24 compiled release scenarios passed. Mach-O loader 1.0.3 no longer promotes header metadata to code; genuine complete discovered bodies now emit. PE SQLite publishes bounded metadata and emits selected bodies with explicit partial semantics. Schema-4 historical migration/rollback and unchanged individual-record bounds are covered. PERFORMANCE.md records inputs, stages, cache/IPC/serialization, memory, real cap failures and limitations. Windows performance execution is the remaining host blocker; no native-Windows SLA or Rust/JS ratio is claimed.
+
+- [ ] **T31 — Package and document the first local release**
+  - Depends on: T29, T30.
+  - Owns: distribution scripts/metadata, user/developer documentation, license/provenance notices, final backlog/plan status updates.
+  - Work: Produce the compiled installable application and document local MCP launch/configuration, project lifecycle, tool schemas, annotation/evidence rules, limits, supported semantic families, and troubleshooting. Include decoder revisions/licenses, a64js generated-data provenance review, fixture redistribution notices, update procedures, and benchmark/host verification evidence. Do not bundle separately licensed Arm reference downloads.
+  - Acceptance: Install from the produced artifact in a clean environment on both hosts and complete a real MCP investigation without source-tree/sibling dependencies. All A01–A12 have recorded evidence; documentation distinguishes shipped behavior from future work. No obsolete aliases, duplicate legacy pipeline, or migration-only scaffold remains.
+  - Owner: ReleaseArtifact (sol-worker: package/isolated-install drivers), ReleaseDocs (sol-worker: operator/developer guidance and provenance notices), Coordinator (dependency/distribution metadata, shared contracts, actual both-host installation, Git and final evidence).
+  - Scheduling: T29/T30 implementations and macOS acceptance/performance are verified; their remaining blockers are Windows execution. T31 consumes those interfaces under the board's explicit exception. It cannot move to Done until both-host installed acceptance and A01–A12 evidence are complete.
 
 ## Done
 - [x] **T28 — Verify input containment and enforce resource/error boundaries**

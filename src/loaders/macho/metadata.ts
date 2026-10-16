@@ -17,7 +17,12 @@ export function readSymbols(s: State, table: SymbolTable | undefined, indirect: 
     const section = sect ? s.rawSections[sect - 1] : undefined;
     if (!(type & 0xe0) && (type & 0xe) === 0xe && !section) malformed('Symbol section index exceeds section table');
     const defined = (type & 0xe) === 0xe || (type & 0xe) === 2;
-    const record: SymbolRecord = { id: s.id('symbol', i), original_name: name || null, display_name: name || null, kind: (type & 0xe0) ? 'unknown' : (type & 0xe) === 2 ? 'absolute' : section ? section.flags & 0x80000400 ? 'function' : 'object' : 'unknown', address: defined ? s.va(value) : null, size: null, binding: desc & 0xc0 ? 'weak' : type & 1 ? 'global' : 'local', evidence_ids: [...s.proof(p, 16, 'Mach-O nlist_64 symbol'), ...nameProof] };
+    // n_sect associates a definition with a section; it does not prove that
+    // n_value lies inside it (linkers also associate image-header symbols with
+    // instruction sections). Only an in-section definition inherits its kind.
+    const inSection = (type & 0xe) === 0xe && section && value >= section.va && value < section.va + section.size;
+    const kind: SymbolRecord['kind'] = type & 0xe0 ? 'unknown' : (type & 0xe) === 2 ? 'absolute' : !inSection ? 'unknown' : section.flags & 0x80000400 || (section.flags & 255) === 8 ? 'function' : 'object';
+    const record: SymbolRecord = { id: s.id('symbol', i), original_name: name || null, display_name: name || null, kind, address: defined ? s.va(value) : null, size: null, binding: desc & 0xc0 ? 'weak' : type & 1 ? 'global' : 'local', evidence_ids: [...s.proof(p, 16, 'Mach-O nlist_64 symbol'), ...nameProof, ...(section?.evidence ?? [])] };
     raw.push({ record, type, desc, value });
     if (!(type & 0xe0)) {
       s.symbols.push(record);

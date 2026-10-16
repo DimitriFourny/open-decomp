@@ -84,9 +84,9 @@ test('schema-1 migration preserves old snapshots without inventing historical re
   state.store.applyAnnotations({ expected_revision: 2, author: 'unrecorded-in-v1', origin: 'llm', edits: [{ operation: 'remove', id: firstId }] });
   const identity = state.store.project_id;
   await state.store.close();
-  // Recreate the v1 layout, which predates removal actors and semantic catalog indexing.
+  // Recreate the v1 layout, before removal actors, semantic catalog indexing and normalized image facts.
   const legacy = new DatabaseSync(join(state.path, 'project.sqlite'));
-  legacy.exec('DROP TABLE annotation_removals; DROP TABLE analysis_artifacts; PRAGMA user_version=1;'); legacy.close();
+  legacy.exec('DROP TABLE annotation_removals; DROP TABLE analysis_artifacts; DROP TABLE loaded_image_records; PRAGMA user_version=1;'); legacy.close();
   state.store = SqliteProjectStore.open(state.path, 'resume');
   assert.equal(state.store.project_id, identity); assert.equal(state.store.snapshot().revision, 3);
   assert.equal(state.store.readAnnotations(subject, 2)[0]!.author, 'old-author'); assert.deepEqual(state.store.readAnnotations(subject, 3), []);

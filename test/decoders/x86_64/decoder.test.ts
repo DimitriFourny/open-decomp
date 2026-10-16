@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { X86Decoder } from '../../../src/decoders/x86_64/index.js';
-import { createOperationContext as operation, type DecodeResult, type DecodedInstruction, type X86Payload } from '../../../src/core/index.js';
+import { createOperationContext as operation, OperationError, type DecodeResult, type DecodedInstruction, type LoadedImage, type X86Payload } from '../../../src/core/index.js';
 import { imageFromBytes, region } from './helpers.js';
 
 function decode(bytes: readonly number[]): DecodeResult {
@@ -173,6 +173,119 @@ test('known data, zero-fill, unmapped holes and instruction budgets stay distinc
     const limited = decoder.decode({ image, regions: [region(image)], features: [], mode: 'long64' }, operation({ budget: { instructions: 1 } }));
     assert.equal(limited.instructions.length, 1);
     assert.ok(limited.gaps.some((g) => g.reason === 'budget'));
+  } finally { decoder.dispose(); }
+});
+
+test('prepared data survives failed and cancelled preparation, changing windows and same-byte snapshots', () => {
+  const initial = imageFromBytes(Uint8Array.from([0xc3, 0x90, 0xc3, 0x90, 0xc3, 0x90, 0xc3, 0xc3]));
+  const entry = region(initial).start;
+  const image: LoadedImage = { ...initial, hints: [
+    { kind: 'data', range: region(initial, 0x1001n, 1), encoding: 'bytes', evidence_ids: [] },
+    ...Array.from({ length: 128 }, () => ({ kind: 'function' as const, address: entry, size: null, evidence_ids: [] })),
+    { kind: 'data', range: { start: { ...entry, space: 'file', value: 5n }, size: 1n }, encoding: 'bytes', evidence_ids: [] },
+  ] };
+  const request = { image, regions: [region(image, 0x1000n, 1)], features: [], mode: 'long64' as const };
+  const decoder = new X86Decoder({ formatting: false });
+  try {
+    assert.throws(() => decoder.decode(request, operation({ budget: { work: 16 } })),
+      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit');
+    // Abort at the final preparation checkpoint, without timers or replacing the adapter.
+    const controller = new AbortController();
+    const cancelling = operation({ signal: controller.signal });
+    let zeroChecks = 0;
+    assert.throws(() => decoder.decode(request, { ...cancelling, checkpoint(work) {
+      if (work === 0 && ++zeroChecks === 2) controller.abort();
+      cancelling.checkpoint(work);
+    } }), (error: unknown) => error instanceof OperationError && error.code === 'cancelled');
+    // Neither failure may install a partial or unchecked entry.
+    assert.throws(() => decoder.decode(request, operation({ budget: { work: 16 } })),
+      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit');
+    const first = decoder.decode(request, operation({ budget: { work: 1_000 } }));
+    assert.equal(first.instructions[0]?.flow.kind, 'return');
+    const whole = { ...request, regions: [region(image)] };
+    // This budget cannot rescan all 128 non-data hints, but covers real cached partition work.
+    const cached = decoder.decode(whole, operation({ budget: { work: 64 } }));
+    assert.deepEqual(cached.instructions.map(instruction => instruction.address.value), [0x1000n, 0x1002n, 0x1003n, 0x1004n, 0x1006n, 0x1007n]);
+    assert.deepEqual(cached.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]), [['data', 0x1001n, 1n], ['data', 0x1005n, 1n]]);
+    assert.deepEqual(cached.instructions[0], first.instructions[0]);
+    const shifted = decoder.decode({ ...whole, regions: [region(image, 0x1004n, 3)] }, operation({ budget: { work: 32 } }));
+    assert.deepEqual(shifted.instructions.map(instruction => instruction.address.value), [0x1004n, 0x1006n]);
+    assert.deepEqual(shifted.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]), [['data', 0x1005n, 1n]]);
+    const other = { ...image, hints: [] };
+    assert.equal(other.id, image.id);
+    const unhinted = decoder.decode({ ...whole, image: other }, operation({ budget: { work: 64 } }));
+    assert.equal(unhinted.coverage.state, 'complete');
+    assert.equal(unhinted.instructions.length, 8);
+    assert.deepEqual(decoder.decode(whole, operation({ budget: { work: 64 } })), cached);
+    const limited = decoder.decode(whole, operation({ budget: { instructions: 1 } }));
+    assert.equal(limited.instructions.length, 1);
+    assert.deepEqual(limited.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]), [
+      ['data', 0x1001n, 1n], ['budget', 0x1002n, 3n], ['data', 0x1005n, 1n], ['budget', 0x1006n, 2n],
+    ]);
+    assert.throws(() => decoder.decode(whole, operation({ budget: { work: 3 } })),
+      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit');
+    const aborted = new AbortController(); aborted.abort();
+    assert.throws(() => decoder.decode(whole, operation({ signal: aborted.signal })),
+      (error: unknown) => error instanceof OperationError && error.code === 'cancelled');
+    const duringPartition = new AbortController();
+    const active = operation({ signal: duringPartition.signal });
+    let charged = 0;
+    assert.throws(() => decoder.decode(whole, { ...active, checkpoint(work) {
+      charged += work;
+      if (charged >= 4) duringPartition.abort();
+      active.checkpoint(work);
+    } }), (error: unknown) => error instanceof OperationError && error.code === 'cancelled');
+  } finally { decoder.dispose(); }
+});
+
+test('prepared partitions retain overlapping data boundaries, holes and split-backing instructions', () => {
+  const initial = imageFromBytes(Uint8Array.from([0xe8, 0, 0, 0xcc, 0xcc, 0, 0, 0xc3, 0x90, 0x90]), { mappings: [
+    { id: 'one', va: 0x1000n, memory_size: 3n, file_offset: 0n, file_size: 3n, permissions: ['execute'] },
+    { id: 'two', va: 0x1003n, memory_size: 6n, file_offset: 5n, file_size: 5n, permissions: ['execute'] },
+  ] });
+  const image: LoadedImage = { ...initial, hints: [
+    { kind: 'data', range: region(initial, 0x1006n, 4), encoding: 'bytes', evidence_ids: [] },
+    { kind: 'data', range: region(initial, 0x1007n, 1), encoding: 'bytes', evidence_ids: [] },
+  ] };
+  const decoder = new X86Decoder({ formatting: false });
+  try {
+    const whole = { image, regions: [region(image, 0x1000n, 11)], features: [], mode: 'long64' as const };
+    const result = decoder.decode(whole, operation());
+    assert.deepEqual(result.instructions.map(instruction => [instruction.address.value, instruction.size, instruction.bytes.start.space]), [
+      [0x1000n, 5, 'va'], [0x1005n, 1, 'file'],
+    ]);
+    assert.deepEqual(result.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]), [
+      ['data', 0x1006n, 1n], ['data', 0x1007n, 1n], ['data', 0x1008n, 1n], ['data', 0x1009n, 1n], ['unmapped', 0x100an, 1n],
+    ]);
+    const short = decoder.decode({ ...whole, regions: [region(image, 0x1000n, 4)] }, operation());
+    assert.equal(short.instructions.length, 0);
+    assert.deepEqual(short.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]), [['truncated', 0x1000n, 4n]]);
+    assert.deepEqual(decoder.decode(whole, operation()), result);
+    const boundary = { ...image, hints: [{ kind: 'data' as const, range: region(image, 0x1004n, 1), encoding: 'bytes' as const, evidence_ids: [] }] };
+    const stopped = decoder.decode({ ...whole, image: boundary, regions: [region(image, 0x1000n, 6)] }, operation());
+    assert.deepEqual(stopped.instructions.map(instruction => instruction.address.value), [0x1005n]);
+    assert.deepEqual(stopped.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]), [
+      ['truncated', 0x1000n, 4n], ['data', 0x1004n, 1n],
+    ]);
+  } finally { decoder.dispose(); }
+});
+
+test('cached narrow windows skip unrelated data while dense partitions still consume work', () => {
+  const initial = imageFromBytes(new Uint8Array(513).fill(0x90));
+  const image: LoadedImage = { ...initial, hints: Array.from({ length: 256 }, (_, index) => ({
+    kind: 'data', range: region(initial, 0x1001n + BigInt(index * 2), 1), encoding: 'bytes', evidence_ids: [],
+  })) };
+  const request = { image, regions: [region(image, 0x1200n, 1)], features: [], mode: 'long64' as const };
+  const decoder = new X86Decoder({ formatting: false });
+  try {
+    const first = decoder.decode(request, operation());
+    assert.equal(first.instructions.length, 1);
+    assert.deepEqual(decoder.decode(request, operation({ budget: { work: 32 } })), first);
+    const beginning = decoder.decode({ ...request, regions: [region(image, 0x1000n, 2)] }, operation({ budget: { work: 32 } }));
+    assert.deepEqual(beginning.instructions.map(instruction => instruction.address.value), [0x1000n]);
+    assert.deepEqual(beginning.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]), [['data', 0x1001n, 1n]]);
+    assert.throws(() => decoder.decode({ ...request, regions: [region(image)] }, operation({ budget: { work: 32 } })),
+      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit');
   } finally { decoder.dispose(); }
 });
 

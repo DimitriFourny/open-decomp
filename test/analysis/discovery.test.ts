@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
   AddressMap, ImmutableBytes, OperationError, contentHash, createOperationContext, imageIdentity, sliceIdentity,
-  fingerprint, type Address, type AddressRange, type Evidence, type LoadedImage, type Loader,
+  fingerprint, type Address, type AddressRange, type Decoder, type Evidence, type LoadedImage, type Loader,
 } from '../../src/core/index.js';
 import { Arm64Decoder } from '../../src/decoders/arm64/index.js';
 import { X86Decoder } from '../../src/decoders/x86_64/index.js';
@@ -109,6 +109,153 @@ test('ARM direct calls and loops use real fixed-width decoding', () => {
   assert.equal(result.graphs.length, 2);
   assert.equal(result.references.find(reference => reference.kind === 'call')?.to?.value, 0x1010n);
   assert.ok(result.graphs[0]!.blocks.some(block => block.edges.some(edge => edge.to === block.id)));
+});
+
+test('bounded ARM navigation retains every loader root and call without repeatedly preparing image hints', () => {
+  const count = 512;
+  const bytes = Buffer.alloc(count * 8);
+  for (let i = 0; i < count; i++) {
+    bytes.writeUInt32LE(i + 1 < count ? 0x94000002 : 0xd65f03c0, i * 8); // bl next function / ret
+    bytes.writeUInt32LE(0xd65f03c0, i * 8 + 4);
+  }
+  const base = raw([...bytes], 'arm64');
+  const data = address(base, bytes.length - 4);
+  const image: LoadedImage = { ...base, hints: [
+    ...Array.from({ length: count }, (_, i) => ({ kind: 'function' as const, address: address(base, i * 8), size: null, evidence_ids: [] })),
+    { kind: 'data', range: { start: data, size: 4n }, encoding: 'literal_pool', evidence_ids: [] },
+  ] };
+  const result = discover(image, {}, { work: 200_000, instructions: 2_000, blocks: 2_000 });
+  assert.equal(result.coverage.state, 'complete');
+  assert.equal(result.graphs.length, count);
+  assert.ok(result.graphs.every(graph => graph.function.boundary === 'established' && graph.coverage.state === 'complete'));
+  assert.ok(result.graphs.every(graph => graph.instructions.every(instruction => instruction.address.value < data.value)));
+  const calls = result.references.filter(reference => reference.kind === 'call');
+  assert.equal(calls.length, count - 1);
+  for (let i = 0; i < calls.length; i++) {
+    assert.equal(calls[i]!.from_function, result.graphs[i]!.function.id);
+    assert.equal(calls[i]!.to_entity, result.graphs[i + 1]!.function.id);
+    assert.equal(calls[i]!.to?.value, result.graphs[i + 1]!.function.entry.value);
+    assert.equal(calls[i]!.status, 'established');
+    assert.ok(calls[i]!.evidence_ids.every(id => result.evidence.some(item => item.id === id)));
+  }
+  const conflict = discover(image, { assertions: [assertion(image, bytes.length - 4)] }, { work: 200_000, instructions: 2_000, blocks: 2_000 });
+  const blocked = conflict.graphs.find(graph => graph.function.entry.value === data.value)!;
+  assert.equal(conflict.coverage.state, 'partial');
+  assert.equal(blocked.function.boundary, 'conflicting');
+  assert.deepEqual(blocked.instructions, []);
+  assert.equal(blocked.gaps[0]?.reason, 'data');
+  assert.deepEqual(conflict.graphs.slice(0, count).map(graph => graph.function.id), result.graphs.map(graph => graph.function.id));
+});
+
+test('bounded x86 navigation preserves roots, calls, claimed data and identities with many boundaries', () => {
+  const count = 512;
+  const bytes = Buffer.alloc(count * 8, 0xcc);
+  for (let i = 0; i < count; i++) {
+    if (i + 1 < count) bytes.set([0xe8, 3, 0, 0, 0, 0xc3], i * 8); // call next function; ret
+    else bytes[i * 8] = 0xc3;
+  }
+  const base = raw([...bytes]);
+  const source: Evidence = { id: `evidence_${fingerprint('many-native-boundaries')}`,
+    origin: { kind: 'binary', range: { start: address(base, 0), size: BigInt(bytes.length) }, description: 'Native function and data boundaries' },
+    claim: 'Function extents contain trailing data, not reachable code', derived_from: [], conflicts_with: [], revision: 0 };
+  const image: LoadedImage = { ...base, evidence: [source], hints: [
+    ...Array.from({ length: count }, (_, i) => ({ kind: 'function' as const, address: address(base, i * 8), size: 8n, evidence_ids: [source.id] })),
+    ...Array.from({ length: count }, (_, i) => ({ kind: 'data' as const, range: { start: address(base, (count - i - 1) * 8 + 6), size: 2n }, encoding: 'bytes' as const, evidence_ids: [source.id] })),
+  ] };
+  const budget = { work: 200_000, instructions: 2_000, blocks: 2_000 };
+  const result = discover(image, {}, budget);
+  assert.equal(result.coverage.state, 'complete');
+  assert.equal(result.graphs.length, count);
+  assert.equal(result.boundary_claims.length, count);
+  assert.equal(result.references.length, count - 1);
+  for (let i = 0; i < count; i++) {
+    const graph = result.graphs[i]!;
+    assert.equal(graph.function.entry.value, address(image, i * 8).value);
+    assert.equal(graph.function.boundary, 'established');
+    assert.equal(graph.coverage.state, 'complete');
+    assert.deepEqual(graph.instructions.map(instruction => instruction.address.value),
+      (i + 1 < count ? [i * 8, i * 8 + 5] : [i * 8]).map(offset => address(image, offset).value));
+    assert.deepEqual(graph.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]),
+      [['data', address(image, i * 8 + 6).value, 2n]]);
+    const claim = result.boundary_claims[i]!;
+    assert.equal(claim.range.size, 8n);
+    assert.ok(claim.evidence_ids.every(id => result.evidence.find(item => item.id === id)?.derived_from.includes(source.id)));
+    if (i + 1 < count) {
+      const call = result.references[i]!;
+      assert.equal(call.kind, 'call');
+      assert.equal(call.from_function, graph.function.id);
+      assert.equal(call.to_entity, result.graphs[i + 1]!.function.id);
+      assert.equal(call.to?.value, address(image, (i + 1) * 8).value);
+      assert.ok(call.evidence_ids.length > 0);
+      assert.ok(call.evidence_ids.every(id => result.evidence.some(item => item.id === id)));
+    }
+  }
+  assert.deepEqual(result, discover(image, {}, { ...budget, work: 2_000_000 }));
+  const atData = bytes.length - 2;
+  const conflict = discover(image, { assertions: [assertion(image, atData)] }, budget);
+  const blocked = conflict.graphs.find(graph => graph.function.entry.value === address(image, atData).value)!;
+  assert.equal(blocked.function.boundary, 'conflicting');
+  assert.deepEqual(blocked.instructions, []);
+  assert.deepEqual(blocked.gaps[0]!.diagnostics[0]!.evidence_ids, [source.id]);
+  assert.deepEqual(conflict.graphs.slice(0, count).map(graph => graph.function.id), result.graphs.map(graph => graph.function.id));
+});
+
+test('nested data boundaries retain the first containing claim and zero-sized hints do not truncate code', () => {
+  const base = raw([0xeb, 10, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xc3, 0xcc, 0xc3]);
+  const outer = assertion(base, 4).evidence, inner = assertion(base, 6).evidence;
+  const image: LoadedImage = { ...base, evidence: [outer, inner], hints: [
+    { kind: 'data', range: { start: address(base, 6), size: 2n }, encoding: 'bytes', evidence_ids: [inner.id] },
+    { kind: 'data', range: { start: address(base, 4), size: 10n }, encoding: 'bytes', evidence_ids: [outer.id] },
+    { kind: 'data', range: { start: address(base, 1), size: 0n }, encoding: 'bytes', evidence_ids: [] },
+  ], exports: [{ id: `entity_${fingerprint('nested-data-export')}`, address: address(base, 12), original_name: 'not_code', display_name: null, evidence_ids: [], ordinal: null, forwarder: null }] };
+  const result = discover(image, { assertions: [assertion(image, 14)] });
+  assert.deepEqual(result.graphs.map(graph => graph.function.entry.value), [0x1000n, 0x100en]);
+  const first = result.graphs[0]!;
+  assert.equal(first.instructions[0]!.size, 2);
+  assert.equal(first.instructions[0]!.flow.kind, 'branch');
+  assert.equal(first.gaps[0]!.range.start.value, 0x100cn);
+  assert.equal(first.gaps[0]!.range.size, 2n);
+  assert.deepEqual(first.gaps[0]!.diagnostics[0]!.evidence_ids, [outer.id]);
+  assert.equal(result.graphs[1]!.instructions[0]!.flow.kind, 'return');
+});
+
+test('decode lookahead cannot cross data, non-executable backing, holes or zero-fill', () => {
+  const base = raw([0xe8, 0, 0, 0, 0, 0xc3]);
+  const withData: LoadedImage = { ...base, hints: [{ kind: 'data', range: { start: address(base, 4), size: 1n }, encoding: 'bytes', evidence_ids: [] }] };
+  for (const image of [withData, ...['non-executable', 'hole', 'zero-fill'].map(kind => {
+    const mappings = [
+      { id: 'first', va: 0x1000n, file_offset: 0n, file_size: 4n, memory_size: kind === 'zero-fill' ? 6n : 4n, permissions: ['read', 'execute'] as const },
+      ...(kind === 'non-executable' ? [{ id: 'second', va: 0x1004n, file_offset: 4n, file_size: 2n, memory_size: 2n, permissions: ['read'] as const }] : []),
+    ];
+    return { ...base, mappings, address_map: new AddressMap({ image_id: base.id, image_base: base.image_base, byte_length: 6n, slice_offset: 0n, slice_size: 6n, mappings }) };
+  })]) {
+    const result = discover(image);
+    assert.deepEqual(result.graphs[0]!.instructions, []);
+    assert.equal(result.graphs[0]!.gaps[0]!.reason, 'truncated');
+    assert.equal(result.references.length, 0);
+    assert.equal(result.coverage.state, 'partial');
+  }
+});
+
+test('decoder work remains cumulative with work already consumed by its caller', () => {
+  const image = raw([0xc3]);
+  const native = new X86Decoder({ formatting: false });
+  const decoder: Decoder = {
+    name: native.name, version: native.version, architecture: native.architecture,
+    decode(request, context) {
+      // An individually affordable decoder charge must still fail against work
+      // already spent by the caller, rather than a fresh per-window operation.
+      context.checkpoint(20_000);
+      return native.decode(request, context);
+    },
+    dispose() { native.dispose(); },
+  };
+  try {
+    const spent = createOperationContext({ budget: { work: 100_000 } });
+    spent.checkpoint(90_000);
+    assert.throws(() => discoverFunctions({ image, decoder, revision: 0 }, spent),
+      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit');
+  } finally { decoder.dispose(); }
 });
 
 test('noncontiguous regions, file-coordinate data, and reachable data conflicts remain explicit', () => {
