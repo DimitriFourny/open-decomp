@@ -2,7 +2,7 @@
 
 ## Current status
 
-The current F01/F02/F03 macOS development checkout passed strict typechecking, **852/852 tests** (six suites, zero skipped), compilation and actual compiled stdio acceptance for all **eight maintained fixtures and both dialects** under **Node 24.22.0**. Compiled HTTP/HTTPS additionally investigated all four ELF executable/shared symbol-bearing/stripped variants with both dialects, annotations, hash-paged artifacts, cache and full server restart. The corrected bounded-body implementation passed the retained eight-process overflow stress. **No new extension npm artifact has yet been built/installed.** Frozen v0.1 archive results do not qualify current bytes. Current Windows host/installed acceptance and resource gates T29/T30/T31 remain incomplete; this is not a declaration that A01–A12 are complete.
+The current F01/F02/F03 macOS development checkout passed strict typechecking, **852/852 tests** (six suites, zero skipped), compilation and actual compiled stdio acceptance for all **eight maintained fixtures and both dialects** under **Node 24.22.0**. Compiled HTTP/HTTPS additionally investigated all four ELF executable/shared symbol-bearing/stripped variants with both dialects, annotations, hash-paged artifacts, cache and full server restart. The corrected bounded-body implementation passed the retained eight-process overflow stress. A fresh immutable extension candidate from source **`0d3e40bd8e67d6d0afa02edbd5973d1239ff6b7a`** subsequently passed clean empty-cache offline installed acceptance on macOS, as recorded below. Frozen v0.1 archive results do not qualify these bytes. Current Windows host/installed acceptance and resource gates T29/T30/T31 remain incomplete; this is not a declaration that A01–A12 are complete.
 
 macOS host: Darwin 27.0.0, arm64, Mac18,5, Apple M6, 12 logical CPUs, 16 GiB RAM. The current 852-test regression reported **91,318.200375 ms** and passed strict typecheck and build. The historical F01/F02 730-test regression reported 70,385.691125 ms; the earlier frozen 695-test run reported 71,099.741291 ms. These are verification durations, not performance SLAs.
 
@@ -36,7 +36,35 @@ The previous compiled server pre-rejected oversized `Content-Length` while reque
 
 After the successful build, eight concurrent `node .local/http-boundary-probe.mjs` processes each received **413** for **2,097,153 input bytes**, completed all labeled rejection stages and then received **200** for the healthy request: **8/8 passed, zero resets**. Full labeled stdout/stderr is retained in `.local/extension-verification/http-boundary-after.json`, **27,342 bytes**, SHA256 `06ddbf59e0531cf9bce7da1ae380707e97923a91dcc75f04831ef455abbf6278`. Separate compiled HTTP and HTTPS byte-accounting records observed **23-byte** 413 bodies, SHA256 `2d70a47133fe156cdbc4fac58837c81381e6c9078f34d17f9a9e6ce00c0306c4`. The temporary probe was removed only after retaining output. This is bounded-error delivery evidence, not a throughput or hard-RSS guarantee.
 
-Packaging prerequisites remain: Main's reviewed current source milestone, a fresh `pack:release` archive and sibling hash/inventory manifest including the ELF runtime/fixtures guidance, then clean external empty-cache offline installed acceptance on **both** hosts. Current Windows compiled acceptance/required decoder/ABI smoke and T30 resource evidence cannot be replaced by old frozen candidates or these macOS results.
+The reviewed source milestone and fresh candidate packaging/macOS installed prerequisites are now satisfied by the immutable pair below. Current Windows compiled acceptance/required decoder/ABI smoke, Windows installed acceptance and T30 resource evidence remain required; they cannot be replaced by old frozen candidates or these macOS results.
+
+## Immutable F03 candidate and subsequent macOS installed qualification
+
+After Main committed source **`0d3e40bd8e67d6d0afa02edbd5973d1239ff6b7a`**, the existing release driver packaged a fresh, previously absent output directory. No source changes or full regression reruns occurred during this phase. The driver performed its normal clean compilation and bundled all eight resolved production packages into **7,180 inventory files**, using Node **24.22.0** and npm **11.20.0** on macOS arm64.
+
+Both immutable files are under `/Users/df0/Documents/projects/open_decomp/.local/release/local-0.1.0-elf-0d3e40b/`:
+
+| File | Bytes | SHA256 |
+| --- | ---: | --- |
+| `open-decomp-0.1.0.tgz` | 7,508,205 | `ab61b6939c0b901d40ba4aac1a7a0339c8d6e4f47dfe9606801134a6d90ce341` |
+| `open-decomp-0.1.0.tgz.release.json` | 983,773 | `b0057274787c659217ec39f2df575ce83471c5b7f590968d03211e88a59e6154` |
+
+With the verified Node directory prepended to PATH, both commands exited **0**:
+
+```sh
+npm run pack:release -- --out .local/release/local-0.1.0-elf-0d3e40b
+npm run verify:installed -- \
+  --artifact /Users/df0/Documents/projects/open_decomp/.local/release/local-0.1.0-elf-0d3e40b/open-decomp-0.1.0.tgz \
+  --fixtures fixtures/bin
+```
+
+The verifier validated this exact archive against its sibling manifest, copied both fixture manifests and all **27** indexed binary/malformed inputs to an external temporary root, installed with an initially empty npm cache using **offline / ignore-scripts / omit-dev**, checked the recorded inventory, and ran the installed public import, actual Mach-O/PE/ELF decoding with both ISA decoders, and four demangling cases exercising all three WASM engines. The real installed server/workers then passed **28 maintained scenario records plus release completion**: all eight full investigations with both dialects, native variants, typed rejected images, budget failures and unsupported-effect immutable resumes. The complete installed log contains **40 JSON records**, including final installed-acceptance completion. No target execution, source-runtime fallback, compiler dependency or network fetch was used by installed runtime verification.
+
+Retained package log `.local/release/f03-0d3e40b-package.log`: **1,136 bytes**, SHA256 `6c3704d51d6f0f0d1a311ae21fc1d48337af343a508817f5beb6dccaf3bbed4d`. Installed evidence `.local/release/f03-0d3e40b-macos-installed.jsonl`: **19,346 bytes**, SHA256 `9a19217ca68a23592ab616c4d64fca5aafe6e81ad7387df47cd389a990f8d4d0`. Handoff `.local/release/f03-0d3e40b-handoff.json`: **14,262 bytes**, SHA256 `b3100bd746e9f4059e3671b0725dcbc0748ba39ebaf0f529db031b3541a2070a`; it records the full source identity, exact commands, artifact identities, current compiled harness/helper hashes, both manifest hashes and all 27 fixture identities.
+
+**Snapshot boundary:** documentation inside this archive was captured at source milestone `0d3e40b`, before this installed run. Its then-pending packaging/installation statements are build-time history, not a contradiction or evidence of later verification. This section is a subsequent qualification record outside the sealed archive. Neither archive nor manifest was rewritten, and no repack was performed merely to include the archive's own hash.
+
+This is an immutable **candidate**, not a released or both-host-qualified artifact. WindowsNativeOps received the exact pair and current four-helper compiled harness/two-manifest/27-input staging contract for independent Windows qualification. Current Windows compiled/installed acceptance and T30 resource results remain pending; earlier frozen diagnostics do not satisfy them.
 
 
 ## Historical F01/F02 macOS development evidence
