@@ -4,6 +4,8 @@
 
 The current F01/F02/F03 macOS development checkout passed strict typechecking, **852/852 tests** (six suites, zero skipped), compilation and actual compiled stdio acceptance for all **eight maintained fixtures and both dialects** under **Node 24.22.0**. Compiled HTTP/HTTPS additionally investigated all four ELF executable/shared symbol-bearing/stripped variants with both dialects, annotations, hash-paged artifacts, cache and full server restart. The corrected bounded-body implementation passed the retained eight-process overflow stress. A fresh immutable extension candidate from source **`0d3e40bd8e67d6d0afa02edbd5973d1239ff6b7a`** subsequently passed clean empty-cache offline installed acceptance on macOS, as recorded below. Frozen v0.1 archive results do not qualify these bytes. **The verified execution host and current first-local-release acceptance scope are macOS arm64 / Node 24.22.0.** Linux/WSL is intended but not host-qualified; native Windows execution is outside product scope, not a release blocker.
 
+The scope-corrected artifact from source/docs milestone **`a1698357f62644c07bd62d92d5e7b18179f100dc`** has now also passed exact-archive clean offline macOS installed acceptance. Its shipped documentation identifies macOS as verified, Linux/WSL as intended/unverified and native Windows as outside product requirements. The exact immutable pair and subsequent qualification record follow.
+
 ### Execution hosts versus analysis targets
 
 | Role | Scope and evidence |
@@ -22,6 +24,39 @@ The historical Windows environment was Windows 10 Enterprise LTSC 19044 x86-64, 
 Frozen Windows candidate `c9ffe777e32a7bb8bb9afa5eedbc0008b35ca347` passed compilation, 21 x86 decoder cases and actual compiled decoding of both target formats, but its source workflow and lifecycle/bounded-worker cases failed. Oversized-ID handling **passed**, correcting the earlier screenshot interpretation. The run was stopped without a final test-run footer; its retained log and intervention history are below. A later **focused extracted-artifact** probe of frozen `7fe5f80` also failed: initialization took **2,929.086 ms**, import **14,752.847 ms**, then the stalled-output process did not exit before the **120-second watchdog**. No full suite was restarted.
 
 PE target support and native-Windows execution are distinct. macOS cross-compiles PE fixtures and statically analyzes PE, Mach-O and ELF without a VM or executing target binaries. Native Windows host qualification is no longer a product/release requirement. Its observed I/O failures remain real evidence, not merely emulation slowness, and the later focused current-artifact lifecycle pass remains limited to that scenario. Neither result is a Windows throughput claim or a Linux/WSL host pass.
+
+## Scope-corrected macOS artifact and subsequent installed qualification
+
+Main authorized a fresh artifact only after committing the corrected execution-host documentation at **`a1698357f62644c07bd62d92d5e7b18179f100dc`**. Runtime implementation is unchanged from verified source milestone `0d3e40bd8e67d6d0afa02edbd5973d1239ff6b7a`; intervening changes are scope documentation/task-board evidence. The destination was verified absent before packaging. The old `ab61b693…` candidate and its manifest were preserved unchanged.
+
+New immutable pair, under `/Users/df0/Documents/projects/open_decomp/.local/release/local-0.1.0-macos-a169835/`:
+
+| File | Bytes | SHA256 |
+| --- | ---: | --- |
+| `open-decomp-0.1.0.tgz` | 7,510,639 | `3cc8029c73d7ef233dd9740ada7b56a838fa6703c77096643f4080f50421baff` |
+| `open-decomp-0.1.0.tgz.release.json` | 983,773 | `552ccf01a4fbdc487be92272107896e952f60b425a9977a766e795697ae10dd4` |
+
+With the verified Node **24.22.0** directory prepended to PATH, the existing drivers both exited **0**, using npm **11.20.0**:
+
+```sh
+npm run pack:release -- --out .local/release/local-0.1.0-macos-a169835
+npm run verify:installed -- \
+  --artifact /Users/df0/Documents/projects/open_decomp/.local/release/local-0.1.0-macos-a169835/open-decomp-0.1.0.tgz \
+  --fixtures fixtures/bin
+```
+
+Packaging performed only its maintained normal clean compilation; no standalone build, full check, benchmark, target execution or VM qualification was rerun. All tracked source/docs stayed frozen until the pair was sealed. The archive contains **7,180 inventory files** and all eight resolved production packages. The verifier validated the exact archive/manifest, copied both fixture manifests and all **27** indexed inputs into an external temporary root, then installed with a fresh empty npm cache using **offline / ignore-scripts / omit-dev**. Installed runtime had no source-tree/sibling fallback.
+
+Actual installed public import, three-format/both-ISA decoder probes and four cases exercising all three WASM demanglers passed. The real installed MCP server/workers passed **28 maintained scenario records plus release completion**, including all **eight full investigations and both dialects**, native container variants, rejected images, budget failures and unsupported-effect immutable resumes. Complete installed evidence has **40 JSON records**, ending with `installed-acceptance-complete` identifying archive SHA256 `3cc8029c…`. The temporary install was removed by the driver.
+
+| Retained evidence | Bytes | SHA256 |
+| --- | ---: | --- |
+| `.local/release/a169835-package.log` | 1,142 | `8ee088324509ca04f8ef801eae04da5e9d80250b8effbb326ed26832b6610e6c` |
+| `.local/release/a169835-macos-installed.jsonl` | 19,354 | `04b5fa2c42a57d23bee1d731af63afe3981841747b214c7b0015c9dad8390673` |
+| `.local/release/a169835-handoff.json` | 6,080 | `6f0558790d6dc6f3ee23dd1e380d1222bd51a1e70170249798cd0f59fd6a3b96` |
+
+**Post-build record boundary:** the shipped documentation is the accurate scope snapshot at `a169835`, before this new archive's installed run and before the final historical VM-cessation record. This section was added externally **after sealing** the pair. Neither archive nor manifest was rewritten or repacked merely to include its own hash/results. Successful macOS qualification does not assert Linux/WSL execution, native-Windows product support, npm publication or resolution of the notices' public-redistribution/source-provenance limitations.
+
 
 ## F03 and bounded-body integration evidence
 
@@ -47,7 +82,7 @@ The previous compiled server pre-rejected oversized `Content-Length` while reque
 
 After the successful build, eight concurrent `node .local/http-boundary-probe.mjs` processes each received **413** for **2,097,153 input bytes**, completed all labeled rejection stages and then received **200** for the healthy request: **8/8 passed, zero resets**. Full labeled stdout/stderr is retained in `.local/extension-verification/http-boundary-after.json`, **27,342 bytes**, SHA256 `06ddbf59e0531cf9bce7da1ae380707e97923a91dcc75f04831ef455abbf6278`. Separate compiled HTTP and HTTPS byte-accounting records observed **23-byte** 413 bodies, SHA256 `2d70a47133fe156cdbc4fac58837c81381e6c9078f34d17f9a9e6ce00c0306c4`. The temporary probe was removed only after retaining output. This is bounded-error delivery evidence, not a throughput or hard-RSS guarantee.
 
-The reviewed source milestone and fresh candidate packaging/macOS installed prerequisites are satisfied by the immutable pair below. A fresh artifact containing the corrected execution-host documentation still needs its own exact-archive macOS installed acceptance. Native Windows compiled/installed/performance qualification is outside current release scope, not a pending prerequisite. Linux/WSL remains intended and unverified.
+The reviewed runtime milestone and the earlier candidate's packaging/macOS installed prerequisites were satisfied by the `0d3e40b` pair below. The newer `a169835` pair above now also qualifies the corrected shipped execution-host documentation through its own exact-archive macOS installed run. Native Windows compiled/installed/performance qualification is outside release scope; Linux/WSL remains intended and unverified.
 
 ## Immutable F03 candidate and subsequent macOS installed qualification
 
@@ -75,7 +110,7 @@ Retained package log `.local/release/f03-0d3e40b-package.log`: **1,136 bytes**, 
 
 **Snapshot boundary:** documentation inside this archive was captured at source milestone `0d3e40b`, before this installed run. Its then-pending packaging/installation statements are build-time history, not a contradiction or evidence of later verification. This section is a subsequent qualification record outside the sealed archive. Neither archive nor manifest was rewritten, and no repack was performed merely to include the archive's own hash.
 
-This is an immutable **candidate**, not an implicit publication or a claim that every execution environment is qualified. Before the scope correction, WindowsNativeOps received this pair and the four-helper compiled harness/two-manifest/27-input staging contract. Historical native results below are retained; further Windows host/installed/performance work is no longer required. The pair remains unchanged while accurate scope documentation is prepared for a separately identified artifact.
+This earlier immutable **candidate** is retained, not silently overwritten or an implicit publication. Before the scope correction, WindowsNativeOps received this pair and the four-helper compiled harness/two-manifest/27-input staging contract. Its historical native observations remain below; further Windows host/installed/performance work is no longer required. The separately identified `a169835` pair above ships the corrected execution-host documentation and has its own macOS installed evidence.
 
 
 ## Historical F01/F02 macOS development evidence
@@ -194,5 +229,14 @@ WindowsNativeOps subsequently ran the **unaltered current artifact**, not the di
 The focused native run passed with guest command **exit 0**: the stalled peer exited **1 after 30,423.255 ms**, the same durable project resumed at **revision 2**, and the healthy peer closed normally with **EOF exit 0** observed at total **61,519.688 ms**. Probe cleanup completed at **61,547.767 ms**, without watchdog firing. The raw log retains the expected 30-second stall diagnostic and **71,158 received bytes** before the abandoned output was reaped.
 
 Evidence `.local/windows/evidence/current-native-0d3e40b.log`: **1,456 bytes**, SHA256 `fc18c2dc26e093f98df32e2f9e9613c4fcc2eadf1b3fabdf72df371f657370b9`. Input/staging identities are in `.local/windows/evidence/current-0d3e40b-inputs.json` (at this native result, SHA256 `25a65230469a14eb7fe80a39281478de0fdf964171c3a0cde776feeba4351a36`); they bind the sealed pair, current runtime, developer harness, both fixture manifests, 27 inputs, native launcher and execution media. This is current-byte Windows lifecycle evidence, **not** a frozen-overlay result, but it is still **extracted-artifact focused acceptance**, not clean installed acceptance or the full compiled eight-fixture/two-dialect suite. Those broader native checks were not completed and are no longer product/release requirements. No native-Windows, Linux or WSL host qualification is inferred.
+
+### Native work cessation after scope correction — completed
+
+WindowsNativeOps stopped the sole owned in-flight compiled verification command after the user clarified execution-host scope. It matched command token `1674068797134e6d9e967a76f34019bc` and exact command-root PID **1164**, terminating only that owned tree. The helper returned **255** because descendant PID **4028** had already exited; the original verification command returned **1**, with **no host deadline exceeded**. Its completed ABI-contract slice reported a pass, but maintained MCP workflows were incomplete and stopped by scope—not a whole native-Windows host pass. No current native-Windows installed acceptance, pipeline benchmark, resources100 measurement or full TSX-suite rerun was started.
+
+The VM was then stopped gracefully: QMP `system_powerdown` produced `POWERDOWN`, `SUSPEND_DISK`, guest `SHUTDOWN { guest: true, reason: "guest-shutdown" }` and `STOP`. **Only after guest shutdown** did the owner issue QMP `quit`, receive the `host-qmp-quit` shutdown event/return, and observe connection closure. No QEMU force-kill, disk deletion or evidence/media removal occurred. The disk, all logs, guest evidence roots, media and every sealed archive/manifest were preserved. There is no remaining VM/SSH/native-qualification work under the corrected product scope.
+
+Cessation record `.local/windows/evidence/windows-scope-stop-result.json`: **3,059 bytes**, SHA256 `1a8196879d81d6765a0c3f3f1f84c010789578cf0a03d453749f058a5cfc297e`. It binds the exact owned-stop metadata/raw capture, QMP shutdown observations and not-run boundaries. Stopped command raw stdout is retained under `.local/windows/ssh/results/20261016T125105-1674068797134e6d9e967a76f34019bc`, SHA256 `66b1aa32ff5462a7d32276778fa83ba3cadef44a07b2c7ad9605d7c54c575a21`; owned-stop evidence is under `.local/windows/ssh/results/20261016T125516-40c02c072dcb493bae5890b822a9419b`. Together with the current-artifact lifecycle result above, this closes the narrow historical stdout investigation and records cessation without inventing full native-host, Linux/WSL, installation or performance acceptance.
+
 
 
