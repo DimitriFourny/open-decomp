@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import {
   DEFAULT_BUDGET, contentHash, createOperationContext, entityIdentity, newIdentity, toolSchemas,
-  type AnnotationEdit,
+  type AnnotationEdit, type CacheIdentity,
 } from '../../../src/core/index.js';
 import { Arm64Lifter } from '../../../src/lifters/arm64/index.js';
 import { X86Lifter } from '../../../src/lifters/x86_64/index.js';
@@ -14,7 +14,7 @@ import { simplifySSA } from '../../../src/analysis/values/index.js';
 import { loadFunctionGraph, loadFunctionScope } from '../../../src/service/queries/scope.js';
 import { readAnnotationCatalog } from '../../../src/project/cache/index.js';
 import { executeDecompilation } from '../../../src/service/analysis/index.js';
-import { acceptsAnalysisIdentity } from '../../../src/service/analysis/versions.js';
+import { acceptsAnalysisIdentity, pipelineVersions } from '../../../src/service/analysis/versions.js';
 import { execute } from '../../emitters/c/support.js';
 import { loadImage, project } from './support.js';
 
@@ -55,11 +55,54 @@ for (const fixture of [
   };
   evaluate(full.data.emission.text);
   for (const instruction of graph.instructions) assert.ok(full.data.emission.mappings.some(mapping => mapping.instruction_ids.includes(instruction.id)));
+  const python = await p.decompile(fn.id, { options: { emitter: 'python-like' } });
+  const pythonFull = p.payload(python.result).result;
+  assert.ok('data' in python.result); assert.equal(python.result.data.cache, 'computed');
+  assert.equal(pythonFull.data.emission.language, 'python-like');
+  assert.equal(pythonFull.data.emission.reconstruction, 'pseudocode');
+  assert.notEqual(pythonFull.versions.emitter, full.versions.emitter);
+  assert.notEqual(python.result.artifacts[0]!.id, before.result.artifacts[0]!.id);
+  evaluate(pythonFull.data.emission.text);
+  for (const instruction of graph.instructions) assert.ok(pythonFull.data.emission.mappings.some(mapping => mapping.instruction_ids.includes(instruction.id)));
+  for (const mapping of pythonFull.data.emission.mappings) {
+    assert.ok(mapping.start >= 0 && mapping.end > mapping.start && mapping.end <= pythonFull.data.emission.text.length);
+    assert.equal(pythonFull.data.emission.text[mapping.end - 1], '\n');
+  }
+  const restyled = await p.decompile(fn.id, { options: { emitter: 'python-like', include_evidence: false, indent: 8 } });
+  const restyledFull = p.payload(restyled.result).result;
+  assert.ok('data' in restyled.result); assert.equal(restyled.result.data.cache, 'computed');
+  assert.notEqual(restyled.result.artifacts[0]!.id, python.result.artifacts[0]!.id);
+  assert.ok(restyledFull.data.emission.mappings.every(mapping => mapping.evidence_ids.length === 0));
+  evaluate(restyledFull.data.emission.text);
   const repeated = await p.decompile(fn.id, {}, 29000);
   assert.ok('data' in repeated.result); assert.equal(repeated.result.data.cache, 'hit');
   assert.deepEqual(repeated.result.artifacts, before.result.artifacts);
   assert.deepEqual(repeated.result.budget, before.args.budget, 'queue time must not change identity or echoed request budget');
   await p.reopen();
+  const pythonHit = await p.decompile(fn.id, { options: { emitter: 'python-like' } });
+  assert.ok('data' in pythonHit.result); assert.equal(pythonHit.result.data.cache, 'hit');
+  assert.deepEqual(pythonHit.result.artifacts, python.result.artifacts);
+  const identity: CacheIdentity = {
+    image_sha256: p.image.sha256, slice_id: p.image.selected_slice_id, target: p.image.target,
+    function_id: fn.id, evidence_revision: 2, annotation_revision: 2, budget: python.args.budget,
+    options: python.args.options, versions: pythonFull.versions,
+  };
+  assert.equal(acceptsAnalysisIdentity(identity), true);
+  assert.equal(acceptsAnalysisIdentity({ ...identity, versions: full.versions }), false);
+  assert.equal(acceptsAnalysisIdentity({ ...identity, options: before.args.options }), false);
+  assert.strictEqual(pipelineVersions(p.image.target, 'python-like'), pipelineVersions({ ...p.image.target }, 'python-like'));
+  assert.ok(Object.isFrozen(pipelineVersions(p.image.target, 'python-like')));
+  for (const component of Object.keys(identity.versions) as (keyof CacheIdentity['versions'])[]) {
+    assert.equal(acceptsAnalysisIdentity({ ...identity, versions: { ...identity.versions, [component]: 'stale-component' } }), false);
+  }
+  for (const target of [
+    { ...p.image.target, abi: fixture.arm ? 'windows-x64' as const : 'darwin-arm64' as const },
+    { ...p.image.target, format: fixture.arm ? 'pe' as const : 'macho' as const },
+    { ...p.image.target, architecture: fixture.arm ? 'x86_64' as const : 'arm64' as const },
+  ]) {
+    assert.equal(acceptsAnalysisIdentity({ ...identity, target }), false);
+    assert.throws(() => pipelineVersions(target, 'python-like'), { code: 'unsupported_target' });
+  }
   const subject = payload.catalog.subjects.find(subject => subject.kind === 'value'); assert.ok(subject);
   const catalog = await readAnnotationCatalog(p.state.store, 2, [subject.id], createOperationContext(), acceptsAnalysisIdentity);
   assert.equal(catalog?.subject(subject.id)?.kind, 'value');
@@ -86,6 +129,13 @@ for (const fixture of [
   assert.ok(changedPayload.catalog.types.some(type => type.id === typeId && type.source === 'user'));
   assert.ok(changedPayload.result.data.emission.mappings.some(mapping => mapping.semantic_ids.includes(fn.id) && mapping.evidence_ids.some(id => annotated.result.evidence.some(proof => proof.id === id))));
   evaluate(changedPayload.result.data.emission.text);
+  const pythonChanged = await p.decompile(fn.id, { options: { emitter: 'python-like' } });
+  const pythonChangedFull = p.payload(pythonChanged.result).result;
+  assert.ok('data' in pythonChanged.result); assert.equal(pythonChanged.result.data.cache, 'computed');
+  assert.notEqual(pythonChanged.result.artifacts[0]!.id, python.result.artifacts[0]!.id);
+  assert.equal(pythonChangedFull.data.signature?.return_type, typeId);
+  assert.ok(pythonChangedFull.data.emission.mappings.some(mapping => mapping.semantic_ids.includes(fn.id) && mapping.evidence_ids.some(id => annotated.result.evidence.some(proof => proof.id === id))));
+  evaluate(pythonChangedFull.data.emission.text);
   const retracted = await p.annotate(Object.values(ids).map(id => ({ operation: 'retract' as const, id })));
   assert.equal(retracted.result.state, 'complete');
   const after = p.payload((await p.decompile(fn.id)).result);
@@ -93,6 +143,11 @@ for (const fixture of [
   assert.equal(after.catalog.types.some(type => type.id === typeId), false);
   assert.equal(after.result.data.emission.text, full.data.emission.text, 'retraction removes names, notes and source assertions, not machine semantics');
   evaluate(after.result.data.emission.text);
+  const pythonAfter = await p.decompile(fn.id, { options: { emitter: 'python-like' } });
+  assert.ok('data' in pythonAfter.result); assert.equal(pythonAfter.result.data.cache, 'computed');
+  const pythonAfterFull = p.payload(pythonAfter.result).result;
+  assert.equal(pythonAfterFull.data.signature, null);
+  evaluate(pythonAfterFull.data.emission.text);
   assert.equal(contentHash(p.state.store.readImage(p.image.id).read(0n, p.image.bytes.length)), p.image.sha256);
   const history = p.state.store.queryAnnotationHistory({ id: ids.type, revision: 4, limit: 10 }).items;
   assert.deepEqual(history.map(entry => entry.operation), ['set', 'retract']);
@@ -108,7 +163,8 @@ for (const fixture of [
   assert.equal(translated.kind, 'mapped'); if (translated.kind !== 'mapped') assert.fail('Missing fixture instruction');
   raw.set(fixture.bytes, Number(translated.address.value));
   const p = await project(t, raw), fn = p.functions.find(fn => fn.entry.value === fixture.address); assert.ok(fn);
-  const first = await p.decompile(fn.id), full = p.payload(first.result).result;
+  for (const emitter of ['c-like', 'python-like'] as const) {
+  const first = await p.decompile(fn.id, { options: { emitter } }), full = p.payload(first.result).result;
   assert.equal(full.state, 'partial');
   assert.equal(full.coverage.find(item => item.layer === 'decode')?.state, 'complete');
   assert.equal(full.coverage.find(item => item.layer === 'lift')?.state, 'partial');
@@ -117,8 +173,13 @@ for (const fixture of [
     const address = p.image.address_map.translate({ ...range.start, value: BigInt(range.start.value) }, 'va');
     return address.kind === 'mapped' && address.address.value === fixture.address;
   })));
-  const hit = await p.decompile(fn.id); assert.equal(hit.result.state, 'partial');
+  const inputs = new Map(full.data.emission.mappings.flatMap(mapping => mapping.semantic_ids.map(id => [id, 0n] as const)));
+  const observed = execute(full.data.emission.text, inputs);
+  assert.equal(observed.exit, 'unknown');
+  assert.deepEqual(observed.events, ['unknown']);
+  const hit = await p.decompile(fn.id, { options: { emitter } }); assert.equal(hit.result.state, 'partial');
   assert.ok('data' in hit.result); assert.equal(hit.result.data.cache, 'hit');
+  }
 });
 
 test('real pipeline budgets: artifact delivery, cumulative cancellation, and annotation response rollback', { timeout: 60000 }, async t => {

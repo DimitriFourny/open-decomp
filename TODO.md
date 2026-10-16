@@ -26,18 +26,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 ### Later extensions — not first-release blockers
 
-- [ ] **F01 — Add a Python-like pseudocode emitter**
-  - Depends on: T31.
-  - Owns: `src/emitters/python-like/`, emitter selection/capability integration and semantic mapping cases.
-  - Work: Define a readable Python-like pseudocode dialect over the existing presentation model. Make finite-width arithmetic, loads/stores, labels/unstructured flow, and unknown effects explicit; do not imply ordinary Python runtime semantics. Add emitter selection and versioned cache identity without changing the semantic pipeline.
-  - Acceptance: The same analyzed functions render in both styles with equivalent effects and source mappings. No decoder/lifter/type-recovery fork is introduced, and the output is clearly labeled pseudocode rather than recovered or directly executable Python.
-
-- [ ] **F02 — Add authenticated MCP Streamable HTTP transport**
-  - Depends on: T31.
-  - Owns: HTTP transport, authorization integration, remote deployment documentation and security scenarios.
-  - Work: Reuse the same service/tools with authentication, project authorization, origin/DNS-rebinding protection, conservative binding defaults, bounded uploads/import access if offered, and request/work quotas. Define remote artifact and job access under the same identity. Keep transport lifecycle separate from persisted project identity.
-  - Acceptance: An authorized client completes the existing workflow remotely; unauthenticated/cross-project access, malicious origins, and resource abuse are rejected. Local stdio behavior remains intact, and no custom public socket protocol is required.
-
 - [ ] **F03 — Add Linux x86-64 ELF / System V ABI support**
   - Depends on: T31.
   - Selected by user: Linux x86-64, ELF, System V AMD64 ABI. Corpus: compile the existing scalar/control/memory/call/FP/vector sources into symbol-bearing and stripped ELF executables/shared objects; add compiler-backed SysV cases for mixed register banks, aggregate classification/rollback, stack/red-zone use, variadic calls and indirect results before integrating the new target.
@@ -54,7 +42,7 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Owner: ReleaseWorkflows (sol-worker: compiled acceptance scenarios), MigrationAudit (scout: read-only migration/provenance coverage), WindowsProgress (sol-worker: event-driven verification evidence), Coordinator (shared integration, frozen Windows media, both-host execution and recorded evidence).
   - macOS verification: Node 24.22.0 strict typecheck, **695/695 tests**, build, and all **24 compiled MCP release scenarios** passed after the latest native ownership and storage corrections. Selected universal-slice completeness, process-restart/cache/annotation persistence, native variants, malformed imports, repeated bounds and unsupported-effect provenance all ran. RELEASE-VERIFICATION.md distinguishes this implementation from the older frozen Windows candidate.
   - Migration cleanup: Retired the sibling-API collector and redundant captured C files; retained frozen historical JSON, current source oracles/fixture generation and durable-store migrations. Updated recipe hashes and documentation. Evidence and criterion boundaries are in RELEASE-VERIFICATION.md.
-  - Blocker: Frozen Windows **c9ffe77** passed compilation, 21 decoder tests and actual compiled cross-target decode, but guest-console inspection found failed EOF/backpressure/stalled-output/oversized-ID lifecycle cases and a still-owned CLI/worker pair. Two 90-minute observers expired; an event-driven observer follows the same recovering run without rerunning it. Coordinator is resolving the actual failures, not treating a live process as a pass. Windows f059a44's 589 earlier-milestone tests are not current acceptance. A11 installed packaging remains T31 and A12 measured performance remains T30.
+  - Blocker: Frozen Windows **c9ffe77** passed compilation, 21 decoder tests and actual compiled cross-target decode, but failed source workflows, EOF/backpressure/stalled-output lifecycle and additional bounded-worker scenarios. The coordinator stopped that already-failed command tree instead of waiting further. Its complete captured log is preserved with SHA256-bound transfer; it confirms oversized-ID handling passed, correcting the earlier console interpretation. A focused compiled Windows reproducer precedes any full-suite restart. Windows f059a44's 589 earlier-milestone tests are not current acceptance; installed packaging and performance remain T31/T30 gates.
   - Diagnosed correction: The Windows test-owner inspector found a non-draining peer with a live CLI/worker; manual pipe recovery let that same failed run advance. MCP stdout now uses asynchronous Windows descriptor writes and readiness-driven POSIX writes, with callback-level backpressure for small frames. macOS **695/695** and a real compiled stalled-peer shutdown/reopen probe passed (30,013.236292 ms, revision 2). Current Windows execution remains required; RELEASE-VERIFICATION.md records the intervention and the corrected intermediate POSIX EAGAIN regression.
 
 
@@ -80,6 +68,24 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Implemented and macOS verified: Private bundled npm artifact, hash-bound release manifest, external empty-cache offline installed verifier, operator/API/update documentation and 23 complete retained license/provenance assets. Full check **695/695** passed; actual installed public import, both decoders, all three demanglers and all **24 MCP scenarios** passed. Artifact SHA256 `10016938c5eb38c979b2b77f8914e6a7bdd28e4aad4de07f6793b3e07364c871`; exact commands, sizes, notice audit and raw evidence are in RELEASE-VERIFICATION.md. The earlier missing installed a64js closure is corrected. Windows installation remains outstanding; unresolved public Arm generated-data review and Swift WASM source revision are preserved as explicit provenance boundaries.
 
 ## Done
+- [x] **F01 — Add a Python-like pseudocode emitter**
+  - Depends on: T31.
+  - Owns: `src/emitters/python-like/`, emitter selection/capability integration and semantic mapping cases.
+  - Work: Define a readable Python-like pseudocode dialect over the existing presentation model. Make finite-width arithmetic, loads/stores, labels/unstructured flow, and unknown effects explicit; do not imply ordinary Python runtime semantics. Add emitter selection and versioned cache identity without changing the semantic pipeline.
+  - Acceptance: The same analyzed functions render in both styles with equivalent effects and source mappings. No decoder/lifter/type-recovery fork is introduced, and the output is clearly labeled pseudocode rather than recovered or directly executable Python.
+  - Owner: PythonEmitter (astra-worker), PythonSemanticReview (reviewer), ExtensionDocs (sol-worker), Coordinator (shared integration and actual verification).
+  - Scheduling: Used integrated macOS-verified interfaces under the host-verification exception; this does not waive T29–T31 or qualify the frozen Windows artifact.
+  - Implemented and verified: Shared presentation-model rendering, neutral public emission types, finite-width Python-like pseudocode, final-text UTF-16 mappings and full-target/emitter cache integrity. Node 24.22.0 strict typecheck, **730/730 tests** and build passed. Actual compiled stdio/HTTP/HTTPS clients emitted both dialects for Mach-O ARM64 and stripped PE x64, compared instruction mappings, verified artifact hashes, invalidated caches through revision-3 annotations and recovered Python cache hits after process restart. Existing emitter suites independently observe arithmetic/memory/control effects. Documentation and exact evidence are in RELEASE-VERIFICATION.md; no new extension artifact installation or Windows pass is claimed.
+
+- [x] **F02 — Add authenticated MCP Streamable HTTP transport**
+  - Depends on: T31.
+  - Owns: HTTP transport, authorization integration, remote deployment documentation and security scenarios.
+  - Work: Reuse the same service/tools with authentication, project authorization, origin/DNS-rebinding protection, conservative binding defaults, bounded uploads/import access if offered, and request/work quotas. Define remote artifact and job access under the same identity. Keep transport lifecycle separate from persisted project identity.
+  - Acceptance: An authorized client completes the existing workflow remotely; unauthenticated/cross-project access, malicious origins, and resource abuse are rejected. Local stdio behavior remains intact, and no custom public socket protocol is required.
+  - Owner: HttpTransport (astra-worker), HttpSecurityReview (security-reviewer), ExtensionDocs (sol-worker), Coordinator (shared integration and actual verification).
+  - Scheduling: Developed independently against the integrated service under the host-verification exception; first-release host gates remain open.
+  - Implemented and verified: Official SDK HTTP handling, per-request private identity, disjoint canonical project roots, native TLS/Host/Origin checks, bounded admission/output and principal-owned work surviving exchange loss. Node 24.22.0 **730/730 tests** and build passed, including real SDK security and deterministic worker lifecycle cases. Separate compiled HTTP and HTTPS CLI clients completed both target workflows, rejected unauthenticated/hostile-origin/cross-principal access and retained projects/artifacts across full server restart; certificate verification stayed enabled. Local compiled stdio also passed. REMOTE.md documents private bearer provisioning, limits and trust boundaries; no OAuth issuer, upload, public deployment or Windows qualification is implied.
+
 - [x] **T28 — Verify input containment and enforce resource/error boundaries**
   - Depends on: T27.
   - Owns: containment integration cases and documented limits; coordinate fixes in owning modules rather than duplicating validation.

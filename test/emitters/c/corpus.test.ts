@@ -20,7 +20,8 @@ function check(image: LoadedImage, abi: AbiProfile, registerIR: RegisterIR, memo
   const simplified = simplifySSA(constructed.value); assert.equal(simplified.state, 'complete');
   const ir = simplified.value;
   const types = recoverTypes(ir, abi, createOperationContext(), { image_id: image.id, slice_id: image.selected_slice_id, revision: 0 });
-  const output = emit(ir, { types, names: [{ entity_id: ir.id, name: memoryFunction ? 'fixture_memory' : 'fixture_arithmetic' }] });
+  for (const language of ['c-like', 'python-like'] as const) {
+  const output = emit(ir, { types, names: [{ entity_id: ir.id, name: memoryFunction ? 'fixture_memory' : 'fixture_arithmetic' }] }, language);
   const arm = abi.id === 'darwin-arm64', resultRoot = arm ? 'arm64:x0' : 'x86_64:rax';
   const entry = ir.blocks.find(block => block.id === ir.entry)!, bindings = ir.register_states.find(state => state.block === ir.entry)!.entry;
   for (const [a, b] of [[0n, 1n], [0xffffffffn, 3n], [123456789n, 987654321n]] as const) {
@@ -47,6 +48,7 @@ function check(image: LoadedImage, abi: AbiProfile, registerIR: RegisterIR, memo
     for (const id of node.provenance.instruction_ids) assert.ok(instructions.has(id), 'simplified machine origins remain navigable');
   }
   assert.deepEqual(decodeEmission(encodeEmission(output.emission)), output.emission);
+  }
 }
 
 test('actual Mach-O arithmetic and memory outputs execute with recovered type facts and instruction mappings', () => {

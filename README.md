@@ -1,19 +1,20 @@
 # Open Decomp — private local release
 
-Open Decomp is a headless native-binary workbench for LLM clients and ordinary programs. It statically loads native images, exposes structured navigation and evidence, runs its own typed-IR decompiler, and saves revisioned investigations in SQLite. Instruction decoders are dependencies; they are not external decompiler backends. Output is **C-like machine-state pseudocode**, not recovered original source or necessarily recompilable C.
+Open Decomp is a headless native-binary workbench for LLM clients and ordinary programs. It statically loads native images, exposes structured navigation and evidence, runs its own typed-IR decompiler, and saves revisioned investigations in SQLite. Instruction decoders are dependencies; they are not external decompiler backends. The current development checkout emits **C-like and Python-like machine-state pseudocode**, not recovered original source, necessarily recompilable C or executable Python.
 
-**Distribution boundary:** this is the private `open-decomp` 0.1.0 local artifact, not an npm publication or an application-wide open-source license grant. Third-party rights remain separate; read [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). The fixture MIT grant is [fixture-only](fixtures/LICENSE).
+**Distribution boundary:** the frozen private `open-decomp` 0.1.0 local artifacts are distinct from the current development checkout; no new F01/F02 extension artifact has yet been built/installed. This is not an npm publication or an application-wide open-source license grant. Third-party rights remain separate; read [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). The fixture MIT grant is [fixture-only](fixtures/LICENSE).
 
 ## Status and supported targets
 
 - Targets: Mach-O ARM64 executables/dylibs, including explicit ARM64 selection in universal containers; PE32+ x86-64 executables/DLLs using Windows x64 ABI. Target format/ISA/ABI are explicit, never inferred from the host.
 - Intended hosts: macOS arm64 and Windows x86-64. **Node 24.22.0 is the exercised runtime.** The package's engine range is not evidence that every allowed Node version was tested. `node:sqlite` is experimental in this runtime and may emit a stderr warning.
-- Existing macOS source-build evidence: 695 tests and 24 real compiled MCP scenarios, plus selected real SQLite functions on both ISAs and a 100-batch sustained resource run. See [release verification](RELEASE-VERIFICATION.md) and [performance evidence](PERFORMANCE.md) for hashes, options, limits and exact scope.
-- The private artifact's public import, both decoders, all three WASM demanglers and all 24 maintained MCP scenarios passed on macOS after an external empty-cache offline installation. Current Windows lifecycle failures, performance measurements and installed-artifact acceptance remain distinct release gates. Earlier Windows foundation checks and frozen-candidate decoding are not current release acceptance; QEMU TCG observations are not native Windows throughput.
+- Current macOS development evidence: strict typecheck, **730/730 tests** (six suites, zero skipped), build, and actual compiled stdio, HTTP and HTTPS investigation/restart workflows using both emitters and both target formats. Earlier frozen-release evidence includes 24 compiled MCP scenarios, selected real SQLite functions on both ISAs and a 100-batch sustained resource run. See [release verification](RELEASE-VERIFICATION.md) and [performance evidence](PERFORMANCE.md) for hashes, options, limits and exact scope.
+- The frozen pre-extension private artifact's public import, both decoders, all three WASM demanglers and all 24 maintained MCP scenarios passed on macOS after an external empty-cache offline installation. Those results do **not** qualify the extensions. Windows lifecycle failures, performance measurements and installed-artifact acceptance remain separate release gates; the focused frozen-candidate Windows stalled-output probe failed its 120-second watchdog.
+- PE target analysis does not require a Windows host: macOS cross-compiles and statically analyzes PE fixtures. Windows-host qualification instead checks actual Windows process/pipe/filesystem/installation behavior with focused compiled acceptance and required decoder/ABI smoke, not repeated full core-suite runs. Windows-host support and A01–A12 remain required; QEMU is sufficient for focused host checks, but TCG observations are not native Windows throughput.
 
 Bundled verification/plan/backlog documents are **build-time snapshots**, not evidence of a subsequent installation. Bind installed-run claims to the actual archive and its sibling release manifest; consult the coordinator's current evidence before calling the release gate complete. [PLAN.md](PLAN.md) describes direction and A01–A12; [TODO.md](TODO.md) records remaining gates.
 
-**Not shipped:** F01 Python-like emission; F02 authenticated MCP Streamable HTTP/remote hosting; F03 Linux x86-64 ELF/System V ABI. There is no GUI, target debugger/emulator, binary patcher, tool-exposed shell, symbol-server downloader or whole-program equivalence proof.
+**Development extensions:** F01 Python-like emission and F02 private authenticated MCP Streamable HTTP/native TLS are implemented and exercised on macOS as described above; installation and Windows/release qualification are not complete. F03 Linux x86-64 ELF/System V ABI remains planned. There is no GUI, target debugger/emulator, binary patcher, tool-exposed shell, symbol-server downloader or whole-program equivalence proof.
 
 ## Install the private artifact
 
@@ -70,7 +71,11 @@ On Windows use JSON-escaped paths such as `C:\\tools\\node\\node.exe`, `C:\\anal
 | `--max-queued N` | Queued jobs per worker, 0–1,024, default 16. |
 | `--help`, `--version` | Print to stderr, not protocol stdout. |
 
-MCP is local **stdio only**. Stdout must remain protocol traffic; consume stderr separately. The SDK owns framing and version negotiation. EOF and catchable termination signals cancel/reap project owners; use `project_close` for an orderly durable close before disconnecting.
+The first local release uses **stdio**. Stdout must remain protocol traffic; consume stderr separately. The SDK owns framing and version negotiation. EOF and catchable termination signals cancel/reap project owners; use `project_close` for an orderly durable close before disconnecting.
+
+The current development checkout also provides `open-decomp-mcp-http --config /absolute/private/config.json` (`dist/src/mcp/http/entry.js`, or `npm run mcp:http -- --config ...`) for the same tools/resources over official-SDK Streamable HTTP. [REMOTE.md](REMOTE.md) documents provisioning, exact limits and lifecycle. Authentication is private, operator-provisioned high-entropy bearer authentication with stored SHA256 hashes, **not OAuth/SSO**. Every request is authenticated; each principal has disjoint private project ownership, its own service/worker pool, and authorized input roots. Non-loopback listeners require native TLS; Host/Origin allowlists do not create CORS/browser support or an OS sandbox.
+
+HTTP work transfers to the principal at validated, authorized service dispatch, not at a guaranteed durable commit. After dispatch, disconnects, HTTP deadlines and SDK cancellation do not automatically cancel work; use `analysis_cancel`, and inspect durable state after a lost acknowledgement rather than replaying mutations. This ownership differs from a local stdio process's EOF shutdown.
 
 ### Safety boundary
 
@@ -108,7 +113,7 @@ All 13 MCP tools expose concrete input/output JSON Schemas, structured content a
 | `binary_info` | Summary, headers, sections, mappings, entries, relocations, hints and capabilities. |
 | `symbols_find`, `strings_find`, `functions_find` | Snapshot-bound filtered/paged navigation. Matching is exact/prefix/contains, not arbitrary regex. |
 | `function_get` | Metadata, structured disassembly with gaps, or CFG. |
-| `function_decompile` | Bounded homemade analysis and C-like output with source/evidence mappings. |
+| `function_decompile` | Bounded homemade analysis and C-like or Python-like output with source/evidence mappings. |
 | `xrefs_get` | Incoming/outgoing references, including unresolved edges. |
 | `memory_read` | Bounded byte/integer/float/pointer interpretations; machine bits remain hexadecimal. |
 | `annotations_apply` | Atomic revision-checked assertion edits. |
@@ -122,6 +127,12 @@ console.log(JSON.stringify(exportToolJsonSchemas(), null, 2));
 ```
 
 The wire schema is version 1. Exported JSON Schema is draft 2020-12; runtime Zod refinements additionally enforce cross-field and publication invariants. Clients must not bypass those invariants simply because JSON Schema accepts an object.
+
+Set `function_decompile`'s `options.emitter` to `"c-like"` (default) or `"python-like"`. Both consume the same lifted IR, shared analysis and emitter-neutral structured presentation; Python-like output is not a rewrite of C text or a separate semantic pipeline. Finite-width helpers, effect tokens, physical-state snapshots, labels/gotos and indeterminate control remain explicit; Python-like spelling does not imply Python's unbounded integer semantics.
+
+The development root API exports neutral `EmissionInput` / `EmissionResult` from `src/emitters/model.ts`, `CEmitter` / `emitC` / `C_EMITTER_VERSION`, and `PythonLikeEmitter` / `emitPythonLike` / `PYTHON_LIKE_EMITTER_VERSION`. Both dialects use a shared presentation renderer with direct final-text UTF-16 source mappings. Cache identities bind the full selected `Target` (format, ISA, ABI, endian, address width and features), image/slice, component versions, revisions, function, options and budgets, including selected emitter/version; mismatched payload language/version is rejected. Old C-specific emission input/result names are removed, not compatibility aliases.
+
+HTTP embedding exposes `startHttpServer` / `HttpServerHandle` and `loadHttpConfig` / `HttpConfig`; these are transport entry points, not a new public analysis protocol. `HttpServerHandle` reports the bound `url` and an idempotent asynchronous `close()`; trusted embedding-only worker options are never network configuration.
 
 ### Artifacts and delivery
 
@@ -148,7 +159,7 @@ Use hexadecimal `offset`, length at most 524,288 bytes, and the returned next UR
 
 Minimum output budget is 1,024 bytes. Defaults use conservative unknown calls, bounded indirect-target recovery, evidence included, C-like output and two-space indentation. Raising a budget is not proof of completeness and does not silently extend already-published partial function ranges. Full analysis artifacts are limited to 16 MiB. Image storage separately bounds individual records at 16 MiB, aggregate encoded metadata at 64 MiB and facts at one million; these are serialized-data bounds, **not process-memory ceilings**.
 
-MCP frames/wrappers are capped at 2 MiB, pending requests and pending output messages at eight each, request string IDs at 1,024 UTF-8 bytes. Drain replies; a write stalled for 30 seconds closes the connection. Larger non-analysis delivery is an error, not silent truncation. Work/deadline/queue limits and artifact delivery limits are separate. [Performance evidence](PERFORMANCE.md) includes real partial imports, failed limit probes and observed worker RSS; do not extrapolate small-fixture latency or file size into a large-input SLA.
+Local stdio frames/wrappers are capped at 2 MiB, pending requests and pending output messages at eight each, request string IDs at 1,024 UTF-8 bytes. Drain replies; a write stalled for 30 seconds closes the connection. Larger non-analysis delivery is an error, not silent truncation. HTTP has its own bounded connection/request/work lanes and deadlines documented in [REMOTE.md](REMOTE.md), while preserving the tool/resource delivery ceiling. Work/deadline/queue limits and artifact delivery limits are separate. [Performance evidence](PERFORMANCE.md) includes real partial imports, failed limit probes and observed worker RSS; do not extrapolate small-fixture latency or file size into a large-input SLA.
 
 Recognition, lifting, ABI, analysis and reconstruction report **separate coverage**:
 

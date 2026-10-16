@@ -27,7 +27,7 @@ export const sourceMappingSchema = z.strictObject({
   if (mapping.end < mapping.start) context.addIssue({ code: 'custom', message: 'Invalid output span' });
 });
 export const emissionSchema = z.strictObject({
-  language: z.literal('c-like'), emitter_version: z.string().min(1), text: z.string().max(16_777_216),
+  language: z.enum(['c-like', 'python-like']), emitter_version: z.string().min(1), text: z.string().max(16_777_216),
   span_unit: z.literal('utf16'), reconstruction: z.literal('pseudocode'),
   mappings: z.array(sourceMappingSchema).max(100000), helpers: z.array(z.strictObject({ name: z.string().min(1), explanation: z.string().min(1).max(8192) })).max(1000),
 }).superRefine((emission, context) => {

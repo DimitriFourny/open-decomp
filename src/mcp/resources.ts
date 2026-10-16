@@ -23,10 +23,12 @@ export function parseArtifactUri(uri: string) {
   return parsed.data;
 }
 
-export function registerArtifactResources(server: McpServer, service: QueryService): void {
+export function registerArtifactResources(server: McpServer, service: QueryService, authorize?: () => Promise<void | (() => void)>): void {
   async function read(uri: string): Promise<ReadResourceResult> {
     const args = parseArtifactUri(uri);
+    let releaseAuthorization: void | (() => void) = undefined;
     try {
+      releaseAuthorization = await authorize?.();
       // Read at most the requested bytes; text pages may shorten at a trailing
       // scalar boundary but never silently increase the caller's byte allowance.
       const page = artifactReadResultSchema.parse(await service.readArtifact(args));
@@ -61,7 +63,7 @@ export function registerArtifactResources(server: McpServer, service: QueryServi
       if (code === 'not_found') throw new ResourceNotFoundError(uri);
       if (code === 'invalid_address' || code === 'stale_revision' || code === 'invalid_input') throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Artifact read rejected: ${code}`);
       throw new ProtocolError(ProtocolErrorCode.InternalError, 'Artifact could not be read');
-    }
+    } finally { if (typeof releaseAuthorization === 'function') releaseAuthorization(); }
   }
   server.registerResource('analysis-artifact', new ResourceTemplate(ARTIFACT_URI_TEMPLATE, { list: undefined }), {
     title: 'Published analysis artifact page',

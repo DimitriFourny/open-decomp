@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { describe } from 'node:test';
 import { createOperationContext, DEFAULT_ANALYSIS_OPTIONS, OperationError, decodeEmission, encodeEmission, entityIdentity, type Annotation } from '../../../src/core/index.js';
 import { simplifySSA } from '../../../src/analysis/values/index.js';
 import type { TypeRecoveryResult } from '../../../src/analysis/types/index.js';
 import { IRBuilder, integer } from '../../../src/ir/index.js';
 import { structureControlFlow, type Region } from '../../../src/presentation/index.js';
 import { CEmitter, emitC } from '../../../src/emitters/c/index.js';
+import { PythonLikeEmitter, emitPythonLike } from '../../../src/emitters/python-like/index.js';
 import { image, provenance, slice } from '../../ir/support.js';
-import { emit, execute } from './support.js';
+import { emit as render, execute } from './support.js';
 
 const i32 = integer(32);
 function program(name: string): IRBuilder<'ssa'> { return new IRBuilder(slice, entityIdentity(slice, 'function', name), provenance, 'ssa'); }
@@ -15,6 +16,9 @@ function origin(index: number) {
   return { instruction_ids: [entityIdentity(slice, 'instruction', BigInt(0x1000 + index * 4))], ranges: [{ start: { image_id: image, space: 'va' as const, value: BigInt(0x1000 + index * 4) }, size: 4n }], evidence_ids: [`evidence_${String(index).repeat(64)}`], synthetic: [] };
 }
 
+for (const language of ['c-like', 'python-like'] as const) describe(language, () => {
+const emit: typeof render = (input, extra) => render(input, extra, language);
+const emitSelected = language === 'c-like' ? emitC : emitPythonLike;
 test('post-simplification source mappings retain original instructions and exact UTF-16 statement boundaries', () => {
   const b = program('emitted-simplified-origins'), entry = b.block('entry');
   entry.source(origin(1)); const a = entry.constant(i32, 20n);
@@ -33,6 +37,11 @@ test('post-simplification source mappings retain original instructions and exact
   assert.equal(output.emission.text[mapping.start - 1], '\n'); assert.equal(output.emission.text[mapping.end - 1], '\n');
   assert.deepEqual(decodeEmission(encodeEmission(output.emission)), output.emission);
   assert.equal(output.coverage.statements, output.coverage.mapped_statements); assert.equal(output.coverage.controls, output.coverage.mapped_controls);
+  for (const span of output.emission.mappings) {
+    assert.ok(span.start >= 0 && span.end > span.start && span.end <= output.emission.text.length);
+    assert.ok(span.start === 0 || output.emission.text[span.start - 1] === '\n');
+    assert.equal(output.emission.text[span.end - 1], '\n');
+  }
 });
 
 test('untrusted labels and notes are inert data with collision-safe identifiers and preserved subjects', () => {
@@ -68,7 +77,7 @@ test('source assertions, conflicts, field offsets and notes never rewrite machin
   const output = emit(b.finish(entry, [i32]), { types, annotations: [{ id: `annotation_${'c'.repeat(64)}`, entity_id: field, value: { kind: 'note', value: 'Observed extent is not object size' }, author: 'analyst', origin: 'user', status: 'asserted', evidence_ids: [evidence], revision: 1 }] });
   assert.deepEqual(execute(output.emission.text, new Map([[entry.parameters[0]!.id, 0xffffffffn]])).values, [0n]);
   const declarations = output.emission.text.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter(line => /^typedef /.test(line));
-  assert.equal(declarations.length, 1, 'only the unique established source type is declared');
+  assert.equal(declarations.length, language === 'c-like' ? 1 : 0, 'source type evidence never becomes executable Python declarations');
   assert.ok(output.emission.mappings.some(mapping => mapping.semantic_ids.includes(field) && mapping.semantic_ids.includes(word)));
   assert.ok(output.emission.mappings.some(mapping => mapping.semantic_ids.includes(entry.parameters[0]!.id) && mapping.semantic_ids.includes(pointer) && mapping.evidence_ids.includes(evidence)));
   assert.deepEqual(decodeEmission(encodeEmission(output.emission)), output.emission);
@@ -79,15 +88,17 @@ test('output bytes, work, cancellation and nesting fail explicitly without parti
   const structured = structureControlFlow(b.finish(entry, [i32]), createOperationContext()); assert.ok(structured.value);
   const input = { function: structured.value };
   const bounded = (fn: () => unknown, code: string): void => { assert.throws(fn, (error: unknown) => error instanceof OperationError && error.code === code); };
-  bounded(() => emitC(input, DEFAULT_ANALYSIS_OPTIONS, createOperationContext({ budget: { output_bytes: 1024 } })), 'resource_limit');
-  bounded(() => emitC(input, DEFAULT_ANALYSIS_OPTIONS, createOperationContext({ budget: { work: 1 } })), 'resource_limit');
+  bounded(() => emitSelected(input, DEFAULT_ANALYSIS_OPTIONS, createOperationContext({ budget: { output_bytes: 1024 } })), 'resource_limit');
+  bounded(() => emitSelected(input, DEFAULT_ANALYSIS_OPTIONS, createOperationContext({ budget: { work: 1 } })), 'resource_limit');
   const abort = new AbortController(); abort.abort();
-  bounded(() => emitC(input, DEFAULT_ANALYSIS_OPTIONS, createOperationContext({ signal: abort.signal })), 'cancelled');
+  bounded(() => emitSelected(input, DEFAULT_ANALYSIS_OPTIONS, createOperationContext({ signal: abort.signal })), 'cancelled');
   const note: Annotation = { id: `annotation_${'d'.repeat(64)}`, entity_id: b.function_id, value: { kind: 'note', value: '🧪'.repeat(1500) }, author: 'user', origin: 'user', status: 'asserted', evidence_ids: [], revision: 1 };
-  bounded(() => emitC({ ...input, annotations: [note] }, DEFAULT_ANALYSIS_OPTIONS, createOperationContext({ budget: { output_bytes: 5000 } })), 'resource_limit');
+  bounded(() => emitSelected({ ...input, annotations: [note] }, DEFAULT_ANALYSIS_OPTIONS, createOperationContext({ budget: { output_bytes: 5000 } })), 'resource_limit');
   let body: Region = structured.value.body;
   for (let depth = 0; depth < 130; depth++) body = { kind: 'sequence', regions: [body] };
-  bounded(() => emitC({ function: { ...structured.value!, body } }, DEFAULT_ANALYSIS_OPTIONS, createOperationContext()), 'resource_limit');
-  const withoutEvidence = new CEmitter().emit(input, { ...DEFAULT_ANALYSIS_OPTIONS, include_evidence: false, indent: 8 }, createOperationContext());
+  bounded(() => emitSelected({ function: { ...structured.value!, body } }, DEFAULT_ANALYSIS_OPTIONS, createOperationContext()), 'resource_limit');
+  const emitter = language === 'c-like' ? new CEmitter() : new PythonLikeEmitter();
+  const withoutEvidence = emitter.emit(input, { ...DEFAULT_ANALYSIS_OPTIONS, emitter: language, include_evidence: false, indent: 8 }, createOperationContext());
   assert.deepEqual(execute(withoutEvidence.text).values, [42n]); assert.ok(withoutEvidence.mappings.every(mapping => mapping.evidence_ids.length === 0));
+});
 });

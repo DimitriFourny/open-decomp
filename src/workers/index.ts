@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { realpath, lstat } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { authorizePath } from './paths.js';
 import { fileURLToPath } from 'node:url';
 import { OperationError, artifactReadArgsSchema, budgetSchema, decodeDiagnostic, newIdentity, toolSchemas, type Diagnostic, type WireJob, type ToolResult } from '../core/index.js';
 import { commandSchema, eventSchema, FrameDecoder, frame, requestSchema, snapshotSchema, type ArtifactReadInput, type ArtifactReadResult, type Command, type WorkRequest, type WorkerEvent, type WorkerOperation, type WorkerSnapshot } from './protocol.js';
@@ -76,23 +76,7 @@ export class ProjectWorkerPool {
     return new ProjectWorkerPool(roots, options);
   }
   async authorize(path: string, create = false): Promise<string> {
-    const requested = resolve(path);
-    let canonical: string;
-    try {
-      try { canonical = await realpath(requested); }
-      catch (error) {
-        if (!create || !(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') throw error;
-        canonical = resolve(await realpath(dirname(requested)), basename(requested));
-      }
-    } catch (error) {
-      const code = error instanceof Error && 'code' in error ? error.code : undefined;
-      if (code === 'ENOENT') throw failure('not_found', 'Requested path or its parent does not exist');
-      if (code === 'EACCES' || code === 'EPERM') throw failure('permission_denied', 'Requested path is not accessible');
-      if (code === 'ENOTDIR' || code === 'ELOOP') throw failure('invalid_input', 'Requested path has an invalid directory or symlink chain');
-      throw error;
-    }
-    if (!this.#roots.some(root => { const part = relative(root, canonical); return part === '' || (!isAbsolute(part) && part !== '..' && !part.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)); })) throw failure('permission_denied', 'Path is outside host-authorized roots');
-    return canonical;
+    return authorizePath(this.#roots, path, create);
   }
   async open(input: { path: string; mode: 'create' | 'resume' }): Promise<ProjectWorker> {
     if (this.#closed) throw failure('invalid_input', 'Worker pool is closed');

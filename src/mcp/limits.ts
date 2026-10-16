@@ -1,0 +1,4 @@
+export const MAX_MCP_INPUT_BYTES = 2 * 1024 * 1024;
+export const MAX_MCP_PENDING_OUTPUTS = 8;
+export const MAX_MCP_REQUEST_ID_BYTES = 1024;
+export const MAX_MCP_PENDING_REQUESTS = 8;

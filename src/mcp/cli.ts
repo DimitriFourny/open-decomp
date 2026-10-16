@@ -5,12 +5,9 @@ import { write as writeFd } from 'node:fs';
 import { QueryService } from '../service/queries/index.js';
 import type { WorkerPoolOptions } from '../workers/index.js';
 import { createMcpServer } from './server.js';
+import { MAX_MCP_INPUT_BYTES, MAX_MCP_PENDING_OUTPUTS, MAX_MCP_REQUEST_ID_BYTES, MAX_MCP_PENDING_REQUESTS } from './limits.js';
 
 export const MCP_VERSION = '0.1.0';
-export const MAX_MCP_INPUT_BYTES = 2 * 1024 * 1024;
-export const MAX_MCP_PENDING_OUTPUTS = 8;
-export const MAX_MCP_REQUEST_ID_BYTES = 1024;
-export const MAX_MCP_PENDING_REQUESTS = 8;
 const OUTPUT_STALL_MS = 30_000;
 
 const HELP = `Usage: open-decomp-mcp --root PATH [--root PATH ...] [--max-workers N] [--max-queued N]

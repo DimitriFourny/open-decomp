@@ -11,7 +11,8 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { z } from 'zod';
 import { newIdentity, toolSchemas } from '../../src/core/index.js';
-import { MAX_MCP_INPUT_BYTES, MAX_MCP_PENDING_REQUESTS, MAX_MCP_REQUEST_ID_BYTES, parseCliArguments } from '../../src/mcp/cli.js';
+import { parseCliArguments } from '../../src/mcp/cli.js';
+import { MAX_MCP_INPUT_BYTES, MAX_MCP_PENDING_REQUESTS, MAX_MCP_REQUEST_ID_BYTES } from '../../src/mcp/limits.js';
 import { callMcpTool, resultData, runMcpWorkflows } from '../../scripts/mcp-workflow.js';
 
 const entry = fileURLToPath(new URL('../../src/mcp/stdio.ts', import.meta.url));

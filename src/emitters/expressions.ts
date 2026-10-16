@@ -1,4 +1,4 @@
-import { bitWidth, type DataType, type Expression, type Value } from '../../ir/index.js';
+import { bitWidth, type DataType, type Expression, type Value } from '../ir/index.js';
 import type { Writer } from './writer.js';
 
 /** These are machine storage types, never inferred C source types. */
@@ -46,9 +46,9 @@ export function expressionText(expression: Expression, type: DataType, writer: W
     return `${helper}(${writer.join(args)})`;
   };
   switch (expression.kind) {
-    case 'constant': return invoke('bit_pattern', 'Construct the exact low width bits in the named machine storage type; hexadecimal literals are arbitrary precision data, not host C integer literals.', [writer.quote(machineType(type)), String(width), `0x${BigInt.asUintN(width, expression.bits).toString(16)}`]);
+    case 'constant': return invoke('bit_pattern', writer.language === 'c-like' ? 'Construct the exact low width bits in the named machine storage type; hexadecimal literals are arbitrary precision data, not host C integer literals.' : 'Construct the exact low width bits in the named machine storage type; hexadecimal literals are data, not Python arithmetic.', [writer.quote(machineType(type)), String(width), `0x${BigInt.asUintN(width, expression.bits).toString(16)}`]);
     case 'address': return invoke('image_address', 'Image-qualified address-space value; no host pointer, ASLR assumption or memory read.', [writer.quote(expression.address.image_id), writer.quote(expression.address.space), `0x${expression.address.value.toString(16)}`]);
-    case 'integer': return invoke(`bv_${expression.op}`, `Arguments: width, left, right. ${integerMeaning[expression.op]} Unknown/undefined operands propagate; these are not host C operators.`, [String(width), name(expression.left), name(expression.right)]);
+    case 'integer': return invoke(`bv_${expression.op}`, `Arguments: width, left, right. ${integerMeaning[expression.op]} Unknown/undefined operands propagate; these are not host ${writer.language === 'c-like' ? 'C' : 'Python'} operators.`, [String(width), name(expression.left), name(expression.right)]);
     case 'integer_unary': return invoke(`bv_${expression.op}`, `Arguments: width, value. ${expression.op === 'not' ? 'Complement every bit.' : expression.op === 'neg' ? 'Negate modulo 2^width.' : expression.op === 'clz' ? 'Count leading zeros; zero input returns width.' : expression.op === 'ctz' ? 'Count trailing zeros; zero input returns width.' : 'Count set bits.'} Unknown/undefined operands propagate.`, [String(width), name(expression.value)]);
     case 'compare': {
       const operators = { eq: '==', ne: '!=', ult: '<', ule: '<=', ugt: '>', uge: '>=', slt: '<', sle: '<=', sgt: '>', sge: '>=' } as const;
@@ -64,7 +64,9 @@ export function expressionText(expression: Expression, type: DataType, writer: W
       for (const value of expression.values) { writer.context.checkpoint(1); args.push(String(bitWidth(value.type)), name(value)); }
       return invoke('concat_low_first', 'Arguments: total width, repeated (part width, value). First part occupies least significant bits; no host endian dependency. Undefined dominates unknown, otherwise concatenate exact patterns.', args);
     }
-    case 'select': return `(${name(expression.condition)} ? ${name(expression.when_true)} : ${name(expression.when_false)})`;
+    case 'select': return writer.language === 'c-like'
+      ? `(${name(expression.condition)} ? ${name(expression.when_true)} : ${name(expression.when_false)})`
+      : `(${name(expression.when_true)} if ${name(expression.condition)} else ${name(expression.when_false)})`;
     case 'flag': return invoke(`flag_${expression.op}_${expression.flag}`, `Arguments: operand width, left, right, carry/borrow-in. Compute full mathematical ${expression.op === 'add' ? 'left + right + carry' : 'left - right - borrow'} then its wrapped result. Carry is full >= 2^width for addition, full >= 0 for subtraction; borrow is full < 0; overflow compares signed full result with signed wrapped result; zero/negative inspect wrapped result; parity is even parity of its low eight bits. Return the named flag as one bit. Unknown/undefined propagates.`, [String(bitWidth(expression.left.type)), name(expression.left), name(expression.right), name(expression.carry)]);
     case 'float': return invoke(`fp_${expression.op}`, `Arguments: width, left, right. ${fpMeaning} Unknown/undefined propagates.`, [String(width), name(expression.left), name(expression.right)]);
     case 'float_unary': return invoke(`fp_${expression.op}`, `Arguments: width, value. ${expression.op === 'neg' ? 'Toggle only the sign bit, preserving NaN payloads and signed zero.' : expression.op === 'abs' ? 'Clear only the sign bit, preserving NaN payloads.' : fpMeaning} Unknown/undefined propagates.`, [String(width), name(expression.value)]);

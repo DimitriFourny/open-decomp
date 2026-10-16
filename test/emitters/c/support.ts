@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import { createOperationContext, DEFAULT_ANALYSIS_OPTIONS } from '../../../src/core/index.js';
 import type { SSAForm } from '../../../src/ir/index.js';
 import { structureControlFlow } from '../../../src/presentation/index.js';
-import { emitC, type CEmissionInput, type CEmissionResult } from '../../../src/emitters/c/index.js';
+import { emitC } from '../../../src/emitters/c/index.js';
+import { emitPythonLike } from '../../../src/emitters/python-like/index.js';
+import type { EmissionInput, EmissionResult } from '../../../src/emitters/model.js';
 
-export function emit(input: SSAForm, extra: Omit<CEmissionInput, 'function'> = {}): CEmissionResult {
+export function emit(input: SSAForm, extra: Omit<EmissionInput, 'function'> = {}, language: 'c-like' | 'python-like' = 'c-like'): EmissionResult {
   const structured = structureControlFlow(input, createOperationContext());
   assert.ok(structured.value);
-  return emitC({ function: structured.value, ...extra }, DEFAULT_ANALYSIS_OPTIONS, createOperationContext());
+  return (language === 'python-like' ? emitPythonLike : emitC)({ function: structured.value, ...extra }, { ...DEFAULT_ANALYSIS_OPTIONS, emitter: language }, createOperationContext());
 }
 
 type Data = bigint | string | boolean | null | Data[] | { readonly [key: string]: Data };
@@ -21,7 +23,8 @@ type Op = { kind: 'assign'; names: string[]; expression: Expr | null; tuple: boo
 /** Small test-only parser for the emitted machine-expression/control grammar.
  * It consumes the OUTPUT, not IR or mappings, and never evals target text. Helper
  * semantics below are independent arithmetic/byte-array observations, not imports
- * from the production IR interpreter. It intentionally is not a general C parser. */
+ * from the production IR interpreter. Separate C and indentation-sensitive Python
+ * statement parsers share only this expression grammar and independent oracle. */
 class Parser {
   readonly tokens: string[] = [];
   readonly ops: Op[] = [];
@@ -29,6 +32,32 @@ class Parser {
   private position = 0;
   private switchId = 0;
   constructor(text: string) {
+    if (/^def /m.test(text)) {
+      const lines = text.split('\n'), header = lines.findIndex(line => line.startsWith('def '));
+      const indents = [0];
+      const token = /[ \t]+|#[^\n]*|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|[()[\],:=<>]/gy;
+      for (const line of lines.slice(header + 1)) {
+        if (/^\s*(?:#|$)/.test(line)) continue;
+        const indent = line.length - line.trimStart().length;
+        assert.ok(indent > 0, 'Unexpected top-level Python pseudocode');
+        if (indent > indents.at(-1)!) { indents.push(indent); this.tokens.push('INDENT'); }
+        else while (indent < indents.at(-1)!) { indents.pop(); this.tokens.push('DEDENT'); }
+        assert.equal(indent, indents.at(-1));
+        let offset = indent;
+        while (offset < line.length) {
+          token.lastIndex = offset;
+          const match = token.exec(line);
+          assert.ok(match, `Unrecognized Python pseudocode near ${line.slice(offset)}`);
+          offset = token.lastIndex;
+          if (!/^\s|^#/.test(match[0])) this.tokens.push(match[0]);
+        }
+        this.tokens.push('\n');
+      }
+      while (indents.length > 1) { indents.pop(); this.tokens.push('DEDENT'); }
+      this.pythonBlock();
+      assert.equal(this.position, this.tokens.length);
+      return;
+    }
     const token = /\s+|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|[{}()[\],;:=?<>@]/gy;
     let offset = 0;
     while (offset < text.length) {
@@ -55,6 +84,65 @@ class Parser {
     this.take('{');
     while (this.peek() !== '}') this.statement(breaks);
     this.take('}');
+  }
+  private pythonBlock(): void {
+    this.take('INDENT');
+    while (this.peek() !== 'DEDENT') this.pythonStatement();
+    this.take('DEDENT');
+  }
+  private pythonStatement(): void {
+    const token = this.take();
+    if (token === 'label') { this.labels.set(this.take(), this.ops.length); this.take(':'); this.take('\n'); return; }
+    if (token === 'goto') { this.ops.push({ kind: 'jump', target: this.take() }); this.take('\n'); return; }
+    if (token === 'return') { this.ops.push({ kind: 'return', expression: this.expression() }); this.take('\n'); return; }
+    if (token === 'if') {
+      const condition = this.expression(); this.take(':'); this.take('\n');
+      const test: Op & { kind: 'test' } = { kind: 'test', condition, target: -1 }; this.ops.push(test);
+      this.pythonBlock();
+      const end: Op & { kind: 'jump' } = { kind: 'jump', target: -1 }; this.ops.push(end);
+      test.target = this.ops.length;
+      this.take('else'); this.take(':'); this.take('\n'); this.pythonBlock();
+      end.target = this.ops.length; return;
+    }
+    if (token === 'while') {
+      const start = this.ops.length, condition = this.expression(); this.take(':'); this.take('\n');
+      const test: Op & { kind: 'test' } = { kind: 'test', condition, target: -1 }; this.ops.push(test);
+      this.pythonBlock(); this.ops.push({ kind: 'jump', target: start });
+      test.target = this.ops.length; return;
+    }
+    if (token === 'match') {
+      const expression = this.expression(), name = `$match${this.switchId++}`;
+      this.take(':'); this.take('\n'); this.take('INDENT');
+      this.ops.push({ kind: 'assign', names: [name], expression, tuple: false });
+      // An unknown selector must never select the default, including zero cases.
+      this.ops.push({ kind: 'test', condition: { kind: 'binary', op: '==', left: { kind: 'ref', name }, right: { kind: 'ref', name } }, target: this.ops.length + 1 });
+      const dispatch: Op & { kind: 'jump' } = { kind: 'jump', target: -1 }; this.ops.push(dispatch);
+      const cases: { value: Expr; start: number }[] = [], ends: (Op & { kind: 'jump' })[] = [];
+      let otherwise = -1;
+      while (this.peek() !== 'DEDENT') {
+        this.take('case');
+        if (this.peek() === '_') { this.take('_'); otherwise = this.ops.length; }
+        else cases.push({ value: this.expression(), start: this.ops.length });
+        this.take(':'); this.take('\n'); this.pythonBlock();
+        const end: Op & { kind: 'jump' } = { kind: 'jump', target: -1 }; ends.push(end); this.ops.push(end);
+      }
+      this.take('DEDENT'); dispatch.target = this.ops.length;
+      for (const item of cases) {
+        this.ops.push({ kind: 'test', condition: { kind: 'binary', op: '==', left: { kind: 'ref', name }, right: item.value }, target: this.ops.length + 2 });
+        this.ops.push({ kind: 'jump', target: item.start });
+      }
+      assert.ok(otherwise >= 0); this.ops.push({ kind: 'jump', target: otherwise });
+      for (const end of ends) end.target = this.ops.length;
+      return;
+    }
+    const tuple = token === '(', names = tuple ? [] : [token];
+    if (tuple) {
+      while (this.peek() !== ')') { names.push(this.take()); if (this.peek() !== ')') this.take(','); }
+      this.take(')');
+    }
+    if (this.peek() === ':') { this.take(':'); assert.match(this.take(), /^(?:bits\d+_t|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t)$/); }
+    const expression = this.peek() === '=' ? (this.take('='), this.expression()) : null;
+    this.take('\n'); this.ops.push({ kind: 'assign', names, expression, tuple });
   }
   private statement(breaks: number[]): void {
     const token = this.take();
@@ -116,15 +204,23 @@ class Parser {
     let left = this.atom();
     if (['==', '!=', '<', '<=', '>', '>='].includes(this.peek())) left = { kind: 'binary', op: this.take(), left, right: this.atom() };
     if (this.peek() === '?') { this.take('?'); const yes = this.expression(); this.take(':'); left = { kind: 'select', condition: left, yes, no: this.expression() }; }
+    if (this.peek() === 'if') {
+      this.take('if'); const condition = this.expression(); this.take('else');
+      left = { kind: 'select', condition, yes: left, no: this.expression() };
+    }
     return left;
   }
   private atom(): Expr {
     const token = this.take();
     if (token === '(') { const expression = this.expression(); this.take(')'); return expression; }
-    if (token === '{') { const values: Expr[] = []; if (this.peek() !== '}') { values.push(this.expression()); while (this.peek() === ',') { this.take(','); values.push(this.expression()); } } this.take('}'); return { kind: 'list', values }; }
+    if (token === '{' || token === '[') {
+      const close = token === '{' ? '}' : ']', values: Expr[] = [];
+      if (this.peek() !== close) { values.push(this.expression()); while (this.peek() === ',') { this.take(','); values.push(this.expression()); } }
+      this.take(close); return { kind: 'list', values };
+    }
     if (token.startsWith('"')) return { kind: 'literal', value: JSON.parse(token) as string };
     if (/^\d/.test(token)) return { kind: 'literal', value: BigInt(token) };
-    if (token === 'true' || token === 'false') return { kind: 'literal', value: token === 'true' };
+    if (token === 'true' || token === 'false' || token === 'True' || token === 'False') return { kind: 'literal', value: token === 'true' || token === 'True' };
     if (this.peek() === '(') {
       this.take('('); const args: Expr[] = [];
       if (this.peek() !== ')') { args.push(this.expression()); while (this.peek() === ',') { this.take(','); args.push(this.expression()); } }
@@ -176,6 +272,7 @@ export function execute(text: string, inputs: ReadonlyMap<string, bigint> = new 
     scratch.setFloat64(0, value, true); return scratch.getBigUint64(0, true);
   };
   const helper = (name: string, args: Data[]): Data => {
+    if (/^(?:bv_|fp_|cast_|flag_|vector_|extract_bits$|insert_bits$|concat_low_first$|signed_value$)/.test(name) && args.includes(null)) return null;
     if (name === 'bit_pattern') return BigInt.asUintN(Number(number(args[1])), number(args[2]));
     if (name === 'entry_value') { const id = string(args[1]); assert.ok(inputs.has(id), `Missing explicit input ${id}`); return inputs.get(id)!; }
     if (name === 'entry_effect') return 0n;
@@ -258,6 +355,7 @@ export function execute(text: string, inputs: ReadonlyMap<string, bigint> = new 
       const store = name === 'memory_store', address = number(args[1]), count = width(args[2]) / 8, endian = string(args[store ? 4 : 3]);
       assert.equal(number(args[0]), nextEffect, 'Effect order changed');
       events.push(store ? 'store' : 'load');
+      if (address % number(args[store ? 5 : 4]) !== 0n) throw new Boundary('fault', []);
       for (let i = 0; i < count; i++) if (!memory.has(address + BigInt(i))) throw new Boundary('fault', []);
       let value = 0n;
       for (let i = 0; i < count; i++) {
@@ -288,7 +386,7 @@ export function execute(text: string, inputs: ReadonlyMap<string, bigint> = new 
       case 'ref': assert.ok(environment.has(expression.name), `Undeclared/uninitialized emitted value ${expression.name}`); return environment.get(expression.name)!;
       case 'list': return expression.values.map(evaluate);
       case 'call': return helper(expression.name, expression.args.map(evaluate));
-      case 'select': { const condition = evaluate(expression.condition); if (condition === null) throw new Boundary('unknown', []); return evaluate(condition === 0n || condition === false ? expression.no : expression.yes); }
+      case 'select': { const condition = evaluate(expression.condition); if (condition === null) return null; return evaluate(condition === 0n || condition === false ? expression.no : expression.yes); }
       case 'binary': {
         const a = evaluate(expression.left), b = evaluate(expression.right); if (a === null || b === null) return null;
         const left = number(a), right = number(b);

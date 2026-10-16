@@ -21,7 +21,7 @@ const descriptions: Record<ToolName, string> = {
   strings_find: 'Search bounded string pages by text, encoding and location; candidates and established referenced strings remain distinct.',
   functions_find: 'Find stable functions by identity, name, address, boundary certainty and analysis status. Discovery is evidence-based, not proof that all functions are known.',
   function_get: 'Read bounded function metadata, signature assertions, lineage, disassembly or CFG. Unsupported semantics and discovery gaps remain explicit.',
-  function_decompile: 'Analyze using the real homemade target engine and emit C-like pseudocode with source mappings and evidence, not recovered original source. Defaults to a durable queued job; inspect analysis_status and its artifact links. wait:true awaits inline or explicit artifact delivery. Semantic partialness differs from output_limit.',
+  function_decompile: 'Analyze using the real homemade target engine and emit the selected c-like (default) or python-like pseudocode with source mappings and evidence, not recovered original or executable source. Both render the same semantic pipeline. Defaults to a durable queued job; inspect analysis_status and its artifact links. wait:true awaits inline or explicit artifact delivery. Semantic partialness differs from output_limit.',
   xrefs_get: 'Follow evidence-bearing code/data references and incoming/outgoing calls. Preserve unresolved edges rather than inventing targets.',
   memory_read: 'Read bounded immutable mapped bytes or explicit typed machine bits. Zero-fill, unmapped holes and continuations remain distinct; target bytes never execute.',
   annotations_apply: 'Atomically apply revision-checked name, note, type or signature assertions, retractions and removals. Assertions do not become binary facts; successful edits advance one revision and invalidate derived analysis.',
@@ -46,10 +46,18 @@ function toolError(message: string): CallToolResult {
   return { isError: true, content: [{ type: 'text', text: message }] };
 }
 
+export interface McpServerPolicy {
+  /** Trusted host authorization, run after schema validation and before service admission. */
+  readonly authorizeTool?: (name: ToolName, args: ToolArgs<ToolName>) => Promise<void | (() => void)>;
+  readonly authorizeResource?: () => Promise<void | (() => void)>;
+  /** Remote jobs belong to a principal, not to one HTTP exchange. Explicit analysis_cancel remains available. */
+  readonly preserveJobsOnDisconnect?: boolean;
+}
+
 /** Protocol registration only. The caller owns service lifetime and transport. */
-export function createMcpServer(service: QueryService): McpServer {
+export function createMcpServer(service: QueryService, policy: McpServerPolicy = {}): McpServer {
   const server = new McpServer({ name: 'open-decomp', version: '0.1.0' }, {
-    instructions: 'Statically inspect authorized native targets. Use project-owned job IDs for status/cancellation and published artifact resource pages for large results. Local stdio accepts at most eight pending requests, 2 MiB frames and 1,024-byte string request IDs; drain responses before sending more work. A stalled write closes the connection after 30 seconds. Inspect durable revisions/jobs after a lost mutation acknowledgement; never replay mutations automatically. ' + trustBoundary,
+    instructions: 'Statically inspect authorized native targets through local stdio or authenticated HTTP. Use project-owned job IDs for status/cancellation and published artifact resource pages for large results. Transports bound messages to 2 MiB and string request IDs to 1,024 bytes. Local stdio permits eight pending requests and closes a stalled write after 30 seconds. HTTP uses operator-configured principal quotas, roots and deadlines; an authorized dispatched job survives transport disconnect, including wait:true. Inspect durable revisions/jobs after a lost mutation acknowledgement; never replay mutations automatically. ' + trustBoundary,
   });
   const handlers = new Map<ToolName, (input: unknown, context: ServerContext) => Promise<CallToolResult>>();
   for (const name of toolNameSchema.options) {
@@ -72,9 +80,11 @@ export function createMcpServer(service: QueryService): McpServer {
           message: JSON.stringify({ project_id: job.project_id, job_id: job.id, state: job.state, phase: job.progress.phase }),
         } }).catch(() => { /* Progress is optional; ordinary job status remains authoritative. */ });
       };
+      let releaseAuthorization: void | (() => void) = undefined;
       try {
+        releaseAuthorization = await policy.authorizeTool?.(name, args);
         let result = validateToolResponse(name, await service.execute(name, args as ToolInput<typeof name>, {
-          signal: context.mcpReq.signal, ...(onProgress === undefined ? {} : { onProgress }),
+          ...(policy.preserveJobsOnDisconnect ? {} : { signal: context.mcpReq.signal }), ...(onProgress === undefined ? {} : { onProgress }),
           ...(name === 'annotations_apply' ? { max_result_bytes: MUTATION_RESULT_BYTES } : {}),
         }), args);
         let text = JSON.stringify(result);
@@ -102,7 +112,7 @@ export function createMcpServer(service: QueryService): McpServer {
         return response;
       } catch {
         return toolError('Tool could not deliver a validated bounded result. Inspect durable job status and the acknowledged revision before retrying a mutation; do not automatically replay imports or annotation edits.');
-      }
+      } finally { if (typeof releaseAuthorization === 'function') releaseAuthorization(); }
     };
     handlers.set(name, invoke);
     server.registerTool(name, {
@@ -118,6 +128,6 @@ export function createMcpServer(service: QueryService): McpServer {
     const result = await handlers.get(parsed.data)!(request.params.arguments ?? {}, context);
     return server.server.projectCallToolResult(result, jsonSchemas[parsed.data]!.outputSchema);
   });
-  registerArtifactResources(server, service);
+  registerArtifactResources(server, service, policy.authorizeResource);
   return server;
 }

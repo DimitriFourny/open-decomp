@@ -29,5 +29,9 @@ export { recoverLibraryContracts, type LibraryContract, type LibraryContracts, t
 export { recoverRuntimeMetadata, type RuntimeRecord, type RuntimeMetadata, type RuntimeKind } from './metadata/runtime/index.js';
 export * as TypeAnalysis from './analysis/types/index.js';
 export { QueryService, type QueryCallOptions } from './service/queries/index.js';
-export { CEmitter, emitC, type CEmissionInput, type CEmissionResult } from './emitters/c/index.js';
+export type { EmissionInput, EmissionResult } from './emitters/model.js';
+export { CEmitter, emitC, C_EMITTER_VERSION } from './emitters/c/index.js';
+export { PythonLikeEmitter, emitPythonLike, PYTHON_LIKE_EMITTER_VERSION } from './emitters/python-like/index.js';
 export { AnnotationService, createTrustedSemanticCatalog, resolveDurableSubject, type AnnotationCommitHook, type AnnotationSubject, type ActiveAnnotationView, type TrustedSemanticCatalog } from './project/annotations/index.js';
+export { startHttpServer, type HttpServerHandle } from './mcp/http/server.js';
+export { loadHttpConfig, type HttpConfig } from './mcp/http/config.js';

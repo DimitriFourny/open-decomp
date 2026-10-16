@@ -105,7 +105,7 @@ export type Budget = z.infer<typeof budgetSchema>;
 export const analysisOptionsSchema = z.strictObject({
   unknown_calls: z.literal('conservative').default('conservative'),
   indirect_targets: z.enum(['off', 'bounded']).default('bounded'),
-  emitter: z.literal('c-like').default('c-like'),
+  emitter: z.enum(['c-like', 'python-like']).default('c-like'),
   include_evidence: z.boolean().default(true), indent: z.number().int().min(1).max(8).default(2),
 });
 export const DEFAULT_ANALYSIS_OPTIONS = Object.freeze(analysisOptionsSchema.parse({}));

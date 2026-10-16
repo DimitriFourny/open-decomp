@@ -189,6 +189,18 @@ test('cancellation, stale computation and forged full-result metadata never publ
     context: createOperationContext(), inline_limit: 65536 }, () => {
     const value = p.computation(); return { ...value, result: { ...value.result, budget: DEFAULT_BUDGET } };
   }), { code: 'invalid_input' });
+  for (const emission of [
+    { ...p.computation().result.data.emission, language: 'python-like' as const },
+    { ...p.computation().result.data.emission, emitter_version: 'stale-emitter' },
+  ]) {
+    const mismatched = p.job();
+    await assert.rejects(runCachedDecompilation({ store: p.state.store, job_id: mismatched.id, identity: p.identity,
+      context: createOperationContext(), inline_limit: 65536 }, () => {
+      const value = p.computation(); return { ...value, result: { ...value.result, data: { ...value.result.data, emission } } };
+    }), { code: 'invalid_input', message: 'Stored emission dialect/version does not match its cache identity' });
+    assert.equal(p.state.store.findArtifact(p.identity), null);
+    assert.equal(p.state.store.readJob(mismatched.id)?.state, 'running');
+  }
   const stale = p.job();
   await assert.rejects(runCachedDecompilation({ store: p.state.store, job_id: stale.id, identity: p.identity,
     context: createOperationContext(), inline_limit: 65536 }, () => {

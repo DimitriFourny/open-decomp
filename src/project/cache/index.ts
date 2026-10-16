@@ -72,6 +72,9 @@ function validateComputation(store: ProjectStore, identity: CacheIdentity, compu
       result.project_id !== store.project_id || result.revision !== revision || result.artifacts.length !== 0 ||
       fingerprint(result.versions) !== fingerprint(identity.versions) || fingerprint(result.options) !== fingerprint(identity.options) ||
       fingerprint(result.budget) !== fingerprint(identity.budget)) fail('invalid_input', 'Stored analysis metadata does not match its cache identity');
+  if (result.data.emission.language !== identity.options.emitter || result.data.emission.emitter_version !== identity.versions.emitter) {
+    fail('invalid_input', 'Stored emission dialect/version does not match its cache identity');
+  }
   const wireCatalog = catalogSchema.parse({ subjects: computation.catalog.subjects,
     types: computation.catalog.types.map(record => ({ id: record.id, definition: encodeTypeDefinition(record.definition),
       source: record.source, status: record.status, evidence_ids: record.evidence_ids })),

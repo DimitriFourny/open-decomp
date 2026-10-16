@@ -10,6 +10,7 @@ import { recoverDebugInfo } from '../../metadata/debug/index.js';
 import { recoverLibraryContracts } from '../../metadata/library-contracts/index.js';
 import { structureControlFlow } from '../../presentation/index.js';
 import { emitC } from '../../emitters/c/index.js';
+import { emitPythonLike } from '../../emitters/python-like/index.js';
 import { AnnotationService, createTrustedSemanticCatalog } from '../../project/annotations/index.js';
 import { typeReferences } from '../../project/annotations/subjects.js';
 import { MAX_ANALYSIS_ARTIFACT_BYTES, runCachedDecompilation, type AnalysisComputation, type StoredDecompilation } from '../../project/cache/index.js';
@@ -49,11 +50,10 @@ export async function executeDecompilation(args: ToolArgs<'function_decompile'>,
   if (args.project_id !== store.project_id) throw new OperationError({ code: 'permission_denied', severity: 'error', message: 'Decompilation request belongs to another project', evidence_ids: [] });
   context.checkpoint(0);
   const loaded = loadFunctionScope(scope, args.revision, args.function_id), image = loaded.image;
-  const components = pipelineComponents[image.target.architecture];
-  if (image.target.abi !== components.abi.id || image.target.format !== components.loader.format) throw new OperationError({ code: 'unsupported_target', severity: 'error', message: 'No complete lifter/ABI pipeline is registered for the target', evidence_ids: [] });
+  const components = pipelineComponents(image.target);
   const identity: CacheIdentity = {
     image_sha256: image.sha256, slice_id: image.selected_slice_id, target: image.target,
-    versions: pipelineVersions[image.target.architecture],
+    versions: pipelineVersions(image.target, args.options.emitter),
     evidence_revision: args.revision, annotation_revision: args.revision, function_id: args.function_id, options: args.options,
     // The worker context has a reduced remaining deadline. It is NOT the request.
     budget: args.budget,
@@ -146,7 +146,8 @@ export async function executeDecompilation(args: ToolArgs<'function_decompile'>,
       if (assertedNames.size !== 1 || annotations.some(annotation => annotation.status === 'hypothesis')) nameDiagnostics.push({ code: 'conflicting_evidence', severity: 'info', message: 'Name hypotheses or ambiguous assertions remain unresolved; only a unique asserted name overrides native presentation', entity_id, evidence_ids: [...new Set(annotations.flatMap(annotation => annotation.evidence_ids))] });
     }
     context.progress('emit', 6, 7);
-    const emitted = emitC({ function: structured.value, types, names, annotations: active.annotations }, args.options, fullContext);
+    const emit = args.options.emitter === 'python-like' ? emitPythonLike : emitC;
+    const emitted = emit({ function: structured.value, types, names, annotations: active.annotations }, args.options, fullContext);
     const decodeReasons = new Set<string>(), decodeDiagnostics: Diagnostic[] = [...graph.diagnostics];
     let decoded = 0;
     for (const instruction of graph.instructions) {
@@ -189,7 +190,7 @@ export async function executeDecompilation(args: ToolArgs<'function_decompile'>,
     const metadata: ResultMetadata = { schema_version: SCHEMA_VERSION, project_id: store.project_id, revision: args.revision, versions: identity.versions, options: args.options, budget: args.budget, coverage, diagnostics: uniqueDiagnostics.map(encodeDiagnostic), evidence: args.options.include_evidence ? evidence.map(encodeEvidence) : [], artifacts: [] };
     const data = { delivery: 'inline' as const, function_id: ir.id, signature: signature ? signatureSchema.parse(signature) : null, emission: encodeEmission(emitted.emission), capabilities: [
       ...image.capabilities,
-      ...coverage.filter(item => item.layer !== 'decode').map(item => ({ layer: item.layer, feature: item.layer === 'lift' ? components.lifter.name : item.layer === 'abi' ? components.abi.name : item.layer === 'analysis' ? 'SSA, value/effect, stack/call and source-type analysis' : 'C-like pseudocode and instruction mappings', status: item.state === 'complete' ? 'supported' as const : 'partial' as const, limitations: item.reasons })),
+      ...coverage.filter(item => item.layer !== 'decode').map(item => ({ layer: item.layer, feature: item.layer === 'lift' ? components.lifter.name : item.layer === 'abi' ? components.abi.name : item.layer === 'analysis' ? 'SSA, value/effect, stack/call and source-type analysis' : `${args.options.emitter === 'python-like' ? 'Python-like' : 'C-like'} pseudocode and instruction mappings`, status: item.state === 'complete' ? 'supported' as const : 'partial' as const, limitations: item.reasons })),
     ], cache: 'computed' as const };
     const partial = coverage.some(item => item.state !== 'complete');
     const result: StoredDecompilation = partial ? { ...metadata, state: 'partial', reason: graph.coverage.state !== 'complete' ? 'incomplete_index' : 'unsupported_subset', continuation: null, data } : { ...metadata, state: 'complete', data };

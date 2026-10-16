@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { describe } from 'node:test';
 import { entityIdentity } from '../../../src/core/index.js';
 import { IRBuilder, floating, integer, vector, type IntegerOp, type IntegerPredicate } from '../../../src/ir/index.js';
 import { provenance, slice } from '../../ir/support.js';
-import { emit, execute } from './support.js';
+import { emit as render, execute } from './support.js';
 
 function program(name: string): IRBuilder<'ssa'> { return new IRBuilder(slice, entityIdentity(slice, 'function', name), provenance, 'ssa'); }
 
+for (const language of ['c-like', 'python-like'] as const) describe(language, () => {
+const emit: typeof render = (input, extra) => render(input, extra, language);
 test('emitted grouping and finite-width arithmetic are independently executed across non-C widths', () => {
   for (const width of [1, 8, 32, 64, 127, 2048]) {
     const b = program(`emitted-wrap-${width}`), type = integer(width), entry = b.block('entry', [type, type, type]);
@@ -78,4 +80,5 @@ test('undefined integer division and indeterminate branch conditions do not beco
     assert.equal(execute(output.emission.text).exit, 'unknown');
     assert.equal(output.diagnostics.some(diagnostic => diagnostic.code === 'unavailable_semantics'), mode === 'unknown');
   }
+});
 });

@@ -1,5 +1,5 @@
-import { OperationError, type Emission, type OperationContext } from '../../core/index.js';
-import type { Origin } from '../../ir/index.js';
+import { OperationError, type Emission, type OperationContext } from '../core/index.js';
+import type { Origin } from '../ir/index.js';
 
 /** UTF-16 offsets and UTF-8 resource accounting deliberately use different units.
  * Temporary lists/strings are bounded before joining; no silent truncation. */
@@ -12,7 +12,7 @@ export class Writer {
   private metadataBytes = 0;
   offset = 0;
   readonly limit: number;
-  constructor(readonly context: OperationContext, readonly indent: number, readonly evidence: boolean) {
+  constructor(readonly context: OperationContext, readonly indent: number, readonly evidence: boolean, readonly language: Emission['language'] = 'c-like') {
     this.limit = Math.min(context.budget.output_bytes, 16_777_216);
     if (!Number.isInteger(indent) || indent < 1 || indent > 8) throw new RangeError('Indent must be 1..8');
     context.checkpoint(0);
@@ -21,7 +21,7 @@ export class Writer {
     throw new OperationError({ code: 'resource_limit', severity: 'error', message, evidence_ids: [] });
   }
   guard(bytes: number): void {
-    if (bytes > this.limit) this.fail('C-like emission exceeds the output byte budget');
+    if (bytes > this.limit) this.fail('Pseudocode emission exceeds the output byte budget');
   }
   metadata(bytes: number): void {
     this.metadataBytes += bytes;
@@ -73,9 +73,22 @@ export class Writer {
     parts.push('"');
     return parts.join('');
   }
+  /** Syntax is selected before text is written, so spans cover the final dialect. */
+  statement(depth: number, expression: string): void {
+    this.line(depth, `${expression}${this.language === 'c-like' ? ';' : ''}`);
+  }
+  declaration(type: string, name: string, initializer = ''): string {
+    return this.language === 'c-like' ? `${type} ${name}${initializer}` : `${name}: ${type}${initializer}`;
+  }
+  comment(depth: number, text: string): void {
+    this.line(depth, this.language === 'c-like' ? `/* ${text} */` : `# ${text}`);
+  }
+  sequence(parts: readonly string[]): string {
+    return this.language === 'c-like' ? `{${this.join(parts)}}` : `[${this.join(parts)}]`;
+  }
   line(depth: number, text: string): void {
     this.context.checkpoint(1);
-    if (depth > 256) this.fail('C-like emission nesting exceeds 256');
+    if (depth > 256) this.fail('Pseudocode emission nesting exceeds 256');
     const padding = depth * this.indent;
     const bytes = padding + Buffer.byteLength(text) + 1;
     this.guard(this.bytes + this.metadataBytes + bytes);
@@ -86,7 +99,7 @@ export class Writer {
   }
   helper(name: string, explanation: string): string {
     if (!this.helperNames.has(name)) {
-      if (this.helpers.length >= 1000) this.fail('C-like helper limit exceeded');
+      if (this.helpers.length >= 1000) this.fail('Pseudocode helper limit exceeded');
       this.metadata(Buffer.byteLength(name) + Buffer.byteLength(explanation));
       this.helpers.push({ name, explanation });
       this.helperNames.add(name);
@@ -96,16 +109,16 @@ export class Writer {
   map(origin: Origin, start: number, semanticIds: readonly string[] = [], extraEvidence: readonly string[] = []): void {
     this.context.checkpoint(1 + semanticIds.length + origin.provenance.instruction_ids.length + origin.provenance.ranges.length + origin.provenance.evidence_ids.length + extraEvidence.length);
     if (this.offset === start) return;
-    if (this.mappings.length >= 100000 || semanticIds.length >= 10000 || origin.provenance.instruction_ids.length > 10000 || origin.provenance.ranges.length > 10000) this.fail('C-like mapping cardinality limit exceeded');
+    if (this.mappings.length >= 100000 || semanticIds.length >= 10000 || origin.provenance.instruction_ids.length > 10000 || origin.provenance.ranges.length > 10000) this.fail('Pseudocode mapping cardinality limit exceeded');
     const evidence = this.evidence ? this.joinIds(origin.provenance.evidence_ids, extraEvidence) : [];
     const semantic = this.joinIds([origin.id], semanticIds);
     this.metadata(64 + this.join(semantic, '').length + this.join(origin.provenance.instruction_ids, '').length + this.join(evidence, '').length + origin.provenance.ranges.length * 160);
     this.mappings.push({ statement_id: origin.id, start, end: this.offset, semantic_ids: semantic,
       instruction_ids: [...origin.provenance.instruction_ids], ranges: [...origin.provenance.ranges], evidence_ids: evidence });
-    if (evidence.length > 1000) this.fail('C-like mapping evidence limit exceeded');
+    if (evidence.length > 1000) this.fail('Pseudocode mapping evidence limit exceeded');
   }
   private joinIds(a: readonly string[], b: readonly string[]): string[] {
-    if (a.length + b.length > 10000) this.fail('C-like mapping reference limit exceeded');
+    if (a.length + b.length > 10000) this.fail('Pseudocode mapping reference limit exceeded');
     return [...new Set([...a, ...b])];
   }
   text(): string { return this.parts.join(''); }

@@ -16,7 +16,8 @@
     }
   },
   "bin": {
-    "open-decomp": "./dist/src/mcp/stdio.js"
+    "open-decomp": "./dist/src/mcp/stdio.js",
+    "open-decomp-mcp-http": "./dist/src/mcp/http/entry.js"
   },
   "files": [
     "dist/src",
@@ -25,6 +26,7 @@
     "vendor/a64js/README.md",
     "vendor/a64js/snapshot.json",
     "README.md",
+    "REMOTE.md",
     "THIRD-PARTY-NOTICES.md",
     "licenses",
     "PLAN.md",
@@ -44,6 +46,7 @@
     "check": "npm run typecheck && npm test && npm run build",
     "smoke": "node dist/scripts/smoke.js",
     "mcp": "node dist/src/mcp/stdio.js",
+    "mcp:http": "node dist/src/mcp/http/entry.js",
     "smoke:mcp": "node dist/scripts/mcp-smoke.js",
     "pack:release": "node --import tsx scripts/package-release.ts",
     "verify:installed": "node --import tsx scripts/installed-acceptance.ts"

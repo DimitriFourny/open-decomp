@@ -1,11 +1,11 @@
-import type { Annotation, Diagnostic, Emission } from '../../core/index.js';
-import type { TypeRecoveryResult } from '../../analysis/types/index.js';
-import type { StructuredFunction } from '../../presentation/index.js';
+import type { Annotation, Diagnostic, Emission } from '../core/index.js';
+import type { TypeRecoveryResult } from '../analysis/types/index.js';
+import type { StructuredFunction } from '../presentation/index.js';
 
 /** Facts must belong to the same analyzed function/revision. Names are display data,
  * never identities, expressions, type constraints, or call contracts. Conflicting
  * names are retained in diagnostics rather than selected by input order. */
-export interface CEmissionInput {
+export interface EmissionInput {
   readonly function: StructuredFunction;
   readonly types?: TypeRecoveryResult;
   readonly names?: readonly { readonly entity_id: string; readonly name: string }[];
@@ -13,7 +13,7 @@ export interface CEmissionInput {
    * assertions separately. The coordinator resolves active names into names. */
   readonly annotations?: readonly Annotation[];
 }
-export interface CEmissionResult {
+export interface EmissionResult {
   readonly emission: Emission;
   readonly diagnostics: readonly Diagnostic[];
   readonly coverage: {

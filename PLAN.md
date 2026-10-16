@@ -2,7 +2,7 @@
 
 ## 1. Status and purpose
 
-This document records the agreed product direction and implementation contracts. It is a target, not a claim that the features already exist. [TODO.md](TODO.md) is the implementation backlog and execution board.
+This document records the agreed product direction and implementation contracts. First-local-release goals below remain the acceptance baseline, not a claim that every release gate is complete. The current development checkout also implements F01 Python-like emission and F02 private authenticated Streamable HTTP/native TLS; those later extensions do not retroactively become features of the frozen v0.1 artifacts. Current macOS evidence is strict typecheck, 730/730 tests (six suites, zero skipped), build and actual compiled stdio/HTTP/HTTPS investigation/restart workflows. No new extension artifact has yet been built/installed; Windows qualification remains blocked. See [RELEASE-VERIFICATION.md](RELEASE-VERIFICATION.md) for measured scope and provenance, and [TODO.md](TODO.md) for remaining gates.
 
 Build a headless, LLM-oriented reverse-engineering workbench for understanding native programs, especially abandoned or closed-source software whose behavior must be reproduced for compatibility. The system provides deterministic analysis tools; the calling LLM performs the investigation and reasoning. The analysis engine must also be callable by ordinary programs and integration clients.
 
@@ -21,12 +21,12 @@ A successful investigation can open a binary, inspect its structure, search impo
 | Name demangling | Pinned local WASM engines for Itanium C++, Microsoft C++, and Swift | Display-only decoration; preserve native names and identities. Demangled text never establishes an ABI signature or object layout. |
 | Decompiler | Our own TypeScript implementation | Port useful existing behavior into a typed semantic IR and architecture-independent analyses. No Ghidra or other external decompiler backend. |
 | First output syntax | C-like pseudocode | Readable reconstruction, not recovered original source and not a promise of recompilable C. |
-| Output extensibility | Separate emitter interface and structured presentation model | A Python-like or other syntax can be added without rewriting decoding, lifting, or analysis. |
+| Output extensibility | Separate emitter interface and structured presentation model | F01 now provides C-like and Python-like syntax over the same analysis/presentation pipeline; other syntaxes need not rewrite decoding, lifting or analysis. |
 | LLM-facing protocol | MCP using the official TypeScript SDK | Tool discovery, schemas, structured results, progress/cancellation where supported. Do not hand-roll a competing protocol. |
 | Initial transport | MCP over stdio | Client-launched local process; stdout contains protocol messages only, logs go to stderr. |
 | Persistent projects | SQLite, immutable imported images, versioned derived artifacts | Keep facts and annotations durable; derived caches remain disposable. Use the bundled `node:sqlite` API behind a store interface under the pinned Node runtime. |
 | Heavy work | Bounded project worker processes | Parsing, analysis, and synchronous SQLite operations stay off the MCP event loop. A process boundary is fault containment, not by itself a security sandbox. |
-| Later remote access | MCP Streamable HTTP | Same service contracts, with authentication, authorization, origin checks, and resource limits. Not a requirement for the first local release. |
+| Later remote access | MCP Streamable HTTP | F02 now implements private bearer authentication, project authorization, Host/Origin checks, native TLS and resource limits. Separate extension, not a requirement of the original first local release. |
 | LLVM / Capstone disassemblers | Optional development-time comparison tools | Useful independent decoder checks. Neither is an initial runtime decoder dependency; assembly text is never parsed into semantic instructions. |
 
 Full TypeScript refers to first-party code we maintain. iced-x86's Rust implementation compiled to WASM, Node, and SQLite are external dependencies, not a requirement to maintain a mixed-language application. The pinned a64js dependency is a generated ESM snapshot with typed declarations: provenance records its original TypeScript hashes, transformed JavaScript hashes, revision, license, and TypeScript 5.9.3 transformation. `allowJs` copies this vendor runtime into the distribution; first-party TypeScript remains strictly checked.
@@ -39,10 +39,12 @@ Local MCP uses official SDK v2.3.1: `@modelcontextprotocol/server` and `@modelco
 
 ### Native target combinations
 
-- **macOS:** Mach-O, AArch64/arm64, Darwin ARM64 ABI; thin images and selection of ARM64 slices in universal/fat containers; executables and dynamic libraries.
-- **Windows:** PE32+, x86-64, Windows x64 ABI; executables and DLLs.
-- Both target formats must be statically analyzable on either supported host: macOS arm64 and Windows x86-64. Target ISA and OS must never be inferred from the host.
+- **macOS target:** Mach-O, AArch64/arm64, Darwin ARM64 ABI; thin images and selection of ARM64 slices in universal/fat containers; executables and dynamic libraries.
+- **Windows target:** PE32+, x86-64, Windows x64 ABI; executables and DLLs.
+- Both target formats must be statically analyzable on either intended application host: macOS arm64 and Windows x86-64. Target ISA and OS must never be inferred from the host. PE support is not Windows-host qualification: macOS cross-compiles and statically analyzes PE fixtures without a Windows VM.
 - Container format, instruction set, target features, ABI, and source-language metadata are distinct properties. Future ELF, additional architectures, and other ABIs must not require a new public tool protocol.
+
+Windows remains a required application host. Its qualification covers Windows process/pipe/filesystem/installer behavior through focused compiled A01–A11 acceptance and required decoder/ABI smoke, with A12 resource evidence tracked separately. The full architecture-independent core regression suite belongs on macOS; repeatedly running the entire TSX source suite in the Windows VM is not the host strategy. QEMU is sufficient for focused host acceptance; the present stalled-output failure is real I/O behavior, not a reason to remove Windows support or waive A01–A12.
 
 ### Included in the first local release
 
@@ -69,7 +71,7 @@ Objective-C/Swift/C++ metadata may improve names and evidence; it must not be pr
 - Automatic fetching of remote dependencies, symbol servers, or embedded URLs while inspecting a binary.
 - Replacing the homemade decompiler with a public decompiler.
 - Genuine source recovery, exact original types/names, or proof of whole-program equivalence.
-- A Python-like emitter, remote hosting, or another target platform. These are explicit extension tasks, not hidden prerequisites for the first release.
+- A Python-like emitter, remote hosting, or another target platform. These were explicit later extension tasks, not hidden prerequisites for the original first release. F01/F02 are now implemented in development; their own verification and artifact qualification stay separate from frozen-release history.
 
 The selected third target for F03 is **Linux x86-64: ELF and the System V AMD64 ABI**. This extension follows the first local release; it reuses iced-x86 and the x86-64 semantic pipeline rather than introducing a Linux-specific public tool protocol.
 
@@ -89,7 +91,7 @@ flowchart TD
     ABI[ABI and library contracts] --> Analysis[Shared analysis passes]
     IR --> Analysis
     Analysis --> Presentation[Structured presentation model]
-    Presentation --> Emit[C-like emitter; future emitters]
+    Presentation --> Emit[C-like and Python-like emitters]
 ```
 
 The MCP adapter owns protocol concerns only. No decoder, analysis pass, or store depends on MCP types. Worker IPC is a private implementation detail, not another public socket API.
@@ -111,7 +113,7 @@ src/
   abi/                  Darwin ARM64, Windows x64, structured library contracts
   analysis/             discovery, CFG/SSA, references, propagation, stack/types
   presentation/         structured control flow and emitter-neutral statements
-  emitters/             C-like output and emitter contracts
+  emitters/             shared renderer, neutral contracts, C-like/Python-like syntax
   metadata/             debug information, demangling, runtime metadata
   project/              SQLite store, annotations, migrations, revision management
   workers/              worker lifecycle, bounded IPC, cancellation
@@ -170,9 +172,11 @@ A symbol name does not establish a function signature, object size, nonreturning
 
 ### Output languages
 
-Analysis produces an emitter-neutral structured presentation model. The C-like emitter owns syntax, precedence, identifier escaping, declarations, helper spelling, and formatting—not instruction semantics or type inference.
+Analysis produces an emitter-neutral structured presentation model. F01 supplies both C-like and Python-like emitters over that same model and semantic pipeline; neither owns instruction semantics or type inference, and Python-like output is not rewritten C text. Neutral `EmissionInput` / `EmissionResult` live in `src/emitters/model.ts` and are exported at the package root alongside `CEmitter` / `emitC` / `C_EMITTER_VERSION` and `PythonLikeEmitter` / `emitPythonLike` / `PYTHON_LIKE_EMITTER_VERSION`. The old C-specific input/result names are removed, without compatibility aliases.
 
-Each emitter returns text plus mappings from output spans/statements to stable semantic entities and original instructions. Output language, emitter version, and presentation options are part of cache identity. A future Python-like syntax remains explicitly pseudocode unless genuine executable semantics are implemented; it must not accidentally imply Python's unbounded integer behavior for machine-width arithmetic.
+Select `options.emitter: "c-like" | "python-like"`; C-like remains the default. A shared renderer returns each dialect's final text with direct UTF-16 statement/control spans, stable semantic identities and original instruction mappings; output budgets still count UTF-8 bytes. Python-like output is explicitly **non-executable machine pseudocode**: finite-width helpers, effect tokens, physical-state snapshots, simultaneous edge copies, labels/gotos and indeterminate control preserve machine behavior rather than implying ordinary Python arithmetic or source recovery.
+
+Output language, selected emitter version and presentation options are part of cache identity. Pipeline and version selection use the full target contract, not the host or architecture alone. Stored payload language/version must match the selected emitter identity; C and Python-like artifacts cannot stand in for each other.
 
 ## 7. Program model, addresses, and evidence
 
@@ -193,7 +197,7 @@ The initial store uses `project.sqlite`, content-addressed files under `images/`
 
 One active worker owns writes for a project. Apply annotation batches transactionally with an `expected_revision` precondition. A successful edit increments the revision; a conflict returns current revision information without partial edits. Support names, notes, signatures, types/structures, and explicit hypothesis status. Deleting or retracting an assertion must also invalidate dependent analysis.
 
-Cache identities include image hash/slice, decoder/lifter/analysis versions, ABI/features, relevant evidence and annotation revision, analysis policy/options, and emitter settings where applicable. Start with conservative invalidation; targeted dependency invalidation is an optimization, not a correctness prerequisite. Never serve stale inferred types or pseudocode as current after an edit.
+Cache identities include image hash/slice, the full selected `Target` (format, architecture, ABI, endian, address width and features), decoder/lifter/analysis/ABI versions, relevant evidence and annotation revision, function identity, analysis policy/options, original request budgets and selected emitter/version. Start with conservative invalidation; targeted dependency invalidation is an optimization, not a correctness prerequisite. Reject payload language/version mismatches. Never serve stale inferred types or pseudocode as current after an edit.
 
 Resuming a project restores semantic identity, evidence, and user work, not just names in a transient process. Read-only queries operate against a specified revision. Pagination cursors bind to that revision and reject stale/incompatible reuse.
 
@@ -243,7 +247,9 @@ Local stdio uses 2 MiB frames, 1,024-byte string request IDs, eight pending requ
 
 Worker isolation alone is not an OS sandbox. Document actual restrictions; use supported process/OS controls where available and test behavior on both hosts. Never advertise a sandbox stronger than the implementation.
 
-Future HTTP transport requires authentication, project authorization, origin validation/DNS-rebinding defenses, conservative binding defaults, and request/work quotas before it is exposed remotely.
+F02 now provides HTTP transport using the official SDK 2.3.1 `createMcpHandler`, with authentication, project authorization, exact Host/Origin checks, loopback-default binding, native TLS for non-loopback listeners and separate bounded network/work/control lanes. It serves the existing tools/resources, not a new public analysis protocol. [REMOTE.md](REMOTE.md) is the operator contract: `open-decomp-mcp-http --config ABSOLUTE_JSON_PATH` and the compiled `dist/src/mcp/http/entry.js` are separate from installed stdio binary `open-decomp`. Root embedding exports are `startHttpServer` / `HttpServerHandle` and `loadHttpConfig` / `HttpConfig`.
+
+Authentication is private, operator-provisioned high-entropy bearer authentication with stored hashes, not OAuth/SSO. Each principal owns a private project root, service and worker pool; inputs may be shared only through configured authorized roots. Ownership transfers at validated, authorized service dispatch, not a guaranteed durable commit. Subsequent disconnect/deadline/SDK cancellation does not automatically cancel dispatched work: use durable status/cancel and reconcile lost acknowledgements without mutation replay. Shutdown settles dispatched bounded calls, cancels remaining queued work and closes every principal's workers. These controls are not an OS sandbox or general browser/CORS support.
 
 ## 11. Migration and verification strategy
 
@@ -265,8 +271,8 @@ First record behavior and gaps on a redistributable corpus. Port to TypeScript a
 2. Semantic checks: small fixture functions and an isolated test-only IR evaluator or equivalent oracle check arithmetic widths, branches, register slices, flags, memory effects, and calls. Fixture execution occurs only for trusted test inputs on compatible hosts, never for user-loaded targets.
 3. Analysis regressions: joins, loops, irreducible CFGs, stack aliases, unknown calls, jump tables, conflicting type evidence, unsupported instructions, and source mappings.
 4. Loader/project boundaries: malformed images, slices, zero-filled sections, relocations, imports by name/ordinal, persistence, migrations, revision conflicts, stale caches/cursors, and cancelled jobs.
-5. Real MCP smoke: launch the compiled server, discover tools, and execute the complete investigation through stdio on both target formats. Tests alone are not proof that the actual tool surface works.
-6. Host distribution: run the same target fixtures on macOS arm64 and Windows x86-64. Fixture provenance includes source, compiler/linker versions, flags, expected behavior, and redistribution permission.
+5. Real MCP smoke: launch the compiled server, discover tools, and execute the complete investigation through stdio on both target formats. F01/F02 additionally exercise both emitters through actual compiled stdio/HTTP/HTTPS workflows, artifact hashes, cache reuse, annotation invalidation and full-process restart; HTTP(S) also exercises authentication and cross-principal denial. Tests alone are not proof that the actual tool surface works.
+6. Host distribution: keep full core regression on macOS, then run focused host/compiled A01–A11 acceptance and required decoder/ABI smoke on Windows x86-64 against the same target fixtures. Verify process/pipe/filesystem behavior and the actual installed artifact, not merely PE target decoding or a source harness. Fixture provenance includes source, compiler/linker versions, flags, expected behavior, and redistribution permission.
 7. Performance: measure cold import, indexing, per-function decode/lift/analysis/emission, cached requests, IPC/serialization cost, and peak memory on representative small and large inputs. No Rust-vs-JS speed claim or numeric SLA is established yet. Optimize measured bottlenecks without weakening semantics.
 
 Use deterministic, isolated behavior tests. Do not pin incidental pseudocode wording, terminal layouts, source text, or forwarding implementations. The integration owner runs combined checks after each completed work wave; agents do not race full-repository builds/tests against shared edits.
@@ -286,7 +292,7 @@ Use deterministic, isolated behavior tests. Do not pin incidental pseudocode wor
 - **A11 — Reproducible delivery:** Documented installation and launch work on both supported hosts; dependency versions, licenses/provenance, fixture recipes, and capability limits are included.
 - **A12 — Measured resource behavior:** Representative timing/memory results and enforced work/output limits are recorded; cached and uncached paths are exercised without correctness regressions.
 
-All A01–A12 are required for the first local release. Future emitter, remote transport, and target-extension tasks are separately labeled in TODO.md and are not silently substituted for unfinished core work.
+All A01–A12 remain required for the first local release, including Windows-host and resource/delivery gates. Later emitter, remote transport and target-extension tasks are separately labeled in TODO.md; implementing or verifying an extension never substitutes for unfinished core/host acceptance, nor do frozen artifact results qualify a new extension artifact.
 
 ## 13. Execution rules for the backlog
 

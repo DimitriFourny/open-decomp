@@ -100,7 +100,7 @@ export interface AbiProfile extends ComponentIdentity {
   classifyCall(signature: AbiSignature): AbiCallLayout;
 }
 export interface Emitter<Presentation> extends ComponentIdentity {
-  readonly language: 'c-like';
+  readonly language: 'c-like' | 'python-like';
   emit(presentation: Presentation, options: z.infer<typeof analysisOptionsSchema>, context: OperationContext): Emission;
 }
 

@@ -1,15 +1,17 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { describe } from 'node:test';
 import { entityIdentity } from '../../../src/core/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { IRBuilder, integer, type SSAForm } from '../../../src/ir/index.js';
 import { builder, image, provenance, register, slice } from '../../ir/support.js';
-import { emit, execute } from './support.js';
+import { emit as render, execute } from './support.js';
 
 const i1 = integer(1), i8 = integer(8), i32 = integer(32), i64 = integer(64);
 function program(name: string): IRBuilder<'ssa'> { return new IRBuilder(slice, entityIdentity(slice, 'function', name), provenance, 'ssa'); }
 function memory(): Map<bigint, number> { return new Map(Array.from({ length: 16 }, (_, index) => [0x1000n + BigInt(index), 0])); }
 
+for (const language of ['c-like', 'python-like'] as const) describe(language, () => {
+const emit: typeof render = (input, extra) => render(input, extra, language);
 test('emitted loop labels and simultaneous backedge swaps preserve observable effects', () => {
   const b = program('emitted-loop-swaps'), entry = b.block('entry', [i32]), loop = b.block('loop', [i32, i32, i32]), exit = b.block('exit', [i32, i32]);
   entry.jump(loop, [entry.parameters[0]!, entry.constant(i32, 3n), entry.constant(i32, 8n)]);
@@ -97,4 +99,33 @@ test('direct and indirect calls retain targets, explicit operands, results and o
   assert.deepEqual(observation.calls, [{ target: 0x1234n, arguments: [] }, { target: 0x5678n, arguments: [42n, 99n] }]);
   assert.deepEqual(observation.values, [7n, 7n]); assert.deepEqual(observation.events, ['call', 'call', 'store']);
   assert.equal(observation.memory.get(0x1000n), 7);
+});
+test('required memory alignment faults before later stores or successful return', () => {
+  const b = program('emitted-alignment-fault'), entry = b.block('entry');
+  entry.store(entry.constant(i64, 0x1000n), entry.constant(i32, 9n));
+  const loaded = entry.load(i32, entry.constant(i64, 0x1001n), { endian: 'little', alignment: 4, volatile: true });
+  entry.store(entry.constant(i64, 0x1008n), entry.constant(i32, 77n));
+  entry.return([loaded]);
+  const result = execute(emit(b.finish(entry, [i32])).emission.text, new Map(), memory());
+  assert.equal(result.exit, 'fault');
+  assert.deepEqual(result.events, ['store', 'load']);
+  assert.equal(result.memory.get(0x1000n), 9);
+  assert.equal(result.memory.get(0x1008n), 0);
+});
+
+test('indeterminate arithmetic and conditional values never choose a switch default', () => {
+  for (const kind of ['arithmetic', 'select'] as const) {
+    const b = program(`emitted-unknown-match-${kind}`), entry = b.block('entry'), yes = b.block('yes'), no = b.block('no');
+    const value = kind === 'arithmetic'
+      ? entry.int('add', entry.indeterminate(i32, 'unknown', 'unavailable input'), entry.constant(i32, 1n))
+      : entry.select(entry.indeterminate(i1, 'undefined', 'undefined flag'), entry.constant(i32, 0n), entry.constant(i32, 1n));
+    entry.terminate({ kind: 'switch', value, cases: [{ bits: 0n, edge: entry.edge(yes) }], otherwise: entry.edge(no) });
+    yes.store(yes.constant(i64, 0x1000n), yes.constant(i8, 11n)); yes.return();
+    no.store(no.constant(i64, 0x1000n), no.constant(i8, 22n)); no.return();
+    const result = execute(emit(b.finish(entry)).emission.text, new Map(), memory());
+    assert.equal(result.exit, 'unknown');
+    assert.deepEqual(result.events, []);
+    assert.equal(result.memory.get(0x1000n), 0);
+  }
+});
 });
