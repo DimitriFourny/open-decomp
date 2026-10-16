@@ -24,6 +24,9 @@ export interface McpWorkflowOptions {
   readonly fixtures: string;
   readonly nodeArgs?: readonly string[];
   readonly targets?: readonly McpFixture[];
+  readonly serverCwd?: string;
+  readonly serverEnv?: Record<string, string>;
+  readonly temporaryRoot?: string;
 }
 export interface McpWorkflowSummary {
   fixture: string;
@@ -141,6 +144,8 @@ export async function withMcpClient<T>(options: McpWorkflowOptions, root: string
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [...options.nodeArgs ?? [], options.serverEntry, '--root', root, '--root', options.fixtures, '--max-workers', '2', '--max-queued', '4'],
+      ...(options.serverCwd === undefined ? {} : { cwd: options.serverCwd }),
+      ...(options.serverEnv === undefined ? {} : { env: options.serverEnv }),
       stderr: 'pipe',
       maxBufferSize: 2 * 1024 * 1024,
     });
@@ -170,7 +175,7 @@ export async function withMcpClient<T>(options: McpWorkflowOptions, root: string
 }
 
 export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpWorkflowSummary[]> {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-mcp-')));
+  const root = await realpath(await mkdtemp(join(options.temporaryRoot ?? tmpdir(), 'open-decomp-mcp-')));
   const summaries: McpWorkflowSummary[] = [];
   try {
     return await withMcpClient(options, root, async (client, restart) => {

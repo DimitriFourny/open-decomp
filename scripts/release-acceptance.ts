@@ -267,34 +267,40 @@ async function unsupportedEffects(client: Client, options: McpWorkflowOptions, r
   }
 }
 
-let serverEntry = fileURLToPath(new URL('../src/mcp/stdio.js', import.meta.url));
-let fixtures = resolve('fixtures/bin');
-const seen = new Set<string>();
-for (let index = 2; index < process.argv.length; index++) {
-  const flag = process.argv[index]!;
-  if (flag === '--help' && process.argv.length === 3) {
-    process.stderr.write('Usage: node dist/scripts/release-acceptance.js [--server-entry PATH] [--fixtures PATH]\nRun the four maintained investigations plus cross-target release failure/native-variant scenarios through compiled or installed MCP stdio. Fixtures is the bin directory alongside manifest.json and malformed/. Never executes targets. Output is JSON Lines host/scenario evidence; failures exit nonzero.\n');
-    process.exit(0);
+/** Reuse the complete release oracle against either compiled or installed servers. */
+export async function runReleaseAcceptance(options: McpWorkflowOptions): Promise<void> {
+  for (const summary of await runMcpWorkflows(options)) evidence('full-investigation', { ...summary, server_entry: options.serverEntry });
+  const root = await realpath(await mkdtemp(join(options.temporaryRoot ?? tmpdir(), 'open-decomp-release-')));
+  try {
+    await withMcpClient(options, root, async client => {
+      await nativeVariants(client, options, root);
+      await malformedImages(client, options, root);
+      await boundedAnalysis(client, options, root);
+      await unsupportedEffects(client, options, root);
+    });
+    evidence('release-scenarios-complete', { server_entry: options.serverEntry, fixtures: options.fixtures });
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
-  if (flag !== '--server-entry' && flag !== '--fixtures') throw new Error('Unknown release acceptance argument');
-  if (seen.has(flag)) throw new Error(`Duplicate ${flag}`);
-  seen.add(flag);
-  const value = process.argv[++index];
-  if (!value || value.startsWith('--') || value.includes('\0')) throw new Error(`Missing or malformed ${flag}`);
-  if (flag === '--server-entry') serverEntry = resolve(value);
-  else fixtures = resolve(value);
 }
-const options: McpWorkflowOptions = { serverEntry, fixtures };
-for (const summary of await runMcpWorkflows(options)) evidence('full-investigation', { ...summary, server_entry: serverEntry });
-const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-release-')));
-try {
-  await withMcpClient(options, root, async client => {
-    await nativeVariants(client, options, root);
-    await malformedImages(client, options, root);
-    await boundedAnalysis(client, options, root);
-    await unsupportedEffects(client, options, root);
-  });
-  evidence('release-scenarios-complete', { server_entry: serverEntry, fixtures });
-} finally {
-  await rm(root, { recursive: true, force: true });
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  let serverEntry = fileURLToPath(new URL('../src/mcp/stdio.js', import.meta.url));
+  let fixtures = resolve('fixtures/bin');
+  const seen = new Set<string>();
+  for (let index = 2; index < process.argv.length; index++) {
+    const flag = process.argv[index]!;
+    if (flag === '--help' && process.argv.length === 3) {
+      process.stderr.write('Usage: node dist/scripts/release-acceptance.js [--server-entry PATH] [--fixtures PATH]\nRun the four maintained investigations plus cross-target release failure/native-variant scenarios through compiled or installed MCP stdio. Fixtures is the bin directory alongside manifest.json and malformed/. Never executes targets. Output is JSON Lines host/scenario evidence; failures exit nonzero.\n');
+      process.exit(0);
+    }
+    if (flag !== '--server-entry' && flag !== '--fixtures') throw new Error('Unknown release acceptance argument');
+    if (seen.has(flag)) throw new Error(`Duplicate ${flag}`);
+    seen.add(flag);
+    const value = process.argv[++index];
+    if (!value || value.startsWith('--') || value.includes('\0')) throw new Error(`Missing or malformed ${flag}`);
+    if (flag === '--server-entry') serverEntry = resolve(value);
+    else fixtures = resolve(value);
+  }
+  await runReleaseAcceptance({ serverEntry, fixtures });
 }

@@ -2,6 +2,8 @@
   "name": "open-decomp",
   "version": "0.1.0",
   "private": true,
+  "license": "UNLICENSED",
+  "bundleDependencies": true,
   "type": "module",
   "description": "Headless native binary analysis and homemade decompilation for LLM clients",
   "engines": {
@@ -18,8 +20,22 @@
   },
   "files": [
     "dist/src",
-    "vendor",
-    "PLAN.md"
+    "dist/vendor/a64js",
+    "vendor/a64js/LICENSE",
+    "vendor/a64js/README.md",
+    "vendor/a64js/snapshot.json",
+    "README.md",
+    "THIRD-PARTY-NOTICES.md",
+    "licenses",
+    "PLAN.md",
+    "TODO.md",
+    "PERFORMANCE.md",
+    "RELEASE-VERIFICATION.md",
+    "src/core/README.md",
+    "src/decoders/arm64/README.md",
+    "src/decoders/x86_64/README.md",
+    "fixtures/README.md",
+    "fixtures/LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -28,7 +44,9 @@
     "check": "npm run typecheck && npm test && npm run build",
     "smoke": "node dist/scripts/smoke.js",
     "mcp": "node dist/src/mcp/stdio.js",
-    "smoke:mcp": "node dist/scripts/mcp-smoke.js"
+    "smoke:mcp": "node dist/scripts/mcp-smoke.js",
+    "pack:release": "node --import tsx scripts/package-release.ts",
+    "verify:installed": "node --import tsx scripts/installed-acceptance.ts"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.3.1",

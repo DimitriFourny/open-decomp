@@ -1,0 +1,147 @@
+{
+  "description": "Exact pinned dependency license/notice texts retained for the private local artifact. SHA256 identifies UTF-8 file contents, not package tarballs. Application licensing is unchanged.",
+  "files": [
+    {
+      "source": "node_modules/@modelcontextprotocol/core/LICENSE",
+      "path": "licenses/@modelcontextprotocol/core/LICENSE",
+      "sha256": "0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a",
+      "bytes": 12227
+    },
+    {
+      "source": "node_modules/@modelcontextprotocol/server/LICENSE",
+      "path": "licenses/@modelcontextprotocol/server/LICENSE",
+      "sha256": "0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a",
+      "bytes": 12227
+    },
+    {
+      "source": "node_modules/gecko-profiler-demangle/LICENSE-MIT",
+      "path": "licenses/gecko-profiler-demangle/LICENSE-MIT",
+      "sha256": "73ac3f93a589d4e9f8fbd288fe21912d5be9db3421192fb074a95a447f302353",
+      "bytes": 1056
+    },
+    {
+      "source": "node_modules/gecko-profiler-demangle/LICENSE-APACHE",
+      "path": "licenses/gecko-profiler-demangle/LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "bytes": 10847
+    },
+    {
+      "source": "node_modules/iced-x86/LICENSE.txt",
+      "path": "licenses/iced-x86/LICENSE.txt",
+      "sha256": "93a47598376fd3f276b631e75149340087153c6ff1635a53c5790249e9124e2d",
+      "bytes": 1114
+    },
+    {
+      "source": "node_modules/llvm-msvc-demangle/LICENSE",
+      "path": "licenses/llvm-msvc-demangle/LICENSE",
+      "sha256": "91dcf6e6e089855c1f533e16fbf253f3d572545670fc51e1abdd6f480c46d9fa",
+      "bytes": 1088
+    },
+    {
+      "source": "node_modules/llvm-msvc-demangle/THIRD_PARTY_NOTICES.md",
+      "path": "licenses/llvm-msvc-demangle/THIRD_PARTY_NOTICES.md",
+      "sha256": "0d9c0ba97499d5f7ee34b3e16b286f0c4478f1e4a72008125d3b23a199df9e93",
+      "bytes": 1481
+    },
+    {
+      "source": "node_modules/llvm-msvc-demangle/upstream.json",
+      "path": "licenses/llvm-msvc-demangle/upstream.json",
+      "sha256": "198ab2d85d82edffc728701a238aac218e4bee0c6a7b70cef38972112ba55943",
+      "bytes": 4346
+    },
+    {
+      "source": "node_modules/llvm-msvc-demangle/licenses/LLVM.txt",
+      "path": "licenses/llvm-msvc-demangle/licenses/LLVM.txt",
+      "sha256": "8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee",
+      "bytes": 15141
+    },
+    {
+      "source": "node_modules/llvm-msvc-demangle/licenses/libcxx.txt",
+      "path": "licenses/llvm-msvc-demangle/licenses/libcxx.txt",
+      "sha256": "539dd7aed86e8a4f12cbdd0e6c50c189c7d74847e4fecc64ce2c6ee3a01da38b",
+      "bytes": 16703
+    },
+    {
+      "source": "node_modules/llvm-msvc-demangle/licenses/libcxxabi.txt",
+      "path": "licenses/llvm-msvc-demangle/licenses/libcxxabi.txt",
+      "sha256": "e2b35be49f7284a45b7baca8fc7b3ab7440e7902392b2528a457816b5bb2a15c",
+      "bytes": 16706
+    },
+    {
+      "source": "node_modules/llvm-msvc-demangle/licenses/libunwind.txt",
+      "path": "licenses/llvm-msvc-demangle/licenses/libunwind.txt",
+      "sha256": "b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d",
+      "bytes": 16706
+    },
+    {
+      "source": "node_modules/llvm-msvc-demangle/licenses/compiler-rt.txt",
+      "path": "licenses/llvm-msvc-demangle/licenses/compiler-rt.txt",
+      "sha256": "1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d",
+      "bytes": 16708
+    },
+    {
+      "source": "node_modules/llvm-msvc-demangle/licenses/musl.txt",
+      "path": "licenses/llvm-msvc-demangle/licenses/musl.txt",
+      "sha256": "f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af",
+      "bytes": 6204
+    },
+    {
+      "source": "node_modules/llvm-msvc-demangle/licenses/emscripten-LICENSE.txt",
+      "path": "licenses/llvm-msvc-demangle/licenses/emscripten-LICENSE.txt",
+      "sha256": "620a78084fc7ca97c0b5dea9abf891f3ffcadfdbf305276f099c9c4e12fc1d86",
+      "bytes": 5093
+    },
+    {
+      "source": "node_modules/llvm-msvc-demangle/licenses/emscripten-AUTHORS.txt",
+      "path": "licenses/llvm-msvc-demangle/licenses/emscripten-AUTHORS.txt",
+      "sha256": "8585fa1b981f576f52806833481323007ccac5c00f31a873215e31c0f42820f0",
+      "bytes": 29004
+    },
+    {
+      "source": "node_modules/swift-demangle-wasm/LICENSE",
+      "path": "licenses/swift-demangle-wasm/LICENSE",
+      "sha256": "15a31da2759b7cf8f30899dfb134d4bd88e41ddc3178acac97dc5bb0db6d412b",
+      "bytes": 1067
+    },
+    {
+      "source": "node_modules/swift-demangle-wasm/NOTICE",
+      "path": "licenses/swift-demangle-wasm/NOTICE",
+      "sha256": "8030296e8136768b5b1a5d8620a45edd76d18bced19712e578d6d86c6373599d",
+      "bytes": 419
+    },
+    {
+      "source": "node_modules/@bjorn3/browser_wasi_shim/LICENSE-MIT",
+      "path": "licenses/@bjorn3/browser_wasi_shim/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "bytes": 1023
+    },
+    {
+      "source": "node_modules/@bjorn3/browser_wasi_shim/LICENSE-APACHE",
+      "path": "licenses/@bjorn3/browser_wasi_shim/LICENSE-APACHE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "bytes": 11357
+    },
+    {
+      "source": "node_modules/zod/LICENSE",
+      "path": "licenses/zod/LICENSE",
+      "sha256": "3f1189b28e3866e0d979968d466b78f813f76827cfdca1fbb124cc0a5c8841f8",
+      "bytes": 1072
+    },
+    {
+      "source": "https://www.swift.org/LICENSE.txt",
+      "path": "licenses/swift-demangle-wasm/Swift-LICENSE.txt",
+      "sha256": "2794ef94e7dc677a97ee7d02de93d21ec8cc14dddc8b2166c8607608ef43b78d",
+      "bytes": 11716,
+      "retrieved": "2026-10-16",
+      "note": "Full upstream text retrieved through the text reader; Apache-2.0 with Runtime Library Exception, not wrapper NOTICE label."
+    },
+    {
+      "source": "https://creativecommons.org/licenses/by/4.0/legalcode.txt",
+      "path": "licenses/CC-BY-4.0.txt",
+      "sha256": "7c36f36d128fcaa19514264e7bc31a6fe5ef82de1495d5b5f83061e0d30f1992",
+      "bytes": 18646,
+      "retrieved": "2026-10-16",
+      "note": "Full legal text referenced by the SDK licensing transition for non-specification documentation; no application grant."
+    }
+  ]
+}
