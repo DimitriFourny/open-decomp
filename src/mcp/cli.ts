@@ -1,6 +1,7 @@
 import { serveStdio, StdioServerTransport, type StdioServerHandle } from '@modelcontextprotocol/server/stdio';
 import type { JSONRPCMessage } from '@modelcontextprotocol/server';
 import { Writable } from 'node:stream';
+import { write as writeFd } from 'node:fs';
 import { QueryService } from '../service/queries/index.js';
 import type { WorkerPoolOptions } from '../workers/index.js';
 import { createMcpServer } from './server.js';
@@ -73,9 +74,24 @@ class OwnedStdioTransport extends StdioServerTransport {
   #closing = false;
   constructor(closed: () => void) {
     const output = new Writable({
-      write(chunk: Buffer, encoding, callback) {
+      // SDK send must await the write callback even for a small blocked frame.
+      highWaterMark: 1,
+      write(chunk: Buffer, _encoding, callback) {
         if (chunk.byteLength > MAX_MCP_INPUT_BYTES) { callback(new Error('MCP output frame exceeds 2 MiB')); return; }
-        process.stdout.write(chunk, encoding, callback);
+        // POSIX pipes are nonblocking: their stream owns readiness/EAGAIN handling.
+        if (process.platform !== 'win32') { process.stdout.write(chunk, callback); return; }
+        // Windows process.stdout pipe writes can block the event loop, preventing
+        // the stall deadline and owned-worker shutdown from running. Keep the OS
+        // write asynchronous; the single SDK send still owns backpressure.
+        let offset = 0;
+        const written = (error: NodeJS.ErrnoException | null, count: number): void => {
+          if (error) { callback(error); return; }
+          offset += count;
+          if (offset === chunk.byteLength) { callback(); return; }
+          if (count === 0) { callback(new Error('MCP output write made no progress')); return; }
+          writeFd(1, chunk, offset, chunk.byteLength - offset, null, written);
+        };
+        writeFd(1, chunk, 0, chunk.byteLength, null, written);
       },
     });
     super(process.stdin, output, { maxBufferSize: MAX_MCP_INPUT_BYTES });

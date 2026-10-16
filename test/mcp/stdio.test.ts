@@ -89,8 +89,8 @@ for (const shutdown of ['eof', 'SIGINT', 'SIGTERM', 'backpressure', 'stalled-out
   skip: process.platform === 'win32' && (shutdown === 'SIGINT' || shutdown === 'SIGTERM') ? 'Windows child.kill terminates rather than delivering catchable POSIX signals; EOF and backpressure lifecycle remain covered' : false,
 }, async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-mcp-lifecycle-')));
-  t.after(async () => { await rm(root, { recursive: true, force: true }); });
   const process = launch(t, ['--root', root, '--root', fixtures]);
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
   const rpc = rpcReader(process.child);
   const initialized = await rpc.request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'stdio-lifecycle-test', version: '0.1.0' } });
   assert.ok(initialized['result']);

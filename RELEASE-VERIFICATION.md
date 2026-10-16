@@ -4,7 +4,7 @@
 
 The current macOS implementation passes strict typechecking, **695/695 tests**, compilation and all **24 compiled release scenarios** under **Node 24.22.0**. The private artifact also passes an empty-cache, offline installation and the complete maintained MCP investigation suite on macOS. The frozen Windows run exposed CLI lifecycle failures; T29 remains in progress. Windows performance and clean-artifact acceptance remain separate release gates. This is not a declaration that A01–A12 are complete.
 
-macOS host: Darwin 27.0.0, arm64, Mac18,5, Apple M6, 12 logical CPUs, 16 GiB RAM. The latest full regression run reported 66,989.748208 ms; this is verification duration, not a performance SLA.
+macOS host: Darwin 27.0.0, arm64, Mac18,5, Apple M6, 12 logical CPUs, 16 GiB RAM. The latest full regression run reported 71,099.741291 ms after the stdio correction below; this is verification duration, not a performance SLA.
 
 Windows environment: isolated Windows 10 Enterprise LTSC 19044 x86-64, QEMU TCG, one virtual CPU, 4 GiB RAM. No guest network, shared host filesystem, credentials or target execution. An older frozen commit, `f059a4403a0d800bff071a51c5dfa9dc3793ed57`, passed 589 tests; that result does **not** cover the current candidate. Windows POSIX-signal cases are intentionally inapplicable; EOF, backpressure, worker shutdown and persistence still require execution.
 
@@ -75,3 +75,13 @@ This corrects the observed preflight failure where `--help` worked but public im
 Retained JSONL evidence: `.local/release/macos-installed-acceptance.jsonl`, 35 records, SHA256 `df1c668ec3a3bc2fe75110637a6afc7986d43f432766708569ce6e4f437f3d28`. All 23 retained license/provenance assets match their inventory hashes and sizes; 21 local-package copies additionally match the installed source bytes exactly. That audit is `.local/release/license-assets.json`, SHA256 `4bf52ad789a91e50c5044988491356a99a56248eb38b24b4c7e32f00e830325a`. Neither successful installation nor matching notices resolves the public Arm generated-data review or establishes the unknown Swift WASM source revision.
 
 This archive contains build-time documentation snapshots predating its installed run. These results identify these exact bytes; rebuilding after code or documentation changes produces a new artifact requiring its own recorded verification. Windows installation has not yet passed.
+
+## Windows stdout diagnosis and pending host correction
+
+The frozen guest's test-owner inspector showed its remaining CLI child with `stdout.readableFlowing: false`, **71,002 bytes** read, an unfinished **585-byte** stdin stream, and a live project worker. Attaching to the blocked CLI failed while attaching to its test owner succeeded. This matches Node's documented [synchronous Windows standard-output pipe writes](https://nodejs.org/api/process.html#a-note-on-process-io): blocking inside the write prevents the same event loop from firing the 30-second deadline.
+
+At guest time `2026-10-16T08:54:53.939Z`, diagnostic intervention resumed that child's output and ended its input through the owner inspector. The debugger was then detached. The existing frozen check advanced into its remaining cases; it was **not rerun**, and its earlier lifecycle failures remain failures. Retained screenshots include `.local/windows/evidence/test-owner-pipes.png`, `frozen-pipe-released.png` and `post-intervention-log.png`. The second observer also expired; an event-driven observer now follows the same recovering run.
+
+`src/mcp/cli.ts` now uses asynchronous file-descriptor writes on Windows, handles partial writes, and makes the SDK await the actual write callback even for small frames. POSIX retains its readiness-driven stream writer: applying descriptor writes indiscriminately reproduced an actual `EAGAIN`/connection-close failure during SDK tool discovery on macOS. Native POSIX stream handling corrected it. The lifecycle regression also reaps the child before deleting its potentially Windows-locked project directory.
+
+After correction, macOS strict typechecking, **695/695 tests** and compilation passed. A separate actual compiled-client probe paused a real imported project's output, observed exit **1** after **30,013.236292 ms**, then reopened that same project at revision **2**, closed it and observed normal EOF exit. This is exercised macOS behavior, **not a Windows pass**. The Windows branch, remaining guest failures and a new hash-bound artifact still require their own host verification.
