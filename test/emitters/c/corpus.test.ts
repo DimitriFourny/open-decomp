@@ -63,7 +63,7 @@ test('actual PE arithmetic and memory outputs execute with recovered type facts 
   check(corpus.image, abi, corpus.lifted.get(0x180001070n)!.ir, true);
 });
 
-test('real signed selections and loops preserve overflow and zero-trip boundaries in both dialects', () => {
+test('source-level signed selections and loops preserve overflow and zero-trip boundaries in both dialects', () => {
   const armImage = loadDarwin(), armGraphs = discover(armImage), windows = loadWindows();
   for (const arm of [true, false]) {
     const abi = arm ? new DarwinArm64Abi() : new WindowsX64Abi();
@@ -80,7 +80,7 @@ test('real signed selections and loops preserve overflow and zero-trip boundarie
         ? [[0x80000000n, 0x7fffffffn], [0xffffffffn, 0n], [0n, 0xffffffffn], [0x80000000n, 0x80000000n]]
         : [[0x2000n, 0n], [0x2000n, 1n], [0x2000n, 3n]];
       for (const language of ['c-like', 'python-like'] as const) {
-        const output = emit(ir, { types }, language);
+        const output = emit(ir, { types, source: { abi, callees: [], addresses: [] } }, language);
         for (const [a, b] of cases) {
           const roots = new Map<string, bigint>(arm ? [['arm64:x0', a!], ['arm64:x1', b!], ['arm64:sp', 0x9000n]] : [['x86_64:rcx', a!], ['x86_64:rdx', b!], ['x86_64:rsp', 0x9000n]]);
           const inputs = new Map(entry.parameters.map(value => [value.id, 0n]));
@@ -92,9 +92,7 @@ test('real signed selections and loops preserve overflow and zero-trip boundarie
           const observed = execute(output.emission, inputs, memory, 0n, new Map([...roots].map(([root, bits]) => [root, { bits, known: 0xffffffffffffffffn }])));
           const expected = name === 'fixture_maximum' ? BigInt.asIntN(32, a!) > BigInt.asIntN(32, b!) ? a! : b! : words.slice(0, Number(b)).reduce((sum, word) => sum + word, 0n);
           assert.equal(observed.exit, 'machine_return');
-          const returned = observed.registers.get(arm ? 'arm64:x0' : 'x86_64:rax'); assert.ok(returned);
-          assert.equal(BigInt.asUintN(32, returned.known), 0xffffffffn);
-          assert.equal(BigInt.asUintN(32, returned.bits), BigInt.asUintN(32, expected));
+          assert.deepEqual(observed.values, [BigInt.asUintN(32, expected)]);
         }
       }
     }

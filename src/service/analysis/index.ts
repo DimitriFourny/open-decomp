@@ -5,7 +5,6 @@ import {
 import { constructSSA } from '../../analysis/ssa/index.js';
 import { simplifySSA } from '../../analysis/values/index.js';
 import { recoverTypes, type SuppliedSignature, type SuppliedTypeRecord } from '../../analysis/types/index.js';
-import { assertValidIR, type FunctionIR } from '../../ir/index.js';
 import { recoverDebugInfo } from '../../metadata/debug/index.js';
 import { recoverLibraryContracts } from '../../metadata/library-contracts/index.js';
 import { structureControlFlow } from '../../presentation/index.js';
@@ -19,6 +18,8 @@ import { MAX_FRAME_BYTES } from '../../workers/protocol.js';
 import { callDeclarations, resolveCalls } from './calls.js';
 import { closeEvidence, evidenceReferences, semanticCatalog } from './catalog.js';
 import { pipelineComponents, pipelineVersions } from './versions.js';
+import { boundIR, requirePass } from './passes.js';
+import { recoverSourceEvidence } from './source-facts.js';
 export { executeAnnotations } from './annotations.js';
 
 export interface AnalysisScope {
@@ -26,23 +27,6 @@ export interface AnalysisScope {
   readonly context: OperationContext;
   readonly job_id: string;
   readonly max_result_bytes?: number;
-}
-
-function requirePass(state: 'complete' | 'partial', diagnostics: readonly Diagnostic[], context: OperationContext): void {
-  context.checkpoint(0);
-  const failure = diagnostics.find(item => item.code === 'cancelled' || item.code === 'resource_limit');
-  if (failure) throw new OperationError(failure);
-  if (state === 'partial') throw new OperationError({ code: 'unavailable_semantics', severity: 'error', message: 'Analysis pass did not produce a complete valid representation', evidence_ids: [] });
-}
-
-function boundIR(ir: FunctionIR, context: OperationContext): void {
-  let nodes = 0;
-  for (const block of ir.blocks) {
-    context.checkpoint(1 + block.instructions.length + block.parameters.length);
-    nodes += 3 + block.parameters.length + block.instructions.length;
-    if (nodes > context.budget.ir_nodes || ir.blocks.length > context.budget.blocks) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Lifted/SSA graph exceeds the operation node or block budget', evidence_ids: [] });
-  }
-  assertValidIR(ir, work => context.checkpoint(work));
 }
 
 export async function executeDecompilation(args: ToolArgs<'function_decompile'>, scope: AnalysisScope): Promise<ToolResult<'function_decompile'>> {
@@ -161,9 +145,10 @@ export async function executeDecompilation(args: ToolArgs<'function_decompile'>,
       if (!resolvedNames.has(subject)) names.push({ entity_id: subject, name });
       for (const use of uses) if (!named.has(use.call_id)) names.push({ entity_id: use.call_id, name });
     }
+    const source = recoverSourceEvidence({ scope, revision: args.revision, image, ir, instruction_count: graph.instructions.length, functions, references, calls, types, library, debug, native_types: nativeTypes, components });
     context.progress('emit', 6, 7);
     const emit = args.options.emitter === 'python-like' ? emitPythonLike : emitC;
-    const emitted = emit({ function: structured.value, types, names, annotations: active.annotations }, args.options, fullContext);
+    const emitted = emit({ function: structured.value, types, names, annotations: active.annotations, source }, args.options, fullContext);
     const decodeReasons = new Set<string>(), decodeDiagnostics: Diagnostic[] = [...graph.diagnostics];
     let decoded = 0;
     for (const instruction of graph.instructions) {

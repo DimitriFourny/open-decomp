@@ -1,6 +1,7 @@
 import type { Annotation, Diagnostic, Emission } from '../core/index.js';
 import type { TypeRecoveryResult } from '../analysis/types/index.js';
 import type { StructuredFunction } from '../presentation/index.js';
+import type { SourceEvidence } from '../reconstruction/source-model.js';
 
 /** Facts must belong to the same analyzed function/revision. Names are display data,
  * never identities, expressions, type constraints, or call contracts. Conflicting
@@ -12,6 +13,8 @@ export interface EmissionInput {
   /** Only active note annotations are rendered here; type recovery consumes type
    * assertions separately. The coordinator resolves active names into names. */
   readonly annotations?: readonly Annotation[];
+  /** Native ABI and bounded source observations; absent for synthetic IR callers. */
+  readonly source?: SourceEvidence;
 }
 export interface EmissionResult {
   readonly emission: Emission;

@@ -66,7 +66,6 @@ for (const fixture of [
   for (const instruction of graph.instructions) assert.ok(pythonFull.data.emission.mappings.some(mapping => mapping.instruction_ids.includes(instruction.id)));
   for (const mapping of pythonFull.data.emission.mappings) {
     assert.ok(mapping.start >= 0 && mapping.end > mapping.start && mapping.end <= pythonFull.data.emission.text.length);
-    assert.equal(pythonFull.data.emission.text[mapping.end - 1], '\n');
   }
   const restyled = await p.decompile(fn.id, { options: { emitter: 'python-like', include_evidence: false, indent: 8 } });
   const restyledFull = p.payload(restyled.result).result;

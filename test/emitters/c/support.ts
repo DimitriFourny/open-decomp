@@ -39,7 +39,7 @@ class Parser {
       const endHeader = lines.findIndex((line, index) => index >= header && /\):$|\) -> .*:$/.test(line));
       assert.ok(endHeader >= header);
       const indents = [0];
-      const token = /[ \t]+|#[^\n]*|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|<<|>>|[()[\],:=<>+*/%&|^~!-]/gy;
+      const token = /[ \t]+|#[^\n]*|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|<<|>>|[.()[\],:=<>+*/%&|^~!-]/gy;
       for (const line of lines.slice(endHeader + 1)) {
         if (/^\s*(?:#|$)/.test(line)) continue;
         const indent = line.length - line.trimStart().length;
@@ -95,6 +95,7 @@ class Parser {
   }
   private pythonStatement(): void {
     const token = this.take();
+    if (token === 'memory' && this.peek() === '.') { this.position--; this.memoryStatement('\n'); return; }
     if (token === 'label') { this.labels.set(this.take(), this.ops.length); this.take(':'); this.take('\n'); return; }
     if (token === 'pass') { this.take('\n'); return; }
     if (token === 'break' || token === 'continue') {
@@ -156,12 +157,13 @@ class Parser {
       while (this.peek() !== ')') { names.push(this.take()); if (this.peek() !== ')') this.take(','); }
       this.take(')');
     }
-    if (this.peek() === ':') { this.take(':'); assert.match(this.take(), /^(?:bits\d+_t|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t)$/); }
+    if (this.peek() === ':') { this.take(':'); assert.match(this.take(), /^(?:bits\d+_t|u?int\d+_t|bool|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t)$/); }
     const expression = this.peek() === '=' ? (this.take('='), this.expression()) : null;
     this.take('\n'); this.ops.push({ kind: 'assign', names, expression, tuple });
   }
   private statement(breaks: number[]): void {
     const token = this.take();
+    if (token === '(' && this.peek() === '*') { this.position--; this.memoryStatement(';'); return; }
     if (token === ';') return;
     if (this.peek() === ':') { this.take(':'); this.labels.set(token, this.ops.length); this.take(';'); return; }
     if (token === 'goto') { this.ops.push({ kind: 'jump', target: this.take() }); this.take(';'); return; }
@@ -214,10 +216,20 @@ class Parser {
     let names: string[];
     if (token === '(') {
       names = [this.take()]; while (this.peek() === ',') { this.take(','); names.push(this.take()); } this.take(')');
-    } else if (/^(?:bits\d+_t|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t)$/.test(token)) names = [this.take()];
+    } else if (/^(?:bits\d+_t|u?int\d+_t|bool|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t)$/.test(token)) names = [this.take()];
     else names = [token];
     const expression = this.peek() === '=' ? (this.take('='), this.expression()) : null;
     this.take(';'); this.ops.push({ kind: 'assign', names, expression, tuple: token === '(' });
+  }
+  private memoryStatement(end: string): void {
+    const memory = this.expression();
+    assert.ok(memory.kind === 'call' && memory.name === 'read_memory');
+    if (this.peek() === '=') {
+      this.take('=');
+      const value = this.expression();
+      this.ops.push({ kind: 'effect', expression: { kind: 'call', name: 'write_memory', args: [memory.args[0]!, value, ...memory.args.slice(1)] } });
+    } else this.ops.push({ kind: 'effect', expression: memory });
+    this.take(end);
   }
   private expression(minimum = 0): Expr {
     let left = this.atom();
@@ -236,8 +248,29 @@ class Parser {
   }
   private atom(): Expr {
     const token = this.take();
+    if (token === '*') {
+      const pointer = this.atom();
+      assert.ok(pointer.kind === 'call' && pointer.name === '__pointer');
+      return { kind: 'call', name: 'read_memory', args: pointer.args };
+    }
+    if (token === 'memory' && this.peek() === '.') {
+      this.take('.');
+      const view = this.take(), match = /^(volatile_)?(be_)?u(\d+)$/.exec(view); assert.ok(match);
+      this.take('['); const address = this.expression(); this.take(']');
+      return { kind: 'call', name: 'read_memory', args: [address, { kind: 'literal', value: `bits${match[3]}_t` }, { kind: 'literal', value: match[2] ? 'big' : 'little' }, { kind: 'literal', value: 1n }, { kind: 'literal', value: !!match[1] }] };
+    }
     if (['-', '~', '!'].includes(token)) return { kind: 'unary', op: token, value: this.atom() };
     if (token === '(') {
+      if (this.peek() === 'volatile' || /^(?:unaligned_)?u?int\d+_t$/.test(this.peek()) && this.tokens[this.position + 1] === '*') {
+        const volatile = this.peek() === 'volatile' ? (this.take(), true) : false;
+        const type = this.take(), match = /^(unaligned_)?u?int(\d+)_t$/.exec(type); assert.ok(match);
+        this.take('*'); this.take(')');
+        return { kind: 'call', name: '__pointer', args: [this.atom(), { kind: 'literal', value: `bits${match[2]}_t` }, { kind: 'literal', value: 'little' }, { kind: 'literal', value: match[1] ? 1n : BigInt(Number(match[2]) / 8) }, { kind: 'literal', value: volatile }] };
+      }
+      if (/^(?:u?int\d+_t|uintptr_t)$/.test(this.peek()) && this.tokens[this.position + 1] === ')') {
+        const type = this.take(); this.take(')');
+        return { kind: 'call', name: type === 'uintptr_t' ? 'uint64' : type.slice(0, -2), args: [this.atom()] };
+      }
       const expression = this.expression();
       if (this.peek() !== ',') { this.take(')'); return expression; }
       const values = [expression];
@@ -270,10 +303,10 @@ export interface Observation {
   readonly calls: readonly { readonly target: bigint; readonly arguments: readonly bigint[] }[];
 }
 export function execute(emission: { readonly text: string; readonly mappings: readonly { readonly start: number; readonly end: number; readonly statement_id: string; readonly semantic_ids: readonly string[] }[] }, inputs: ReadonlyMap<string, bigint> = new Map(), memory: Map<bigint, number> = new Map(), callDelta = 0n, entryRegisters: Observation['registers'] = new Map()): Observation {
-  const text = emission.text, parser = new Parser(text), environment = new Map<string, Data>(), events: string[] = [];
+  const text = emission.text, parser = new Parser(text), environment = new Map<string, Data>(inputs), events: string[] = [];
   // Mappings supply only formal input identity; every operation below executes
   // parsed output independently of the analyzed IR and its reconstruction plan.
-  const python = /^def /m.test(text), headerEnd = python ? text.search(/^\).*:$/m) : text.indexOf('{');
+  const python = /^def /m.test(text), headerEnd = python ? text.search(/\)\s*(?:-> [^\n]+)?:/) : text.indexOf('{');
   for (const mapping of emission.mappings) {
     if (mapping.end > headerEnd) continue;
     const line = text.slice(mapping.start, mapping.end).trim();
@@ -319,6 +352,9 @@ export function execute(emission: { readonly text: string; readonly mappings: re
     scratch.setFloat64(0, value, true); return scratch.getBigUint64(0, true);
   };
   const helper = (name: string, args: Data[]): Data => {
+    const sourceCast = /^(u?int)(\d+)$/.exec(name);
+    if (sourceCast) return args[0] === null ? null : sourceCast[1] === 'uint' ? BigInt.asUintN(Number(sourceCast[2]), number(args[0])) : BigInt.asIntN(Number(sourceCast[2]), number(args[0]));
+    if (name === '__pointer') return args[0]!;
     if (/^(?:bv_|fp_|cast_|flag_|vector_|extract_bits$|insert_bits$|concat_low_first$|signed_value$|wrap$)/.test(name) && args.includes(null)) return null;
     if (name === 'wrap') return BigInt.asUintN(Number(number(args[0])), number(args[1]));
     if (name === 'bit_pattern') return BigInt.asUintN(Number(number(args[1])), number(args[2]));

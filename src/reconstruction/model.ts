@@ -2,11 +2,12 @@ import type { Diagnostic, RegisterDescriptor } from '../core/index.js';
 import type { SignatureAssociation, MemoryShape, ObservedField } from '../analysis/types/model.js';
 import type { Expression, Instruction, Origin, Value } from '../ir/index.js';
 import type { BlockRegion, ParallelTransfer, StructuredFunction } from '../presentation/index.js';
+import type { SourcePresentation } from './source-model.js';
 
 /** A source projection exists only when every physical location is an exact,
  * compatible whole value. Physical boundaries otherwise remain explicit. */
 export interface BoundaryProjection {
-  readonly kind: 'source' | 'physical';
+  readonly kind: 'source' | 'inferred' | 'physical';
   readonly signature: SignatureAssociation | null;
   readonly arguments: readonly Value[];
   readonly results: readonly Value[];
@@ -21,6 +22,7 @@ export interface MemoryView {
 }
 export interface Reconstruction {
   readonly function: StructuredFunction;
+  readonly source?: SourcePresentation;
   readonly blocks: ReadonlyMap<string, BlockRegion>;
   readonly values: ReadonlyMap<string, Value>;
   /** Rewritten pure definitions. Operand identities remain original SSA IDs. */

@@ -1,3 +1,4 @@
+import type { Address } from '../core/index.js';
 import { bitWidth, sameType, type DataType, type Expression, type Value } from '../ir/index.js';
 import type { Writer } from './writer.js';
 
@@ -45,37 +46,63 @@ const fpMeaning = 'IEEE binary32/64, nearest ties-even and gradual underflow; ar
 /** Reconstruction chooses substitutions; formatting preserves width semantics.
  * Arithmetic is readable infix with explicit reduction where overflow matters.
  * Exact floating/vector/unknown operations retain documented semantic helpers. */
-export function expressionText(expression: Expression, type: DataType, writer: Writer, name: (value: Value) => string): string {
+export function expressionText(expression: Expression, type: DataType, writer: Writer, name: (value: Value) => string, source?: { readonly address: (address: Address) => string }): string {
   const width = bitWidth(type);
   const invoke = (helper: string, meaning: string, args: readonly string[]): string => {
     writer.helper(helper, meaning);
     return `${helper}(${writer.join(args)})`;
   };
+  const unsigned = (bits: number, value: string): string => {
+    if (writer.language === 'c-like') return bits === 1 ? `((${value}) & 1)` : `((uint${bits}_t)(${value}))`;
+    return invoke(`uint${bits}`, `Reduce to an unsigned ${bits}-bit value; unknown/undefined propagates.`, [value]);
+  };
+  const signed = (bits: number, value: string): string => writer.language === 'c-like'
+    ? `((int${bits}_t)(${value}))`
+    : invoke(`int${bits}`, `Interpret the low ${bits} bits as a signed two's-complement value; unknown/undefined propagates.`, [value]);
   switch (expression.kind) {
-    case 'constant': return type.kind === 'integer' ? `0x${BigInt.asUintN(width, expression.bits).toString(16)}` : invoke('bit_pattern', 'Construct exact machine-storage bits, preserving floating-point/vector payloads.', [writer.quote(machineType(type)), String(width), `0x${BigInt.asUintN(width, expression.bits).toString(16)}`]);
-    case 'address': return invoke('image_address', 'Image-qualified address-space value; no host pointer, ASLR assumption or memory read.', [writer.quote(expression.address.image_id), writer.quote(expression.address.space), `0x${expression.address.value.toString(16)}`]);
+    case 'constant': return type.kind === 'integer' ? source && expression.bits >= 0n && expression.bits <= 9n ? String(expression.bits) : `0x${BigInt.asUintN(width, expression.bits).toString(16)}` : invoke('bit_pattern', 'Construct exact machine-storage bits, preserving floating-point/vector payloads.', [writer.quote(machineType(type)), String(width), `0x${BigInt.asUintN(width, expression.bits).toString(16)}`]);
+    case 'address': return source ? source.address(expression.address) : invoke('image_address', 'Image-qualified address-space value; no host pointer, ASLR assumption or memory read.', [writer.quote(expression.address.image_id), writer.quote(expression.address.space), `0x${expression.address.value.toString(16)}`]);
     case 'integer': {
       const operator = integerOperators[expression.op];
       if (operator) {
         const infix = `(${name(expression.left)} ${operator} ${name(expression.right)})`;
+        if (source) return expression.op === 'and' || expression.op === 'or' || expression.op === 'xor' ? infix : unsigned(width, infix);
         return expression.op === 'and' || expression.op === 'or' || expression.op === 'xor' ? infix : invoke('wrap', 'Arguments: bit width, mathematical integer expression. Reduce modulo 2^width; unknown/undefined propagates. Infix arithmetic inside wrap is mathematical, not host C arithmetic.', [String(width), infix]);
       }
       return invoke(`bv_${expression.op}`, `Arguments: width, left, right. ${integerMeaning[expression.op]} Unknown/undefined operands propagate.`, [String(width), name(expression.left), name(expression.right)]);
     }
     case 'integer_unary':
+      if (source && (expression.op === 'neg' || expression.op === 'not')) return unsigned(width, `(${expression.op === 'neg' ? '-' : '~'}${name(expression.value)})`);
       if (expression.op === 'neg' || expression.op === 'not') return invoke('wrap', 'Arguments: bit width, mathematical integer expression. Reduce modulo 2^width; unknown/undefined propagates. Infix arithmetic inside wrap is mathematical, not host C arithmetic.', [String(width), `(${expression.op === 'neg' ? '-' : '~'}${name(expression.value)})`]);
       return invoke(`bv_${expression.op}`, `Arguments: width, value. ${expression.op === 'clz' ? 'Count leading zeros; zero input returns width.' : expression.op === 'ctz' ? 'Count trailing zeros; zero input returns width.' : 'Count set bits.'} Unknown/undefined operands propagate.`, [String(width), name(expression.value)]);
     case 'compare': {
-      const signed = expression.op.startsWith('s');
-      const operand = (value: Value): string => signed ? invoke('signed_value', 'Interpret a width-bit pattern as its mathematical two\'s-complement signed value; no host narrowing cast. Unknown/undefined propagates.', [String(bitWidth(value.type)), name(value)]) : name(value);
+      const isSigned = expression.op.startsWith('s');
+      const operand = (value: Value): string => isSigned ? source ? signed(bitWidth(value.type), name(value)) : invoke('signed_value', 'Interpret a width-bit pattern as its mathematical two\'s-complement signed value; no host narrowing cast. Unknown/undefined propagates.', [String(bitWidth(value.type)), name(value)]) : name(value);
       return `(${operand(expression.left)} ${comparisonOperators[expression.op]} ${operand(expression.right)})`;
     }
     case 'cast':
       if (expression.op === 'bitcast' && sameType(type, expression.value.type)) return name(expression.value);
+      if (source && type.kind === 'integer' && expression.value.type.kind === 'integer') {
+        if (expression.op === 'truncate' || expression.op === 'zero_extend') return unsigned(width, name(expression.value));
+        if (expression.op === 'sign_extend') return unsigned(width, signed(bitWidth(expression.value.type), name(expression.value)));
+      }
       return invoke(`cast_${expression.op}`, `Arguments: destination machine type, source machine type, value. ${castMeaning[expression.op]} Unknown/undefined operands propagate.`, [writer.quote(machineType(type)), writer.quote(machineType(expression.value.type)), name(expression.value)]);
-    case 'extract': return invoke('extract_bits', 'Arguments: result width, source, bit offset. Return that slice, offset zero is least significant; preserve raw FP/vector bits. Unknown/undefined propagates.', [String(width), name(expression.value), String(expression.offset)]);
+    case 'extract':
+      if (source && expression.value.type.kind === 'integer' && type.kind === 'integer') return unsigned(width, expression.offset ? `(${name(expression.value)} >> ${expression.offset})` : name(expression.value));
+      return invoke('extract_bits', 'Arguments: result width, source, bit offset. Return that slice, offset zero is least significant; preserve raw FP/vector bits. Unknown/undefined propagates.', [String(width), name(expression.value), String(expression.offset)]);
     case 'insert': return invoke('insert_bits', 'Arguments: result width, base, value width, value, offset. Replace only the designated slice, preserving all other bits. Unknown/undefined propagates.', [String(width), name(expression.base), String(bitWidth(expression.value.type)), name(expression.value), String(expression.offset)]);
     case 'concat': {
+      if (source && type.kind === 'integer' && expression.values.every(value => value.type.kind === 'integer')) {
+        let offset = 0;
+        const parts: string[] = [];
+        for (const value of expression.values) {
+          writer.context.checkpoint(1);
+          const part = unsigned(width, name(value));
+          parts.push(offset ? `(${part} << ${offset})` : part);
+          offset += bitWidth(value.type);
+        }
+        return `(${writer.join(parts, ' | ')})`;
+      }
       const args = [String(width)];
       for (const value of expression.values) { writer.context.checkpoint(1); args.push(String(bitWidth(value.type)), name(value)); }
       return invoke('concat_low_first', 'Arguments: total width, repeated (part width, value). First part occupies least significant bits; no host endian dependency. Undefined dominates unknown, otherwise concatenate exact patterns.', args);

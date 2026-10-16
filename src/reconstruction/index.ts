@@ -5,6 +5,9 @@ import type { BlockRegion, Control, ParallelTransfer, Region } from '../presenta
 import { boundaryProjector } from './boundaries.js';
 import { foldExpressions, identityOperand } from './expressions.js';
 import type { Assignment, BoundaryProjection, MemoryView, Reconstruction } from './model.js';
+import { planSource } from './source-planner.js';
+import { planSourceStack } from './source-stack.js';
+import { normalizeSourceExpressions } from './source-expressions.js';
 export type * from './model.js';
 
 function controlTransfers(control: Control): readonly ParallelTransfer[] {
@@ -55,6 +58,9 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
   const entry = blocks.get(input.function.entry);
   const entryBindings = entry?.register_entry ?? [];
   const entryParameters = new Set(entry?.parameters.map(value => value.id));
+  const sourcePlan = input.source ? planSource(input, blocks, values, expressions, owner, context) : null;
+  const sourceStack = sourcePlan ? planSourceStack(input, blocks, expressions, allTransfers, sourcePlan.calls, sourcePlan.returns, sourcePlan.alias, context) : null;
+  if (sourcePlan) normalizeSourceExpressions(values, expressions, owner, sourcePlan.make, context);
 
   // A three-level identity lattice (unreached / exact identity / conflicting).
   // Ignoring unreached backedges discovers unchanged loop-carried registers;
@@ -68,7 +74,7 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     if (sources) {
       dependencies.set(id, sources);
       for (const source of sources) { context.checkpoint(1); const list = identityUsers.get(source.id) ?? []; list.push(id); identityUsers.set(source.id, list); }
-      if (entryParameters.has(id) || sources.length === 0) identities.set(id, id);
+      if (entryParameters.has(id) && (!sourcePlan || !alias) || sources.length === 0) identities.set(id, id);
     } else identities.set(id, id);
   }
   const identityQueue = [...values.keys()], identityQueued = new Set(identityQueue);
@@ -84,6 +90,11 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     identities.set(id, result);
     for (const user of identityUsers.get(id) ?? []) if (!identityQueued.has(user)) { identityQueued.add(user); identityQueue.push(user); }
   }
+  if (sourcePlan) for (const [id, identity] of identities) {
+    context.checkpoint(1);
+    if (identity && id !== identity && values.has(identity)) sourcePlan.alias(values.get(id)!, { kind: 'cast', op: 'bitcast', value: values.get(identity)! });
+  }
+  if (sourcePlan) normalizeSourceExpressions(values, expressions, owner, sourcePlan.make, context);
   const initial = new Map(entryBindings.map(binding => [binding.register.id, binding.value.id]));
   const snapshot = (bindings: readonly RegisterBinding[]): readonly RegisterBinding[] => bindings.filter(binding => {
     context.checkpoint(1); const identity = identities.get(binding.value.id); return identity === undefined || identity === null || initial.get(binding.register.id) !== identity;
@@ -96,15 +107,16 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     context.checkpoint(1);
     for (const node of block.statements) {
       context.checkpoint(1);
-      if ('register_inputs' in node) physical_inputs.set(node.id, snapshot(node.register_inputs));
+      if ('register_inputs' in node) physical_inputs.set(node.id, sourcePlan ? [] : snapshot(node.register_inputs));
       if (node.kind === 'call') {
-        const projection = project(node.id, node.register_inputs, node.register_outputs, node.arguments, node.results);
+        const projection = sourcePlan?.calls.get(node.id) ?? project(node.id, node.register_inputs, node.register_outputs, node.arguments, node.results);
         calls.set(node.id, projection.kind === 'physical' ? { ...projection, inputs: physical_inputs.get(node.id)! } : projection);
       }
     }
     const control = block.control;
-    if (control.kind === 'return' || control.kind === 'trap' || control.kind === 'unknown' || control.kind === 'indirect') physical_exits.set(control.id, snapshot(block.register_exit));
+    if (control.kind === 'return' || control.kind === 'trap' || control.kind === 'unknown' || control.kind === 'indirect') physical_exits.set(control.id, sourcePlan ? [] : snapshot(block.register_exit));
     if (control.kind === 'return') {
+      if (sourcePlan) { returns.set(control.id, sourcePlan.returns.get(control.id)!); continue; }
       const projection = project(input.function.id, entryBindings, block.register_exit, [], control.values, true);
       if (projection.kind === 'source') {
         returns.set(control.id, { ...projection, arguments: [], inputs: [], outputs: snapshot(projection.outputs).filter(binding => !projection.results.some(value => value.id === binding.value.id)) });
@@ -124,10 +136,10 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
   const roots = new Map<string, Value[]>();
   for (const block of blocks.values()) {
     for (const node of block.statements) {
-      context.checkpoint(1); if (node.kind === 'assign') continue;
+      context.checkpoint(1); if (node.kind === 'assign' || sourceStack?.hidden.has(node.id) || node.kind === 'load' && sourceStack?.returnAddressLoads.has(node.result.id)) continue;
       retained.add(node.id); const operands: Value[] = [];
       if (node.kind === 'write_register') operands.push(node.value);
-      if (node.kind === 'load' || node.kind === 'store') { operands.push(node.address); if (node.kind === 'store') operands.push(node.value); }
+      if (node.kind === 'load' || node.kind === 'store') { if (!sourceStack?.locals.has(node.id)) operands.push(node.address); if (node.kind === 'store') operands.push(node.value); }
       if (node.kind === 'call') { const projection = calls.get(node.id)!; operands.push(...projection.arguments, ...projection.inputs.map(binding => binding.value)); if (node.target.kind === 'indirect') operands.push(node.target.value); }
       else if ('register_inputs' in node) operands.push(...(physical_inputs.get(node.id) ?? []).map(binding => binding.value));
       roots.set(node.id, operands); for (const value of operands) use(value, block.id);
@@ -147,12 +159,16 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
   }
   for (let cursor = 0; cursor < liveQueue.length; cursor++) {
     context.checkpoint(1); const value = liveQueue[cursor]!, expression = expressions.get(value.id);
+    const returnAddress = sourceStack?.returnAddressLoads.get(value.id);
+    if (returnAddress) { retained.add(returnAddress.node.id); roots.set(returnAddress.node.id, [returnAddress.node.address]); use(returnAddress.node.address, returnAddress.block); }
+    if (sourceStack?.addresses.has(value.id)) continue;
     if (expression) for (const operand of expressionOperands(expression)) use(operand, owner.get(value.id)!);
-    for (const incoming of incomingUses.get(value.id) ?? []) use(incoming.source, incoming.block);
+    if (!sourcePlan || !expression || !identityOperand(value.type, expression)) for (const incoming of incomingUses.get(value.id) ?? []) use(incoming.source, incoming.block);
   }
+  if (sourcePlan) for (const [id, projection] of calls) calls.set(id, { ...projection, outputs: projection.outputs.filter(binding => { context.checkpoint(1); return live.has(binding.value.id) && !expressions.has(binding.value.id); }) });
   const transfers = new Map<ParallelTransfer, readonly { readonly destination: Value; readonly source: Value }[]>();
   for (const { transfer, block } of allTransfers) {
-    const copies = transfer.copies.filter(copy => { context.checkpoint(1); return live.has(copy.destination.id) && copy.destination.id !== copy.source.id; });
+    const copies = transfer.copies.filter(copy => { context.checkpoint(1); return live.has(copy.destination.id) && copy.destination.id !== copy.source.id && (!sourcePlan || !identityOperand(copy.destination.type, expressions.get(copy.destination.id) ?? { kind: 'indeterminate', state: 'unknown', reason: 'phi' })); });
     transfers.set(transfer, copies); roots.get(block.control.id)!.push(...copies.map(copy => copy.source));
   }
 
@@ -160,10 +176,11 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
   // parameter must never be expanded after a successor transfer rebinds it.
   // Constants are the sole freely shared expressions. Sizes account for every
   // operand occurrence, bounding a repeated-operand DAG before rendering.
-  const inline = new Set<string>(), expansion = new Map<string, { size: number; depth: number }>();
+  const inline = new Set<string>(sourcePlan?.forcedInline), expansion = new Map<string, { size: number; depth: number }>();
+  if (sourceStack) for (const id of sourceStack.addresses.keys()) inline.add(id);
   const visiting = new Set<string>();
   for (const id of assignments.keys()) {
-    if (!live.has(id) || expansion.has(id)) continue;
+    if (!live.has(id) || inline.has(id) || expansion.has(id)) continue;
     const work: { id: string; exit: boolean }[] = [{ id, exit: false }];
     while (work.length) {
       context.checkpoint(1); const item = work.pop()!, node = assignments.get(item.id);
@@ -184,6 +201,7 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     }
   }
   for (const [id, node] of assignments) if (live.has(id) && !inline.has(id)) { retained.add(node.id); roots.set(node.id, [...expressionOperands(expressions.get(id)!)]); }
+  sourcePlan?.materialize(live, inline);
 
   // Every original statement gets a real output owner, including dead annotated
   // subjects. Inline/folded dependencies follow their consumer; otherwise the
@@ -208,11 +226,13 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
   const physicalParameters = (entry?.parameters ?? []).filter(value => live.has(value.id));
   let signature = functionProjection?.kind === 'source' ? functionProjection.signature : null;
   if (signature && physicalParameters.some(value => !functionProjection!.arguments.some(parameter => parameter.id === value.id))) signature = null;
+  if (sourcePlan) signature = sourcePlan.signature;
   // A source return without a fully expressible function interface still retains
   // its proven result binding; physical outputs are never dropped by this choice.
-  const parameters = signature ? functionProjection!.arguments : physicalParameters;
+  const parameters = sourcePlan ? sourcePlan.finalize(live) : signature ? functionProjection!.arguments : physicalParameters;
   const parameter_registers = new Map<string, RegisterDescriptor>();
   for (const binding of entryBindings) { context.checkpoint(1); parameter_registers.set(binding.value.id, binding.register); }
+  if (sourcePlan) for (const [id, register] of sourcePlan.parameterRegisters) parameter_registers.set(id, register);
   const memory = new Map<string, MemoryView>(), ambiguous = new Set<string>();
   const conflicting = new Set(input.types?.conflicts.map(item => item.subject_id) ?? []);
   if (input.types?.state === 'complete') for (const shape of input.types.shapes) for (const field of shape.fields) {
@@ -240,9 +260,10 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
         const expression = expressions.get(node.result.id)!;
         if (expression.kind === 'indeterminate' && expression.state === 'unknown') unavailable(node, 'An unknown machine value remains explicit.');
       } else if (node.kind === 'unknown_effect') unavailable(node, 'Unknown instruction effects remain ordered and explicit.');
-      else if (node.kind === 'call' && calls.get(node.id)?.kind !== 'source') unavailable(node, 'The source call interface is unresolved; physical arguments and effects remain explicit.');
+      else if (node.kind === 'call' && calls.get(node.id)?.kind === 'physical') unavailable(node, sourcePlan ? 'The source call interface is unresolved; unknown call effects remain explicit.' : 'The source call interface is unresolved; physical arguments and effects remain explicit.');
     }
     if (block.control.kind === 'unknown' || block.control.kind === 'indirect') unavailable(block.control, 'A control boundary remains unresolved; no target or trap is invented.');
   }
-  return { function: input.function, blocks, values, expressions, inline, live, retained, transfers, origins, parameters, parameter_registers, signature, calls, returns, physical_inputs, physical_exits, memory, diagnostics };
+  const source = sourcePlan && sourceStack ? { ...sourcePlan.presentation, locals: sourceStack.locals, stack: sourceStack.frame(retained, live), stack_addresses: sourceStack.addresses } : undefined;
+  return { function: input.function, blocks, values, expressions, inline, live, retained, transfers, origins, parameters, parameter_registers, signature, calls, returns, physical_inputs, physical_exits, memory, diagnostics, ...(source ? { source } : {}) };
 }

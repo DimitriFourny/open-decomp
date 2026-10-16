@@ -1,5 +1,5 @@
 import { OperationError, type Address, type Annotation, type CallClobbers, type Diagnostic, type Emitter, type OperationContext, type RegisterDescriptor } from '../core/index.js';
-import { expressionOperands, type Instruction, type Origin, type RegisterBinding, type Value } from '../ir/index.js';
+import { bitWidth, expressionOperands, type DataType, type Expression, type Instruction, type Origin, type RegisterBinding, type Value } from '../ir/index.js';
 import type { BlockRegion, Control, ControlArm, ParallelTransfer, Region } from '../presentation/index.js';
 import type { SuppliedTypeRecord } from '../analysis/types/index.js';
 import { reconstruct } from '../reconstruction/index.js';
@@ -35,6 +35,13 @@ export class Renderer {
   private headerStart = 0;
   private headerEnd = 0;
 
+  private readonly sourceNames = new Map<string, string>();
+  private readonly usedSourceNames = new Set<string>();
+  private readonly sourceAddresses = new Map<string, { readonly name?: string; readonly string?: string } | null>();
+  private readonly sourceAddressesByValue = new Map<bigint, Address | null>();
+  private readonly sourceValueTypes = new Map<string, string>();
+  private sourceTemporary = 0;
+  private sourceLocal = 0;
   constructor(private readonly input: EmissionInput, private readonly options: Options, private readonly context: OperationContext, private readonly language: 'c-like' | 'python-like', private readonly version: string) {
     this.writer = new Writer(context, options.indent, options.include_evidence, language);
     this.program = reconstruct(input, context);
@@ -73,6 +80,21 @@ export class Renderer {
         for (const id of requirement.fact.evidence_ids) row.evidence.add(id);
       }
       this.sourceEvidence.set(signature.subject_id, row);
+    }
+    for (const item of this.program.source?.addresses ?? []) {
+      context.checkpoint(1);
+      const key = this.addressKey(item.address), previous = this.sourceAddresses.get(key);
+      if (previous === undefined) this.sourceAddresses.set(key, item);
+      else if (previous && (previous.name !== item.name || previous.string !== item.string)) this.sourceAddresses.set(key, null);
+      if (item.address.space === 'va') {
+        const address = this.sourceAddressesByValue.get(item.address.value);
+        this.sourceAddressesByValue.set(item.address.value, address === undefined || address && this.addressKey(address) === key ? item.address : null);
+      }
+    }
+    for (const projection of this.program.calls.values()) {
+      if (!projection.signature) continue;
+      const declaration = projection.signature.signature;
+      if (projection.results.length === 1) this.sourceValueTypes.set(projection.results[0]!.id, declaration.return_type);
     }
     for (const block of this.program.blocks.values()) {
       context.checkpoint(1);
@@ -117,15 +139,48 @@ export class Renderer {
     this.identifiers.set(id, { entity_id: id, identifier, original_name: original });
     return identifier;
   }
-  private local(value: Value): string { return this.identifier(value.id, 'v'); }
+  private sourceIdentifier(id: string, preferred: string): string {
+    const previous = this.identifiers.get(id);
+    if (previous) return previous.identifier;
+    let stem = preferred.replace(/[^A-Za-z0-9_]/g, '_').slice(0, 64);
+    if (!/^[A-Za-z_]/.test(stem)) stem = `value_${stem}`;
+    if (/^(?:auto|break|case|char|const|continue|def|default|do|double|else|enum|extern|False|float|for|goto|if|int|lambda|long|match|None|pass|register|return|short|signed|sizeof|static|struct|switch|True|typedef|union|unsigned|void|volatile|while|bool|uint\d+_t|int\d+_t)$/.test(stem)) stem = `value_${stem}`;
+    let name = stem, suffix = 1;
+    while (this.usedSourceNames.has(name)) { this.context.checkpoint(1); name = `${stem}_${suffix++}`; }
+    this.usedSourceNames.add(name);
+    this.writer.metadata(id.length + name.length + Buffer.byteLength(preferred));
+    this.identifiers.set(id, { entity_id: id, identifier: name, original_name: this.names.get(id) ?? null });
+    return name;
+  }
+  private local(value: Value): string {
+    return this.program.source ? this.identifiers.get(value.id)?.identifier ?? this.sourceIdentifier(value.id, this.names.get(value.id) ?? `value${this.sourceTemporary++}`) : this.identifier(value.id, 'v');
+  }
+  private valueType(value: Value): string {
+    const source = this.sourceValueTypes.get(value.id);
+    if (source) return this.sourceType(source);
+    return this.dataType(value.type);
+  }
+  private dataType(type: DataType): string {
+    return this.program.source && type.kind === 'integer' ? type.bits === 1 ? 'bool' : `uint${type.bits}_t` : machineType(type);
+  }
+  private expression(expression: Expression, type: DataType): string {
+    return expressionText(expression, type, this.writer, this.value, this.program.source ? { address: this.sourceAddress } : undefined);
+  }
   private value = (value: Value): string => {
     this.context.checkpoint(1);
+    const stack = this.program.source?.stack, offset = this.program.source?.stack_addresses.get(value.id);
+    if (stack && offset !== undefined) return this.language === 'c-like' ? `((uintptr_t)&stack_frame[${offset - stack.minimum_offset}])` : `address_of(stack_frame, ${offset - stack.minimum_offset})`;
     const expression = this.program.inline.has(value.id) ? this.program.expressions.get(value.id) : undefined;
-    if (!expression) return this.local(value);
+    if (!expression) {
+      const name = this.local(value), id = this.sourceValueTypes.get(value.id);
+      const type = id && this.typeRecords.get(id)?.definition;
+      if (this.program.source && type && type.kind === 'integer' && type.signed) return this.language === 'c-like' ? `((uint${type.bits}_t)(${name}))` : this.call(`uint${type.bits}`, 'Convert a signed source result back to its exact ABI bit pattern.', [name]);
+      return name;
+    }
     if (this.expanding.has(value.id)) this.invalid('Cyclic reconstructed expression');
     if (this.expanding.size >= 128 || ++this.expansionWork > this.context.budget.ir_nodes * 64) this.writer.fail('Reconstructed expression expansion exceeds its budget');
     this.expanding.add(value.id);
-    const text = expressionText(expression, value.type, this.writer, this.value);
+    const text = this.expression(expression, value.type);
     this.expanding.delete(value.id);
     this.writer.guard(Buffer.byteLength(text));
     return text;
@@ -144,7 +199,7 @@ export class Renderer {
       this.emittedNotes.add(note.id);
       const start = this.writer.offset;
       this.writer.comment(depth, `note ${note.status}/${note.origin} id=${this.writer.quote(note.id)} subject=${this.writer.quote(id)} author=${this.writer.quote(note.author)}: ${this.writer.quote(note.value.value)}`);
-      this.writer.map(this.dataOrigin(id), start, [id], note.evidence_ids);
+      this.mapped(this.dataOrigin(id), start, [id], note.evidence_ids);
     }
   }
   private semanticIds(origin: Origin): string[] {
@@ -166,6 +221,13 @@ export class Renderer {
     this.context.checkpoint(ids.length);
     return ids;
   }
+  private mapped(origin: Origin, start: number, ids: readonly string[] = [], evidence: readonly string[] = [], end = this.writer.offset): void {
+    const contributors = this.program.source?.value_origins;
+    const resolve = (id: string): readonly string[] => contributors?.get(id) ?? [id];
+    const subjects = [...resolve(origin.id), ...ids.flatMap(resolve)];
+    this.context.checkpoint(subjects.length);
+    this.writer.map({ ...origin, id: subjects[0] ?? origin.id }, start, subjects, evidence, end);
+  }
   private map(origin: Origin, start: number, ids: readonly string[] = [], end = this.writer.offset): void {
     if (start === end) { start = this.headerStart; end = this.headerEnd; }
     const origins = this.program.origins.get(origin.id) ?? [];
@@ -174,10 +236,41 @@ export class Renderer {
       this.context.checkpoint(1);
       if (seen.has(contributor.id)) continue;
       seen.add(contributor.id);
-      this.writer.map(contributor, start, [...ids, ...this.semanticIds(contributor)], [], end);
+      this.mapped(contributor, start, [...ids, ...this.semanticIds(contributor)], [], end);
       if (this.statements.has(contributor.id)) this.mappedStatements.add(contributor.id);
       if (this.controls.has(contributor.id)) this.mappedControls.add(contributor.id);
     }
+  }
+  private addressKey(address: Address): string { return `${address.image_id}:${address.space}:${address.value}`; }
+  private sourceAddress = (address: Address): string => {
+    const key = this.addressKey(address), item = this.sourceAddresses.get(key);
+    if (item?.string !== undefined) return this.writer.quote(item.string).replace(/\\u000a/g, '\\n').replace(/\\u000d/g, '\\r').replace(/\\u0009/g, '\\t').replace(/\\u0000/g, '\\0');
+    if (item?.name) {
+      const name = this.sourceNames.get(key) ?? this.sourceIdentifier(key, item.name);
+      this.sourceNames.set(key, name);
+      return this.language === 'c-like' ? `((uintptr_t)&${name})` : `address_of(${name})`;
+    }
+    if (address.space === 'va') return `0x${address.value.toString(16)}`;
+    return this.address(address);
+  };
+  private sourceAddressValue(value: Value): string {
+    const expression = this.program.expressions.get(value.id);
+    const fact = this.input.types?.calls?.stack.values.get(value.id)?.value;
+    if (fact?.kind === 'address') return this.sourceAddress(fact.address);
+    const bits = expression?.kind === 'constant' ? expression.bits : fact?.kind === 'constant' ? fact.bits : null;
+    const address = bits === null ? undefined : this.sourceAddressesByValue.get(bits);
+    return address ? this.sourceAddress(address) : this.value(value);
+  }
+  private sourceCallee(node: Extract<Instruction, { kind: 'call' }>): string {
+    if (node.target.kind === 'indirect') return this.value(node.target.value);
+    const key = this.addressKey(node.target.address), previous = this.sourceNames.get(key);
+    if (previous) return previous;
+    const projection = this.program.calls.get(node.id);
+    let preferred = this.names.get(node.id) ?? `sub_${node.target.address.value.toString(16)}`;
+    if (projection?.signature?.source === 'library' && this.input.source?.abi.id === 'darwin-arm64') preferred = preferred.replace(/^_/, '');
+    const name = this.sourceIdentifier(node.id, preferred);
+    this.sourceNames.set(key, name);
+    return name;
   }
   private address(address: Address): string {
     return this.call('image_address', 'Image-qualified address-space value; no host pointer or assumed memory contents.', [this.writer.quote(address.image_id), this.writer.quote(address.space), `0x${address.value.toString(16)}`]);
@@ -206,7 +299,7 @@ export class Renderer {
     this.context.checkpoint(1);
     if (depth > 32) return this.identifier(id, 'type');
     const record = this.typeRecords.get(id);
-    if (!record || record.status !== 'established') return this.identifier(id, 'type');
+    if (!record || record.status !== 'established' && record.status !== 'asserted' && !(record.source === 'analysis' && record.status === 'candidate')) return this.identifier(id, 'type');
     const type = record.definition;
     switch (type.kind) {
       case 'void': return 'void';
@@ -218,12 +311,45 @@ export class Renderer {
       case 'structure': case 'unknown': return this.identifier(id, 'type');
     }
   }
+  private storage(node: Extract<Instruction, { kind: 'load' | 'store' }>): string {
+    const local = this.program.source?.locals.get(node.id);
+    if (local) return this.identifiers.get(local.id)?.identifier ?? this.sourceIdentifier(local.id, `local${this.sourceLocal++}`);
+    const address = this.sourceAddressValue(node.address), type = node.kind === 'load' ? node.result.type : node.value.type;
+    if (this.language === 'python-like') {
+      const name = `${node.access.volatile ? 'volatile_' : ''}${node.access.endian === 'big' ? 'be_' : ''}${type.kind === 'integer' ? `u${type.bits}` : machineType(type)}`;
+      this.writer.helper(`memory.${name}`, `Ordered ${node.access.endian}-endian ${bitWidth(type)}-bit memory view, alignment ${node.access.alignment}; aliasing and faults are preserved. It is not a scalar local.`);
+      return `memory.${name}[${address}]`;
+    }
+    const name = type.kind === 'integer' ? `${node.access.alignment * 8 < type.bits ? 'unaligned_' : ''}uint${type.bits}_t` : machineType(type);
+    if (node.access.endian === 'big') return this.call(`memory_be${bitWidth(type)}`, 'Big-endian memory lvalue; ordered access with original aliasing and fault behavior.', [address]);
+    this.writer.helper(name, `Exact ${bitWidth(type)}-bit little-endian storage view with ${node.access.alignment}-byte required alignment; no strict-aliasing or padding assumption.`);
+    return `(*(${node.access.volatile ? 'volatile ' : ''}${name} *)(uintptr_t)(${address}))`;
+  }
+  private sourceCall(node: Extract<Instruction, { kind: 'call' }>): string {
+    const projection = this.program.calls.get(node.id)!;
+    const args = projection.arguments.map((value, index) => {
+      this.context.checkpoint(1);
+      const parameter = projection.signature?.signature.parameters[index];
+      const pointer = parameter && this.typeRecords.get(parameter.type_id)?.definition.kind === 'pointer';
+      const text = pointer ? this.sourceAddressValue(value) : this.value(value);
+      if (pointer && this.language === 'c-like') return `((${this.sourceType(parameter.type_id)})(uintptr_t)(${text}))`;
+      const type = parameter && this.typeRecords.get(parameter.type_id)?.definition;
+      if (type?.kind === 'integer' && type.signed && this.language === 'python-like') return this.call(`int${type.bits}`, 'Interpret source integer argument with its established signed ABI type.', [text]);
+      return text;
+    });
+    if (projection.kind === 'physical') args.push(this.call('unknown_arguments', 'Unresolved remainder of a call interface; not zero arguments or a purity claim.', []));
+    const target = this.sourceCallee(node);
+    this.writer.helper(target, `${projection.kind === 'source' ? 'Established' : 'Inferred or incomplete'} source call. Original target: ${node.target.kind === 'direct' ? this.writer.quote(this.addressKey(node.target.address)) : 'indirect'}. Original memory effect: ${node.clobbers.memory}. Calls remain ordered; unused machine clobbers are not source results.`);
+    const operation = `${target}(${this.writer.join(args)})`;
+    const results = projection.results.filter(value => this.program.live.has(value.id));
+    return results.length ? `${results.length === 1 ? this.local(results[0]!) : `(${this.writer.join(results.map(value => this.local(value)))})`} = ${operation}` : operation;
+  }
   private instruction(node: Instruction, depth: number): void {
     this.emitNotes(node.id, depth);
     const start = this.writer.offset;
     let text: string;
     switch (node.kind) {
-      case 'assign': text = `${this.local(node.result)} = ${expressionText(this.program.expressions.get(node.result.id) ?? node.expression, node.result.type, this.writer, this.value)}`; break;
+      case 'assign': text = `${this.local(node.result)} = ${this.expression(this.program.expressions.get(node.result.id) ?? node.expression, node.result.type)}`; break;
       case 'read_register': {
         const operation = this.call('read_register', 'Ordered physical slice read; statement order carries effects.', [this.registerKey(node.register)]);
         text = this.program.live.has(node.result.id) ? `${this.local(node.result)} = ${operation}` : operation;
@@ -231,6 +357,11 @@ export class Renderer {
       }
       case 'write_register': text = this.call('write_register', 'Ordered architectural write; arguments: slice, value, write rule, root width. Honor discard/preserve/zero-extend/replace exactly.', [this.registerKey(node.register), this.value(node.value), this.writer.quote(node.register.write_rule), String(node.register.root_width_bits)]); break;
       case 'load': case 'store': {
+        if (this.program.source) {
+          const storage = this.storage(node);
+          text = node.kind === 'store' ? `${storage} = ${this.value(node.value)}` : this.program.live.has(node.result.id) ? `${this.local(node.result)} = ${storage}` : storage;
+          break;
+        }
         let address = this.value(node.address);
         const view = this.program.memory.get(node.id);
         if (view) {
@@ -244,6 +375,7 @@ export class Renderer {
         break;
       }
       case 'call': case 'unknown_effect': {
+        if (this.program.source && node.kind === 'call') { text = this.sourceCall(node); break; }
         const projection = this.program.calls.get(node.id);
         const results = node.kind === 'call' ? projection?.results ?? node.results : [];
         const resultIds = new Set(results.map(value => value.id));
@@ -284,13 +416,21 @@ export class Renderer {
       }
     }
     this.writer.statement(depth, text);
+    if (this.program.source && node.kind === 'call') {
+      const projection = this.program.calls.get(node.id)!;
+      const returned = new Set(projection.results.map(value => value.id));
+      for (const binding of projection.outputs) if (this.program.live.has(binding.value.id) && !returned.has(binding.value.id) && !this.program.expressions.has(binding.value.id)) {
+        const unknown = this.call('unknown_value', 'Live non-result call clobber; no source value or constant is invented.', [this.writer.quote(this.dataType(binding.value.type)), this.writer.quote(`call clobbers ${this.registerName(binding.register)}`)]);
+        this.writer.statement(depth, `${this.local(binding.value)} = ${unknown}`);
+      }
+    }
     this.map(node, start);
     if (node.kind === 'call') {
       const proof = this.sourceEvidence.get(node.id);
-      this.writer.map(node, start, proof ? [...proof.ids] : [], [...node.contract_evidence, ...(proof?.evidence ?? [])]);
+      this.mapped(node, start, proof ? [...proof.ids] : [], [...node.contract_evidence, ...(proof?.evidence ?? [])]);
     }
     const view = this.program.memory.get(node.id);
-    if (view) this.writer.map(node, start, [view.shape.id, view.field.id, view.shape.type_id], [...view.shape.evidence_ids, ...view.field.evidence_ids]);
+    if (view) this.mapped(node, start, [view.shape.id, view.field.id, view.shape.type_id], [...view.shape.evidence_ids, ...view.field.evidence_ids]);
   }
   private ordinaryTransfer(transfer: ParallelTransfer, nesting: readonly Nest[]): boolean {
     if (transfer.mode === 'next') return true;
@@ -302,19 +442,35 @@ export class Renderer {
     }
     return false;
   }
-  private findLabels(region: Region, nesting: readonly Nest[], depth: number): void {
+  private firstBlock(region: Region): string | null {
+    this.context.checkpoint(1);
+    if (region.kind === 'block') return region.id;
+    if (region.kind === 'loop') return region.header;
+    for (const child of region.regions) { const first = this.firstBlock(child); if (first) return first; }
+    return null;
+  }
+  private findLabels(region: Region, nesting: readonly Nest[], depth: number, follow: string | null = null): void {
     this.context.checkpoint(1);
     if (depth > 128) this.writer.fail('Structured input nesting exceeds 128');
-    if (region.kind === 'sequence') { for (const child of region.regions) this.findLabels(child, nesting, depth + 1); return; }
-    if (region.kind === 'loop') { this.findLabels(region.body, [...nesting, { kind: 'loop', header: region.header }], depth + 1); return; }
+    if (region.kind === 'sequence') {
+      let next = follow;
+      for (let index = region.regions.length - 1; index >= 0; index--) {
+        const child = region.regions[index]!;
+        this.findLabels(child, nesting, depth + 1, next);
+        next = this.firstBlock(child) ?? next;
+      }
+      return;
+    }
+    if (region.kind === 'loop') { this.findLabels(region.body, [...nesting, { kind: 'loop', header: region.header }], depth + 1, region.header); return; }
     const transfer = (item: ParallelTransfer): void => {
       if (!this.program.blocks.has(item.target)) this.invalid('Transfer target has no structured block');
-      if (!this.ordinaryTransfer(item, nesting)) { this.labels.add(item.target); this.gotos.add(item); }
+      if (!this.ordinaryTransfer(item, nesting) && (!this.program.source || item.target !== follow)) { this.labels.add(item.target); this.gotos.add(item); }
     };
     const arm = (item: ControlArm, nested: readonly Nest[]): void => {
-      if (!this.ordinaryTransfer(item.transfer, nested)) { this.labels.add(item.transfer.target); this.gotos.add(item.transfer); }
+      const destination = item.body ? this.firstBlock(item.body) : follow;
+      if (!this.ordinaryTransfer(item.transfer, nested) && (!this.program.source || item.transfer.target !== destination)) { this.labels.add(item.transfer.target); this.gotos.add(item.transfer); }
       if (!this.program.blocks.has(item.transfer.target)) this.invalid('Transfer target has no structured block');
-      if (item.body) this.findLabels(item.body, nested, depth + 1);
+      if (item.body) this.findLabels(item.body, nested, depth + 1, follow);
     };
     const control = region.control;
     if (control.kind === 'jump') transfer(control.transfer);
@@ -389,7 +545,7 @@ export class Renderer {
           }
           if (!candidate) this.invalid('Parallel transfer dependency cycle cannot be resolved');
           candidate.temporary = `transfer_${this.temporary++}`;
-          this.writer.statement(depth, this.writer.declaration(machineType(candidate.destination.type), candidate.temporary, ` = ${this.value(candidate.source)}`));
+          this.writer.statement(depth, this.writer.declaration(this.valueType(candidate.destination), candidate.temporary, ` = ${this.value(candidate.source)}`));
           release(candidate);
         } else {
           const move = ready[next++]!;
@@ -418,14 +574,24 @@ export class Renderer {
         ids.push(control.transfer.target, control.transfer.effect.destination.id);
         for (const copy of control.transfer.copies) ids.push(copy.source.id, copy.destination.id);
         break;
-      case 'if':
+      case 'if': {
         ids.push(control.condition.id);
-        this.writer.line(depth, this.language === 'c-like' ? `if (${this.value(control.condition)}) {` : `if ${this.value(control.condition)}:`);
+        const condition = this.value(control.condition);
+        let conditionValue = control.condition, expression: Expression | undefined;
+        for (let depth = 0; this.program.source && depth < 128 && this.program.inline.has(conditionValue.id); depth++) {
+          this.context.checkpoint(1);
+          expression = this.program.expressions.get(conditionValue.id);
+          if (expression?.kind !== 'cast' || expression.op !== 'bitcast') break;
+          conditionValue = expression.value;
+        }
+        const grouped = expression?.kind === 'compare';
+        this.writer.line(depth, this.language === 'c-like' ? `if ${grouped ? condition : `(${condition})`} {` : `if ${condition}:`);
         this.arm(control.when_true, depth + 1);
         this.writer.line(depth, this.language === 'c-like' ? '} else {' : 'else:');
         this.arm(control.when_false, depth + 1);
         if (this.language === 'c-like') this.writer.line(depth, '}');
         break;
+      }
       case 'switch':
         ids.push(control.value.id);
         this.writer.line(depth, this.language === 'c-like' ? `switch (${this.value(control.value)}) {` : `match ${this.value(control.value)}:`);
@@ -443,7 +609,7 @@ export class Renderer {
         const projection = this.program.returns.get(control.id);
         for (const value of control.values) ids.push(value.id);
         for (const binding of block.register_exit) ids.push(binding.value.id);
-        if (projection?.kind === 'source' && projection.outputs.length === 0) {
+        if (projection && projection.kind !== 'physical' && projection.outputs.length === 0) {
           const values = this.writer.list(projection.results, this.value);
           this.writer.statement(depth, values.length ? `return ${values.length === 1 ? values[0] : `(${this.writer.join(values)})`}` : 'return');
         } else {
@@ -464,6 +630,16 @@ export class Renderer {
     }
     this.map(control, start, ids);
   }
+  private sourceDefinitions(anchor: string, depth: number): void {
+    for (const definition of this.program.source?.definitions?.get(anchor) ?? []) {
+      this.context.checkpoint(1);
+      const value = definition.result, expression = definition.expression;
+      this.emitNotes(anchor, depth);
+      const start = this.writer.offset;
+      this.writer.statement(depth, `${this.local(value)} = ${this.expression(expression, value.type)}`);
+      this.mapped(this.dataOrigin(anchor), start, [value.id]);
+    }
+  }
   private region(region: Region, depth: number): void {
     this.context.checkpoint(1);
     if (region.kind === 'sequence') { for (const child of region.regions) this.region(child, depth); }
@@ -475,21 +651,24 @@ export class Renderer {
       this.emitNotes(region.id, depth);
       const start = this.writer.offset;
       if (this.labels.has(region.id)) this.writer.line(depth, this.language === 'c-like' ? `${this.identifier(region.id, 'label')}:;` : `label ${this.identifier(region.id, 'label')}:`);
+      this.sourceDefinitions(region.id, depth);
       for (const node of region.statements) {
         this.context.checkpoint(1);
         if (this.program.retained.has(node.id)) this.instruction(node, depth);
+        this.sourceDefinitions(node.id, depth);
       }
+      this.sourceDefinitions(region.control.id, depth);
       this.control(region.control, region, depth);
       this.map(region, start, [region.effect_parameter.id, ...region.parameters.map(value => value.id)]);
     }
   }
   render(): EmissionResult {
     const w = this.writer;
-    w.helper('reconstruction_model', 'High-level pseudocode, not original source or necessarily executable C/Python. bitsN_t are exact unsigned bit patterns; arithmetic inside wrap is mathematical and wraps only at explicit width boundaries. Float/vector helpers preserve raw payloads. Unknown/undefined values propagate through operators and conditions, never silently becoming false. Statement order preserves memory, faults and calls without effect tokens. Parallel transfers preserve simultaneous RHS values through dependency-ordered writes and cycle snapshots. Source interfaces appear only with a complete compatible proven ABI; physical boundaries remain explicit. label/goto are pseudocode only.');
-    w.comment(0, `${this.language === 'c-like' ? 'C-like' : 'Python-like'} reconstruction; explicit widths and ordered memory, not original source.`);
-    const functionName = this.identifier(this.input.function.id, 'fn');
+    w.helper('reconstruction_model', 'Pseudocode, not original source. Source reconstruction observes ABI arguments, results and ordered memory/call effects, not private frame traffic or caller-saved scratch state at return. Inferred interfaces are not established prototypes. Unsigned casts reduce modulo their width; signed casts interpret two-complement bits. Unknown/undefined values propagate. Float/vector helpers preserve payloads. Scalar locals require private nonoverlapping storage; shared storage retains memory views. Parallel transfers preserve simultaneous RHS values. label/goto are pseudocode only.');
+    w.comment(0, this.program.source ? `${this.language === 'c-like' ? 'C-like' : 'Python-like'} pseudocode; ${this.program.source.inferred ? 'inferred ABI interface' : 'recovered source interface'}.` : `${this.language === 'c-like' ? 'C-like' : 'Python-like'} reconstruction; explicit widths and ordered memory, not original source.`);
     const displayName = this.names.get(this.input.function.id);
-    if (displayName) w.comment(0, `function: ${w.quote(displayName)}`);
+    const functionName = this.program.source ? this.sourceIdentifier(this.input.function.id, `fn_${displayName ?? 'function'}`) : this.identifier(this.input.function.id, 'fn');
+    if (displayName && !this.program.source) w.comment(0, `function: ${w.quote(displayName)}`);
     this.emitNotes(this.input.function.id, 0);
     const signature = this.program.signature;
     const parameters: { value: Value; type: string; name: string }[] = [];
@@ -499,32 +678,56 @@ export class Renderer {
       const source = signature?.signature.parameters[i];
       const register = this.program.parameter_registers.get(value.id);
       if (!this.names.has(value.id) && source?.name) this.names.set(value.id, source.name);
-      if (!this.names.has(value.id) && register) this.names.set(value.id, this.registerName(register));
-      parameters.push({ value, type: source ? this.sourceType(source.type_id) : machineType(value.type), name: this.identifier(value.id, source ? 'arg' : register ? 'reg' : 'arg') });
+      if (!this.names.has(value.id) && register && !this.program.source) this.names.set(value.id, this.registerName(register));
+      const name = this.program.source ? this.sourceIdentifier(value.id, this.program.source.parameter_names.get(value.id) ?? source?.name ?? `arg${i}`) : this.identifier(value.id, source ? 'arg' : register ? 'reg' : 'arg');
+      parameters.push({ value, type: source ? this.sourceType(source.type_id) : this.dataType(value.type), name });
     }
-    const returnType = signature ? this.sourceType(signature.signature.return_type) : 'physical_result';
+    const returnType = signature ? this.sourceType(signature.signature.return_type) : this.program.source ? this.program.source.return_type ? this.dataType(this.program.source.return_type) : 'void' : 'physical_result';
     this.headerStart = w.offset;
-    if (parameters.length) {
+    if (this.program.source && parameters.length <= 4) {
+      const declarations = parameters.map(parameter => w.declaration(parameter.type, parameter.name));
+      const prefix = this.language === 'c-like' ? `${returnType} ${functionName}(` : `def ${functionName}(`;
+      w.line(0, `${prefix}${this.writer.join(declarations)}${this.language === 'c-like' ? ') {' : `) -> ${returnType}:`}`);
+      let offset = this.headerStart + prefix.length;
+      for (let index = 0; index < parameters.length; index++) {
+        const parameter = parameters[index]!, length = declarations[index]!.length;
+        this.mapped({ ...this.dataOrigin(parameter.value.id), id: parameter.value.id }, offset, [parameter.value.id], signature?.evidence_ids ?? [], offset + length);
+        offset += length + 2;
+      }
+    } else if (parameters.length) {
       w.line(0, this.language === 'c-like' ? `${returnType} ${functionName}(` : `def ${functionName}(`);
       for (let i = 0; i < parameters.length; i++) {
         const parameter = parameters[i]!;
         const start = w.offset;
         w.line(1, `${w.declaration(parameter.type, parameter.name)}${i + 1 < parameters.length ? ',' : ''}`);
         const source = signature?.signature.parameters[i];
-        w.map({ ...this.dataOrigin(parameter.value.id), id: parameter.value.id }, start, source ? [parameter.value.id, source.id, source.type_id] : [parameter.value.id], signature?.evidence_ids ?? []);
+        this.mapped({ ...this.dataOrigin(parameter.value.id), id: parameter.value.id }, start, source ? [parameter.value.id, source.id, source.type_id] : [parameter.value.id], signature?.evidence_ids ?? []);
       }
       w.line(0, this.language === 'c-like' ? ') {' : `) -> ${returnType}:`);
     } else w.line(0, this.language === 'c-like' ? `${returnType} ${functionName}() {` : `def ${functionName}() -> ${returnType}:`);
     this.headerEnd = w.offset;
     const proof = this.sourceEvidence.get(this.input.function.id);
-    w.map(this.input.function, this.headerStart, proof ? [...proof.ids] : [], [...(proof?.evidence ?? [])]);
+    this.mapped(this.input.function, this.headerStart, proof ? [...proof.ids] : [], [...(proof?.evidence ?? [])]);
     const formals = new Set(parameters.map(parameter => parameter.value.id));
+    const stack = this.program.source?.stack;
+    if (stack) {
+      w.statement(1, this.language === 'c-like' ? `_Alignas(${stack.alignment}) uint8_t stack_frame[${stack.size}]` : `stack_frame = ${this.call('stack_storage', 'Private byte-addressable stack storage with original initialization unknown; overlapping accesses share bytes.', [String(stack.size), String(stack.alignment)])}`);
+    }
+    const declaredLocals = new Set<string>();
+    for (const [node, local] of this.program.source?.locals ?? []) {
+      this.context.checkpoint(1);
+      if (declaredLocals.has(local.id) || !this.program.retained.has(node)) continue;
+      declaredLocals.add(local.id);
+      const name = this.sourceIdentifier(local.id, `local${this.sourceLocal++}`), start = w.offset;
+      w.statement(1, w.declaration(this.dataType(local.type), name));
+      this.mapped(this.dataOrigin(node), start, [node]);
+    }
     for (const value of this.program.values.values()) {
       this.context.checkpoint(1);
-      if (!this.program.live.has(value.id) || this.program.inline.has(value.id) || formals.has(value.id)) continue;
+      if (!this.program.live.has(value.id) || this.program.inline.has(value.id) || formals.has(value.id) || this.program.source?.stack_addresses.has(value.id)) continue;
       const start = w.offset;
-      w.statement(1, w.declaration(machineType(value.type), this.local(value)));
-      w.map(this.dataOrigin(value.id), start, [value.id]);
+      w.statement(1, w.declaration(this.valueType(value), this.local(value)));
+      this.mapped(this.dataOrigin(value.id), start, [value.id]);
       this.emitNotes(value.id, 1);
     }
     this.region(this.program.function.body, 1);
