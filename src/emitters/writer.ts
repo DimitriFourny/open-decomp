@@ -11,6 +11,8 @@ export class Writer {
   private bytes = 0;
   private metadataBytes = 0;
   offset = 0;
+  /** Non-comment lines, used to keep empty Python-like suites syntactically explicit. */
+  codeLines = 0;
   readonly limit: number;
   constructor(readonly context: OperationContext, readonly indent: number, readonly evidence: boolean, readonly language: Emission['language'] = 'c-like') {
     this.limit = Math.min(context.budget.output_bytes, 16_777_216);
@@ -81,12 +83,12 @@ export class Writer {
     return this.language === 'c-like' ? `${type} ${name}${initializer}` : `${name}: ${type}${initializer}`;
   }
   comment(depth: number, text: string): void {
-    this.line(depth, this.language === 'c-like' ? `/* ${text} */` : `# ${text}`);
+    this.line(depth, this.language === 'c-like' ? `/* ${text} */` : `# ${text}`, false);
   }
   sequence(parts: readonly string[]): string {
     return this.language === 'c-like' ? `{${this.join(parts)}}` : `[${this.join(parts)}]`;
   }
-  line(depth: number, text: string): void {
+  line(depth: number, text: string, code = true): void {
     this.context.checkpoint(1);
     if (depth > 256) this.fail('Pseudocode emission nesting exceeds 256');
     const padding = depth * this.indent;
@@ -96,6 +98,7 @@ export class Writer {
     this.parts.push(line);
     this.bytes += bytes;
     this.offset += line.length;
+    if (code) this.codeLines++;
   }
   helper(name: string, explanation: string): string {
     if (!this.helperNames.has(name)) {
@@ -106,14 +109,14 @@ export class Writer {
     }
     return name;
   }
-  map(origin: Origin, start: number, semanticIds: readonly string[] = [], extraEvidence: readonly string[] = []): void {
+  map(origin: Origin, start: number, semanticIds: readonly string[] = [], extraEvidence: readonly string[] = [], end = this.offset): void {
     this.context.checkpoint(1 + semanticIds.length + origin.provenance.instruction_ids.length + origin.provenance.ranges.length + origin.provenance.evidence_ids.length + extraEvidence.length);
-    if (this.offset === start) return;
+    if (end === start) return;
     if (this.mappings.length >= 100000 || semanticIds.length >= 10000 || origin.provenance.instruction_ids.length > 10000 || origin.provenance.ranges.length > 10000) this.fail('Pseudocode mapping cardinality limit exceeded');
     const evidence = this.evidence ? this.joinIds(origin.provenance.evidence_ids, extraEvidence) : [];
     const semantic = this.joinIds([origin.id], semanticIds);
     this.metadata(64 + this.join(semantic, '').length + this.join(origin.provenance.instruction_ids, '').length + this.join(evidence, '').length + origin.provenance.ranges.length * 160);
-    this.mappings.push({ statement_id: origin.id, start, end: this.offset, semantic_ids: semantic,
+    this.mappings.push({ statement_id: origin.id, start, end, semantic_ids: semantic,
       instruction_ids: [...origin.provenance.instruction_ids], ranges: [...origin.provenance.ranges], evidence_ids: evidence });
     if (evidence.length > 1000) this.fail('Pseudocode mapping evidence limit exceeded');
   }

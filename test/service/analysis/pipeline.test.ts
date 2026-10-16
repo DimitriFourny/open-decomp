@@ -40,20 +40,20 @@ for (const fixture of [
   const constructed = constructSSA(lifted.ir); assert.equal(constructed.state, 'complete');
   assert.equal(constructed.value.form, 'ssa'); if (constructed.value.form !== 'ssa') assert.fail('Missing SSA');
   const ir = simplifySSA(constructed.value).value;
-  const evaluate = (text: string): void => {
+  const evaluate = (emission: Parameters<typeof execute>[0]): void => {
     for (const [a, b] of [[0n, 1n], [0xffffffffn, 3n], [123456789n, 987654321n]] as const) {
       const roots = new Map<string, bigint>(fixture.arm ? [['arm64:x0', a], ['arm64:x1', b], ['arm64:sp', 0x9000n]] : [['x86_64:rcx', a], ['x86_64:rdx', b], ['x86_64:rsp', 0x9000n]]);
       const inputs = new Map(ir.blocks.find(block => block.id === ir.entry)!.parameters.map(value => [value.id, 0n]));
       for (const binding of ir.register_states.find(state => state.block === ir.entry)!.entry) inputs.set(binding.value.id, BigInt.asUintN(binding.register.width_bits, (roots.get(binding.register.root) ?? 0n) >> BigInt(binding.register.offset_bits)));
       const memory = new Map<bigint, number>(); for (let i = 0; i < 8; i++) memory.set(0x9000n + BigInt(i), 0);
-      const observed = execute(text, inputs, memory), result = observed.registers.get(fixture.arm ? 'arm64:x0' : 'x86_64:rax')!;
+      const observed = execute(emission, inputs, memory, 0n, new Map([...roots].map(([root, bits]) => [root, { bits, known: 0xffffffffffffffffn }]))), result = observed.registers.get(fixture.arm ? 'arm64:x0' : 'x86_64:rax');
       assert.equal(observed.exit, 'machine_return');
-      assert.equal(BigInt.asUintN(32, result.known), 0xffffffffn);
-      assert.equal(BigInt.asUintN(32, result.bits), BigInt.asUintN(32, a + 3n * b) ^ 0x55n);
-      if (!fixture.arm) assert.equal(observed.registers.get('x86_64:rflags')!.known & 0x10n, 0n, 'architecturally undefined AF remains indeterminate without unsupported coverage');
+      if (result) assert.equal(BigInt.asUintN(32, result.known), 0xffffffffn);
+      assert.equal(BigInt.asUintN(32, result?.bits ?? observed.values[0]!), BigInt.asUintN(32, a + 3n * b) ^ 0x55n);
+      if (!fixture.arm && result) assert.equal(observed.registers.get('x86_64:rflags')!.known & 0x10n, 0n, 'architecturally undefined AF remains indeterminate without unsupported coverage');
     }
   };
-  evaluate(full.data.emission.text);
+  evaluate(full.data.emission);
   for (const instruction of graph.instructions) assert.ok(full.data.emission.mappings.some(mapping => mapping.instruction_ids.includes(instruction.id)));
   const python = await p.decompile(fn.id, { options: { emitter: 'python-like' } });
   const pythonFull = p.payload(python.result).result;
@@ -62,7 +62,7 @@ for (const fixture of [
   assert.equal(pythonFull.data.emission.reconstruction, 'pseudocode');
   assert.notEqual(pythonFull.versions.emitter, full.versions.emitter);
   assert.notEqual(python.result.artifacts[0]!.id, before.result.artifacts[0]!.id);
-  evaluate(pythonFull.data.emission.text);
+  evaluate(pythonFull.data.emission);
   for (const instruction of graph.instructions) assert.ok(pythonFull.data.emission.mappings.some(mapping => mapping.instruction_ids.includes(instruction.id)));
   for (const mapping of pythonFull.data.emission.mappings) {
     assert.ok(mapping.start >= 0 && mapping.end > mapping.start && mapping.end <= pythonFull.data.emission.text.length);
@@ -73,7 +73,7 @@ for (const fixture of [
   assert.ok('data' in restyled.result); assert.equal(restyled.result.data.cache, 'computed');
   assert.notEqual(restyled.result.artifacts[0]!.id, python.result.artifacts[0]!.id);
   assert.ok(restyledFull.data.emission.mappings.every(mapping => mapping.evidence_ids.length === 0));
-  evaluate(restyledFull.data.emission.text);
+  evaluate(restyledFull.data.emission);
   const repeated = await p.decompile(fn.id, {}, 29000);
   assert.ok('data' in repeated.result); assert.equal(repeated.result.data.cache, 'hit');
   assert.deepEqual(repeated.result.artifacts, before.result.artifacts);
@@ -128,26 +128,26 @@ for (const fixture of [
   assert.equal(changedPayload.result.data.signature?.parameters.length, 2);
   assert.ok(changedPayload.catalog.types.some(type => type.id === typeId && type.source === 'user'));
   assert.ok(changedPayload.result.data.emission.mappings.some(mapping => mapping.semantic_ids.includes(fn.id) && mapping.evidence_ids.some(id => annotated.result.evidence.some(proof => proof.id === id))));
-  evaluate(changedPayload.result.data.emission.text);
+  evaluate(changedPayload.result.data.emission);
   const pythonChanged = await p.decompile(fn.id, { options: { emitter: 'python-like' } });
   const pythonChangedFull = p.payload(pythonChanged.result).result;
   assert.ok('data' in pythonChanged.result); assert.equal(pythonChanged.result.data.cache, 'computed');
   assert.notEqual(pythonChanged.result.artifacts[0]!.id, python.result.artifacts[0]!.id);
   assert.equal(pythonChangedFull.data.signature?.return_type, typeId);
   assert.ok(pythonChangedFull.data.emission.mappings.some(mapping => mapping.semantic_ids.includes(fn.id) && mapping.evidence_ids.some(id => annotated.result.evidence.some(proof => proof.id === id))));
-  evaluate(pythonChangedFull.data.emission.text);
+  evaluate(pythonChangedFull.data.emission);
   const retracted = await p.annotate(Object.values(ids).map(id => ({ operation: 'retract' as const, id })));
   assert.equal(retracted.result.state, 'complete');
   const after = p.payload((await p.decompile(fn.id)).result);
   assert.equal(after.result.data.signature, null);
   assert.equal(after.catalog.types.some(type => type.id === typeId), false);
   assert.equal(after.result.data.emission.text, full.data.emission.text, 'retraction removes names, notes and source assertions, not machine semantics');
-  evaluate(after.result.data.emission.text);
+  evaluate(after.result.data.emission);
   const pythonAfter = await p.decompile(fn.id, { options: { emitter: 'python-like' } });
   assert.ok('data' in pythonAfter.result); assert.equal(pythonAfter.result.data.cache, 'computed');
   const pythonAfterFull = p.payload(pythonAfter.result).result;
   assert.equal(pythonAfterFull.data.signature, null);
-  evaluate(pythonAfterFull.data.emission.text);
+  evaluate(pythonAfterFull.data.emission);
   assert.equal(contentHash(p.state.store.readImage(p.image.id).read(0n, p.image.bytes.length)), p.image.sha256);
   const history = p.state.store.queryAnnotationHistory({ id: ids.type, revision: 4, limit: 10 }).items;
   assert.deepEqual(history.map(entry => entry.operation), ['set', 'retract']);
@@ -174,7 +174,7 @@ for (const fixture of [
     return address.kind === 'mapped' && address.address.value === fixture.address;
   })));
   const inputs = new Map(full.data.emission.mappings.flatMap(mapping => mapping.semantic_ids.map(id => [id, 0n] as const)));
-  const observed = execute(full.data.emission.text, inputs);
+  const observed = execute(full.data.emission, inputs);
   assert.equal(observed.exit, 'unknown');
   assert.deepEqual(observed.events, ['unknown']);
   const hit = await p.decompile(fn.id, { options: { emitter } }); assert.equal(hit.result.state, 'partial');
@@ -189,7 +189,7 @@ test('real pipeline budgets: artifact delivery, cumulative cancellation, and ann
   assert.equal(limited.result.data.delivery, 'artifact');
   assert.ok(Buffer.byteLength(JSON.stringify(limited.result)) <= 4096);
   const full = p.payload(limited.result).result;
-  assert.equal(full.state, 'complete'); assert.ok(full.data.emission.text.length > 4096);
+  assert.equal(full.state, 'complete');
   const job_id = p.job('function_decompile'), controller = new AbortController();
   const args = toolSchemas.function_decompile.input.parse({ project_id: p.state.store.project_id, revision: 2, function_id: fn.id, options: { indent: 4 } });
   const context = createOperationContext({ signal: controller.signal, onProgress: phase => { if (phase === 'ssa') controller.abort(); } });

@@ -15,10 +15,11 @@ export function emit(input: SSAForm, extra: Omit<EmissionInput, 'function'> = {}
 type Data = bigint | string | boolean | null | Data[] | { readonly [key: string]: Data };
 type Expr = { kind: 'literal'; value: Data } | { kind: 'ref'; name: string }
   | { kind: 'call'; name: string; args: Expr[] } | { kind: 'list'; values: Expr[] }
-  | { kind: 'binary'; op: string; left: Expr; right: Expr } | { kind: 'select'; condition: Expr; yes: Expr; no: Expr };
+  | { kind: 'binary'; op: string; left: Expr; right: Expr } | { kind: 'unary'; op: string; value: Expr }
+  | { kind: 'select'; condition: Expr; yes: Expr; no: Expr };
 type Op = { kind: 'assign'; names: string[]; expression: Expr | null; tuple: boolean }
   | { kind: 'jump'; target: string | number } | { kind: 'test'; condition: Expr; target: number }
-  | { kind: 'return'; expression: Expr };
+  | { kind: 'return'; expression: Expr } | { kind: 'effect'; expression: Expr };
 
 /** Small test-only parser for the emitted machine-expression/control grammar.
  * It consumes the OUTPUT, not IR or mappings, and never evals target text. Helper
@@ -31,12 +32,15 @@ class Parser {
   readonly labels = new Map<string, number>();
   private position = 0;
   private switchId = 0;
+  private readonly loops: { start: number; breaks: number[] }[] = [];
   constructor(text: string) {
     if (/^def /m.test(text)) {
       const lines = text.split('\n'), header = lines.findIndex(line => line.startsWith('def '));
+      const endHeader = lines.findIndex((line, index) => index >= header && /\):$|\) -> .*:$/.test(line));
+      assert.ok(endHeader >= header);
       const indents = [0];
-      const token = /[ \t]+|#[^\n]*|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|[()[\],:=<>]/gy;
-      for (const line of lines.slice(header + 1)) {
+      const token = /[ \t]+|#[^\n]*|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|<<|>>|[()[\],:=<>+*/%&|^~!-]/gy;
+      for (const line of lines.slice(endHeader + 1)) {
         if (/^\s*(?:#|$)/.test(line)) continue;
         const indent = line.length - line.trimStart().length;
         assert.ok(indent > 0, 'Unexpected top-level Python pseudocode');
@@ -58,7 +62,7 @@ class Parser {
       assert.equal(this.position, this.tokens.length);
       return;
     }
-    const token = /\s+|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|[{}()[\],;:=?<>@]/gy;
+    const token = /\s+|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|<<|>>|[{}()[\],;:=?<>@+*/%&|^~!-]/gy;
     let offset = 0;
     while (offset < text.length) {
       token.lastIndex = offset;
@@ -67,10 +71,9 @@ class Parser {
       offset = token.lastIndex;
       if (!/^\s|^\/\*/.test(match[0])) this.tokens.push(match[0]);
     }
-    const start = this.tokens.indexOf('machine_exit');
+    const start = this.tokens.indexOf('{');
     assert.ok(start >= 0);
-    this.position = start + 1;
-    while (this.peek() !== '{') this.position++;
+    this.position = start;
     this.block([]);
   }
   private peek(): string { return this.tokens[this.position] ?? ''; }
@@ -93,22 +96,32 @@ class Parser {
   private pythonStatement(): void {
     const token = this.take();
     if (token === 'label') { this.labels.set(this.take(), this.ops.length); this.take(':'); this.take('\n'); return; }
+    if (token === 'pass') { this.take('\n'); return; }
+    if (token === 'break' || token === 'continue') {
+      const loop = this.loops.at(-1); assert.ok(loop);
+      if (token === 'break') loop.breaks.push(this.ops.length);
+      this.ops.push({ kind: 'jump', target: token === 'continue' ? loop.start : -1 });
+      this.take('\n'); return;
+    }
     if (token === 'goto') { this.ops.push({ kind: 'jump', target: this.take() }); this.take('\n'); return; }
-    if (token === 'return') { this.ops.push({ kind: 'return', expression: this.expression() }); this.take('\n'); return; }
+    if (token === 'return') { this.ops.push({ kind: 'return', expression: this.peek() === '\n' ? { kind: 'list', values: [] } : this.expression() }); this.take('\n'); return; }
     if (token === 'if') {
       const condition = this.expression(); this.take(':'); this.take('\n');
       const test: Op & { kind: 'test' } = { kind: 'test', condition, target: -1 }; this.ops.push(test);
       this.pythonBlock();
       const end: Op & { kind: 'jump' } = { kind: 'jump', target: -1 }; this.ops.push(end);
       test.target = this.ops.length;
-      this.take('else'); this.take(':'); this.take('\n'); this.pythonBlock();
+      if (this.peek() === 'else') { this.take('else'); this.take(':'); this.take('\n'); this.pythonBlock(); }
       end.target = this.ops.length; return;
     }
     if (token === 'while') {
       const start = this.ops.length, condition = this.expression(); this.take(':'); this.take('\n');
       const test: Op & { kind: 'test' } = { kind: 'test', condition, target: -1 }; this.ops.push(test);
-      this.pythonBlock(); this.ops.push({ kind: 'jump', target: start });
-      test.target = this.ops.length; return;
+      const loop = { start, breaks: [] as number[] }; this.loops.push(loop);
+      this.pythonBlock(); this.loops.pop(); this.ops.push({ kind: 'jump', target: start });
+      test.target = this.ops.length;
+      for (const index of loop.breaks) { const op = this.ops[index]!; if (op.kind === 'jump') op.target = this.ops.length; }
+      return;
     }
     if (token === 'match') {
       const expression = this.expression(), name = `$match${this.switchId++}`;
@@ -135,6 +148,9 @@ class Parser {
       for (const end of ends) end.target = this.ops.length;
       return;
     }
+    if (this.peek() === '(') {
+      this.position--; this.ops.push({ kind: 'effect', expression: this.expression() }); this.take('\n'); return;
+    }
     const tuple = token === '(', names = tuple ? [] : [token];
     if (tuple) {
       while (this.peek() !== ')') { names.push(this.take()); if (this.peek() !== ')') this.take(','); }
@@ -149,21 +165,23 @@ class Parser {
     if (token === ';') return;
     if (this.peek() === ':') { this.take(':'); this.labels.set(token, this.ops.length); this.take(';'); return; }
     if (token === 'goto') { this.ops.push({ kind: 'jump', target: this.take() }); this.take(';'); return; }
-    if (token === 'return') { this.ops.push({ kind: 'return', expression: this.expression() }); this.take(';'); return; }
+    if (token === 'return') { this.ops.push({ kind: 'return', expression: this.peek() === ';' ? { kind: 'list', values: [] } : this.expression() }); this.take(';'); return; }
     if (token === 'break') { breaks.push(this.ops.length); this.ops.push({ kind: 'jump', target: -1 }); this.take(';'); return; }
+    if (token === 'continue') { const loop = this.loops.at(-1); assert.ok(loop); this.ops.push({ kind: 'jump', target: loop.start }); this.take(';'); return; }
     if (token === 'if') {
       this.take('('); const condition = this.expression(); this.take(')');
       const test: Op & { kind: 'test' } = { kind: 'test', condition, target: -1 }; this.ops.push(test);
       this.block(breaks);
       const end: Op & { kind: 'jump' } = { kind: 'jump', target: -1 }; this.ops.push(end);
       test.target = this.ops.length;
-      this.take('else'); this.block(breaks); end.target = this.ops.length; return;
+      if (this.peek() === 'else') { this.take('else'); this.block(breaks); }
+      end.target = this.ops.length; return;
     }
     if (token === 'while') {
       const start = this.ops.length;
       this.take('('); const condition = this.expression(); this.take(')');
       const test: Op & { kind: 'test' } = { kind: 'test', condition, target: -1 }; this.ops.push(test);
-      const exits: number[] = []; this.block(exits); this.ops.push({ kind: 'jump', target: start });
+      const exits: number[] = []; this.loops.push({ start, breaks: exits }); this.block(exits); this.loops.pop(); this.ops.push({ kind: 'jump', target: start });
       test.target = this.ops.length;
       for (const index of exits) { const op = this.ops[index]!; assert.equal(op.kind, 'jump'); if (op.kind === 'jump') op.target = this.ops.length; }
       return;
@@ -192,6 +210,7 @@ class Parser {
       for (const index of exits) { const op = this.ops[index]!; if (op.kind === 'jump') op.target = this.ops.length; }
       return;
     }
+    if (this.peek() === '(') { this.position--; this.ops.push({ kind: 'effect', expression: this.expression() }); this.take(';'); return; }
     let names: string[];
     if (token === '(') {
       names = [this.take()]; while (this.peek() === ',') { this.take(','); names.push(this.take()); } this.take(')');
@@ -200,9 +219,14 @@ class Parser {
     const expression = this.peek() === '=' ? (this.take('='), this.expression()) : null;
     this.take(';'); this.ops.push({ kind: 'assign', names, expression, tuple: token === '(' });
   }
-  private expression(): Expr {
+  private expression(minimum = 0): Expr {
     let left = this.atom();
-    if (['==', '!=', '<', '<=', '>', '>='].includes(this.peek())) left = { kind: 'binary', op: this.take(), left, right: this.atom() };
+    const precedence: Record<string, number> = { '|': 1, '^': 2, '&': 3, '==': 4, '!=': 4, '<': 5, '<=': 5, '>': 5, '>=': 5, '<<': 6, '>>': 6, '+': 7, '-': 7, '*': 8, '/': 8, '%': 8 };
+    while ((precedence[this.peek()] ?? -1) >= minimum) {
+      const op = this.take(), right = this.expression(precedence[op]! + 1);
+      left = { kind: 'binary', op, left, right };
+    }
+    if (minimum > 0) return left;
     if (this.peek() === '?') { this.take('?'); const yes = this.expression(); this.take(':'); left = { kind: 'select', condition: left, yes, no: this.expression() }; }
     if (this.peek() === 'if') {
       this.take('if'); const condition = this.expression(); this.take('else');
@@ -212,7 +236,14 @@ class Parser {
   }
   private atom(): Expr {
     const token = this.take();
-    if (token === '(') { const expression = this.expression(); this.take(')'); return expression; }
+    if (['-', '~', '!'].includes(token)) return { kind: 'unary', op: token, value: this.atom() };
+    if (token === '(') {
+      const expression = this.expression();
+      if (this.peek() !== ',') { this.take(')'); return expression; }
+      const values = [expression];
+      while (this.peek() === ',') { this.take(','); if (this.peek() !== ')') values.push(this.expression()); }
+      this.take(')'); return { kind: 'list', values };
+    }
     if (token === '{' || token === '[') {
       const close = token === '{' ? '}' : ']', values: Expr[] = [];
       if (this.peek() !== close) { values.push(this.expression()); while (this.peek() === ',') { this.take(','); values.push(this.expression()); } }
@@ -238,10 +269,21 @@ export interface Observation {
   readonly events: readonly string[];
   readonly calls: readonly { readonly target: bigint; readonly arguments: readonly bigint[] }[];
 }
-export function execute(text: string, inputs: ReadonlyMap<string, bigint> = new Map(), memory: Map<bigint, number> = new Map(), callDelta = 0n): Observation {
-  const parser = new Parser(text), environment = new Map<string, Data>([['incoming', null]]), events: string[] = [];
+export function execute(emission: { readonly text: string; readonly mappings: readonly { readonly start: number; readonly end: number; readonly statement_id: string; readonly semantic_ids: readonly string[] }[] }, inputs: ReadonlyMap<string, bigint> = new Map(), memory: Map<bigint, number> = new Map(), callDelta = 0n, entryRegisters: Observation['registers'] = new Map()): Observation {
+  const text = emission.text, parser = new Parser(text), environment = new Map<string, Data>(), events: string[] = [];
+  // Mappings supply only formal input identity; every operation below executes
+  // parsed output independently of the analyzed IR and its reconstruction plan.
+  const python = /^def /m.test(text), headerEnd = python ? text.search(/^\).*:$/m) : text.indexOf('{');
+  for (const mapping of emission.mappings) {
+    if (mapping.end > headerEnd) continue;
+    const line = text.slice(mapping.start, mapping.end).trim();
+    const match = python ? /^([A-Za-z_]\w*)\s*:\s*[^,\n]+,?$/.exec(line) : /^\S+\s+([A-Za-z_]\w*),?$/.exec(line);
+    if (!match) continue;
+    const id = inputs.has(mapping.statement_id) ? mapping.statement_id : mapping.semantic_ids.find(id => inputs.has(id));
+    assert.ok(id, `Missing explicit input for ${match[1]}`);
+    environment.set(match[1]!, inputs.get(id)!);
+  }
   const calls: { target: bigint; arguments: bigint[] }[] = [];
-  let nextEffect = 0n;
   const number = (value: Data | undefined): bigint => { assert.equal(typeof value, 'bigint'); return value as bigint; };
   const array = (value: Data | undefined): Data[] => { assert.ok(Array.isArray(value)); return value; };
   const string = (value: Data | undefined): string => { assert.equal(typeof value, 'string'); return value as string; };
@@ -250,14 +292,19 @@ export function execute(text: string, inputs: ReadonlyMap<string, bigint> = new 
     return match[1] ? Number(match[1]) : Number(match[2]) * Number(match[3]);
   };
   const object = (value: Data | undefined): { readonly [key: string]: Data } => { assert.ok(value !== null && typeof value === 'object' && !Array.isArray(value)); return value; };
+  const descriptor = (value: Data | undefined): { root: string; offset: bigint; bits: bigint } => {
+    const match = /^(.*):(\d+):(\d+)$/.exec(string(value)); assert.ok(match);
+    return { root: match[1]!, offset: BigInt(match[2]!), bits: BigInt(match[3]!) };
+  };
   const physical = (state: Data | undefined): Observation['registers'] => {
-    const roots = new Map<string, { bits: bigint; known: bigint }>();
-    for (const item of array(state)) {
-      const binding = array(item), descriptor = array(binding[0]), root = string(descriptor[1]), offset = number(descriptor[2]), bits = number(descriptor[3]);
+    const roots = new Map(entryRegisters);
+    const bindings = array(state);
+    for (let i = 0; i < bindings.length; i += 2) {
+      const { root, offset, bits } = descriptor(bindings[i]), value = bindings[i + 1];
       const mask = ((1n << bits) - 1n) << offset, previous = roots.get(root) ?? { bits: 0n, known: 0n };
-      roots.set(root, binding[1] === null
+      roots.set(root, value === null
         ? { bits: previous.bits & ~mask, known: previous.known & ~mask }
-        : { bits: (previous.bits & ~mask) | (number(binding[1]) << offset & mask), known: previous.known | mask });
+        : { bits: (previous.bits & ~mask) | (number(value) << offset & mask), known: previous.known | mask });
     }
     return roots;
   };
@@ -272,12 +319,13 @@ export function execute(text: string, inputs: ReadonlyMap<string, bigint> = new 
     scratch.setFloat64(0, value, true); return scratch.getBigUint64(0, true);
   };
   const helper = (name: string, args: Data[]): Data => {
-    if (/^(?:bv_|fp_|cast_|flag_|vector_|extract_bits$|insert_bits$|concat_low_first$|signed_value$)/.test(name) && args.includes(null)) return null;
+    if (/^(?:bv_|fp_|cast_|flag_|vector_|extract_bits$|insert_bits$|concat_low_first$|signed_value$|wrap$)/.test(name) && args.includes(null)) return null;
+    if (name === 'wrap') return BigInt.asUintN(Number(number(args[0])), number(args[1]));
     if (name === 'bit_pattern') return BigInt.asUintN(Number(number(args[1])), number(args[2]));
-    if (name === 'entry_value') { const id = string(args[1]); assert.ok(inputs.has(id), `Missing explicit input ${id}`); return inputs.get(id)!; }
-    if (name === 'entry_effect') return 0n;
     if (name === 'image_address') return number(args[2]);
-    if (name === 'register_slice' || name === 'binding' || name === 'register_state' || name === 'explicit_values' || name === 'clobbers') return args;
+    if (name === 'stack_slot' || name === 'field_view') return args[0]!;
+    if (name === 'source_target') return args[1]!;
+    if (name === 'physical_inputs' || name === 'explicit_values' || name === 'boundary') return args;
     if (name === 'signed_value') return BigInt.asIntN(Number(number(args[0])), number(args[1]));
     if (name.startsWith('bv_')) {
       const n = Number(number(args[0])), a = number(args[1]), b = args[2] === undefined ? 0n : number(args[2]);
@@ -351,33 +399,32 @@ export function execute(text: string, inputs: ReadonlyMap<string, bigint> = new 
     if (name === 'vector_lanes') { const match = /^vector_[if](\d+)x\d+_t$/.exec(string(args[0])); assert.ok(match); let result = 0n; for (let i = 1; i < args.length; i++) result |= number(args[i]) << BigInt((i - 1) * Number(match[1])); return result; }
     if (name === 'vector_lane') return BigInt.asUintN(width(args[0]), number(args[1]) >> (number(args[2]) * BigInt(width(args[0]))));
     if (name === 'vector_insert') { const match = /^vector_[if](\d+)x\d+_t$/.exec(string(args[0])); assert.ok(match); const n = BigInt(match[1]!), offset = n * number(args[2]), mask = ((1n << n) - 1n) << offset; return number(args[1]) & ~mask | number(args[3]) << offset; }
-    if (name === 'memory_store' || name === 'memory_load') {
-      const store = name === 'memory_store', address = number(args[1]), count = width(args[2]) / 8, endian = string(args[store ? 4 : 3]);
-      assert.equal(number(args[0]), nextEffect, 'Effect order changed');
+    if (name === 'write_memory' || name === 'read_memory') {
+      const store = name === 'write_memory', address = number(args[0]), count = width(args[store ? 2 : 1]) / 8, endian = string(args[store ? 3 : 2]);
       events.push(store ? 'store' : 'load');
-      if (address % number(args[store ? 5 : 4]) !== 0n) throw new Boundary('fault', []);
+      if (address % number(args[store ? 4 : 3]) !== 0n) throw new Boundary('fault', []);
       for (let i = 0; i < count; i++) if (!memory.has(address + BigInt(i))) throw new Boundary('fault', []);
       let value = 0n;
       for (let i = 0; i < count; i++) {
         const shift = BigInt((endian === 'little' ? i : count - 1 - i) * 8), cell = address + BigInt(i);
-        if (store) memory.set(cell, Number(number(args[3]) >> shift & 255n)); else value |= BigInt(memory.get(cell)!) << shift;
+        if (store) memory.set(cell, Number(number(args[1]) >> shift & 255n)); else value |= BigInt(memory.get(cell)!) << shift;
       }
-      nextEffect++; return store ? nextEffect : [nextEffect, value];
+      return store ? null : value;
     }
-    if (name === 'machine_call') {
-      assert.equal(number(args[0]), nextEffect); events.push('call'); nextEffect++;
-      calls.push({ target: number(args[1]), arguments: array(args[2]).map(number) });
-      const before = physical(args[3]), results = array(args[5]).map(() => callDelta), outputs = array(args[6]).map(item => {
-        const descriptor = array(item), root = string(descriptor[1]), offset = number(descriptor[2]), n = Number(number(descriptor[3]));
-        const value = before.get(root), required = (1n << (offset + BigInt(n))) - 1n;
+    if (name === 'physical_call' || name === 'source_call') {
+      events.push('call');
+      calls.push({ target: number(args[0]), arguments: array(args[1]).map(number) });
+      const before = physical(args[2]), results = array(args[4]).map(() => callDelta), outputs = array(args[5]).map(item => {
+        const { root, offset, bits } = descriptor(item), n = Number(bits);
+        const value = before.get(root), required = (1n << (offset + bits)) - 1n;
         if (value === undefined || (value.known & required) !== required) return null;
         return BigInt.asUintN(n, (value.bits + callDelta) >> offset);
       });
-      return [nextEffect, ...results, ...outputs];
+      return [...results, ...outputs];
     }
-    if (name === 'unknown_effect') { events.push('unknown'); throw new Boundary('unknown', []); }
+    if (name === 'opaque_effect') { events.push('unknown'); throw new Boundary('unknown', []); }
     if (name === 'unknown_value' || name === 'undefined_value') return null;
-    if (name === 'machine_return' || name.endsWith('_exit')) return { exit: name, values: name === 'machine_return' ? array(args[1]) : [], state: args.at(-1)! };
+    if (name === 'physical_return' || name === 'source_return' || name.endsWith('_exit')) return { exit: name.endsWith('_return') ? 'machine_return' : name, values: name.endsWith('_return') ? array(args[0]) : [], state: args.at(-1)! };
     throw new Error(`Oracle does not support helper ${name}`);
   };
   const evaluate = (expression: Expr): Data => {
@@ -387,11 +434,24 @@ export function execute(text: string, inputs: ReadonlyMap<string, bigint> = new 
       case 'list': return expression.values.map(evaluate);
       case 'call': return helper(expression.name, expression.args.map(evaluate));
       case 'select': { const condition = evaluate(expression.condition); if (condition === null) return null; return evaluate(condition === 0n || condition === false ? expression.no : expression.yes); }
+      case 'unary': {
+        const value = evaluate(expression.value); if (value === null) return null;
+        const operand = number(value);
+        return expression.op === '-' ? -operand : expression.op === '~' ? ~operand : BigInt(operand === 0n);
+      }
       case 'binary': {
         const a = evaluate(expression.left), b = evaluate(expression.right); if (a === null || b === null) return null;
         const left = number(a), right = number(b);
-        const result = expression.op === '==' ? left === right : expression.op === '!=' ? left !== right : expression.op === '<' ? left < right : expression.op === '<=' ? left <= right : expression.op === '>' ? left > right : left >= right;
-        return result ? 1n : 0n;
+        switch (expression.op) {
+          case '+': return left + right; case '-': return left - right; case '*': return left * right;
+          case '&': return left & right; case '|': return left | right; case '^': return left ^ right;
+          case '<<': return left << right; case '>>': return left >> right;
+          case '/': return left / right; case '%': return left % right;
+          case '==': return BigInt(left === right); case '!=': return BigInt(left !== right);
+          case '<': return BigInt(left < right); case '<=': return BigInt(left <= right);
+          case '>': return BigInt(left > right); case '>=': return BigInt(left >= right);
+          default: throw new Error(`Unknown emitted operator ${expression.op}`);
+        }
       }
     }
   };
@@ -401,9 +461,16 @@ export function execute(text: string, inputs: ReadonlyMap<string, bigint> = new 
       const op = parser.ops[pc++]; assert.ok(op, 'Emitted control fell out of function');
       switch (op.kind) {
         case 'assign': if (op.expression) { const value = evaluate(op.expression), values = op.tuple ? array(value) : [value]; assert.equal(values.length, op.names.length); op.names.forEach((name, index) => environment.set(name, values[index]!)); } break;
+        case 'effect': evaluate(op.expression); break;
         case 'jump': { const target = typeof op.target === 'number' ? op.target : parser.labels.get(op.target); assert.ok(target !== undefined && target >= 0, 'Missing emitted label'); pc = target; break; }
         case 'test': { const value = evaluate(op.condition); if (value === null) throw new Boundary('unknown', []); if (value === false || value === 0n) pc = op.target; break; }
-        case 'return': { const result = object(evaluate(op.expression)); return { exit: string(result['exit']), values: array(result['values']).map(number), registers: physical(result['state']), memory, events, calls }; }
+        case 'return': {
+          const value = evaluate(op.expression);
+          if (value === null) throw new Boundary('unknown', []);
+          if (typeof value === 'bigint' || Array.isArray(value)) return { exit: 'machine_return', values: (Array.isArray(value) ? value : [value]).map(number), registers: new Map(), memory, events, calls };
+          const result = object(value);
+          return { exit: string(result['exit']), values: array(result['values']).map(number), registers: physical(result['state']), memory, events, calls };
+        }
       }
     }
     throw new Error('Emitted program exceeded oracle step bound');

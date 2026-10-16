@@ -145,6 +145,22 @@ export async function executeDecompilation(args: ToolArgs<'function_decompile'>,
       else if (entity_id === ir.id && (loaded.function.display_name ?? loaded.function.original_name)) names.push({ entity_id, name: (loaded.function.display_name ?? loaded.function.original_name)! });
       if (assertedNames.size !== 1 || annotations.some(annotation => annotation.status === 'hypothesis')) nameDiagnostics.push({ code: 'conflicting_evidence', severity: 'info', message: 'Name hypotheses or ambiguous assertions remain unresolved; only a unique asserted name overrides native presentation', entity_id, evidence_ids: [...new Set(annotations.flatMap(annotation => annotation.evidence_ids))] });
     }
+    // Names decorate grounded callee identities; they never establish a prototype.
+    const nativeNames = new Map<string, string>();
+    for (const subject of [...functions, ...image.imports, ...image.exports]) {
+      context.checkpoint(1);
+      const name = subject.display_name ?? subject.original_name;
+      if (name) nativeNames.set(subject.id, name);
+    }
+    const resolvedNames = new Map(names.map(item => [item.entity_id, item.name]));
+    for (const [subject, uses] of calls.calls_by_subject) {
+      context.checkpoint(1 + uses.length);
+      // Ambiguous/hypothetical annotations must not silently select a native alias.
+      const name = resolvedNames.get(subject) ?? (named.has(subject) ? undefined : nativeNames.get(subject));
+      if (!name) continue;
+      if (!resolvedNames.has(subject)) names.push({ entity_id: subject, name });
+      for (const use of uses) if (!named.has(use.call_id)) names.push({ entity_id: use.call_id, name });
+    }
     context.progress('emit', 6, 7);
     const emit = args.options.emitter === 'python-like' ? emitPythonLike : emitC;
     const emitted = emit({ function: structured.value, types, names, annotations: active.annotations }, args.options, fullContext);

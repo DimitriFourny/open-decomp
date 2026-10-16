@@ -2,15 +2,15 @@ import type { Emitter, OperationContext } from '../../core/index.js';
 import type { EmissionInput, EmissionResult } from '../model.js';
 import { Renderer } from '../renderer.js';
 
-export const C_EMITTER_VERSION = 'typed-machine-c-2';
+export const C_EMITTER_VERSION = 'reconstructed-c-3';
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
 
-/** C-like reconstruction, NOT recovered source or a compilable C translation.
- * This emitter consumes verified structured IR; it does not recover signatures,
- * simplify expressions, delete effects, or reinterpret annotation assertions. */
+/** C-like high-level pseudocode, not a compilable source translation.
+ * The shared reconstruction owns propagation, liveness and proven source views;
+ * this entrypoint selects syntax while preserving evidence and resource limits. */
 export class CEmitter implements Emitter<EmissionInput> {
   readonly id = 'c-like';
-  readonly name = 'typed-machine-c';
+  readonly name = 'reconstructed-c';
   readonly version = C_EMITTER_VERSION;
   readonly language = 'c-like' as const;
   emit(input: EmissionInput, options: Options, context: OperationContext): EmissionResult['emission'] {

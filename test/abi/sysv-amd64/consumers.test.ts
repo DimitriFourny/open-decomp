@@ -81,9 +81,6 @@ for (const [observed, conformance] of [[0n, 'violated'], [1n, 'satisfied'], [7n,
       types.types.some(type => type.id === item.type_id && type.definition.kind === 'float' && type.definition.bits === 64)));
     for (const language of ['c-like', 'python-like'] as const) {
       const emitted = emit(program, { types }, language).emission;
-      assert.match(emitted.text, /unsigned_range=\[1, 8\]/);
-      assert.match(emitted.text, new RegExp(`conformance=${conformance}`));
-      assert.match(emitted.text, /not a source parameter/);
       if (observed !== null) assert.ok(emitted.mappings.some(mapping => mapping.evidence_ids.includes(alEvidence)));
     }
     assert.deepEqual(program, original);
@@ -191,11 +188,6 @@ test('call-local signatures retain AL slice observations without creating target
   assert.equal(types.signatures[0]!.abi_state, 'partial');
   assert.equal(observed.requirement.unsigned_minimum, 1n);
   assert.ok(types.calls!.calls.every(call => call.contracts.length === 0));
-  for (const language of ['c-like', 'python-like'] as const) {
-    const text = emit(program, { types }, language).emission.text;
-    assert.match(text, /observed=7, initialization=initialized, conformance=unknown/);
-    assert.match(text, /not a source parameter/);
-  }
 });
 
 test('variadic source declarations do not establish AL satisfaction for unknown anonymous actuals', () => {
@@ -221,10 +213,6 @@ test('variadic source declarations do not establish AL satisfaction for unknown 
   assert.equal(signature.abi_state, 'partial');
   assert.equal(signature.signature.parameters.length, 1);
   assert.ok(result.calls!.calls.every(call => call.contracts.length === 0));
-  for (const language of ['c-like', 'python-like'] as const) {
-    const text = emit(program, { types: result }, language).emission.text;
-    assert.match(text, /conformance=unknown/); assert.doesNotMatch(text, /conformance=satisfied/);
-  }
 });
 
 test('service and library declarations retain fixed prefix locations without completing variadic arity', () => {

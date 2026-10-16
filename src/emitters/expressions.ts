@@ -1,4 +1,4 @@
-import { bitWidth, type DataType, type Expression, type Value } from '../ir/index.js';
+import { bitWidth, sameType, type DataType, type Expression, type Value } from '../ir/index.js';
 import type { Writer } from './writer.js';
 
 /** These are machine storage types, never inferred C source types. */
@@ -10,6 +10,12 @@ export function machineType(type: DataType): string {
   }
 }
 
+const integerOperators: Partial<Record<Extract<Expression, { kind: 'integer' }>['op'], string>> = {
+  add: '+', sub: '-', mul: '*', and: '&', or: '|', xor: '^',
+};
+const comparisonOperators: Record<Extract<Expression, { kind: 'compare' }>['op'], string> = {
+  eq: '==', ne: '!=', ult: '<', ule: '<=', ugt: '>', uge: '>=', slt: '<', sle: '<=', sgt: '>', sge: '>=',
+};
 const integerMeaning: Record<string, string> = {
   add: 'Add unsigned bit patterns and reduce modulo 2^width.',
   sub: 'Subtract unsigned bit patterns and reduce modulo 2^width.',
@@ -36,9 +42,9 @@ const castMeaning: Record<string, string> = {
 };
 const fpMeaning = 'IEEE binary32/64, nearest ties-even and gradual underflow; arithmetic NaNs canonicalize to 0x7fc00000/0x7ff8000000000000. No ambient exception/control-register behavior is invented.';
 
-/** Formatting never propagates, reassociates, or evaluates input expressions. SSA
- * operands remain named references, so size is linear even for shared DAGs. Helper
- * arguments carry widths explicitly; C promotions/overflow never define semantics. */
+/** Reconstruction chooses substitutions; formatting preserves width semantics.
+ * Arithmetic is readable infix with explicit reduction where overflow matters.
+ * Exact floating/vector/unknown operations retain documented semantic helpers. */
 export function expressionText(expression: Expression, type: DataType, writer: Writer, name: (value: Value) => string): string {
   const width = bitWidth(type);
   const invoke = (helper: string, meaning: string, args: readonly string[]): string => {
@@ -46,17 +52,27 @@ export function expressionText(expression: Expression, type: DataType, writer: W
     return `${helper}(${writer.join(args)})`;
   };
   switch (expression.kind) {
-    case 'constant': return invoke('bit_pattern', writer.language === 'c-like' ? 'Construct the exact low width bits in the named machine storage type; hexadecimal literals are arbitrary precision data, not host C integer literals.' : 'Construct the exact low width bits in the named machine storage type; hexadecimal literals are data, not Python arithmetic.', [writer.quote(machineType(type)), String(width), `0x${BigInt.asUintN(width, expression.bits).toString(16)}`]);
+    case 'constant': return type.kind === 'integer' ? `0x${BigInt.asUintN(width, expression.bits).toString(16)}` : invoke('bit_pattern', 'Construct exact machine-storage bits, preserving floating-point/vector payloads.', [writer.quote(machineType(type)), String(width), `0x${BigInt.asUintN(width, expression.bits).toString(16)}`]);
     case 'address': return invoke('image_address', 'Image-qualified address-space value; no host pointer, ASLR assumption or memory read.', [writer.quote(expression.address.image_id), writer.quote(expression.address.space), `0x${expression.address.value.toString(16)}`]);
-    case 'integer': return invoke(`bv_${expression.op}`, `Arguments: width, left, right. ${integerMeaning[expression.op]} Unknown/undefined operands propagate; these are not host ${writer.language === 'c-like' ? 'C' : 'Python'} operators.`, [String(width), name(expression.left), name(expression.right)]);
-    case 'integer_unary': return invoke(`bv_${expression.op}`, `Arguments: width, value. ${expression.op === 'not' ? 'Complement every bit.' : expression.op === 'neg' ? 'Negate modulo 2^width.' : expression.op === 'clz' ? 'Count leading zeros; zero input returns width.' : expression.op === 'ctz' ? 'Count trailing zeros; zero input returns width.' : 'Count set bits.'} Unknown/undefined operands propagate.`, [String(width), name(expression.value)]);
+    case 'integer': {
+      const operator = integerOperators[expression.op];
+      if (operator) {
+        const infix = `(${name(expression.left)} ${operator} ${name(expression.right)})`;
+        return expression.op === 'and' || expression.op === 'or' || expression.op === 'xor' ? infix : invoke('wrap', 'Arguments: bit width, mathematical integer expression. Reduce modulo 2^width; unknown/undefined propagates. Infix arithmetic inside wrap is mathematical, not host C arithmetic.', [String(width), infix]);
+      }
+      return invoke(`bv_${expression.op}`, `Arguments: width, left, right. ${integerMeaning[expression.op]} Unknown/undefined operands propagate.`, [String(width), name(expression.left), name(expression.right)]);
+    }
+    case 'integer_unary':
+      if (expression.op === 'neg' || expression.op === 'not') return invoke('wrap', 'Arguments: bit width, mathematical integer expression. Reduce modulo 2^width; unknown/undefined propagates. Infix arithmetic inside wrap is mathematical, not host C arithmetic.', [String(width), `(${expression.op === 'neg' ? '-' : '~'}${name(expression.value)})`]);
+      return invoke(`bv_${expression.op}`, `Arguments: width, value. ${expression.op === 'clz' ? 'Count leading zeros; zero input returns width.' : expression.op === 'ctz' ? 'Count trailing zeros; zero input returns width.' : 'Count set bits.'} Unknown/undefined operands propagate.`, [String(width), name(expression.value)]);
     case 'compare': {
-      const operators = { eq: '==', ne: '!=', ult: '<', ule: '<=', ugt: '>', uge: '>=', slt: '<', sle: '<=', sgt: '>', sge: '>=' } as const;
       const signed = expression.op.startsWith('s');
       const operand = (value: Value): string => signed ? invoke('signed_value', 'Interpret a width-bit pattern as its mathematical two\'s-complement signed value; no host narrowing cast. Unknown/undefined propagates.', [String(bitWidth(value.type)), name(value)]) : name(value);
-      return `(${operand(expression.left)} ${operators[expression.op]} ${operand(expression.right)})`;
+      return `(${operand(expression.left)} ${comparisonOperators[expression.op]} ${operand(expression.right)})`;
     }
-    case 'cast': return invoke(`cast_${expression.op}`, `Arguments: destination machine type, source machine type, value. ${castMeaning[expression.op]} Unknown/undefined operands propagate.`, [writer.quote(machineType(type)), writer.quote(machineType(expression.value.type)), name(expression.value)]);
+    case 'cast':
+      if (expression.op === 'bitcast' && sameType(type, expression.value.type)) return name(expression.value);
+      return invoke(`cast_${expression.op}`, `Arguments: destination machine type, source machine type, value. ${castMeaning[expression.op]} Unknown/undefined operands propagate.`, [writer.quote(machineType(type)), writer.quote(machineType(expression.value.type)), name(expression.value)]);
     case 'extract': return invoke('extract_bits', 'Arguments: result width, source, bit offset. Return that slice, offset zero is least significant; preserve raw FP/vector bits. Unknown/undefined propagates.', [String(width), name(expression.value), String(expression.offset)]);
     case 'insert': return invoke('insert_bits', 'Arguments: result width, base, value width, value, offset. Replace only the designated slice, preserving all other bits. Unknown/undefined propagates.', [String(width), name(expression.base), String(bitWidth(expression.value.type)), name(expression.value), String(expression.offset)]);
     case 'concat': {

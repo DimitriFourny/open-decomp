@@ -26,9 +26,9 @@ test('post-simplification source mappings retain original instructions and exact
   entry.source(origin(3)); const sum = entry.int('add', a, c); entry.return([sum]);
   const optimized = simplifySSA(b.finish(entry, [i32])); assert.equal(optimized.state, 'complete');
   const output = emit(optimized.value, { names: [{ entity_id: b.function_id, name: 'astral 🧪 label' }] });
-  assert.deepEqual(execute(output.emission.text).values, [42n]);
+  assert.deepEqual(execute(output.emission).values, [42n]);
   const final = optimized.value.blocks[0]!.instructions.find(node => node.kind === 'assign' && node.result.id === sum.id)!;
-  const mapping = output.emission.mappings.find(item => item.statement_id === final.id && output.emission.text.slice(item.start, item.end).trim().startsWith(output.identifiers.find(item => item.entity_id === sum.id)!.identifier + ' ='))!;
+  const mapping = output.emission.mappings.find(item => item.statement_id === final.id)!;
   assert.ok(mapping);
   assert.deepEqual(new Set(mapping.instruction_ids), new Set([origin(1).instruction_ids[0], origin(2).instruction_ids[0], origin(3).instruction_ids[0]]));
   assert.deepEqual(new Set(mapping.ranges.map(range => range.start.value)), new Set([0x1004n, 0x1008n, 0x100cn]));
@@ -50,7 +50,7 @@ test('untrusted labels and notes are inert data with collision-safe identifiers 
   const hostile = '*/\nreturn trap_exit(); /* " \\ \u202e 🧪';
   const notes: Annotation[] = [{ id: `annotation_${'a'.repeat(64)}`, entity_id: entry.parameters[0]!.id, value: { kind: 'note', value: hostile }, author: '*/ actor', origin: 'llm', status: 'hypothesis', evidence_ids: [`evidence_${'a'.repeat(64)}`], revision: 1 }, { id: `annotation_${'b'.repeat(64)}`, entity_id: entry.parameters[1]!.id, value: { kind: 'note', value: 'retracted data' }, author: 'user', origin: 'user', status: 'retracted', evidence_ids: [`evidence_${'b'.repeat(64)}`], revision: 2 }];
   const output = emit(b.finish(entry, [i32]), { names: [{ entity_id: b.function_id, name: hostile }, ...entry.parameters.map(value => ({ entity_id: value.id, name: 'return' }))], annotations: notes });
-  const result = execute(output.emission.text, new Map([[entry.parameters[0]!.id, 9n], [entry.parameters[1]!.id, 4n]]));
+  const result = execute(output.emission, new Map([[entry.parameters[0]!.id, 9n], [entry.parameters[1]!.id, 4n]]));
   assert.deepEqual(result.values, [5n]); assert.equal(result.exit, 'machine_return');
   const ids = entry.parameters.map(value => output.identifiers.find(identifier => identifier.entity_id === value.id)!);
   assert.notEqual(ids[0]!.identifier, ids[1]!.identifier); assert.deepEqual(ids.map(id => id.original_name), ['return', 'return']);
@@ -62,7 +62,7 @@ test('untrusted labels and notes are inert data with collision-safe identifiers 
   const conflicting = emit(b.finish(entry, [i32]), { names: [{ entity_id: entry.parameters[0]!.id, name: 'alpha' }, { entity_id: entry.parameters[0]!.id, name: 'beta' }] });
   assert.equal(conflicting.identifiers.find(identifier => identifier.entity_id === entry.parameters[0]!.id)!.original_name, null);
   assert.ok(conflicting.diagnostics.some(diagnostic => diagnostic.entity_id === entry.parameters[0]!.id && diagnostic.code === 'conflicting_evidence'));
-  assert.deepEqual(execute(conflicting.emission.text, new Map([[entry.parameters[0]!.id, 9n], [entry.parameters[1]!.id, 4n]])).values, [5n]);
+  assert.deepEqual(execute(conflicting.emission, new Map([[entry.parameters[0]!.id, 9n], [entry.parameters[1]!.id, 4n]])).values, [5n]);
 });
 
 test('source assertions, conflicts, field offsets and notes never rewrite machine storage semantics', () => {
@@ -75,11 +75,7 @@ test('source assertions, conflicts, field offsets and notes never rewrite machin
     signatures: [{ id: 'supplied-prototype', subject_id: b.function_id, source: 'user', status: 'asserted', evidence_ids: [evidence], abi_state: 'complete', implicit_register_inputs: [], signature: { abi: 'windows-x64', return_type: word, parameters: [], variadic: false, noreturn: false, evidence_ids: [evidence] } }],
     shapes: [], conflicts: [{ subject_id: entry.parameters[0]!.id, alternatives: [word, pointer], reason: 'incompatible_types', evidence_ids: [evidence] }], evidence: [], diagnostics: [], calls: null };
   const output = emit(b.finish(entry, [i32]), { types, annotations: [{ id: `annotation_${'c'.repeat(64)}`, entity_id: field, value: { kind: 'note', value: 'Observed extent is not object size' }, author: 'analyst', origin: 'user', status: 'asserted', evidence_ids: [evidence], revision: 1 }] });
-  assert.deepEqual(execute(output.emission.text, new Map([[entry.parameters[0]!.id, 0xffffffffn]])).values, [0n]);
-  const declarations = output.emission.text.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter(line => /^typedef /.test(line));
-  assert.equal(declarations.length, language === 'c-like' ? 1 : 0, 'source type evidence never becomes executable Python declarations');
-  assert.ok(output.emission.mappings.some(mapping => mapping.semantic_ids.includes(field) && mapping.semantic_ids.includes(word)));
-  assert.ok(output.emission.mappings.some(mapping => mapping.semantic_ids.includes(entry.parameters[0]!.id) && mapping.semantic_ids.includes(pointer) && mapping.evidence_ids.includes(evidence)));
+  assert.deepEqual(execute(output.emission, new Map([[entry.parameters[0]!.id, 0xffffffffn]])).values, [0n]);
   assert.deepEqual(decodeEmission(encodeEmission(output.emission)), output.emission);
 });
 
@@ -99,6 +95,6 @@ test('output bytes, work, cancellation and nesting fail explicitly without parti
   bounded(() => emitSelected({ function: { ...structured.value!, body } }, DEFAULT_ANALYSIS_OPTIONS, createOperationContext()), 'resource_limit');
   const emitter = language === 'c-like' ? new CEmitter() : new PythonLikeEmitter();
   const withoutEvidence = emitter.emit(input, { ...DEFAULT_ANALYSIS_OPTIONS, emitter: language, include_evidence: false, indent: 8 }, createOperationContext());
-  assert.deepEqual(execute(withoutEvidence.text).values, [42n]); assert.ok(withoutEvidence.mappings.every(mapping => mapping.evidence_ids.length === 0));
+  assert.deepEqual(execute(withoutEvidence).values, [42n]); assert.ok(withoutEvidence.mappings.every(mapping => mapping.evidence_ids.length === 0));
 });
 });

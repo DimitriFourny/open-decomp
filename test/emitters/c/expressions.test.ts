@@ -18,7 +18,7 @@ test('emitted grouping and finite-width arithmetic are independently executed ac
     const output = emit(b.finish(entry, [type]));
     const mask = (1n << BigInt(width)) - 1n;
     for (const [x, y, z] of [[mask, 2n & mask, 3n & mask], [0n, mask, 1n]] as const) {
-      const actual = execute(output.emission.text, new Map([[a!.id, x], [c!.id, y], [d!.id, z]]));
+      const actual = execute(output.emission, new Map([[a!.id, x], [c!.id, y], [d!.id, z]]));
       const wrapped = (value: bigint): bigint => value & mask;
       assert.deepEqual(actual.values, [wrapped(wrapped(x - wrapped(y - z)) * wrapped(x + z))]);
     }
@@ -38,7 +38,7 @@ test('signedness, full shift counts, rotates and integer unary families survive 
   const predicates: IntegerPredicate[] = ['eq', 'ne', 'ult', 'ule', 'ugt', 'uge', 'slt', 'sle', 'sgt', 'sge'];
   values.push(...predicates.map(op => entry.compare(op, a, c))); expected.push(0n, 1n, 0n, 0n, 1n, 1n, 1n, 1n, 0n, 0n);
   entry.return(values);
-  assert.deepEqual(execute(emit(b.finish(entry, values.map(value => value.type))).emission.text).values, expected);
+  assert.deepEqual(execute(emit(b.finish(entry, values.map(value => value.type))).emission).values, expected);
 });
 
 test('bit slices, low-first concat, casts, lazy select and carry/borrow flags retain bit identity', () => {
@@ -52,7 +52,7 @@ test('bit slices, low-first concat, casts, lazy select and carry/borrow flags re
   for (const flag of ['carry', 'borrow', 'overflow', 'zero', 'negative', 'parity'] as const) values.push(entry.flag('add', flag, max, zero, carry));
   for (const flag of ['carry', 'borrow', 'overflow', 'zero', 'negative', 'parity'] as const) values.push(entry.flag('sub', flag, zero, zero, carry));
   entry.return(values);
-  assert.deepEqual(execute(emit(b.finish(entry, values.map(value => value.type))).emission.text).values, [0x1281n, 0x1341n, 0x34n, 0xff81n, 0x81n, 0x81n, 0x1281n, 1n, 0n, 0n, 1n, 0n, 1n, 0n, 1n, 0n, 0n, 1n, 1n]);
+  assert.deepEqual(execute(emit(b.finish(entry, values.map(value => value.type))).emission).values, [0x1281n, 0x1341n, 0x34n, 0xff81n, 0x81n, 0x81n, 0x1281n, 1n, 0n, 0n, 1n, 0n, 1n, 0n, 1n, 0n, 0n, 1n, 1n]);
 });
 
 test('IEEE payloads, negative zero, comparisons, conversions and vector lane arithmetic are not integer approximations', () => {
@@ -65,7 +65,7 @@ test('IEEE payloads, negative zero, comparisons, conversions and vector lane ari
   values.push(entry.lane(doubled, 0), entry.lane(doubled, 1), entry.assign(vi, { kind: 'vector_insert', vector: packed, value: entry.constant(integer(8), 7n), lane: 1 }));
   const floats = entry.pack(vf, [one, two]); values.push(entry.lane(entry.vectorFloat('mul', floats, floats), 1));
   entry.return(values);
-  assert.deepEqual(execute(emit(b.finish(entry, values.map(value => value.type))).emission.text).values, [0xffa12345n, 0n, 0x7fc00000n, 0x3f800000n, 0x40800000n, 0x3f000000n, 0x40000000n, 1n, 1n, 1n, 0x7fa12345n, 0x3ff0000000000000n, 0xffffffffn, 0x40400000n, 0xbf800000n, 254n, 2n, 0x7ffn, 0x40800000n]);
+  assert.deepEqual(execute(emit(b.finish(entry, values.map(value => value.type))).emission).values, [0xffa12345n, 0n, 0x7fc00000n, 0x3f800000n, 0x40800000n, 0x3f000000n, 0x40000000n, 1n, 1n, 1n, 0x7fa12345n, 0x3ff0000000000000n, 0xffffffffn, 0x40400000n, 0xbf800000n, 254n, 2n, 0x7ffn, 0x40800000n]);
 });
 
 test('undefined integer division and indeterminate branch conditions do not become traps or false branches', () => {
@@ -77,7 +77,7 @@ test('undefined integer division and indeterminate branch conditions do not beco
     entry.branch(entry.compare('eq', value, entry.constant(i8, 0n)), entry.edge(yes), entry.edge(no));
     yes.return([yes.constant(i8, 1n)]); no.return([no.constant(i8, 2n)]);
     const output = emit(b.finish(entry, [i8]));
-    assert.equal(execute(output.emission.text).exit, 'unknown');
+    assert.equal(execute(output.emission).exit, 'unknown');
     assert.equal(output.diagnostics.some(diagnostic => diagnostic.code === 'unavailable_semantics'), mode === 'unknown');
   }
 });
