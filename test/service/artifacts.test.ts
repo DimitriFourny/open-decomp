@@ -46,7 +46,7 @@ test('real child artifact reads are project/revision scoped, resumable and below
     offset = page.next_offset ?? '';
   } while (offset);
   assert.deepEqual(Buffer.concat(chunks), bytes);
-  const second = await service.execute('project_open', { source: { kind: 'import', input_path: join(fixtures, 'pe-x86_64-symbols.exe'), project_path: join(root, 'second') } });
+  const second = await service.execute('project_open', { wait: true, source: { kind: 'import', input_path: join(fixtures, 'pe-x86_64-symbols.exe'), project_path: join(root, 'second') } });
   assert.ok(second.project_id && second.revision !== null);
   await assert.rejects(service.readArtifact({ project_id: second.project_id, revision: second.revision, artifact_id: artifact.id, offset: '0x0', length: 1 }), { code: 'not_found' });
   await assert.rejects(service.readArtifact({ project_id: artifact.project_id, revision: artifact.revision - 1, artifact_id: artifact.id, offset: '0x0', length: 1 }), { code: 'stale_revision' });

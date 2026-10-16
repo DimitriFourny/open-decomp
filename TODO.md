@@ -21,19 +21,9 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 
 ### Worker execution, service, and MCP integration
 
-- [ ] **T27 — Expose the complete local MCP tool surface**
-  - Depends on: T23, T25, T26.
-  - Owns: `src/mcp/`, compiled server entry point, deterministic stdio smoke client.
-  - Work: Use the official TypeScript SDK to publish every tool named in PLAN.md with validated input/output schemas and structured results. Connect real project/query/analysis/annotation operations, job status/cancel, progress where supported, and bounded artifact/resource reads. Add an actual launch command; reserve stdout for protocol traffic and send diagnostics to stderr.
-  - Acceptance: Launch the compiled server and discover/call its tools through a real MCP client. For each target, open → inspect/search → follow references → decompile → annotate → reanalyze → close/resume succeeds with correct revisions/evidence. Long jobs can be inspected/cancelled without depending on optional client extensions. No mock backend, generic shell, or arbitrary SQL tool is exposed. Contributes A09.
 
 ### Integration, containment, and delivery
 
-- [ ] **T28 — Verify input containment and enforce resource/error boundaries**
-  - Depends on: T27.
-  - Owns: containment integration cases and documented limits; coordinate fixes in owning modules rather than duplicating validation.
-  - Work: Exercise authorized-root checks, canonical/symlink paths, project/artifact isolation, parser arithmetic/count limits, work/IR/output budgets, cancellation, crashes, and transactional recovery through the real service. Check that strings/symbols/notes remain data and that no target execution, dynamic target-library load, remote fetch, or arbitrary file access is reachable. Document actual worker/OS restrictions without overstating sandbox guarantees.
-  - Acceptance: Hostile/malformed fixtures and denied paths produce bounded, typed errors; unrelated project artifacts remain inaccessible. Worker termination cannot corrupt saved analysis, flood stdout, or leave requests hanging indefinitely. Existing legitimate binaries still complete their workflows. Contributes A10.
 
 - [ ] **T29 — Run cross-target and cross-host release acceptance**
   - Depends on: T28.
@@ -75,11 +65,27 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Acceptance: The complete investigation workflow works for the selected target with evidence-backed semantics, and existing targets remain correct. Public tools require no architecture-specific command fork.
 
 ## Doing
+- [ ] **T28 — Verify input containment and enforce resource/error boundaries**
+  - Depends on: T27.
+  - Owns: containment integration cases and documented limits; coordinate fixes in owning modules rather than duplicating validation.
+  - Work: Exercise authorized-root checks, canonical/symlink paths, project/artifact isolation, parser arithmetic/count limits, work/IR/output budgets, cancellation, crashes, and transactional recovery through the real service. Check that strings/symbols/notes remain data and that no target execution, dynamic target-library load, remote fetch, or arbitrary file access is reachable. Document actual worker/OS restrictions without overstating sandbox guarantees.
+  - Acceptance: Hostile/malformed fixtures and denied paths produce bounded, typed errors; unrelated project artifacts remain inaccessible. Worker termination cannot corrupt saved analysis, flood stdout, or leave requests hanging indefinitely. Existing legitimate binaries still complete their workflows. Contributes A10.
+  - Owner: ParserContainment (sol-worker: hostile loader/metadata inputs), AnalysisBounds (astra-worker: preallocation and cumulative semantic bounds), Coordinator (MCP/worker/path/control/output boundaries, integration and documentation).
 
 
 
 
 ## Done
+- [x] **T27 — Expose the complete local MCP tool surface**
+  - Depends on: T23, T25, T26.
+  - Owns: `src/mcp/`, compiled server entry point, deterministic stdio smoke client.
+  - Work: Use the official TypeScript SDK to publish every tool named in PLAN.md with validated input/output schemas and structured results. Connect real project/query/analysis/annotation operations, job status/cancel, progress where supported, and bounded artifact/resource reads. Add an actual launch command; reserve stdout for protocol traffic and send diagnostics to stderr.
+  - Acceptance: Launch the compiled server and discover/call its tools through a real MCP client. For each target, open → inspect/search → follow references → decompile → annotate → reanalyze → close/resume succeeds with correct revisions/evidence. Long jobs can be inspected/cancelled without depending on optional client extensions. No mock backend, generic shell, or arbitrary SQL tool is exposed. Contributes A09.
+  - Owner: McpTools (sol-worker: SDK tool/resource adapter), McpLaunch (sol-worker: compiled stdio launch/client workflows), Coordinator (async service contracts, dependency pins, integration and verification).
+  - Decision: Pin official SDK v2.3.1 server/core/client packages for MCP 2026-07-28, not the maintenance-only v1 package. Import and decompilation expose ordinary project-owned jobs by default (`wait: true` requests a final inline response); job controls report the acknowledged revision, and a sole imported image can be inspected without guessing its ID.
+  - Implemented: Official SDK tool/resource adapter, explicit-root compiled stdio CLI, bounded readable artifact pages, default async job ownership, explicit unfinished-import inspection/repair, copied-project identity rejection, typed path errors and truthful close-revision reconciliation. SDK exchange teardown cannot cancel admitted jobs; closing stdin releases oversized blocked writers.
+  - Verification: Node 24.22.0 strict typecheck, **632/632 tests**, and build passed. The official SDK client launched the compiled server and completed all four symbol-bearing/stripped Mach-O arm64 and PE x86-64 workflows at revisions 2→3→4, including 15–23 artifact pages, cancellation and reopened cache hits. Rebuilt smoke passed again with a 2 MiB client buffer. Real probes reproduced/fixed close revision 0→1 mismatch and oversized-input process hang; copied-project routing rejection is covered by a real-directory regression. Windows f059a44 independently passed 589/589 earlier-milestone tests and cross-target decode; T27 Windows verification remains T29 work.
+
 - [x] **T25 — Integrate the complete decompilation pipeline and revision-aware cache**
   - Depends on: T15, T22, T23, T24.
   - Owns: `src/service/analysis/`, `src/project/cache/`, pipeline integration cases.

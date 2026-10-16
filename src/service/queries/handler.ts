@@ -151,7 +151,15 @@ async function dispatch(operation: ToolName, input: unknown, suppliedScope: Scop
   const envelope = queryEnvelope(common.project_id, common.revision, common.budget);
   switch (operation) {
     case 'binary_info': {
-      const args = toolSchemas.binary_info.input.parse(input), image = loadImage(scope.store, args.revision, args.image_id);
+      const args = toolSchemas.binary_info.input.parse(input);
+      let imageId = args.image_id;
+      if (imageId === undefined) {
+        const images = scope.store.snapshot(args.revision).images;
+        if (images.length === 0) queryFailure('not_found', 'Requested snapshot contains no image');
+        if (images.length !== 1) queryFailure('ambiguous_slice', 'An explicit image ID is required for a multi-image snapshot');
+        imageId = images[0]!.image_id;
+      }
+      const image = loadImage(scope.store, args.revision, imageId);
       if (args.view === 'summary') return { ...envelope, diagnostics: image.diagnostics.map(encodeDiagnostic), state: 'complete', data: { view: 'summary', image: wireValue({ id: image.id, sha256: image.sha256, byte_length: BigInt(image.bytes.length), selected_slice_id: image.selected_slice_id, image_base: image.image_base, target: image.target, slices: image.slices, entry_points: image.entry_points, capabilities: image.capabilities }) } };
       const values: readonly unknown[] = image[args.view];
       return paginate(scope, operation, args, values, 'complete', (item, index) => {

@@ -4,7 +4,7 @@ import { artifactReadArgsSchema, artifactReadResultSchema, budgetSchema, diagnos
 export const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 export const MAX_IMAGES = 256;
 const pathSchema = z.string().min(1).max(32768);
-export const importRequestSchema = z.strictObject({ kind: z.literal('import'), source_path: pathSchema, slice_id: sliceIdSchema.nullable().default(null), budget: budgetSchema });
+export const importRequestSchema = z.strictObject({ kind: z.literal('import'), source_path: pathSchema, slice_id: sliceIdSchema.nullable().default(null), resume_only: z.boolean().optional(), budget: budgetSchema });
 const workerOperationSchema = toolNameSchema.exclude(['project_open', 'project_close', 'analysis_cancel', 'analysis_status']);
 export type WorkerOperation = z.output<typeof workerOperationSchema>;
 const executeSchema = z.strictObject({ kind: z.literal('execute'), operation: workerOperationSchema, args: z.unknown(), budget: budgetSchema }).superRefine((request, ctx) => {

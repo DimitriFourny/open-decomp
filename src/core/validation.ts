@@ -37,7 +37,11 @@ export function validateToolRequest<K extends ToolName>(operation: K, input: unk
 export function validateToolResponse<K extends ToolName>(operation: K, output: unknown, args: ToolArgs<K>): ToolResult<K> {
   const result = toolSchemas[operation].output.parse(output) as ToolResult<K>;
   if ('project_id' in args && result.project_id !== args.project_id) throw new TypeError('Result belongs to another project');
-  if ('revision' in args && result.revision !== args.revision) throw new TypeError('Result belongs to another revision');
+  if ('revision' in args && result.revision !== args.revision) {
+    const reconciledClose = operation === 'project_close' && 'running_jobs' in args && args.running_jobs !== 'reject' &&
+      result.state === 'complete' && result.revision !== null && result.revision >= args.revision;
+    if (!reconciledClose) throw new TypeError('Result belongs to another revision');
+  }
   if ('expected_revision' in args && result.state === 'complete') {
     if (result.revision !== nextRevision(args.expected_revision)) throw new TypeError('Mutation must advance exactly one revision');
   }

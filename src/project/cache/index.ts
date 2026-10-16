@@ -3,7 +3,7 @@ import {
   OperationError, SCHEMA_VERSION, cacheIdentityKey, cacheIdentitySchema, contentHash,
   decodeEvidence, decodeTypeDefinition, encodeArtifact, encodeEvidence, encodeTypeDefinition,
   entityIdSchema, evidenceIdSchema, evidenceSchema, fingerprint, functionDecompileResultSchema,
-  imageIdSchema, newIdentity, sliceIdSchema, targetSchema, typeDefinitionSchema,
+  imageIdSchema, newIdentity, projectDecompilationArtifactResult, sliceIdSchema, targetSchema, typeDefinitionSchema,
   type Artifact, type CacheIdentity, type Evidence, type Job, type OperationContext,
   type ProjectStore, type ToolResult,
 } from '../../core/index.js';
@@ -156,13 +156,7 @@ function delivery(result: StoredDecompilation, artifact: Artifact, cache: 'hit' 
   const handle = encodeArtifact(artifact);
   const inline = functionDecompileResultSchema.parse({ ...result, artifacts: [handle], data: { ...result.data, cache } });
   if (Buffer.byteLength(JSON.stringify(inline)) <= limit) return inline;
-  const bounded = functionDecompileResultSchema.parse({
-    schema_version: result.schema_version, project_id: result.project_id, revision: result.revision,
-    versions: result.versions, options: result.options, budget: result.budget,
-    coverage: [], evidence: [], artifacts: [handle], state: 'partial', reason: 'output_limit', continuation: null,
-    diagnostics: [{ code: 'resource_limit', severity: 'info', message: 'Full decompilation, coverage and diagnostics are available in the analysis artifact.', evidence_ids: [] }],
-    data: { delivery: 'artifact', function_id: result.data.function_id, artifact_id: artifact.id, cache },
-  });
+  const bounded = projectDecompilationArtifactResult(inline);
   if (Buffer.byteLength(JSON.stringify(bounded)) > limit) fail('resource_limit', 'Output budget cannot contain the analysis artifact response');
   return bounded;
 }

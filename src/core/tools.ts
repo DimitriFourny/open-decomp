@@ -44,17 +44,17 @@ const pageInfoSchema = z.strictObject({ next_cursor: z.string().min(1).max(16384
 
 export const projectOpenArgsSchema = z.strictObject({
   source: z.discriminatedUnion('kind', [
-    z.strictObject({ kind: z.literal('import'), input_path: z.string().min(1).max(32768), project_path: z.string().min(1).max(32768), slice_id: sliceIdSchema.optional() }),
+    z.strictObject({ kind: z.literal('import'), input_path: z.string().min(1).max(32768), project_path: z.string().min(1).max(32768), slice_id: sliceIdSchema.optional(), mode: z.enum(['create', 'resume']).default('create') }),
     z.strictObject({ kind: z.literal('resume'), project_path: z.string().min(1).max(32768) }),
-  ]), budget: budgetSchema.default(DEFAULT_BUDGET),
+  ]), wait: z.boolean().default(false), budget: budgetSchema.default(DEFAULT_BUDGET),
 });
 export const projectCloseArgsSchema = z.strictObject({ ...requestContext, running_jobs: z.enum(['wait', 'cancel', 'reject']).default('reject') });
-export const binaryInfoArgsSchema = z.strictObject({ ...requestContext, image_id: imageIdSchema, view: z.enum(['summary', 'headers', 'sections', 'mappings', 'entry_points', 'relocations', 'hints', 'capabilities']).default('summary'), ...paging });
+export const binaryInfoArgsSchema = z.strictObject({ ...requestContext, image_id: imageIdSchema.optional(), view: z.enum(['summary', 'headers', 'sections', 'mappings', 'entry_points', 'relocations', 'hints', 'capabilities']).default('summary'), ...paging });
 export const symbolsFindArgsSchema = z.strictObject({ ...requestContext, image_id: imageIdSchema, kinds: z.array(z.enum(['symbol', 'import', 'export'])).min(1).max(3).default(['symbol', 'import', 'export']), query: querySchema.default(defaultQuery), address: addressSchema.optional(), ...paging });
 export const stringsFindArgsSchema = z.strictObject({ ...requestContext, image_id: imageIdSchema, query: querySchema.default(defaultQuery), encodings: z.array(z.enum(['ascii', 'utf8', 'utf16le'])).min(1).max(3).default(['ascii', 'utf8', 'utf16le']), status: z.enum(['all', 'candidate', 'referenced']).default('all'), range: rangeSchema.optional(), ...paging });
 export const functionsFindArgsSchema = z.strictObject({ ...requestContext, image_id: imageIdSchema, id: entityIdSchema.optional(), query: querySchema.default(defaultQuery), address: addressSchema.optional(), boundary: z.enum(['candidate', 'established', 'conflicting']).optional(), analysis: z.enum(['not_analyzed', 'partial', 'complete', 'unsupported']).optional(), ...paging });
 export const functionGetArgsSchema = z.strictObject({ ...requestContext, function_id: entityIdSchema, view: z.enum(['metadata', 'disassembly', 'cfg']).default('metadata'), ...paging });
-export const functionDecompileArgsSchema = z.strictObject({ ...requestContext, function_id: entityIdSchema, options: analysisOptionsSchema.default(DEFAULT_ANALYSIS_OPTIONS) });
+export const functionDecompileArgsSchema = z.strictObject({ ...requestContext, function_id: entityIdSchema, wait: z.boolean().default(false), options: analysisOptionsSchema.default(DEFAULT_ANALYSIS_OPTIONS) });
 export const xrefsGetArgsSchema = z.strictObject({ ...requestContext, target: z.discriminatedUnion('kind', [z.strictObject({ kind: z.literal('entity'), id: entityIdSchema }), z.strictObject({ kind: z.literal('address'), address: addressSchema })]), direction: z.enum(['incoming', 'outgoing', 'both']).default('both'), kinds: z.array(z.enum(['call', 'tail_call', 'branch', 'read', 'write', 'address', 'unknown'])).min(1).max(7).default(['call', 'tail_call', 'branch', 'read', 'write', 'address', 'unknown']), include_unresolved: z.boolean().default(true), ...paging });
 export const memoryReadArgsSchema = z.strictObject({
   ...requestContext, address: addressSchema, length: z.number().int().min(1).max(1_048_576).default(4096),
@@ -180,7 +180,12 @@ const memoryDataSchema = z.strictObject({
     context.addIssue({ code: 'custom', message: 'Memory continuation must begin immediately after the returned segments' });
   }
 });
-export const projectOpenResultSchema = resultSchema(z.strictObject({ image: imageSummarySchema, resumed: z.boolean() }));
+export const projectOpenResultSchema = resultSchema(z.strictObject({ image: imageSummarySchema.nullable(), resumed: z.boolean() })).superRefine((result, context) => {
+  if ('data' in result && result.data.image === null &&
+      (result.state !== 'partial' || result.reason !== 'incomplete_index' || !result.data.resumed)) {
+    context.addIssue({ code: 'custom', message: 'An unfinished project is an explicitly resumed, incomplete snapshot' });
+  }
+});
 export const projectCloseResultSchema = resultSchema(z.strictObject({ closed: z.literal(true), persisted_revision: revisionSchema }));
 export const binaryInfoResultSchema = resultSchema(binaryInfoDataSchema);
 export const symbolsFindResultSchema = resultSchema(z.strictObject({ items: z.array(symbolItemSchema).max(1000), page: pageInfoSchema }));
@@ -197,13 +202,30 @@ export const functionDecompileResultSchema = resultSchema(z.discriminatedUnion('
     context.addIssue({ code: 'custom', message: 'Artifact-only decompilation requires an output-limited partial result and its published artifact' });
   }
 });
+
+/** A transport may deliver the published analysis rather than repeat its large
+ * body. Original analysis budgets, options and semantic partialness live unchanged
+ * in that artifact; this envelope reports only the separate delivery limitation. */
+export function projectDecompilationArtifactResult(result: ToolResult<'function_decompile'>): ToolResult<'function_decompile'> {
+  if (!('data' in result) || result.data.delivery === 'artifact') return result;
+  const artifact = result.artifacts.find(item => item.media_type === 'application/vnd.open-decomp.function+json' &&
+    item.project_id === result.project_id && item.revision === result.revision);
+  if (!artifact) throw new RangeError('Artifact delivery requires a published analysis for the same snapshot');
+  return functionDecompileResultSchema.parse({
+    schema_version: result.schema_version, project_id: result.project_id, revision: result.revision,
+    versions: result.versions, options: result.options, budget: result.budget,
+    coverage: [], evidence: [], artifacts: [artifact], state: 'partial', reason: 'output_limit', continuation: null,
+    diagnostics: [{ code: 'resource_limit', severity: 'info', message: 'Full decompilation, coverage and diagnostics are available in the analysis artifact.', evidence_ids: [] }],
+    data: { delivery: 'artifact', function_id: result.data.function_id, artifact_id: artifact.id, cache: result.data.cache },
+  });
+}
 export const xrefsGetResultSchema = resultSchema(z.strictObject({ items: z.array(referenceSchema).max(1000), page: pageInfoSchema }));
 export const memoryReadResultSchema = resultSchema(memoryDataSchema);
 export const annotationsApplyResultSchema = resultSchema(z.strictObject({ previous_revision: revisionSchema, revision: revisionSchema, applied: z.array(annotationSchema).max(1000), removed: z.array(z.string().regex(/^annotation_[0-9a-f]{64}$/)).max(1000), invalidation: z.strictObject({ scope: z.literal('project'), derived_before_revision: revisionSchema }) }).superRefine((data, context) => {
   if (data.revision !== data.previous_revision + 1 || data.invalidation.derived_before_revision !== data.revision) context.addIssue({ code: 'custom', message: 'An atomic annotation batch advances revision exactly once' });
 }));
-export const analysisStatusResultSchema = resultSchema(z.strictObject({ job: jobSchema }));
-export const analysisCancelResultSchema = resultSchema(z.strictObject({ job: jobSchema, outcome: z.enum(['cancelled', 'already_finished', 'cancellation_requested']) }).superRefine((data, context) => {
+export const analysisStatusResultSchema = resultSchema(z.strictObject({ job: jobSchema, known_revision: revisionSchema }));
+export const analysisCancelResultSchema = resultSchema(z.strictObject({ job: jobSchema, known_revision: revisionSchema, outcome: z.enum(['cancelled', 'already_finished', 'cancellation_requested']) }).superRefine((data, context) => {
   if ((data.outcome === 'cancelled' && data.job.state !== 'cancelled') ||
       (data.outcome === 'already_finished' && !['completed', 'failed', 'stale'].includes(data.job.state)) ||
       (data.outcome === 'cancellation_requested' && !['queued', 'running'].includes(data.job.state))) {

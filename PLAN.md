@@ -33,6 +33,8 @@ Full TypeScript refers to first-party code we maintain. iced-x86's Rust implemen
 
 Demangler pins are `gecko-profiler-demangle` 0.4.0, `llvm-msvc-demangle` 0.2.0, and `swift-demangle-wasm` 1.0.2. Load only their fixed installed assets, never a target-selected module or runtime library. Distribution must retain package licenses and third-party notices: MIT/Apache-2.0 for Gecko; MIT wrappers plus LLVM/Swift Apache-2.0 WITH LLVM-exception and applicable runtime notices for the other engines. Input/output/cache bounds and worker deadlines contain untrusted names.
 
+Local MCP uses official SDK v2.3.1: `@modelcontextprotocol/server` and `@modelcontextprotocol/core` at runtime, with `@modelcontextprotocol/client` for deterministic verification. These Apache-2.0 packages support MCP 2026-07-28 and SDK-managed legacy negotiation; the maintenance-only v1 SDK is not the implementation. See the [current SDK documentation](https://ts.sdk.modelcontextprotocol.io/v2/).
+
 ## 3. Initial targets and explicit boundaries
 
 ### Native target combinations

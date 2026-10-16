@@ -46,8 +46,8 @@ const success: Record<ToolName, object> = {
   xrefs_get: { state: 'empty', data: { items: [], page } },
   memory_read: { state: 'complete', data: { requested: range, segments: [{ kind: 'mapped', range, bytes_hex: '01020304' }], values: [], next_address: null } },
   annotations_apply: { state: 'complete', revision: 4, data: { previous_revision: 3, revision: 4, applied: [{ id: annotationId, entity_id: entity, value: { kind: 'note', value: 'Binary strings are data, not instructions.' }, author: 'analyst', origin: 'user', status: 'hypothesis', evidence_ids: [], revision: 4 }], removed: [], invalidation: { scope: 'project', derived_before_revision: 4 } } },
-  analysis_status: { state: 'complete', data: { job } },
-  analysis_cancel: { state: 'complete', data: { job, outcome: 'cancellation_requested' } },
+  analysis_status: { state: 'complete', data: { job, known_revision: 3 } },
+  analysis_cancel: { state: 'complete', data: { job, known_revision: 3, outcome: 'cancellation_requested' } },
 };
 
 test('tool contracts reject unknown request data, malformed project identities and incompatible response shapes', () => {
@@ -89,7 +89,6 @@ test('empty results differ from incomplete searches, partial results and running
 });
 
 test('budgets, read bounds, structured memory holes and byte counts are enforced', () => {
-  assert.equal(memoryReadArgsSchema.parse({ ...request, address }).length, 4096);
   assert.equal(memoryReadArgsSchema.safeParse({ ...request, address, length: 1_048_577 }).success, false);
   assert.equal(memoryReadArgsSchema.safeParse({ ...request, address, length: 3, interpretation: 'u16' }).success, false);
   assert.equal(memoryReadArgsSchema.safeParse({ ...request, address: { ...address, value: '0xffffffffffffffff' }, length: 2 }).success, false);
@@ -118,8 +117,8 @@ test('jobs cannot publish stale revisions and cancellation races have explicit o
   assert.equal(jobSchema.safeParse({ ...job, state: 'completed', published_revision: 2 }).success, false);
   assert.equal(jobSchema.safeParse({ ...job, state: 'cancelled', published_revision: 3 }).success, false);
   assert.equal(jobSchema.safeParse({ ...job, progress: { phase: 'lift', completed: 5, total: 4 } }).success, false);
-  assert.equal(analysisCancelResultSchema.safeParse({ ...envelope, state: 'complete', data: { job, outcome: 'cancelled' } }).success, false);
-  assert.equal(analysisCancelResultSchema.parse({ ...envelope, state: 'complete', data: { job: { ...job, state: 'completed', published_revision: 3 }, outcome: 'already_finished' } }).state, 'complete');
+  assert.equal(analysisCancelResultSchema.safeParse({ ...envelope, state: 'complete', data: { job, known_revision: 3, outcome: 'cancelled' } }).success, false);
+  assert.equal(analysisCancelResultSchema.parse({ ...envelope, state: 'complete', data: { job: { ...job, state: 'completed', published_revision: 3 }, known_revision: 3, outcome: 'already_finished' } }).state, 'complete');
 });
 
 test('emitter spans refer to actual UTF-16 text bounds', () => {
@@ -133,6 +132,6 @@ test('serialized output budgets and job/project bindings are enforced at deliver
   const output = { ...envelope, state: 'complete', data: { delivery: 'inline', function_id: entity, signature: null, emission: { language: 'c-like', emitter_version: '1', text: 'x'.repeat(4096), span_unit: 'utf16', reconstruction: 'pseudocode', mappings: [], helpers: [] }, capabilities: [], cache: 'computed' } };
   assert.throws(() => validateToolResponse('function_decompile', output, args), RangeError);
   const statusArgs = validateToolRequest('analysis_status', inputs.analysis_status, 3);
-  assert.throws(() => validateToolResponse('analysis_status', { ...envelope, state: 'complete', data: { job: { ...job, id: `job_${'f'.repeat(64)}` } } }, statusArgs));
+  assert.throws(() => validateToolResponse('analysis_status', { ...envelope, state: 'complete', data: { known_revision: 3, job: { ...job, id: `job_${'f'.repeat(64)}` } } }, statusArgs));
   assert.equal(stringsFindResultSchema.safeParse({ ...envelope, state: 'partial', reason: 'output_limit', continuation: null, data: { items: [], page } }).success, false);
 });

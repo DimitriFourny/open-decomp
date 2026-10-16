@@ -13,6 +13,9 @@
       "import": "./dist/src/index.js"
     }
   },
+  "bin": {
+    "open-decomp": "./dist/src/mcp/stdio.js"
+  },
   "files": [
     "dist/src",
     "vendor",
@@ -23,14 +26,19 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "check": "npm run typecheck && npm test && npm run build",
-    "smoke": "node dist/scripts/smoke.js"
+    "smoke": "node dist/scripts/smoke.js",
+    "mcp": "node dist/src/mcp/stdio.js",
+    "smoke:mcp": "node dist/scripts/mcp-smoke.js"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.1",
     "@types/node": "24.19.2",
     "tsx": "4.20.6",
     "typescript": "5.9.3"
   },
   "dependencies": {
+    "@modelcontextprotocol/core": "2.3.1",
+    "@modelcontextprotocol/server": "2.3.1",
     "gecko-profiler-demangle": "0.4.0",
     "iced-x86": "1.21.0",
     "llvm-msvc-demangle": "0.2.0",

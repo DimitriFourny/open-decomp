@@ -145,6 +145,17 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
         } });
         context.checkpoint(0);
         if (work.request.kind === 'import') {
+          const before = db.snapshot();
+          if (work.request.resume_only) {
+            if (before.images.length > 1) fail('invalid_input', 'Import repair cannot select a multi-image project');
+            const prior = before.images[0];
+            if (prior) {
+              let loaded = false;
+              try { db.readLoadedImage(prior.image_id, prior.selected_slice_id); loaded = true; }
+              catch (error) { if (!(error instanceof OperationError) || error.code !== 'not_found') throw error; }
+              if (loaded) fail('invalid_input', 'Import repair cannot replace a loaded image');
+            }
+          }
           if (db.snapshot().images.length >= MAX_IMAGES) fail('resource_limit', 'Project image limit reached');
           if (realpathSync(work.request.source_path) !== work.request.source_path) fail('permission_denied', 'Authorized source path changed before child read');
           const fd = openSync(work.request.source_path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
@@ -162,6 +173,9 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
           const sha256 = contentHash(raw), bytes = new ImmutableBytes(raw), image_id = imageIdentity(sha256);
           const loader = raw[0] === 0x4d && raw[1] === 0x5a ? peLoader : new MachOLoader();
           const image = loader.load({ bytes, sha256, image_id, slice_id: work.request.slice_id }, context);
+          if (work.request.resume_only && before.images.some(prior => prior.sha256 !== sha256 || prior.selected_slice_id !== image.selected_slice_id)) {
+            fail('invalid_input', 'Import repair bytes and selected slice must match the saved snapshot');
+          }
           context.checkpoint(0);
           await db.importImage({ bytes, sha256, selected_slice_id: image.selected_slice_id });
           job = { ...job, progress: { phase: 'image_snapshot', completed: 1, total: 2 } }; db.saveJob(job);
@@ -189,7 +203,12 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
           else { context.checkpoint(0); job = { ...job, state: 'completed', progress: { phase: 'complete', completed: 1, total: 1 } }; db.saveJob(job); }
         }
       }
-    } catch (error) { result = undefined; job = saveFailure(job, error); }
+    } catch (error) {
+      result = undefined; job = saveFailure(job, error);
+      // Import may have saved immutable bytes before failing metadata preparation.
+      // Acknowledge that revision without pretending the failed job completed.
+      if (work.request.kind === 'import') result = await describeProject(db);
+    }
     await send({ kind: 'job', id: command.id, job: encodeJob(job), ...(result === undefined ? {} : { result }) });
   };
   const decoder = new FrameDecoder(value => {

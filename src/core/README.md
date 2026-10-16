@@ -34,23 +34,25 @@ Decoder metadata preserves raw x86 prefix bytes and separates architectural RFLA
 
 All objects reject extra keys. All operations except `project_open` identify a project and snapshot revision; `annotations_apply` instead supplies `expected_revision`. Every request has a validated work/output budget. Search/list views have a page limit and optional cursor. Query filters use exact/prefix/contains text matching, not arbitrary regular expressions or code.
 
-- `project_open`: import via authorized input/project paths and optional selected slice ID, or resume via project path. Returns an image summary and resume status. Ambiguous-slice diagnostics can carry structured choices.
-- `project_close`: revision plus running-job policy (`reject`, `wait`, `cancel`); returns persisted revision and closed status.
-- `binary_info`: image and selected `summary`, `headers`, `sections`, `mappings`, `entry_points`, `relocations`, `hints`, or `capabilities` view. Each non-summary view is independently paged.
+- `project_open`: import via authorized input/project paths and optional selected slice ID, or resume via project path. Imports default to a durable `queued` result; `wait: true` requests the final image summary. Explicit import `mode: "resume"` repairs only an empty project or one unfinished image with matching bytes/slice. Ordinary resume never retries: unfinished projects return `partial` / `incomplete_index` with `data.image: null`, permitting saved-job inspection and close before repair.
+- `project_close`: revision plus running-job policy (`reject`, `wait`, `cancel`); returns persisted revision and closed status. The precondition checks the acknowledged snapshot. Waiting/cancelling may reveal a newer already-committed revision; successful close reports that reconciled revision, not stale cached metadata.
+- `binary_info`: image and selected `summary`, `headers`, `sections`, `mappings`, `entry_points`, `relocations`, `hints`, or `capabilities` view. Each non-summary view is independently paged. Omit `image_id` only when the requested snapshot contains exactly one image; absent/ambiguous images fail explicitly.
 - `symbols_find`: image, symbol/import/export kinds, name query, optional exact address.
 - `strings_find`: image, query, encodings, candidate/referenced filter, optional location range.
 - `functions_find`: image, optional stable ID, query, address, boundary certainty and analysis status.
 - `function_get`: stable function ID and metadata/disassembly/CFG view; metadata includes signature, ranges, annotations and lineage. Disassembly carries explicit gaps.
-- `function_decompile`: function ID, conservative analysis and C-like presentation options. Inline delivery returns pseudocode, signature, statement spans, original instruction/range mappings, capabilities and cache status. Oversized delivery is explicitly `partial` / `output_limit` with `data.delivery: "artifact"` and a matching published artifact handle; no empty or truncated emission is labeled complete.
+- `function_decompile`: function ID, conservative analysis and C-like presentation options. Defaults to a durable `queued` result; `wait: true` awaits inline or artifact delivery and is not part of cache identity. Inline data contains pseudocode, signature, statement spans, original instruction/range mappings, capabilities and cache status. Oversized delivery is explicitly `partial` / `output_limit` with `data.delivery: "artifact"` and a matching published artifact handle; no empty or truncated emission is labeled complete.
 - `xrefs_get`: stable entity or explicit address, direction, reference kinds, unresolved-edge inclusion.
 - `memory_read`: address, byte length, endian, and bytes/integer/float/pointer interpretation. Typed values retain hexadecimal machine bits (including floating-point bit patterns). Segments distinguish real bytes, zero-fill and unmapped holes; partial reads require a continuation address.
 - `annotations_apply`: atomic set/retract/remove edits with stable annotation IDs, author, user/LLM origin and assertion status. Returns one revision increment and conservative project-wide derived-result invalidation. An annotation ID occurs at most once in a batch.
-- `analysis_status`: project revision and job ID; returns input revision, lifecycle/progress and artifact references, including old-revision jobs.
-- `analysis_cancel`: same handle; explicitly distinguishes completed cancellation, requested cancellation and work already finished.
+- `analysis_status`: project revision and job ID; returns the durable job and `known_revision`, the last acknowledged project revision. A completed import may have its final snapshot acknowledgement briefly in flight. Imports and annotations do not use the artifact-only `published_revision` field.
+- `analysis_cancel`: same handle and acknowledged revision; explicitly distinguishes completed cancellation, requested cancellation and work already finished.
 
 Each result includes schema version, project/revision, backend/component versions, options, budget, per-layer coverage, diagnostics, evidence and artifacts. A component version is `null` when that component has not been loaded/run; do not invent a version. `complete` means the requested bounded operation finished, not that all architecture semantics are supported. Per-layer coverage remains authoritative. `empty` is reserved for a fully indexed, exhausted query with zero items. `partial`, `unsupported`, `failed`, `cancelled`, `queued` and `running` are separate states. Stale-revision failures retain the requested snapshot in the envelope and report the current revision separately.
 
-`exportToolJsonSchemas()` produces draft-2020-12 schemas with object roots suitable for later MCP registration. JSON Schema covers structural constraints; Zod refinements additionally enforce cross-field invariants (ranges, job publication, empty/partial distinctions, spans, revision increments). Call `validateToolRequest` before work and `validateToolResponse` before transport delivery; the latter checks snapshot/job bindings and actual UTF-8 output size.
+`exportToolJsonSchemas()` produces draft-2020-12 schemas with object roots used by MCP registration. JSON Schema covers structural constraints; Zod refinements additionally enforce cross-field invariants (ranges, job publication, empty/partial distinctions, spans, revision increments). Call `validateToolRequest` before work and `validateToolResponse` before transport delivery; the latter checks snapshot/job bindings and actual UTF-8 output size.
+
+`QueryService.execute()` transfers ownership of asynchronous work to the project after durable admission. Its request signal/progress callbacks apply only until the response returns; ending an MCP exchange cannot cancel an already-returned job. Use ordinary `analysis_status` / `analysis_cancel` afterward. `QueryService.submit()` exposes the lower-level ticket with full-lifecycle signal/progress handling. Fixed-width admission envelopes fit the minimum 1,024-byte output budget; analysis publication and artifact delivery have separate output checks.
 
 ## Defaults and bounds
 
@@ -101,3 +103,22 @@ Derived-only annotations require analysis published at the current revision and 
 
 Worker recovery tests use a private, job-ID-scoped filesystem gate to block the actual child event loop on both operating systems. Kill, cancellation, deadline, queue, commit-before-response and reopen checks no longer depend on Unix stop signals; production workers have no client-selectable gate.
 Outer test watchdogs are distinct from service deadlines: the three multi-owner lifecycle scenarios allow 120 seconds and the oversized-frame process test allows 30 seconds after measured Windows CPU-emulation timeouts. The operation budgets and the real 200 ms blocked-worker deadline assertion are unchanged.
+
+## Local MCP launch and artifact access
+
+Use Node 24 LTS; integration verification pins 24.22.0. After `npm ci` and `npm run build`:
+
+```sh
+npm run mcp -- --root /absolute/input-directory --root /absolute/project-directory
+npm run smoke:mcp
+```
+
+The compiled entry is `dist/src/mcp/stdio.js`; the package binary is `open-decomp`. At least one existing authorized root is required. `--root` is repeatable; `--max-workers` accepts 1–32 and `--max-queued` accepts 0–1,024. No cwd/home root is implicit. Help, version and diagnostics go to stderr; stdout is SDK protocol traffic only. EOF and catchable termination signals cancel/reap project owners. Closing the owned stdin descriptor also releases a writer blocked on oversized input.
+
+All 13 tools expose concrete schemas, structured content and readable JSON text. Large inline decompilations use `projectDecompilationArtifactResult`, the same projection as cache delivery: original options/budgets and semantic completeness remain in the published full artifact. The delivery envelope explicitly reports `output_limit`. Tool/resource wrappers are bounded to 2 MiB; arbitrary non-analysis responses that cannot fit return a delivery error, never silent truncation. A mutation may already have committed when delivery fails: inspect the durable revision/job rather than replaying it.
+
+Published handles have resource links and the template `open-decomp://artifact/{project_id}/{revision}/{artifact_id}?offset={offset}&length={length}`. Offset is hexadecimal; length is at most 524,288 bytes. Resource `_meta[\"open-decomp/artifact\"]` retains the exact handle, offset, consumed length, next offset/URI and encoding. JSON/text pages preserve UTF-8 scalar boundaries and never exceed the requested byte allowance; use length ≥4 to fit every scalar. Other media uses explicit base64. Resource access resolves IDs through the owning worker, never filesystem paths. Raw URI syntax, project, revision and stored hash are checked.
+
+The SDK owns framing and protocol negotiation. Its pinned stdio implementation discards non-JSON lines; invalid JSON-RPC objects and oversized buffered input trigger bounded stderr diagnostics and shutdown. Target strings/names/notes remain untrusted data. Child processes are fault containment, not an OS sandbox; they do not execute targets, load target libraries or fetch embedded URLs.
+
+`scripts/mcp-smoke.ts` drives the compiled server with the official SDK client and no optional progress/task extensions. `--server-entry` and `--fixtures` select installed-entry verification inputs. The workflow covers both architectures with symbol-bearing and stripped fixtures, navigation, mappings/evidence, asynchronous jobs, artifact paging/hash checks, annotations/retractions, stale revisions, cache invalidation and close/resume.

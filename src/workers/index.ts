@@ -78,10 +78,18 @@ export class ProjectWorkerPool {
   async authorize(path: string, create = false): Promise<string> {
     const requested = resolve(path);
     let canonical: string;
-    try { canonical = await realpath(requested); }
-    catch (error) {
-      if (!create || !(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') throw error;
-      canonical = resolve(await realpath(dirname(requested)), basename(requested));
+    try {
+      try { canonical = await realpath(requested); }
+      catch (error) {
+        if (!create || !(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') throw error;
+        canonical = resolve(await realpath(dirname(requested)), basename(requested));
+      }
+    } catch (error) {
+      const code = error instanceof Error && 'code' in error ? error.code : undefined;
+      if (code === 'ENOENT') throw failure('not_found', 'Requested path or its parent does not exist');
+      if (code === 'EACCES' || code === 'EPERM') throw failure('permission_denied', 'Requested path is not accessible');
+      if (code === 'ENOTDIR' || code === 'ELOOP') throw failure('invalid_input', 'Requested path has an invalid directory or symlink chain');
+      throw error;
     }
     if (!this.#roots.some(root => { const part = relative(root, canonical); return part === '' || (!isAbsolute(part) && part !== '..' && !part.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)); })) throw failure('permission_denied', 'Path is outside host-authorized roots');
     return canonical;

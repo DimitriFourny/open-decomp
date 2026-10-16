@@ -90,7 +90,7 @@ test('artifact-only delivery is bounded before publication and later inline hits
   assert.equal(first.result.state, 'partial'); assert.ok('data' in first.result);
   assert.equal(first.result.data.delivery, 'artifact');
   assert.ok(Buffer.byteLength(JSON.stringify(first.result)) <= 4096);
-  const responseScope = { project_id: p.state.store.project_id, revision: 2, function_id: p.fn.id, options: p.identity.options, budget: p.identity.budget };
+  const responseScope = { project_id: p.state.store.project_id, revision: 2, function_id: p.fn.id, wait: true, options: p.identity.options, budget: p.identity.budget };
   validateToolResponse('function_decompile', first.result, responseScope);
   assert.ok(first.result.state === 'partial');
   const { reason: _reason, continuation: _continuation, ...withoutPartial } = first.result;

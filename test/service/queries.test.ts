@@ -3,7 +3,7 @@ import { test, type TestContext } from 'node:test';
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { DEFAULT_BUDGET, newIdentity, type ResultEnvelope, type ToolInput } from '../../src/core/index.js';
+import { DEFAULT_BUDGET, newIdentity, type ResultEnvelope, type ToolInput, type ToolResult } from '../../src/core/index.js';
 import { QueryService } from '../../src/service/queries/index.js';
 import type { WorkerPoolOptions } from '../../src/workers/index.js';
 import { runtimeBytes } from '../metadata/fixture.js';
@@ -13,6 +13,11 @@ const fixtures = resolve('fixtures/bin');
 function data<T>(result: ResultEnvelope<T>): T {
   assert.ok('data' in result, JSON.stringify(result));
   return result.data;
+}
+function openedImage(result: ToolResult<'project_open'>) {
+  const image = data(result).image;
+  assert.ok(image, 'Expected a ready loaded image, not an unfinished import');
+  return image;
 }
 async function setup(t: TestContext, options: Partial<WorkerPoolOptions> = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-queries-')));
@@ -28,8 +33,8 @@ for (const fixture of [
   { name: 'corpus-stripped.dll', architecture: 'x86_64', entry: 0x180001200n, arithmetic: 0x180001030n, instructions: 4, magic: '4d5a' },
 ]) test(`real child ${fixture.name}: strings -> references -> function -> CFG/disassembly/bytes and reopen`, { timeout: 60000 }, async t => {
   const { root, service } = await setup(t), projectPath = join(root, 'project');
-  const opened = await service.execute('project_open', { source: { kind: 'import', input_path: join(fixtures, fixture.name), project_path: projectPath } });
-  const image = data(opened).image;
+  const opened = await service.execute('project_open', { wait: true, source: { kind: 'import', input_path: join(fixtures, fixture.name), project_path: projectPath } });
+  const image = openedImage(opened);
   assert.equal(image.target.architecture, fixture.architecture);
   assert.equal(opened.revision, 2);
   assert.ok(opened.project_id);
@@ -100,7 +105,7 @@ for (const fixture of [
   assert.equal(data(closed).persisted_revision, before);
   const resumed = await service.execute('project_open', { source: { kind: 'resume', project_path: projectPath } });
   assert.equal(resumed.project_id, scope.project_id); assert.equal(resumed.revision, before);
-  assert.equal(data(resumed).image.id, image.id);
+  assert.equal(openedImage(resumed).id, image.id);
   const persisted = data(await service.execute('strings_find', { ...scope, query: { text: 'open-decomp trusted fixture v1', match: 'exact' } }));
   assert.deepEqual(persisted.items, strings.items);
   const reopenedFunction = data(await service.execute('function_get', { project_id: scope.project_id, revision: scope.revision, function_id: reference.from_function }));
@@ -116,8 +121,8 @@ for (const fixture of [
   { name: 'pe-x86_64-symbols.exe', imported: 'fixture_check', instruction: 0x140001004n },
 ]) test(`real child ${fixture.name}: native import navigation and fixed-revision pagination`, { timeout: 60000 }, async t => {
   const { root, service } = await setup(t);
-  const opened = await service.execute('project_open', { source: { kind: 'import', input_path: join(fixtures, fixture.name), project_path: join(root, 'project') } });
-  const image = data(opened).image, scope = { project_id: opened.project_id!, revision: opened.revision!, image_id: image.id };
+  const opened = await service.execute('project_open', { wait: true, source: { kind: 'import', input_path: join(fixtures, fixture.name), project_path: join(root, 'project') } });
+  const image = openedImage(opened), scope = { project_id: opened.project_id!, revision: opened.revision!, image_id: image.id };
   const imports = data(await service.execute('symbols_find', { ...scope, kinds: ['import'], query: { text: fixture.imported, match: 'exact', case_sensitive: true } }));
   const references = [];
   for (const item of imports.items) {
@@ -167,8 +172,8 @@ for (const fixture of [
 
 test('real child memory reads preserve full-width typed bits, zero-fill, holes and bounded continuation', { timeout: 60000 }, async t => {
   const { root, service } = await setup(t);
-  const opened = await service.execute('project_open', { source: { kind: 'import', input_path: join(fixtures, 'corpus-symbols.dll'), project_path: join(root, 'project') } });
-  const image = data(opened).image, scope = { project_id: opened.project_id!, revision: opened.revision!, image_id: image.id };
+  const opened = await service.execute('project_open', { wait: true, source: { kind: 'import', input_path: join(fixtures, 'corpus-symbols.dll'), project_path: join(root, 'project') } });
+  const image = openedImage(opened), scope = { project_id: opened.project_id!, revision: opened.revision!, image_id: image.id };
   const mappings = data(await service.execute('binary_info', { ...scope, view: 'mappings' }));
   if (mappings.view !== 'mappings') assert.fail('Wrong binary view');
   const zero = mappings.items.find(item => BigInt(item.memory_size) > BigInt(item.file_size));
@@ -196,8 +201,8 @@ test('real child memory reads preserve full-width typed bits, zero-fill, holes a
 
 test('committed annotation revisions and future-revision rejection keep job controls responsive with a stopped owner', { timeout: 120000 }, async t => {
   const { root, service } = await setup(t, { entry_point: new URL(import.meta.url.endsWith('.ts') ? './pause-query.ts' : './pause-query.js', import.meta.url), cancel_grace_ms: 10 });
-  const opened = await service.execute('project_open', { source: { kind: 'import', input_path: join(fixtures, 'pe-x86_64-symbols.exe'), project_path: join(root, 'project') } });
-  const scope = { project_id: opened.project_id!, revision: opened.revision!, image_id: data(opened).image.id };
+  const opened = await service.execute('project_open', { wait: true, source: { kind: 'import', input_path: join(fixtures, 'pe-x86_64-symbols.exe'), project_path: join(root, 'project') } });
+  const scope = { project_id: opened.project_id!, revision: opened.revision!, image_id: openedImage(opened).id };
   const sections = data(await service.execute('binary_info', { ...scope, view: 'sections' }));
   assert.ok(sections.view === 'sections');
   const edited = data(await service.execute('annotations_apply', { project_id: scope.project_id, expected_revision: scope.revision, author: 'control-regression', origin: 'user', edits: [
@@ -232,9 +237,9 @@ test('committed annotation revisions and future-revision rejection keep job cont
 test('lost annotation responses preserve one committed revision and never retry the mutation', { timeout: 120000 }, async t => {
   const { root, service } = await setup(t, { entry_point: new URL(import.meta.url.endsWith('.ts') ? './pause-annotation.ts' : './pause-annotation.js', import.meta.url), cancel_grace_ms: 10 });
   const project_path = join(root, 'project');
-  const opened = await service.execute('project_open', { source: { kind: 'import', input_path: join(fixtures, 'pe-x86_64-symbols.exe'), project_path } });
+  const opened = await service.execute('project_open', { wait: true, source: { kind: 'import', input_path: join(fixtures, 'pe-x86_64-symbols.exe'), project_path } });
   const scope = { project_id: opened.project_id!, revision: opened.revision! };
-  const fn = data(await service.execute('functions_find', { ...scope, image_id: data(opened).image.id })).items[0]!;
+  const fn = data(await service.execute('functions_find', { ...scope, image_id: openedImage(opened).id })).items[0]!;
   const id = newIdentity('annotation');
   let started!: (job: string) => void;
   const running = new Promise<string>(resolve => { started = resolve; });
@@ -259,8 +264,8 @@ test('lost annotation responses preserve one committed revision and never retry 
 
 for (const [file, fragment] of [['objc-cxx.dylib', 'fixture::bar'], ['metadata.dll', 'fixture::bar'], ['swift.dylib', 'FixtureMetadata.metadataSum']] as const) test(`real child metadata ${file}: native and decorated names remain searchable`, { timeout: 60000 }, async t => {
   const { root, service } = await setup(t);
-  const opened = await service.execute('project_open', { source: { kind: 'import', input_path: resolve('test/metadata/fixtures', file), project_path: join(root, 'project') } });
-  const scope = { project_id: opened.project_id!, revision: opened.revision!, image_id: data(opened).image.id };
+  const opened = await service.execute('project_open', { wait: true, source: { kind: 'import', input_path: resolve('test/metadata/fixtures', file), project_path: join(root, 'project') } });
+  const scope = { project_id: opened.project_id!, revision: opened.revision!, image_id: openedImage(opened).id };
   const decorated = data(await service.execute('symbols_find', { ...scope, kinds: ['symbol', 'export'], query: { text: fragment } }));
   const labels = decorated.items.map(item => item.kind === 'symbol' ? item.symbol : item.kind === 'export' ? item.export : item.import);
   const named = labels.find(item => item.original_name && item.display_name?.includes(fragment));
@@ -306,8 +311,8 @@ test('real child discovery retains truncated entry gaps without sweeping through
   pe[rawOffset + rawSize - 1] = 0x0f;
   for (const [index, bytes, available] of [[0, macho.bytes.subarray(0, -2), 2], [1, pe, 1]] as const) {
     const source = join(root, `truncated-${index}`); await writeFile(source, bytes);
-    const opened = await service.execute('project_open', { source: { kind: 'import', input_path: source, project_path: join(root, `project-${index}`) } });
-    const image = data(opened).image, address = image.entry_points[0];
+    const opened = await service.execute('project_open', { wait: true, source: { kind: 'import', input_path: source, project_path: join(root, `project-${index}`) } });
+    const image = openedImage(opened), address = image.entry_points[0];
     assert.ok(address);
     const scope = { project_id: opened.project_id!, revision: opened.revision!, image_id: image.id };
     const fn = data(await service.execute('functions_find', { ...scope, address })).items.find(item => item.entry.value === address.value);
