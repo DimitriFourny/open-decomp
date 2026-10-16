@@ -1,6 +1,6 @@
 import { entityIdentity, fingerprint, type AbiProfile, type AbiSignature, type AbiType, type CanonicalValue, type Diagnostic, type Evidence, type OperationContext, type RecoveredType, type Signature } from '../../core/index.js';
 import { bitWidth, expressionOperands, successors, type DataType, type Expression, type Instruction, type RegisterBinding, type SSAForm, type Value } from '../../ir/index.js';
-import { analyzeCalls, type CallAnalysisResult, type ContractObservation, type LocationObservation, type SuppliedCallContract, type SuppliedFunctionContract } from '../calls/index.js';
+import { analyzeCalls, observeImplicitRegisterInputs, type CallAnalysisResult, type ContractObservation, type LocationObservation, type SuppliedCallContract, type SuppliedFunctionContract } from '../calls/index.js';
 import { inspectRegister, inspectStackMemory, type StackSnapshot } from '../stack/index.js';
 import { AnalysisBudget } from '../ssa/budget.js';
 import { SourceLayouts, typeKey } from './layout.js';
@@ -39,7 +39,7 @@ export function recoverTypes(input: SSAForm, abi: AbiProfile, context: Operation
     const diagnostics: Diagnostic[] = [], conflicts: TypeConflict[] = [];
     const evidence = new Map<string, Evidence>();
     const records = new Map<string, SuppliedTypeRecord[]>();
-    const layouts = new SourceLayouts(records, budget);
+    const layouts = new SourceLayouts(records, budget, abi.layout);
     const values = new Map<string, Value>(), nodes = new Map<string, Instruction>();
     const subjects = new Set<string>([input.id]);
     const typeSubjects = new Set<string>();
@@ -93,7 +93,7 @@ export function recoverTypes(input: SSAForm, abi: AbiProfile, context: Operation
       const derived_from = [...new Set(parents)].sort();
       if (derived_from.length > 1000) budget.charge(budget.limit + 1);
       const key = `evidence_${fingerprint([options.slice_id, input.id, rule, subject, derived_from, source ? [source.author, source.agent, source.status] : null])}`;
-      if (!evidence.has(key)) evidence.set(key, { id: key, origin: source ? { kind: 'assertion', ...source } : { kind: 'analysis', analyzer: 'source-types', version: '1', rule }, claim: rule, derived_from, conflicts_with: [], revision: options.revision });
+      if (!evidence.has(key)) evidence.set(key, { id: key, origin: source ? { kind: 'assertion', ...source } : { kind: 'analysis', analyzer: 'source-types', version: '2', rule }, claim: rule, derived_from, conflicts_with: [], revision: options.revision });
       return key;
     };
     const addType = (record: SuppliedTypeRecord): void => {
@@ -156,7 +156,7 @@ export function recoverTypes(input: SSAForm, abi: AbiProfile, context: Operation
         bindings.push({ subject_id: annotation.entity_id, type_id: annotation.value.type_id, source: annotation.origin, status: annotation.status, evidence_ids: [proof] });
       } else suppliedSignatures.push({ id: annotation.id, subject_id: annotation.entity_id, signature: annotation.value.value, source: annotation.origin, status: annotation.status, evidence_ids: [proof] });
     }
-    const sourceAbi = (signature: Signature): AbiSignature => ({ returns: layouts.abi(signature.return_type), parameters: signature.parameters.map(parameter => layouts.abi(parameter.type_id)), variadic: signature.variadic, fixed_parameter_count: signature.parameters.length });
+    const sourceAbi = (signature: Signature): AbiSignature => ({ returns: layouts.abi(signature.return_type), parameters: signature.parameters.map(parameter => layouts.abi(parameter.type_id)), variadic: signature.variadic, fixed_parameter_count: signature.parameters.length, argument_list_complete: !signature.variadic });
     const functionContracts: SuppliedFunctionContract[] = [...(options.function_contracts ?? [])];
     const callContracts: SuppliedCallContract[] = [...(options.contracts ?? [])];
     const declarationByContract = new Map<string, SuppliedSignature>();
@@ -258,24 +258,30 @@ export function recoverTypes(input: SSAForm, abi: AbiProfile, context: Operation
       let declaration = supplied ?? declarationByContract.get(observation.contract.id);
       if (!declaration) {
         const signature = observation.contract.signature;
-        // Core Signature cannot encode unknown count. Keep it solely in calls.
-        if (signature.parameters === null) return;
+        // Core Signature records formal parameters, not unknown old-style
+        // prototypes or the anonymous actuals of an observed variadic call.
+        if (signature.parameters === null || signature.prototyped === false) return;
+        const formals = signature.variadic ? signature.parameters.slice(0, signature.fixed_parameter_count) : signature.parameters;
         declaration = { id: observation.contract.id, subject_id, source: 'analysis', status: observation.status, evidence_ids: observation.contract.evidence_ids,
-          signature: { abi: abi.id, return_type: fromAbi(signature.returns, observation.contract.evidence_ids), parameters: signature.parameters.map((type, index) => ({ id: id('parameter', [observation.contract.id, index]), name: null, type_id: fromAbi(type, observation.contract.evidence_ids) })), variadic: signature.variadic, noreturn: observation.contract.noreturn ?? false, evidence_ids: [...observation.contract.evidence_ids] } };
+          signature: { abi: abi.id, return_type: fromAbi(signature.returns, observation.contract.evidence_ids), parameters: formals.map((type, index) => ({ id: id('parameter', [observation.contract.id, index]), name: null, type_id: fromAbi(type, observation.contract.evidence_ids) })), variadic: signature.variadic, noreturn: observation.contract.noreturn ?? false, evidence_ids: [...observation.contract.evidence_ids] } };
       }
       const status = observation.status === 'conflicting' || declaration.status === 'conflicting' ? 'conflicting' : observation.status === 'candidate' ? 'candidate' : declaration.status;
       const current: SuppliedSignature = { ...declaration, subject_id, status };
-      signatures.push({ ...current, abi_state: observation.layout.state });
+      signatures.push({ ...current, abi_state: observation.layout.state, implicit_register_inputs: observation.implicit_register_inputs });
       const call = nodes.get(subject_id);
       const entryBindings = input.register_states.find(row => row.block === input.entry)?.entry ?? [];
       const returnBlock = input.blocks.find(block => block.terminator.id === observation.boundary_id);
       const before = call?.kind === 'call' ? call.register_inputs : entryBindings;
       const after = call?.kind === 'call' ? call.register_outputs : input.register_states.find(row => row.block === returnBlock?.id)?.exit ?? [];
       for (const parameter of observation.parameters) {
-        const type = current.signature.parameters[parameter.index];
-        if (type) for (const location of parameter.locations) bindLocation(location, type.type_id, current, subject_id, before);
+        const formal = current.signature.parameters[parameter.index];
+        const actual = observation.contract.signature.variadic && parameter.index >= observation.contract.signature.fixed_parameter_count
+          ? observation.contract.signature.parameters?.[parameter.index] : undefined;
+        const type_id = formal?.type_id ?? (actual ? fromAbi(actual, observation.contract.evidence_ids) : null);
+        if (type_id) for (const location of parameter.locations) bindLocation(location, type_id, current, subject_id, before);
       }
-      for (const location of observation.returns) bindLocation(location, current.signature.return_type, current, subject_id, after);
+      const returnType = observation.layout.hidden_result ? generated({ kind: 'pointer', bits: 64, to: current.signature.return_type }, current.evidence_ids) : current.signature.return_type;
+      for (const location of observation.returns) bindLocation(location, returnType, current, subject_id, after);
       if (observation.hidden_result) bindLocation(observation.hidden_result, current.signature.return_type, current, subject_id, before);
     };
     for (const observation of calls.function_contracts) consume(observation, input.id);
@@ -297,9 +303,10 @@ export function recoverTypes(input: SSAForm, abi: AbiProfile, context: Operation
       }
       if (declaration.subject_id === input.id && declarationByContract.has(declaration.id) || consumedCallDeclarations.has(declaration)) continue;
       const layout = abi.classifyCall(sourceAbi(declaration.signature));
-      signatures.push({ ...declaration, abi_state: layout.state });
+      const before = node?.kind === 'call' && declaration.status !== 'hypothesis' && declaration.status !== 'candidate' ? stack.snapshots.get(node.id) : undefined;
+      budget.charge(layout.implicit_register_inputs.length);
+      signatures.push({ ...declaration, abi_state: layout.state, implicit_register_inputs: observeImplicitRegisterInputs(layout, before ?? null) });
       if (node?.kind !== 'call' || declaration.status === 'hypothesis' || declaration.status === 'candidate') continue;
-      const before = stack.snapshots.get(node.id);
       if (!before) continue;
       const after: StackSnapshot = { ...before, registers: node.register_outputs.flatMap(binding => { const fact = stack.values.get(binding.value.id); return fact ? [{ register: binding.register, fact }] : []; }) };
       const observe = (location: LocationObservation['location'], snapshot: StackSnapshot): LocationObservation | null => {
@@ -317,7 +324,8 @@ export function recoverTypes(input: SSAForm, abi: AbiProfile, context: Operation
         const observation = observe(location, before), type = declaration.signature.parameters[parameter.index];
         if (observation && type) bindLocation(observation, type.type_id, declaration, node.id, node.register_inputs);
       }
-      for (const location of layout.returns) { const observation = observe(location, after); if (observation) bindLocation(observation, declaration.signature.return_type, declaration, node.id, node.register_outputs); }
+      const returnType = layout.hidden_result ? generated({ kind: 'pointer', bits: 64, to: declaration.signature.return_type }, declaration.evidence_ids) : declaration.signature.return_type;
+      for (const location of layout.returns) { const observation = observe(location, after); if (observation) bindLocation(observation, returnType, declaration, node.id, node.register_outputs); }
       if (layout.hidden_result) { const observation = observe(layout.hidden_result, before); if (observation) bindLocation(observation, declaration.signature.return_type, declaration, node.id, node.register_inputs); }
     }
 

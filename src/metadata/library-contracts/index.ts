@@ -100,11 +100,11 @@ export function recoverLibraryContracts(input: { readonly image: LoadedImage; re
       diagnostics.push({ code: 'resource_limit', severity: 'warning', message: 'Library contract bound reached', evidence_ids: [] });
       break;
     }
-    const id = entityIdentity(image.selected_slice_id, 'library-contract', [imported.id, name, '1']);
-    const proof = `evidence_${fingerprint([id, revision, 'library-declaration-v1'])}`;
+    const id = entityIdentity(image.selected_slice_id, 'library-contract', [imported.id, name, '2']);
+    const proof = `evidence_${fingerprint([id, revision, 'library-declaration-v2'])}`;
     const returns = resolve(declaration.returns, proof), parameters = declaration.parameters.map(([parameter, type], index) => ({ id: entityIdentity(image.selected_slice_id, 'library-parameter', [id, index]), name: parameter, type: resolve(type, proof) }));
     const unsupported = declaration.library === 'swift-core' || declaration.library === 'swift-concurrency';
-    const abi_signature: AbiSignature = { returns: returns.abi_type, parameters: parameters.map(parameter => parameter.type.abi_type), variadic: declaration.variadic === true, fixed_parameter_count: parameters.length, calling_convention: unsupported ? 'unknown' : 'default' };
+    const abi_signature: AbiSignature = { returns: returns.abi_type, parameters: parameters.map(parameter => parameter.type.abi_type), variadic: declaration.variadic === true, fixed_parameter_count: parameters.length, argument_list_complete: declaration.variadic !== true, calling_convention: unsupported ? 'unknown' : 'default' };
     const signature: Signature | null = unsupported ? null : { abi: abi.id, return_type: returns.id, parameters: parameters.map(parameter => ({ id: parameter.id, name: parameter.name, type_id: parameter.type.id })), variadic: declaration.variadic === true, noreturn: declaration.noreturn === true, evidence_ids: [proof] };
     const contract: LibraryContract = { id, import_id: imported.id, library: imported.library, linkage_name: imported.original_name, slot: imported.slot, callable_entry: imported.callable_entry,
       abi_state: unsupported ? 'unsupported' : 'supported', abi_signature, signature, noreturn: declaration.noreturn === true,
@@ -113,7 +113,7 @@ export function recoverLibraryContracts(input: { readonly image: LoadedImage; re
     const index = contracts.length;
     contracts.push(contract);
     semantics.push(fingerprint([name, abi.id, declaration.library, declaration.noreturn === true, declaration.variadic === true]));
-    evidence.push({ id: proof, origin: { kind: 'library', library: imported.library, contract: name, version: '1' }, claim: 'Conditional library declaration from native import identity; no implementation authentication or argument initialization asserted', derived_from: [...imported.evidence_ids], conflicts_with: [], revision });
+    evidence.push({ id: proof, origin: { kind: 'library', library: imported.library, contract: name, version: '2' }, claim: 'Conditional library declaration from native import identity; no implementation authentication or argument initialization asserted', derived_from: [...imported.evidence_ids], conflicts_with: [], revision });
     for (const [role, address] of [['slot', imported.slot], ['callable', imported.callable_entry]] as const) {
       if (address === null) continue;
       const normalized = image.address_map.translate(address, 'va');

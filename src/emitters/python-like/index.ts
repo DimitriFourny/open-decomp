@@ -2,7 +2,7 @@ import type { Emitter, OperationContext } from '../../core/index.js';
 import type { EmissionInput, EmissionResult } from '../model.js';
 import { Renderer } from '../renderer.js';
 
-export const PYTHON_LIKE_EMITTER_VERSION = 'typed-machine-python-like-1';
+export const PYTHON_LIKE_EMITTER_VERSION = 'typed-machine-python-like-2';
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
 
 /** Python-shaped machine pseudocode, never ordinary executable Python. Decoding,

@@ -24,6 +24,48 @@ The DLL is not an empty shell: it contains all semantic functions, exported data
 
 `metadata/*.txt` is captured LLVM 23.1.3 header/section/symbol/export/import/relocation/unwind/debug evidence; `*.disassembly.txt` is independent instruction evidence. These are inspectable text, not assembly parsed by our decompiler. The fixture-only `scripts/fixtures/inspect.ts` populates index facts and is **not** the production loader or its hostile-input policy.
 
+### ELF / System V AMD64 corpus
+
+The independent `elf-manifest.json` indexes LLVM cross-compiled Linux x86-64 inputs without rewriting the historical Mach-O/PE manifest or its pinned recipes. Generate it with the commands below before running ELF tests or the full investigation workflows. Generated artifacts are compiler outputs, not synthesized headers; generation never executes them.
+
+| Output under `bin/` | Format/type | Native interface |
+| --- | --- | --- |
+| `elf-x86_64-symbols` / `elf-x86_64-stripped` | ELF64 ET_EXEC, linked base `0x400000` | Explicit analysis entry `fixture_entry`; dynamic corpus exports and `fixture_external` import |
+| `libcorpus-elf-x86_64-symbols.so` / `libcorpus-elf-x86_64-stripped.so` | ELF64 ET_DYN | All existing `fixture_*` scalar/control/stack/memory/call/FP/vector functions and data; `fixture_external` import |
+| `libfixture-native.so` | ELF64 ET_DYN, self-authored dependency | Exports `fixture_external(value) = value ^ 0x1234` |
+
+Both main images record `DT_NEEDED libfixture-native.so`; that does not by itself attribute an individual undefined symbol to a library. Their stripped variants remove static/debug tables while retaining the dynamic interfaces. `fixture_entry` is intentionally **not** runnable Linux process startup: no CRT, syscalls, exit routine, kernel behavior or dynamic-linker execution is claimed. Shared-library internal corpus calls bind locally (`-Bsymbolic`) so source-call oracles have stable linked targets; the external native import remains dynamic.
+
+`code/elf-x86_64/fixture_*.bin` is separate from PE `code/x86_64/`. ELF function extents come from `STT_FUNC` values and sizes, not next-symbol guesses or parsed assembly. `metadata/` holds independent LLVM header/section/program-header/symbol/dynamic/relocation reports and raw-byte disassembly. The ELF manifest pins sources, recipes, tools/versions/hashes, commands, image bytes, reports and ranges. Its workflow addresses are linked VAs derived from those compiler symbols, not hardcoded offsets or runtime ASLR guesses.
+
+`test/fixtures/elf-manifest.test.ts` checks provenance, real executable/shared stripping, native interfaces, zero-fill and exact code ranges. `elf-semantics.test.ts` decodes and lifts the compiler bytes through the normal ELF/x86/SysV pipeline, evaluates the existing independent `expected.json` cases (including FP/vector, stack and physical-state call oracles), and checks observable results/memory rather than instruction counts or emitted spelling. This is test-owned IR evaluation, **not execution of the target binary**. MCP full investigations cover executable/shared symbols/stripped variants, explicit format/ABI and native-header checks, annotations/retraction, both emitters, restarted and reopened caches, and standard tools only. Installed acceptance copies and hash-checks both manifests' inputs outside the source checkout.
+
+The dedicated `test/abi/sysv-amd64/fixtures/abi.c` corpus independently covers INTEGER/SSE banks, rollback on exhaustion of either bank, ninth-SSE/seventh-INTEGER stack arguments, INTEGER/SSE/mixed/reversed aggregate returns, hidden large-result buffers, red-zone-compatible negative accesses versus explicit larger frames, variadic AL, and 80-bit `long double` with sixteen-byte object stride. The compiler-evidence test feeds raw ELF bytes to the decoder; formatted LLVM text is never decoder input. Pointer/storage evidence does not claim x87 reconstruction.
+
+ELF support requires ELF64LE EM_X86_64 ET_EXEC/ET_DYN, OSABI 0/3, bounded valid program/section tables and unique PT_LOAD mappings. Sectionless images, extended counts/indexes, ELF DWARF, PLT callable-entry recovery and runtime dependency/relocation/ASLR/IFUNC-result guessing are outside this subset. Native symbol-bearing inputs therefore still have unavailable debug types/signatures: aggregate analysis/reconstruction may truthfully be partial even when decode/lift/ABI are complete and every reconstruction unit/instruction mapping is emitted. SysV variadic declarations establish only a fixed prefix, not complete actual arguments; AL is an upper bound on vector-register use, not proof of arity.
+
+Current macOS proof passed strict checking, 852 tests and build, compiled stdio investigations for all eight fixtures/both dialects, and real compiled HTTP/HTTPS investigations for all four ELF variants with both dialects, annotation/cache/hash-paging and full process restart. Exact evidence is in [RELEASE-VERIFICATION.md](../RELEASE-VERIFICATION.md). This is static development-checkout evidence, not Linux execution, current Windows-host qualification or new installed-artifact acceptance.
+
+Generate only these SDK/CRT-free ELF inputs from the repository root with LLVM Clang/lld and repository Node/tsx dependencies:
+
+```sh
+LLVM_BIN=/opt/homebrew/opt/llvm/bin \
+  node --import tsx scripts/fixtures/generate-elf.ts
+LLVM_BIN=/opt/homebrew/opt/llvm/bin \
+  node --import tsx test/abi/sysv-amd64/fixtures/generate.ts
+```
+
+`ELF_CC` and `LD_LLD` optionally override the compiler/linker; `LLVM_BIN` selects `clang`, `ld.lld`, `llvm-readobj`, `llvm-objdump`, and `llvm-objcopy`. No Linux SDK/headers/libraries, network, host Linux installation or target execution is required. Both generators use explicit target/entry/soname, disabled build IDs, stable source mappings and temporary-object cleanup. Byte identity is promised only for recorded artifacts/toolchains, not across LLVM versions. The first command writes the five images above, `fixtures/elf-manifest.json`, `fixtures/code/elf-x86_64/*.bin`, and corresponding `fixtures/metadata/<image>.txt` / `<image>.disassembly.txt`. The second writes `test/abi/sysv-amd64/fixtures/{abi.so,abi.disassembly.txt,abi.metadata.txt,evidence.json}`. Neither generator is part of builds or normal tests.
+
+After intentional generation, the coordinator runs focused provenance, semantic and ABI evidence checks:
+
+```sh
+node --import tsx --test test/fixtures/elf-*.test.ts test/abi/sysv-amd64/compiler-evidence.test.ts
+```
+
+Compiled acceptance remains `node dist/scripts/release-acceptance.js`; it now investigates each supported format/ABI rather than treating all x86-64 inputs as PE. No ELF native-execution mode was added to `execute-trusted.ts`.
+
+
 ### Loader-independent function inputs
 
 `code/arm64/fixture_*.bin` and `code/x86_64/fixture_*.bin` contain 16 compiler function ranges per architecture. `manifest.codeRanges` binds each raw file to its parent image, source symbol, VA, file offset, byte length and hash. They can be consumed immediately by decoder/lifter tests with no image loader or sibling checkout. Symbol-to-next-symbol extents can contain compiler alignment padding, especially x86 NOP/INT3 bytes; these bytes are not proof of reachable instructions. Use CFG reachability, do not call recognition counts whole-function semantic conformance.

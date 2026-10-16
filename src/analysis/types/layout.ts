@@ -1,4 +1,4 @@
-import { fingerprint, type AbiType, type CanonicalValue, type RecoveredType } from '../../core/index.js';
+import { fingerprint, type AbiType, type CanonicalValue, type DataLayout, type RecoveredType } from '../../core/index.js';
 import type { AnalysisBudget } from '../ssa/budget.js';
 import type { SuppliedTypeRecord } from './model.js';
 
@@ -11,7 +11,7 @@ export function typeKey(type: RecoveredType): string {
  * ordinary; cyclic by-value graphs, missing layouts and conflicting definitions
  * remain unknown. No alignment is inferred for structures or opaque objects. */
 export class SourceLayouts {
-  constructor(readonly records: Map<string, SuppliedTypeRecord[]>, readonly budget: AnalysisBudget) {}
+  constructor(readonly records: Map<string, SuppliedTypeRecord[]>, readonly budget: AnalysisBudget, readonly layout: DataLayout) {}
 
   definition(id: string, established = false): RecoveredType | null {
     const all = this.records.get(id) ?? [];
@@ -33,6 +33,7 @@ export class SourceLayouts {
     const type = this.definition(id);
     if (!type) return null;
     if (type.kind === 'void') return 0n;
+    if (type.kind === 'float' && type.bits === 80) return this.layout.long_double_bits === 80 ? BigInt(this.layout.long_double_storage_bits / 8) : null;
     if (type.kind === 'integer' || type.kind === 'float' || type.kind === 'pointer') return type.bits % 8 === 0 ? BigInt(type.bits / 8) : null;
     if (type.kind === 'unknown' || type.kind === 'structure') return type.size;
     active.add(id);
@@ -74,7 +75,7 @@ export class SourceLayouts {
     if (!type) return { kind: 'unknown', size: null };
     switch (type.kind) {
       case 'void': case 'integer': return type;
-      case 'float': return type.bits === 80 ? { kind: 'unknown', size: 10n } : { kind: 'float', bits: type.bits };
+      case 'float': return { kind: 'float', bits: type.bits };
       case 'pointer': return { kind: 'pointer' };
       case 'unknown': return type;
       case 'vector': {

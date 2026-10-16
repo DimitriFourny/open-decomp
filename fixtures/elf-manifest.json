@@ -1,0 +1,2403 @@
+{
+  "schemaVersion": 1,
+  "license": "MIT",
+  "target_execution": "never executed; offline static analysis only",
+  "tools": {
+    "clang": {
+      "path": "/opt/homebrew/opt/llvm/bin/clang",
+      "version": "Homebrew clang version 23.1.3\nTarget: arm64-apple-darwin27.0.0\nThread model: posix\nInstalledDir: /opt/homebrew/Cellar/llvm/23.1.3_1/bin",
+      "sha256": "efdad95de9f1ee4863117fd89a89bdb1a2389298a6d3c444e042aadf92d95448"
+    },
+    "lld": {
+      "path": "/opt/homebrew/bin/ld.lld",
+      "version": "Homebrew LLD 23.1.3 (compatible with GNU linkers)",
+      "sha256": "3854f9bfaafa2913757829339364be48f0067a60efefe3d5c6eb21f2d716a3ba"
+    },
+    "readobj": {
+      "path": "/opt/homebrew/opt/llvm/bin/llvm-readobj",
+      "version": "Homebrew LLVM version 23.1.3\n  Optimized build.",
+      "sha256": "ac384fe23158f8fa7e2c4ac07e6775d8c10c706edcecc2d4e59608a2efe5b0d6"
+    },
+    "objdump": {
+      "path": "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+      "version": "Homebrew LLVM version 23.1.3\n  Optimized build.\n\n\n  Registered Targets:\n    aarch64     - AArch64 (little endian)\n    aarch64_32  - AArch64 (little endian ILP32)\n    aarch64_be  - AArch64 (big endian)\n    amdgcn      - legacy name for amdgpu\n    amdgpu      - AMDGPU gfx6+\n    arm         - ARM\n    arm64       - ARM64 (little endian)\n    arm64_32    - ARM64 (little endian ILP32)\n    armeb       - ARM (big endian)\n    avr         - Atmel AVR Microcontroller\n    bpf         - BPF (host endian)\n    bpfeb       - BPF (big endian)\n    bpfel       - BPF (little endian)\n    hexagon     - Hexagon\n    lanai       - Lanai\n    loongarch32 - 32-bit LoongArch\n    loongarch64 - 64-bit LoongArch\n    mips        - MIPS (32-bit big endian)\n    mips64      - MIPS (64-bit big endian)\n    mips64el    - MIPS (64-bit little endian)\n    mipsel      - MIPS (32-bit little endian)\n    msp430      - MSP430 [experimental]\n    nvptx       - NVIDIA PTX 32-bit\n    nvptx64     - NVIDIA PTX 64-bit\n    ppc32       - PowerPC 32\n    ppc32le     - PowerPC 32 LE\n    ppc64       - PowerPC 64\n    ppc64le     - PowerPC 64 LE\n    r600        - AMD GPUs HD2XXX-HD6XXX\n    riscv32     - 32-bit RISC-V\n    riscv32be   - 32-bit big endian RISC-V\n    riscv64     - 64-bit RISC-V\n    riscv64be   - 64-bit big endian RISC-V\n    sparc       - Sparc\n    sparcel     - Sparc LE\n    sparcv9     - Sparc V9\n    spirv       - SPIR-V Logical\n    spirv32     - SPIR-V 32-bit\n    spirv64     - SPIR-V 64-bit\n    systemz     - SystemZ\n    thumb       - Thumb\n    thumbeb     - Thumb (big endian)\n    ve          - VE\n    wasm32      - WebAssembly 32-bit\n    wasm64      - WebAssembly 64-bit\n    x86         - 32-bit X86: Pentium-Pro and above\n    x86-64      - 64-bit X86: EM64T and AMD64\n    xcore       - XCore",
+      "sha256": "5d03ad36cc2701796e5f106197d7ce70df0bdbe90f72a333ea6e40fd7b822092"
+    },
+    "objcopy": {
+      "path": "/opt/homebrew/opt/llvm/bin/llvm-objcopy",
+      "version": "llvm-objcopy, compatible with GNU objcopy\nHomebrew LLVM version 23.1.3\n  Optimized build.",
+      "sha256": "d405f01c92ccb87616e694df7992ea37977d40b4456732f874b464ce2c5d3f99"
+    }
+  },
+  "commands": [
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/clang",
+      "arguments": [
+        "--target=x86_64-unknown-linux-gnu",
+        "-std=c11",
+        "-O1",
+        "-g",
+        "-ffreestanding",
+        "-fPIC",
+        "-ffp-contract=off",
+        "-fno-vectorize",
+        "-fno-slp-vectorize",
+        "-fno-stack-protector",
+        "-fno-builtin",
+        "-ffile-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-fdebug-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-c",
+        "fixtures/source/corpus.c",
+        "-o",
+        "<temporary>/corpus.o"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/clang",
+      "arguments": [
+        "--target=x86_64-unknown-linux-gnu",
+        "-std=c11",
+        "-O1",
+        "-g",
+        "-ffreestanding",
+        "-fPIC",
+        "-ffp-contract=off",
+        "-fno-vectorize",
+        "-fno-slp-vectorize",
+        "-fno-stack-protector",
+        "-fno-builtin",
+        "-ffile-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-fdebug-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-c",
+        "fixtures/source/check.c",
+        "-o",
+        "<temporary>/check.o"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/clang",
+      "arguments": [
+        "--target=x86_64-unknown-linux-gnu",
+        "-std=c11",
+        "-O1",
+        "-g",
+        "-ffreestanding",
+        "-fPIC",
+        "-ffp-contract=off",
+        "-fno-vectorize",
+        "-fno-slp-vectorize",
+        "-fno-stack-protector",
+        "-fno-builtin",
+        "-ffile-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-fdebug-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-c",
+        "fixtures/source/elf-entry.c",
+        "-o",
+        "<temporary>/elf-entry.o"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/clang",
+      "arguments": [
+        "--target=x86_64-unknown-linux-gnu",
+        "-std=c11",
+        "-O1",
+        "-g",
+        "-ffreestanding",
+        "-fPIC",
+        "-ffp-contract=off",
+        "-fno-vectorize",
+        "-fno-slp-vectorize",
+        "-fno-stack-protector",
+        "-fno-builtin",
+        "-ffile-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-fdebug-prefix-map=/Users/df0/Documents/projects/open_decomp=.",
+        "-c",
+        "fixtures/source/elf-native.c",
+        "-o",
+        "<temporary>/elf-native.o"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/bin/ld.lld",
+      "arguments": [
+        "-m",
+        "elf_x86_64",
+        "--build-id=none",
+        "-shared",
+        "--soname=libfixture-native.so",
+        "-o",
+        "fixtures/bin/libfixture-native.so",
+        "<temporary>/elf-native.o"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/bin/ld.lld",
+      "arguments": [
+        "--build-id=none",
+        "-m",
+        "elf_x86_64",
+        "-z",
+        "noexecstack",
+        "--hash-style=both",
+        "<temporary>/corpus.o",
+        "<temporary>/check.o",
+        "<temporary>/elf-entry.o",
+        "fixtures/bin/libfixture-native.so",
+        "--export-dynamic",
+        "--entry=fixture_entry",
+        "--image-base=0x400000",
+        "--dynamic-linker=/lib64/ld-linux-x86-64.so.2",
+        "-o",
+        "fixtures/bin/elf-x86_64-symbols"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/bin/ld.lld",
+      "arguments": [
+        "--build-id=none",
+        "-m",
+        "elf_x86_64",
+        "-z",
+        "noexecstack",
+        "--hash-style=both",
+        "<temporary>/corpus.o",
+        "<temporary>/check.o",
+        "<temporary>/elf-entry.o",
+        "fixtures/bin/libfixture-native.so",
+        "-shared",
+        "-Bsymbolic",
+        "--soname=libcorpus-elf-x86_64.so",
+        "-o",
+        "fixtures/bin/libcorpus-elf-x86_64-symbols.so"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objcopy",
+      "arguments": [
+        "--strip-all",
+        "fixtures/bin/elf-x86_64-symbols",
+        "fixtures/bin/elf-x86_64-stripped"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objcopy",
+      "arguments": [
+        "--strip-all",
+        "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+        "fixtures/bin/libcorpus-elf-x86_64-stripped.so"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-readobj",
+      "arguments": [
+        "--file-headers",
+        "--program-headers",
+        "--sections",
+        "--symbols",
+        "--dyn-symbols",
+        "--dynamic-table",
+        "--needed-libs",
+        "--relocations",
+        "fixtures/bin/elf-x86_64-symbols"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+      "arguments": [
+        "--disassemble",
+        "fixtures/bin/elf-x86_64-symbols"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-readobj",
+      "arguments": [
+        "--file-headers",
+        "--program-headers",
+        "--sections",
+        "--symbols",
+        "--dyn-symbols",
+        "--dynamic-table",
+        "--needed-libs",
+        "--relocations",
+        "fixtures/bin/elf-x86_64-stripped"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+      "arguments": [
+        "--disassemble",
+        "fixtures/bin/elf-x86_64-stripped"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-readobj",
+      "arguments": [
+        "--file-headers",
+        "--program-headers",
+        "--sections",
+        "--symbols",
+        "--dyn-symbols",
+        "--dynamic-table",
+        "--needed-libs",
+        "--relocations",
+        "fixtures/bin/libcorpus-elf-x86_64-symbols.so"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+      "arguments": [
+        "--disassemble",
+        "fixtures/bin/libcorpus-elf-x86_64-symbols.so"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-readobj",
+      "arguments": [
+        "--file-headers",
+        "--program-headers",
+        "--sections",
+        "--symbols",
+        "--dyn-symbols",
+        "--dynamic-table",
+        "--needed-libs",
+        "--relocations",
+        "fixtures/bin/libcorpus-elf-x86_64-stripped.so"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+      "arguments": [
+        "--disassemble",
+        "fixtures/bin/libcorpus-elf-x86_64-stripped.so"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-readobj",
+      "arguments": [
+        "--file-headers",
+        "--program-headers",
+        "--sections",
+        "--symbols",
+        "--dyn-symbols",
+        "--dynamic-table",
+        "--needed-libs",
+        "--relocations",
+        "fixtures/bin/libfixture-native.so"
+      ]
+    },
+    {
+      "executable": "/opt/homebrew/opt/llvm/bin/llvm-objdump",
+      "arguments": [
+        "--disassemble",
+        "fixtures/bin/libfixture-native.so"
+      ]
+    }
+  ],
+  "sourceFiles": [
+    {
+      "path": "fixtures/source/corpus.h",
+      "size": 1298,
+      "sha256": "f8a1b44dc60c7991633b5d3c4f0254569c92b9f006f12ca29c521079903469ec"
+    },
+    {
+      "path": "fixtures/source/corpus.c",
+      "size": 2171,
+      "sha256": "1585f825365918ad5044fd40fca359722ca2ebb0631065ece62c6f84b1c7c467"
+    },
+    {
+      "path": "fixtures/source/check.c",
+      "size": 2212,
+      "sha256": "ab14d124a05a4bab3f190f5700bcad2622fbfd1f2468da89d56ef356af2b7d5c"
+    },
+    {
+      "path": "fixtures/source/elf-entry.c",
+      "size": 430,
+      "sha256": "7e2d2d7bcc7d9f51d5f30766009d610c182c4ad4afc9b34cc32509887b975af8"
+    },
+    {
+      "path": "fixtures/source/elf-native.c",
+      "size": 242,
+      "sha256": "45094ee7d4c8115c7f1cdf06f74b0095f25e59d5eb41a3846c987339a2eab376"
+    },
+    {
+      "path": "fixtures/expected.json",
+      "size": 3295,
+      "sha256": "811ba83f014d2afd2953e420320570600c06d986c9a274d711966b7a16a4e8b5"
+    },
+    {
+      "path": "fixtures/inventory.json",
+      "size": 6240,
+      "sha256": "f5f49835e2fab48fbfadf3c8603858f1482f795bae1144637f66c901b4f8e188"
+    },
+    {
+      "path": "fixtures/LICENSE",
+      "size": 1692,
+      "sha256": "5f2006a035c3e3263d91db76f57dee0b23bd4e3cf5dd0c1ffae2bd3f317d0c8f"
+    },
+    {
+      "path": "scripts/fixtures/generate-elf.ts",
+      "size": 6643,
+      "sha256": "10cde89366e6999ebbc852423847b79b338c7e2fc167c0d081f545814c04c491"
+    },
+    {
+      "path": "scripts/fixtures/inspect-elf.ts",
+      "size": 4208,
+      "sha256": "035954f7561a197bd9349a0a45e0c94961c76cfba2689b843c066fb2d2075c61"
+    }
+  ],
+  "images": [
+    {
+      "path": "fixtures/bin/elf-x86_64-symbols",
+      "size": 14384,
+      "sha256": "2569be2d310d4aec4ea6ad0c4c9344aee7100f202f796bb03fcbd93709aa58e6",
+      "facts": {
+        "format": "elf",
+        "architecture": "x86_64",
+        "abi": "sysv-amd64",
+        "kind": "executable",
+        "imageBase": "0x400000",
+        "entryAddress": "0x401e80",
+        "mappings": [
+          {
+            "name": "PT_LOAD[2]",
+            "address": "0x400000",
+            "virtualSize": 2120,
+            "fileOffset": 0,
+            "fileSize": 2120,
+            "flags": 4
+          },
+          {
+            "name": "PT_LOAD[3]",
+            "address": "0x401850",
+            "virtualSize": 1632,
+            "fileOffset": 2128,
+            "fileSize": 1632,
+            "flags": 5
+          },
+          {
+            "name": "PT_LOAD[4]",
+            "address": "0x402eb0",
+            "virtualSize": 336,
+            "fileOffset": 3760,
+            "fileSize": 208,
+            "flags": 6
+          },
+          {
+            "name": "PT_LOAD[5]",
+            "address": "0x403f80",
+            "virtualSize": 560,
+            "fileOffset": 3968,
+            "fileSize": 40,
+            "flags": 6
+          }
+        ],
+        "sections": [
+          {
+            "name": "",
+            "type": 0,
+            "address": "0x0",
+            "size": 0,
+            "fileOffset": 0,
+            "flags": 0
+          },
+          {
+            "name": ".interp",
+            "type": 1,
+            "address": "0x400238",
+            "size": 28,
+            "fileOffset": 568,
+            "flags": 2
+          },
+          {
+            "name": ".dynsym",
+            "type": 11,
+            "address": "0x400258",
+            "size": 552,
+            "fileOffset": 600,
+            "flags": 2
+          },
+          {
+            "name": ".gnu.hash",
+            "type": 1879048182,
+            "address": "0x400480",
+            "size": 152,
+            "fileOffset": 1152,
+            "flags": 2
+          },
+          {
+            "name": ".hash",
+            "type": 5,
+            "address": "0x400518",
+            "size": 192,
+            "fileOffset": 1304,
+            "flags": 2
+          },
+          {
+            "name": ".dynstr",
+            "type": 3,
+            "address": "0x4005d8",
+            "size": 379,
+            "fileOffset": 1496,
+            "flags": 2
+          },
+          {
+            "name": ".rela.plt",
+            "type": 4,
+            "address": "0x400758",
+            "size": 24,
+            "fileOffset": 1880,
+            "flags": 66
+          },
+          {
+            "name": ".rodata",
+            "type": 1,
+            "address": "0x400770",
+            "size": 216,
+            "fileOffset": 1904,
+            "flags": 18
+          },
+          {
+            "name": ".text",
+            "type": 1,
+            "address": "0x401850",
+            "size": 1598,
+            "fileOffset": 2128,
+            "flags": 6
+          },
+          {
+            "name": ".plt",
+            "type": 1,
+            "address": "0x401e90",
+            "size": 32,
+            "fileOffset": 3728,
+            "flags": 6
+          },
+          {
+            "name": ".dynamic",
+            "type": 6,
+            "address": "0x402eb0",
+            "size": 208,
+            "fileOffset": 3760,
+            "flags": 3
+          },
+          {
+            "name": ".got",
+            "type": 1,
+            "address": "0x402f80",
+            "size": 0,
+            "fileOffset": 3968,
+            "flags": 3
+          },
+          {
+            "name": ".relro_padding",
+            "type": 8,
+            "address": "0x402f80",
+            "size": 128,
+            "fileOffset": 3968,
+            "flags": 3
+          },
+          {
+            "name": ".data",
+            "type": 1,
+            "address": "0x403f80",
+            "size": 8,
+            "fileOffset": 3968,
+            "flags": 3
+          },
+          {
+            "name": ".got.plt",
+            "type": 1,
+            "address": "0x403f88",
+            "size": 32,
+            "fileOffset": 3976,
+            "flags": 3
+          },
+          {
+            "name": ".bss",
+            "type": 8,
+            "address": "0x403fb0",
+            "size": 512,
+            "fileOffset": 4008,
+            "flags": 3
+          },
+          {
+            "name": ".debug_loclists",
+            "type": 1,
+            "address": "0x0",
+            "size": 475,
+            "fileOffset": 4008,
+            "flags": 0
+          },
+          {
+            "name": ".debug_abbrev",
+            "type": 1,
+            "address": "0x0",
+            "size": 775,
+            "fileOffset": 4483,
+            "flags": 0
+          },
+          {
+            "name": ".debug_info",
+            "type": 1,
+            "address": "0x0",
+            "size": 2319,
+            "fileOffset": 5258,
+            "flags": 0
+          },
+          {
+            "name": ".debug_str_offsets",
+            "type": 1,
+            "address": "0x0",
+            "size": 476,
+            "fileOffset": 7577,
+            "flags": 0
+          },
+          {
+            "name": ".debug_str",
+            "type": 1,
+            "address": "0x0",
+            "size": 744,
+            "fileOffset": 8053,
+            "flags": 48
+          },
+          {
+            "name": ".debug_addr",
+            "type": 1,
+            "address": "0x0",
+            "size": 448,
+            "fileOffset": 8797,
+            "flags": 0
+          },
+          {
+            "name": ".comment",
+            "type": 1,
+            "address": "0x0",
+            "size": 59,
+            "fileOffset": 9245,
+            "flags": 48
+          },
+          {
+            "name": ".debug_frame",
+            "type": 1,
+            "address": "0x0",
+            "size": 624,
+            "fileOffset": 9304,
+            "flags": 0
+          },
+          {
+            "name": ".debug_line",
+            "type": 1,
+            "address": "0x0",
+            "size": 1161,
+            "fileOffset": 9928,
+            "flags": 0
+          },
+          {
+            "name": ".debug_line_str",
+            "type": 1,
+            "address": "0x0",
+            "size": 104,
+            "fileOffset": 11089,
+            "flags": 48
+          },
+          {
+            "name": ".symtab",
+            "type": 2,
+            "address": "0x0",
+            "size": 648,
+            "fileOffset": 11200,
+            "flags": 0
+          },
+          {
+            "name": ".shstrtab",
+            "type": 3,
+            "address": "0x0",
+            "size": 279,
+            "fileOffset": 11848,
+            "flags": 0
+          },
+          {
+            "name": ".strtab",
+            "type": 3,
+            "address": "0x0",
+            "size": 396,
+            "fileOffset": 12127,
+            "flags": 0
+          }
+        ],
+        "functions": [
+          {
+            "name": "fixture_stack",
+            "address": "0x401850",
+            "fileOffset": 2128,
+            "size": 29
+          },
+          {
+            "name": "fixture_arithmetic",
+            "address": "0x401870",
+            "fileOffset": 2160,
+            "size": 9
+          },
+          {
+            "name": "fixture_maximum",
+            "address": "0x401880",
+            "fileOffset": 2176,
+            "size": 8
+          },
+          {
+            "name": "fixture_loop",
+            "address": "0x401890",
+            "fileOffset": 2192,
+            "size": 31
+          },
+          {
+            "name": "fixture_memory",
+            "address": "0x4018b0",
+            "fileOffset": 2224,
+            "size": 10
+          },
+          {
+            "name": "fixture_direct",
+            "address": "0x4018c0",
+            "fileOffset": 2240,
+            "size": 33
+          },
+          {
+            "name": "fixture_indirect",
+            "address": "0x4018f0",
+            "fileOffset": 2288,
+            "size": 12
+          },
+          {
+            "name": "fixture_divide",
+            "address": "0x401900",
+            "fileOffset": 2304,
+            "size": 6
+          },
+          {
+            "name": "fixture_width",
+            "address": "0x401910",
+            "fileOffset": 2320,
+            "size": 13
+          },
+          {
+            "name": "fixture_stack_args",
+            "address": "0x401920",
+            "fileOffset": 2336,
+            "size": 79
+          },
+          {
+            "name": "fixture_float",
+            "address": "0x401970",
+            "fileOffset": 2416,
+            "size": 21
+          },
+          {
+            "name": "fixture_vector",
+            "address": "0x401990",
+            "fileOffset": 2448,
+            "size": 16
+          },
+          {
+            "name": "fixture_vector_integer",
+            "address": "0x4019a0",
+            "fileOffset": 2464,
+            "size": 25
+          },
+          {
+            "name": "fixture_variadic",
+            "address": "0x4019c0",
+            "fileOffset": 2496,
+            "size": 198
+          },
+          {
+            "name": "fixture_string",
+            "address": "0x401a88",
+            "fileOffset": 2696,
+            "size": 8
+          },
+          {
+            "name": "fixture_check",
+            "address": "0x401a90",
+            "fileOffset": 2704,
+            "size": 983
+          },
+          {
+            "name": "fixture_native_call",
+            "address": "0x401e70",
+            "fileOffset": 3696,
+            "size": 10
+          },
+          {
+            "name": "fixture_entry",
+            "address": "0x401e80",
+            "fileOffset": 3712,
+            "size": 14
+          }
+        ],
+        "symbols": [
+          "_DYNAMIC",
+          "check.c",
+          "corpus.c",
+          "elf-entry.c",
+          "fixture_arithmetic",
+          "fixture_callback",
+          "fixture_check",
+          "fixture_direct",
+          "fixture_divide",
+          "fixture_entry",
+          "fixture_external",
+          "fixture_float",
+          "fixture_indirect",
+          "fixture_loop",
+          "fixture_maximum",
+          "fixture_memory",
+          "fixture_message",
+          "fixture_native_call",
+          "fixture_stack",
+          "fixture_stack_args",
+          "fixture_string",
+          "fixture_variadic",
+          "fixture_vector",
+          "fixture_vector_integer",
+          "fixture_width",
+          "fixture_zero_fill"
+        ],
+        "imports": [
+          "fixture_external"
+        ],
+        "exports": [
+          "fixture_arithmetic",
+          "fixture_callback",
+          "fixture_check",
+          "fixture_direct",
+          "fixture_divide",
+          "fixture_entry",
+          "fixture_float",
+          "fixture_indirect",
+          "fixture_loop",
+          "fixture_maximum",
+          "fixture_memory",
+          "fixture_message",
+          "fixture_native_call",
+          "fixture_stack",
+          "fixture_stack_args",
+          "fixture_string",
+          "fixture_variadic",
+          "fixture_vector",
+          "fixture_vector_integer",
+          "fixture_width",
+          "fixture_zero_fill"
+        ],
+        "needed": [
+          "libfixture-native.so"
+        ]
+      },
+      "symbolState": "symbol-bearing",
+      "metadataPath": "fixtures/metadata/elf-x86_64-symbols.txt",
+      "metadataSha256": "0c045be45238fed18ed9fd2d9a1f3b758aad016a197cfb3a41e9b28756bac516",
+      "disassemblyPath": "fixtures/metadata/elf-x86_64-symbols.disassembly.txt",
+      "disassemblySha256": "e0688e5ecc3c607c439ecfcc75a0e7b79ad3b7b75b7a8fb69ee5210133c44bad",
+      "workflow": {
+        "arithmetic": "0x401870",
+        "entry": "0x401a88"
+      }
+    },
+    {
+      "path": "fixtures/bin/elf-x86_64-stripped",
+      "size": 5216,
+      "sha256": "3d85eca0af883c30ec8acd4c196d930f8482894330511e2ef958d106b8488b27",
+      "facts": {
+        "format": "elf",
+        "architecture": "x86_64",
+        "abi": "sysv-amd64",
+        "kind": "executable",
+        "imageBase": "0x400000",
+        "entryAddress": "0x401e80",
+        "mappings": [
+          {
+            "name": "PT_LOAD[2]",
+            "address": "0x400000",
+            "virtualSize": 2120,
+            "fileOffset": 0,
+            "fileSize": 2120,
+            "flags": 4
+          },
+          {
+            "name": "PT_LOAD[3]",
+            "address": "0x401850",
+            "virtualSize": 1632,
+            "fileOffset": 2128,
+            "fileSize": 1632,
+            "flags": 5
+          },
+          {
+            "name": "PT_LOAD[4]",
+            "address": "0x402eb0",
+            "virtualSize": 336,
+            "fileOffset": 3760,
+            "fileSize": 208,
+            "flags": 6
+          },
+          {
+            "name": "PT_LOAD[5]",
+            "address": "0x403f80",
+            "virtualSize": 560,
+            "fileOffset": 3968,
+            "fileSize": 40,
+            "flags": 6
+          }
+        ],
+        "sections": [
+          {
+            "name": "",
+            "type": 0,
+            "address": "0x0",
+            "size": 0,
+            "fileOffset": 0,
+            "flags": 0
+          },
+          {
+            "name": ".interp",
+            "type": 1,
+            "address": "0x400238",
+            "size": 28,
+            "fileOffset": 568,
+            "flags": 2
+          },
+          {
+            "name": ".dynsym",
+            "type": 11,
+            "address": "0x400258",
+            "size": 552,
+            "fileOffset": 600,
+            "flags": 2
+          },
+          {
+            "name": ".gnu.hash",
+            "type": 1879048182,
+            "address": "0x400480",
+            "size": 152,
+            "fileOffset": 1152,
+            "flags": 2
+          },
+          {
+            "name": ".hash",
+            "type": 5,
+            "address": "0x400518",
+            "size": 192,
+            "fileOffset": 1304,
+            "flags": 2
+          },
+          {
+            "name": ".dynstr",
+            "type": 3,
+            "address": "0x4005d8",
+            "size": 379,
+            "fileOffset": 1496,
+            "flags": 2
+          },
+          {
+            "name": ".rela.plt",
+            "type": 4,
+            "address": "0x400758",
+            "size": 24,
+            "fileOffset": 1880,
+            "flags": 66
+          },
+          {
+            "name": ".rodata",
+            "type": 1,
+            "address": "0x400770",
+            "size": 216,
+            "fileOffset": 1904,
+            "flags": 18
+          },
+          {
+            "name": ".text",
+            "type": 1,
+            "address": "0x401850",
+            "size": 1598,
+            "fileOffset": 2128,
+            "flags": 6
+          },
+          {
+            "name": ".plt",
+            "type": 1,
+            "address": "0x401e90",
+            "size": 32,
+            "fileOffset": 3728,
+            "flags": 6
+          },
+          {
+            "name": ".dynamic",
+            "type": 6,
+            "address": "0x402eb0",
+            "size": 208,
+            "fileOffset": 3760,
+            "flags": 3
+          },
+          {
+            "name": ".got",
+            "type": 1,
+            "address": "0x402f80",
+            "size": 0,
+            "fileOffset": 3968,
+            "flags": 3
+          },
+          {
+            "name": ".relro_padding",
+            "type": 8,
+            "address": "0x402f80",
+            "size": 128,
+            "fileOffset": 3968,
+            "flags": 3
+          },
+          {
+            "name": ".data",
+            "type": 1,
+            "address": "0x403f80",
+            "size": 8,
+            "fileOffset": 3968,
+            "flags": 3
+          },
+          {
+            "name": ".got.plt",
+            "type": 1,
+            "address": "0x403f88",
+            "size": 32,
+            "fileOffset": 3976,
+            "flags": 3
+          },
+          {
+            "name": ".bss",
+            "type": 8,
+            "address": "0x403fb0",
+            "size": 512,
+            "fileOffset": 4008,
+            "flags": 3
+          },
+          {
+            "name": ".shstrtab",
+            "type": 3,
+            "address": "0x0",
+            "size": 118,
+            "fileOffset": 4008,
+            "flags": 0
+          }
+        ],
+        "functions": [
+          {
+            "name": "fixture_stack",
+            "address": "0x401850",
+            "fileOffset": 2128,
+            "size": 29
+          },
+          {
+            "name": "fixture_arithmetic",
+            "address": "0x401870",
+            "fileOffset": 2160,
+            "size": 9
+          },
+          {
+            "name": "fixture_maximum",
+            "address": "0x401880",
+            "fileOffset": 2176,
+            "size": 8
+          },
+          {
+            "name": "fixture_loop",
+            "address": "0x401890",
+            "fileOffset": 2192,
+            "size": 31
+          },
+          {
+            "name": "fixture_memory",
+            "address": "0x4018b0",
+            "fileOffset": 2224,
+            "size": 10
+          },
+          {
+            "name": "fixture_direct",
+            "address": "0x4018c0",
+            "fileOffset": 2240,
+            "size": 33
+          },
+          {
+            "name": "fixture_indirect",
+            "address": "0x4018f0",
+            "fileOffset": 2288,
+            "size": 12
+          },
+          {
+            "name": "fixture_divide",
+            "address": "0x401900",
+            "fileOffset": 2304,
+            "size": 6
+          },
+          {
+            "name": "fixture_width",
+            "address": "0x401910",
+            "fileOffset": 2320,
+            "size": 13
+          },
+          {
+            "name": "fixture_stack_args",
+            "address": "0x401920",
+            "fileOffset": 2336,
+            "size": 79
+          },
+          {
+            "name": "fixture_float",
+            "address": "0x401970",
+            "fileOffset": 2416,
+            "size": 21
+          },
+          {
+            "name": "fixture_vector",
+            "address": "0x401990",
+            "fileOffset": 2448,
+            "size": 16
+          },
+          {
+            "name": "fixture_vector_integer",
+            "address": "0x4019a0",
+            "fileOffset": 2464,
+            "size": 25
+          },
+          {
+            "name": "fixture_variadic",
+            "address": "0x4019c0",
+            "fileOffset": 2496,
+            "size": 198
+          },
+          {
+            "name": "fixture_string",
+            "address": "0x401a88",
+            "fileOffset": 2696,
+            "size": 8
+          },
+          {
+            "name": "fixture_check",
+            "address": "0x401a90",
+            "fileOffset": 2704,
+            "size": 983
+          },
+          {
+            "name": "fixture_native_call",
+            "address": "0x401e70",
+            "fileOffset": 3696,
+            "size": 10
+          },
+          {
+            "name": "fixture_entry",
+            "address": "0x401e80",
+            "fileOffset": 3712,
+            "size": 14
+          }
+        ],
+        "symbols": [],
+        "imports": [
+          "fixture_external"
+        ],
+        "exports": [
+          "fixture_arithmetic",
+          "fixture_callback",
+          "fixture_check",
+          "fixture_direct",
+          "fixture_divide",
+          "fixture_entry",
+          "fixture_float",
+          "fixture_indirect",
+          "fixture_loop",
+          "fixture_maximum",
+          "fixture_memory",
+          "fixture_message",
+          "fixture_native_call",
+          "fixture_stack",
+          "fixture_stack_args",
+          "fixture_string",
+          "fixture_variadic",
+          "fixture_vector",
+          "fixture_vector_integer",
+          "fixture_width",
+          "fixture_zero_fill"
+        ],
+        "needed": [
+          "libfixture-native.so"
+        ]
+      },
+      "symbolState": "stripped",
+      "metadataPath": "fixtures/metadata/elf-x86_64-stripped.txt",
+      "metadataSha256": "154adab2ba78d14af167e98acca07e550801d600b268502c52338b03c712ca79",
+      "disassemblyPath": "fixtures/metadata/elf-x86_64-stripped.disassembly.txt",
+      "disassemblySha256": "37ddca81e966298294ca390c078b7d25a2fd99507354154bde1163d4c400b27d",
+      "workflow": {
+        "arithmetic": "0x401870",
+        "entry": "0x401a88"
+      }
+    },
+    {
+      "path": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "size": 14432,
+      "sha256": "bfc23ebe9e9e1b84181eea9a526a3cd44a6cc1ab3aee815e9cbcd28dd2deb90f",
+      "facts": {
+        "format": "elf",
+        "architecture": "x86_64",
+        "abi": "sysv-amd64",
+        "kind": "library",
+        "imageBase": "0x0",
+        "entryAddress": null,
+        "mappings": [
+          {
+            "name": "PT_LOAD[1]",
+            "address": "0x0",
+            "virtualSize": 2088,
+            "fileOffset": 0,
+            "fileSize": 2088,
+            "flags": 4
+          },
+          {
+            "name": "PT_LOAD[2]",
+            "address": "0x1830",
+            "virtualSize": 1632,
+            "fileOffset": 2096,
+            "fileSize": 1632,
+            "flags": 5
+          },
+          {
+            "name": "PT_LOAD[3]",
+            "address": "0x2e90",
+            "virtualSize": 368,
+            "fileOffset": 3728,
+            "fileSize": 288,
+            "flags": 6
+          },
+          {
+            "name": "PT_LOAD[4]",
+            "address": "0x3fb0",
+            "virtualSize": 560,
+            "fileOffset": 4016,
+            "fileSize": 40,
+            "flags": 6
+          }
+        ],
+        "sections": [
+          {
+            "name": "",
+            "type": 0,
+            "address": "0x0",
+            "size": 0,
+            "fileOffset": 0,
+            "flags": 0
+          },
+          {
+            "name": ".dynsym",
+            "type": 11,
+            "address": "0x200",
+            "size": 552,
+            "fileOffset": 512,
+            "flags": 2
+          },
+          {
+            "name": ".gnu.hash",
+            "type": 1879048182,
+            "address": "0x428",
+            "size": 152,
+            "fileOffset": 1064,
+            "flags": 2
+          },
+          {
+            "name": ".hash",
+            "type": 5,
+            "address": "0x4c0",
+            "size": 192,
+            "fileOffset": 1216,
+            "flags": 2
+          },
+          {
+            "name": ".dynstr",
+            "type": 3,
+            "address": "0x580",
+            "size": 403,
+            "fileOffset": 1408,
+            "flags": 2
+          },
+          {
+            "name": ".rela.dyn",
+            "type": 4,
+            "address": "0x718",
+            "size": 24,
+            "fileOffset": 1816,
+            "flags": 2
+          },
+          {
+            "name": ".rela.plt",
+            "type": 4,
+            "address": "0x730",
+            "size": 24,
+            "fileOffset": 1840,
+            "flags": 66
+          },
+          {
+            "name": ".rodata",
+            "type": 1,
+            "address": "0x750",
+            "size": 216,
+            "fileOffset": 1872,
+            "flags": 18
+          },
+          {
+            "name": ".text",
+            "type": 1,
+            "address": "0x1830",
+            "size": 1598,
+            "fileOffset": 2096,
+            "flags": 6
+          },
+          {
+            "name": ".plt",
+            "type": 1,
+            "address": "0x1e70",
+            "size": 32,
+            "fileOffset": 3696,
+            "flags": 6
+          },
+          {
+            "name": ".dynamic",
+            "type": 6,
+            "address": "0x2e90",
+            "size": 288,
+            "fileOffset": 3728,
+            "flags": 3
+          },
+          {
+            "name": ".got",
+            "type": 1,
+            "address": "0x2fb0",
+            "size": 0,
+            "fileOffset": 4016,
+            "flags": 3
+          },
+          {
+            "name": ".relro_padding",
+            "type": 8,
+            "address": "0x2fb0",
+            "size": 80,
+            "fileOffset": 4016,
+            "flags": 3
+          },
+          {
+            "name": ".data",
+            "type": 1,
+            "address": "0x3fb0",
+            "size": 8,
+            "fileOffset": 4016,
+            "flags": 3
+          },
+          {
+            "name": ".got.plt",
+            "type": 1,
+            "address": "0x3fb8",
+            "size": 32,
+            "fileOffset": 4024,
+            "flags": 3
+          },
+          {
+            "name": ".bss",
+            "type": 8,
+            "address": "0x3fe0",
+            "size": 512,
+            "fileOffset": 4056,
+            "flags": 3
+          },
+          {
+            "name": ".debug_loclists",
+            "type": 1,
+            "address": "0x0",
+            "size": 475,
+            "fileOffset": 4056,
+            "flags": 0
+          },
+          {
+            "name": ".debug_abbrev",
+            "type": 1,
+            "address": "0x0",
+            "size": 775,
+            "fileOffset": 4531,
+            "flags": 0
+          },
+          {
+            "name": ".debug_info",
+            "type": 1,
+            "address": "0x0",
+            "size": 2319,
+            "fileOffset": 5306,
+            "flags": 0
+          },
+          {
+            "name": ".debug_str_offsets",
+            "type": 1,
+            "address": "0x0",
+            "size": 476,
+            "fileOffset": 7625,
+            "flags": 0
+          },
+          {
+            "name": ".debug_str",
+            "type": 1,
+            "address": "0x0",
+            "size": 744,
+            "fileOffset": 8101,
+            "flags": 48
+          },
+          {
+            "name": ".debug_addr",
+            "type": 1,
+            "address": "0x0",
+            "size": 448,
+            "fileOffset": 8845,
+            "flags": 0
+          },
+          {
+            "name": ".comment",
+            "type": 1,
+            "address": "0x0",
+            "size": 59,
+            "fileOffset": 9293,
+            "flags": 48
+          },
+          {
+            "name": ".debug_frame",
+            "type": 1,
+            "address": "0x0",
+            "size": 624,
+            "fileOffset": 9352,
+            "flags": 0
+          },
+          {
+            "name": ".debug_line",
+            "type": 1,
+            "address": "0x0",
+            "size": 1161,
+            "fileOffset": 9976,
+            "flags": 0
+          },
+          {
+            "name": ".debug_line_str",
+            "type": 1,
+            "address": "0x0",
+            "size": 104,
+            "fileOffset": 11137,
+            "flags": 48
+          },
+          {
+            "name": ".symtab",
+            "type": 2,
+            "address": "0x0",
+            "size": 648,
+            "fileOffset": 11248,
+            "flags": 0
+          },
+          {
+            "name": ".shstrtab",
+            "type": 3,
+            "address": "0x0",
+            "size": 281,
+            "fileOffset": 11896,
+            "flags": 0
+          },
+          {
+            "name": ".strtab",
+            "type": 3,
+            "address": "0x0",
+            "size": 396,
+            "fileOffset": 12177,
+            "flags": 0
+          }
+        ],
+        "functions": [
+          {
+            "name": "fixture_stack",
+            "address": "0x1830",
+            "fileOffset": 2096,
+            "size": 29
+          },
+          {
+            "name": "fixture_arithmetic",
+            "address": "0x1850",
+            "fileOffset": 2128,
+            "size": 9
+          },
+          {
+            "name": "fixture_maximum",
+            "address": "0x1860",
+            "fileOffset": 2144,
+            "size": 8
+          },
+          {
+            "name": "fixture_loop",
+            "address": "0x1870",
+            "fileOffset": 2160,
+            "size": 31
+          },
+          {
+            "name": "fixture_memory",
+            "address": "0x1890",
+            "fileOffset": 2192,
+            "size": 10
+          },
+          {
+            "name": "fixture_direct",
+            "address": "0x18a0",
+            "fileOffset": 2208,
+            "size": 33
+          },
+          {
+            "name": "fixture_indirect",
+            "address": "0x18d0",
+            "fileOffset": 2256,
+            "size": 12
+          },
+          {
+            "name": "fixture_divide",
+            "address": "0x18e0",
+            "fileOffset": 2272,
+            "size": 6
+          },
+          {
+            "name": "fixture_width",
+            "address": "0x18f0",
+            "fileOffset": 2288,
+            "size": 13
+          },
+          {
+            "name": "fixture_stack_args",
+            "address": "0x1900",
+            "fileOffset": 2304,
+            "size": 79
+          },
+          {
+            "name": "fixture_float",
+            "address": "0x1950",
+            "fileOffset": 2384,
+            "size": 21
+          },
+          {
+            "name": "fixture_vector",
+            "address": "0x1970",
+            "fileOffset": 2416,
+            "size": 16
+          },
+          {
+            "name": "fixture_vector_integer",
+            "address": "0x1980",
+            "fileOffset": 2432,
+            "size": 25
+          },
+          {
+            "name": "fixture_variadic",
+            "address": "0x19a0",
+            "fileOffset": 2464,
+            "size": 198
+          },
+          {
+            "name": "fixture_string",
+            "address": "0x1a68",
+            "fileOffset": 2664,
+            "size": 8
+          },
+          {
+            "name": "fixture_check",
+            "address": "0x1a70",
+            "fileOffset": 2672,
+            "size": 983
+          },
+          {
+            "name": "fixture_native_call",
+            "address": "0x1e50",
+            "fileOffset": 3664,
+            "size": 10
+          },
+          {
+            "name": "fixture_entry",
+            "address": "0x1e60",
+            "fileOffset": 3680,
+            "size": 14
+          }
+        ],
+        "symbols": [
+          "_DYNAMIC",
+          "check.c",
+          "corpus.c",
+          "elf-entry.c",
+          "fixture_arithmetic",
+          "fixture_callback",
+          "fixture_check",
+          "fixture_direct",
+          "fixture_divide",
+          "fixture_entry",
+          "fixture_external",
+          "fixture_float",
+          "fixture_indirect",
+          "fixture_loop",
+          "fixture_maximum",
+          "fixture_memory",
+          "fixture_message",
+          "fixture_native_call",
+          "fixture_stack",
+          "fixture_stack_args",
+          "fixture_string",
+          "fixture_variadic",
+          "fixture_vector",
+          "fixture_vector_integer",
+          "fixture_width",
+          "fixture_zero_fill"
+        ],
+        "imports": [
+          "fixture_external"
+        ],
+        "exports": [
+          "fixture_arithmetic",
+          "fixture_callback",
+          "fixture_check",
+          "fixture_direct",
+          "fixture_divide",
+          "fixture_entry",
+          "fixture_float",
+          "fixture_indirect",
+          "fixture_loop",
+          "fixture_maximum",
+          "fixture_memory",
+          "fixture_message",
+          "fixture_native_call",
+          "fixture_stack",
+          "fixture_stack_args",
+          "fixture_string",
+          "fixture_variadic",
+          "fixture_vector",
+          "fixture_vector_integer",
+          "fixture_width",
+          "fixture_zero_fill"
+        ],
+        "needed": [
+          "libfixture-native.so"
+        ]
+      },
+      "symbolState": "symbol-bearing",
+      "metadataPath": "fixtures/metadata/libcorpus-elf-x86_64-symbols.so.txt",
+      "metadataSha256": "0ae31885f1f3e5b77b66174ac139b9f269b308a8f7b13be6b92fda0a8cda4dd2",
+      "disassemblyPath": "fixtures/metadata/libcorpus-elf-x86_64-symbols.so.disassembly.txt",
+      "disassemblySha256": "2569499781a7fcbfdcf6fa30992293486078c64fff2d77e80fcb029006770281",
+      "workflow": {
+        "arithmetic": "0x1850",
+        "entry": "0x1a68"
+      }
+    },
+    {
+      "path": "fixtures/bin/libcorpus-elf-x86_64-stripped.so",
+      "size": 5264,
+      "sha256": "0e9262507df4cdf58c3d470ce9d0e86f5de26f26a548c748df91d5da5a12a668",
+      "facts": {
+        "format": "elf",
+        "architecture": "x86_64",
+        "abi": "sysv-amd64",
+        "kind": "library",
+        "imageBase": "0x0",
+        "entryAddress": null,
+        "mappings": [
+          {
+            "name": "PT_LOAD[1]",
+            "address": "0x0",
+            "virtualSize": 2088,
+            "fileOffset": 0,
+            "fileSize": 2088,
+            "flags": 4
+          },
+          {
+            "name": "PT_LOAD[2]",
+            "address": "0x1830",
+            "virtualSize": 1632,
+            "fileOffset": 2096,
+            "fileSize": 1632,
+            "flags": 5
+          },
+          {
+            "name": "PT_LOAD[3]",
+            "address": "0x2e90",
+            "virtualSize": 368,
+            "fileOffset": 3728,
+            "fileSize": 288,
+            "flags": 6
+          },
+          {
+            "name": "PT_LOAD[4]",
+            "address": "0x3fb0",
+            "virtualSize": 560,
+            "fileOffset": 4016,
+            "fileSize": 40,
+            "flags": 6
+          }
+        ],
+        "sections": [
+          {
+            "name": "",
+            "type": 0,
+            "address": "0x0",
+            "size": 0,
+            "fileOffset": 0,
+            "flags": 0
+          },
+          {
+            "name": ".dynsym",
+            "type": 11,
+            "address": "0x200",
+            "size": 552,
+            "fileOffset": 512,
+            "flags": 2
+          },
+          {
+            "name": ".gnu.hash",
+            "type": 1879048182,
+            "address": "0x428",
+            "size": 152,
+            "fileOffset": 1064,
+            "flags": 2
+          },
+          {
+            "name": ".hash",
+            "type": 5,
+            "address": "0x4c0",
+            "size": 192,
+            "fileOffset": 1216,
+            "flags": 2
+          },
+          {
+            "name": ".dynstr",
+            "type": 3,
+            "address": "0x580",
+            "size": 403,
+            "fileOffset": 1408,
+            "flags": 2
+          },
+          {
+            "name": ".rela.dyn",
+            "type": 4,
+            "address": "0x718",
+            "size": 24,
+            "fileOffset": 1816,
+            "flags": 2
+          },
+          {
+            "name": ".rela.plt",
+            "type": 4,
+            "address": "0x730",
+            "size": 24,
+            "fileOffset": 1840,
+            "flags": 66
+          },
+          {
+            "name": ".rodata",
+            "type": 1,
+            "address": "0x750",
+            "size": 216,
+            "fileOffset": 1872,
+            "flags": 18
+          },
+          {
+            "name": ".text",
+            "type": 1,
+            "address": "0x1830",
+            "size": 1598,
+            "fileOffset": 2096,
+            "flags": 6
+          },
+          {
+            "name": ".plt",
+            "type": 1,
+            "address": "0x1e70",
+            "size": 32,
+            "fileOffset": 3696,
+            "flags": 6
+          },
+          {
+            "name": ".dynamic",
+            "type": 6,
+            "address": "0x2e90",
+            "size": 288,
+            "fileOffset": 3728,
+            "flags": 3
+          },
+          {
+            "name": ".got",
+            "type": 1,
+            "address": "0x2fb0",
+            "size": 0,
+            "fileOffset": 4016,
+            "flags": 3
+          },
+          {
+            "name": ".relro_padding",
+            "type": 8,
+            "address": "0x2fb0",
+            "size": 80,
+            "fileOffset": 4016,
+            "flags": 3
+          },
+          {
+            "name": ".data",
+            "type": 1,
+            "address": "0x3fb0",
+            "size": 8,
+            "fileOffset": 4016,
+            "flags": 3
+          },
+          {
+            "name": ".got.plt",
+            "type": 1,
+            "address": "0x3fb8",
+            "size": 32,
+            "fileOffset": 4024,
+            "flags": 3
+          },
+          {
+            "name": ".bss",
+            "type": 8,
+            "address": "0x3fe0",
+            "size": 512,
+            "fileOffset": 4056,
+            "flags": 3
+          },
+          {
+            "name": ".shstrtab",
+            "type": 3,
+            "address": "0x0",
+            "size": 120,
+            "fileOffset": 4056,
+            "flags": 0
+          }
+        ],
+        "functions": [
+          {
+            "name": "fixture_stack",
+            "address": "0x1830",
+            "fileOffset": 2096,
+            "size": 29
+          },
+          {
+            "name": "fixture_arithmetic",
+            "address": "0x1850",
+            "fileOffset": 2128,
+            "size": 9
+          },
+          {
+            "name": "fixture_maximum",
+            "address": "0x1860",
+            "fileOffset": 2144,
+            "size": 8
+          },
+          {
+            "name": "fixture_loop",
+            "address": "0x1870",
+            "fileOffset": 2160,
+            "size": 31
+          },
+          {
+            "name": "fixture_memory",
+            "address": "0x1890",
+            "fileOffset": 2192,
+            "size": 10
+          },
+          {
+            "name": "fixture_direct",
+            "address": "0x18a0",
+            "fileOffset": 2208,
+            "size": 33
+          },
+          {
+            "name": "fixture_indirect",
+            "address": "0x18d0",
+            "fileOffset": 2256,
+            "size": 12
+          },
+          {
+            "name": "fixture_divide",
+            "address": "0x18e0",
+            "fileOffset": 2272,
+            "size": 6
+          },
+          {
+            "name": "fixture_width",
+            "address": "0x18f0",
+            "fileOffset": 2288,
+            "size": 13
+          },
+          {
+            "name": "fixture_stack_args",
+            "address": "0x1900",
+            "fileOffset": 2304,
+            "size": 79
+          },
+          {
+            "name": "fixture_float",
+            "address": "0x1950",
+            "fileOffset": 2384,
+            "size": 21
+          },
+          {
+            "name": "fixture_vector",
+            "address": "0x1970",
+            "fileOffset": 2416,
+            "size": 16
+          },
+          {
+            "name": "fixture_vector_integer",
+            "address": "0x1980",
+            "fileOffset": 2432,
+            "size": 25
+          },
+          {
+            "name": "fixture_variadic",
+            "address": "0x19a0",
+            "fileOffset": 2464,
+            "size": 198
+          },
+          {
+            "name": "fixture_string",
+            "address": "0x1a68",
+            "fileOffset": 2664,
+            "size": 8
+          },
+          {
+            "name": "fixture_check",
+            "address": "0x1a70",
+            "fileOffset": 2672,
+            "size": 983
+          },
+          {
+            "name": "fixture_native_call",
+            "address": "0x1e50",
+            "fileOffset": 3664,
+            "size": 10
+          },
+          {
+            "name": "fixture_entry",
+            "address": "0x1e60",
+            "fileOffset": 3680,
+            "size": 14
+          }
+        ],
+        "symbols": [],
+        "imports": [
+          "fixture_external"
+        ],
+        "exports": [
+          "fixture_arithmetic",
+          "fixture_callback",
+          "fixture_check",
+          "fixture_direct",
+          "fixture_divide",
+          "fixture_entry",
+          "fixture_float",
+          "fixture_indirect",
+          "fixture_loop",
+          "fixture_maximum",
+          "fixture_memory",
+          "fixture_message",
+          "fixture_native_call",
+          "fixture_stack",
+          "fixture_stack_args",
+          "fixture_string",
+          "fixture_variadic",
+          "fixture_vector",
+          "fixture_vector_integer",
+          "fixture_width",
+          "fixture_zero_fill"
+        ],
+        "needed": [
+          "libfixture-native.so"
+        ]
+      },
+      "symbolState": "stripped",
+      "metadataPath": "fixtures/metadata/libcorpus-elf-x86_64-stripped.so.txt",
+      "metadataSha256": "63cd76f09b678f2ce82334f6f557f2a8ce39d7fae20a25372f6d74d876346be7",
+      "disassemblyPath": "fixtures/metadata/libcorpus-elf-x86_64-stripped.so.disassembly.txt",
+      "disassemblySha256": "706f40bb9d2e91e0579316bcf04a7a5baa1f564bf895fe439fb805703c821886",
+      "workflow": {
+        "arithmetic": "0x1850",
+        "entry": "0x1a68"
+      }
+    },
+    {
+      "path": "fixtures/bin/libfixture-native.so",
+      "size": 2888,
+      "sha256": "b7fd4c46692bba21ebcaddbbe81aac592fe83d38aac9659605ab32290786fae7",
+      "facts": {
+        "format": "elf",
+        "architecture": "x86_64",
+        "abi": "sysv-amd64",
+        "kind": "library",
+        "imageBase": "0x0",
+        "entryAddress": null,
+        "mappings": [
+          {
+            "name": "PT_LOAD[1]",
+            "address": "0x0",
+            "virtualSize": 599,
+            "fileOffset": 0,
+            "fileSize": 599,
+            "flags": 4
+          },
+          {
+            "name": "PT_LOAD[2]",
+            "address": "0x1258",
+            "virtualSize": 8,
+            "fileOffset": 600,
+            "fileSize": 8,
+            "flags": 5
+          },
+          {
+            "name": "PT_LOAD[3]",
+            "address": "0x2260",
+            "virtualSize": 3488,
+            "fileOffset": 608,
+            "fileSize": 128,
+            "flags": 6
+          }
+        ],
+        "sections": [
+          {
+            "name": "",
+            "type": 0,
+            "address": "0x0",
+            "size": 0,
+            "fileOffset": 0,
+            "flags": 0
+          },
+          {
+            "name": ".dynsym",
+            "type": 11,
+            "address": "0x1c8",
+            "size": 48,
+            "fileOffset": 456,
+            "flags": 2
+          },
+          {
+            "name": ".gnu.hash",
+            "type": 1879048182,
+            "address": "0x1f8",
+            "size": 32,
+            "fileOffset": 504,
+            "flags": 2
+          },
+          {
+            "name": ".hash",
+            "type": 5,
+            "address": "0x218",
+            "size": 24,
+            "fileOffset": 536,
+            "flags": 2
+          },
+          {
+            "name": ".dynstr",
+            "type": 3,
+            "address": "0x230",
+            "size": 39,
+            "fileOffset": 560,
+            "flags": 2
+          },
+          {
+            "name": ".text",
+            "type": 1,
+            "address": "0x1258",
+            "size": 8,
+            "fileOffset": 600,
+            "flags": 6
+          },
+          {
+            "name": ".dynamic",
+            "type": 6,
+            "address": "0x2260",
+            "size": 128,
+            "fileOffset": 608,
+            "flags": 3
+          },
+          {
+            "name": ".relro_padding",
+            "type": 8,
+            "address": "0x22e0",
+            "size": 3360,
+            "fileOffset": 736,
+            "flags": 3
+          },
+          {
+            "name": ".debug_abbrev",
+            "type": 1,
+            "address": "0x0",
+            "size": 75,
+            "fileOffset": 736,
+            "flags": 0
+          },
+          {
+            "name": ".debug_info",
+            "type": 1,
+            "address": "0x0",
+            "size": 66,
+            "fileOffset": 811,
+            "flags": 0
+          },
+          {
+            "name": ".debug_str_offsets",
+            "type": 1,
+            "address": "0x0",
+            "size": 32,
+            "fileOffset": 877,
+            "flags": 0
+          },
+          {
+            "name": ".debug_str",
+            "type": 1,
+            "address": "0x0",
+            "size": 97,
+            "fileOffset": 909,
+            "flags": 48
+          },
+          {
+            "name": ".debug_addr",
+            "type": 1,
+            "address": "0x0",
+            "size": 16,
+            "fileOffset": 1006,
+            "flags": 0
+          },
+          {
+            "name": ".comment",
+            "type": 1,
+            "address": "0x0",
+            "size": 59,
+            "fileOffset": 1022,
+            "flags": 48
+          },
+          {
+            "name": ".debug_frame",
+            "type": 1,
+            "address": "0x0",
+            "size": 48,
+            "fileOffset": 1088,
+            "flags": 0
+          },
+          {
+            "name": ".debug_line",
+            "type": 1,
+            "address": "0x0",
+            "size": 94,
+            "fileOffset": 1136,
+            "flags": 0
+          },
+          {
+            "name": ".debug_line_str",
+            "type": 1,
+            "address": "0x0",
+            "size": 31,
+            "fileOffset": 1230,
+            "flags": 48
+          },
+          {
+            "name": ".symtab",
+            "type": 2,
+            "address": "0x0",
+            "size": 96,
+            "fileOffset": 1264,
+            "flags": 0
+          },
+          {
+            "name": ".shstrtab",
+            "type": 3,
+            "address": "0x0",
+            "size": 207,
+            "fileOffset": 1360,
+            "flags": 0
+          },
+          {
+            "name": ".strtab",
+            "type": 3,
+            "address": "0x0",
+            "size": 40,
+            "fileOffset": 1567,
+            "flags": 0
+          }
+        ],
+        "functions": [
+          {
+            "name": "fixture_external",
+            "address": "0x1258",
+            "fileOffset": 600,
+            "size": 8
+          }
+        ],
+        "symbols": [
+          "_DYNAMIC",
+          "elf-native.c",
+          "fixture_external"
+        ],
+        "imports": [],
+        "exports": [
+          "fixture_external"
+        ],
+        "needed": []
+      },
+      "symbolState": "symbol-bearing",
+      "metadataPath": "fixtures/metadata/libfixture-native.so.txt",
+      "metadataSha256": "baa644afe9bcb27d664c4eb7cdb034efd0b6584e5b34f757ea8ca8eec3abf660",
+      "disassemblyPath": "fixtures/metadata/libfixture-native.so.disassembly.txt",
+      "disassemblySha256": "68da91d1c166629da015055727808e44d655204a76d4bff164702b0078bb4d79",
+      "workflow": null
+    }
+  ],
+  "codeRanges": [
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_stack.bin",
+      "size": 29,
+      "sha256": "398ca4740a0bfe631a3834cfe9cc96c340789533a0a5842933f1fb8294edef2c",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_stack",
+      "address": "0x1830",
+      "fileOffset": 2096,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_arithmetic.bin",
+      "size": 9,
+      "sha256": "bbcabe6f5900a6665e09ddaef740c1780f825aa223aaed8c33472e49dd04cc97",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_arithmetic",
+      "address": "0x1850",
+      "fileOffset": 2128,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_maximum.bin",
+      "size": 8,
+      "sha256": "962c6ec72fe1fdb818ad9c78674e782d69d0d73c5d56f59484b63cadade154d3",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_maximum",
+      "address": "0x1860",
+      "fileOffset": 2144,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_loop.bin",
+      "size": 31,
+      "sha256": "0b22b9951cf83a3cc0b61eaeeea90a60cf0c73e7fabbb2b84d555c0b5ad84c9c",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_loop",
+      "address": "0x1870",
+      "fileOffset": 2160,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_memory.bin",
+      "size": 10,
+      "sha256": "61cb5e417840deb79c3ca414d83e5c0cee9daf65c04bed6d437db27a65206a1c",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_memory",
+      "address": "0x1890",
+      "fileOffset": 2192,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_direct.bin",
+      "size": 33,
+      "sha256": "afe759f0521a61677ca12dbbdbb40c8edb67edf029cb0dc3d5c9d4a5ad170abd",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_direct",
+      "address": "0x18a0",
+      "fileOffset": 2208,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_indirect.bin",
+      "size": 12,
+      "sha256": "182bdba376cc2eb0c3459020b0677997c38fa191edc73625c879c3b0e26f2f09",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_indirect",
+      "address": "0x18d0",
+      "fileOffset": 2256,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_divide.bin",
+      "size": 6,
+      "sha256": "34769d1f8f8518618506bc4a681e71393c27eea9b68d31b41baf8d10f3c4ab36",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_divide",
+      "address": "0x18e0",
+      "fileOffset": 2272,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_width.bin",
+      "size": 13,
+      "sha256": "3b2588ea9e625ad36c350ae57a0cb6888fb126032c257f667b2d7d80015f6576",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_width",
+      "address": "0x18f0",
+      "fileOffset": 2288,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_stack_args.bin",
+      "size": 79,
+      "sha256": "22f80076cd847c4513e43556ad924967d3437569df1c4a7d0f1ff3a1c4322ddb",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_stack_args",
+      "address": "0x1900",
+      "fileOffset": 2304,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_float.bin",
+      "size": 21,
+      "sha256": "e03d184218c0bc29f0af6ba5812a69ecaef9e1b933666ab8abc4292b239499e8",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_float",
+      "address": "0x1950",
+      "fileOffset": 2384,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_vector.bin",
+      "size": 16,
+      "sha256": "5ea47922765d77d133ddd478573f50ac72bd901aeb7bf8b74d97e04de1420826",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_vector",
+      "address": "0x1970",
+      "fileOffset": 2416,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_vector_integer.bin",
+      "size": 25,
+      "sha256": "2e416dff3e5a761e71ec3a013ab8010a24bfcd50cd3c06735a1fa30f337e14d7",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_vector_integer",
+      "address": "0x1980",
+      "fileOffset": 2432,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_variadic.bin",
+      "size": 198,
+      "sha256": "f1d89f1f49493757ffbed756a9399cc54204919757482c3c240992ff556c6044",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_variadic",
+      "address": "0x19a0",
+      "fileOffset": 2464,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_string.bin",
+      "size": 8,
+      "sha256": "413ceb886c9c5ac46777515ea9b8901093cd7894dc56dfbf26c79ae0c5bc7949",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_string",
+      "address": "0x1a68",
+      "fileOffset": 2664,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_check.bin",
+      "size": 983,
+      "sha256": "9e875d0b27f7d80f2d9a77a6e3039d50cb6a1484ab3cd2a6120e72eb4d7451ba",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_check",
+      "address": "0x1a70",
+      "fileOffset": 2672,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_native_call.bin",
+      "size": 10,
+      "sha256": "51d750d7df0178801d1344537c8d3bcd77274adc49c08e10f0b74ab654bdcdf2",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_native_call",
+      "address": "0x1e50",
+      "fileOffset": 3664,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    },
+    {
+      "path": "fixtures/code/elf-x86_64/fixture_entry.bin",
+      "size": 14,
+      "sha256": "03f3c2c57e05221a8a4162baa376092967d2217fd43ceaba999945add6ca0d3b",
+      "architecture": "x86_64",
+      "format": "elf",
+      "abi": "sysv-amd64",
+      "image": "fixtures/bin/libcorpus-elf-x86_64-symbols.so",
+      "symbol": "fixture_entry",
+      "address": "0x1e60",
+      "fileOffset": 3680,
+      "boundaryEvidence": "ELF STT_FUNC st_value/st_size from compiler symbol table; independently recorded by llvm-readobj"
+    }
+  ],
+  "expected": "fixtures/expected.json",
+  "inventory": "fixtures/inventory.json",
+  "malformed": [],
+  "notes": [
+    "SDK/CRT-free LLVM cross-compilation; explicit analysis entry is not process startup.",
+    "Stripping removes static/debug symbols; dynamic exports/imports and symbol-sized function ranges remain.",
+    "DT_NEEDED does not attribute individual imports to libraries.",
+    "ELF ranges use code/elf-x86_64, never overwrite Windows code/x86_64."
+  ]
+}

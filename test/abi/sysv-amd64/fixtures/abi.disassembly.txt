@@ -1,0 +1,241 @@
+
+<fixture>/abi.so:	file format elf64-x86-64
+
+Disassembly of section .text:
+
+0000000000001620 <abi_mixed>:
+    1620: 89 f8                        	movl	%edi, %eax
+    1622: f2 48 0f 2a d0               	cvtsi2sd	%rax, %xmm2
+    1627: f2 0f 58 c2                  	addsd	%xmm2, %xmm0
+    162b: 89 f0                        	movl	%esi, %eax
+    162d: 0f 57 d2                     	xorps	%xmm2, %xmm2
+    1630: f2 48 0f 2a d0               	cvtsi2sd	%rax, %xmm2
+    1635: f3 0f 5a c9                  	cvtss2sd	%xmm1, %xmm1
+    1639: f2 0f 58 c2                  	addsd	%xmm2, %xmm0
+    163d: 66 48 0f 6e d2               	movq	%rdx, %xmm2
+    1642: 66 0f 62 15 b6 ef ff ff      	punpckldq	-0x104a(%rip), %xmm2 # xmm2 = xmm2[0],mem[0],xmm2[1],mem[1]
+                                                                        # 0x600
+    164a: f2 0f 58 c1                  	addsd	%xmm1, %xmm0
+    164e: 66 0f 5c 15 9a ef ff ff      	subpd	-0x1066(%rip), %xmm2    # 0x5f0
+    1656: 66 0f 28 ca                  	movapd	%xmm2, %xmm1
+    165a: 66 0f 15 ca                  	unpckhpd	%xmm2, %xmm1            # xmm1 = xmm1[1],xmm2[1]
+    165e: f2 0f 58 ca                  	addsd	%xmm2, %xmm1
+    1662: f2 0f 58 c1                  	addsd	%xmm1, %xmm0
+    1666: c3                           	retq
+    1667: 66 0f 1f 84 00 00 00 00 00   	nopw	(%rax,%rax)
+
+0000000000001670 <abi_aggregate>:
+    1670: 48 01 f7                     	addq	%rsi, %rdi
+    1673: 66 48 0f 6e d7               	movq	%rdi, %xmm2
+    1678: 66 0f 62 15 80 ef ff ff      	punpckldq	-0x1080(%rip), %xmm2 # xmm2 = xmm2[0],mem[0],xmm2[1],mem[1]
+                                                                        # 0x600
+    1680: 66 0f 5c 15 68 ef ff ff      	subpd	-0x1098(%rip), %xmm2    # 0x5f0
+    1688: 66 0f 28 da                  	movapd	%xmm2, %xmm3
+    168c: 66 0f 15 da                  	unpckhpd	%xmm2, %xmm3            # xmm3 = xmm3[1],xmm2[1]
+    1690: f2 0f 58 da                  	addsd	%xmm2, %xmm3
+    1694: f2 0f 58 c3                  	addsd	%xmm3, %xmm0
+    1698: f2 0f 58 c1                  	addsd	%xmm1, %xmm0
+    169c: c3                           	retq
+    169d: 0f 1f 00                     	nopl	(%rax)
+
+00000000000016a0 <abi_rollback>:
+    16a0: 48 01 f7                     	addq	%rsi, %rdi
+    16a3: 48 01 ca                     	addq	%rcx, %rdx
+    16a6: 48 01 fa                     	addq	%rdi, %rdx
+    16a9: 4d 01 c8                     	addq	%r9, %r8
+    16ac: 49 01 d0                     	addq	%rdx, %r8
+    16af: 4c 03 44 24 08               	addq	0x8(%rsp), %r8
+    16b4: 66 49 0f 6e c8               	movq	%r8, %xmm1
+    16b9: 66 0f 62 0d 3f ef ff ff      	punpckldq	-0x10c1(%rip), %xmm1 # xmm1 = xmm1[0],mem[0],xmm1[1],mem[1]
+                                                                        # 0x600
+    16c1: 66 0f 5c 0d 27 ef ff ff      	subpd	-0x10d9(%rip), %xmm1    # 0x5f0
+    16c9: 66 0f 28 d1                  	movapd	%xmm1, %xmm2
+    16cd: 66 0f 15 d1                  	unpckhpd	%xmm1, %xmm2            # xmm2 = xmm2[1],xmm1[1]
+    16d1: f2 0f 58 d1                  	addsd	%xmm1, %xmm2
+    16d5: f2 0f 58 54 24 10            	addsd	0x10(%rsp), %xmm2
+    16db: f2 0f 58 c2                  	addsd	%xmm2, %xmm0
+    16df: c3                           	retq
+
+00000000000016e0 <abi_sse_rollback>:
+    16e0: f2 0f 58 c1                  	addsd	%xmm1, %xmm0
+    16e4: f2 0f 58 c2                  	addsd	%xmm2, %xmm0
+    16e8: f2 0f 58 c3                  	addsd	%xmm3, %xmm0
+    16ec: f2 0f 58 c4                  	addsd	%xmm4, %xmm0
+    16f0: f2 0f 58 c5                  	addsd	%xmm5, %xmm0
+    16f4: f2 0f 58 c6                  	addsd	%xmm6, %xmm0
+    16f8: f2 0f 58 c7                  	addsd	%xmm7, %xmm0
+    16fc: f2 0f 58 44 24 10            	addsd	0x10(%rsp), %xmm0
+    1702: 48 03 7c 24 08               	addq	0x8(%rsp), %rdi
+    1707: 66 48 0f 6e cf               	movq	%rdi, %xmm1
+    170c: 66 0f 62 0d ec ee ff ff      	punpckldq	-0x1114(%rip), %xmm1 # xmm1 = xmm1[0],mem[0],xmm1[1],mem[1]
+                                                                        # 0x600
+    1714: 66 0f 5c 0d d4 ee ff ff      	subpd	-0x112c(%rip), %xmm1    # 0x5f0
+    171c: 66 0f 28 d1                  	movapd	%xmm1, %xmm2
+    1720: 66 0f 15 d1                  	unpckhpd	%xmm1, %xmm2            # xmm2 = xmm2[1],xmm1[1]
+    1724: f2 0f 58 d1                  	addsd	%xmm1, %xmm2
+    1728: f2 0f 58 c2                  	addsd	%xmm2, %xmm0
+    172c: c3                           	retq
+    172d: 0f 1f 00                     	nopl	(%rax)
+
+0000000000001730 <abi_sse_overflow>:
+    1730: f2 0f 58 c1                  	addsd	%xmm1, %xmm0
+    1734: f2 0f 58 c2                  	addsd	%xmm2, %xmm0
+    1738: f2 0f 58 c3                  	addsd	%xmm3, %xmm0
+    173c: f2 0f 58 c4                  	addsd	%xmm4, %xmm0
+    1740: f2 0f 58 c5                  	addsd	%xmm5, %xmm0
+    1744: f2 0f 58 c6                  	addsd	%xmm6, %xmm0
+    1748: f2 0f 58 c7                  	addsd	%xmm7, %xmm0
+    174c: f2 0f 58 44 24 08            	addsd	0x8(%rsp), %xmm0
+    1752: c3                           	retq
+    1753: 66 66 66 66 2e 0f 1f 84 00 00 00 00 00       	nopw	%cs:(%rax,%rax)
+
+0000000000001760 <abi_stack_args>:
+    1760: 48 01 fe                     	addq	%rdi, %rsi
+    1763: 48 8d 04 0a                  	leaq	(%rdx,%rcx), %rax
+    1767: 48 01 f0                     	addq	%rsi, %rax
+    176a: 4c 01 c0                     	addq	%r8, %rax
+    176d: 4c 01 c8                     	addq	%r9, %rax
+    1770: 48 03 44 24 08               	addq	0x8(%rsp), %rax
+    1775: 48 03 44 24 10               	addq	0x10(%rsp), %rax
+    177a: c3                           	retq
+    177b: 0f 1f 44 00 00               	nopl	(%rax,%rax)
+
+0000000000001780 <abi_ret_integer>:
+    1780: 48 8d 47 01                  	leaq	0x1(%rdi), %rax
+    1784: 48 8d 56 02                  	leaq	0x2(%rsi), %rdx
+    1788: c3                           	retq
+    1789: 0f 1f 80 00 00 00 00         	nopl	(%rax)
+
+0000000000001790 <abi_ret_sse>:
+    1790: f2 0f 58 05 80 ee ff ff      	addsd	-0x1180(%rip), %xmm0    # 0x618
+    1798: f2 0f 58 0d 70 ee ff ff      	addsd	-0x1190(%rip), %xmm1    # 0x610
+    17a0: c3                           	retq
+    17a1: 66 66 66 66 66 66 2e 0f 1f 84 00 00 00 00 00 	nopw	%cs:(%rax,%rax)
+
+00000000000017b0 <abi_ret_mixed>:
+    17b0: 48 8d 47 01                  	leaq	0x1(%rdi), %rax
+    17b4: f2 0f 58 05 54 ee ff ff      	addsd	-0x11ac(%rip), %xmm0    # 0x610
+    17bc: c3                           	retq
+    17bd: 0f 1f 00                     	nopl	(%rax)
+
+00000000000017c0 <abi_ret_reverse>:
+    17c0: f2 0f 58 05 50 ee ff ff      	addsd	-0x11b0(%rip), %xmm0    # 0x618
+    17c8: 48 8d 47 02                  	leaq	0x2(%rdi), %rax
+    17cc: c3                           	retq
+    17cd: 0f 1f 00                     	nopl	(%rax)
+
+00000000000017d0 <abi_sret>:
+    17d0: 48 89 f8                     	movq	%rdi, %rax
+    17d3: 48 89 37                     	movq	%rsi, (%rdi)
+    17d6: 48 89 57 08                  	movq	%rdx, 0x8(%rdi)
+    17da: 48 01 f2                     	addq	%rsi, %rdx
+    17dd: 48 89 57 10                  	movq	%rdx, 0x10(%rdi)
+    17e1: c3                           	retq
+    17e2: 66 66 66 66 66 2e 0f 1f 84 00 00 00 00 00    	nopw	%cs:(%rax,%rax)
+
+00000000000017f0 <abi_red_zone>:
+    17f0: 48 89 7c 24 e8               	movq	%rdi, -0x18(%rsp)
+    17f5: 48 c7 44 24 f8 07 00 00 00   	movq	$0x7, -0x8(%rsp)
+    17fe: 48 c7 44 24 d8 09 00 00 00   	movq	$0x9, -0x28(%rsp)
+    1807: 48 8b 44 24 e8               	movq	-0x18(%rsp), %rax
+    180c: 48 03 44 24 f8               	addq	-0x8(%rsp), %rax
+    1811: 48 03 44 24 d8               	addq	-0x28(%rsp), %rax
+    1816: c3                           	retq
+    1817: 66 0f 1f 84 00 00 00 00 00   	nopw	(%rax,%rax)
+
+0000000000001820 <abi_stack>:
+    1820: 48 81 ec c8 00 00 00         	subq	$0xc8, %rsp
+    1827: 48 89 7c 24 80               	movq	%rdi, -0x80(%rsp)
+    182c: 89 f0                        	movl	%esi, %eax
+    182e: b9 cd cc cc cc               	movl	$0xcccccccd, %ecx       # imm = 0xCCCCCCCD
+    1833: 48 0f af c8                  	imulq	%rax, %rcx
+    1837: 48 c1 e9 25                  	shrq	$0x25, %rcx
+    183b: c1 e1 03                     	shll	$0x3, %ecx
+    183e: 8d 04 89                     	leal	(%rcx,%rcx,4), %eax
+    1841: 29 c6                        	subl	%eax, %esi
+    1843: 48 c7 44 f4 80 07 00 00 00   	movq	$0x7, -0x80(%rsp,%rsi,8)
+    184c: 48 8b 44 24 80               	movq	-0x80(%rsp), %rax
+    1851: 48 81 c4 c8 00 00 00         	addq	$0xc8, %rsp
+    1858: c3                           	retq
+    1859: 0f 1f 80 00 00 00 00         	nopl	(%rax)
+
+0000000000001860 <abi_variadic>:
+    1860: 48 83 ec 58                  	subq	$0x58, %rsp
+    1864: 48 89 74 24 a8               	movq	%rsi, -0x58(%rsp)
+    1869: 48 89 54 24 b0               	movq	%rdx, -0x50(%rsp)
+    186e: 48 89 4c 24 b8               	movq	%rcx, -0x48(%rsp)
+    1873: 4c 89 44 24 c0               	movq	%r8, -0x40(%rsp)
+    1878: 4c 89 4c 24 c8               	movq	%r9, -0x38(%rsp)
+    187d: 84 c0                        	testb	%al, %al
+    187f: 74 28                        	je	0x18a9 <abi_variadic+0x49>
+    1881: 66 0f 29 44 24 d0            	movapd	%xmm0, -0x30(%rsp)
+    1887: 0f 29 4c 24 e0               	movaps	%xmm1, -0x20(%rsp)
+    188c: 0f 29 54 24 f0               	movaps	%xmm2, -0x10(%rsp)
+    1891: 0f 29 1c 24                  	movaps	%xmm3, (%rsp)
+    1895: 0f 29 64 24 10               	movaps	%xmm4, 0x10(%rsp)
+    189a: 0f 29 6c 24 20               	movaps	%xmm5, 0x20(%rsp)
+    189f: 0f 29 74 24 30               	movaps	%xmm6, 0x30(%rsp)
+    18a4: 0f 29 7c 24 40               	movaps	%xmm7, 0x40(%rsp)
+    18a9: 48 8d 44 24 a0               	leaq	-0x60(%rsp), %rax
+    18ae: 48 89 44 24 90               	movq	%rax, -0x70(%rsp)
+    18b3: 48 8d 44 24 60               	leaq	0x60(%rsp), %rax
+    18b8: 48 89 44 24 88               	movq	%rax, -0x78(%rsp)
+    18bd: 48 b8 08 00 00 00 30 00 00 00	movabsq	$0x3000000008, %rax     # imm = 0x3000000008
+    18c7: 48 89 44 24 80               	movq	%rax, -0x80(%rsp)
+    18cc: 85 ff                        	testl	%edi, %edi
+    18ce: 74 4d                        	je	0x191d <abi_variadic+0xbd>
+    18d0: 48 8b 44 24 90               	movq	-0x70(%rsp), %rax
+    18d5: 8b 4c 24 84                  	movl	-0x7c(%rsp), %ecx
+    18d9: 66 0f 57 c0                  	xorpd	%xmm0, %xmm0
+    18dd: 48 8b 54 24 88               	movq	-0x78(%rsp), %rdx
+    18e2: eb 26                        	jmp	0x190a <abi_variadic+0xaa>
+    18e4: 66 66 66 2e 0f 1f 84 00 00 00 00 00  	nopw	%cs:(%rax,%rax)
+    18f0: 48 89 d6                     	movq	%rdx, %rsi
+    18f3: 89 ca                        	movl	%ecx, %edx
+    18f5: 48 01 c2                     	addq	%rax, %rdx
+    18f8: 83 c1 10                     	addl	$0x10, %ecx
+    18fb: 89 4c 24 84                  	movl	%ecx, -0x7c(%rsp)
+    18ff: f2 0f 58 02                  	addsd	(%rdx), %xmm0
+    1903: 48 89 f2                     	movq	%rsi, %rdx
+    1906: ff cf                        	decl	%edi
+    1908: 74 17                        	je	0x1921 <abi_variadic+0xc1>
+    190a: 81 f9 a0 00 00 00            	cmpl	$0xa0, %ecx
+    1910: 76 de                        	jbe	0x18f0 <abi_variadic+0x90>
+    1912: 48 8d 72 08                  	leaq	0x8(%rdx), %rsi
+    1916: 48 89 74 24 88               	movq	%rsi, -0x78(%rsp)
+    191b: eb e2                        	jmp	0x18ff <abi_variadic+0x9f>
+    191d: 66 0f 57 c0                  	xorpd	%xmm0, %xmm0
+    1921: 48 83 c4 58                  	addq	$0x58, %rsp
+    1925: c3                           	retq
+    1926: 66 2e 0f 1f 84 00 00 00 00 00	nopw	%cs:(%rax,%rax)
+
+0000000000001930 <abi_call_variadic>:
+    1930: 50                           	pushq	%rax
+    1931: bf 02 00 00 00               	movl	$0x2, %edi
+    1936: b0 02                        	movb	$0x2, %al
+    1938: e8 33 00 00 00               	callq	0x1970 <abi_variadic@plt>
+    193d: f2 0f 58 05 d3 ec ff ff      	addsd	-0x132d(%rip), %xmm0    # 0x618
+    1945: 58                           	popq	%rax
+    1946: c3                           	retq
+    1947: 90                           	nop
+
+0000000000001948 <abi_long_double_size>:
+    1948: b8 10 00 00 00               	movl	$0x10, %eax
+    194d: c3                           	retq
+    194e: 66 90                        	nop
+
+0000000000001950 <abi_long_double_storage>:
+    1950: 0f b6 47 10                  	movzbl	0x10(%rdi), %eax
+    1954: c3                           	retq
+
+Disassembly of section .plt:
+
+0000000000001960 <.plt>:
+    1960: ff 35 e2 20 00 00            	pushq	0x20e2(%rip)            # 0x3a48
+    1966: ff 25 e4 20 00 00            	jmpq	*0x20e4(%rip)           # 0x3a50
+    196c: 0f 1f 40 00                  	nopl	(%rax)
+
+0000000000001970 <abi_variadic@plt>:
+    1970: ff 25 e2 20 00 00            	jmpq	*0x20e2(%rip)           # 0x3a58
+    1976: 68 00 00 00 00               	pushq	$0x0
+    197b: e9 e0 ff ff ff               	jmp	0x1960 <.plt>

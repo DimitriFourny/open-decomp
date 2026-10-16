@@ -291,7 +291,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   for (let index = 2; index < process.argv.length; index++) {
     const flag = process.argv[index]!;
     if (flag === '--help' && process.argv.length === 3) {
-      process.stderr.write('Usage: node dist/scripts/release-acceptance.js [--server-entry PATH] [--fixtures PATH]\nRun the four maintained investigations plus cross-target release failure/native-variant scenarios through compiled or installed MCP stdio. Fixtures is the bin directory alongside manifest.json and malformed/. Never executes targets. Output is JSON Lines host/scenario evidence; failures exit nonzero.\n');
+      process.stderr.write('Usage: node dist/scripts/release-acceptance.js [--server-entry PATH] [--fixtures PATH]\nRun the maintained Mach-O/Darwin, PE/Windows and ELF/SysV investigations plus cross-target release failure/native-variant scenarios through compiled or installed MCP stdio. Fixtures is the bin directory alongside manifest.json, elf-manifest.json and malformed/. Never executes targets. Output is JSON Lines host/scenario evidence; failures exit nonzero.\n');
       process.exit(0);
     }
     if (flag !== '--server-entry' && flag !== '--fixtures') throw new Error('Unknown release acceptance argument');

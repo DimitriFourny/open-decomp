@@ -47,6 +47,12 @@ export interface DebugRecovery {
  * Overlapping concrete definitions have null core signatures and linked conflicts. */
 export function recoverDebugInfo(image: LoadedImage, context: OperationContext, external?: ExternalDebugInput): DebugRecovery {
   context.checkpoint(0);
+  if (image.target.format === 'elf') {
+    const diagnostic: Diagnostic = { code: 'unavailable_semantics', severity: 'warning',
+      message: 'ELF DWARF recovery is unavailable; native symbols remain usable, but debug types, signatures and source locations are not recovered.', evidence_ids: [] };
+    if (external) throw new OperationError({ ...diagnostic, code: 'unsupported_target', severity: 'error' });
+    return { status: 'partial', uuid: null, content_sha256: image.sha256, data: null, types: [], functions: [], evidence: [], diagnostics: [diagnostic] };
+  }
   if (image.target.format !== 'macho') {
     if (external) throw new OperationError({ code: 'unsupported_target', severity: 'error', message: 'External DWARF recovery requires a Mach-O image; PDB parsing is not implemented', evidence_ids: [] });
     return { status: 'absent', uuid: null, content_sha256: image.sha256, data: null, types: [], functions: [], evidence: [], diagnostics: [] };

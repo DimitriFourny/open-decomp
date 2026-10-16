@@ -260,7 +260,9 @@ export async function startHttpServer(input: HttpConfig, workerRuntime: Pick<Wor
       if (request.headers['content-encoding'] !== undefined || request.headers.expect !== undefined) throw new HttpRejection(415);
       if (!/^application\/json(?:\s*;.*)?$/i.test(request.headers['content-type'] ?? '')) throw new HttpRejection(415);
       const contentLength = request.headers['content-length'];
-      if (contentLength !== undefined && (!/^\d+$/.test(contentLength) || Number(contentLength) > MAX_MCP_INPUT_BYTES)) throw new HttpRejection(413);
+      if (contentLength !== undefined && !/^\d+$/.test(contentLength)) throw new HttpRejection(413);
+      // Enforce size while consuming the bounded body. Closing solely from its
+      // advertised length can reset an in-flight upload before 413 reaches it.
       const body = await readBody(request, controller.signal, config.limits.body_timeout_ms);
       const parsedBody = parseBoundedMessage(body);
       const headers = new Headers();

@@ -27,16 +27,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 ### Later extensions — not first-release blockers
 
 ## Doing
-- [ ] **F03 — Add Linux x86-64 ELF / System V ABI support**
-  - Depends on: T31.
-  - Selected by user: Linux x86-64, ELF, System V AMD64 ABI. Corpus: compile the existing scalar/control/memory/call/FP/vector sources into symbol-bearing and stripped ELF executables/shared objects; add compiler-backed SysV cases for mixed register banks, aggregate classification/rollback, stack/red-zone use, variadic calls and indirect results before integrating the new target.
-  - Owns: ELF loading, System V AMD64 ABI classification, x86-64 adapter/lifter target integration and the selected conformance/acceptance corpus.
-  - Work: Add only the components required by the selected combination, reusing existing semantic analysis, persistence, tools, and emitters. Publish exact capabilities and unsupported cases. If replacing a decoder, implement its architecture adapter and adjudicate semantic conformance rather than assuming a drop-in swap.
-  - Acceptance: The complete investigation workflow works for the selected target with evidence-backed semantics, and existing targets remain correct. Public tools require no architecture-specific command fork.
-  - Owner: ElfLoader (sol-worker: bounded native loader), SysVAbi (astra-worker: ABI and semantic integration), ElfCorpus (sol-worker: compiler fixtures and standard workflows), MacIntegration (sol-worker: integrated verification, compiled workflows and documentation), Coordinator (shared contracts, acceptance decisions, task board and Git).
-  - Scheduling: Implementation proceeds against the verified macOS engine under the host-verification exception. Linux target analysis is cross-compiled and does not require a Linux or Windows VM; this does not waive the Windows-host T29–T31 gates.
-  - Progress: Real ELF/SysV compiler corpora generated; five reviewed semantic/native-boundary defects reproduced failing-before and corrected. Latest strict typecheck passed and **851/852 tests** passed. The remaining workflow assertion conflates complete machine semantics with unavailable ELF source metadata; MacIntegration owns the precise coverage check and subsequent compiled proof.
-
 - [ ] **T29 — Run cross-target and cross-host release acceptance**
   - Depends on: T28.
   - Owns: end-to-end acceptance suite, host verification configuration, release evidence.
@@ -73,6 +63,16 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Implemented and macOS verified: Private bundled npm artifact, hash-bound release manifest, external empty-cache offline installed verifier, operator/API/update documentation and 23 complete retained license/provenance assets. Full check **695/695** passed; actual installed public import, both decoders, all three demanglers and all **24 MCP scenarios** passed. Artifact SHA256 `10016938c5eb38c979b2b77f8914e6a7bdd28e4aad4de07f6793b3e07364c871`; exact commands, sizes, notice audit and raw evidence are in RELEASE-VERIFICATION.md. The earlier missing installed a64js closure is corrected. Windows installation remains outstanding; unresolved public Arm generated-data review and Swift WASM source revision are preserved as explicit provenance boundaries.
 
 ## Done
+- [x] **F03 — Add Linux x86-64 ELF / System V ABI support**
+  - Depends on: T31.
+  - Selected by user: Linux x86-64, ELF, System V AMD64 ABI. Corpus: compile the existing scalar/control/memory/call/FP/vector sources into symbol-bearing and stripped ELF executables/shared objects; add compiler-backed SysV cases for mixed register banks, aggregate classification/rollback, stack/red-zone use, variadic calls and indirect results before integrating the new target.
+  - Owns: ELF loading, System V AMD64 ABI classification, x86-64 adapter/lifter target integration and the selected conformance/acceptance corpus.
+  - Work: Add only the components required by the selected combination, reusing existing semantic analysis, persistence, tools, and emitters. Publish exact capabilities and unsupported cases. If replacing a decoder, implement its architecture adapter and adjudicate semantic conformance rather than assuming a drop-in swap.
+  - Acceptance: The complete investigation workflow works for the selected target with evidence-backed semantics, and existing targets remain correct. Public tools require no architecture-specific command fork.
+  - Owner: ElfLoader (sol-worker: bounded native loader), SysVAbi (astra-worker: ABI and semantic integration), ElfCorpus (sol-worker: compiler fixtures and standard workflows), MacIntegration (sol-worker: integrated verification, compiled workflows and documentation), Coordinator (shared contracts, acceptance decisions, task board and Git).
+  - Scheduling: Implementation proceeds against the verified macOS engine under the host-verification exception. Linux target analysis is cross-compiled and does not require a Linux or Windows VM; this does not waive the Windows-host T29–T31 gates.
+  - Implemented and verified: Bounded ELF64 loading, System V AMD64 ABI and compiler-backed corpora reuse the existing decoder, lifter, analysis, storage, tools and both emitters. Five reviewed semantic/native-boundary defects were reproduced failing-before and corrected. Node 24.22.0 strict typecheck, **852/852 tests** and build passed; compiled stdio passed **28 scenarios plus completion** across all eight fixtures. Actual HTTP and trusted-CA HTTPS covered all four ELF variants, both dialects, hash-paged artifacts, mappings, cross-principal denial, revision invalidation and full-process restart/cache recovery. Machine coverage is complete while unavailable ELF DWARF/source metadata remains explicitly partial. Eight concurrent compiled overflow probes now return 413 without the previously observed connection reset. Exact evidence is retained in RELEASE-VERIFICATION.md; current Windows-host and installed-release gates remain open.
+
 - [x] **F01 — Add a Python-like pseudocode emitter**
   - Depends on: T31.
   - Owns: `src/emitters/python-like/`, emitter selection/capability integration and semantic mapping cases.

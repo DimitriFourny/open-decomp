@@ -51,7 +51,7 @@ const clobbers: CallClobbers = Object.freeze({
 });
 const dataLayout: DataLayout = Object.freeze({ endian: 'little', pointer_bits: 64,
   char_bits: 8, short_bits: 16, int_bits: 32, long_bits: 32, long_long_bits: 64,
-  float_bits: 32, double_bits: 64, long_double_bits: 64, stack_alignment: 16, aggregate_max_alignment: 16 });
+  float_bits: 32, double_bits: 64, long_double_bits: 64, long_double_storage_bits: 64, stack_alignment: 16, aggregate_max_alignment: 16 });
 
 type Argument = { readonly kind: 'integer' | 'float'; readonly bits: number }
   | { readonly kind: 'indirect'; readonly size: bigint; readonly alignment: number };
@@ -104,11 +104,13 @@ function registerLocation(register: RegisterDescriptor, bits: number): AbiLocati
  */
 export class WindowsX64Abi implements AbiProfile {
   readonly name = 'Microsoft x64 ABI';
-  readonly version = '1';
+  readonly version = '2';
   readonly id = 'windows-x64';
   readonly architecture = 'x86_64';
   readonly layout = dataLayout;
   readonly stack_pointer = rsp;
+  readonly stack_return_address_bytes = 8n;
+  readonly red_zone_bytes = 0n;
   readonly preserved = preserved;
   readonly unknown_call_clobbers = clobbers;
 
@@ -116,12 +118,13 @@ export class WindowsX64Abi implements AbiProfile {
     const diagnostics: Diagnostic[] = [];
     const parameters: { index: number; locations: AbiLocation[] }[] = [];
     const returns: AbiLocation[] = [];
+    const argument_count = signature.parameters !== null && (signature.argument_list_complete ?? (!signature.variadic && signature.prototyped !== false)) ? signature.parameters.length : null;
     let hiddenResult: AbiLocation | null = null;
     let state: AbiCallLayout['state'] = 'complete';
     let slots = 0;
-    const result = (): AbiCallLayout => ({ parameters, returns, hidden_result: hiddenResult,
+    const result = (): AbiCallLayout => ({ parameters, argument_count, returns, hidden_result: hiddenResult,
       stack_bytes: (32n + BigInt(Math.max(0, slots - 4)) * 8n + 15n) / 16n * 16n,
-      shadow_space: 32n, stack_alignment: 16, clobbers, diagnostics, state });
+      shadow_space: 32n, stack_alignment: 16, implicit_register_inputs: [], clobbers, diagnostics, state });
     if (signature.calling_convention !== undefined && signature.calling_convention !== 'default') {
       diagnostics.push(unsupported(`Calling convention ${signature.calling_convention} is not the default Microsoft x64 ABI; no argument or return locations established.`));
       state = 'unsupported'; return result();
@@ -151,6 +154,10 @@ export class WindowsX64Abi implements AbiProfile {
         (!signature.variadic && signature.fixed_parameter_count !== signature.parameters.length)) {
       diagnostics.push({ code: 'invalid_input', severity: 'error', message: 'Invalid fixed parameter count for the supplied ABI signature.', evidence_ids: [] });
       state = 'unsupported'; return result();
+    }
+    if (argument_count === null) {
+      diagnostics.push(unsupported('Only a known argument prefix is supplied; total arity and final stack allocation remain unknown.'));
+      state = 'partial';
     }
     for (let index = 0; index < signature.parameters.length; index++, slots++) {
       const type = signature.parameters[index]!;

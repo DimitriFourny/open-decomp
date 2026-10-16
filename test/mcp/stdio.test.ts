@@ -85,7 +85,7 @@ test('official SDK source-entry workflows analyze both targets, symbol-bearing a
   await runMcpWorkflows({ serverEntry: entry, fixtures, nodeArgs });
 });
 
-for (const shutdown of ['eof', 'SIGINT', 'SIGTERM', 'backpressure', 'stalled-output', 'oversized-id'] as const) test(`source CLI ${shutdown} reaps a real owned worker and leaves its project resumable`, {
+for (const shutdown of ['eof', 'SIGINT', 'SIGTERM', 'backpressure', 'stalled-output', 'drained-output', 'oversized-id'] as const) test(`source CLI ${shutdown} reaps a real owned worker and leaves its project resumable`, {
   timeout: shutdown === 'stalled-output' ? 120000 : 60000,
   skip: process.platform === 'win32' && (shutdown === 'SIGINT' || shutdown === 'SIGTERM') ? 'Windows child.kill terminates rather than delivering catchable POSIX signals; EOF and backpressure lifecycle remain covered' : false,
 }, async t => {
@@ -128,6 +128,12 @@ for (const shutdown of ['eof', 'SIGINT', 'SIGTERM', 'backpressure', 'stalled-out
         }],
       },
     } })}\n`);
+  } else if (shutdown === 'drained-output') {
+    // Receiving the full frame can precede its Windows write callback. Immediate
+    // EOF must still let that callback settle and preserve successful shutdown.
+    const listed = await rpc.request('tools/list', {});
+    assert.ok(z.object({ tools: z.array(z.unknown()) }).parse(listed['result']).tools.length > 0);
+    process.child.stdin.end();
   } else if (shutdown === 'eof') process.child.stdin.end();
   else process.child.kill(shutdown);
   await process.closed;

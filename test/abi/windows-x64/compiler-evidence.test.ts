@@ -133,7 +133,7 @@ test('compiler generic 64-bit vectors are not shape-equivalent to __m64 ABI iden
 });
 
 test('compiler variadic caller duplicates XMM1 into RDX and reserves shadow space', () => {
-  const layout = windowsX64Abi.classifyCall({ returns: f64, parameters: [u32, f64], variadic: true, fixed_parameter_count: 1 });
+  const layout = windowsX64Abi.classifyCall({ returns: f64, parameters: [u32, f64], variadic: true, fixed_parameter_count: 1, argument_list_complete: true });
   const instructions = decode('abi_call_variadic');
   const first = payload(instructions[0]);
   assert.equal(first.mnemonic, 'sub');

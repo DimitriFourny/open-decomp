@@ -109,11 +109,19 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
   WriteFile: entry('windows-kernel', 'int', [['file', V], ['buffer', V], ['count', 'uint'], ['written', U], ['overlapped', OVERLAPPED]], { memory: [footprint(1, 'read', count(2)), footprint(3, 'write', bytes(4n)), footprint(4, 'read_write')] }),
 };
 
-export function identifiesLibrary(path: string, entry: CatalogEntry, format: 'macho' | 'pe'): boolean {
+export function identifiesLibrary(path: string, entry: CatalogEntry, format: 'macho' | 'pe' | 'elf'): boolean {
   if (format === 'pe') {
     const module = path.toLowerCase();
     if (entry.library === 'windows-kernel') return module === 'kernel32.dll' || module === 'kernelbase.dll';
     return (entry.library === 'c' || entry.library === 'windows-crt') && (module === 'ucrtbase.dll' || module === 'msvcrt.dll');
+  }
+  if (format === 'elf') {
+    // Only explicit import attribution qualifies. A DT_NEEDED list is not a
+    // symbol-to-library binding, and a Darwin library path is not ELF evidence.
+    const module = path.slice(path.lastIndexOf('/') + 1);
+    if (entry.library === 'c' || entry.library === 'posix') return module === 'libc.so.6';
+    if (entry.library === 'cxx') return module === 'libstdc++.so.6' || module === 'libc++abi.so.1';
+    return false;
   }
   if (entry.library === 'c' || entry.library === 'posix' || entry.library === 'darwin') return path === '/usr/lib/libSystem.B.dylib' || path === '/usr/lib/libSystem.dylib' || /^\/usr\/lib\/system\/libsystem_[a-z0-9_]+\.dylib$/.test(path);
   if (entry.library === 'cxx') return /^\/usr\/lib\/libc\+\+(abi)?(?:\.\d+)*\.dylib$/.test(path);

@@ -389,7 +389,11 @@ export class Renderer {
           const declaration = `source_signature ${this.typeName(signature.return_type)} ${this.identifier(subject, subject === this.input.function.id ? 'fn' : 'call_site')}(${w.join(parameters) || 'void'});`;
           w.line(0, trusted ? declaration : `/* evidence only: ${declaration} */`);
         }
-        w.map(this.dataOrigin(subject), start, [subject, signature.return_type, ...signature.parameters.map(parameter => parameter.id)], association.evidence_ids);
+        const contracts = subject === this.input.function.id ? this.input.types?.calls?.function_contracts ?? [] : this.calls.get(subject)?.contracts ?? [];
+        this.context.checkpoint(contracts.length);
+        if (!contracts.some(observation => observation.contract.id === association.id)) this.implicitRegisterFacts(association.implicit_register_inputs, 0);
+        w.map(this.dataOrigin(subject), start, [subject, signature.return_type, ...signature.parameters.map(parameter => parameter.id)],
+          [...new Set([...association.evidence_ids, ...association.implicit_register_inputs.flatMap(item => item.fact.evidence_ids)])]);
       }
     }
     for (const [subject, associations] of this.associations) for (const association of associations) {
@@ -421,12 +425,19 @@ export class Renderer {
     }
     if (this.input.types?.state === 'partial') this.report('unavailable_semantics', 'Type recovery was partial; omitted source facts are unknown, not absent.', this.input.function.id);
   }
+  private implicitRegisterFacts(inputs: ContractObservation['implicit_register_inputs'], depth: number): void {
+    for (const item of inputs) {
+      this.context.checkpoint(1);
+      const requirement = item.requirement;
+      this.writer.comment(depth, `implicit register input: ${this.register(requirement.register)} unsigned_range=[${requirement.unsigned_minimum}, ${requirement.unsigned_maximum}] purpose=${requirement.purpose}; observed=${item.fact.value.kind === 'constant' ? item.fact.value.bits.toString() : 'unknown'}, initialization=${item.fact.initialization}, conformance=${item.conformance}; not a source parameter`);
+    }
+  }
   private contractFacts(observations: readonly ContractObservation[], subject: string, depth: number): void {
     const w = this.writer;
     for (const observation of observations) {
       this.context.checkpoint(1);
       const start = w.offset, signature = observation.contract.signature, layout = observation.layout;
-      w.comment(depth, `ABI contract ${w.quote(observation.contract.id)} ${observation.status}/${layout.state}; boundary=${observation.boundary_id === null ? 'not observed' : w.quote(observation.boundary_id)}; argument count=${signature.parameters === null ? 'unknown' : signature.parameters.length}, fixed=${signature.fixed_parameter_count}, variadic=${signature.variadic}, noreturn=${observation.contract.noreturn ?? 'unknown'}; stack_bytes=${layout.stack_bytes.toString()}, shadow_space=${layout.shadow_space.toString()}, stack_alignment=${layout.stack_alignment}; observations do not imply initialization`);
+      w.comment(depth, `ABI contract ${w.quote(observation.contract.id)} ${observation.status}/${layout.state}; boundary=${observation.boundary_id === null ? 'not observed' : w.quote(observation.boundary_id)}; argument count=${layout.argument_count ?? 'unknown'}, known prefix=${signature.parameters?.length ?? 0}, fixed=${signature.fixed_parameter_count}, variadic=${signature.variadic}, noreturn=${observation.contract.noreturn ?? 'unknown'}; stack_bytes=${layout.stack_bytes.toString()}, shadow_space=${layout.shadow_space.toString()}, stack_alignment=${layout.stack_alignment}; observations do not imply initialization`);
       const location = (role: string, item: LocationObservation): void => {
         this.context.checkpoint(1);
         const loc = item.location;
@@ -435,10 +446,14 @@ export class Renderer {
             : `indirect pointer=${'stack_offset' in loc.pointer ? `stack(${loc.pointer.stack_offset.toString()})` : this.register(loc.pointer)} size=${loc.size.toString()} alignment=${loc.alignment}`;
         w.comment(depth, `${role}: ${description}; initialization=${item.fact.initialization}, pointee_initialization=${item.pointee?.initialization ?? 'not observed'}`);
       };
-      for (const parameter of observation.parameters) for (const item of parameter.locations) location(`parameter ${parameter.index}`, item);
+      for (const parameter of observation.parameters) {
+        const role = signature.prototyped === false ? 'actual argument' : signature.variadic && parameter.index >= signature.fixed_parameter_count ? 'anonymous actual' : 'parameter';
+        for (const item of parameter.locations) location(`${role} ${parameter.index}`, item);
+      }
       if (observation.hidden_result) location('hidden result', observation.hidden_result);
       for (const item of observation.returns) location('return fragment', item);
-      w.map(this.dataOrigin(subject), start, [subject], observation.contract.evidence_ids);
+      this.implicitRegisterFacts(observation.implicit_register_inputs, depth);
+      w.map(this.dataOrigin(subject), start, [subject], [...new Set([...observation.contract.evidence_ids, ...observation.implicit_register_inputs.flatMap(item => item.fact.evidence_ids)])]);
     }
   }
   private callFacts(id: string, depth: number): void {

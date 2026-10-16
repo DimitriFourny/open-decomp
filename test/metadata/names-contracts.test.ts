@@ -95,5 +95,9 @@ test('known zero arity, variadic fixed prefixes and unsupported Swift convention
   const abort = result.contracts.find(item => item.linkage_name === '_abort')!, printf = result.contracts.find(item => item.linkage_name === '_printf')!, swift = result.contracts.find(item => item.linkage_name === '_swift_task_alloc')!;
   assert.deepEqual(abort.abi_signature.parameters, []); assert.equal(abort.noreturn, true);
   assert.equal(printf.abi_signature.variadic, true); assert.equal(printf.abi_signature.fixed_parameter_count, 1); assert.equal(printf.abi_signature.parameters?.length, 1);
+  assert.equal(printf.abi_signature.argument_list_complete, false);
+  const printfLayout = new DarwinArm64Abi().classifyCall(printf.abi_signature);
+  assert.equal(printfLayout.state, 'partial'); assert.equal(printfLayout.argument_count, null);
+  assert.equal(printfLayout.parameters.length, 1);
   assert.equal(swift.abi_state, 'unsupported'); assert.equal(swift.signature, null); assert.equal(new DarwinArm64Abi().classifyCall(swift.abi_signature).state, 'unsupported');
 });

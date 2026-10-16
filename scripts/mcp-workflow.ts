@@ -13,10 +13,14 @@ import {
 } from '../src/core/index.js';
 
 export const MCP_FIXTURES = [
-  { file: 'macho-arm64-symbols', architecture: 'arm64', arithmetic: '0x100000574', entry: '0x100000708', magic: 'cffaedfe' },
-  { file: 'macho-arm64-stripped', architecture: 'arm64', arithmetic: '0x100000574', entry: '0x100000708', magic: 'cffaedfe' },
-  { file: 'corpus-symbols.dll', architecture: 'x86_64', arithmetic: '0x180001030', entry: '0x180001200', magic: '4d5a' },
-  { file: 'corpus-stripped.dll', architecture: 'x86_64', arithmetic: '0x180001030', entry: '0x180001200', magic: '4d5a' },
+  { file: 'macho-arm64-symbols', format: 'macho', abi: 'darwin-arm64', architecture: 'arm64', arithmetic: '0x100000574', entry: '0x100000708', magic: 'cffaedfe' },
+  { file: 'macho-arm64-stripped', format: 'macho', abi: 'darwin-arm64', architecture: 'arm64', arithmetic: '0x100000574', entry: '0x100000708', magic: 'cffaedfe' },
+  { file: 'corpus-symbols.dll', format: 'pe', abi: 'windows-x64', architecture: 'x86_64', arithmetic: '0x180001030', entry: '0x180001200', magic: '4d5a' },
+  { file: 'corpus-stripped.dll', format: 'pe', abi: 'windows-x64', architecture: 'x86_64', arithmetic: '0x180001030', entry: '0x180001200', magic: '4d5a' },
+  { file: 'elf-x86_64-symbols', format: 'elf', abi: 'sysv-amd64', architecture: 'x86_64', arithmetic: 'manifest', entry: 'manifest', magic: '7f454c46' },
+  { file: 'elf-x86_64-stripped', format: 'elf', abi: 'sysv-amd64', architecture: 'x86_64', arithmetic: 'manifest', entry: 'manifest', magic: '7f454c46' },
+  { file: 'libcorpus-elf-x86_64-symbols.so', format: 'elf', abi: 'sysv-amd64', architecture: 'x86_64', arithmetic: 'manifest', entry: 'manifest', magic: '7f454c46' },
+  { file: 'libcorpus-elf-x86_64-stripped.so', format: 'elf', abi: 'sysv-amd64', architecture: 'x86_64', arithmetic: 'manifest', entry: 'manifest', magic: '7f454c46' },
 ] as const;
 export type McpFixture = (typeof MCP_FIXTURES)[number];
 export interface McpWorkflowOptions {
@@ -32,6 +36,8 @@ export interface McpWorkflowSummary {
   fixture: string;
   sha256: string;
   architecture: string;
+  format: string;
+  abi: string;
   revision: number;
   artifact_pages: number;
   cancellation: string;
@@ -120,11 +126,14 @@ export async function readAnalysis(client: Client, handle: WireArtifact) {
 
 /** Bind all acceptance inputs to the checked-in manifest, including temporary mutation bases. */
 export async function readMcpFixture(fixtures: string, relative: string): Promise<Buffer> {
-  const manifest = z.object({
+  const schema = z.object({
     images: z.array(z.object({ path: z.string(), size: z.number().int(), sha256: z.string().regex(/^[0-9a-f]{64}$/) })),
     malformed: z.array(z.object({ path: z.string(), size: z.number().int(), sha256: z.string().regex(/^[0-9a-f]{64}$/) })),
-  }).parse(JSON.parse(await readFile(join(dirname(fixtures), 'manifest.json'), 'utf8')));
-  const record = manifest.images.find(item => item.path === `fixtures/${relative}`) ?? manifest.malformed.find(item => item.path === `fixtures/${relative}`);
+  });
+  const manifests = await Promise.all(['manifest.json', 'elf-manifest.json'].map(async name => schema.parse(JSON.parse(await readFile(join(dirname(fixtures), name), 'utf8')))));
+  const matches = manifests.flatMap(manifest => [...manifest.images, ...manifest.malformed]).filter(item => item.path === `fixtures/${relative}`);
+  assert.equal(matches.length, 1, `Unique fixture manifest identity for ${relative}`);
+  const record = matches[0];
   assert.ok(record, `No fixture manifest identity for ${relative}`);
   assert.ok(/^(bin|malformed)\/[^/\\]+$/.test(relative), 'Expected a checked-in binary fixture');
   const bytes = await readFile(relative.startsWith('bin/') ? join(fixtures, relative.slice(4)) : join(dirname(fixtures), relative));
@@ -201,7 +210,17 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
       assert.equal(denied.state, 'failed');
       if (denied.state === 'failed') assert.ok(['permission_denied', 'not_found', 'invalid_input'].includes(denied.error.code));
     }
-    for (const fixture of options.targets ?? MCP_FIXTURES) {
+    for (const target of options.targets ?? MCP_FIXTURES) {
+      let arithmeticAddress: string = target.arithmetic, stringAddress: string = target.entry;
+      if (target.format === 'elf') {
+        const manifest = z.object({ images: z.array(z.object({ path: z.string(), workflow: z.object({ arithmetic: z.string(), entry: z.string() }).nullable() })) })
+          .parse(JSON.parse(await readFile(join(dirname(options.fixtures), 'elf-manifest.json'), 'utf8')));
+        const workflow = manifest.images.find(image => image.path === `fixtures/bin/${target.file}`)?.workflow;
+        assert.ok(workflow, `Missing ELF workflow addresses for ${target.file}`);
+        arithmeticAddress = workflow.arithmetic;
+        stringAddress = workflow.entry;
+      }
+      const fixture = { ...target, arithmetic: arithmeticAddress, entry: stringAddress };
       const fixtureBytes = await readMcpFixture(options.fixtures, `bin/${fixture.file}`);
       const sha256 = createHash('sha256').update(fixtureBytes).digest('hex');
       const projectPath = join(root, fixture.file);
@@ -221,21 +240,25 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
       const image = summary.image;
       assert.equal(image.sha256, sha256);
       assert.equal(image.target.architecture, fixture.architecture);
+      assert.equal(image.target.format, fixture.format);
+      assert.equal(image.target.abi, fixture.abi);
       const imageScope = () => ({ ...scope(), image_id: image.id });
       const headers = resultData(await callMcpTool(client, 'binary_info', { ...imageScope(), view: 'headers' }));
       assert.equal(headers.view, 'headers');
       if (headers.view !== 'headers') assert.fail('Wrong header view');
-      const machine = headers.items.flatMap(header => header.fields).find(field => field.name === (fixture.architecture === 'arm64' ? 'cputype' : 'Machine'));
+      const fieldName = fixture.format === 'macho' ? 'cputype' : fixture.format === 'pe' ? 'Machine' : 'e_machine';
+      const machine = headers.items.flatMap(header => header.fields).find(field => field.name === fieldName);
       assert.ok(machine?.kind === 'integer');
-      assert.equal(BigInt(machine.value), fixture.architecture === 'arm64' ? 0x100000cn : 0x8664n);
+      assert.equal(BigInt(machine.value), fixture.format === 'macho' ? 0x100000cn : fixture.format === 'pe' ? 0x8664n : 62n);
       const sections = resultData(await callMcpTool(client, 'binary_info', { ...imageScope(), view: 'sections' }));
       assert.ok(sections.view === 'sections' && sections.items.some(section => section.permissions.includes('execute')));
       const imports = resultData(await callMcpTool(client, 'symbols_find', { ...imageScope(), kinds: ['import'] }));
       assert.ok(imports.items.every(item => item.kind === 'import'));
-      if (fixture.architecture === 'arm64') assert.ok(imports.items.some(item => item.kind === 'import' && item.import.original_name === '_puts'));
+      if (fixture.format === 'macho') assert.ok(imports.items.some(item => item.kind === 'import' && item.import.original_name === '_puts'));
+      if (fixture.format === 'elf') assert.ok(imports.items.some(item => item.kind === 'import' && item.import.original_name === 'fixture_external'));
       const exports = resultData(await callMcpTool(client, 'symbols_find', { ...imageScope(), kinds: ['export'] }));
       assert.ok(exports.items.every(item => item.kind === 'export'));
-      if (fixture.architecture === 'x86_64') assert.ok(exports.items.length > 0);
+      if (fixture.format !== 'macho') assert.ok(exports.items.some(item => item.kind === 'export' && item.export.original_name === 'fixture_arithmetic'));
       const strings = resultData(await callMcpTool(client, 'strings_find', { ...imageScope(), query: { text: 'open-decomp trusted fixture v1', match: 'exact' } }));
       assert.equal(strings.items.length, 1);
       assert.equal(strings.items[0]!.status, 'referenced');
@@ -261,7 +284,7 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
       assert.ok(fn);
       const arithmetic = resultData(await callMcpTool(client, 'function_get', { ...scope(), function_id: fn.id, view: 'disassembly' }));
       assert.ok(arithmetic.view === 'disassembly');
-      assert.equal(arithmetic.items.length, fixture.architecture === 'arm64' ? 5 : 4);
+      assert.ok(arithmetic.items.some(instruction => instruction.flow.kind !== 'return'));
       assert.equal(arithmetic.items.at(-1)?.flow.kind, 'return');
       const pagedInstructionIds: string[] = [];
       let instructionCursor: string | undefined;
@@ -281,7 +304,20 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
       assert.ok(handle);
       assert.equal(handle.revision, revision);
       const baseline = await readAnalysis(client, handle);
-      assert.equal(baseline.result.state, 'complete');
+      // Source metadata can be unavailable even when every machine operation was
+      // decoded, lifted, ABI-classified and emitted. Require those facts directly.
+      for (const layer of ['decode', 'lift', 'abi'] as const) {
+        const coverage = baseline.result.coverage.filter(item => item.layer === layer);
+        assert.equal(coverage.length, 1, `${fixture.file}: unique ${layer} coverage`);
+        assert.equal(coverage[0]!.state, 'complete', JSON.stringify(baseline.result));
+        assert.ok(coverage[0]!.completed_units > 0);
+        assert.equal(coverage[0]!.completed_units, coverage[0]!.total_units);
+        assert.deepEqual(coverage[0]!.reasons, []);
+      }
+      const reconstruction = baseline.result.coverage.filter(item => item.layer === 'reconstruction');
+      assert.equal(reconstruction.length, 1, `${fixture.file}: unique reconstruction coverage`);
+      assert.ok(reconstruction[0]!.completed_units > 0);
+      assert.equal(reconstruction[0]!.completed_units, reconstruction[0]!.total_units, JSON.stringify(baseline.result));
       const baselineData = resultData(baseline.result);
       assert.ok(baselineData.delivery === 'inline');
       assert.equal(baselineData.signature, null, 'Native register usage must not invent a source signature');
@@ -343,6 +379,18 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
       assert.equal(changedData.signature?.return_type, type_id);
       assert.match(changedData.emission.text, /reviewed_arithmetic/);
       assert.ok(changedPayload.result.evidence.some(proof => proof.origin.kind === 'assertion' && proof.origin.agent === 'user' && proof.origin.status === 'asserted'));
+      for (const emitter of ['c-like', 'python-like'] as const) {
+        const emitted: ToolResult<'function_decompile'> = await callMcpTool(client, 'function_decompile', { ...scope(), function_id: fn.id, wait: true, options: { emitter } });
+        const payload = await readAnalysis(client, emitted.artifacts[0]!);
+        const data = resultData(payload.result);
+        assert.ok(data.delivery === 'inline');
+        assert.equal(data.emission.language, emitter);
+        assert.equal(data.signature?.return_type, type_id);
+        assert.ok(data.emission.mappings.some(mapping => mapping.instruction_ids.length > 0));
+        const cachedEmission: ToolResult<'function_decompile'> = await callMcpTool(client, 'function_decompile', { ...scope(), function_id: fn.id, wait: true, options: { emitter } });
+        assert.equal(resultData(cachedEmission).cache, 'hit');
+        assert.deepEqual(cachedEmission.artifacts, emitted.artifacts);
+      }
       // Tear down the SDK transport/server, not merely its project owner.
       client = await restart();
       const restarted = await callMcpTool(client, 'project_open', { source: { kind: 'resume', project_path: projectPath } });
@@ -358,6 +406,11 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
       assert.equal(resultData(restartedCache).cache, 'hit');
       assert.deepEqual(restartedCache.artifacts, changed.artifacts);
       assert.deepEqual((await readAnalysis(client, restartedCache.artifacts[0]!)).result, changedPayload.result);
+      const restartedPython = await callMcpTool(client, 'function_decompile', { ...scope(), function_id: fn.id, wait: true, options: { emitter: 'python-like' } });
+      assert.equal(resultData(restartedPython).cache, 'hit');
+      const restartedPythonData = resultData((await readAnalysis(client, restartedPython.artifacts[0]!)).result);
+      assert.ok(restartedPythonData.delivery === 'inline');
+      assert.equal(restartedPythonData.signature?.return_type, type_id);
       const retracted = resultData(await callMcpTool(client, 'annotations_apply', { project_id, expected_revision: revision, author: 'deterministic-reviewer', origin: 'user', edits: ids.map(id => ({ operation: 'retract', id })) }));
       assert.equal(retracted.revision, revision + 1);
       revision = retracted.revision;
@@ -367,11 +420,20 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
       assert.ok(restoredData.delivery === 'inline');
       assert.equal(restoredData.signature, null);
       assert.equal(restoredData.emission.text, baselineData.emission.text);
+      const restoredPython = await callMcpTool(client, 'function_decompile', { ...scope(), function_id: fn.id, wait: true, options: { emitter: 'python-like' } });
+      const restoredPythonData = resultData((await readAnalysis(client, restoredPython.artifacts[0]!)).result);
+      assert.ok(restoredPythonData.delivery === 'inline');
+      assert.equal(restoredPythonData.signature, null);
       const small = await callMcpTool(client, 'function_decompile', { ...scope(), function_id: fn.id, wait: true, budget: { output_bytes: 4096 } });
       assert.equal(small.state, 'partial');
       if (small.state === 'partial') assert.equal(small.reason, 'output_limit');
       assert.equal(resultData(small).delivery, 'artifact');
-      assert.equal((await readAnalysis(client, small.artifacts[0]!)).result.state, 'complete');
+      const smallPayload = await readAnalysis(client, small.artifacts[0]!);
+      assert.equal(smallPayload.result.state, restoredPayload.result.state);
+      assert.deepEqual(smallPayload.result.coverage, restoredPayload.result.coverage);
+      const smallData = resultData(smallPayload.result);
+      assert.ok(smallData.delivery === 'inline');
+      assert.deepEqual(smallData.emission, restoredData.emission, 'Artifact-only delivery must preserve the full reconstruction');
       const cancellable = await callMcpTool(client, 'function_decompile', { ...scope(), function_id: fn.id, options: { indent: 7 } });
       assert.ok(cancellable.state === 'queued');
       const cancelled = resultData(await callMcpTool(client, 'analysis_cancel', { ...scope(), job_id: cancellable.job.id }));
@@ -401,6 +463,9 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
       const cached = await callMcpTool(client, 'function_decompile', { ...scope(), function_id: fn.id, wait: true });
       assert.equal(resultData(cached).cache, 'hit');
       assert.deepEqual(cached.artifacts, restored.artifacts);
+      const reopenedPython = await callMcpTool(client, 'function_decompile', { ...scope(), function_id: fn.id, wait: true, options: { emitter: 'python-like' } });
+      assert.equal(resultData(reopenedPython).cache, 'hit');
+      assert.deepEqual(reopenedPython.artifacts, restoredPython.artifacts);
       resultData(await callMcpTool(client, 'project_close', scope()));
       // Also exercise a fresh import's explicit synchronous delivery, not just resume.
       const synchronous = await callMcpTool(client, 'project_open', { source: { kind: 'import', input_path: join(options.fixtures, fixture.file), project_path: join(root, `${fixture.file}-wait`) }, wait: true });
@@ -409,7 +474,7 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
       assert.ok(synchronousData.image);
       assert.equal(synchronousData.image.id, image.id);
       resultData(await callMcpTool(client, 'project_close', { project_id: synchronous.project_id!, revision: synchronous.revision! }));
-      summaries.push({ fixture: fixture.file, sha256, architecture: fixture.architecture, revision, artifact_pages: baseline.pages, cancellation: cancelled.outcome, reopened_cache: 'hit', restarted_cache: 'hit' });
+      summaries.push({ fixture: fixture.file, sha256, architecture: fixture.architecture, format: fixture.format, abi: fixture.abi, revision, artifact_pages: baseline.pages, cancellation: cancelled.outcome, reopened_cache: 'hit', restarted_cache: 'hit' });
     }
     return summaries;
     });

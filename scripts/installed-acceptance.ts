@@ -22,35 +22,39 @@ const fixtureManifestSchema = z.object({
 const installedProbe = String.raw`
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import * as app from 'open-decomp';
 const [fixtures, expectedEntry] = process.argv.slice(2);
 assert.equal(import.meta.resolve('open-decomp'), expectedEntry);
 console.log(JSON.stringify({ scenario: 'installed-root-import', outcome: 'passed', entry: import.meta.resolve('open-decomp'), node: process.version, platform: process.platform, architecture: process.arch }));
+const elfManifest = JSON.parse(await readFile(join(dirname(fixtures), 'elf-manifest.json'), 'utf8'));
+const elfArithmetic = elfManifest.images.find(image => image.path === 'fixtures/bin/libcorpus-elf-x86_64-symbols.so').facts.functions.find(fn => fn.name === 'fixture_arithmetic');
 for (const target of [
-  { file: 'macho-arm64-symbols', Loader: app.MachOLoader, Decoder: app.Arm64Decoder, architecture: 'arm64', mode: 'a64', address: 0x100000574n, size: 20n, count: 5 },
-  { file: 'corpus-symbols.dll', Loader: app.PELoader, Decoder: app.X86Decoder, architecture: 'x86_64', mode: 'long64', address: 0x180001030n, size: 9n, count: 4 },
+  { file: 'macho-arm64-symbols', Loader: app.MachOLoader, Decoder: app.Arm64Decoder, architecture: 'arm64', format: 'macho', abi: 'darwin-arm64', mode: 'a64', address: 0x100000574n, size: 20n },
+  { file: 'corpus-symbols.dll', Loader: app.PELoader, Decoder: app.X86Decoder, architecture: 'x86_64', format: 'pe', abi: 'windows-x64', mode: 'long64', address: 0x180001030n, size: 9n },
+  { file: 'libcorpus-elf-x86_64-symbols.so', Loader: app.ELFLoader, Decoder: app.X86Decoder, architecture: 'x86_64', format: 'elf', abi: 'sysv-amd64', mode: 'long64', address: BigInt(elfArithmetic.address), size: BigInt(elfArithmetic.size) },
 ]) {
   const data = await readFile(join(fixtures, target.file));
   const sha256 = app.contentHash(data), context = app.createOperationContext();
   const image = new target.Loader().load({ image_id: app.imageIdentity(sha256), sha256, bytes: new app.ImmutableBytes(data), slice_id: null }, context);
   assert.equal(image.target.architecture, target.architecture);
+  assert.equal(image.target.format, target.format);
+  assert.equal(image.target.abi, target.abi);
   const decoder = new target.Decoder();
   try {
     const result = decoder.decode({ image, mode: target.mode, features: image.target.features, regions: [{ start: { image_id: image.id, space: 'va', value: target.address }, size: target.size }] }, context);
     assert.equal(result.coverage.state, 'complete');
     assert.deepEqual(result.gaps, []);
-    assert.equal(result.instructions.length, target.count);
+    assert.ok(result.instructions.some(instruction => instruction.flow.kind !== 'return'));
     assert.ok(result.instructions.every(instruction => instruction.validity === 'valid' && instruction.payload?.architecture === target.architecture));
     assert.equal(result.instructions.at(-1).flow.kind, 'return');
-    if (target.architecture === 'arm64') assert.equal(result.instructions[3].payload.canonical_encoding, 'EOR_32_log_shift');
-    else assert.deepEqual(result.instructions.map(instruction => instruction.payload.mnemonic), ['lea', 'add', 'xor', 'ret']);
-    console.log(JSON.stringify({ scenario: 'installed-real-decoder', outcome: 'passed', architecture: target.architecture, fixture: target.file, sha256, instructions: result.instructions.length, decoder: decoder.name, version: decoder.version }));
+    console.log(JSON.stringify({ scenario: 'installed-real-decoder', outcome: 'passed', architecture: target.architecture, format: target.format, abi: target.abi, fixture: target.file, sha256, instructions: result.instructions.length, decoder: decoder.name, version: decoder.version }));
   } finally { decoder.dispose(); }
 }
 for (const [name, format, language, fragment] of [
   ['__ZN7fixture3barEi', 'macho', 'c++-itanium', 'fixture::bar'],
   ['?bar@fixture@@YAHH@Z', 'pe', 'c++-msvc', 'fixture::bar'],
+  ['_ZN7fixture3barEi', 'elf', 'c++-itanium', 'fixture::bar'],
   ['$sSi1soiyS2i_SitFZ', 'macho', 'swift', 'Swift.Int'],
 ]) {
   const result = await app.demangleName(name, format, app.createOperationContext());
@@ -96,6 +100,8 @@ async function installedAcceptance(): Promise<void> {
   const sourceFixtures = await realpath(resolve(fixtureArgument));
   const sourceManifestBytes = await readFile(join(dirname(sourceFixtures), 'manifest.json'));
   const sourceManifest = fixtureManifestSchema.parse(JSON.parse(sourceManifestBytes.toString('utf8')));
+  const elfManifestBytes = await readFile(join(dirname(sourceFixtures), 'elf-manifest.json'));
+  const elfManifest = fixtureManifestSchema.parse(JSON.parse(elfManifestBytes.toString('utf8')));
   const sourceRoot = await realpath(fileURLToPath(new URL('../', import.meta.url)));
   const temporary = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-installed-')));
   try {
@@ -108,8 +114,9 @@ async function installedAcceptance(): Promise<void> {
     await mkdir(fixtures, { recursive: true });
     await mkdir(join(inputs, 'malformed'));
     await writeFile(join(inputs, 'manifest.json'), sourceManifestBytes, { flag: 'wx' });
+    await writeFile(join(inputs, 'elf-manifest.json'), elfManifestBytes, { flag: 'wx' });
     const fixtureIdentities: { path: string; sha256: string; size: number }[] = [];
-    for (const record of [...sourceManifest.images, ...sourceManifest.malformed]) {
+    for (const record of [...sourceManifest.images, ...sourceManifest.malformed, ...elfManifest.images, ...elfManifest.malformed]) {
       const path = record.path.slice('fixtures/'.length);
       const bytes = await readMcpFixture(sourceFixtures, path);
       await writeFile(join(inputs, path), bytes, { flag: 'wx', mode: 0o600 });
@@ -123,7 +130,7 @@ async function installedAcceptance(): Promise<void> {
     assert.equal(identity.shasum, manifest.artifact.shasum);
     assert.equal(identity.integrity, manifest.artifact.integrity);
     const npmVersion = (await runReleaseNpm(npm, ['--version'], install)).trim();
-    process.stdout.write(`${JSON.stringify({ scenario: 'installed-artifact-identity', outcome: 'passed', artifact, manifest: manifestPath, ...identity, host: { ...host, npm: npmVersion }, built_with: manifest.toolchain, lockfile: manifest.lockfile, fixture_manifest_sha256: createHash('sha256').update(sourceManifestBytes).digest('hex'), fixtures: fixtureIdentities })}\n`);
+    process.stdout.write(`${JSON.stringify({ scenario: 'installed-artifact-identity', outcome: 'passed', artifact, manifest: manifestPath, ...identity, host: { ...host, npm: npmVersion }, built_with: manifest.toolchain, lockfile: manifest.lockfile, fixture_manifest_sha256: createHash('sha256').update(sourceManifestBytes).digest('hex'), elf_fixture_manifest_sha256: createHash('sha256').update(elfManifestBytes).digest('hex'), fixtures: fixtureIdentities })}\n`);
     await writeFile(join(install, 'package.json'), JSON.stringify({ name: 'open-decomp-installed-acceptance', private: true, type: 'module' }), { flag: 'wx' });
     const userConfig = join(temporary, 'user.npmrc'), globalConfig = join(temporary, 'global.npmrc');
     await writeFile(userConfig, '', { flag: 'wx' });

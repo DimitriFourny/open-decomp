@@ -3,24 +3,29 @@ import { Arm64Decoder } from '../../decoders/arm64/index.js';
 import { X86Decoder } from '../../decoders/x86_64/index.js';
 import { MachOLoader } from '../../loaders/macho/index.js';
 import { PELoader } from '../../loaders/pe/index.js';
+import { ELFLoader } from '../../loaders/elf/index.js';
 import { Arm64Lifter } from '../../lifters/arm64/index.js';
 import { X86Lifter } from '../../lifters/x86_64/index.js';
 import { DarwinArm64Abi } from '../../abi/darwin-arm64/index.js';
 import { WindowsX64Abi } from '../../abi/windows-x64/index.js';
+import { SysVAMD64Abi } from '../../abi/sysv-amd64/index.js';
 import { C_EMITTER_VERSION } from '../../emitters/c/index.js';
 import { PYTHON_LIKE_EMITTER_VERSION } from '../../emitters/python-like/index.js';
 
+const x86Lifter = new X86Lifter();
 const components = {
-  arm64: Object.freeze({ abi: new DarwinArm64Abi(), lifter: new Arm64Lifter(), loader: new MachOLoader() }),
-  x86_64: Object.freeze({ abi: new WindowsX64Abi(), lifter: new X86Lifter(), loader: new PELoader() }),
+  darwin_arm64: Object.freeze({ abi: new DarwinArm64Abi(), lifter: new Arm64Lifter(), loader: new MachOLoader() }),
+  windows_x64: Object.freeze({ abi: new WindowsX64Abi(), lifter: x86Lifter, loader: new PELoader() }),
+  sysv_amd64: Object.freeze({ abi: new SysVAMD64Abi(), lifter: x86Lifter, loader: new ELFLoader() }),
 };
 
 /** Dispatch on the full target contract, not the host or ISA alone. Features
  * remain part of CacheIdentity and are consumed by decoding, not ABI selection. */
 function targetPipeline(target: Target): keyof typeof components | undefined {
   if (target.endian !== 'little' || target.address_bits !== 64) return undefined;
-  if (target.architecture === 'arm64' && target.format === 'macho' && target.abi === 'darwin-arm64') return 'arm64';
-  if (target.architecture === 'x86_64' && target.format === 'pe' && target.abi === 'windows-x64') return 'x86_64';
+  if (target.architecture === 'arm64' && target.format === 'macho' && target.abi === 'darwin-arm64') return 'darwin_arm64';
+  if (target.architecture === 'x86_64' && target.format === 'pe' && target.abi === 'windows-x64') return 'windows_x64';
+  if (target.architecture === 'x86_64' && target.format === 'elf' && target.abi === 'sysv-amd64') return 'sysv_amd64';
   return undefined;
 }
 
@@ -32,12 +37,12 @@ export function pipelineComponents(target: Target): typeof components[keyof type
 
 // Components without independent releases are explicitly versioned by this
 // composition contract. Bump the corresponding entry when its semantics change.
-const analysis = 'pipeline/2;discovery/1;targets/1;ssa/2;values-effects/2;stack-calls/1;debug/1;library/1;types/1;annotations/1;structure/1';
+const analysis = 'pipeline/2;discovery/1;targets/1;ssa/2;values-effects/2;stack-calls/2;debug/1;library/2;types/2;annotations/1;structure/1';
 const versionRecords = (() => {
   const arm = new Arm64Decoder(), x86 = new X86Decoder({ formatting: false });
   try {
-    const versions = (architecture: keyof typeof components, decoder: string): Readonly<Record<CacheIdentity['options']['emitter'], CacheIdentity['versions']>> => {
-      const component = components[architecture];
+    const versions = (pipeline: keyof typeof components, decoder: string): Readonly<Record<CacheIdentity['options']['emitter'], CacheIdentity['versions']>> => {
+      const component = components[pipeline];
       const common = { backend: 'open-decomp/1', loader: `${component.loader.name}/${component.loader.version}`, decoder,
         lifter: `${component.lifter.name}/${component.lifter.version}`, analysis, abi: `${component.abi.id}/${component.abi.version}` };
       return Object.freeze({
@@ -45,7 +50,11 @@ const versionRecords = (() => {
         'python-like': Object.freeze({ ...common, emitter: PYTHON_LIKE_EMITTER_VERSION }),
       });
     };
-    return Object.freeze({ arm64: versions('arm64', arm.version), x86_64: versions('x86_64', x86.version) });
+    return Object.freeze({
+      darwin_arm64: versions('darwin_arm64', arm.version),
+      windows_x64: versions('windows_x64', x86.version),
+      sysv_amd64: versions('sysv_amd64', x86.version),
+    });
   } finally {
     arm.dispose(); x86.dispose();
   }

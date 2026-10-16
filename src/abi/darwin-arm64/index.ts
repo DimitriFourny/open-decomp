@@ -30,15 +30,17 @@ import type { AbiCallLayout, AbiLocation, AbiProfile, AbiType, CallClobbers, Dat
  */
 export class DarwinArm64Abi implements AbiProfile {
   readonly name = 'Darwin ARM64 C ABI';
-  readonly version = '1.0.0';
+  readonly version = '1.1.0';
   readonly id = 'darwin-arm64' as const;
   readonly architecture = 'arm64' as const;
   readonly layout: DataLayout = Object.freeze({
     endian: 'little', pointer_bits: 64, char_bits: 8, short_bits: 16, int_bits: 32,
     long_bits: 64, long_long_bits: 64, float_bits: 32, double_bits: 64,
-    long_double_bits: 64, stack_alignment: 16, aggregate_max_alignment: 16,
+    long_double_bits: 64, long_double_storage_bits: 64, stack_alignment: 16, aggregate_max_alignment: 16,
   });
   readonly stack_pointer = SP;
+  readonly stack_return_address_bytes = 0n;
+  readonly red_zone_bytes = 128n;
   /** x18 is platform-reserved, not an allocatable callee-saved register. */
   readonly preserved: readonly RegisterDescriptor[] = PRESERVED;
   /** Includes upper halves of v8-v15, never their preserved low 64 bits. */
@@ -46,13 +48,14 @@ export class DarwinArm64Abi implements AbiProfile {
 
   classifyCall(signature: Parameters<AbiProfile['classifyCall']>[0]): AbiCallLayout {
     const diagnostics: Diagnostic[] = [];
+    const argument_count = signature.parameters !== null && (signature.argument_list_complete ?? (!signature.variadic && signature.prototyped !== false)) ? signature.parameters.length : null;
     const report = (message: string, invalid = false): void => {
       diagnostics.push({ code: invalid ? 'invalid_input' : 'unavailable_semantics', severity: 'warning', message, evidence_ids: [] });
     };
     if ((signature.calling_convention !== undefined && signature.calling_convention !== 'default') || signature.prototyped === false) {
       report('Only the prototyped Darwin C calling convention is supported; no foreign or unprototyped locations are assumed.');
-      return { parameters: (signature.parameters ?? []).map((_, index) => ({ index, locations: [] })), returns: [], hidden_result: null,
-        stack_bytes: 0n, shadow_space: 0n, stack_alignment: 16, clobbers: CLOBBERS, diagnostics, state: 'unsupported' };
+      return { parameters: (signature.parameters ?? []).map((_, index) => ({ index, locations: [] })), argument_count, returns: [], hidden_result: null,
+        stack_bytes: 0n, shadow_space: 0n, stack_alignment: 16, implicit_register_inputs: [], clobbers: CLOBBERS, diagnostics, state: 'unsupported' };
     }
 
     let returns: readonly AbiLocation[] = [], hidden_result: AbiLocation | null = null;
@@ -62,17 +65,18 @@ export class DarwinArm64Abi implements AbiProfile {
     else returns = registerLocations(result, 0);
     if (signature.parameters === null) {
       report('Parameter count is unknown; no arguments or complete stack allocation are established.');
-      return { parameters: [], returns, hidden_result, stack_bytes: 0n, shadow_space: 0n,
-        stack_alignment: 16, clobbers: CLOBBERS, diagnostics, state: 'partial' };
+      return { parameters: [], argument_count, returns, hidden_result, stack_bytes: 0n, shadow_space: 0n,
+        stack_alignment: 16, implicit_register_inputs: [], clobbers: CLOBBERS, diagnostics, state: 'partial' };
     }
     const validCount = Number.isSafeInteger(signature.fixed_parameter_count) && signature.fixed_parameter_count >= 0 &&
       signature.fixed_parameter_count <= signature.parameters.length &&
       (signature.variadic || signature.fixed_parameter_count === signature.parameters.length);
     if (!validCount) {
       report('Invalid fixed_parameter_count: it must identify the fixed prefix (all parameters for a nonvariadic call).', true);
-      return { parameters: signature.parameters.map((_, index) => ({ index, locations: [] })), returns: [], hidden_result: null,
-        stack_bytes: 0n, shadow_space: 0n, stack_alignment: 16, clobbers: CLOBBERS, diagnostics, state: 'unsupported' };
+      return { parameters: signature.parameters.map((_, index) => ({ index, locations: [] })), argument_count, returns: [], hidden_result: null,
+        stack_bytes: 0n, shadow_space: 0n, stack_alignment: 16, implicit_register_inputs: [], clobbers: CLOBBERS, diagnostics, state: 'unsupported' };
     }
+    if (argument_count === null) report('Only a known argument prefix is supplied; total arity and final stack allocation remain unknown.');
 
     let ngrn = 0, nsrn = 0, stack = 0n, uncertain = false;
     const parameters = signature.parameters.map((type, index): AbiCallLayout['parameters'][number] => {
@@ -120,8 +124,8 @@ export class DarwinArm64Abi implements AbiProfile {
       stack += anonymous ? align(size, 8) : size;
       return { index, locations };
     });
-    return { parameters, returns, hidden_result, stack_bytes: align(stack, 16), shadow_space: 0n, stack_alignment: 16,
-      clobbers: CLOBBERS, diagnostics, state: diagnostics.length === 0 ? 'complete' : 'partial' };
+    return { parameters, argument_count, returns, hidden_result, stack_bytes: align(stack, 16), shadow_space: 0n, stack_alignment: 16,
+      implicit_register_inputs: [], clobbers: CLOBBERS, diagnostics, state: diagnostics.length === 0 ? 'complete' : 'partial' };
   }
 }
 
@@ -183,7 +187,7 @@ function classify(type: AbiType, depth = 0, budget = { remaining: 4096 }): Shape
     }
     case 'float':
       // Darwin long double is binary64, not the generic PCS binary128.
-      if (type.bits === 128) return null;
+      if (type.bits === 80 || type.bits === 128) return null;
       return { kind: 'simd', size: BigInt(type.bits / 8), alignment: type.bits / 8,
         members: [{ bits: type.bits, vector: false, offset: 0 }] };
     case 'vector': {

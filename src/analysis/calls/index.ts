@@ -42,6 +42,11 @@ export interface ContractObservation {
   readonly parameters: readonly { readonly index: number; readonly locations: readonly LocationObservation[] }[];
   readonly hidden_result: LocationObservation | null;
   readonly returns: readonly LocationObservation[];
+  readonly implicit_register_inputs: readonly {
+    readonly requirement: AbiCallLayout['implicit_register_inputs'][number];
+    readonly fact: StackFact;
+    readonly conformance: 'satisfied' | 'violated' | 'unknown';
+  }[];
 }
 export interface CallFact {
   readonly node_id: EntityId;
@@ -64,14 +69,42 @@ export interface CallAnalysisResult {
   readonly function_contract_status: 'unknown' | 'established' | 'conflicting';
 }
 const unknown: StackFact = Object.freeze({ value: { kind: 'unknown' as const }, initialization: 'unknown', value_ids: [], evidence_ids: [], incoming_registers: [] });
+/** Shared with call-local source declarations; observing a requirement never
+ * turns it into a source argument or changes the physical IR. */
+export function observeImplicitRegisterInputs(layout: AbiCallLayout, snapshot: StackSnapshot | null): ContractObservation['implicit_register_inputs'] {
+  return layout.implicit_register_inputs.map(requirement => {
+    const fact = snapshot ? inspectRegister(snapshot, requirement.register) : unknown;
+    const bits = fact.initialization === 'initialized' && fact.value.kind === 'constant' ? fact.value.bits : null;
+    const conformance = bits === null ? 'unknown' : bits < requirement.unsigned_minimum || bits > requirement.unsigned_maximum
+      ? 'violated' : layout.state === 'complete' && layout.argument_count !== null ? 'satisfied' : 'unknown';
+    return { requirement, fact, conformance };
+  });
+}
 function targetKey(target: ContractTarget): string {
   return target.kind === 'address' ? fingerprint([target.kind, target.address.image_id, target.address.space, target.address.value]) : fingerprint([target.kind, target.image_id, target.import_id]);
 }
-function contractKey(contract: SuppliedFunctionContract): string {
-  return fingerprint({ ...contract.signature, calling_convention: contract.signature.calling_convention ?? 'default', prototyped: contract.signature.prototyped ?? true } as unknown as CanonicalValue);
-}
 function conflicting(contracts: readonly SuppliedFunctionContract[]): boolean {
-  return new Set(contracts.map(contractKey)).size > 1 || new Set(contracts.flatMap(contract => contract.noreturn === undefined ? [] : [contract.noreturn])).size > 1;
+  const headers = new Set<string>(), noreturn = new Set<boolean>(), parameterTypes: string[] = [];
+  let completeCount: number | null = null;
+  for (const contract of contracts) {
+    const signature = contract.signature;
+    headers.add(fingerprint({ returns: signature.returns, variadic: signature.variadic, fixed_parameter_count: signature.fixed_parameter_count,
+      calling_convention: signature.calling_convention ?? 'default', prototyped: signature.prototyped ?? true } as unknown as CanonicalValue));
+    if (contract.noreturn !== undefined) noreturn.add(contract.noreturn);
+    if (headers.size > 1 || noreturn.size > 1) return true;
+    if (signature.parameters === null) continue;
+    if (signature.argument_list_complete ?? (!signature.variadic && signature.prototyped !== false)) {
+      if (completeCount !== null && completeCount !== signature.parameters.length) return true;
+      completeCount = signature.parameters.length;
+    }
+    for (const [index, type] of signature.parameters.entries()) {
+      const key = fingerprint(type as unknown as CanonicalValue);
+      if (parameterTypes[index] !== undefined && parameterTypes[index] !== key) return true;
+      parameterTypes[index] = key;
+    }
+    if (completeCount !== null && parameterTypes.length > completeCount) return true;
+  }
+  return false;
 }
 
 /** Nonrewriting ABI observations, not prototype inference. Contracts are explicit
@@ -90,7 +123,7 @@ function conflicting(contracts: readonly SuppliedFunctionContract[]): boolean {
  * and CFG remain untouched even when continuation contradicts the supplied claim.
  * IR calls expose callee-entry SP: the x86 lifter explicitly pushes the hardware
  * return address before the call and restores caller SP afterward. Thus +40 is
- * used directly, never adjusted twice; Darwin has no push. No vararg-count guessing.
+ * used directly, never adjusted twice; SysV uses +8 and Darwin has no push.
  * Total work is shared with stack recovery (default one million units). Supplied
  * aggregate layouts are traversed with a depth bound of 64; pointee observations
  * beyond 65536 bytes stay unknown. External memory contents are never read here.
@@ -145,8 +178,10 @@ export function analyzeCalls(input: SSAForm, abi: AbiProfile, context: Operation
       budget.charge((contract.signature.parameters?.length ?? 0) + 1);
       const layout = abi.classifyCall(contract.signature);
       diagnostics.push(...layout.diagnostics);
+      budget.charge(layout.implicit_register_inputs.length);
+      const implicit_register_inputs = observeImplicitRegisterInputs(layout, snapshot);
       return { contract, status, boundary_id, layout, parameters: layout.parameters.map(parameter => ({ index: parameter.index, locations: parameter.locations.map(location => observe(location, snapshot)) })),
-        hidden_result: layout.hidden_result ? observe(layout.hidden_result, snapshot) : null,
+        implicit_register_inputs, hidden_result: layout.hidden_result ? observe(layout.hidden_result, snapshot) : null,
         returns: layout.returns.map(location => observe(location, output)) };
     };
     const calls: CallFact[] = [];

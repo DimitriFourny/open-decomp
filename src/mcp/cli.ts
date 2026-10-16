@@ -66,6 +66,7 @@ class OwnedStdioTransport extends StdioServerTransport {
   readonly #closed: () => void;
   readonly #output: Writable;
   #pendingOutput = 0;
+  #pendingWrite = false;
   #outputTail: Promise<void> = Promise.resolve();
   readonly #requests = new Set<string | number>();
   #closing = false;
@@ -73,7 +74,7 @@ class OwnedStdioTransport extends StdioServerTransport {
     const output = new Writable({
       // SDK send must await the write callback even for a small blocked frame.
       highWaterMark: 1,
-      write(chunk: Buffer, _encoding, callback) {
+      write: (chunk: Buffer, _encoding, callback) => {
         if (chunk.byteLength > MAX_MCP_INPUT_BYTES) { callback(new Error('MCP output frame exceeds 2 MiB')); return; }
         // POSIX pipes are nonblocking: their stream owns readiness/EAGAIN handling.
         if (process.platform !== 'win32') { process.stdout.write(chunk, callback); return; }
@@ -82,12 +83,15 @@ class OwnedStdioTransport extends StdioServerTransport {
         // write asynchronous; the single SDK send still owns backpressure.
         let offset = 0;
         const written = (error: NodeJS.ErrnoException | null, count: number): void => {
+          this.#pendingWrite = false;
           if (error) { callback(error); return; }
           offset += count;
           if (offset === chunk.byteLength) { callback(); return; }
           if (count === 0) { callback(new Error('MCP output write made no progress')); return; }
+          this.#pendingWrite = true;
           writeFd(1, chunk, offset, chunk.byteLength - offset, null, written);
         };
+        this.#pendingWrite = true;
         writeFd(1, chunk, 0, chunk.byteLength, null, written);
       },
     });
@@ -134,9 +138,21 @@ class OwnedStdioTransport extends StdioServerTransport {
     // Pausing leaves an oversized writer blocked on an owned pipe. Closing the
     // descriptor releases that writer and lets this single-connection process exit.
     process.stdin.destroy();
+    // EOF can arrive after the peer receives a frame but before its Windows
+    // write callback runs. Keep that send and its existing deadline alive.
+    if (process.platform === 'win32' && this.#pendingWrite && !this.#output.destroyed) await this.#outputTail;
     this.#output.destroy(new Error('MCP connection closed'));
     process.stdout.destroy();
     this.#closed();
+  }
+  /** Called only after the connection and all owned project workers have closed. */
+  exit(): never {
+    // Windows fs.write runs a synchronous OS write on libuv's thread pool.
+    // Destroy cannot cancel it, and process.exit joins that pool indefinitely.
+    // An abandoned write is a failed connection; self-termination on Windows
+    // exits with code 1 without joining the pool. Drained connections exit normally.
+    if (process.platform === 'win32' && this.#pendingWrite) process.kill(process.pid, 'SIGKILL');
+    process.exit();
   }
 }
 
@@ -161,8 +177,8 @@ export async function runStdio(args: readonly string[]): Promise<void> {
     }).then(() => {
       // This entry owns the process. Node stdio can retain a blocked write after
       // destroy; exit only after every worker has released its durable project.
-      process.exit();
-    }, error => { report(error); process.exit(1); });
+      transport.exit();
+    }, error => { report(error); transport.exit(); });
     return shutdown;
   };
   const report = (error: unknown): void => {

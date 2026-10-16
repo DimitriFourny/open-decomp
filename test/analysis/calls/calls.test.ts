@@ -89,7 +89,7 @@ test('unknown signatures and read-before-write candidates never invent count or 
 });
 
 test('known Darwin anonymous arguments use promoted eight-byte stack slots independently of fixed registers', () => {
-  const sig: AbiSignature = { returns: { kind: 'void' }, parameters: [u64, u8, { kind: 'float', bits: 32 }], variadic: true, fixed_parameter_count: 1 };
+  const sig: AbiSignature = { returns: { kind: 'void' }, parameters: [u64, u8, { kind: 'float', bits: 32 }], variadic: true, fixed_parameter_count: 1, argument_list_complete: true };
   const ir = builder('calls-darwin-varargs'), b = ir.block('entry'), sp = b.int('sub', b.readRegister(darwin.stack_pointer), b.constant(i64, 32n));
   b.writeRegister(darwin.stack_pointer, sp); b.store(sp, b.constant(i32, 123n));
   b.store(b.int('add', sp, b.constant(i64, 8n)), b.constant(i64, 0x3ff0000000000000n));
@@ -102,7 +102,7 @@ test('known Darwin anonymous arguments use promoted eight-byte stack slots indep
 });
 
 test('Windows variadic FP duplication does not claim an unwritten integer copy is initialized', () => {
-  const sig: AbiSignature = { returns: { kind: 'void' }, parameters: [u64, { kind: 'float', bits: 64 }], variadic: true, fixed_parameter_count: 1 };
+  const sig: AbiSignature = { returns: { kind: 'void' }, parameters: [u64, { kind: 'float', bits: 64 }], variadic: true, fixed_parameter_count: 1, argument_list_complete: true };
   const layout = windows.classifyCall(sig), locations = layout.parameters[1]!.locations;
   assert.equal(locations.length, 2);
   const fp = locations.find(location => location.kind === 'register' && location.register.bank === 'vector')!;

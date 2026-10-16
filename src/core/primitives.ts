@@ -32,12 +32,13 @@ export const rangeSchema = z.strictObject({ start: addressSchema, size: hexU64Sc
   }
 });
 export const targetSchema = z.strictObject({
-  format: z.enum(['macho', 'pe']), architecture: z.enum(['arm64', 'x86_64']),
-  abi: z.enum(['darwin-arm64', 'windows-x64']), endian: z.literal('little'), address_bits: z.literal(64),
+  format: z.enum(['macho', 'pe', 'elf']), architecture: z.enum(['arm64', 'x86_64']),
+  abi: z.enum(['darwin-arm64', 'windows-x64', 'sysv-amd64']), endian: z.literal('little'), address_bits: z.literal(64),
   features: z.array(z.string().min(1).max(128)).max(256),
 }).superRefine((target, context) => {
   if ((target.format === 'macho' && (target.architecture !== 'arm64' || target.abi !== 'darwin-arm64')) ||
-      (target.format === 'pe' && (target.architecture !== 'x86_64' || target.abi !== 'windows-x64'))) {
+      (target.format === 'pe' && (target.architecture !== 'x86_64' || target.abi !== 'windows-x64')) ||
+      (target.format === 'elf' && (target.architecture !== 'x86_64' || target.abi !== 'sysv-amd64'))) {
     context.addIssue({ code: 'custom', message: 'Unsupported format/ISA/ABI combination' });
   }
 });

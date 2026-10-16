@@ -1,0 +1,9 @@
+
+fixtures/bin/libfixture-native.so:	file format elf64-x86-64
+
+Disassembly of section .text:
+
+0000000000001258 <fixture_external>:
+    1258: 89 f8                        	movl	%edi, %eax
+    125a: 35 34 12 00 00               	xorl	$0x1234, %eax           # imm = 0x1234
+    125f: c3                           	retq

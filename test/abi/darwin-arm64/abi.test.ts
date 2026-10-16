@@ -24,7 +24,7 @@ function repeated(type: AbiType, count: number, stride: bigint, alignment: numbe
   return record(BigInt(count) * stride, alignment, Array.from({ length: count }, (_, index) => ({ offset: BigInt(index) * stride, type })));
 }
 function call(parameters: readonly AbiType[], returns: AbiType = nothing, fixed = parameters.length): AbiCallLayout {
-  return abi.classifyCall({ parameters, returns, variadic: fixed !== parameters.length, fixed_parameter_count: fixed });
+  return abi.classifyCall({ parameters, returns, variadic: fixed !== parameters.length, fixed_parameter_count: fixed, argument_list_complete: true });
 }
 function registers(locations: readonly AbiLocation[]): readonly string[] {
   return locations.map(location => { assert.equal(location.kind, 'register'); assert.ok(location.kind === 'register'); return location.register.id; });
@@ -63,7 +63,7 @@ function reg(instruction: DecodedInstruction | undefined, index: number) {
 test('profile publishes Darwin LP64 and no argument-count or symbol lookup policy', () => {
   assert.equal(abi.id, 'darwin-arm64'); assert.equal(abi.architecture, 'arm64');
   assert.deepEqual(abi.layout, { endian: 'little', pointer_bits: 64, char_bits: 8, short_bits: 16, int_bits: 32,
-    long_bits: 64, long_long_bits: 64, float_bits: 32, double_bits: 64, long_double_bits: 64,
+    long_bits: 64, long_long_bits: 64, float_bits: 32, double_bits: 64, long_double_bits: 64, long_double_storage_bits: 64,
     stack_alignment: 16, aggregate_max_alignment: 16 });
   const opaque = call([], unknown);
   assert.deepEqual(opaque.parameters, []); assert.deepEqual(opaque.returns, []); assert.equal(opaque.hidden_result, null);

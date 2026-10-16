@@ -1,0 +1,433 @@
+
+fixtures/bin/elf-x86_64-symbols:	file format elf64-x86-64
+
+Disassembly of section .text:
+
+0000000000401850 <fixture_stack>:
+  401850: 89 7c 24 f8                  	movl	%edi, -0x8(%rsp)
+  401854: c7 44 24 f4 07 00 00 00      	movl	$0x7, -0xc(%rsp)
+  40185c: c7 44 24 fc 09 00 00 00      	movl	$0x9, -0x4(%rsp)
+  401864: 8b 44 24 f8                  	movl	-0x8(%rsp), %eax
+  401868: 03 44 24 f4                  	addl	-0xc(%rsp), %eax
+  40186c: c3                           	retq
+  40186d: 0f 1f 00                     	nopl	(%rax)
+
+0000000000401870 <fixture_arithmetic>:
+  401870: 8d 04 76                     	leal	(%rsi,%rsi,2), %eax
+  401873: 01 f8                        	addl	%edi, %eax
+  401875: 83 f0 55                     	xorl	$0x55, %eax
+  401878: c3                           	retq
+  401879: 0f 1f 80 00 00 00 00         	nopl	(%rax)
+
+0000000000401880 <fixture_maximum>:
+  401880: 89 f0                        	movl	%esi, %eax
+  401882: 39 f7                        	cmpl	%esi, %edi
+  401884: 0f 4f c7                     	cmovgl	%edi, %eax
+  401887: c3                           	retq
+  401888: 0f 1f 84 00 00 00 00 00      	nopl	(%rax,%rax)
+
+0000000000401890 <fixture_loop>:
+  401890: 85 f6                        	testl	%esi, %esi
+  401892: 74 18                        	je	0x4018ac <fixture_loop+0x1c>
+  401894: 89 f1                        	movl	%esi, %ecx
+  401896: 31 c0                        	xorl	%eax, %eax
+  401898: 31 d2                        	xorl	%edx, %edx
+  40189a: 66 0f 1f 44 00 00            	nopw	(%rax,%rax)
+  4018a0: 03 04 97                     	addl	(%rdi,%rdx,4), %eax
+  4018a3: 48 ff c2                     	incq	%rdx
+  4018a6: 48 39 d1                     	cmpq	%rdx, %rcx
+  4018a9: 75 f5                        	jne	0x4018a0 <fixture_loop+0x10>
+  4018ab: c3                           	retq
+  4018ac: 31 c0                        	xorl	%eax, %eax
+  4018ae: c3                           	retq
+  4018af: 90                           	nop
+
+00000000004018b0 <fixture_memory>:
+  4018b0: 48 89 f0                     	movq	%rsi, %rax
+  4018b3: 48 03 07                     	addq	(%rdi), %rax
+  4018b6: 48 89 07                     	movq	%rax, (%rdi)
+  4018b9: c3                           	retq
+  4018ba: 66 0f 1f 44 00 00            	nopw	(%rax,%rax)
+
+00000000004018c0 <fixture_direct>:
+  4018c0: 55                           	pushq	%rbp
+  4018c1: 53                           	pushq	%rbx
+  4018c2: 50                           	pushq	%rax
+  4018c3: 89 fb                        	movl	%edi, %ebx
+  4018c5: e8 86 ff ff ff               	callq	0x401850 <fixture_stack>
+  4018ca: 89 c5                        	movl	%eax, %ebp
+  4018cc: 89 df                        	movl	%ebx, %edi
+  4018ce: be 02 00 00 00               	movl	$0x2, %esi
+  4018d3: e8 98 ff ff ff               	callq	0x401870 <fixture_arithmetic>
+  4018d8: 01 e8                        	addl	%ebp, %eax
+  4018da: 48 83 c4 08                  	addq	$0x8, %rsp
+  4018de: 5b                           	popq	%rbx
+  4018df: 5d                           	popq	%rbp
+  4018e0: c3                           	retq
+  4018e1: 66 66 66 66 66 66 2e 0f 1f 84 00 00 00 00 00 	nopw	%cs:(%rax,%rax)
+
+00000000004018f0 <fixture_indirect>:
+  4018f0: 50                           	pushq	%rax
+  4018f1: 48 89 f8                     	movq	%rdi, %rax
+  4018f4: 89 f7                        	movl	%esi, %edi
+  4018f6: ff d0                        	callq	*%rax
+  4018f8: ff c0                        	incl	%eax
+  4018fa: 59                           	popq	%rcx
+  4018fb: c3                           	retq
+  4018fc: 0f 1f 40 00                  	nopl	(%rax)
+
+0000000000401900 <fixture_divide>:
+  401900: 89 f8                        	movl	%edi, %eax
+  401902: 99                           	cltd
+  401903: f7 fe                        	idivl	%esi
+  401905: c3                           	retq
+  401906: 66 2e 0f 1f 84 00 00 00 00 00	nopw	%cs:(%rax,%rax)
+
+0000000000401910 <fixture_width>:
+  401910: 89 d1                        	movl	%edx, %ecx
+  401912: 89 fa                        	movl	%edi, %edx
+  401914: 89 f0                        	movl	%esi, %eax
+  401916: 48 01 d0                     	addq	%rdx, %rax
+  401919: 48 d3 e8                     	shrq	%cl, %rax
+  40191c: c3                           	retq
+  40191d: 0f 1f 00                     	nopl	(%rax)
+
+0000000000401920 <fixture_stack_args>:
+  401920: 53                           	pushq	%rbx
+  401921: 48 8b 44 24 28               	movq	0x28(%rsp), %rax
+  401926: 4c 8b 54 24 20               	movq	0x20(%rsp), %r10
+  40192b: 4c 8b 5c 24 18               	movq	0x18(%rsp), %r11
+  401930: 48 8b 5c 24 10               	movq	0x10(%rsp), %rbx
+  401935: 48 8d 34 77                  	leaq	(%rdi,%rsi,2), %rsi
+  401939: 48 8d 14 52                  	leaq	(%rdx,%rdx,2), %rdx
+  40193d: 48 01 f2                     	addq	%rsi, %rdx
+  401940: 48 8d 0c 8a                  	leaq	(%rdx,%rcx,4), %rcx
+  401944: 4b 8d 14 80                  	leaq	(%r8,%r8,4), %rdx
+  401948: 48 01 ca                     	addq	%rcx, %rdx
+  40194b: 4b 8d 0c 49                  	leaq	(%r9,%r9,2), %rcx
+  40194f: 48 8d 0c 4a                  	leaq	(%rdx,%rcx,2), %rcx
+  401953: 48 8d 0c d9                  	leaq	(%rcx,%rbx,8), %rcx
+  401957: 48 29 d9                     	subq	%rbx, %rcx
+  40195a: 4a 8d 0c d9                  	leaq	(%rcx,%r11,8), %rcx
+  40195e: 4b 8d 14 d2                  	leaq	(%r10,%r10,8), %rdx
+  401962: 48 01 ca                     	addq	%rcx, %rdx
+  401965: 48 8d 04 80                  	leaq	(%rax,%rax,4), %rax
+  401969: 48 8d 04 42                  	leaq	(%rdx,%rax,2), %rax
+  40196d: 5b                           	popq	%rbx
+  40196e: c3                           	retq
+  40196f: 90                           	nop
+
+0000000000401970 <fixture_float>:
+  401970: f2 0f 59 05 40 ee ff ff      	mulsd	-0x11c0(%rip), %xmm0    # 0x4007b8 <fixture_external+0x4007b8>
+  401978: f2 0f 59 0d 20 ee ff ff      	mulsd	-0x11e0(%rip), %xmm1    # 0x4007a0 <fixture_external+0x4007a0>
+  401980: f2 0f 58 c1                  	addsd	%xmm1, %xmm0
+  401984: c3                           	retq
+  401985: 66 66 2e 0f 1f 84 00 00 00 00 00     	nopw	%cs:(%rax,%rax)
+
+0000000000401990 <fixture_vector>:
+  401990: 0f 10 06                     	movups	(%rsi), %xmm0
+  401993: 0f 10 0a                     	movups	(%rdx), %xmm1
+  401996: 0f 58 c0                     	addps	%xmm0, %xmm0
+  401999: 0f 58 c1                     	addps	%xmm1, %xmm0
+  40199c: 0f 11 07                     	movups	%xmm0, (%rdi)
+  40199f: c3                           	retq
+
+00000000004019a0 <fixture_vector_integer>:
+  4019a0: f3 0f 6f 06                  	movdqu	(%rsi), %xmm0
+  4019a4: f3 0f 6f 0a                  	movdqu	(%rdx), %xmm1
+  4019a8: 66 0f fe c8                  	paddd	%xmm0, %xmm1
+  4019ac: 66 0f ef 0d 5c ee ff ff      	pxor	-0x11a4(%rip), %xmm1    # 0x400810 <fixture_external+0x400810>
+  4019b4: f3 0f 7f 0f                  	movdqu	%xmm1, (%rdi)
+  4019b8: c3                           	retq
+  4019b9: 0f 1f 80 00 00 00 00         	nopl	(%rax)
+
+00000000004019c0 <fixture_variadic>:
+  4019c0: 48 83 ec 58                  	subq	$0x58, %rsp
+  4019c4: 48 89 74 24 a8               	movq	%rsi, -0x58(%rsp)
+  4019c9: 48 89 54 24 b0               	movq	%rdx, -0x50(%rsp)
+  4019ce: 48 89 4c 24 b8               	movq	%rcx, -0x48(%rsp)
+  4019d3: 4c 89 44 24 c0               	movq	%r8, -0x40(%rsp)
+  4019d8: 4c 89 4c 24 c8               	movq	%r9, -0x38(%rsp)
+  4019dd: 84 c0                        	testb	%al, %al
+  4019df: 74 28                        	je	0x401a09 <fixture_variadic+0x49>
+  4019e1: 66 0f 29 44 24 d0            	movapd	%xmm0, -0x30(%rsp)
+  4019e7: 0f 29 4c 24 e0               	movaps	%xmm1, -0x20(%rsp)
+  4019ec: 0f 29 54 24 f0               	movaps	%xmm2, -0x10(%rsp)
+  4019f1: 0f 29 1c 24                  	movaps	%xmm3, (%rsp)
+  4019f5: 0f 29 64 24 10               	movaps	%xmm4, 0x10(%rsp)
+  4019fa: 0f 29 6c 24 20               	movaps	%xmm5, 0x20(%rsp)
+  4019ff: 0f 29 74 24 30               	movaps	%xmm6, 0x30(%rsp)
+  401a04: 0f 29 7c 24 40               	movaps	%xmm7, 0x40(%rsp)
+  401a09: 48 8d 44 24 a0               	leaq	-0x60(%rsp), %rax
+  401a0e: 48 89 44 24 90               	movq	%rax, -0x70(%rsp)
+  401a13: 48 8d 44 24 60               	leaq	0x60(%rsp), %rax
+  401a18: 48 89 44 24 88               	movq	%rax, -0x78(%rsp)
+  401a1d: 48 b8 08 00 00 00 30 00 00 00	movabsq	$0x3000000008, %rax     # imm = 0x3000000008
+  401a27: 48 89 44 24 80               	movq	%rax, -0x80(%rsp)
+  401a2c: 85 ff                        	testl	%edi, %edi
+  401a2e: 74 4d                        	je	0x401a7d <fixture_variadic+0xbd>
+  401a30: 48 8b 44 24 90               	movq	-0x70(%rsp), %rax
+  401a35: 8b 4c 24 84                  	movl	-0x7c(%rsp), %ecx
+  401a39: 66 0f 57 c0                  	xorpd	%xmm0, %xmm0
+  401a3d: 48 8b 54 24 88               	movq	-0x78(%rsp), %rdx
+  401a42: eb 26                        	jmp	0x401a6a <fixture_variadic+0xaa>
+  401a44: 66 66 66 2e 0f 1f 84 00 00 00 00 00  	nopw	%cs:(%rax,%rax)
+  401a50: 48 89 d6                     	movq	%rdx, %rsi
+  401a53: 89 ca                        	movl	%ecx, %edx
+  401a55: 48 01 c2                     	addq	%rax, %rdx
+  401a58: 83 c1 10                     	addl	$0x10, %ecx
+  401a5b: 89 4c 24 84                  	movl	%ecx, -0x7c(%rsp)
+  401a5f: f2 0f 58 02                  	addsd	(%rdx), %xmm0
+  401a63: 48 89 f2                     	movq	%rsi, %rdx
+  401a66: ff cf                        	decl	%edi
+  401a68: 74 17                        	je	0x401a81 <fixture_variadic+0xc1>
+  401a6a: 81 f9 a0 00 00 00            	cmpl	$0xa0, %ecx
+  401a70: 76 de                        	jbe	0x401a50 <fixture_variadic+0x90>
+  401a72: 48 8d 72 08                  	leaq	0x8(%rdx), %rsi
+  401a76: 48 89 74 24 88               	movq	%rsi, -0x78(%rsp)
+  401a7b: eb e2                        	jmp	0x401a5f <fixture_variadic+0x9f>
+  401a7d: 66 0f 57 c0                  	xorpd	%xmm0, %xmm0
+  401a81: 48 83 c4 58                  	addq	$0x58, %rsp
+  401a85: c3                           	retq
+  401a86: 66 90                        	nop
+
+0000000000401a88 <fixture_string>:
+  401a88: 48 8d 05 91 ed ff ff         	leaq	-0x126f(%rip), %rax     # 0x400820 <fixture_message>
+  401a8f: c3                           	retq
+
+0000000000401a90 <fixture_check>:
+  401a90: 41 56                        	pushq	%r14
+  401a92: 53                           	pushq	%rbx
+  401a93: 48 81 ec 88 00 00 00         	subq	$0x88, %rsp
+  401a9a: 0f 28 05 1f ed ff ff         	movaps	-0x12e1(%rip), %xmm0    # 0x4007c0 <fixture_external+0x4007c0>
+  401aa1: 0f 29 44 24 30               	movaps	%xmm0, 0x30(%rsp)
+  401aa6: 48 c7 44 24 08 ff ff ff ff   	movq	$-0x1, 0x8(%rsp)
+  401aaf: 0f 28 05 1a ed ff ff         	movaps	-0x12e6(%rip), %xmm0    # 0x4007d0 <fixture_external+0x4007d0>
+  401ab6: 0f 29 44 24 70               	movaps	%xmm0, 0x70(%rsp)
+  401abb: 0f 28 05 3e ed ff ff         	movaps	-0x12c2(%rip), %xmm0    # 0x400800 <fixture_external+0x400800>
+  401ac2: 0f 29 44 24 60               	movaps	%xmm0, 0x60(%rsp)
+  401ac7: 0f 28 05 22 ed ff ff         	movaps	-0x12de(%rip), %xmm0    # 0x4007f0 <fixture_external+0x4007f0>
+  401ace: 0f 29 44 24 50               	movaps	%xmm0, 0x50(%rsp)
+  401ad3: 66 0f 28 05 05 ed ff ff      	movapd	-0x12fb(%rip), %xmm0    # 0x4007e0 <fixture_external+0x4007e0>
+  401adb: 66 0f 29 44 24 40            	movapd	%xmm0, 0x40(%rsp)
+  401ae1: bf 03 00 00 00               	movl	$0x3, %edi
+  401ae6: be 04 00 00 00               	movl	$0x4, %esi
+  401aeb: e8 80 fd ff ff               	callq	0x401870 <fixture_arithmetic>
+  401af0: bb 01 00 00 00               	movl	$0x1, %ebx
+  401af5: 83 f8 5a                     	cmpl	$0x5a, %eax
+  401af8: 0f 85 5c 03 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401afe: bf ff ff ff ff               	movl	$0xffffffff, %edi       # imm = 0xFFFFFFFF
+  401b03: be 01 00 00 00               	movl	$0x1, %esi
+  401b08: e8 63 fd ff ff               	callq	0x401870 <fixture_arithmetic>
+  401b0d: 83 f8 57                     	cmpl	$0x57, %eax
+  401b10: 0f 85 44 03 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401b16: bf f9 ff ff ff               	movl	$0xfffffff9, %edi       # imm = 0xFFFFFFF9
+  401b1b: be 03 00 00 00               	movl	$0x3, %esi
+  401b20: e8 5b fd ff ff               	callq	0x401880 <fixture_maximum>
+  401b25: bb 02 00 00 00               	movl	$0x2, %ebx
+  401b2a: 83 f8 03                     	cmpl	$0x3, %eax
+  401b2d: 0f 85 27 03 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401b33: bf fe ff ff ff               	movl	$0xfffffffe, %edi       # imm = 0xFFFFFFFE
+  401b38: be f8 ff ff ff               	movl	$0xfffffff8, %esi       # imm = 0xFFFFFFF8
+  401b3d: e8 3e fd ff ff               	callq	0x401880 <fixture_maximum>
+  401b42: 83 f8 fe                     	cmpl	$-0x2, %eax
+  401b45: 0f 85 0f 03 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401b4b: 48 8d 7c 24 30               	leaq	0x30(%rsp), %rdi
+  401b50: 31 f6                        	xorl	%esi, %esi
+  401b52: e8 39 fd ff ff               	callq	0x401890 <fixture_loop>
+  401b57: bb 03 00 00 00               	movl	$0x3, %ebx
+  401b5c: 85 c0                        	testl	%eax, %eax
+  401b5e: 0f 85 f6 02 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401b64: 48 8d 7c 24 30               	leaq	0x30(%rsp), %rdi
+  401b69: be 04 00 00 00               	movl	$0x4, %esi
+  401b6e: e8 1d fd ff ff               	callq	0x401890 <fixture_loop>
+  401b73: 83 f8 1a                     	cmpl	$0x1a, %eax
+  401b76: 0f 85 de 02 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401b7c: bf 23 00 00 00               	movl	$0x23, %edi
+  401b81: e8 ca fc ff ff               	callq	0x401850 <fixture_stack>
+  401b86: 83 f8 2a                     	cmpl	$0x2a, %eax
+  401b89: 0f 85 c6 02 00 00            	jne	0x401e55 <fixture_check+0x3c5>
+  401b8f: bf ff ff ff ff               	movl	$0xffffffff, %edi       # imm = 0xFFFFFFFF
+  401b94: e8 b7 fc ff ff               	callq	0x401850 <fixture_stack>
+  401b99: bb 04 00 00 00               	movl	$0x4, %ebx
+  401b9e: 83 f8 06                     	cmpl	$0x6, %eax
+  401ba1: 0f 85 b3 02 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401ba7: 48 8d 7c 24 08               	leaq	0x8(%rsp), %rdi
+  401bac: be 01 00 00 00               	movl	$0x1, %esi
+  401bb1: e8 fa fc ff ff               	callq	0x4018b0 <fixture_memory>
+  401bb6: bb 05 00 00 00               	movl	$0x5, %ebx
+  401bbb: 48 0b 44 24 08               	orq	0x8(%rsp), %rax
+  401bc0: 0f 85 94 02 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401bc6: 48 8d 7c 24 08               	leaq	0x8(%rsp), %rdi
+  401bcb: be 2a 00 00 00               	movl	$0x2a, %esi
+  401bd0: e8 db fc ff ff               	callq	0x4018b0 <fixture_memory>
+  401bd5: 48 83 f8 2a                  	cmpq	$0x2a, %rax
+  401bd9: 0f 85 7b 02 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401bdf: 48 83 7c 24 08 2a            	cmpq	$0x2a, 0x8(%rsp)
+  401be5: 0f 85 6f 02 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401beb: bf 05 00 00 00               	movl	$0x5, %edi
+  401bf0: e8 cb fc ff ff               	callq	0x4018c0 <fixture_direct>
+  401bf5: bb 06 00 00 00               	movl	$0x6, %ebx
+  401bfa: 83 f8 6a                     	cmpl	$0x6a, %eax
+  401bfd: 0f 85 57 02 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401c03: 48 8d 3d 46 fc ff ff         	leaq	-0x3ba(%rip), %rdi      # 0x401850 <fixture_stack>
+  401c0a: be 23 00 00 00               	movl	$0x23, %esi
+  401c0f: e8 dc fc ff ff               	callq	0x4018f0 <fixture_indirect>
+  401c14: 83 f8 2b                     	cmpl	$0x2b, %eax
+  401c17: 0f 85 3d 02 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401c1d: bf f3 ff ff ff               	movl	$0xfffffff3, %edi       # imm = 0xFFFFFFF3
+  401c22: be 05 00 00 00               	movl	$0x5, %esi
+  401c27: e8 d4 fc ff ff               	callq	0x401900 <fixture_divide>
+  401c2c: bb 07 00 00 00               	movl	$0x7, %ebx
+  401c31: 83 f8 fe                     	cmpl	$-0x2, %eax
+  401c34: 0f 85 20 02 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401c3a: bf 0d 00 00 00               	movl	$0xd, %edi
+  401c3f: be fb ff ff ff               	movl	$0xfffffffb, %esi       # imm = 0xFFFFFFFB
+  401c44: e8 b7 fc ff ff               	callq	0x401900 <fixture_divide>
+  401c49: 83 f8 fe                     	cmpl	$-0x2, %eax
+  401c4c: 0f 85 08 02 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401c52: bf ff ff ff ff               	movl	$0xffffffff, %edi       # imm = 0xFFFFFFFF
+  401c57: be 01 00 00 00               	movl	$0x1, %esi
+  401c5c: 31 d2                        	xorl	%edx, %edx
+  401c5e: e8 ad fc ff ff               	callq	0x401910 <fixture_width>
+  401c63: bb 08 00 00 00               	movl	$0x8, %ebx
+  401c68: 49 be 00 00 00 00 01 00 00 00	movabsq	$0x100000000, %r14      # imm = 0x100000000
+  401c72: 4c 39 f0                     	cmpq	%r14, %rax
+  401c75: 0f 85 df 01 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401c7b: bf ff ff ff ff               	movl	$0xffffffff, %edi       # imm = 0xFFFFFFFF
+  401c80: be 01 00 00 00               	movl	$0x1, %esi
+  401c85: ba 20 00 00 00               	movl	$0x20, %edx
+  401c8a: e8 81 fc ff ff               	callq	0x401910 <fixture_width>
+  401c8f: 48 83 f8 01                  	cmpq	$0x1, %rax
+  401c93: 0f 85 c1 01 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401c99: bf ff ff ff ff               	movl	$0xffffffff, %edi       # imm = 0xFFFFFFFF
+  401c9e: be 01 00 00 00               	movl	$0x1, %esi
+  401ca3: ba 40 00 00 00               	movl	$0x40, %edx
+  401ca8: e8 63 fc ff ff               	callq	0x401910 <fixture_width>
+  401cad: 4c 39 f0                     	cmpq	%r14, %rax
+  401cb0: 0f 85 a4 01 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401cb6: bf 01 00 00 00               	movl	$0x1, %edi
+  401cbb: be 02 00 00 00               	movl	$0x2, %esi
+  401cc0: ba 03 00 00 00               	movl	$0x3, %edx
+  401cc5: b9 04 00 00 00               	movl	$0x4, %ecx
+  401cca: 41 b8 05 00 00 00            	movl	$0x5, %r8d
+  401cd0: 41 b9 06 00 00 00            	movl	$0x6, %r9d
+  401cd6: 6a 0a                        	pushq	$0xa
+  401cd8: 6a 09                        	pushq	$0x9
+  401cda: 6a 08                        	pushq	$0x8
+  401cdc: 6a 07                        	pushq	$0x7
+  401cde: e8 3d fc ff ff               	callq	0x401920 <fixture_stack_args>
+  401ce3: 48 83 c4 20                  	addq	$0x20, %rsp
+  401ce7: bb 09 00 00 00               	movl	$0x9, %ebx
+  401cec: 48 3d 81 01 00 00            	cmpq	$0x181, %rax            # imm = 0x181
+  401cf2: 0f 85 62 01 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401cf8: f2 0f 10 05 70 ea ff ff      	movsd	-0x1590(%rip), %xmm0    # 0x400770 <fixture_external+0x400770>
+  401d00: f2 0f 10 0d a8 ea ff ff      	movsd	-0x1558(%rip), %xmm1    # 0x4007b0 <fixture_external+0x4007b0>
+  401d08: e8 63 fc ff ff               	callq	0x401970 <fixture_float>
+  401d0d: bb 0a 00 00 00               	movl	$0xa, %ebx
+  401d12: 66 0f 2e 05 76 ea ff ff      	ucomisd	-0x158a(%rip), %xmm0    # 0x400790 <fixture_external+0x400790>
+  401d1a: 0f 85 3a 01 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401d20: 0f 8a 34 01 00 00            	jp	0x401e5a <fixture_check+0x3ca>
+  401d26: f2 0f 10 05 52 ea ff ff      	movsd	-0x15ae(%rip), %xmm0    # 0x400780 <fixture_external+0x400780>
+  401d2e: f2 0f 10 0d 6a ea ff ff      	movsd	-0x1596(%rip), %xmm1    # 0x4007a0 <fixture_external+0x4007a0>
+  401d36: e8 35 fc ff ff               	callq	0x401970 <fixture_float>
+  401d3b: 66 0f 2e 05 35 ea ff ff      	ucomisd	-0x15cb(%rip), %xmm0    # 0x400778 <fixture_external+0x400778>
+  401d43: 0f 85 11 01 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401d49: 0f 8a 0b 01 00 00            	jp	0x401e5a <fixture_check+0x3ca>
+  401d4f: 48 8d 7c 24 20               	leaq	0x20(%rsp), %rdi
+  401d54: 48 8d 74 24 70               	leaq	0x70(%rsp), %rsi
+  401d59: 48 8d 54 24 60               	leaq	0x60(%rsp), %rdx
+  401d5e: e8 2d fc ff ff               	callq	0x401990 <fixture_vector>
+  401d63: f3 0f 10 44 24 20            	movss	0x20(%rsp), %xmm0
+  401d69: 0f 2e 05 d4 ea ff ff         	ucomiss	-0x152c(%rip), %xmm0    # 0x400844 <fixture_message+0x24>
+  401d70: bb 0b 00 00 00               	movl	$0xb, %ebx
+  401d75: 0f 85 df 00 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401d7b: 0f 8a d9 00 00 00            	jp	0x401e5a <fixture_check+0x3ca>
+  401d81: f3 0f 10 4c 24 24            	movss	0x24(%rsp), %xmm1
+  401d87: 0f 57 c0                     	xorps	%xmm0, %xmm0
+  401d8a: 0f 2e c8                     	ucomiss	%xmm0, %xmm1
+  401d8d: 0f 85 c7 00 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401d93: 0f 8a c1 00 00 00            	jp	0x401e5a <fixture_check+0x3ca>
+  401d99: f3 0f 10 4c 24 28            	movss	0x28(%rsp), %xmm1
+  401d9f: 0f 2e c8                     	ucomiss	%xmm0, %xmm1
+  401da2: 0f 85 b2 00 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401da8: 0f 8a ac 00 00 00            	jp	0x401e5a <fixture_check+0x3ca>
+  401dae: f3 0f 10 44 24 2c            	movss	0x2c(%rsp), %xmm0
+  401db4: 0f 2e 05 85 ea ff ff         	ucomiss	-0x157b(%rip), %xmm0    # 0x400840 <fixture_message+0x20>
+  401dbb: 0f 85 99 00 00 00            	jne	0x401e5a <fixture_check+0x3ca>
+  401dc1: 0f 8a 93 00 00 00            	jp	0x401e5a <fixture_check+0x3ca>
+  401dc7: 48 8d 7c 24 10               	leaq	0x10(%rsp), %rdi
+  401dcc: 48 8d 74 24 50               	leaq	0x50(%rsp), %rsi
+  401dd1: 48 8d 54 24 40               	leaq	0x40(%rsp), %rdx
+  401dd6: e8 c5 fb ff ff               	callq	0x4019a0 <fixture_vector_integer>
+  401ddb: 83 7c 24 10 54               	cmpl	$0x54, 0x10(%rsp)
+  401de0: bb 0c 00 00 00               	movl	$0xc, %ebx
+  401de5: 75 73                        	jne	0x401e5a <fixture_check+0x3ca>
+  401de7: 83 7c 24 14 56               	cmpl	$0x56, 0x14(%rsp)
+  401dec: 75 6c                        	jne	0x401e5a <fixture_check+0x3ca>
+  401dee: 83 7c 24 18 55               	cmpl	$0x55, 0x18(%rsp)
+  401df3: 75 65                        	jne	0x401e5a <fixture_check+0x3ca>
+  401df5: 83 7c 24 1c 55               	cmpl	$0x55, 0x1c(%rsp)
+  401dfa: 75 5e                        	jne	0x401e5a <fixture_check+0x3ca>
+  401dfc: f2 0f 10 05 84 e9 ff ff      	movsd	-0x167c(%rip), %xmm0    # 0x400788 <fixture_external+0x400788>
+  401e04: f2 0f 10 0d 9c e9 ff ff      	movsd	-0x1664(%rip), %xmm1    # 0x4007a8 <fixture_external+0x4007a8>
+  401e0c: f2 0f 10 15 84 e9 ff ff      	movsd	-0x167c(%rip), %xmm2    # 0x400798 <fixture_external+0x400798>
+  401e14: bf 03 00 00 00               	movl	$0x3, %edi
+  401e19: b0 03                        	movb	$0x3, %al
+  401e1b: e8 a0 fb ff ff               	callq	0x4019c0 <fixture_variadic>
+  401e20: bb 0d 00 00 00               	movl	$0xd, %ebx
+  401e25: 66 0f 2e 05 83 e9 ff ff      	ucomisd	-0x167d(%rip), %xmm0    # 0x4007b0 <fixture_external+0x4007b0>
+  401e2d: 75 2b                        	jne	0x401e5a <fixture_check+0x3ca>
+  401e2f: 7a 29                        	jp	0x401e5a <fixture_check+0x3ca>
+  401e31: e8 52 fc ff ff               	callq	0x401a88 <fixture_string>
+  401e36: bb 0e 00 00 00               	movl	$0xe, %ebx
+  401e3b: 80 38 6f                     	cmpb	$0x6f, (%rax)
+  401e3e: 75 1a                        	jne	0x401e5a <fixture_check+0x3ca>
+  401e40: e8 43 fc ff ff               	callq	0x401a88 <fixture_string>
+  401e45: 31 c9                        	xorl	%ecx, %ecx
+  401e47: 80 78 1d 31                  	cmpb	$0x31, 0x1d(%rax)
+  401e4b: bb 0e 00 00 00               	movl	$0xe, %ebx
+  401e50: 0f 44 d9                     	cmovel	%ecx, %ebx
+  401e53: eb 05                        	jmp	0x401e5a <fixture_check+0x3ca>
+  401e55: bb 04 00 00 00               	movl	$0x4, %ebx
+  401e5a: 89 d8                        	movl	%ebx, %eax
+  401e5c: 48 81 c4 88 00 00 00         	addq	$0x88, %rsp
+  401e63: 5b                           	popq	%rbx
+  401e64: 41 5e                        	popq	%r14
+  401e66: c3                           	retq
+  401e67: cc                           	int3
+  401e68: cc                           	int3
+  401e69: cc                           	int3
+  401e6a: cc                           	int3
+  401e6b: cc                           	int3
+  401e6c: cc                           	int3
+  401e6d: cc                           	int3
+  401e6e: cc                           	int3
+  401e6f: cc                           	int3
+
+0000000000401e70 <fixture_native_call>:
+  401e70: 50                           	pushq	%rax
+  401e71: e8 2a 00 00 00               	callq	0x401ea0 <fixture_external@plt>
+  401e76: ff c0                        	incl	%eax
+  401e78: 59                           	popq	%rcx
+  401e79: c3                           	retq
+  401e7a: 66 0f 1f 44 00 00            	nopw	(%rax,%rax)
+
+0000000000401e80 <fixture_entry>:
+  401e80: 50                           	pushq	%rax
+  401e81: e8 0a fc ff ff               	callq	0x401a90 <fixture_check>
+  401e86: 89 c7                        	movl	%eax, %edi
+  401e88: 58                           	popq	%rax
+  401e89: e9 e2 ff ff ff               	jmp	0x401e70 <fixture_native_call>
+
+Disassembly of section .plt:
+
+0000000000401e90 <.plt>:
+  401e90: ff 35 fa 20 00 00            	pushq	0x20fa(%rip)            # 0x403f90 <fixture_external+0x403f90>
+  401e96: ff 25 fc 20 00 00            	jmpq	*0x20fc(%rip)           # 0x403f98 <fixture_external+0x403f98>
+  401e9c: 0f 1f 40 00                  	nopl	(%rax)
+
+0000000000401ea0 <fixture_external@plt>:
+  401ea0: ff 25 fa 20 00 00            	jmpq	*0x20fa(%rip)           # 0x403fa0 <fixture_external+0x403fa0>
+  401ea6: 68 00 00 00 00               	pushq	$0x0
+  401eab: e9 e0 ff ff ff               	jmp	0x401e90 <.plt>

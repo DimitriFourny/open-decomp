@@ -11,7 +11,7 @@ export const metadataFieldSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('bytes'), name: z.string().min(1), range: rangeSchema }),
 ]);
 export const headerSchema = z.strictObject({
-  kind: z.enum(['mach_header', 'load_command', 'dos_header', 'coff_header', 'optional_header', 'data_directory', 'debug_record', 'tls_record']),
+  kind: z.enum(['mach_header', 'load_command', 'dos_header', 'coff_header', 'optional_header', 'data_directory', 'debug_record', 'tls_record', 'elf_header', 'elf_program_header', 'elf_section_header', 'elf_dynamic']),
   name: z.string().min(1), range: rangeSchema, fields: z.array(metadataFieldSchema).max(1000), evidence_ids: evidenceRefsSchema,
 });
 export const sectionSchema = z.strictObject({
@@ -77,7 +77,7 @@ export const typeDefinitionSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('structure'), size: hexU64Schema.nullable(), alignment: z.number().int().min(1).max(65536).nullable(), fields: z.array(z.strictObject({ id: entityIdSchema, name: z.string().max(1024), offset: hexU64Schema, type_id: entityIdSchema })).max(10000) }),
 ]);
 export const signatureSchema = z.strictObject({
-  abi: z.enum(['darwin-arm64', 'windows-x64']), return_type: entityIdSchema,
+  abi: z.enum(['darwin-arm64', 'windows-x64', 'sysv-amd64']), return_type: entityIdSchema,
   parameters: z.array(z.strictObject({ id: entityIdSchema, name: z.string().max(1024).nullable(), type_id: entityIdSchema })).max(1000),
   variadic: z.boolean(), noreturn: z.boolean(), evidence_ids: evidenceRefsSchema,
 });

@@ -18,6 +18,56 @@ Import from `src/core/index.ts` or the owning module, using `.js` relative speci
 | `serialization.ts` | Explicit recovered-type/annotation, artifact, job and emission codecs. Internal domain records use bigint; wire schemas and `Wire*` aliases use validated hexadecimal strings. |
 | `operation.ts` | `createOperationContext` owns one monotonic deadline and cumulative work counter per operation; `OperationError` carries typed cancellation/resource diagnostics across component boundaries. |
 
+## ABI boundary facts
+
+`AbiProfile` owns source layout and physical call classification. System V AMD64
+uses the [AMD64 psABI §3.2.3](https://gitlab.com/x86-psABIs/x86-64-ABI/-/blob/master/x86-64-ABI/low-level-sys-info.tex):
+independent INTEGER/SSE banks, recursive eightbyte merging, whole-argument
+register rollback, mixed-bank returns, and RDI hidden-result storage with its
+pointer returned in RAX. Source associations distinguish that returned pointer
+from the aggregate bytes (also for Microsoft x64). Field alignment is checked at
+its absolute enclosing offset, including primitive leaves inside packed records;
+an unaligned leaf makes the enclosing aggregate MEMORY-class.
+
+`DataLayout.long_double_bits` describes precision representation, while
+`long_double_storage_bits` describes object storage: SysV is 80/128, existing
+Darwin ARM64 and Microsoft x64 profiles are 64/64. An 80-bit source float therefore
+occupies 16 bytes on SysV, including in arrays; it is never relabeled binary128.
+x87 reconstruction, AVX argument types, nontrivial C++ and syscall conventions
+remain unsupported. Incomplete aggregate layouts do not imply allocation of
+later parameters.
+
+Stack locations are callee-entry offsets. `stack_return_address_bytes` is eight
+for both x86 ABIs and zero for Darwin ARM64; the lifter already performs x86's
+push, so consumers never add it again. SysV has no shadow space; the first stack
+argument starts at +8. `stack_bytes` excludes the push and is only a lower bound
+for partial layouts. `red_zone_bytes` records ABI capability, not ownership of
+negative offsets or survival across calls. Over-aligned stack objects can raise
+the outgoing alignment beyond the default 16 bytes.
+
+`AbiSignature.parameters` can be a known prefix, not necessarily all actuals.
+Source/library/service variadic declarations supply their fixed parameters and
+set `argument_list_complete: false`. Explicit complete variadic or unprototyped
+actual lists must set it to `true`; omission defaults to completeness only for
+ordinary prototyped nonvariadic calls. `AbiCallLayout.argument_count` is null for
+incomplete lists, while known prefix locations survive in a partial layout.
+A complete list retains its count even if a type prevents physical allocation.
+Anonymous actuals remain call observations, not synthesized fixed formal
+parameters in a source signature.
+
+`AbiCallLayout.implicit_register_inputs` records machine requirements separately
+from source parameters. SysV variadic/unprototyped calls require AL to be an
+unsigned upper bound on vector-register usage, from the established count to
+eight, not an exact count. Call analysis retains the actual register fact,
+evidence, and satisfied/violated/unknown conformance; partial layouts cannot
+establish satisfaction. Both emitters render these facts only as inert metadata.
+Existing ABIs have no such implicit inputs.
+
+ELF library contracts require explicit recognized ELF library attribution; a
+needed-library list or Darwin path is not symbol attribution. ELF DWARF recovery
+is explicitly unavailable (partial diagnostic, no recovered debug declarations),
+without suppressing native symbols or treating Mach-O section rules as ELF rules.
+
 ## Address and byte ownership rules
 
 `file` always means an offset into the original immutable **container**, including the selected slice offset. `rva` is relative to the explicit image base; `va` is static virtual address. No runtime slide is guessed. Ranges are half-open; the exclusive end may equal 2^64, but neither an address nor a size may exceed unsigned 64-bit representation.

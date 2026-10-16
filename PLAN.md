@@ -2,7 +2,7 @@
 
 ## 1. Status and purpose
 
-This document records the agreed product direction and implementation contracts. First-local-release goals below remain the acceptance baseline, not a claim that every release gate is complete. The current development checkout also implements F01 Python-like emission and F02 private authenticated Streamable HTTP/native TLS; those later extensions do not retroactively become features of the frozen v0.1 artifacts. Current macOS evidence is strict typecheck, 730/730 tests (six suites, zero skipped), build and actual compiled stdio/HTTP/HTTPS investigation/restart workflows. No new extension artifact has yet been built/installed; Windows qualification remains blocked. See [RELEASE-VERIFICATION.md](RELEASE-VERIFICATION.md) for measured scope and provenance, and [TODO.md](TODO.md) for remaining gates.
+This document records the agreed product direction and implementation contracts. First-local-release goals below remain the acceptance baseline, not a claim that every release gate is complete. The current development checkout implements F01 Python-like emission, F02 private authenticated Streamable HTTP/native TLS and F03 ELF/System V AMD64; these do not retroactively become features of frozen v0.1 artifacts. Current macOS evidence is strict typecheck, 852/852 tests (six suites, zero skipped), build, compiled eight-fixture/two-emitter stdio acceptance, and compiled HTTP/HTTPS ELF annotation/cache/restart/hash-paging workflows. No new extension artifact has yet been built/installed; current Windows qualification remains separate. See [RELEASE-VERIFICATION.md](RELEASE-VERIFICATION.md) for scope/provenance, and [TODO.md](TODO.md) for remaining gates.
 
 Build a headless, LLM-oriented reverse-engineering workbench for understanding native programs, especially abandoned or closed-source software whose behavior must be reproduced for compatibility. The system provides deterministic analysis tools; the calling LLM performs the investigation and reasoning. The analysis engine must also be callable by ordinary programs and integration clients.
 
@@ -41,8 +41,9 @@ Local MCP uses official SDK v2.3.1: `@modelcontextprotocol/server` and `@modelco
 
 - **macOS target:** Mach-O, AArch64/arm64, Darwin ARM64 ABI; thin images and selection of ARM64 slices in universal/fat containers; executables and dynamic libraries.
 - **Windows target:** PE32+, x86-64, Windows x64 ABI; executables and DLLs.
-- Both target formats must be statically analyzable on either intended application host: macOS arm64 and Windows x86-64. Target ISA and OS must never be inferred from the host. PE support is not Windows-host qualification: macOS cross-compiles and statically analyzes PE fixtures without a Windows VM.
-- Container format, instruction set, target features, ABI, and source-language metadata are distinct properties. Future ELF, additional architectures, and other ABIs must not require a new public tool protocol.
+- **F03 target:** ELF64 little-endian EM_X86_64 ET_EXEC/ET_DYN, System V AMD64 ABI, OSABI 0/3. Requires bounded valid section/program tables and unique PT_LOAD translations. Sectionless and extended-count/index encodings, ELF DWARF, dependency/relocation execution, ASLR guessing, PLT callable-entry recovery and IFUNC-selected targets are outside this subset. OSABI 0 is not proof of Linux syscall/kernel semantics.
+- All three target formats are statically analyzable independently of host; intended application hosts remain macOS arm64 and Windows x86-64. PE/ELF analysis on macOS is not Windows-host or Linux-host qualification.
+- Container format, instruction set, target features, ABI, and source-language metadata are distinct properties. ELF reuses iced-x86, the x86 lifter, shared analysis and public tools; no Linux-specific decompiler or public protocol was added.
 
 Windows remains a required application host. Its qualification covers Windows process/pipe/filesystem/installer behavior through focused compiled A01–A11 acceptance and required decoder/ABI smoke, with A12 resource evidence tracked separately. The full architecture-independent core regression suite belongs on macOS; repeatedly running the entire TSX source suite in the Windows VM is not the host strategy. QEMU is sufficient for focused host acceptance; the present stalled-output failure is real I/O behavior, not a reason to remove Windows support or waive A01–A12.
 
@@ -71,9 +72,9 @@ Objective-C/Swift/C++ metadata may improve names and evidence; it must not be pr
 - Automatic fetching of remote dependencies, symbol servers, or embedded URLs while inspecting a binary.
 - Replacing the homemade decompiler with a public decompiler.
 - Genuine source recovery, exact original types/names, or proof of whole-program equivalence.
-- A Python-like emitter, remote hosting, or another target platform. These were explicit later extension tasks, not hidden prerequisites for the original first release. F01/F02 are now implemented in development; their own verification and artifact qualification stay separate from frozen-release history.
+- A Python-like emitter, remote hosting, or another target platform. These were explicit later extension tasks, not hidden prerequisites for the original first release. F01/F02/F03 are now implemented in development; their own verification and artifact qualification stay separate from frozen-release history.
 
-The selected third target for F03 is **Linux x86-64: ELF and the System V AMD64 ABI**. This extension follows the first local release; it reuses iced-x86 and the x86-64 semantic pipeline rather than introducing a Linux-specific public tool protocol.
+F03 implements **ELF x86-64 and the System V AMD64 ABI** as a static Linux-target subset, not a Linux application-host release or target execution environment. Source metadata may remain partial despite complete decode/lift/ABI and all reconstruction units; the workflow oracle requires those machine-layer facts, complete instruction mappings and evidence links rather than forcing aggregate `complete`.
 
 ## 4. Architecture and ownership boundaries
 
@@ -83,7 +84,7 @@ flowchart TD
     MCP --> Service[Analysis service]
     Service --> Worker[Bounded project workers]
     Worker --> Store[Project store and immutable images]
-    Worker --> Loaders[PE and Mach-O loaders]
+    Worker --> Loaders[PE, Mach-O and ELF loaders]
     Loaders --> Model[Program model]
     Model --> Decode[Architecture-specific decoder adapters]
     Decode --> Lift[Architecture-specific lifters]
@@ -105,12 +106,13 @@ src/
   core/                 identities, addresses, diagnostics, capabilities, contracts
   loaders/macho/        Mach-O / fat containers and loader metadata
   loaders/pe/           PE32+ and loader metadata
+  loaders/elf/          ELF64LE x86-64 static native metadata
   decoders/arm64/       a64js adapter
   decoders/x86_64/      iced-x86 adapter and WASM ownership
   ir/                   semantic nodes, builders, verification, provenance
   lifters/arm64/        ARM64 semantics
   lifters/x86_64/       x86-64 semantics
-  abi/                  Darwin ARM64, Windows x64, structured library contracts
+  abi/                  Darwin ARM64, Windows x64, System V AMD64, library contracts
   analysis/             discovery, CFG/SSA, references, propagation, stack/types
   presentation/         structured control flow and emitter-neutral statements
   emitters/             shared renderer, neutral contracts, C-like/Python-like syntax
@@ -166,7 +168,9 @@ Use bounded fixed-point/worklist passes. Side effects, reachability, arithmetic 
 
 ### ABI and type boundaries
 
-Darwin ARM64 and Windows x64 models define argument/return locations, preserved registers, stack alignment, stack arguments, variadic rules, aggregate rules within the supported subset, and target C data layout. In particular, Darwin and Windows do not have the same `long` width, and Windows x64 shadow space is not a Darwin rule.
+Darwin ARM64, Windows x64 and System V AMD64 models define argument/return locations, preserved registers, stack alignment, stack arguments, variadic rules, supported aggregate classification and target C layout. SysV uses six INTEGER/eight SSE registers with independent allocation and aggregate rollback, mixed returns/hidden results, callee-entry RSP offsets including the pushed return address, no Windows shadow space and a 128-byte red-zone capability without inferred ownership. SysV `long double` is an 80-bit value in 128-bit object storage; x87 value/return reconstruction, AVX argument types, nontrivial C++ and kernel/syscall conventions remain unsupported.
+
+Argument-list completeness is explicit: a known prefix is not complete variadic/unprototyped actuals. Unknown layouts prevent certainty about later allocation; unknown source arity is never inferred from register use. SysV AL supplies an upper bound on vector argument-register usage, not a source argument; declaration-only variadic metadata cannot satisfy an unknown observed call. Actual-list completeness must be established before treating the list/stack extent as final.
 
 A symbol name does not establish a function signature, object size, nonreturning property, or side-effect contract. Keep debug information, library contracts, analysis deductions, and user/LLM assumptions distinct. Conflicts are reported, not silently merged into certainty. Strict treatment of unknown calls is the default; any speculative policy is explicit and included in results and cache keys.
 
@@ -177,6 +181,8 @@ Analysis produces an emitter-neutral structured presentation model. F01 supplies
 Select `options.emitter: "c-like" | "python-like"`; C-like remains the default. A shared renderer returns each dialect's final text with direct UTF-16 statement/control spans, stable semantic identities and original instruction mappings; output budgets still count UTF-8 bytes. Python-like output is explicitly **non-executable machine pseudocode**: finite-width helpers, effect tokens, physical-state snapshots, simultaneous edge copies, labels/gotos and indeterminate control preserve machine behavior rather than implying ordinary Python arithmetic or source recovery.
 
 Output language, selected emitter version and presentation options are part of cache identity. Pipeline and version selection use the full target contract, not the host or architecture alone. Stored payload language/version must match the selected emitter identity; C and Python-like artifacts cannot stand in for each other.
+
+Current emitter versions are `typed-machine-c-2` and `typed-machine-python-like-2`; composed analysis includes `stack-calls/2`, `library/2` and `types/2` for changed call/layout/type semantics. Old versioned artifacts are not newly verified output; schema migration does not automatically reparse historical images with a new loader.
 
 ## 7. Program model, addresses, and evidence
 

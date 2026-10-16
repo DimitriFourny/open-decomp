@@ -4,6 +4,7 @@ import { dirname, basename, join } from 'node:path';
 import { ImmutableBytes, OperationError, contentHash, createOperationContext, encodeDiagnostic, encodeJob, imageIdentity, type Diagnostic, type Job, type OperationContext, type ProjectStore, type ToolArgs, type ToolName, type ToolResult, toolSchemas } from '../core/index.js';
 import { MachOLoader } from '../loaders/macho/index.js';
 import { peLoader } from '../loaders/pe/index.js';
+import { elfLoader } from '../loaders/elf/index.js';
 import { SqliteProjectStore } from '../project/store/index.js';
 import { commandSchema, eventSchema, FrameDecoder, frame, MAX_IMAGES, type Command, type WorkRequest, type WorkerEvent, type WorkerSnapshot } from './protocol.js';
 
@@ -177,7 +178,8 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
             }
           } finally { closeSync(fd); }
           const sha256 = contentHash(raw), bytes = new ImmutableBytes(raw), image_id = imageIdentity(sha256);
-          const loader = raw[0] === 0x4d && raw[1] === 0x5a ? peLoader : new MachOLoader();
+          const loader = raw[0] === 0x4d && raw[1] === 0x5a ? peLoader
+            : raw[0] === 0x7f && raw[1] === 0x45 && raw[2] === 0x4c && raw[3] === 0x46 ? elfLoader : new MachOLoader();
           const image = loader.load({ bytes, sha256, image_id, slice_id: work.request.slice_id }, context);
           if (work.request.resume_only && before.images.some(prior => prior.sha256 !== sha256 || prior.selected_slice_id !== image.selected_slice_id)) {
             fail('invalid_input', 'Import repair bytes and selected slice must match the saved snapshot');

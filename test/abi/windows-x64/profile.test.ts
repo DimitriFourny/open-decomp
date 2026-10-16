@@ -12,7 +12,7 @@ const f32: AbiType = { kind: 'float', bits: 32 };
 const f64: AbiType = { kind: 'float', bits: 64 };
 const aggregate = (size: bigint, alignment = 1): AbiType => ({ kind: 'aggregate', size, alignment, fields: [] });
 function call(parameters: readonly AbiType[], returns: AbiType = u64, options: Partial<Signature> = {}): AbiCallLayout {
-  return windowsX64Abi.classifyCall({ returns, parameters, variadic: false, fixed_parameter_count: parameters.length, ...options });
+  return windowsX64Abi.classifyCall({ returns, parameters, variadic: false, fixed_parameter_count: parameters.length, argument_list_complete: true, ...options });
 }
 function register(location: AbiLocation | undefined, name: string, bits: number): void {
   assert.ok(location?.kind === 'register');
@@ -29,7 +29,7 @@ test('concrete Microsoft profile exposes LLP64 and binary64 long double', () => 
   assert.equal(windowsX64Abi.id, 'windows-x64');
   assert.equal(windowsX64Abi.architecture, 'x86_64');
   assert.deepEqual(windowsX64Abi.layout, { endian: 'little', pointer_bits: 64, char_bits: 8, short_bits: 16,
-    int_bits: 32, long_bits: 32, long_long_bits: 64, float_bits: 32, double_bits: 64, long_double_bits: 64,
+    int_bits: 32, long_bits: 32, long_long_bits: 64, float_bits: 32, double_bits: 64, long_double_bits: 64, long_double_storage_bits: 64,
     stack_alignment: 16, aggregate_max_alignment: 16 });
   assert.equal(windowsX64Abi.stack_pointer.id, 'x86_64:rsp');
 });

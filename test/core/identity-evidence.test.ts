@@ -60,6 +60,7 @@ test('revisions and per-layer coverage cannot imply unsupported semantics succee
   assert.equal(coverageSchema.parse({ layer: 'lift', state: 'unsupported', completed_units: 0, total_units: 10, reasons: ['unavailable instruction semantics'] }).state, 'unsupported');
   assert.equal(coverageSchema.safeParse({ layer: 'lift', state: 'complete', completed_units: 11, total_units: 10, reasons: [] }).success, false);
   assert.equal(targetSchema.safeParse({ format: 'pe', architecture: 'arm64', abi: 'darwin-arm64', endian: 'little', address_bits: 64, features: [] }).success, false);
+  assert.equal(targetSchema.safeParse({ format: 'elf', architecture: 'x86_64', abi: 'windows-x64', endian: 'little', address_bits: 64, features: [] }).success, false);
 });
 
 test('cache keys include revisions, semantic policy, features and component versions', () => {

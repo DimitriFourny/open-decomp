@@ -1,4 +1,4 @@
-import { entityIdentity, fingerprint, type Annotation, type Evidence, type FunctionRecord, type LoadedImage, type OperationContext, type ReferenceRecord } from '../../core/index.js';
+import { entityIdentity, fingerprint, type Annotation, type DataLayout, type Evidence, type FunctionRecord, type LoadedImage, type OperationContext, type ReferenceRecord } from '../../core/index.js';
 import type { SSAForm } from '../../ir/index.js';
 import type { ContractTarget, SuppliedCallContract, SuppliedCallResolution } from '../../analysis/calls/index.js';
 import { AnalysisBudget } from '../../analysis/ssa/budget.js';
@@ -74,13 +74,13 @@ export function resolveCalls(ir: SSAForm, image: LoadedImage, functions: readonl
 
 /** Use the existing source-layout resolver and typed ABI contracts, retaining
  * exact call IDs and explicit provenance for each source declaration's use. */
-export function callDeclarations(ir: SSAForm, image: LoadedImage, revision: number, scope: CallScope, debug: DebugRecovery, annotations: readonly Annotation[], types: readonly SuppliedTypeRecord[], context: OperationContext): {
+export function callDeclarations(ir: SSAForm, image: LoadedImage, revision: number, scope: CallScope, debug: DebugRecovery, annotations: readonly Annotation[], types: readonly SuppliedTypeRecord[], context: OperationContext, layout: DataLayout): {
   contracts: SuppliedCallContract[]; signatures: SuppliedSignature[]; evidence: Evidence[];
 } {
   const records = new Map<string, SuppliedTypeRecord[]>();
   for (const record of types) { context.checkpoint(1); const list = records.get(record.id) ?? []; list.push(record); records.set(record.id, list); }
   const budget = new AnalysisBudget({ max_work: context.budget.work, checkpoint: work => context.checkpoint(work) });
-  const layouts = new SourceLayouts(records, budget);
+  const layouts = new SourceLayouts(records, budget, layout);
   const contracts: SuppliedCallContract[] = [], signatures: SuppliedSignature[] = [], evidence: Evidence[] = [];
   const add = (declaration: SuppliedSignature, uses: readonly { call_id: string; target: ContractTarget; evidence_ids: readonly string[] }[]): void => {
     if (!uses.length) return;
@@ -88,9 +88,9 @@ export function callDeclarations(ir: SSAForm, image: LoadedImage, revision: numb
     const parents = [...new Set([...declaration.evidence_ids, ...declaration.signature.evidence_ids, ...uses.flatMap(use => use.evidence_ids)])].sort();
     const proof = `evidence_${fingerprint([image.selected_slice_id, ir.id, id, parents, revision])}`;
     context.checkpoint(1 + parents.length);
-    evidence.push({ id: proof, origin: { kind: 'analysis', analyzer: 'pipeline-call-contracts', version: '1', rule: 'exact grounded call-site source declaration' }, claim: 'Source declaration applied only to calls with a grounded target identity', derived_from: parents, conflicts_with: [], revision });
+    evidence.push({ id: proof, origin: { kind: 'analysis', analyzer: 'pipeline-call-contracts', version: '2', rule: 'exact grounded call-site source declaration' }, claim: 'Source declaration applied only to calls with a grounded target identity', derived_from: parents, conflicts_with: [], revision });
     if (declaration.status === 'asserted' || declaration.status === 'established' || declaration.status === 'conflicting') contracts.push({ id, target: uses[0]!.target,
-      signature: { returns: layouts.abi(declaration.signature.return_type), parameters: declaration.signature.parameters.map(parameter => layouts.abi(parameter.type_id)), variadic: declaration.signature.variadic, fixed_parameter_count: declaration.signature.parameters.length },
+      signature: { returns: layouts.abi(declaration.signature.return_type), parameters: declaration.signature.parameters.map(parameter => layouts.abi(parameter.type_id)), variadic: declaration.signature.variadic, fixed_parameter_count: declaration.signature.parameters.length, argument_list_complete: !declaration.signature.variadic },
       noreturn: declaration.signature.noreturn, evidence_ids: [proof] });
     for (const use of uses) signatures.push({ ...declaration, id, subject_id: use.call_id, evidence_ids: [proof] });
   };

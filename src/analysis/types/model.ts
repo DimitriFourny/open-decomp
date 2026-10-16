@@ -2,7 +2,7 @@ import type { Address, Annotation, Diagnostic, Evidence, RecoveredType, Signatur
 import type { DataType } from '../../ir/index.js';
 import type { DebugRecovery } from '../../metadata/debug/index.js';
 import type { LibraryContracts } from '../../metadata/library-contracts/index.js';
-import type { CallAnalysisOptions, CallAnalysisResult } from '../calls/index.js';
+import type { CallAnalysisOptions, CallAnalysisResult, ContractObservation } from '../calls/index.js';
 
 export type TypeSource = 'analysis' | 'debug' | 'library' | 'user' | 'llm';
 export type TypeStatus = 'candidate' | 'established' | 'asserted' | 'hypothesis' | 'conflicting';
@@ -42,6 +42,8 @@ export interface TypeAssociation extends TypeBinding {
 }
 export interface SignatureAssociation extends SuppliedSignature {
   readonly abi_state: 'complete' | 'partial' | 'unsupported';
+  /** Machine requirements also survive declarations scoped to one call node. */
+  readonly implicit_register_inputs: ContractObservation['implicit_register_inputs'];
 }
 export interface ObservedField {
   readonly id: string;

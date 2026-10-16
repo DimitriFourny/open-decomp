@@ -55,14 +55,15 @@ export type ArchitecturePayload = { readonly arm64: Arm64Payload; readonly x86_6
 export interface DataLayout {
   readonly endian: 'little'; readonly pointer_bits: 64;
   readonly char_bits: 8; readonly short_bits: 16; readonly int_bits: 32; readonly long_bits: 32 | 64; readonly long_long_bits: 64;
-  readonly float_bits: 32; readonly double_bits: 64; readonly long_double_bits: 64 | 128;
+  readonly float_bits: 32; readonly double_bits: 64; readonly long_double_bits: 64 | 80 | 128;
+  readonly long_double_storage_bits: 64 | 128;
   readonly stack_alignment: number; readonly aggregate_max_alignment: number;
 }
 /** Resolved source layouts for ABI classification, not a second semantic IR type system. */
 export type AbiType =
   | { readonly kind: 'void' }
   | { readonly kind: 'integer'; readonly bits: number; readonly signed: boolean }
-  | { readonly kind: 'float'; readonly bits: 16 | 32 | 64 | 128 }
+  | { readonly kind: 'float'; readonly bits: 16 | 32 | 64 | 80 | 128 }
   | { readonly kind: 'pointer' }
   | { readonly kind: 'vector'; readonly element: 'integer' | 'float'; readonly element_bits: number; readonly lanes: number }
   | { readonly kind: 'aggregate'; readonly size: bigint; readonly alignment: number; readonly fields: readonly { readonly offset: bigint; readonly type: AbiType }[]; readonly trivial_for_abi?: boolean }
@@ -76,9 +77,18 @@ export interface CallClobbers {
   readonly flags: readonly RegisterDescriptor[];
   readonly memory: 'unknown_read_write' | 'read_only' | 'none';
 }
+/** Machine boundary requirements, never source-language parameters. */
+export interface AbiImplicitRegisterInput {
+  readonly register: RegisterDescriptor;
+  readonly unsigned_minimum: bigint; readonly unsigned_maximum: bigint;
+  readonly purpose: 'vector_argument_register_upper_bound';
+}
 export interface AbiCallLayout {
   readonly parameters: readonly { readonly index: number; readonly locations: readonly AbiLocation[] }[];
+  /** Complete actual count, independent of layout support; null for a known prefix. */
+  readonly argument_count: number | null;
   readonly returns: readonly AbiLocation[]; readonly hidden_result: AbiLocation | null;
+  readonly implicit_register_inputs: readonly AbiImplicitRegisterInput[];
   readonly stack_bytes: bigint; readonly shadow_space: bigint; readonly stack_alignment: number;
   readonly clobbers: CallClobbers; readonly diagnostics: readonly Diagnostic[];
   readonly state: 'complete' | 'partial' | 'unsupported';
@@ -86,8 +96,13 @@ export interface AbiCallLayout {
 /** Explicit ABI input. Omitted convention/prototyped flags mean the ordinary prototyped C ABI. */
 export interface AbiSignature {
   readonly returns: AbiType;
-  /** null preserves an unknown argument count; an empty list is a known zero-argument list. */
+  /** Known argument-type prefix, or all actuals when argument_list_complete is
+   * true. A variadic source declaration supplies only its fixed prefix.
+   * null preserves wholly unknown arguments, regardless of completeness. */
   readonly parameters: readonly AbiType[] | null;
+  /** Omission means complete only for ordinary prototyped nonvariadic calls.
+   * Known variadic/unprototyped actual lists must explicitly set true. */
+  readonly argument_list_complete?: boolean;
   readonly variadic: boolean;
   readonly fixed_parameter_count: number;
   readonly calling_convention?: 'default' | 'vectorcall' | 'member_function' | 'unknown';
@@ -96,6 +111,9 @@ export interface AbiSignature {
 export interface AbiProfile extends ComponentIdentity {
   readonly id: Target['abi']; readonly architecture: Target['architecture']; readonly layout: DataLayout;
   readonly stack_pointer: RegisterDescriptor; readonly preserved: readonly RegisterDescriptor[];
+  readonly stack_return_address_bytes: bigint;
+  /** ABI capability only: not evidence that any local occupies the red zone. */
+  readonly red_zone_bytes: bigint;
   readonly unknown_call_clobbers: CallClobbers;
   classifyCall(signature: AbiSignature): AbiCallLayout;
 }

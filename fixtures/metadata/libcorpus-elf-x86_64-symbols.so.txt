@@ -1,0 +1,1061 @@
+
+File: fixtures/bin/libcorpus-elf-x86_64-symbols.so
+Format: elf64-x86-64
+Arch: x86_64
+AddressSize: 64bit
+LoadName: libcorpus-elf-x86_64.so
+ElfHeader {
+  Ident {
+    Magic: (7F 45 4C 46)
+    Class: 64-bit (0x2)
+    DataEncoding: LittleEndian (0x1)
+    FileVersion: 1
+    OS/ABI: SystemV (0x0)
+    ABIVersion: 0
+    Unused: (00 00 00 00 00 00 00)
+  }
+  Type: SharedObject (0x3)
+  Machine: EM_X86_64 (0x3E)
+  Version: 1
+  Entry: 0x0
+  ProgramHeaderOffset: 0x40
+  SectionHeaderOffset: 0x3120
+  Flags [ (0x0)
+  ]
+  HeaderSize: 64
+  ProgramHeaderEntrySize: 56
+  ProgramHeaderCount: 8
+  SectionHeaderEntrySize: 64
+  SectionHeaderCount: 29
+  StringTableSectionIndex: 27
+}
+Sections [
+  Section {
+    Index: 0
+    Name:  (0)
+    Type: SHT_NULL (0x0)
+    Flags [ (0x0)
+    ]
+    Address: 0x0
+    Offset: 0x0
+    Size: 0
+    Link: 0
+    Info: 0
+    AddressAlignment: 0
+    EntrySize: 0
+  }
+  Section {
+    Index: 1
+    Name: .dynsym (1)
+    Type: SHT_DYNSYM (0xB)
+    Flags [ (0x2)
+      SHF_ALLOC (0x2)
+    ]
+    Address: 0x200
+    Offset: 0x200
+    Size: 552
+    Link: 4
+    Info: 1
+    AddressAlignment: 8
+    EntrySize: 24
+  }
+  Section {
+    Index: 2
+    Name: .gnu.hash (9)
+    Type: SHT_GNU_HASH (0x6FFFFFF6)
+    Flags [ (0x2)
+      SHF_ALLOC (0x2)
+    ]
+    Address: 0x428
+    Offset: 0x428
+    Size: 152
+    Link: 1
+    Info: 0
+    AddressAlignment: 8
+    EntrySize: 0
+  }
+  Section {
+    Index: 3
+    Name: .hash (19)
+    Type: SHT_HASH (0x5)
+    Flags [ (0x2)
+      SHF_ALLOC (0x2)
+    ]
+    Address: 0x4C0
+    Offset: 0x4C0
+    Size: 192
+    Link: 1
+    Info: 0
+    AddressAlignment: 4
+    EntrySize: 4
+  }
+  Section {
+    Index: 4
+    Name: .dynstr (25)
+    Type: SHT_STRTAB (0x3)
+    Flags [ (0x2)
+      SHF_ALLOC (0x2)
+    ]
+    Address: 0x580
+    Offset: 0x580
+    Size: 403
+    Link: 0
+    Info: 0
+    AddressAlignment: 1
+    EntrySize: 0
+  }
+  Section {
+    Index: 5
+    Name: .rela.dyn (33)
+    Type: SHT_RELA (0x4)
+    Flags [ (0x2)
+      SHF_ALLOC (0x2)
+    ]
+    Address: 0x718
+    Offset: 0x718
+    Size: 24
+    Link: 1
+    Info: 0
+    AddressAlignment: 8
+    EntrySize: 24
+  }
+  Section {
+    Index: 6
+    Name: .rela.plt (43)
+    Type: SHT_RELA (0x4)
+    Flags [ (0x42)
+      SHF_ALLOC (0x2)
+      SHF_INFO_LINK (0x40)
+    ]
+    Address: 0x730
+    Offset: 0x730
+    Size: 24
+    Link: 1
+    Info: 14
+    AddressAlignment: 8
+    EntrySize: 24
+  }
+  Section {
+    Index: 7
+    Name: .rodata (53)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x12)
+      SHF_ALLOC (0x2)
+      SHF_MERGE (0x10)
+    ]
+    Address: 0x750
+    Offset: 0x750
+    Size: 216
+    Link: 0
+    Info: 0
+    AddressAlignment: 16
+    EntrySize: 0
+  }
+  Section {
+    Index: 8
+    Name: .text (61)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x6)
+      SHF_ALLOC (0x2)
+      SHF_EXECINSTR (0x4)
+    ]
+    Address: 0x1830
+    Offset: 0x830
+    Size: 1598
+    Link: 0
+    Info: 0
+    AddressAlignment: 16
+    EntrySize: 0
+  }
+  Section {
+    Index: 9
+    Name: .plt (67)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x6)
+      SHF_ALLOC (0x2)
+      SHF_EXECINSTR (0x4)
+    ]
+    Address: 0x1E70
+    Offset: 0xE70
+    Size: 32
+    Link: 0
+    Info: 0
+    AddressAlignment: 16
+    EntrySize: 0
+  }
+  Section {
+    Index: 10
+    Name: .dynamic (72)
+    Type: SHT_DYNAMIC (0x6)
+    Flags [ (0x3)
+      SHF_ALLOC (0x2)
+      SHF_WRITE (0x1)
+    ]
+    Address: 0x2E90
+    Offset: 0xE90
+    Size: 288
+    Link: 4
+    Info: 0
+    AddressAlignment: 8
+    EntrySize: 16
+  }
+  Section {
+    Index: 11
+    Name: .got (81)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x3)
+      SHF_ALLOC (0x2)
+      SHF_WRITE (0x1)
+    ]
+    Address: 0x2FB0
+    Offset: 0xFB0
+    Size: 0
+    Link: 0
+    Info: 0
+    AddressAlignment: 8
+    EntrySize: 0
+  }
+  Section {
+    Index: 12
+    Name: .relro_padding (86)
+    Type: SHT_NOBITS (0x8)
+    Flags [ (0x3)
+      SHF_ALLOC (0x2)
+      SHF_WRITE (0x1)
+    ]
+    Address: 0x2FB0
+    Offset: 0xFB0
+    Size: 80
+    Link: 0
+    Info: 0
+    AddressAlignment: 1
+    EntrySize: 0
+  }
+  Section {
+    Index: 13
+    Name: .data (101)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x3)
+      SHF_ALLOC (0x2)
+      SHF_WRITE (0x1)
+    ]
+    Address: 0x3FB0
+    Offset: 0xFB0
+    Size: 8
+    Link: 0
+    Info: 0
+    AddressAlignment: 8
+    EntrySize: 0
+  }
+  Section {
+    Index: 14
+    Name: .got.plt (107)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x3)
+      SHF_ALLOC (0x2)
+      SHF_WRITE (0x1)
+    ]
+    Address: 0x3FB8
+    Offset: 0xFB8
+    Size: 32
+    Link: 0
+    Info: 0
+    AddressAlignment: 8
+    EntrySize: 0
+  }
+  Section {
+    Index: 15
+    Name: .bss (116)
+    Type: SHT_NOBITS (0x8)
+    Flags [ (0x3)
+      SHF_ALLOC (0x2)
+      SHF_WRITE (0x1)
+    ]
+    Address: 0x3FE0
+    Offset: 0xFD8
+    Size: 512
+    Link: 0
+    Info: 0
+    AddressAlignment: 16
+    EntrySize: 0
+  }
+  Section {
+    Index: 16
+    Name: .debug_loclists (121)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x0)
+    ]
+    Address: 0x0
+    Offset: 0xFD8
+    Size: 475
+    Link: 0
+    Info: 0
+    AddressAlignment: 1
+    EntrySize: 0
+  }
+  Section {
+    Index: 17
+    Name: .debug_abbrev (137)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x0)
+    ]
+    Address: 0x0
+    Offset: 0x11B3
+    Size: 775
+    Link: 0
+    Info: 0
+    AddressAlignment: 1
+    EntrySize: 0
+  }
+  Section {
+    Index: 18
+    Name: .debug_info (151)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x0)
+    ]
+    Address: 0x0
+    Offset: 0x14BA
+    Size: 2319
+    Link: 0
+    Info: 0
+    AddressAlignment: 1
+    EntrySize: 0
+  }
+  Section {
+    Index: 19
+    Name: .debug_str_offsets (163)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x0)
+    ]
+    Address: 0x0
+    Offset: 0x1DC9
+    Size: 476
+    Link: 0
+    Info: 0
+    AddressAlignment: 1
+    EntrySize: 0
+  }
+  Section {
+    Index: 20
+    Name: .debug_str (182)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x30)
+      SHF_MERGE (0x10)
+      SHF_STRINGS (0x20)
+    ]
+    Address: 0x0
+    Offset: 0x1FA5
+    Size: 744
+    Link: 0
+    Info: 0
+    AddressAlignment: 1
+    EntrySize: 1
+  }
+  Section {
+    Index: 21
+    Name: .debug_addr (193)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x0)
+    ]
+    Address: 0x0
+    Offset: 0x228D
+    Size: 448
+    Link: 0
+    Info: 0
+    AddressAlignment: 1
+    EntrySize: 0
+  }
+  Section {
+    Index: 22
+    Name: .comment (205)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x30)
+      SHF_MERGE (0x10)
+      SHF_STRINGS (0x20)
+    ]
+    Address: 0x0
+    Offset: 0x244D
+    Size: 59
+    Link: 0
+    Info: 0
+    AddressAlignment: 1
+    EntrySize: 1
+  }
+  Section {
+    Index: 23
+    Name: .debug_frame (214)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x0)
+    ]
+    Address: 0x0
+    Offset: 0x2488
+    Size: 624
+    Link: 0
+    Info: 0
+    AddressAlignment: 8
+    EntrySize: 0
+  }
+  Section {
+    Index: 24
+    Name: .debug_line (227)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x0)
+    ]
+    Address: 0x0
+    Offset: 0x26F8
+    Size: 1161
+    Link: 0
+    Info: 0
+    AddressAlignment: 1
+    EntrySize: 0
+  }
+  Section {
+    Index: 25
+    Name: .debug_line_str (239)
+    Type: SHT_PROGBITS (0x1)
+    Flags [ (0x30)
+      SHF_MERGE (0x10)
+      SHF_STRINGS (0x20)
+    ]
+    Address: 0x0
+    Offset: 0x2B81
+    Size: 104
+    Link: 0
+    Info: 0
+    AddressAlignment: 1
+    EntrySize: 1
+  }
+  Section {
+    Index: 26
+    Name: .symtab (255)
+    Type: SHT_SYMTAB (0x2)
+    Flags [ (0x0)
+    ]
+    Address: 0x0
+    Offset: 0x2BF0
+    Size: 648
+    Link: 28
+    Info: 5
+    AddressAlignment: 8
+    EntrySize: 24
+  }
+  Section {
+    Index: 27
+    Name: .shstrtab (263)
+    Type: SHT_STRTAB (0x3)
+    Flags [ (0x0)
+    ]
+    Address: 0x0
+    Offset: 0x2E78
+    Size: 281
+    Link: 0
+    Info: 0
+    AddressAlignment: 1
+    EntrySize: 0
+  }
+  Section {
+    Index: 28
+    Name: .strtab (273)
+    Type: SHT_STRTAB (0x3)
+    Flags [ (0x0)
+    ]
+    Address: 0x0
+    Offset: 0x2F91
+    Size: 396
+    Link: 0
+    Info: 0
+    AddressAlignment: 1
+    EntrySize: 0
+  }
+]
+ProgramHeaders [
+  ProgramHeader {
+    Type: PT_PHDR (0x6)
+    Offset: 0x40
+    VirtualAddress: 0x40
+    PhysicalAddress: 0x40
+    FileSize: 448
+    MemSize: 448
+    Flags [ (0x4)
+      PF_R (0x4)
+    ]
+    Alignment: 8
+  }
+  ProgramHeader {
+    Type: PT_LOAD (0x1)
+    Offset: 0x0
+    VirtualAddress: 0x0
+    PhysicalAddress: 0x0
+    FileSize: 2088
+    MemSize: 2088
+    Flags [ (0x4)
+      PF_R (0x4)
+    ]
+    Alignment: 4096
+  }
+  ProgramHeader {
+    Type: PT_LOAD (0x1)
+    Offset: 0x830
+    VirtualAddress: 0x1830
+    PhysicalAddress: 0x1830
+    FileSize: 1632
+    MemSize: 1632
+    Flags [ (0x5)
+      PF_R (0x4)
+      PF_X (0x1)
+    ]
+    Alignment: 4096
+  }
+  ProgramHeader {
+    Type: PT_LOAD (0x1)
+    Offset: 0xE90
+    VirtualAddress: 0x2E90
+    PhysicalAddress: 0x2E90
+    FileSize: 288
+    MemSize: 368
+    Flags [ (0x6)
+      PF_R (0x4)
+      PF_W (0x2)
+    ]
+    Alignment: 4096
+  }
+  ProgramHeader {
+    Type: PT_LOAD (0x1)
+    Offset: 0xFB0
+    VirtualAddress: 0x3FB0
+    PhysicalAddress: 0x3FB0
+    FileSize: 40
+    MemSize: 560
+    Flags [ (0x6)
+      PF_R (0x4)
+      PF_W (0x2)
+    ]
+    Alignment: 4096
+  }
+  ProgramHeader {
+    Type: PT_DYNAMIC (0x2)
+    Offset: 0xE90
+    VirtualAddress: 0x2E90
+    PhysicalAddress: 0x2E90
+    FileSize: 288
+    MemSize: 288
+    Flags [ (0x6)
+      PF_R (0x4)
+      PF_W (0x2)
+    ]
+    Alignment: 8
+  }
+  ProgramHeader {
+    Type: PT_GNU_RELRO (0x6474E552)
+    Offset: 0xE90
+    VirtualAddress: 0x2E90
+    PhysicalAddress: 0x2E90
+    FileSize: 288
+    MemSize: 368
+    Flags [ (0x4)
+      PF_R (0x4)
+    ]
+    Alignment: 1
+  }
+  ProgramHeader {
+    Type: PT_GNU_STACK (0x6474E551)
+    Offset: 0x0
+    VirtualAddress: 0x0
+    PhysicalAddress: 0x0
+    FileSize: 0
+    MemSize: 0
+    Flags [ (0x6)
+      PF_R (0x4)
+      PF_W (0x2)
+    ]
+    Alignment: 0
+  }
+]
+DynamicSection [ (18 entries)
+  Tag                Type      Name/Value
+  0x0000000000000001 NEEDED    Shared library: [libfixture-native.so]
+  0x000000000000000E SONAME    Library soname: [libcorpus-elf-x86_64.so]
+  0x000000000000001E FLAGS     SYMBOLIC 
+  0x0000000000000007 RELA      0x718
+  0x0000000000000008 RELASZ    24 (bytes)
+  0x0000000000000009 RELAENT   24 (bytes)
+  0x000000006FFFFFF9 RELACOUNT 1
+  0x0000000000000017 JMPREL    0x730
+  0x0000000000000002 PLTRELSZ  24 (bytes)
+  0x0000000000000003 PLTGOT    0x3FB8
+  0x0000000000000014 PLTREL    RELA
+  0x0000000000000006 SYMTAB    0x200
+  0x000000000000000B SYMENT    24 (bytes)
+  0x0000000000000005 STRTAB    0x580
+  0x000000000000000A STRSZ     403 (bytes)
+  0x000000006FFFFEF5 GNU_HASH  0x428
+  0x0000000000000004 HASH      0x4C0
+  0x0000000000000000 NULL      0x0
+]
+NeededLibraries [
+  libfixture-native.so
+]
+Relocations [
+  Section (5) .rela.dyn {
+    0x3FB0 R_X86_64_RELATIVE - 0x1830
+  }
+  Section (6) .rela.plt {
+    0x3FD0 R_X86_64_JUMP_SLOT fixture_external 0x0
+  }
+]
+Symbols [
+  Symbol {
+    Name:  (0)
+    Value: 0x0
+    Size: 0
+    Binding: Local (0x0)
+    Type: None (0x0)
+    Other: 0
+    Section: Undefined (0x0)
+  }
+  Symbol {
+    Name: corpus.c (1)
+    Value: 0x0
+    Size: 0
+    Binding: Local (0x0)
+    Type: File (0x4)
+    Other: 0
+    Section: Absolute (0xFFF1)
+  }
+  Symbol {
+    Name: check.c (10)
+    Value: 0x0
+    Size: 0
+    Binding: Local (0x0)
+    Type: File (0x4)
+    Other: 0
+    Section: Absolute (0xFFF1)
+  }
+  Symbol {
+    Name: elf-entry.c (18)
+    Value: 0x0
+    Size: 0
+    Binding: Local (0x0)
+    Type: File (0x4)
+    Other: 0
+    Section: Absolute (0xFFF1)
+  }
+  Symbol {
+    Name: _DYNAMIC (387)
+    Value: 0x2E90
+    Size: 0
+    Binding: Local (0x0)
+    Type: None (0x0)
+    Other [ (0x2)
+      STV_HIDDEN (0x2)
+    ]
+    Section: .dynamic (0xA)
+  }
+  Symbol {
+    Name: fixture_stack (30)
+    Value: 0x1830
+    Size: 29
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_arithmetic (44)
+    Value: 0x1850
+    Size: 9
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_maximum (63)
+    Value: 0x1860
+    Size: 8
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_loop (79)
+    Value: 0x1870
+    Size: 31
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_memory (92)
+    Value: 0x1890
+    Size: 10
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_direct (107)
+    Value: 0x18A0
+    Size: 33
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_indirect (122)
+    Value: 0x18D0
+    Size: 12
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_divide (139)
+    Value: 0x18E0
+    Size: 6
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_width (154)
+    Value: 0x18F0
+    Size: 13
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_stack_args (168)
+    Value: 0x1900
+    Size: 79
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_float (187)
+    Value: 0x1950
+    Size: 21
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_vector (201)
+    Value: 0x1970
+    Size: 16
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_vector_integer (216)
+    Value: 0x1980
+    Size: 25
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_variadic (239)
+    Value: 0x19A0
+    Size: 198
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_string (256)
+    Value: 0x1A68
+    Size: 8
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_message (271)
+    Value: 0x800
+    Size: 31
+    Binding: Global (0x1)
+    Type: Object (0x1)
+    Other: 0
+    Section: .rodata (0x7)
+  }
+  Symbol {
+    Name: fixture_callback (287)
+    Value: 0x3FB0
+    Size: 8
+    Binding: Global (0x1)
+    Type: Object (0x1)
+    Other: 0
+    Section: .data (0xD)
+  }
+  Symbol {
+    Name: fixture_zero_fill (304)
+    Value: 0x3FE0
+    Size: 512
+    Binding: Global (0x1)
+    Type: Object (0x1)
+    Other: 0
+    Section: .bss (0xF)
+  }
+  Symbol {
+    Name: fixture_check (322)
+    Value: 0x1A70
+    Size: 983
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_native_call (336)
+    Value: 0x1E50
+    Size: 10
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_external (356)
+    Value: 0x0
+    Size: 0
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: Undefined (0x0)
+  }
+  Symbol {
+    Name: fixture_entry (373)
+    Value: 0x1E60
+    Size: 14
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+]
+DynamicSymbols [
+  Symbol {
+    Name:  (0)
+    Value: 0x0
+    Size: 0
+    Binding: Local (0x0)
+    Type: None (0x0)
+    Other: 0
+    Section: Undefined (0x0)
+  }
+  Symbol {
+    Name: fixture_external (327)
+    Value: 0x0
+    Size: 0
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: Undefined (0x0)
+  }
+  Symbol {
+    Name: fixture_indirect (93)
+    Value: 0x18D0
+    Size: 12
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_stack_args (139)
+    Value: 0x1900
+    Size: 79
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_check (293)
+    Value: 0x1A70
+    Size: 983
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_native_call (307)
+    Value: 0x1E50
+    Size: 10
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_divide (110)
+    Value: 0x18E0
+    Size: 6
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_width (125)
+    Value: 0x18F0
+    Size: 13
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_string (227)
+    Value: 0x1A68
+    Size: 8
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_message (242)
+    Value: 0x800
+    Size: 31
+    Binding: Global (0x1)
+    Type: Object (0x1)
+    Other: 0
+    Section: .rodata (0x7)
+  }
+  Symbol {
+    Name: fixture_zero_fill (275)
+    Value: 0x3FE0
+    Size: 512
+    Binding: Global (0x1)
+    Type: Object (0x1)
+    Other: 0
+    Section: .bss (0xF)
+  }
+  Symbol {
+    Name: fixture_maximum (34)
+    Value: 0x1860
+    Size: 8
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_memory (63)
+    Value: 0x1890
+    Size: 10
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_arithmetic (15)
+    Value: 0x1850
+    Size: 9
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_loop (50)
+    Value: 0x1870
+    Size: 31
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_vector (172)
+    Value: 0x1970
+    Size: 16
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_variadic (210)
+    Value: 0x19A0
+    Size: 198
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_entry (344)
+    Value: 0x1E60
+    Size: 14
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_stack (1)
+    Value: 0x1830
+    Size: 29
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_direct (78)
+    Value: 0x18A0
+    Size: 33
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_float (158)
+    Value: 0x1950
+    Size: 21
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_vector_integer (187)
+    Value: 0x1980
+    Size: 25
+    Binding: Global (0x1)
+    Type: Function (0x2)
+    Other: 0
+    Section: .text (0x8)
+  }
+  Symbol {
+    Name: fixture_callback (258)
+    Value: 0x3FB0
+    Size: 8
+    Binding: Global (0x1)
+    Type: Object (0x1)
+    Other: 0
+    Section: .data (0xD)
+  }
+]

@@ -2,7 +2,7 @@ import type { Emitter, OperationContext } from '../../core/index.js';
 import type { EmissionInput, EmissionResult } from '../model.js';
 import { Renderer } from '../renderer.js';
 
-export const C_EMITTER_VERSION = 'typed-machine-c-1';
+export const C_EMITTER_VERSION = 'typed-machine-c-2';
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
 
 /** C-like reconstruction, NOT recovered source or a compilable C translation.

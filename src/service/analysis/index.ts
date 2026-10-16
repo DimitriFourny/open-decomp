@@ -104,7 +104,7 @@ export async function executeDecompilation(args: ToolArgs<'function_decompile'>,
         pending.push(...typeReferences(type.definition));
       }
     }
-    const nativeCalls = callDeclarations(ir, image, args.revision, calls, debug, [], nativeTypes, context);
+    const nativeCalls = callDeclarations(ir, image, args.revision, calls, debug, [], nativeTypes, context, components.abi.layout);
     const options = { image_id: image.id, slice_id: image.selected_slice_id, revision: args.revision, entry_address: loaded.function.entry, debug, library, max_work: context.budget.work, resolutions: calls.resolutions };
     context.progress('types', 4, 7);
     const baseline = recoverTypes(ir, components.abi, fullContext, { ...options, types: nativeTypes, signatures: [...nativeSignatures, ...nativeCalls.signatures], contracts: nativeCalls.contracts });
@@ -122,7 +122,7 @@ export async function executeDecompilation(args: ToolArgs<'function_decompile'>,
     }
     if (expanded) active = annotationService.active(args.revision, fullContext, { catalog: trusted, entity_ids: [...selected] });
     const asserted = active.annotations.some(annotation => annotation.value.kind === 'type' || annotation.value.kind === 'signature');
-    const suppliedCalls = asserted ? callDeclarations(ir, image, args.revision, calls, debug, active.annotations, [...nativeTypes, ...active.types], context) : nativeCalls;
+    const suppliedCalls = asserted ? callDeclarations(ir, image, args.revision, calls, debug, active.annotations, [...nativeTypes, ...active.types], context, components.abi.layout) : nativeCalls;
     const externalSubjects = new Set(calls.subjects.filter(id => id !== ir.id));
     const localSubjects = new Set([...selected].filter(id => !externalSubjects.has(id)));
     const types = asserted ? recoverTypes(ir, components.abi, fullContext, { ...options, types: [...nativeTypes, ...active.types], annotations: active.annotations.filter(annotation => localSubjects.has(annotation.entity_id)), signatures: [...nativeSignatures, ...suppliedCalls.signatures], contracts: suppliedCalls.contracts }) : baseline;

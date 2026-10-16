@@ -141,7 +141,9 @@ interface State { parameters: StackFact[]; memory: Map<bigint, StackByte>; escap
  * any stack-derived physical input, including nested pointers in stack storage.
  * No negative offset alone establishes a local/source type or complete frame size.
  * Windows entry +0..7 is the return address, +8..39 home space, +40 arguments;
- * Darwin entry +0 is incoming argument storage. On exhaustion all facts are cleared.
+ * SysV entry +0..7 is the return address and +8 starts incoming arguments;
+ * Darwin entry +0 is incoming argument storage. Negative offsets remain local
+ * candidates, never proof of ABI red-zone ownership. On exhaustion facts clear.
  * Defaults: one million charged work units and 65536 distinct tracked bytes per
  * state. Sub-byte memory operations retain uncertainty rather than padding bits.
  * Result maps are read-only views owned by this result; the input is never mutated.
@@ -208,7 +210,7 @@ export function recoverStack(input: SSAForm, abi: AbiProfile, context: Operation
     };
     const region = (offset: bigint | null, size: bigint): StackAccess['region'] => {
       if (offset === null) return 'dynamic';
-      const classify = (at: bigint): StackAccess['region'] => at < 0n ? 'local_candidate' : abi.id === 'windows-x64' && at < 8n ? 'return_address' : abi.id === 'windows-x64' && at < 40n ? 'shadow_space' : 'incoming_candidate';
+      const classify = (at: bigint): StackAccess['region'] => at < 0n ? 'local_candidate' : at < abi.stack_return_address_bytes ? 'return_address' : abi.id === 'windows-x64' && at < 40n ? 'shadow_space' : 'incoming_candidate';
       return classify(offset) === classify(offset + size - 1n) ? classify(offset) : 'mixed';
     };
     const evaluate = (expression: Expression, result: Value): StackFact => {

@@ -302,7 +302,7 @@ for (const abi of targets) test(`${abi.id}: a supplied call declaration preserve
   const abiSignature: AbiSignature = { returns: { kind: 'integer', bits: abi.layout.long_bits, signed: true }, parameters: [{ kind: 'pointer' }], variadic: false, fixed_parameter_count: 1 };
   const result = recoverTypes(program, abi, createOperationContext(), { ...baseOptions, types: sourceTypes(abi), signatures: [declaration], contracts: [{ id: declaration.id, target: { kind: 'address', address: target }, signature: abiSignature, evidence_ids: [] }] });
   const first = result.signatures.filter(signature => signature.subject_id === calls[0]!.id);
-  assert.deepEqual(first, [{ ...declaration, abi_state: 'complete' }]);
+  assert.deepEqual(first, [{ ...declaration, abi_state: 'complete', implicit_register_inputs: [] }]);
   assert.equal(result.conflicts.some(conflict => conflict.subject_id === calls[0]!.id), false);
   const second = result.signatures.find(signature => signature.subject_id === calls[1]!.id)!;
   assert.equal(second.source, 'analysis'); assert.equal(second.status, 'established');
