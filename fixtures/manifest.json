@@ -28,7 +28,7 @@
     },
     {
       "path": "fixtures/inventory.json",
-      "sha256": "f16a8f36413065f2c1c1e9aa8499b13c29e87200c2a1c45e7b729dda099e6829"
+      "sha256": "f5f49835e2fab48fbfadf3c8603858f1482f795bae1144637f66c901b4f8e188"
     },
     {
       "path": "fixtures/loader-expectations.json",
@@ -40,15 +40,11 @@
     },
     {
       "path": "scripts/fixtures/generate.ts",
-      "sha256": "822e02ceaf83aa0a0a9eb15c395769bb6dec875843e985252a7a2a9357fd5892"
+      "sha256": "29da24e6e7ca0881b2fcfa9f1f54ed2056da8bbd3d6234cea15d0df5e81ffcb2"
     },
     {
       "path": "scripts/fixtures/inspect.ts",
       "sha256": "d29337ca2f69e06e4d715d1c763464269ce2368dda37bec92497384693033b3e"
-    },
-    {
-      "path": "scripts/fixtures/capture-arm64.ts",
-      "sha256": "564c120116f03a33d73b37c1700bfced124ff97560301520de8c1fd295c54239"
     },
     {
       "path": "scripts/fixtures/execute-trusted.ts",
@@ -2589,6 +2585,7 @@
     "Symbol ranges include compiler alignment padding; not a recovered instruction-only function-size oracle.",
     "PE exports survive debug stripping; symbol-bearing files carry DWARF, stripped files do not.",
     "No sibling checkout or compiler is required to consume prebuilt bytes.",
-    "Legacy double/vector semantics, ten-argument signatures and raw indirect call contracts have explicit gaps; see inventory and baseline."
+    "Legacy double/vector semantics, ten-argument signatures and raw indirect call contracts have explicit gaps; see inventory and baseline.",
+    "The ARM64 baseline is frozen historical migration evidence, not regenerated output or a current semantic oracle."
   ]
 }

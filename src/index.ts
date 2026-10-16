@@ -11,7 +11,7 @@ export { discoverFunctions, type DiscoveryInput, type DiscoveryResult } from './
 export * as DWARF from './metadata/dwarf/index.js';
 export { recoverDebugInfo, debugContextAt, variableLocationsAt, type DebugRecovery, type ExternalDebugInput } from './metadata/debug/index.js';
 export { ProjectWorkerPool, ProjectWorker, type JobTicket, type JobOutcome, type WorkRequest, type WorkerSnapshot } from './workers/index.js';
-export { runProjectWorker, type WorkerHandler } from './workers/runtime.js';
+export { runProjectWorker, type WorkerHandler, type PreparedImport } from './workers/runtime.js';
 export { Arm64Lifter, type Arm64LiftResult } from './lifters/arm64/index.js';
 export { X86Lifter, type X86LiftResult } from './lifters/x86_64/index.js';
 export * as SSA from './analysis/ssa/index.js';

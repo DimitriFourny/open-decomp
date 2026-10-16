@@ -30,7 +30,7 @@ const SUBTYPES: Record<number, string> = { 0: 'arm64', 1: 'arm64v8', 2: 'arm64e'
  */
 export class MachOLoader implements Loader {
   readonly name = 'open-decomp-macho';
-  readonly version = '1.0.1';
+  readonly version = '1.0.2';
   readonly format = 'macho' as const;
   inspect(bytes: ImmutableBytes, imageId: string, context: OperationContext): { slices: readonly ImageSlice[]; diagnostics: readonly Diagnostic[] } {
     context.checkpoint(1);
@@ -89,8 +89,14 @@ export class MachOLoader implements Loader {
       if (!slice) throw new MachOError('unsupported_target', 'No supported little-endian ARM64 executable/dylib slice');
     }
     const s = new State(new Reader(input.bytes, slice.offset, safe(slice.size), context), slice);
-    s.diagnostics.push(...inspection.diagnostics);
-    return parseImage(s, input, inspection.slices);
+    const image = parseImage(s, input, inspection.slices);
+    // Nonselected architectures are container facts, not lost metadata in this
+    // slice. Add their diagnostics only after selected-slice capabilities form.
+    for (const diagnostic of inspection.diagnostics) {
+      if (s.diagnostics.length >= 1000) break;
+      s.diagnostics.push(diagnostic);
+    }
+    return image;
   }
 }
 

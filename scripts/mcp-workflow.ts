@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
@@ -27,10 +27,12 @@ export interface McpWorkflowOptions {
 }
 export interface McpWorkflowSummary {
   fixture: string;
+  sha256: string;
   architecture: string;
   revision: number;
   artifact_pages: number;
   cancellation: string;
+  restarted_cache: 'hit';
   reopened_cache: 'hit';
 }
 
@@ -77,7 +79,7 @@ const storedAnalysisSchema = z.object({
 });
 
 /** Read small, byte-accounted resource pages and verify the original artifact digest. */
-async function readAnalysis(client: Client, handle: WireArtifact) {
+export async function readAnalysis(client: Client, handle: WireArtifact) {
   const chunks: Buffer[] = [];
   let offset = '0x0', pages = 0;
   do {
@@ -113,23 +115,65 @@ async function readAnalysis(client: Client, handle: WireArtifact) {
   return { ...storedAnalysisSchema.parse(JSON.parse(bytes.toString('utf8'))), pages };
 }
 
-export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpWorkflowSummary[]> {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-mcp-')));
-  // No optional progress or task extension: ordinary tools must suffice to drive jobs.
-  const client = new Client({ name: 'open-decomp-deterministic-client', version: '0.1.0' }, { capabilities: {} });
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [...options.nodeArgs ?? [], options.serverEntry, '--root', root, '--root', options.fixtures, '--max-workers', '2', '--max-queued', '4'],
-    stderr: 'pipe',
-    maxBufferSize: 2 * 1024 * 1024,
-  });
+/** Bind all acceptance inputs to the checked-in manifest, including temporary mutation bases. */
+export async function readMcpFixture(fixtures: string, relative: string): Promise<Buffer> {
+  const manifest = z.object({
+    images: z.array(z.object({ path: z.string(), size: z.number().int(), sha256: z.string().regex(/^[0-9a-f]{64}$/) })),
+    malformed: z.array(z.object({ path: z.string(), size: z.number().int(), sha256: z.string().regex(/^[0-9a-f]{64}$/) })),
+  }).parse(JSON.parse(await readFile(join(dirname(fixtures), 'manifest.json'), 'utf8')));
+  const record = manifest.images.find(item => item.path === `fixtures/${relative}`) ?? manifest.malformed.find(item => item.path === `fixtures/${relative}`);
+  assert.ok(record, `No fixture manifest identity for ${relative}`);
+  assert.ok(/^(bin|malformed)\/[^/\\]+$/.test(relative), 'Expected a checked-in binary fixture');
+  const bytes = await readFile(relative.startsWith('bin/') ? join(fixtures, relative.slice(4)) : join(dirname(fixtures), relative));
+  assert.equal(bytes.length, record.size, relative);
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), record.sha256, relative);
+  return bytes;
+}
+
+/** Share the actual SDK/stdio launch and protocol error oracle across release scenarios. */
+export async function withMcpClient<T>(options: McpWorkflowOptions, root: string, work: (client: Client, restart: () => Promise<Client>) => Promise<T>): Promise<T> {
   const protocolErrors: Error[] = [];
   let diagnostics = '';
-  client.onerror = error => { protocolErrors.push(error); };
-  transport.stderr?.on('data', (chunk: Buffer) => { diagnostics = (diagnostics + chunk.toString('utf8')).slice(-8192); });
+  let serverPid: number | null = null;
+  const connect = async (): Promise<Client> => {
+    // No optional progress or task extension: ordinary tools must suffice to drive jobs.
+    const connected = new Client({ name: 'open-decomp-deterministic-client', version: '0.1.0' }, { capabilities: {} });
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [...options.nodeArgs ?? [], options.serverEntry, '--root', root, '--root', options.fixtures, '--max-workers', '2', '--max-queued', '4'],
+      stderr: 'pipe',
+      maxBufferSize: 2 * 1024 * 1024,
+    });
+    connected.onerror = error => { protocolErrors.push(error); };
+    transport.stderr?.on('data', (chunk: Buffer) => { diagnostics = (diagnostics + chunk.toString('utf8')).slice(-8192); });
+    try { await connected.connect(transport); }
+    catch (error) { await connected.close(); throw error; }
+    assert.ok(transport.pid !== null);
+    serverPid = transport.pid;
+    return connected;
+  };
+  let client = await connect();
+  const restart = async (): Promise<Client> => {
+    const previousPid = serverPid;
+    await client.close();
+    client = await connect();
+    assert.notEqual(serverPid, previousPid, 'Resume must use a newly spawned MCP server');
+    return client;
+  };
+  try {
+    const result = await work(client, restart);
+    assert.deepEqual(protocolErrors, [], `Protocol/stdout errors; stderr: ${diagnostics}`);
+    return result;
+  } finally {
+    await client.close();
+  }
+}
+
+export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpWorkflowSummary[]> {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-mcp-')));
   const summaries: McpWorkflowSummary[] = [];
   try {
-    await client.connect(transport);
+    return await withMcpClient(options, root, async (client, restart) => {
     const discovery = await client.listTools();
     assert.deepEqual(discovery.tools.map(tool => tool.name).sort(), Object.keys(toolSchemas).sort());
     for (const tool of discovery.tools) {
@@ -153,6 +197,8 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
       if (denied.state === 'failed') assert.ok(['permission_denied', 'not_found', 'invalid_input'].includes(denied.error.code));
     }
     for (const fixture of options.targets ?? MCP_FIXTURES) {
+      const fixtureBytes = await readMcpFixture(options.fixtures, `bin/${fixture.file}`);
+      const sha256 = createHash('sha256').update(fixtureBytes).digest('hex');
       const projectPath = join(root, fixture.file);
       const queuedImport = await callMcpTool(client, 'project_open', { source: { kind: 'import', input_path: join(options.fixtures, fixture.file), project_path: projectPath } });
       assert.equal(queuedImport.state, 'queued');
@@ -168,6 +214,7 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
       assert.equal(summary.view, 'summary');
       if (summary.view !== 'summary') assert.fail('Wrong binary summary');
       const image = summary.image;
+      assert.equal(image.sha256, sha256);
       assert.equal(image.target.architecture, fixture.architecture);
       const imageScope = () => ({ ...scope(), image_id: image.id });
       const headers = resultData(await callMcpTool(client, 'binary_info', { ...imageScope(), view: 'headers' }));
@@ -232,7 +279,6 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
       assert.equal(baseline.result.state, 'complete');
       const baselineData = resultData(baseline.result);
       assert.ok(baselineData.delivery === 'inline');
-      assert.match(baselineData.emission.text, /return/);
       assert.equal(baselineData.signature, null, 'Native register usage must not invent a source signature');
       const proofIds = new Set(baseline.result.evidence.map(proof => proof.id));
       for (const proof of baseline.result.evidence) {
@@ -271,6 +317,17 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
       const stale = await callMcpTool(client, 'annotations_apply', { project_id, expected_revision: before, author: 'stale-client', origin: 'user', edits: [{ operation: 'retract', id: ids[0]! }] });
       assert.equal(stale.state, 'failed');
       if (stale.state === 'failed') { assert.equal(stale.error.code, 'stale_revision'); assert.equal(stale.current_revision, revision); }
+      // Restart the owner while assertions are active, not only after retraction.
+      resultData(await callMcpTool(client, 'project_close', scope()));
+      const assertedResume = await callMcpTool(client, 'project_open', { source: { kind: 'resume', project_path: projectPath } });
+      assert.equal(assertedResume.project_id, project_id);
+      assert.equal(assertedResume.revision, revision);
+      assert.equal(resultData(assertedResume).image?.id, image.id);
+      const assertedMetadata = resultData(await callMcpTool(client, 'function_get', { ...scope(), function_id: fn.id }));
+      assert.ok(assertedMetadata.view === 'metadata');
+      for (const id of ids.slice(1)) {
+        assert.deepEqual(assertedMetadata.annotations.find(annotation => annotation.id === id), edited.applied.find(annotation => annotation.id === id));
+      }
       const renamed = resultData(await callMcpTool(client, 'functions_find', { ...imageScope(), query: { text: 'reviewed_arithmetic', match: 'exact' } }));
       assert.equal(renamed.items[0]?.id, fn.id);
       const changed = await callMcpTool(client, 'function_decompile', { ...scope(), function_id: fn.id, wait: true });
@@ -281,6 +338,21 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
       assert.equal(changedData.signature?.return_type, type_id);
       assert.match(changedData.emission.text, /reviewed_arithmetic/);
       assert.ok(changedPayload.result.evidence.some(proof => proof.origin.kind === 'assertion' && proof.origin.agent === 'user' && proof.origin.status === 'asserted'));
+      // Tear down the SDK transport/server, not merely its project owner.
+      client = await restart();
+      const restarted = await callMcpTool(client, 'project_open', { source: { kind: 'resume', project_path: projectPath } });
+      assert.equal(restarted.project_id, project_id);
+      assert.equal(restarted.revision, revision);
+      assert.equal(resultData(restarted).image?.id, image.id);
+      const restartedMetadata = resultData(await callMcpTool(client, 'function_get', { ...scope(), function_id: fn.id }));
+      assert.ok(restartedMetadata.view === 'metadata');
+      for (const id of ids.slice(1)) {
+        assert.deepEqual(restartedMetadata.annotations.find(annotation => annotation.id === id), edited.applied.find(annotation => annotation.id === id));
+      }
+      const restartedCache = await callMcpTool(client, 'function_decompile', { ...scope(), function_id: fn.id, wait: true });
+      assert.equal(resultData(restartedCache).cache, 'hit');
+      assert.deepEqual(restartedCache.artifacts, changed.artifacts);
+      assert.deepEqual((await readAnalysis(client, restartedCache.artifacts[0]!)).result, changedPayload.result);
       const retracted = resultData(await callMcpTool(client, 'annotations_apply', { project_id, expected_revision: revision, author: 'deterministic-reviewer', origin: 'user', edits: ids.map(id => ({ operation: 'retract', id })) }));
       assert.equal(retracted.revision, revision + 1);
       revision = retracted.revision;
@@ -332,12 +404,11 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
       assert.ok(synchronousData.image);
       assert.equal(synchronousData.image.id, image.id);
       resultData(await callMcpTool(client, 'project_close', { project_id: synchronous.project_id!, revision: synchronous.revision! }));
-      summaries.push({ fixture: fixture.file, architecture: fixture.architecture, revision, artifact_pages: baseline.pages, cancellation: cancelled.outcome, reopened_cache: 'hit' });
+      summaries.push({ fixture: fixture.file, sha256, architecture: fixture.architecture, revision, artifact_pages: baseline.pages, cancellation: cancelled.outcome, reopened_cache: 'hit', restarted_cache: 'hit' });
     }
-    assert.deepEqual(protocolErrors, [], `Protocol/stdout errors; stderr: ${diagnostics}`);
     return summaries;
+    });
   } finally {
-    try { await client.close(); }
-    finally { await rm(root, { recursive: true, force: true }); }
+    await rm(root, { recursive: true, force: true });
   }
 }

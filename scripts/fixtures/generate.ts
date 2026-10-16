@@ -94,7 +94,7 @@ bad('pe-directory-overrun.bin',pe,'import directory RVA = 0xfffff000','reject or
 bad('pe-unsupported-machine.bin',pe,'COFF machine = 0x1c4 (ARMNT)','unsupported machine, never infer x86-64',b=>{b.writeUInt16LE(0x1c4,b.readUInt32LE(0x3c)+4);return b;});
 bad('arm64-trailing-byte.bin','fixtures/code/arm64/fixture_arithmetic.bin','remove final byte from compiler function','decoder: trailing 3-byte incomplete instruction',b=>b.subarray(0,b.length-1));
 bad('x86-call-truncated.bin','fixtures/code/x86_64/fixture_direct.bin','take bytes [8,11) of compiler CALL rel32 at function+8','decoder: 3-byte truncated 5-byte CALL rel32',b=>b.subarray(8,11));
-const sourcePaths=['fixtures/source/corpus.h','fixtures/source/corpus.c','fixtures/source/check.c','fixtures/source/kernel32.def','fixtures/source/library-runner.c','fixtures/expected.json','fixtures/inventory.json','fixtures/loader-expectations.json','fixtures/LICENSE','scripts/fixtures/generate.ts','scripts/fixtures/inspect.ts','scripts/fixtures/capture-arm64.ts','scripts/fixtures/execute-trusted.ts'];
+const sourcePaths=['fixtures/source/corpus.h','fixtures/source/corpus.c','fixtures/source/check.c','fixtures/source/kernel32.def','fixtures/source/library-runner.c','fixtures/expected.json','fixtures/inventory.json','fixtures/loader-expectations.json','fixtures/LICENSE','scripts/fixtures/generate.ts','scripts/fixtures/inspect.ts','scripts/fixtures/execute-trusted.ts'];
 writeFileSync('fixtures/manifest.json',JSON.stringify({
   schemaVersion:1,license:'MIT',
   sourceFiles:sourcePaths.map(path=>({path,sha256:hash(readFileSync(path))})),
@@ -107,6 +107,7 @@ writeFileSync('fixtures/manifest.json',JSON.stringify({
     'PE exports survive debug stripping; symbol-bearing files carry DWARF, stripped files do not.',
     'No sibling checkout or compiler is required to consume prebuilt bytes.',
     'Legacy double/vector semantics, ten-argument signatures and raw indirect call contracts have explicit gaps; see inventory and baseline.',
+    'The ARM64 baseline is frozen historical migration evidence, not regenerated output or a current semantic oracle.',
   ],
 },null,2)+'\n');
 for (const name of ['macho-arm64-symbols','macho-arm64-stripped','macho-universal']) chmodSync(`fixtures/bin/${name}`,0o755);

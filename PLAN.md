@@ -71,6 +71,8 @@ Objective-C/Swift/C++ metadata may improve names and evidence; it must not be pr
 - Genuine source recovery, exact original types/names, or proof of whole-program equivalence.
 - A Python-like emitter, remote hosting, or another target platform. These are explicit extension tasks, not hidden prerequisites for the first release.
 
+The selected third target for F03 is **Linux x86-64: ELF and the System V AMD64 ABI**. This extension follows the first local release; it reuses iced-x86 and the x86-64 semantic pipeline rather than introducing a Linux-specific public tool protocol.
+
 ## 4. Architecture and ownership boundaries
 
 ```mermaid

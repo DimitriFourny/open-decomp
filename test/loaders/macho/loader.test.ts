@@ -76,6 +76,9 @@ test('real universal selection preserves container-relative mappings and every b
   const inspected = loader.inspect(immutable, id, createOperationContext({}));
   assert.equal(inspected.slices.length, 2); const arm = inspected.slices.find(slice => slice.supported); assert.ok(arm); assert.equal(arm.offset, 32768n);
   const loaded = load(bytes, arm.id); assert.equal(loaded.image_base, 0x100000000n);
+  assert.ok(loaded.diagnostics.some(diagnostic => diagnostic.code === 'unsupported_target'));
+  assert.ok(loaded.capabilities.some(capability => capability.layer === 'format' && capability.status === 'supported'));
+  assert.equal(loaded.capabilities.some(capability => capability.status === 'partial'), false);
   assert.equal(loaded.address_map.translate({ image_id: id, space: 'va', value: 0x100000574n }, 'file').address.value, 32768n + 1396n);
   assert.equal(load(bytes).selected_slice_id, arm.id);
   const proofIds = new Set(loaded.evidence.map(proof => proof.id));

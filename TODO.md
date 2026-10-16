@@ -51,10 +51,10 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Work: Reuse the same service/tools with authentication, project authorization, origin/DNS-rebinding protection, conservative binding defaults, bounded uploads/import access if offered, and request/work quotas. Define remote artifact and job access under the same identity. Keep transport lifecycle separate from persisted project identity.
   - Acceptance: An authorized client completes the existing workflow remotely; unauthenticated/cross-project access, malicious origins, and resource abuse are rejected. Local stdio behavior remains intact, and no custom public socket protocol is required.
 
-- [ ] **F03 — Extend to another explicit format/ISA/ABI target**
+- [ ] **F03 — Add Linux x86-64 ELF / System V ABI support**
   - Depends on: T31.
-  - Gate: Select the next target combination and representative semantic corpus before assigning implementation; no target is assumed by this task.
-  - Owns: The selected loader/decoder/lifter/ABI additions and their conformance/acceptance corpus.
+  - Selected by user: Linux x86-64, ELF, System V AMD64 ABI. Corpus: compile the existing scalar/control/memory/call/FP/vector sources into symbol-bearing and stripped ELF executables/shared objects; add compiler-backed SysV cases for mixed register banks, aggregate classification/rollback, stack/red-zone use, variadic calls and indirect results before integrating the new target.
+  - Owns: ELF loading, System V AMD64 ABI classification, x86-64 adapter/lifter target integration and the selected conformance/acceptance corpus.
   - Work: Add only the components required by the selected combination, reusing existing semantic analysis, persistence, tools, and emitters. Publish exact capabilities and unsupported cases. If replacing a decoder, implement its architecture adapter and adjudicate semantic conformance rather than assuming a drop-in swap.
   - Acceptance: The complete investigation workflow works for the selected target with evidence-backed semantics, and existing targets remain correct. Public tools require no architecture-specific command fork.
 
@@ -65,7 +65,9 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Work: Execute PLAN.md A01–A11 with real fixtures and the compiled MCP server on macOS arm64 and Windows x86-64. Each host analyzes both target formats without running the target. Include stripped/symbol-bearing cases, persistence, annotation-driven reanalysis, unsupported semantics, malformed files, source mappings, cancellation, and decoder/ABI semantic regressions. Integrate outstanding migration fixes and remove obsolete migration scaffolding.
   - Acceptance: Record actual commands/scenarios and outcomes for the complete matrix; unavailable host execution is an explicit blocker, not an inferred pass. All required behavior works without `../disass_arm`, private inputs, undeclared developer tools, or a public decompiler. Contributes A01–A11.
   - Owner: ReleaseWorkflows (sol-worker: compiled acceptance scenarios), MigrationAudit (scout: read-only migration/provenance coverage), Coordinator (shared integration, frozen Windows media, both-host execution and recorded evidence).
-  - Baseline: T28 passed Node 24.22.0 typecheck/build, 668/668 tests and four compiled MCP investigations on macOS arm64. Windows f059a44 passed 589/589 earlier-milestone tests only; current release acceptance must run on a newly frozen snapshot.
+  - macOS verification: Node 24.22.0 strict typecheck, **669/669 tests**, build, and all **24 compiled MCP release scenarios** passed. The new universal-image case exposed and fixed nonselected-slice warnings incorrectly making selected ARM64 indexes partial; loader 1.0.2 and persistent-service regressions preserve the warning without false incompleteness. Process-restart/cache/annotation persistence, native variants, malformed imports, repeated bounds and unsupported-effect provenance all ran.
+  - Migration cleanup: Retired the sibling-API collector and redundant captured C files; retained frozen historical JSON, current source oracles/fixture generation and durable-store migrations. Updated recipe hashes and documentation. Evidence and criterion boundaries are in RELEASE-VERIFICATION.md.
+  - Blocker: Current Windows acceptance must run on the newly frozen candidate. Windows f059a44 passed 589 earlier-milestone tests only; that result is not current acceptance. A11 installed packaging remains T31 and A12 measured performance remains T30.
 
 
 
@@ -329,4 +331,3 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Acceptance: Historical facts remain snapshot-bound, annotation pages/history preserve identity and provenance across reopen/migration, and invalid batches/cursors do not mutate state.
   - Owner: Coordinator.
   - Evidence: Focused strict typecheck and all ten store/history regressions passed on Node 24.22.0. The actual API probe changed a future-metadata leak to not_found at the pre-publication revision. A project created by compiled 00f5e15 migrated from persistence schema 1 to 2, retained old snapshots and a wire-schema-1 artifact, and preserved new set/retract/remove actors across reopen; old removal actors remain null. Empty versus omitted ID-filter cursor collisions are rejected. Full combined wave verification follows T20/T26.
-

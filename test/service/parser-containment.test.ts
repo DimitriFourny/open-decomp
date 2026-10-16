@@ -172,6 +172,26 @@ for (const scenario of partials) test(`actual child metadata containment: ${scen
   assert.ok(resumed.diagnostics.some(diagnostic => diagnostic.code === scenario.code));
 });
 
+test('an unsupported nonselected universal slice leaves selected native indexes complete across resume', { timeout: 60000 }, async t => {
+  const { root, service } = await setup(t), project_path = join(root, 'project'), input_path = join(root, 'input');
+  await writeFile(input_path, await readFile(join(fixtures, 'macho-universal')));
+  const opened = await service.execute('project_open', { wait: true, source: { kind: 'import', input_path, project_path }, budget });
+  assert.equal(opened.state, 'complete', JSON.stringify(opened));
+  assert.ok(opened.diagnostics.some(diagnostic => diagnostic.code === 'unsupported_target'));
+  const image = data(opened).image; assert.ok(image);
+  assert.equal(image.target.architecture, 'arm64');
+  assert.ok(image.slices.some(slice => slice.architecture === 'x86_64' && !slice.supported));
+  const scope = { project_id: opened.project_id!, revision: opened.revision!, image_id: image.id };
+  const names = await service.execute('symbols_find', { ...scope, kinds: ['symbol', 'import', 'export'], query: { text: 'absent_native_name', match: 'exact', case_sensitive: true } });
+  assert.equal(names.state, 'empty');
+  assert.equal(data(names).page.index_state, 'complete'); assert.deepEqual(data(names).items, []);
+  data(await service.execute('project_close', { project_id: scope.project_id, revision: scope.revision }));
+  const resumed = await service.execute('project_open', { source: { kind: 'resume', project_path } });
+  assert.equal(resumed.state, 'complete'); assert.equal(resumed.revision, scope.revision);
+  assert.equal(data(resumed).image?.id, image.id);
+  assert.ok(resumed.diagnostics.some(diagnostic => diagnostic.code === 'unsupported_target'));
+});
+
 for (const format of ['macho', 'pe'] as const) test(`actual child ${format} hostile native names remain inert searchable data`, { timeout: 60000 }, async t => {
   const { root, service } = await setup(t);
   let requests = 0;

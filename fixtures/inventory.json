@@ -26,5 +26,5 @@
     "entryState":"Reconstructed C may add initial_sp and preserved-register parameters. fixture_direct output requires source arg plus initial_sp, initial_x19, initial_x20, initial_x29, initial_x30; callers must provide valid backing storage. An initial one-argument reconstruction harness was invalid and is not regression evidence."
   },
   "notExercised": ["AL/AH/AX partial-write distinctions beyond EAX zero extension", "ADC/SBB carry chains", "unsigned MUL/DIV", "pointer authentication", "AVX/AVX-512/SVE", "TLS callbacks", "PE delay/ordinal imports or forwarded exports", "C++ exceptions or Objective-C/Swift metadata"],
-  "oracleStrategy":"Offline test-only BigInt/IEEE-number reference functions check deterministic vectors. Trusted native C harness checks compiler output on compatible hosts. Later typed IR evaluators should compare the same cases and memory side effects; service code never executes targets."
+  "oracleStrategy":"Offline test-only BigInt/IEEE-number reference functions check deterministic vectors. Trusted native C harness checks compiler output on compatible hosts. Current typed IR evaluator suites compare the same cases and memory side effects; service code never executes targets."
 }

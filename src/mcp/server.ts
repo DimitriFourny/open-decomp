@@ -49,7 +49,7 @@ function toolError(message: string): CallToolResult {
 /** Protocol registration only. The caller owns service lifetime and transport. */
 export function createMcpServer(service: QueryService): McpServer {
   const server = new McpServer({ name: 'open-decomp', version: '0.1.0' }, {
-    instructions: 'Statically inspect authorized native targets. Use project-owned job IDs for status/cancellation and published artifact resource pages for large results. ' + trustBoundary,
+    instructions: 'Statically inspect authorized native targets. Use project-owned job IDs for status/cancellation and published artifact resource pages for large results. Local stdio accepts at most eight pending requests, 2 MiB frames and 1,024-byte string request IDs; drain responses before sending more work. A stalled write closes the connection after 30 seconds. Inspect durable revisions/jobs after a lost mutation acknowledgement; never replay mutations automatically. ' + trustBoundary,
   });
   const handlers = new Map<ToolName, (input: unknown, context: ServerContext) => Promise<CallToolResult>>();
   for (const name of toolNameSchema.options) {

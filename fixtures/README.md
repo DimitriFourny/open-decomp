@@ -33,14 +33,14 @@ The DLL is not an empty shell: it contains all semantic functions, exported data
 * `source/corpus.c` / `corpus.h`: wrapping integer arithmetic, signed comparison/division, loops, volatile stack storage, aliased load/add/store, direct/indirect calls, 32-to-64-bit extension and masked variable shifts, ten integer arguments, binary64 arithmetic, 128-bit four-lane float/integer vectors, promoted floating varargs, and a referenced string.
 * `source/check.c`: all 24 deterministic cases, with stable failure IDs 1–14 and exit 0 on success. The Mach-O executable additionally prints exactly `open-decomp trusted fixture v1\n`. Finite FP test values are exact; contraction is disabled. No signed C division by zero or `INT_MIN/-1` is claimed defined.
 * `expected.json`: explicit arguments, results and memory-after expectations, independent of pseudocode wording.
-* `inventory.json`: exact source signatures, semantic families, observed compiler instruction families per ISA, legacy capability boundaries and exclusions. It does **not** claim all ARM64/x86 semantics. Missing ADC/SBB, AL/AH/AX boundaries, advanced vectors, authentication, TLS, ordinal/delay imports, forwarded exports and language runtime cases remain explicit.
-* `test/fixtures/oracle.ts`: isolated source-level BigInt width/wrapping and IEEE-number/`Math.fround` reference semantics. It never executes a user image or imports the service. Later IR evaluators should run the same vectors and compare memory effects, calls and branch results, not generated source spelling.
+* `inventory.json`: exact compiler-corpus signatures, semantic families, observed instruction families, historical API boundaries and corpus exclusions. It does **not** describe total product coverage: targeted tests separately cover ADC/SBB, partial-register writes, logical authentication boundaries, TLS, ordinal/delay imports, forwarded exports and Objective-C/Swift metadata. Advanced-vector and runtime limitations remain explicit.
+* `test/fixtures/oracle.ts`: isolated source-level BigInt width/wrapping and IEEE-number/`Math.fround` reference semantics. It never executes a user image or imports the service. Current typed-IR evaluator suites compare these vectors and memory/call/branch effects rather than generated source spelling.
 
 The trusted native harness establishes compiler-output behavior on compatible hosts; the mathematical oracle is an additional check, not a claim that a source evaluator decodes machine code. No tests or application modules load the sibling implementation. All normal fixture tests use checked-in bytes/results and require no network, private binaries, cross-compiler or target execution.
 
 ## Existing ARM64 API baseline
 
-`baseline/arm64.json` captures direct calls to the reference **`decompile(bytes, options)` API**, not executions of its test suite. It records the image hash, reference implementation/a64js source hashes, every input word/address, raw and applicable source-contracted outputs, CFGs, source maps, diagnostics, counts, source/API/rendered signatures and real process results. `baseline/code/*.c` is captured generated output, not a new legacy runtime backend. The reference tool itself is neither vendored nor relicensed here; collecting a new baseline requires an authorized developer checkout.
+`baseline/arm64.json` is frozen historical evidence from direct calls to the reference **`decompile(bytes, options)` API**, not executions of its test suite or a current regression oracle. It retains image/reference/a64js hashes, input words/addresses, captured code, CFGs, mappings, diagnostics, source/API/rendered signatures and real process results. The migration-only collector and redundant C-file copies have been retired; historical command paths in the JSON describe that past run, not runnable current instructions. The reference implementation is neither vendored nor required.
 
 Existing behavior coverage was inspected in `../disass_arm/test/decompiler-core/`: API byte/record validation and sparse CFGs; integer/flag widths; native arithmetic/loops/memory; stack aliases/escapes; typed and unknown calls; Darwin variadic conventions; pointer authentication; native presentation/type-recovery and structured CFG tests. The new corpus carries forward the applicable scalar/stack/call/memory families and adds real FP/vector compiler cases. It does not report those old tests as run or automatically import every old regression/private fixture.
 
@@ -52,22 +52,22 @@ Observed collection on macOS ARM64, Node **26.11.1** (collection host, not the p
 * **EntryStatePrototypeBoundary:** source/API signature `uint32_t fixture_direct(uint32_t)` becomes a six-parameter rendered C prototype: source arg, `initial_sp`, `initial_x19`, `initial_x20`, `initial_x29`, `initial_x30`. The API explicitly warns about these requirements. The recorded direct-call harness supplies an aligned 128-byte backing array, a pointer to its midpoint as `initial_sp`, and all four initial register values. Calling the reconstruction as if it had the one-argument source ABI is invalid; an initial such harness was discarded and is **not** miscompilation/regression evidence. Preserve this source/API/output-signature distinction during migration.
 * Raw indirect calls have explicit unresolved-contract errors despite 8/8 recognized/supported instructions. No signature is inferred from a callback name.
 * Scalar FP: 1/6 supported; floating vector: 1/6; integer vector: 1/7; floating variadic: 11/14. Reachable unsupported semantics produce errors. The old public API rejects `double` signature types and ten-parameter signatures. Ten-argument raw instruction support (17/17) does not establish ABI support. The integrated `fixture_check` is also incomplete because of these families.
-* PE execution is **not run**: no Windows x86-64 host, Wine executable, or configured SSH host was available. Native Windows execution is an explicit remaining host prerequisite, not an inferred pass. PE generation and independent static metadata collection did complete.
+* PE execution was **not run** during collection: no Windows x86-64 host, Wine executable, or configured SSH host was available. The later isolated Windows verification runs the analysis application, not these target programs; it does not retroactively establish native PE execution. PE generation and independent static metadata collection did complete.
 
-These observations are migration input: supported behavior should be retained; unsupported cases require explicit IR boundaries until implemented. Neither instruction counts nor captured C text are semantic proofs for unexecuted families.
+These observations are historical migration input, not the current support inventory. Current lifter, ABI, shared-analysis and emitter regressions exercise scalar/stack/call/memory and implemented FP/vector behavior against source-level semantic oracles, preserving explicit unsupported boundaries. Neither old instruction counts nor captured C text prove unexecuted families.
 
 ## Commands
 
-Run all commands from the repository root. Fixture rebuilds are deliberately separate from `npm run build`; no root npm scripts were changed.
+Run all commands from the repository root. Fixture rebuilds are deliberately separate from `npm run build`.
 
-### Offline validation (coordinator; authored, not run by this slice)
+### Offline fixture maintenance validation
 
 ```sh
 npm run typecheck
 node --import tsx --test test/fixtures/*.test.ts
 ```
 
-These check hashes/manifest structure, independently pinned fields/bytes, exact universal slicing, stripping behavior, exports/imports and zero-fill, every malformed mutation, raw code/source binding, and the independent semantic vectors. They do not compile or execute fixtures. Captured API diagnostics and entry-state results are historical migration evidence, not passing tests of the new implementation; lifter and analysis regressions must exercise current code against the source-level oracle.
+These check hashes/manifest structure, independently pinned fields/bytes, exact universal slicing, stripping behavior, exports/imports and zero-fill, every malformed mutation, raw code/source binding, and the independent semantic vectors. They do not compile or execute fixtures. Captured API diagnostics and entry-state results are historical migration evidence, not passing tests of the new implementation. Run `npm run check` for the current lifter, ABI, analysis, emitter and service regressions; run `node dist/scripts/release-acceptance.js` for the compiled MCP scenarios.
 
 ### Trusted native behavior, no compiler or sibling required
 
@@ -98,16 +98,8 @@ CC=/usr/bin/clang LLVM_BIN=/opt/homebrew/opt/llvm/bin LLD_LINK=lld-link \
 
 Defaults are the recorded local tool locations; the three environment variables override them. The exact source paths and flags are in `manifest.commands`: C11, `-O1 -g`, no auto-vectorization, no FP contraction, no stack protector or builtin library substitution; explicit `arm64-apple-macos13.0`, `x86_64-apple-macos13.0` and `x86_64-pc-windows-msvc`; PE timestamp 0, explicit bases, no default libraries, DLL no-entry and EXE explicit entry. LLVM tools independently inspect every result. The recipe removes its temporary object/import-library directory on success.
 
-Hashes pin the **checked-in** artifacts. SDK/tool/debug metadata/UUID changes may alter rebuilt bytes; do not promise cross-toolchain byte identity. After an intentional rebuild, inspect the independent reports, review address/byte expectations in tests and `loader-expectations.json`, and recapture the baseline against the new image. Do not simply regenerate expected semantic results from decompiler output.
-
-### Recapture the direct old-API baseline (developer-only)
-
-```sh
-node --import tsx scripts/fixtures/capture-arm64.ts ../disass_arm
-```
-
-The argument selects the reference checkout at runtime; it is not a package/runtime import. This command reads but never edits that checkout. It invokes the API on real extracted functions, executes trusted native fixtures, compiles/executes representable reconstructed functions with the correct extra entry-state ABI, probes unsupported signatures, writes `baseline/arm64.json`/`baseline/code/`, and removes its temporary build directory. Actual commands/exit statuses/stdout/stderr are recorded. Do not run the collector as an application build/test step. A successful collector process means evidence was collected; inspect its recorded statuses rather than treating unsupported cases as successes.
+Hashes pin the **checked-in** artifacts. SDK/tool/debug metadata/UUID changes may alter rebuilt bytes; do not promise cross-toolchain byte identity. After an intentional rebuild, inspect independent reports, review address/byte expectations in tests and `loader-expectations.json`, and run the current semantic suites. The historical ARM64 baseline remains bound to its recorded old image and is not regenerated. Do not derive expected semantic results from the decompiler under test.
 
 ## Malformed inputs
 
-There are 13 explicit boundary cases: empty input; truncated Mach-O/PE headers; overrun/zero Mach-O load-command size; unsupported Mach CPU; fat slice outside the container; PE header/raw-section/import-directory overruns; unsupported PE machine; a real ARM64 function with a trailing incomplete word; and a real x86 direct CALL truncated to three of its five bytes. Each resolves to its parent bytes and exact mutation in the manifest. The fixture tests assert those mutations, **not** production-loader behavior before those loaders exist. Later loader/decoder tests should enforce the recorded reject/unsupported/incomplete distinctions without target execution.
+There are 13 explicit boundary cases: empty input; truncated Mach-O/PE headers; overrun/zero Mach-O load-command size; unsupported Mach CPU; fat slice outside the container; PE header/raw-section/import-directory overruns; unsupported PE machine; a real ARM64 function with a trailing incomplete word; and a real x86 direct CALL truncated to three of its five bytes. Each resolves to its parent bytes and exact mutation in the manifest. Fixture tests validate those mutations; current loader/decoder and actual-child containment suites enforce their reject/unsupported/incomplete distinctions without target execution.
