@@ -74,17 +74,20 @@ export function expressionProblems(type: DataType, e: Expression): readonly stri
  * This stronger rule avoids implicit dominance assumptions, including unreachable blocks.
  * A single linear effect chain orders registers, memory and calls; forks occur only at terminators.
  */
-export function verifyIR(ir: FunctionIR): readonly IRProblem[] {
+export function verifyIR(ir: FunctionIR, checkpoint?: (work: number) => void): readonly IRProblem[] {
+  checkpoint?.(ir.blocks.length + ir.returns.length + (ir.form === 'ssa' ? ir.register_states.length : 0));
   const problems: IRProblem[] = [];
   const report = (code: IRProblem['code'], node: string, message: string): void => { problems.push({ code, node, message }); };
   const identities = new Set<string>();
   const identify = (id: string): void => {
+    checkpoint?.(1);
     if (!entityIdSchema.safeParse(id).success || identities.has(id)) report('identity', id, 'Malformed or duplicate entity identity');
     identities.add(id);
   };
   const origin = (node: Origin): void => {
     identify(node.id);
     const p = node.provenance;
+    checkpoint?.(p.instruction_ids.length + p.evidence_ids.length + p.synthetic.length + p.ranges.length);
     if (p.instruction_ids.length === 0 && p.synthetic.length === 0) report('provenance', node.id, 'Missing instruction or synthetic origin');
     if (p.instruction_ids.some(id => !entityIdSchema.safeParse(id).success) || p.evidence_ids.some(id => !evidenceIdSchema.safeParse(id).success) || p.synthetic.some(reason => reason.trim().length === 0) || p.ranges.some(range => !machineRangeSchema.safeParse(range).success || range.size === 0n)) report('provenance', node.id, 'Invalid source identity, range, evidence or justification');
     if (p.instruction_ids.length > 0 && p.ranges.length === 0) report('provenance', node.id, 'Instruction origin needs a source range');
@@ -92,6 +95,7 @@ export function verifyIR(ir: FunctionIR): readonly IRProblem[] {
   const registerRoots = new Map<string, number>();
   const registers = new Map<string, RegisterDescriptor>();
   const register = (r: RegisterDescriptor, node: string): boolean => {
+    checkpoint?.(1);
     if (!registerSchema.safeParse(r).success) { report('register', node, 'Invalid core register descriptor'); return false; }
     if (r.write_rule === 'replace_root' && (r.offset_bits !== 0 || r.width_bits !== r.root_width_bits)) report('register', node, 'replace_root must cover the root');
     if (r.write_rule === 'zero_extend_root' && r.offset_bits !== 0) report('register', node, 'zero_extend_root must start at bit zero');
@@ -124,6 +128,7 @@ export function verifyIR(ir: FunctionIR): readonly IRProblem[] {
     return result;
   };
   const sameMasks = (actual: ReadonlyMap<string, bigint>, expected: ReadonlyMap<string, bigint>, node: string): void => {
+    checkpoint?.(expected.size);
     if (actual.size !== expected.size || [...expected].some(([root, mask]) => actual.get(root) !== mask)) report('register', node, 'SSA architectural-state coverage mismatch');
   };
   const tracked = masks(states.get(ir.entry)?.entry ?? [], ir.id);
@@ -136,6 +141,7 @@ export function verifyIR(ir: FunctionIR): readonly IRProblem[] {
       local.set(v.id, v.type);
     };
     const reference = (v: Value | Effect, node: string): void => {
+      checkpoint?.(1);
       const type = local.get(v.id);
       if (!type) report('reference', node, `Undefined, forward or cross-block value ${v.id}`);
       else if (!sameType(type, v.type)) report('type', node, 'Reference type differs from its definition');
@@ -205,6 +211,7 @@ export function verifyIR(ir: FunctionIR): readonly IRProblem[] {
       if (instruction.kind === 'call' || instruction.kind === 'unknown_effect') {
         const outputMasks = masks(instruction.register_outputs, instruction.id), expected = new Map<string, bigint>();
         if (ir.form === 'ssa') for (const r of [...instruction.clobbers.registers, ...instruction.clobbers.flags]) {
+          checkpoint?.(1);
           if (!registerSchema.safeParse(r).success) continue;
           const mask = (((1n << BigInt(r.width_bits)) - 1n) << BigInt(r.offset_bits)) & (tracked.get(r.root) ?? 0n);
           if (mask) expected.set(r.root, (expected.get(r.root) ?? 0n) | mask);
@@ -227,6 +234,7 @@ export function verifyIR(ir: FunctionIR): readonly IRProblem[] {
       if (t.value.type.kind !== 'integer') report('type', t.id, 'Switch selector must be integer');
       const cases = new Set<bigint>();
       for (const item of t.cases) {
+        checkpoint?.(1);
         if (cases.has(item.bits) || item.bits < 0n || !validType(t.value.type) || item.bits >= (1n << BigInt(bitWidth(t.value.type)))) report('control_flow', t.id, 'Duplicate or out-of-width switch case');
         cases.add(item.bits);
       }
@@ -237,6 +245,7 @@ export function verifyIR(ir: FunctionIR): readonly IRProblem[] {
     }
     if (t.kind === 'indirect') pointer(t.target, t.id);
     if ((t.kind === 'trap' || t.kind === 'unknown' || t.kind === 'indirect') && t.reason.trim().length === 0) report('semantic', t.id, 'Boundary needs a reason');
+    checkpoint?.(t.kind === 'switch' ? t.cases.length + 1 : 1);
     for (const edge of successors(t)) {
       reference(edge.effect, t.id);
       if (edge.effect.id !== effect.id || edge.effect.type.kind !== 'effect') report('effect_order', t.id, 'Edge does not carry final effect');
@@ -252,7 +261,7 @@ export function verifyIR(ir: FunctionIR): readonly IRProblem[] {
   }
   return problems;
 }
-export function assertValidIR(ir: FunctionIR): void {
-  const problems = verifyIR(ir);
+export function assertValidIR(ir: FunctionIR, checkpoint?: (work: number) => void): void {
+  const problems = verifyIR(ir, checkpoint);
   if (problems.length > 0) throw new IRValidationError(problems);
 }

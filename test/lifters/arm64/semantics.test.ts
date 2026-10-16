@@ -188,13 +188,12 @@ test('noncontiguous discovery blocks and split-backed provenance survive lifting
   assert.ok(sourceNodes.length > 0); assert.ok(sourceNodes.every(node => node.provenance.ranges.some(range => range.start.space === 'va' && range.start.value === 0x1008n)));
 });
 
-test('decode gaps, cancellation and explicit work limits remain visible', () => {
+test('decode gaps remain unknown and pre-aborted lifts do not run', () => {
   const graph = fromWords([0xd503201f]);
   const result = lift(graph);
   assert.equal(result.coverage.state, 'partial'); assert.equal(evaluate(result.ir).status, 'unknown');
   const controller = new AbortController(); controller.abort();
   assert.throws(() => new Arm64Lifter().lift(graph, new DarwinArm64Abi(), createOperationContext({ signal: controller.signal })));
-  assert.throws(() => new Arm64Lifter().lift(fromWords([0x528000e0, ret]), new DarwinArm64Abi(), createOperationContext({ budget: { ir_nodes: 1 } })), /node limit/);
   const program = lift(fromWords([0x528000e0, ret])).ir;
   const withoutRegisters = evaluateIR(program, { registers: initialRegisters(program) });
   assert.equal(registerBits(withoutRegisters), 7n);

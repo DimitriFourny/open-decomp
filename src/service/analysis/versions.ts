@@ -16,7 +16,7 @@ export const pipelineComponents = {
 
 // Components without independent releases are explicitly versioned by this
 // composition contract. Bump the corresponding entry when its semantics change.
-const analysis = 'pipeline/1;discovery/1;targets/1;ssa/1;values-effects/1;stack-calls/1;debug/1;library/1;types/1;annotations/1;structure/1';
+const analysis = 'pipeline/2;discovery/1;targets/1;ssa/2;values-effects/2;stack-calls/1;debug/1;library/1;types/1;annotations/1;structure/1';
 export const pipelineVersions: Record<Target['architecture'], CacheIdentity['versions']> = (() => {
   const arm = new Arm64Decoder(), x86 = new X86Decoder({ formatting: false });
   const versions = (architecture: Target['architecture'], decoder: string): CacheIdentity['versions'] => {

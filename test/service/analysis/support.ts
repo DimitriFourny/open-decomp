@@ -29,7 +29,7 @@ export async function project(t: TestContext, fixture: string | Uint8Array) {
   t.after(async () => { await state.store.close(); rmSync(path, { recursive: true, force: true }); });
   await state.store.importImage({ bytes: image.bytes, sha256: image.sha256, selected_slice_id: image.selected_slice_id });
   const prepared = await prepareQueryImport(image, { revision: 2, context: createOperationContext() });
-  assert.equal(state.store.transaction(1, tx => { tx.putImage(image); prepared(tx); }).state, 'committed');
+  assert.equal(state.store.transaction(1, tx => { tx.putImage(prepared.image); prepared.publish(tx); }).state, 'committed');
   const functions = state.store.queryRecords({ kind: 'function', revision: 2, image_id: image.id, limit: 1000 }).items;
   function job(operation: 'function_decompile' | 'annotations_apply', revision = state.store.snapshot().revision): string {
     const id = newIdentity('job');

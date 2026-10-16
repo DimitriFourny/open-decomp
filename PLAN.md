@@ -235,6 +235,10 @@ Restrict imports and project access to explicitly authorized roots or handles. C
 
 Treat binaries and metadata as hostile parser inputs. Enforce file/range/decompression/table-count limits, recursion/work budgets, checked arithmetic, and cancellation points. Bound worker count, queued work, decoded instructions, IR growth, and output. A worker crash must not corrupt project state or hang the MCP host. Use atomic artifact publication and database transactions.
 
+Implemented bounds apply during construction, not only to completed graphs: lifters and SSA reserve node/block capacity, and provenance/verification consume cumulative work. Budget-truncated discovery cannot publish a semantic artifact. Partial supported-metadata recovery retains diagnostics and explicitly incomplete native-name indexes across reopen.
+
+Local stdio uses 2 MiB frames, 1,024-byte string request IDs, eight pending requests/output messages and a 30-second stalled-write limit. Reject invalid IDs before mutations; check annotation text-plus-structured delivery inside its transaction without changing semantic budgets/cache identity. Shutdown waits for every worker even if one close fails. These are bounded failure policies, not a guarantee that an acknowledgement survives client disconnection.
+
 Worker isolation alone is not an OS sandbox. Document actual restrictions; use supported process/OS controls where available and test behavior on both hosts. Never advertise a sandbox stronger than the implementation.
 
 Future HTTP transport requires authentication, project authorization, origin validation/DNS-rebinding defenses, conservative binding defaults, and request/work quotas before it is exposed remotely.

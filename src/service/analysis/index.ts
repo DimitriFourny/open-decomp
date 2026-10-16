@@ -24,6 +24,7 @@ export interface AnalysisScope {
   readonly store: ProjectStore;
   readonly context: OperationContext;
   readonly job_id: string;
+  readonly max_result_bytes?: number;
 }
 
 function requirePass(state: 'complete' | 'partial', diagnostics: readonly Diagnostic[], context: OperationContext): void {
@@ -40,7 +41,7 @@ function boundIR(ir: FunctionIR, context: OperationContext): void {
     nodes += 3 + block.parameters.length + block.instructions.length;
     if (nodes > context.budget.ir_nodes || ir.blocks.length > context.budget.blocks) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Lifted/SSA graph exceeds the operation node or block budget', evidence_ids: [] });
   }
-  assertValidIR(ir);
+  assertValidIR(ir, work => context.checkpoint(work));
 }
 
 export async function executeDecompilation(args: ToolArgs<'function_decompile'>, scope: AnalysisScope): Promise<ToolResult<'function_decompile'>> {
@@ -57,16 +58,17 @@ export async function executeDecompilation(args: ToolArgs<'function_decompile'>,
     // The worker context has a reduced remaining deadline. It is NOT the request.
     budget: args.budget,
   };
-  return runCachedDecompilation({ ...scope, identity, inline_limit: Math.min(args.budget.output_bytes, MAX_FRAME_BYTES - 16384) }, (): AnalysisComputation => {
+  return runCachedDecompilation({ ...scope, identity, inline_limit: Math.min(args.budget.output_bytes, scope.max_result_bytes ?? Infinity, MAX_FRAME_BYTES - 16384) }, (): AnalysisComputation => {
     // Only output capacity changes. All stages charge the same cumulative clock,
     // work counter, cancellation signal, node/block limits and progress channel.
     const fullContext: OperationContext = { ...context, budget: { ...context.budget, output_bytes: MAX_ANALYSIS_ARTIFACT_BYTES }, checkpoint: work => context.checkpoint(work), progress: (phase, completed, total) => context.progress(phase, completed, total) };
     context.progress('decode', 0, 7);
     const graph = loadFunctionGraph(scope, args.revision, loaded);
+    if (graph.gaps.some(gap => gap.reason === 'budget')) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Instruction budget ended before the function graph was complete; no analysis was published', evidence_ids: [] });
     context.progress('lift', 1, 7);
     const lifted = components.lifter.lift(graph, components.abi, context);
     boundIR(lifted.ir, context);
-    const passOptions = { max_work: context.budget.work, checkpoint: (work: number) => context.checkpoint(work) };
+    const passOptions = { max_work: context.budget.work, max_ir_nodes: context.budget.ir_nodes, max_blocks: context.budget.blocks, checkpoint: (work: number) => context.checkpoint(work) };
     context.progress('ssa', 2, 7);
     const constructed = constructSSA(lifted.ir, passOptions);
     requirePass(constructed.state, constructed.diagnostics, context);
@@ -190,7 +192,7 @@ export async function executeDecompilation(args: ToolArgs<'function_decompile'>,
       ...coverage.filter(item => item.layer !== 'decode').map(item => ({ layer: item.layer, feature: item.layer === 'lift' ? components.lifter.name : item.layer === 'abi' ? components.abi.name : item.layer === 'analysis' ? 'SSA, value/effect, stack/call and source-type analysis' : 'C-like pseudocode and instruction mappings', status: item.state === 'complete' ? 'supported' as const : 'partial' as const, limitations: item.reasons })),
     ], cache: 'computed' as const };
     const partial = coverage.some(item => item.state !== 'complete');
-    const result: StoredDecompilation = partial ? { ...metadata, state: 'partial', reason: graph.gaps.some(gap => gap.reason === 'budget') ? 'budget' : graph.coverage.state !== 'complete' ? 'incomplete_index' : 'unsupported_subset', continuation: null, data } : { ...metadata, state: 'complete', data };
+    const result: StoredDecompilation = partial ? { ...metadata, state: 'partial', reason: graph.coverage.state !== 'complete' ? 'incomplete_index' : 'unsupported_subset', continuation: null, data } : { ...metadata, state: 'complete', data };
     toolSchemas.function_decompile.output.parse(result);
     context.checkpoint(0);
     return { result, catalog: { ...catalog, evidence } };

@@ -1,9 +1,9 @@
 import { OperationError } from '../../core/index.js';
 import type { Diagnostic } from '../../core/index.js';
+import type { IRConstructionLimits } from '../../ir/budget.js';
 
-export interface AnalysisOptions {
+export interface AnalysisOptions extends IRConstructionLimits {
   readonly max_work?: number;
-  readonly checkpoint?: (work: number) => void;
 }
 export interface AnalysisResult<T> {
   readonly state: 'complete' | 'partial';

@@ -1,10 +1,9 @@
-import { checkedEnd, type ImmutableBytes, type OperationContext, type Diagnostic } from '../../core/index.js';
+import { OperationError, checkedEnd, type ImmutableBytes, type OperationContext, type Diagnostic } from '../../core/index.js';
 
-export class MachOError extends Error {
-  readonly diagnostic: Diagnostic;
+export class MachOError extends OperationError {
   constructor(code: Diagnostic['code'], message: string) {
-    super(message); this.name = 'MachOError';
-    this.diagnostic = { code, severity: 'error', message, evidence_ids: [] };
+    super({ code, severity: 'error', message, evidence_ids: [] });
+    this.name = 'MachOError';
   }
 }
 export function malformed(message: string): never { throw new MachOError('malformed_image', message); }

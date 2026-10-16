@@ -4,7 +4,12 @@ import { ProjectWorkerPool } from '../../workers/index.js';
 import type { ArtifactReadInput, ArtifactReadResult, JobOutcome, JobTicket, ProjectWorker, WorkerOperation, WorkerPoolOptions, ExecuteRequest } from '../../workers/index.js';
 import { queryAdmission, queryEnvelope, queryFailure } from './shared.js';
 
-export interface QueryCallOptions { readonly signal?: AbortSignal; readonly onProgress?: (job: WireJob) => void }
+export interface QueryCallOptions {
+  readonly signal?: AbortSignal;
+  readonly onProgress?: (job: WireJob) => void;
+  /** Trusted transport delivery ceiling; never changes the requested budget/cache identity. */
+  readonly max_result_bytes?: number;
+}
 /** The host facade for project navigation, analysis and annotation jobs. All image
  * parsing, decoding, semantic work and store access stays in persistent children.
  * Paths are host-authorized before admission; target-selected names are never paths.
@@ -24,7 +29,8 @@ export class QueryService {
    * by default; wait:true requests the terminal response instead. */
   async submit<K extends WorkerOperation>(operation: K, input: ToolInput<K>, options: QueryCallOptions = {}): Promise<JobTicket> {
     const args = toolSchemas[operation].input.parse(input) as ToolArgs<K>;
-    return this.#project(args.project_id).submit({ kind: 'execute', operation, args, budget: args.budget } as ExecuteRequest, options);
+    return this.#project(args.project_id).submit({ kind: 'execute', operation, args, budget: args.budget,
+      ...(options.max_result_bytes === undefined ? {} : { max_result_bytes: options.max_result_bytes }) } as ExecuteRequest, options);
   }
   async execute<K extends ToolName>(operation: K, input: ToolInput<K>, options: QueryCallOptions = {}): Promise<ToolResult<K>> {
     const args = toolSchemas[operation].input.parse(input);
@@ -39,7 +45,7 @@ export class QueryService {
         let active = true;
         const abort = (): void => controller.abort(signal?.reason);
         if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
-        options = { signal: controller.signal, ...(onProgress ? { onProgress: (job: WireJob): void => { if (active) onProgress(job); } } : {}) };
+        options = { ...options, signal: controller.signal, ...(onProgress ? { onProgress: (job: WireJob): void => { if (active) onProgress(job); } } : {}) };
         // Admission transfers ownership to the project. Ending an MCP exchange
         // must not cancel its already-returned durable job handle.
         releaseRequest = () => { active = false; signal?.removeEventListener('abort', abort); };
@@ -78,7 +84,7 @@ export class QueryService {
                 if (info.state === 'failed' || info.state === 'unsupported') throw new OperationError(decodeDiagnostic(info.error));
                 queryFailure('resource_limit', 'Project summary did not complete');
               }
-              result = { ...queryEnvelope(projectId, snapshot.revision, open.budget), state: 'complete', data: { image: info.data.image, resumed: open.source.kind === 'resume' || open.source.mode === 'resume' } };
+              result = { ...info, data: { image: info.data.image, resumed: open.source.kind === 'resume' || open.source.mode === 'resume' } };
             }
           }
         } catch (error) {
@@ -118,7 +124,7 @@ export class QueryService {
         }
       }
       const parsed = toolSchemas[operation].output.parse(result) as ToolResult<K>;
-      if (Buffer.byteLength(JSON.stringify(parsed)) > args.budget.output_bytes) queryFailure('resource_limit', 'Tool result exceeds the output budget');
+      if (Buffer.byteLength(JSON.stringify(parsed)) > Math.min(args.budget.output_bytes, options.max_result_bytes ?? Infinity)) queryFailure('resource_limit', 'Tool result exceeds the operation or transport delivery limit');
       return parsed;
     } catch (error) {
       const diagnostic = error instanceof OperationError ? error.diagnostic : { code: 'internal_error' as const, severity: 'error' as const, message: (error instanceof Error ? error.message : String(error)).slice(0, 8192), evidence_ids: [] };

@@ -1,10 +1,16 @@
 import { serveStdio, StdioServerTransport, type StdioServerHandle } from '@modelcontextprotocol/server/stdio';
+import type { JSONRPCMessage } from '@modelcontextprotocol/server';
+import { Writable } from 'node:stream';
 import { QueryService } from '../service/queries/index.js';
 import type { WorkerPoolOptions } from '../workers/index.js';
 import { createMcpServer } from './server.js';
 
 export const MCP_VERSION = '0.1.0';
 export const MAX_MCP_INPUT_BYTES = 2 * 1024 * 1024;
+export const MAX_MCP_PENDING_OUTPUTS = 8;
+export const MAX_MCP_REQUEST_ID_BYTES = 1024;
+export const MAX_MCP_PENDING_REQUESTS = 8;
+const OUTPUT_STALL_MS = 30_000;
 
 const HELP = `Usage: open-decomp-mcp --root PATH [--root PATH ...] [--max-workers N] [--max-queued N]
 
@@ -60,15 +66,63 @@ export function parseCliArguments(args: readonly string[]): CliOptions {
 /** Keep SDK parsing/framing intact while observing every transport-close path. */
 class OwnedStdioTransport extends StdioServerTransport {
   readonly #closed: () => void;
+  readonly #output: Writable;
+  #pendingOutput = 0;
+  #outputTail: Promise<void> = Promise.resolve();
+  readonly #requests = new Set<string | number>();
+  #closing = false;
   constructor(closed: () => void) {
-    super(process.stdin, process.stdout, { maxBufferSize: MAX_MCP_INPUT_BYTES });
+    const output = new Writable({
+      write(chunk: Buffer, encoding, callback) {
+        if (chunk.byteLength > MAX_MCP_INPUT_BYTES) { callback(new Error('MCP output frame exceeds 2 MiB')); return; }
+        process.stdout.write(chunk, encoding, callback);
+      },
+    });
+    super(process.stdin, output, { maxBufferSize: MAX_MCP_INPUT_BYTES });
+    this.#output = output;
     this.#closed = closed;
   }
+  accept(message: JSONRPCMessage): boolean {
+    if (this.#closing) return false;
+    if ('id' in message && typeof message.id === 'string' && Buffer.byteLength(message.id) > MAX_MCP_REQUEST_ID_BYTES) {
+      throw new Error('MCP request ID exceeds 1,024 bytes');
+    }
+    if ('method' in message && 'id' in message) {
+      if (this.#requests.has(message.id)) throw new Error('MCP request ID is already pending');
+      if (this.#requests.size >= MAX_MCP_PENDING_REQUESTS) throw new Error('MCP pending request limit exceeded; drain responses before submitting more work');
+      this.#requests.add(message.id);
+    }
+    return true;
+  }
+  override send(message: JSONRPCMessage): Promise<void> {
+    if (this.#pendingOutput >= MAX_MCP_PENDING_OUTPUTS) {
+      const error = new Error('MCP output queue limit exceeded; the client is not draining responses');
+      this.onerror?.(error);
+      void this.close().catch(() => {});
+      return Promise.reject(error);
+    }
+    this.#pendingOutput++;
+    // One SDK send owns backpressure listeners at a time. The bounded queue keeps
+    // messages, not repeatedly serialized copies, until the previous write drains.
+    const sent = this.#outputTail.then(async () => {
+      const timer = setTimeout(() => this.#output.destroy(new Error('MCP output stalled for 30 seconds')), OUTPUT_STALL_MS);
+      try { await super.send(message); }
+      finally { clearTimeout(timer); }
+    });
+    this.#outputTail = sent.catch(() => {});
+    return sent.finally(() => {
+      this.#pendingOutput--;
+      if ('id' in message && message.id !== undefined && !('method' in message)) this.#requests.delete(message.id);
+    });
+  }
   override async close(): Promise<void> {
+    this.#closing = true;
     await super.close();
     // Pausing leaves an oversized writer blocked on an owned pipe. Closing the
     // descriptor releases that writer and lets this single-connection process exit.
     process.stdin.destroy();
+    this.#output.destroy(new Error('MCP connection closed'));
+    process.stdout.destroy();
     this.#closed();
   }
 }
@@ -85,13 +139,17 @@ export async function runStdio(args: readonly string[]): Promise<void> {
   let reportedError = false;
   const stop = (): Promise<void> => {
     shutdown ??= Promise.resolve().then(async () => {
-      try { await handle?.close(); }
+      try { await transport.close(); await handle?.close(); }
       finally {
         await service.close('cancel');
         process.off('SIGINT', onSignal);
         process.off('SIGTERM', onSignal);
       }
-    });
+    }).then(() => {
+      // This entry owns the process. Node stdio can retain a blocked write after
+      // destroy; exit only after every worker has released its durable project.
+      process.exit();
+    }, error => { report(error); process.exit(1); });
     return shutdown;
   };
   const report = (error: unknown): void => {
@@ -112,6 +170,11 @@ export async function runStdio(args: readonly string[]): Promise<void> {
       onerror: error => { report(error); void stop().catch(report); },
       maxSubscriptions: 16,
     });
+    const receive = transport.onmessage;
+    transport.onmessage = message => {
+      try { if (transport.accept(message)) receive?.(message); }
+      catch (error) { report(error); void transport.close().catch(report); }
+    };
   } catch (error) {
     await stop();
     throw error;

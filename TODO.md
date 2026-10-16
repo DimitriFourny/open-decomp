@@ -25,12 +25,6 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
 ### Integration, containment, and delivery
 
 
-- [ ] **T29 — Run cross-target and cross-host release acceptance**
-  - Depends on: T28.
-  - Owns: end-to-end acceptance suite, host verification configuration, release evidence.
-  - Work: Execute PLAN.md A01–A11 with real fixtures and the compiled MCP server on macOS arm64 and Windows x86-64. Each host analyzes both target formats without running the target. Include stripped/symbol-bearing cases, persistence, annotation-driven reanalysis, unsupported semantics, malformed files, source mappings, cancellation, and decoder/ABI semantic regressions. Integrate outstanding migration fixes and remove obsolete migration scaffolding.
-  - Acceptance: Record actual commands/scenarios and outcomes for the complete matrix; unavailable host execution is an explicit blocker, not an inferred pass. All required behavior works without `../disass_arm`, private inputs, undeclared developer tools, or a public decompiler. Contributes A01–A11.
-
 - [ ] **T30 — Measure end-to-end performance and resource bounds**
   - Depends on: T29.
   - Owns: benchmark workloads/harness and performance evidence; coordinate implementation fixes with owning modules.
@@ -65,17 +59,27 @@ The design contract is [PLAN.md](PLAN.md). Task IDs are stable; move whole task 
   - Acceptance: The complete investigation workflow works for the selected target with evidence-backed semantics, and existing targets remain correct. Public tools require no architecture-specific command fork.
 
 ## Doing
-- [ ] **T28 — Verify input containment and enforce resource/error boundaries**
-  - Depends on: T27.
-  - Owns: containment integration cases and documented limits; coordinate fixes in owning modules rather than duplicating validation.
-  - Work: Exercise authorized-root checks, canonical/symlink paths, project/artifact isolation, parser arithmetic/count limits, work/IR/output budgets, cancellation, crashes, and transactional recovery through the real service. Check that strings/symbols/notes remain data and that no target execution, dynamic target-library load, remote fetch, or arbitrary file access is reachable. Document actual worker/OS restrictions without overstating sandbox guarantees.
-  - Acceptance: Hostile/malformed fixtures and denied paths produce bounded, typed errors; unrelated project artifacts remain inaccessible. Worker termination cannot corrupt saved analysis, flood stdout, or leave requests hanging indefinitely. Existing legitimate binaries still complete their workflows. Contributes A10.
-  - Owner: ParserContainment (sol-worker: hostile loader/metadata inputs), AnalysisBounds (astra-worker: preallocation and cumulative semantic bounds), Coordinator (MCP/worker/path/control/output boundaries, integration and documentation).
+- [ ] **T29 — Run cross-target and cross-host release acceptance**
+  - Depends on: T28.
+  - Owns: end-to-end acceptance suite, host verification configuration, release evidence.
+  - Work: Execute PLAN.md A01–A11 with real fixtures and the compiled MCP server on macOS arm64 and Windows x86-64. Each host analyzes both target formats without running the target. Include stripped/symbol-bearing cases, persistence, annotation-driven reanalysis, unsupported semantics, malformed files, source mappings, cancellation, and decoder/ABI semantic regressions. Integrate outstanding migration fixes and remove obsolete migration scaffolding.
+  - Acceptance: Record actual commands/scenarios and outcomes for the complete matrix; unavailable host execution is an explicit blocker, not an inferred pass. All required behavior works without `../disass_arm`, private inputs, undeclared developer tools, or a public decompiler. Contributes A01–A11.
+  - Owner: ReleaseWorkflows (sol-worker: compiled acceptance scenarios), MigrationAudit (scout: read-only migration/provenance coverage), Coordinator (shared integration, frozen Windows media, both-host execution and recorded evidence).
+  - Baseline: T28 passed Node 24.22.0 typecheck/build, 668/668 tests and four compiled MCP investigations on macOS arm64. Windows f059a44 passed 589/589 earlier-milestone tests only; current release acceptance must run on a newly frozen snapshot.
 
 
 
 
 ## Done
+- [x] **T28 — Verify input containment and enforce resource/error boundaries**
+  - Depends on: T27.
+  - Owns: containment integration cases and documented limits; coordinate fixes in owning modules rather than duplicating validation.
+  - Work: Exercise authorized-root checks, canonical/symlink paths, project/artifact isolation, parser arithmetic/count limits, work/IR/output budgets, cancellation, crashes, and transactional recovery through the real service. Check that strings/symbols/notes remain data and that no target execution, dynamic target-library load, remote fetch, or arbitrary file access is reachable. Document actual worker/OS restrictions without overstating sandbox guarantees.
+  - Acceptance: Hostile/malformed fixtures and denied paths produce bounded, typed errors; unrelated project artifacts remain inaccessible. Worker termination cannot corrupt saved analysis, flood stdout, or leave requests hanging indefinitely. Existing legitimate binaries still complete their workflows. Contributes A10.
+  - Owner: ParserContainment (sol-worker: hostile loader/metadata inputs), AnalysisBounds (astra-worker: preallocation and cumulative semantic bounds), Coordinator (MCP/worker/path/control/output boundaries, integration and documentation).
+  - Implemented: Typed Mach-O parser failures; durable import diagnostics and partial native indexes; preallocation IR/lifter/SSA capacity checks and cumulative provenance/verification work; budget-truncated graph rejection; transactional MCP annotation delivery preflight without budget mutation; bounded stdio IDs/request/output queues and stalled-write shutdown; all-owner shutdown completion even when one close fails. Changes span loaders, IR/lifters/shared analysis, service/worker/MCP boundaries and semantic integration regressions; limits and OS-isolation exclusions are documented in PLAN.md and src/core/README.md.
+  - Verification: Node 24.22.0 strict typecheck, **668/668 tests**, build and all four compiled symbol-bearing/stripped Mach-O arm64/PE x86-64 MCP workflows passed. Actual compiled probes changed oversized annotations from a hidden revision-3 commit to typed resource_limit at unchanged revision 2; rejected a 2,000,000-byte request ID before mutation; bounded a non-draining request backlog; and exited a single stalled output at **30,108 ms** without an external kill. A compiled two-owner failure probe now returns only with the second worker dead and no pending job. Earlier reproduction observed 5,364,216 queued stdout bytes and listener warnings, ARM64 allocation of 500 assignments before a one-node rejection, x86-64 success with 1,502 assignments under that limit, and argument-stack overflow at 150,000 provenance sources; the semantic/boundary regressions pass after construction-time fixes. Current Windows coverage remains T29's gate.
+
 - [x] **T27 — Expose the complete local MCP tool surface**
   - Depends on: T23, T25, T26.
   - Owns: `src/mcp/`, compiled server entry point, deterministic stdio smoke client.

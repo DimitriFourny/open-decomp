@@ -111,7 +111,10 @@ export class ProjectWorkerPool {
   async close(policy: 'wait' | 'cancel' | 'reject' = 'wait'): Promise<void> {
     if (policy === 'reject' && [...this.#projects.values()].some(project => project.busy)) throw failure('invalid_input', 'Worker pool has active jobs');
     this.#closed = true;
-    await Promise.all([...this.#projects.values()].map(project => project.close(policy)));
+    const outcomes = await Promise.allSettled([...this.#projects.values()].map(project => project.close(policy)));
+    // One failed close must not let the CLI exit while another owner still holds
+    // its database or an admitted job. Report failure only after all owners settle.
+    for (const outcome of outcomes) if (outcome.status === 'rejected') throw outcome.reason;
   }
 }
 

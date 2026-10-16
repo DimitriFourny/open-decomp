@@ -13,7 +13,7 @@ import { executeDecompilation, executeAnnotations } from '../analysis/index.js';
 
 type PageArgs = { project_id: string; revision: number; budget: OperationContext['budget']; page: { limit: number; cursor?: string | undefined } };
 type Paging = { readonly binding: CursorBinding; readonly after: string };
-type Scope = { readonly store: ProjectStore; readonly context: OperationContext; readonly job_id: string; readonly paging?: Paging };
+type Scope = { readonly store: ProjectStore; readonly context: OperationContext; readonly job_id: string; readonly paging?: Paging; readonly max_result_bytes?: number };
 type Query = { readonly text: string; readonly match: 'exact' | 'prefix' | 'contains'; readonly case_sensitive: boolean };
 function matches(query: Query, ...values: readonly (string | null)[]): boolean {
   if (query.text === '' && query.match !== 'exact') return true;
@@ -108,7 +108,7 @@ function paginate<T>(scope: Scope, operation: ToolName, args: PageArgs, source: 
     const result = state !== 'complete' ? { ...metadata, state: 'partial', reason: partialReason, continuation: next_cursor, data }
       : more && count < args.page.limit ? { ...metadata, state: 'partial', reason: 'output_limit', continuation: next_cursor, data }
       : { ...metadata, state: count ? 'complete' : 'empty', data };
-    if (Buffer.byteLength(JSON.stringify(result)) <= Math.min(args.budget.output_bytes, MAX_FRAME_BYTES - 16384)) return result;
+    if (Buffer.byteLength(JSON.stringify(result)) <= Math.min(args.budget.output_bytes, scope.max_result_bytes ?? Infinity, MAX_FRAME_BYTES - 16384)) return result;
     if (count <= 1) queryFailure('resource_limit', 'One query item exceeds the output budget; increase output_bytes');
     count = Math.floor(count / 2);
   }
@@ -136,7 +136,7 @@ export const queryWorkerHandler: WorkerHandler = {
   async execute<K extends ToolName>(operation: K, input: ToolArgs<K>, scope: Scope): Promise<ToolResult<K>> {
     const result = await dispatch(operation, input, scope);
     const parsed = toolSchemas[operation].output.parse(result) as ToolResult<K>;
-    if (Buffer.byteLength(JSON.stringify(parsed)) > Math.min(scope.context.budget.output_bytes, MAX_FRAME_BYTES - 16384)) queryFailure('resource_limit', 'Query result exceeds the output budget');
+    if (Buffer.byteLength(JSON.stringify(parsed)) > Math.min(scope.context.budget.output_bytes, scope.max_result_bytes ?? Infinity, MAX_FRAME_BYTES - 16384)) queryFailure('resource_limit', 'Query result exceeds the operation or transport delivery limit');
     return parsed;
   },
 };
@@ -160,7 +160,12 @@ async function dispatch(operation: ToolName, input: unknown, suppliedScope: Scop
         imageId = images[0]!.image_id;
       }
       const image = loadImage(scope.store, args.revision, imageId);
-      if (args.view === 'summary') return { ...envelope, diagnostics: image.diagnostics.map(encodeDiagnostic), state: 'complete', data: { view: 'summary', image: wireValue({ id: image.id, sha256: image.sha256, byte_length: BigInt(image.bytes.length), selected_slice_id: image.selected_slice_id, image_base: image.image_base, target: image.target, slices: image.slices, entry_points: image.entry_points, capabilities: image.capabilities }) } };
+      if (args.view === 'summary') {
+        const partial = image.capabilities.some(capability => (capability.layer === 'format' || capability.layer === 'analysis') && capability.status === 'partial');
+        return { ...envelope, diagnostics: image.diagnostics.map(encodeDiagnostic),
+          ...(partial ? { state: 'partial', reason: 'incomplete_index', continuation: null } : { state: 'complete' }),
+          data: { view: 'summary', image: wireValue({ id: image.id, sha256: image.sha256, byte_length: BigInt(image.bytes.length), selected_slice_id: image.selected_slice_id, image_base: image.image_base, target: image.target, slices: image.slices, entry_points: image.entry_points, capabilities: image.capabilities }) } };
+      }
       const values: readonly unknown[] = image[args.view];
       return paginate(scope, operation, args, values, 'complete', (item, index) => {
         const record = item as { id?: string; name?: string; feature?: string; value?: bigint; range?: { start: Address } };
@@ -258,7 +263,7 @@ function readMemory(args: ToolArgs<'memory_read'>, scope: Scope): unknown {
   const widths = { bytes: 1, u8: 1, i8: 1, u16: 2, i16: 2, u32: 4, i32: 4, f32: 4, u64: 8, i64: 8, f64: 8, pointer: 8 } as const;
   const width = widths[args.interpretation], envelope = queryEnvelope(args.project_id, args.revision, args.budget);
   // Hex plus typed address records are bounded before allocating or serializing IPC.
-  let length = Math.min(args.length, Math.max(width, Math.floor((Math.min(args.budget.output_bytes, MAX_FRAME_BYTES - 16384) - 900) / (args.interpretation === 'bytes' ? 2 : 240)) * width));
+  let length = Math.min(args.length, Math.max(width, Math.floor((Math.min(args.budget.output_bytes, scope.max_result_bytes ?? Infinity, MAX_FRAME_BYTES - 16384) - 900) / (args.interpretation === 'bytes' ? 2 : 240)) * width));
   length -= length % width;
   for (;;) {
     scope.context.checkpoint(length);
@@ -287,7 +292,7 @@ function readMemory(args: ToolArgs<'memory_read'>, scope: Scope): unknown {
     const next_address = length < args.length ? wireValue({ ...address, value: address.value + BigInt(length) }) : null;
     const data = { requested: wireValue({ start: address, size: BigInt(args.length) }), segments, values, next_address };
     const result = next_address ? { ...envelope, state: 'partial', reason: 'output_limit', continuation: null, data } : { ...envelope, state: 'complete', data };
-    if (Buffer.byteLength(JSON.stringify(result)) <= Math.min(args.budget.output_bytes, MAX_FRAME_BYTES - 16384)) return result;
+    if (Buffer.byteLength(JSON.stringify(result)) <= Math.min(args.budget.output_bytes, scope.max_result_bytes ?? Infinity, MAX_FRAME_BYTES - 16384)) return result;
     if (length <= width) queryFailure('resource_limit', 'Memory result metadata exceeds output budget');
     length = Math.max(width, Math.floor(length / width / 2) * width);
   }

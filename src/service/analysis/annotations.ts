@@ -42,7 +42,7 @@ export async function executeAnnotations(args: ToolArgs<'annotations_apply'>, sc
   };
   const validate = (result: ToolResult<'annotations_apply'>): ToolResult<'annotations_apply'> => {
     const parsed = toolSchemas.annotations_apply.output.parse(result);
-    if (Buffer.byteLength(JSON.stringify(parsed)) > Math.min(args.budget.output_bytes, MAX_FRAME_BYTES - 16384)) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Annotation response exceeds the output budget; no edits were committed', evidence_ids: [] });
+    if (Buffer.byteLength(JSON.stringify(parsed)) > Math.min(args.budget.output_bytes, scope.max_result_bytes ?? Infinity, MAX_FRAME_BYTES - 16384)) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Annotation response exceeds the operation or transport delivery limit; no edits were committed', evidence_ids: [] });
     return parsed;
   };
   let committed: ToolResult<'annotations_apply'> | undefined;

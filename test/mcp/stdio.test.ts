@@ -10,8 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { z } from 'zod';
-import { toolSchemas } from '../../src/core/index.js';
-import { MAX_MCP_INPUT_BYTES, parseCliArguments } from '../../src/mcp/cli.js';
+import { newIdentity, toolSchemas } from '../../src/core/index.js';
+import { MAX_MCP_INPUT_BYTES, MAX_MCP_PENDING_REQUESTS, MAX_MCP_REQUEST_ID_BYTES, parseCliArguments } from '../../src/mcp/cli.js';
 import { callMcpTool, resultData, runMcpWorkflows } from '../../scripts/mcp-workflow.js';
 
 const entry = fileURLToPath(new URL('../../src/mcp/stdio.ts', import.meta.url));
@@ -84,9 +84,9 @@ test('official SDK source-entry workflows analyze both targets, symbol-bearing a
   await runMcpWorkflows({ serverEntry: entry, fixtures, nodeArgs });
 });
 
-for (const shutdown of ['eof', 'SIGINT', 'SIGTERM'] as const) test(`source CLI ${shutdown} reaps a real owned worker and leaves its project resumable`, {
-  timeout: 60000,
-  skip: process.platform === 'win32' && shutdown !== 'eof' ? 'Windows child.kill terminates rather than delivering catchable POSIX signals; EOF lifecycle remains covered' : false,
+for (const shutdown of ['eof', 'SIGINT', 'SIGTERM', 'backpressure', 'stalled-output', 'oversized-id'] as const) test(`source CLI ${shutdown} reaps a real owned worker and leaves its project resumable`, {
+  timeout: shutdown === 'stalled-output' ? 120000 : 60000,
+  skip: process.platform === 'win32' && (shutdown === 'SIGINT' || shutdown === 'SIGTERM') ? 'Windows child.kill terminates rather than delivering catchable POSIX signals; EOF and backpressure lifecycle remain covered' : false,
 }, async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-mcp-lifecycle-')));
   t.after(async () => { await rm(root, { recursive: true, force: true }); });
@@ -99,12 +99,44 @@ for (const shutdown of ['eof', 'SIGINT', 'SIGTERM'] as const) test(`source CLI $
   const openedRpc = await rpc.request('tools/call', { name: 'project_open', arguments: { source: { kind: 'import', input_path: join(fixtures, 'corpus-symbols.dll'), project_path: projectPath }, wait: true } });
   const opened = z.object({ structuredContent: toolSchemas.project_open.output }).parse(openedRpc['result']);
   assert.equal(opened.structuredContent.state, 'complete');
-  if (shutdown === 'eof') process.child.stdin.end();
+  if (shutdown === 'backpressure' || shutdown === 'stalled-output') {
+    // Keep the peer alive without draining large discovery replies. Resume only
+    // after exit so the parent can consume EOF and observe the child's close event.
+    // The single-response case exercises a real child/OS pipe deadline; fake
+    // timers in this parent cannot advance the separate process's clock.
+    process.child.once('exit', () => process.child.stdout.resume());
+    process.child.stdout.pause();
+    const requests = shutdown === 'backpressure' ? MAX_MCP_PENDING_REQUESTS + 4 : 1;
+    for (let index = 0; index < requests; index++) {
+      process.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 100 + index, method: 'tools/list', params: {} })}\n`);
+    }
+  } else if (shutdown === 'oversized-id') {
+    assert.ok('data' in opened.structuredContent && opened.structuredContent.data.image);
+    const found = await rpc.request('tools/call', { name: 'functions_find', arguments: {
+      project_id: opened.structuredContent.project_id, revision: opened.structuredContent.revision,
+      image_id: opened.structuredContent.data.image.id,
+    } });
+    const functions = z.object({ structuredContent: toolSchemas.functions_find.output }).parse(found['result']).structuredContent;
+    assert.ok('data' in functions);
+    process.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 'i'.repeat(MAX_MCP_REQUEST_ID_BYTES + 1), method: 'tools/call', params: {
+      name: 'annotations_apply', arguments: {
+        project_id: opened.structuredContent.project_id, expected_revision: opened.structuredContent.revision,
+        author: 'request-id-boundary', origin: 'user', edits: [{
+          operation: 'set', id: newIdentity('annotation'), entity_id: functions.data.items[0]!.id,
+          value: { kind: 'note', value: 'Must not be committed before rejecting the request ID' }, status: 'asserted', evidence_ids: [],
+        }],
+      },
+    } })}\n`);
+  } else if (shutdown === 'eof') process.child.stdin.end();
   else process.child.kill(shutdown);
   await process.closed;
-  assert.equal(process.child.exitCode, 0, process.output.stderr);
+  const rejectedPeer = shutdown === 'backpressure' || shutdown === 'stalled-output' || shutdown === 'oversized-id';
+  assert.equal(process.child.exitCode, rejectedPeer ? 1 : 0, process.output.stderr);
   assert.equal(process.child.signalCode, null);
-  for (const line of process.output.stdout.trim().split('\n')) {
+  if (rejectedPeer) assert.ok(process.output.stderr.length > 0 && process.output.stderr.length <= 1024);
+  else assert.ok(process.output.stdout.endsWith('\n'));
+  // A connection terminated for a non-draining peer may end inside its last frame.
+  for (const line of process.output.stdout.split('\n').slice(0, -1)) {
     z.object({ jsonrpc: z.literal('2.0') }).parse(JSON.parse(line));
   }
   const client = new Client({ name: 'stdio-reopen-test', version: '0.1.0' });

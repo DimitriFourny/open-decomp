@@ -1,6 +1,6 @@
 import type { AbiProfile, Address, DecodedInstruction, Diagnostic, FunctionGraph, Lifter, OperationContext } from '../../core/index.js';
 import { OperationError } from '../../core/index.js';
-import { IRBuilder, instructionProvenance, integer, mergeProvenance, type BlockBuilder, type RegisterIR } from '../../ir/index.js';
+import { IRBuilder, instructionProvenance, integer, mergeProvenanceSources, type BlockBuilder, type RegisterIR } from '../../ir/index.js';
 import { ArmSemantics, Unsupported, fpControlMask, gp, needsFpGuard, stateRegister, unknownClobbers } from './semantics.js';
 
 export interface Arm64LiftResult {
@@ -34,20 +34,24 @@ export interface Arm64LiftResult {
  */
 export class Arm64Lifter implements Lifter<RegisterIR> {
   readonly name = 'ARM64 typed semantic lifter';
-  readonly version = '1.0.0';
+  readonly version = '1.0.1';
   readonly architecture = 'arm64' as const;
   lift(graph: FunctionGraph, abi: AbiProfile, context: OperationContext): Arm64LiftResult {
     if (abi.architecture !== 'arm64') throw new TypeError('ARM64 lifter requires an ARM64 ABI');
     context.checkpoint(0);
+    if (graph.instructions.length > context.budget.instructions) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Lift input exceeds the instruction budget', evidence_ids: [], details: { kind: 'limit', resource: 'instructions', limit: context.budget.instructions, consumed: graph.instructions.length } });
+    if (graph.blocks.length > context.budget.blocks) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Lift input exceeds the block budget', evidence_ids: [], details: { kind: 'limit', resource: 'blocks', limit: context.budget.blocks, consumed: graph.blocks.length } });
+    if (graph.blocks.length * 3 > context.budget.ir_nodes) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Lift input exceeds the minimum IR node budget', evidence_ids: [], details: { kind: 'limit', resource: 'ir_nodes', limit: context.budget.ir_nodes, consumed: graph.blocks.length * 3 } });
+    context.checkpoint(graph.instructions.length + graph.blocks.length);
     const instructions = new Map(graph.instructions.map(instruction => [instruction.id, instruction]));
-    const provenance = graph.instructions.length ? mergeProvenance(...graph.instructions.map(instructionProvenance))
+    const provenance = graph.instructions.length ? mergeProvenanceSources(graph.instructions.map(instructionProvenance), work => context.checkpoint(work))
       : { instruction_ids: [], ranges: graph.function.ranges, evidence_ids: graph.function.evidence_ids, synthetic: ['Discovered function with no decoded instructions'] };
-    const build = new IRBuilder(graph.slice_id, graph.function.id, provenance);
+    const build = new IRBuilder(graph.slice_id, graph.function.id, provenance, 'register', context);
     const blocks = new Map<string, BlockBuilder>();
     const byAddress = new Map<bigint, BlockBuilder>();
     for (const block of graph.blocks) {
       const sources = block.instructions.map(id => instructions.get(id)).filter((value): value is DecodedInstruction => value !== undefined);
-      const result = build.block(['discovered', block.id], [], sources.length ? mergeProvenance(...sources.map(instructionProvenance)) : provenance);
+      const result = build.block(['discovered', block.id], [], sources.length ? mergeProvenanceSources(sources.map(instructionProvenance), work => context.checkpoint(work)) : provenance);
       blocks.set(block.id, result);
       if (sources[0]) byAddress.set(sources[0].address.value, result);
     }
@@ -133,9 +137,6 @@ export class Arm64Lifter implements Lifter<RegisterIR> {
       unknown(entry, 'Function entry has no discovered block'); entry.terminate({ kind: 'unknown', reason: 'Missing discovered entry' });
     }
     const ir = build.finish(entry);
-    const nodes = ir.blocks.reduce((count, block) => count + block.instructions.length + 1, 0);
-    context.checkpoint(nodes);
-    if (nodes > context.budget.ir_nodes) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'ARM64 lift IR node limit reached', evidence_ids: [], details: { kind: 'limit', resource: 'ir_nodes', limit: context.budget.ir_nodes, consumed: nodes } });
     if (graph.gaps.length) reasons.add('Discovery contains undecoded byte gaps');
     return { ir, diagnostics, coverage: { layer: 'lift', state: reasons.size ? 'partial' : 'complete', completed_units: completed, total_units: graph.instructions.length, reasons: [...reasons] } };
   }

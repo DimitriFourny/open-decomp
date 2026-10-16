@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { createOperationContext, contentHash, imageIdentity, ImmutableBytes, type LoadedImage } from '../../../src/core/index.js';
+import { createOperationContext, contentHash, imageIdentity, ImmutableBytes, OperationError, type LoadedImage } from '../../../src/core/index.js';
 import { MachOLoader, MachOError } from '../../../src/loaders/macho/index.js';
 
 const loader = new MachOLoader();
@@ -94,6 +94,17 @@ for (const fat64 of [false, true]) for (const little of [false, true]) test(`fat
 for (const name of ['empty.bin', 'macho-header-truncated.bin', 'macho-command-zero.bin', 'macho-command-overrun.bin', 'fat-slice-overrun.bin']) test(`malformed fixture ${name} fails explicitly`, () => {
   const bytes = readFileSync(new URL(`../../../fixtures/malformed/${name}`, import.meta.url));
   assert.throws(() => load(bytes), (error: unknown) => error instanceof MachOError && error.diagnostic.code === 'malformed_image');
+});
+
+test('Mach-O malformed ranges and count limits preserve typed operation failures', () => {
+  const overflow = image(); overflow.writeBigUInt64LE(0xfffffffffffffff0n, 32 + 24);
+  const unsafe = image(); unsafe.writeBigUInt64LE(1n << 53n, 32 + 40);
+  const count = Buffer.alloc(32 + 65537 * 8);
+  image().copy(count); count.writeUInt32LE(65537, 16); count.writeUInt32LE(65537 * 8, 20);
+  for (const [bytes, code] of [[overflow, 'malformed_image'], [unsafe, 'malformed_image'], [count, 'resource_limit']] as const) {
+    assert.throws(() => load(bytes), (error: unknown) =>
+      error instanceof MachOError && error instanceof OperationError && error.code === code && error.diagnostic.code === code);
+  }
 });
 
 test('unknown CPU/subtype and object-file inputs remain inspectable but not falsely supported', () => {

@@ -30,7 +30,7 @@ const SUBTYPES: Record<number, string> = { 0: 'arm64', 1: 'arm64v8', 2: 'arm64e'
  */
 export class MachOLoader implements Loader {
   readonly name = 'open-decomp-macho';
-  readonly version = '1.0.0';
+  readonly version = '1.0.1';
   readonly format = 'macho' as const;
   inspect(bytes: ImmutableBytes, imageId: string, context: OperationContext): { slices: readonly ImageSlice[]; diagnostics: readonly Diagnostic[] } {
     context.checkpoint(1);

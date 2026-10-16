@@ -212,3 +212,24 @@ test('default static query handler returns real loaded image facts', { timeout: 
   assert.equal(result.data.image.target.format, 'pe');
   await Promise.all([project.close(), project.close()]);
 });
+
+test('a failed owner close waits for every other owner and admitted job before rejecting', { timeout: 120000 }, async t => {
+  const { root, pool } = await setup(t, {
+    max_queued: 0, entry_point: new URL('./pause-running.ts', import.meta.url),
+  });
+  const first = await pool.open({ path: join(root, 'first'), mode: 'create' });
+  const second = await pool.open({ path: join(root, 'second'), mode: 'create' });
+  const ticket = await second.submit(importRequest(macho));
+  await ticket.accepted;
+  await waitForWorkerPause(ticket.id, t);
+  // Occupy the idle owner's control channel before its close command is admitted.
+  const controls = Array.from({ length: 4 }, () => first.refresh().catch(() => {}));
+  // Release the blocked owner on the other owner's actual failure, not a guessed delay.
+  const release = first.close('wait').catch(() => resumeWorker(ticket.id));
+  await assert.rejects(pool.close('wait'), { code: 'resource_limit' });
+  assert.equal(second.busy, false);
+  assert.throws(() => process.kill(second.pid!, 0), { code: 'ESRCH' });
+  assert.equal((await ticket.result).job.state, 'completed');
+  await release;
+  await Promise.all(controls);
+});

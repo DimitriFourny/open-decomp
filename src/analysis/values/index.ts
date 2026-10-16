@@ -1,5 +1,5 @@
 import type { EntityId } from '../../core/index.js';
-import { bitWidth, evaluateExpression, expressionOperands, mergeProvenance, sameType, successors } from '../../ir/index.js';
+import { bitWidth, evaluateExpression, expressionOperands, mergeProvenanceSources, sameType, successors } from '../../ir/index.js';
 import type { BasicBlock, Edge, Expression, Instruction, IntegerPredicate, SSAForm, Terminator, Value } from '../../ir/index.js';
 import { instructionOperands, instructionResults, mapExpression, terminatorOperands } from '../effects/index.js';
 import { AnalysisBudget } from '../ssa/budget.js';
@@ -223,7 +223,7 @@ function rewrite(input: SSAForm, analysis: ValueAnalysis, budget: AnalysisBudget
         const origins = expressionOperands(node.expression).flatMap(value => {
           const definition = definitions.get(value.id); return definition ? [definition.provenance] : [];
         });
-        const replacement: Assignment = { ...node, expression, provenance: mergeProvenance(node.provenance, ...origins) };
+        const replacement: Assignment = { ...node, expression, provenance: mergeProvenanceSources([node.provenance, ...origins], work => budget.charge(work)) };
         nodes.push(replacement); definitions.set(node.result.id, replacement);
       } else nodes.push(node);
     }
@@ -232,13 +232,13 @@ function rewrite(input: SSAForm, analysis: ValueAnalysis, budget: AnalysisBudget
       const condition = analysis.facts.get(terminator.condition.id);
       if (condition?.kind === 'constant') {
         const definition = definitions.get(terminator.condition.id);
-        terminator = { kind: 'jump', id: terminator.id, provenance: mergeProvenance(terminator.provenance, ...(definition ? [definition.provenance] : [])), effect: terminator.effect, edge: condition.bits === 0n ? terminator.when_false : terminator.when_true }; changed = true;
+        terminator = { kind: 'jump', id: terminator.id, provenance: mergeProvenanceSources([terminator.provenance, ...(definition ? [definition.provenance] : [])], work => budget.charge(work)), effect: terminator.effect, edge: condition.bits === 0n ? terminator.when_false : terminator.when_true }; changed = true;
       }
     } else if (terminator.kind === 'switch') {
       const selector = analysis.facts.get(terminator.value.id);
       if (selector?.kind === 'constant') {
         const definition = definitions.get(terminator.value.id);
-        terminator = { kind: 'jump', id: terminator.id, provenance: mergeProvenance(terminator.provenance, ...(definition ? [definition.provenance] : [])), effect: terminator.effect, edge: terminator.cases.find(item => item.bits === selector.bits)?.edge ?? terminator.otherwise }; changed = true;
+        terminator = { kind: 'jump', id: terminator.id, provenance: mergeProvenanceSources([terminator.provenance, ...(definition ? [definition.provenance] : [])], work => budget.charge(work)), effect: terminator.effect, edge: terminator.cases.find(item => item.bits === selector.bits)?.edge ?? terminator.otherwise }; changed = true;
       }
     }
     const live = new Set([...terminatorOperands(terminator), ...(states.get(block.id)?.exit ?? []).map(binding => binding.value)].map(value => value.id));
@@ -247,7 +247,7 @@ function rewrite(input: SSAForm, analysis: ValueAnalysis, budget: AnalysisBudget
     for (let i = nodes.length - 1; i >= 0; i--) {
       budget.charge();
       const node = nodes[i]!;
-      if (node.kind === 'assign' && !live.has(node.result.id)) { changed = true; provenance = mergeProvenance(provenance, node.provenance); continue; }
+      if (node.kind === 'assign' && !live.has(node.result.id)) { changed = true; provenance = mergeProvenanceSources([provenance, node.provenance], work => budget.charge(work)); continue; }
       kept.push(node);
       for (const value of instructionOperands(node)) live.add(value.id);
     }
@@ -280,7 +280,7 @@ function rewrite(input: SSAForm, analysis: ValueAnalysis, budget: AnalysisBudget
         // Never rotate an effect-free cycle's parameter permutation on successive passes.
         if (visited.has(next.target)) return initial;
         edge = { target: next.target, arguments: next.arguments.map(value => substitution.get(value.id)!), effect: initial.effect };
-        provenance = mergeProvenance(provenance, target.provenance, term.provenance);
+        provenance = mergeProvenanceSources([provenance, target.provenance, term.provenance], work => budget.charge(work));
       }
       if (edge.target !== initial.target || edge.arguments.some((value, index) => value.id !== initial.arguments[index]?.id)) { changed = true; return edge; }
       return initial;
@@ -310,9 +310,9 @@ function propagateCopies(input: SSAForm, budget: AnalysisBudget): { value: SSAFo
       let node = original;
       const operands = instructionOperands(node);
       if (operands.some(value => aliases.has(value.id))) {
-        const source = mergeProvenance(node.provenance, ...operands.flatMap(value => {
+        const source = mergeProvenanceSources([node.provenance, ...operands.flatMap(value => {
           const origin = origins.get(value.id); return origin ? [origin] : [];
-        }));
+        })], work => budget.charge(work));
         switch (node.kind) {
           case 'assign': node = { ...node, provenance: source, expression: mapExpression(node.expression, map) }; break;
           case 'load': node = { ...node, provenance: source, address: map(node.address), register_inputs: node.register_inputs.map(binding => ({ ...binding, value: map(binding.value) })) }; break;
@@ -324,14 +324,14 @@ function propagateCopies(input: SSAForm, budget: AnalysisBudget): { value: SSAFo
       }
       if (node.kind === 'assign' && node.expression.kind === 'cast' && node.expression.op === 'bitcast' && sameType(node.result.type, node.expression.value.type)) {
         aliases.set(node.result.id, node.expression.value); origins.set(node.result.id, node.provenance);
-        provenance = mergeProvenance(provenance, node.provenance); changed = true;
+        provenance = mergeProvenanceSources([provenance, node.provenance], work => budget.charge(work)); changed = true;
       } else nodes.push(node);
     }
     const edge = (value: Edge): Edge => ({ ...value, arguments: value.arguments.map(map) });
     let terminator = block.terminator;
-    const source = mergeProvenance(terminator.provenance, ...terminatorOperands(terminator).flatMap(value => {
+    const source = mergeProvenanceSources([terminator.provenance, ...terminatorOperands(terminator).flatMap(value => {
       const origin = origins.get(value.id); return origin ? [origin] : [];
-    }));
+    })], work => budget.charge(work));
     switch (terminator.kind) {
       case 'return': terminator = { ...terminator, values: terminator.values.map(map) }; break;
       case 'indirect': terminator = { ...terminator, target: map(terminator.target) }; break;

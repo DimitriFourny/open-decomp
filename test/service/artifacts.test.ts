@@ -19,8 +19,8 @@ test('real child artifact reads are project/revision scoped, resumable and below
   const context = createOperationContext();
   const image = new MachOLoader().load({ bytes: new ImmutableBytes(raw), image_id: imageIdentity(sha256), sha256, slice_id: null }, context);
   await store.importImage({ bytes: image.bytes, sha256, selected_slice_id: image.selected_slice_id });
-  const publish = await prepareQueryImport(image, { revision: 2, context });
-  assert.equal(store.transaction(1, tx => { tx.putImage(image); publish(tx); }).state, 'committed');
+  const prepared = await prepareQueryImport(image, { revision: 2, context });
+  assert.equal(store.transaction(1, tx => { tx.putImage(prepared.image); prepared.publish(tx); }).state, 'committed');
   const fn = store.queryRecords({ image_id: image.id, revision: 2, kind: 'function', limit: 1 }).items[0];
   assert.ok(fn);
   const job: Job = { id: newIdentity('job'), project_id: store.project_id, input_revision: 2, operation: 'function_get', state: 'running', progress: { phase: 'archive', completed: 0, total: 1 }, artifacts: [], diagnostics: [], published_revision: null };

@@ -175,7 +175,8 @@ test('ordinary MCP cancellation remains usable with a blocked real child and an 
   const scope = { project_id: opened.project_id!, revision: opened.revision!, job_id: opened.job.id };
   const running = (await call('analysis_status', scope)).result;
   assert.ok('data' in running);
-  assert.equal(running.data.job.state, 'running');
+  assert.equal(running.data.job.id, opened.job.id);
+  assert.ok(['queued', 'running'].includes(running.data.job.state), 'Status is the last acknowledged durable state, not the unacknowledged child gate');
   const cancelled = (await call('analysis_cancel', scope)).result;
   assert.ok('data' in cancelled);
   assert.equal(cancelled.data.outcome, 'cancelled');
@@ -262,4 +263,45 @@ test('artifact resources preserve UTF-8 bytes, hashes, binary representation and
   assert.ok(other.project_id);
   await assert.rejects(client.readResource({ uri: canonical.replace(project_id, other.project_id) }), (error: unknown) => ProtocolError.isInstance(error) && error.code === ProtocolErrorCode.InvalidParams);
   await service.close('cancel');
+});
+
+test('MCP annotation delivery overflow rolls back before commit and preserves the requested budget', { timeout: 90000 }, async t => {
+  const { root, call } = await setup(t);
+  const opened = (await call('project_open', { wait: true, source: {
+    kind: 'import', input_path: join(fixtures, 'corpus-symbols.dll'), project_path: join(root, 'project'),
+  } })).result;
+  assert.ok('data' in opened && opened.data.image);
+  const scope = { project_id: opened.project_id!, revision: opened.revision!, image_id: opened.data.image.id };
+  const functions = (await call('functions_find', scope)).result;
+  assert.ok('data' in functions);
+  const entity_id = functions.data.items[0]!.id;
+  const edits = Array.from({ length: 20 }, () => ({
+    operation: 'set' as const, id: newIdentity('annotation'), entity_id,
+    value: { kind: 'note' as const, value: 'x'.repeat(60000) },
+    status: 'asserted' as const, evidence_ids: [],
+  }));
+  const budget = { ...DEFAULT_BUDGET, output_bytes: 2_000_000 };
+  const rejected = (await call('annotations_apply', {
+    project_id: scope.project_id, expected_revision: scope.revision,
+    author: 'delivery-boundary', origin: 'user', edits, budget,
+  })).result;
+  assert.ok(rejected.state === 'failed');
+  assert.equal(rejected.error.code, 'resource_limit');
+  assert.equal(rejected.current_revision, scope.revision);
+  assert.deepEqual(rejected.budget, budget);
+  // A smaller batch with the same identity/precondition succeeds exactly once.
+  const accepted = (await call('annotations_apply', {
+    project_id: scope.project_id, expected_revision: scope.revision,
+    author: 'delivery-boundary', origin: 'user', edits: edits.slice(0, 1), budget,
+  })).result;
+  assert.ok(accepted.state === 'complete');
+  assert.equal(accepted.revision, scope.revision + 1);
+  assert.deepEqual(accepted.budget, budget);
+  assert.deepEqual(accepted.data.applied.map(annotation => annotation.id), [edits[0]!.id]);
+  await call('project_close', { project_id: scope.project_id, revision: accepted.revision });
+  const store = SqliteProjectStore.open(join(root, 'project'), 'resume');
+  try {
+    assert.equal(store.snapshot().revision, scope.revision + 1);
+    assert.deepEqual(store.readAnnotations(entity_id, scope.revision + 1).map(annotation => annotation.id), [edits[0]!.id]);
+  } finally { await store.close(); }
 });

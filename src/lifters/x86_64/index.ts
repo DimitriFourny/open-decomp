@@ -1,5 +1,6 @@
 import type { AbiProfile, DecodedInstruction, Diagnostic, FunctionGraph, Lifter, OperationContext } from '../../core/index.js';
-import { IRBuilder, instructionProvenance, integer, mergeProvenance, syntheticProvenance } from '../../ir/index.js';
+import { OperationError } from '../../core/index.js';
+import { IRBuilder, instructionProvenance, integer, mergeProvenanceSources, syntheticProvenance } from '../../ir/index.js';
 import type { BlockBuilder, RegisterIR } from '../../ir/index.js';
 import { Unsupported, X86Semantics, gpr, unknownClobbers } from './semantics.js';
 
@@ -45,15 +46,20 @@ export interface X86LiftResult {
  */
 export class X86Lifter implements Lifter<RegisterIR> {
   readonly name = 'x86-64 typed semantic lifter';
-  readonly version = '1';
+  readonly version = '2';
   readonly architecture = 'x86_64';
   lift(graph: FunctionGraph, abi: AbiProfile, context: OperationContext): X86LiftResult {
     if (abi.architecture !== this.architecture) throw new TypeError('x86 lifter requires an x86 ABI');
+    context.checkpoint(0);
+    if (graph.instructions.length > context.budget.instructions) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Lift input exceeds the instruction budget', evidence_ids: [], details: { kind: 'limit', resource: 'instructions', limit: context.budget.instructions, consumed: graph.instructions.length } });
+    if (graph.blocks.length > context.budget.blocks) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Lift input exceeds the block budget', evidence_ids: [], details: { kind: 'limit', resource: 'blocks', limit: context.budget.blocks, consumed: graph.blocks.length } });
+    if (graph.blocks.length * 3 > context.budget.ir_nodes) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Lift input exceeds the minimum IR node budget', evidence_ids: [], details: { kind: 'limit', resource: 'ir_nodes', limit: context.budget.ir_nodes, consumed: graph.blocks.length * 3 } });
+    context.checkpoint(graph.instructions.length + graph.blocks.length);
     const origins = graph.instructions.map(instructionProvenance);
-    const provenance = origins.length ? mergeProvenance(...origins) : syntheticProvenance('Discovered x86 function has no decoded instructions');
-    const builder = new IRBuilder(graph.slice_id, graph.function.id, provenance);
+    const provenance = origins.length ? mergeProvenanceSources(origins, work => context.checkpoint(work)) : syntheticProvenance('Discovered x86 function has no decoded instructions');
+    const builder = new IRBuilder(graph.slice_id, graph.function.id, provenance, 'register', context);
     const decoded = new Map(graph.instructions.map(instruction => [instruction.id, instruction]));
-    const blocks = new Map(graph.blocks.map(block => [block.id, builder.block(['discovered', block.id], [], mergeProvenance(...block.instructions.map(id => decoded.has(id) ? instructionProvenance(decoded.get(id)!) : provenance)))]));
+    const blocks = new Map(graph.blocks.map(block => [block.id, builder.block(['discovered', block.id], [], mergeProvenanceSources(block.instructions.map(id => decoded.has(id) ? instructionProvenance(decoded.get(id)!) : provenance), work => context.checkpoint(work)))]));
     const byAddress = new Map<bigint, BlockBuilder>();
     for (const block of graph.blocks) {
       const first = decoded.get(block.instructions[0] ?? '');

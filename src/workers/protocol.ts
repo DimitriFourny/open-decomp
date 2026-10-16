@@ -7,14 +7,15 @@ const pathSchema = z.string().min(1).max(32768);
 export const importRequestSchema = z.strictObject({ kind: z.literal('import'), source_path: pathSchema, slice_id: sliceIdSchema.nullable().default(null), resume_only: z.boolean().optional(), budget: budgetSchema });
 const workerOperationSchema = toolNameSchema.exclude(['project_open', 'project_close', 'analysis_cancel', 'analysis_status']);
 export type WorkerOperation = z.output<typeof workerOperationSchema>;
-const executeSchema = z.strictObject({ kind: z.literal('execute'), operation: workerOperationSchema, args: z.unknown(), budget: budgetSchema }).superRefine((request, ctx) => {
+const executeSchema = z.strictObject({ kind: z.literal('execute'), operation: workerOperationSchema, args: z.unknown(), budget: budgetSchema,
+  max_result_bytes: z.number().int().min(1024).max(MAX_FRAME_BYTES).optional() }).superRefine((request, ctx) => {
   const parsed = toolSchemas[request.operation].input.safeParse(request.args);
   if (!parsed.success) ctx.addIssue({ code: 'custom', message: 'Invalid operation arguments' });
   else if (JSON.stringify(parsed.data.budget) !== JSON.stringify(request.budget)) ctx.addIssue({ code: 'custom', message: 'Operation and worker budgets must agree' });
 });
 export const requestSchema = z.union([importRequestSchema, executeSchema]);
 export type ImportRequest = z.output<typeof importRequestSchema>;
-export type ExecuteRequest = { [K in WorkerOperation]: { kind: 'execute'; operation: K; args: ToolArgs<K>; budget: z.output<typeof budgetSchema> } }[WorkerOperation];
+export type ExecuteRequest = { [K in WorkerOperation]: { kind: 'execute'; operation: K; args: ToolArgs<K>; budget: z.output<typeof budgetSchema>; max_result_bytes?: number } }[WorkerOperation];
 export type WorkRequest = ImportRequest | ExecuteRequest;
 export const snapshotSchema = z.strictObject({ project_id: projectIdSchema, revision: revisionSchema, schema_version: revisionSchema, images: z.array(z.strictObject({ image_id: imageIdSchema, sha256: z.string().regex(/^[a-f0-9]{64}$/), selected_slice_id: sliceIdSchema, state: z.enum(['loaded', 'snapshot_without_metadata']) })).max(MAX_IMAGES) });
 export type WorkerSnapshot = z.output<typeof snapshotSchema>;

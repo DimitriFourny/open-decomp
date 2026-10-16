@@ -7,15 +7,21 @@ import { peLoader } from '../loaders/pe/index.js';
 import { SqliteProjectStore } from '../project/store/index.js';
 import { commandSchema, eventSchema, FrameDecoder, frame, MAX_IMAGES, type Command, type WorkRequest, type WorkerEvent, type WorkerSnapshot } from './protocol.js';
 
+export interface PreparedImport {
+  /** Native facts plus the bounded diagnostic/capability report from import preparation. */
+  readonly image: LoadedImage;
+  publish(transaction: StoreTransaction): void;
+}
+
 /** Statically wire this in a trusted child entry point. Inputs/results are frontend wire types;
  * the store, decoded images and IR remain inside the owning child. Publishing handlers must
  * use store.publishArtifact or commit the terminal job in their mutation transaction.
  * No module names, executable source or SQL are accepted over the transport. */
 export interface WorkerHandler {
-  execute<K extends ToolName>(operation: K, args: ToolArgs<K>, scope: { readonly store: ProjectStore; readonly context: OperationContext; readonly job_id: string }): Promise<ToolResult<K>>;
-  /** Async preparation runs before publication; returned writes run synchronously in
-   * the same transaction as immutable loader facts. A failed preparation publishes none. */
-  prepareImport?(image: LoadedImage, scope: { readonly store: ProjectStore; readonly context: OperationContext; readonly revision: number }): Promise<(tx: StoreTransaction) => void>;
+  execute<K extends ToolName>(operation: K, args: ToolArgs<K>, scope: { readonly store: ProjectStore; readonly context: OperationContext; readonly job_id: string; readonly max_result_bytes?: number }): Promise<ToolResult<K>>;
+  /** Preparation runs before publication. The final image report and navigation
+   * writes share the same transaction; failed preparation publishes neither. */
+  prepareImport?(image: LoadedImage, scope: { readonly store: ProjectStore; readonly context: OperationContext; readonly revision: number }): Promise<PreparedImport>;
 }
 export function workerDiagnostic(error: unknown): Diagnostic {
   return error instanceof OperationError ? error.diagnostic : { code: 'internal_error', severity: 'error', message: (error instanceof Error ? error.message : String(error)).slice(0, 8192), evidence_ids: [] };
@@ -182,10 +188,10 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
           await send({ kind: 'progress', id: job.id, job: encodeJob(job) });
           observer?.phase?.('image_snapshot', job);
           context.checkpoint(0);
-          const publishPrepared = await handler?.prepareImport?.(image, { store: db, context, revision: db.snapshot().revision + 1 });
+          const prepared = await handler?.prepareImport?.(image, { store: db, context, revision: db.snapshot().revision + 1 });
           context.checkpoint(0);
           const completed: Job = { ...job, state: 'completed', progress: { phase: 'complete', completed: 1, total: 1 } };
-          const mutation = db.transaction(db.snapshot().revision, tx => { tx.putImage(image); publishPrepared?.(tx); db.saveJob(completed); });
+          const mutation = db.transaction(db.snapshot().revision, tx => { tx.putImage(prepared?.image ?? image); prepared?.publish(tx); db.saveJob(completed); });
           if (mutation.state !== 'committed') fail('internal_error', 'Loaded image metadata transaction did not commit');
           job = completed;
           await send({ kind: 'progress', id: job.id, job: encodeJob(job) });
@@ -195,9 +201,10 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
         } else {
           if (!handler) fail('unavailable_semantics', `No child handler is registered for ${work.request.operation}`);
           const args = toolSchemas[work.request.operation].input.parse(work.request.args);
-          result = await handler.execute(work.request.operation, args, { store: db, context, job_id: job.id });
+          result = await handler.execute(work.request.operation, args, { store: db, context, job_id: job.id,
+            ...(work.request.max_result_bytes === undefined ? {} : { max_result_bytes: work.request.max_result_bytes }) });
           result = toolSchemas[work.request.operation].output.parse(result);
-          frame(result, work.request.budget.output_bytes);
+          frame(result, Math.min(work.request.budget.output_bytes, work.request.max_result_bytes ?? Infinity));
           const persisted = db.readJob(job.id);
           if (persisted && terminal(persisted)) job = persisted;
           else { context.checkpoint(0); job = { ...job, state: 'completed', progress: { phase: 'complete', completed: 1, total: 1 } }; db.saveJob(job); }
