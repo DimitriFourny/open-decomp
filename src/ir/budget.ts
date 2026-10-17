@@ -16,6 +16,7 @@ export class IRConstructionBudget {
         throw new RangeError('IR construction limits must be nonnegative safe integers');
     }
   }
+
   block(parameters: number): void {
     this.limits.checkpoint?.(0);
     const blocks = this.#blocks + 1;
@@ -25,6 +26,7 @@ export class IRConstructionBudget {
     this.nodes(3 + parameters);
     this.#blocks = blocks;
   }
+
   nodes(count = 1): void {
     this.limits.checkpoint?.(count);
     const nodes = this.#nodes + count;
@@ -32,6 +34,7 @@ export class IRConstructionBudget {
       this.#exceeded('ir_nodes', this.limits.max_ir_nodes!, nodes);
     this.#nodes = nodes;
   }
+
   #exceeded(resource: 'blocks' | 'ir_nodes', limit: number, consumed: number): never {
     throw new OperationError({
       code: 'resource_limit',

@@ -137,6 +137,7 @@ class OwnedStdioTransport extends StdioServerTransport {
     this.#output = output;
     this.#closed = closed;
   }
+
   accept(message: JSONRPCMessage): boolean {
     if (this.#closing) return false;
     if (
@@ -156,6 +157,7 @@ class OwnedStdioTransport extends StdioServerTransport {
     }
     return true;
   }
+
   override send(message: JSONRPCMessage): Promise<void> {
     if (this.#pendingOutput >= MAX_MCP_PENDING_OUTPUTS) {
       const error = new Error(
@@ -186,6 +188,7 @@ class OwnedStdioTransport extends StdioServerTransport {
         this.#requests.delete(message.id);
     });
   }
+
   override async close(): Promise<void> {
     this.#closing = true;
     await super.close();
@@ -200,6 +203,7 @@ class OwnedStdioTransport extends StdioServerTransport {
     process.stdout.destroy();
     this.#closed();
   }
+
   /** Called only after the connection and all owned project workers have closed. */
   exit(): never {
     // Windows fs.write runs a synchronous OS write on libuv's thread pool.

@@ -16,12 +16,14 @@ export class ObjCRecovery {
   readonly protocols = new Map<bigint, string>();
   readonly activeProtocols = new Set<bigint>();
   constructor(readonly r: RuntimeReader) {}
+
   name(slot: bigint, allowEmpty = false): string {
     const value = this.r.pointer(slot);
     if (value === null)
       throw new RuntimeIssue('malformed_image', 'Missing Objective-C metadata name pointer', slot);
     return this.r.text(value, false, allowEmpty);
   }
+
   classAt(slot: bigint, depth: number): { name: string; target: bigint | null } | null {
     this.r.file(slot, 8n);
     const external = this.r.externalClasses.get(slot),
@@ -38,6 +40,7 @@ export class ObjCRecovery {
     const target = this.r.pointer(slot);
     return target === null ? null : { name: this.classInfo(target, depth), target };
   }
+
   methods(address: bigint | null, owner: string, classMethod: boolean, declaration = false): void {
     if (address === null) return;
     const r = this.r,
@@ -86,6 +89,7 @@ export class ObjCRecovery {
         );
       });
   }
+
   ivars(address: bigint | null, owner: string): void {
     if (address === null) return;
     const r = this.r,
@@ -106,6 +110,7 @@ export class ObjCRecovery {
         });
       });
   }
+
   adopted(address: bigint | null, owner: string, depth: number): void {
     if (address === null) return;
     const r = this.r,
@@ -120,6 +125,7 @@ export class ObjCRecovery {
         r.add('objc_protocol_adoption', name, slot, 8n, { owner, target });
       });
   }
+
   protocol(address: bigint, depth: number): string {
     const r = this.r;
     r.depth(depth, address);
@@ -154,6 +160,7 @@ export class ObjCRecovery {
       this.activeProtocols.delete(address);
     }
   }
+
   classInfo(address: bigint, depth = 0, metaclass = false, instanceOwner?: string): string {
     const r = this.r;
     r.depth(depth, address);
@@ -224,6 +231,7 @@ export class ObjCRecovery {
       this.activeClasses.delete(address);
     }
   }
+
   category(address: bigint): void {
     const r = this.r;
     r.file(address, 48n);
@@ -237,6 +245,7 @@ export class ObjCRecovery {
     r.attempt(() => this.methods(r.pointer(address + 24n), owner, true));
     r.attempt(() => this.adopted(r.pointer(address + 32n), owner, 0));
   }
+
   run(): void {
     const r = this.r;
     for (const section of r.sections)

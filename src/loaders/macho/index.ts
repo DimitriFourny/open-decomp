@@ -205,6 +205,7 @@ export class MachOLoader implements Loader {
     for (const entry of entries) add(entry.offset, entry.size, entry);
     return { slices, diagnostics };
   }
+
   load(input: Parameters<Loader['load']>[0], context: OperationContext): LoadedImage {
     const inspection = this.inspect(input.bytes, input.image_id, context),
       supported = inspection.slices.filter((slice) => slice.supported);

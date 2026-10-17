@@ -237,14 +237,18 @@ bun run smoke:mcp
 
 `check` runs typecheck, tests and compilation using the existing `tsc`, Node `node:test` and `tsx` toolchain. Run tests with `bun run test`, **not `bun test`**; Bun is not the application or test runtime. The release harness is the maintained official-SDK client driving the actual compiled server; its `--server-entry PATH --fixtures PATH` options select another entry/corpus. Fixture `bin`, sibling `manifest.json`, `elf-manifest.json` and `malformed` inputs must agree. It never executes analyzed binaries. General fixture rebuild/native trusted-execution commands are separate explicit developer actions documented in [FIXTURES.md](FIXTURES.md), not install/service behavior.
 
-Formatting uses the exact-pinned local Prettier development dependency; the pinned Bun 1.4.3 does not provide `bun fmt`. From the repository root:
+Formatting runs the exact-pinned local ESLint Stylistic fixer before Prettier; the pinned Bun 1.4.3 does not provide `bun fmt`. From the repository root:
 
 ```sh
 bun run format        # Rewrite supported first-party files
 bun run format:check  # Check without writing; exits 1 for formatting differences
+bun run format src/emitters/renderer.ts
+bun run format:check src/emitters/renderer.ts
 ```
 
-`.prettierrc.json` uses two-space indentation, single quotes, semicolons, trailing commas and a 100-column print width. `.prettierignore` excludes the Bun lockfile, vendored code, license snapshots, fixture corpora and hash-bound fixture generation recipes; `.gitignore` also applies. Prettier-aware editors use the same local dependency and configuration.
+Optional paths restrict both stages to those files or directories; without paths, both stages process the checkout. `eslint.config.js` requires blank lines between consecutive class methods, without requiring separators between fields or statements. It keeps TypeScript overload signatures grouped. ESLint inserts the method separators and Prettier preserves them.
+
+`.prettierrc.json` uses two-space indentation, single quotes, semicolons, trailing commas and a 100-column print width. Both stages respect `.gitignore` and `.prettierignore`, excluding the Bun lockfile, vendored code, license snapshots, fixture corpora and hash-bound fixture generation recipes. Prettier-aware editors use the same local dependency and configuration; run the formatting command to apply the method-spacing rule too.
 
 Formatting is separate from `bun run check`; run `bun run format:check` alongside the typecheck, tests and build to verify code style.
 

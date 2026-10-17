@@ -176,6 +176,7 @@ export class BinarySession {
     this.projectId = opened.project_id;
     this.revision = opened.revision;
   }
+
   /** Use openBinary() rather than constructing a service/project manually. */
   static async open(input: string, options: OpenBinaryOptions = {}): Promise<BinarySession> {
     const sliceId =
@@ -228,9 +229,11 @@ export class BinarySession {
       throw error;
     }
   }
+
   #requireOpen(): void {
     if (this.#closing) invalid('Binary session is closed.');
   }
+
   async findFunctions(
     options: FunctionQuery = {},
     call: QueryCallOptions = {},
@@ -242,6 +245,7 @@ export class BinarySession {
       call,
     );
   }
+
   async decompile(
     input: FunctionSelector,
     options: DecompileOptions = {},
@@ -292,6 +296,7 @@ export class BinarySession {
     );
     return this.#materialize(result, options.signal);
   }
+
   async #materialize(
     result: ToolResult<'function_decompile'>,
     signal?: AbortSignal,
@@ -360,6 +365,7 @@ export class BinarySession {
       data: { ...stored.data, cache: result.data.cache },
     });
   }
+
   close(): Promise<void> {
     this.#closing ??= this.service.close('cancel');
     return this.#closing;

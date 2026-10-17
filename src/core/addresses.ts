@@ -99,25 +99,30 @@ export class ImmutableBytes {
     this.#bytes = new Uint8Array(bytes);
     this.#view = new DataView(this.#bytes.buffer, this.#bytes.byteOffset, this.#bytes.byteLength);
   }
+
   get length(): number {
     return this.#bytes.length;
   }
+
   at(offset: number): number {
     if (!Number.isSafeInteger(offset) || offset < 0 || offset >= this.length)
       throw new RangeError('Byte offset outside image');
     return this.#bytes[offset]!;
   }
+
   read(offset: bigint, length: number): Uint8Array {
     if (!Number.isSafeInteger(length) || length < 0) throw new RangeError('Invalid byte count');
     const start = checkedIndex(offset, this.length);
     checkedIndex(offset + BigInt(length), this.length);
     return this.#bytes.slice(start, start + length);
   }
+
   u32(offset: bigint, littleEndian = true): number {
     const start = checkedIndex(offset, this.length);
     checkedIndex(offset + 4n, this.length);
     return this.#view.getUint32(start, littleEndian);
   }
+
   u64(offset: bigint, littleEndian = true): bigint {
     const start = checkedIndex(offset, this.length);
     checkedIndex(offset + 8n, this.length);
@@ -168,6 +173,7 @@ export class AddressMap {
       ),
     });
   }
+
   translate(source: Address, space: Address['space']): Translation {
     const context = this.#context;
     if (source.image_id !== context.image_id)
@@ -228,6 +234,7 @@ export class AddressMap {
       mapping_id: mapping.id,
     };
   }
+
   /** Partition a read without inventing backing bytes for holes or zero-fill. */
   spans(source: Address, size: bigint): readonly TranslationSpan[] {
     const context = this.#context;

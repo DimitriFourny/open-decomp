@@ -333,11 +333,13 @@ export class SqliteProjectStore implements ProjectStore {
       'revision',
     );
   }
+
   #revision(revision: number): void {
     revisionSchema.parse(revision);
     if (revision > this.#current())
       fail('stale_revision', 'Requested project revision does not exist');
   }
+
   #latest(
     table: 'evidence' | 'types' | 'signatures' | 'annotations',
     id: string,
@@ -348,6 +350,7 @@ export class SqliteProjectStore implements ProjectStore {
       .prepare(`SELECT * FROM ${table} WHERE id=? AND revision<=? ORDER BY revision DESC LIMIT 1`)
       .get(id, revision);
   }
+
   #storagePath(kind: 'images' | 'artifacts', filename: string): string {
     directory(join(this.#path, kind), false);
     return join(this.#path, kind, filename);
@@ -801,6 +804,7 @@ export class SqliteProjectStore implements ProjectStore {
       return value;
     });
   }
+
   queryAnnotations(query: AnnotationQuery): {
     items: readonly Annotation[];
     next_cursor: string | null;
@@ -856,6 +860,7 @@ export class SqliteProjectStore implements ProjectStore {
         : null,
     };
   }
+
   queryAnnotationHistory(query: AnnotationHistoryQuery): {
     items: readonly AnnotationHistoryEntry[];
     next_cursor: string | null;
@@ -926,6 +931,7 @@ export class SqliteProjectStore implements ProjectStore {
         : null,
     };
   }
+
   readEvidence(ids: readonly string[], revision: number): readonly Evidence[] {
     this.#revision(revision);
     if (ids.length > 1000) fail('resource_limit', 'Too many evidence identities');
@@ -941,6 +947,7 @@ export class SqliteProjectStore implements ProjectStore {
     }
     return values;
   }
+
   readType(
     id: string,
     revision: number,
@@ -955,12 +962,14 @@ export class SqliteProjectStore implements ProjectStore {
     value.evidence_ids.forEach((item) => evidenceIdSchema.parse(item));
     return value;
   }
+
   readSignature(functionId: string, revision: number): Signature | null {
     entityIdSchema.parse(functionId);
     const row = this.#latest('signatures', functionId, revision);
     if (!row) return null;
     return signatureSchema.parse(decodeStored<Signature>(row['payload']));
   }
+
   readLineage(entityId: string, revision: number): readonly z.infer<typeof lineageSchema>[] {
     this.#revision(revision);
     entityIdSchema.parse(entityId);
@@ -1206,6 +1215,7 @@ export class SqliteProjectStore implements ProjectStore {
     }
     this.#db.prepare('INSERT OR REPLACE INTO jobs VALUES (?,?)').run(job.id, encodeStored(job));
   }
+
   readJob(jobId: string): Job | null {
     this.#current();
     jobIdSchema.parse(jobId);
@@ -1215,6 +1225,7 @@ export class SqliteProjectStore implements ProjectStore {
     encodeJob(job);
     return job;
   }
+
   listJobs(query: { readonly limit: number; readonly cursor?: string }): {
     items: readonly Job[];
     next_cursor: string | null;
@@ -1247,6 +1258,7 @@ export class SqliteProjectStore implements ProjectStore {
         : null,
     };
   }
+
   async close(): Promise<void> {
     if (this.#closed) return;
     if (this.#transaction) fail('invalid_input', 'Cannot close a project inside a transaction');

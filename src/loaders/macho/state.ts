@@ -42,14 +42,17 @@ export class State {
     readonly r: Reader,
     readonly slice: ImageSlice,
   ) {}
+
   id(kind: string, birth: number | string | bigint): string {
     return entityIdentity(this.slice.id, kind, birth);
   }
+
   va(value: bigint): Address {
     if (value < 0n || value >= 1n << 64n)
       throw new MachOError('malformed_image', 'Address exceeds unsigned 64-bit space');
     return { image_id: this.slice.image_id, space: 'va', value };
   }
+
   file(offset: number, size: number): AddressRange {
     this.r.range(offset, size);
     return {
@@ -61,6 +64,7 @@ export class State {
       size: BigInt(size),
     };
   }
+
   proof(offset: number, size: number, claim: string): string[] {
     this.r.range(offset, size);
     const id = `evidence_${fingerprint([this.slice.id, offset, size, claim])}`;
@@ -77,6 +81,7 @@ export class State {
     }
     return [id];
   }
+
   header(
     kind: HeaderRecord['kind'],
     name: string,
@@ -88,6 +93,7 @@ export class State {
     this.headers.push({ kind, name, range: this.file(p, size), fields, evidence_ids: evidence });
     return evidence;
   }
+
   warn(
     message: string,
     code: Diagnostic['code'] = 'unsupported_target',
@@ -96,6 +102,7 @@ export class State {
     if (this.diagnostics.length < 1000)
       this.diagnostics.push({ code, severity: 'warning', message, evidence_ids });
   }
+
   optional(label: string, parse: () => void): void {
     try {
       parse();
@@ -110,11 +117,13 @@ export class State {
       this.warn(`${label}: ${error.message}`, error.diagnostic.code);
     }
   }
+
   readable(p: number, n: number): void {
     this.r.range(p, n);
     if (this.encrypted.some((range) => range.offset < p + n && p < range.offset + range.size))
       throw new MachOError('unsupported_target', 'Metadata overlaps encrypted bytes');
   }
+
   library(ordinal: number): string | null {
     if (ordinal <= 0)
       return (

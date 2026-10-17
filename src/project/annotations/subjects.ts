@@ -169,12 +169,15 @@ export class TrustedSemanticCatalog {
     if (this.project_id !== store.project_id || this.revision !== revision)
       missing('Semantic catalog belongs to a different project or revision');
   }
+
   subject(id: string): AnnotationSubject | null {
     return this.#subjects.get(id) ?? null;
   }
+
   types(id: string): readonly SuppliedTypeRecord[] {
     return structuredClone(this.#types.get(id) ?? []);
   }
+
   evidence(id: string): Evidence | null {
     const value = this.#evidence.get(id);
     return value ? structuredClone(value) : null;

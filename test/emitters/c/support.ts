@@ -105,25 +105,30 @@ class Parser {
     this.position = start;
     this.block([]);
   }
+
   private peek(): string {
     return this.tokens[this.position] ?? '';
   }
+
   private take(expected?: string): string {
     const token = this.tokens[this.position++];
     assert.ok(token, 'Unexpected end of emitted code');
     if (expected !== undefined) assert.equal(token, expected);
     return token;
   }
+
   private block(breaks: number[]): void {
     this.take('{');
     while (this.peek() !== '}') this.statement(breaks);
     this.take('}');
   }
+
   private pythonBlock(): void {
     this.take('INDENT');
     while (this.peek() !== 'DEDENT') this.pythonStatement();
     this.take('DEDENT');
   }
+
   private pythonStatement(): void {
     const token = this.take();
     if (token === 'memory' && this.peek() === '.') {
@@ -277,6 +282,7 @@ class Parser {
     this.take('\n');
     this.ops.push({ kind: 'assign', names, expression, tuple });
   }
+
   private statement(breaks: number[]): void {
     const token = this.take();
     if (token === '(' && this.peek() === '*') {
@@ -420,6 +426,7 @@ class Parser {
     this.take(';');
     this.ops.push({ kind: 'assign', names, expression, tuple: token === '(' });
   }
+
   private memoryStatement(end: string): void {
     const memory = this.expression();
     assert.ok(memory.kind === 'call' && memory.name === 'read_memory');
@@ -437,6 +444,7 @@ class Parser {
     } else this.ops.push({ kind: 'effect', expression: memory });
     this.take(end);
   }
+
   private expression(minimum = 0): Expr {
     let left = this.atom();
     const precedence: Record<string, number> = {
@@ -477,6 +485,7 @@ class Parser {
     }
     return left;
   }
+
   private atom(): Expr {
     const token = this.take();
     if (token === '*') {

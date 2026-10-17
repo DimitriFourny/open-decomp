@@ -33,9 +33,11 @@ export class Reader {
     readonly image: string,
     readonly context: OperationContext,
   ) {}
+
   address(space: Address['space'], value: bigint): Address {
     return { image_id: this.image, space, value };
   }
+
   fail(message: string, offset?: bigint): never {
     throw new ELFLoadError(
       'malformed_image',
@@ -43,15 +45,18 @@ export class Reader {
       offset === undefined ? undefined : this.address('file', offset),
     );
   }
+
   work(units = 1): void {
     if (this.context.signal.aborted)
       throw new ELFLoadError('cancelled', 'ELF inspection cancelled');
     this.context.checkpoint(units);
   }
+
   bounds(offset: bigint, size: bigint): void {
     if (offset < 0n || size < 0n || offset + size > BigInt(this.bytes.length))
       this.fail('ELF file range exceeds container', offset < 0n ? undefined : offset);
   }
+
   end(start: bigint, size: bigint): bigint {
     try {
       return checkedEnd(start, size);
@@ -59,29 +64,35 @@ export class Reader {
       return this.fail('ELF address range overflows uint64');
     }
   }
+
   u8(p: bigint): number {
     this.work();
     this.bounds(p, 1n);
     return this.bytes.at(Number(p));
   }
+
   u16(p: bigint): number {
     this.bounds(p, 2n);
     return this.u8(p) + 256 * this.u8(p + 1n);
   }
+
   u32(p: bigint): number {
     this.work();
     this.bounds(p, 4n);
     return this.bytes.u32(p);
   }
+
   u64(p: bigint): bigint {
     this.work();
     this.bounds(p, 8n);
     return this.bytes.u64(p);
   }
+
   signed(p: bigint, width: number): bigint {
     const value = width === 64 ? this.u64(p) : BigInt(this.u32(p));
     return BigInt.asIntN(width, value);
   }
+
   table(p: bigint, count: bigint, stride: bigint): number {
     if (stride <= 0n) this.fail('ELF table has zero entry size', p);
     this.bounds(p, count * stride);
@@ -95,6 +106,7 @@ export class Reader {
     this.work(Number(count));
     return Number(count);
   }
+
   string(p: bigint, end: bigint): string {
     this.bounds(p, 0n);
     this.bounds(end, 0n);
@@ -114,6 +126,7 @@ export class Reader {
     }
     return value;
   }
+
   identification(): { supported: boolean; architecture: string; reason: string } {
     this.work();
     if (this.bytes.length > 128 * 1024 * 1024)
@@ -144,6 +157,7 @@ export class Reader {
         : `Unsupported ELF machine ${machine}, type ${type}, OSABI ${osabi}; require EM_X86_64 ET_EXEC/ET_DYN System V/Linux`,
     };
   }
+
   basic(): ELFHeader {
     if (this.u32(20n) !== 1 || this.u16(52n) !== 64)
       this.fail('Invalid ELF64 header version or size');

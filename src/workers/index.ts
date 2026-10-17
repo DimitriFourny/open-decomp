@@ -126,6 +126,7 @@ export class ProjectWorkerPool {
     bounded(options.startup_timeout_ms, 30000, 1, 600000);
     bounded(options.cancel_grace_ms, 100, 0, 10000);
   }
+
   static async create(options: WorkerPoolOptions): Promise<ProjectWorkerPool> {
     if (!options.authorized_roots.length || options.authorized_roots.length > 64)
       throw failure('invalid_input', 'Configure between one and 64 authorized roots');
@@ -139,9 +140,11 @@ export class ProjectWorkerPool {
     );
     return new ProjectWorkerPool(roots, options);
   }
+
   async authorize(path: string, create = false): Promise<string> {
     return authorizePath(this.#roots, path, create);
   }
+
   async open(input: { path: string; mode: 'create' | 'resume' }): Promise<ProjectWorker> {
     if (this.#closed) throw failure('invalid_input', 'Worker pool is closed');
     if (this.#projects.size + this.#opening >= this.max_workers)
@@ -167,6 +170,7 @@ export class ProjectWorkerPool {
       this.#opening--;
     }
   }
+
   async close(policy: 'wait' | 'cancel' | 'reject' = 'wait'): Promise<void> {
     if (policy === 'reject' && [...this.#projects.values()].some((project) => project.busy))
       throw failure('invalid_input', 'Worker pool has active jobs');
@@ -209,16 +213,20 @@ export class ProjectWorker {
     this.#options = options;
     this.#release = release;
   }
+
   get pid(): number | undefined {
     return this.#child?.pid;
   }
+
   get busy(): boolean {
     return this.#jobs.size + this.#reserved > 0;
   }
+
   get snapshot(): WorkerSnapshot {
     if (!this.#snapshot) throw failure('invalid_input', 'Worker is not ready');
     return structuredClone(this.#snapshot);
   }
+
   async start(
     mode: 'create' | 'resume',
     interrupted?: { id: string; reason: 'cancelled' | 'deadline' },
@@ -300,6 +308,7 @@ export class ProjectWorker {
       clearTimeout(timeout);
     }
   }
+
   async #rpc(command: Command): Promise<WorkerEvent> {
     if (!this.#child || this.#child.exitCode !== null || this.#child.signalCode !== null)
       throw failure('worker_failed', 'Project worker is unavailable');
@@ -320,6 +329,7 @@ export class ProjectWorker {
     });
     return result.promise;
   }
+
   async submit(
     input: WorkRequest,
     options: { signal?: AbortSignal; onProgress?: (job: WireJob) => void } = {},
@@ -388,6 +398,7 @@ export class ProjectWorker {
       this.#reserved--;
     }
   }
+
   #pump(): void {
     if (this.#running || this.#recovering || this.#closed) return;
     const job = [...this.#jobs.values()].find((item) => item.admitted);
@@ -434,24 +445,28 @@ export class ProjectWorker {
         if (!this.#recovering) this.#finishError(job, error);
       });
   }
+
   #remove(job: PendingJob): void {
     clearTimeout(job.timer);
     job.cleanup();
     this.#jobs.delete(job.id);
     if (this.#running === job) this.#running = undefined;
   }
+
   #finish(job: PendingJob, outcome: JobOutcome): void {
     this.#remove(job);
     job.accepted.resolve(outcome.job);
     job.outcome.resolve(outcome);
     this.#pump();
   }
+
   #finishError(job: PendingJob, error: unknown): void {
     this.#remove(job);
     job.accepted.reject(error);
     job.outcome.reject(error);
     this.#pump();
   }
+
   async #interrupt(id: string, reason: 'cancelled' | 'deadline'): Promise<void> {
     const job = this.#jobs.get(id);
     if (!job) return;
@@ -464,6 +479,7 @@ export class ProjectWorker {
     // A blocked JS loop cannot receive cancellation. Stop the owner, then reconcile SQLite.
     await this.#recover({ id, reason });
   }
+
   #recover(interrupted?: { id: string; reason: 'cancelled' | 'deadline' }): Promise<void> {
     if (this.#recovering) return this.#recovering;
     this.#recovering = (async () => {
@@ -507,6 +523,7 @@ export class ProjectWorker {
     });
     return this.#recovering;
   }
+
   /** Active observations are last acknowledged durable child states, not invented host
    * progress. This remains responsive while the owner is in synchronous analysis. */
   async inspectJob(id: string): Promise<WireJob> {
@@ -518,6 +535,7 @@ export class ProjectWorker {
       throw failure('worker_failed', 'Invalid job inspection acknowledgement');
     return event.job;
   }
+
   /** Cancels admitted work through the existing durable lifecycle, never a second queue. */
   async cancelJob(id: string): Promise<WireJob> {
     const pending = this.#jobs.get(id);
@@ -527,6 +545,7 @@ export class ProjectWorker {
     }
     return this.inspectJob(id);
   }
+
   /** Artifact identities are resolved only by this project's child/store. Hex output is
    * capped below the IPC frame limit; next_offset permits bounded continuation. */
   async readArtifact(input: ArtifactReadInput): Promise<ArtifactReadResult> {
@@ -540,6 +559,7 @@ export class ProjectWorker {
       throw failure('worker_failed', 'Invalid artifact acknowledgement');
     return event.result;
   }
+
   async refresh(): Promise<WorkerSnapshot> {
     if (this.#recovering) await this.#recovering;
     const event = await this.#rpc({ kind: 'snapshot', id: newIdentity('job') });
@@ -548,6 +568,7 @@ export class ProjectWorker {
     this.#snapshot = event.snapshot;
     return this.snapshot;
   }
+
   async close(policy: 'wait' | 'cancel' | 'reject' = 'wait'): Promise<void> {
     if (this.#closePromise) return this.#closePromise;
     if (this.#closed) return this.#disposePromise;
@@ -556,6 +577,7 @@ export class ProjectWorker {
     this.#closePromise = this.#closeOwned(policy);
     return this.#closePromise;
   }
+
   async #closeOwned(policy: 'wait' | 'cancel' | 'reject'): Promise<void> {
     if (policy === 'cancel')
       await Promise.all([...this.#jobs.keys()].map((id) => this.#interrupt(id, 'cancelled')));
@@ -575,6 +597,7 @@ export class ProjectWorker {
       await this.dispose();
     }
   }
+
   /** Unconditionally releases the OS owner; pending identities are reconciled on next resume. */
   dispose(): Promise<void> {
     if (this.#disposePromise) return this.#disposePromise;

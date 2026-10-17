@@ -86,9 +86,11 @@ class Reader {
     readonly image: string,
     readonly context: OperationContext,
   ) {}
+
   address(space: Address['space'], value: bigint): Address {
     return { image_id: this.image, space, value: checkedU64(value) };
   }
+
   fail(message: string, offset?: bigint): never {
     throw new PELoadError(
       'malformed_image',
@@ -96,33 +98,40 @@ class Reader {
       offset === undefined ? undefined : this.address('file', offset),
     );
   }
+
   work(units = 1): void {
     if (this.context.signal.aborted) throw new PELoadError('cancelled', 'PE inspection cancelled');
     this.context.checkpoint(units);
   }
+
   bounds(offset: bigint, size: bigint): void {
     if (offset < 0n || size < 0n || offset + size > BigInt(this.bytes.length))
       this.fail('PE file range exceeds container', offset < 0n ? undefined : offset);
   }
+
   u8(offset: bigint): number {
     this.work();
     this.bounds(offset, 1n);
     return this.bytes.at(Number(offset));
   }
+
   u16(offset: bigint): number {
     this.bounds(offset, 2n);
     return this.u8(offset) + 256 * this.u8(offset + 1n);
   }
+
   u32(offset: bigint): number {
     this.work();
     this.bounds(offset, 4n);
     return this.bytes.u32(offset);
   }
+
   u64(offset: bigint): bigint {
     this.work();
     this.bounds(offset, 8n);
     return this.bytes.u64(offset);
   }
+
   fixed(offset: bigint, size: number): string {
     this.bounds(offset, BigInt(size));
     let text = '';
@@ -133,6 +142,7 @@ class Reader {
     }
     return text;
   }
+
   string(offset: bigint, end = BigInt(this.bytes.length)): string {
     let text = '';
     for (let i = 0; i <= MAX_STRING; i++) {
@@ -150,6 +160,7 @@ class Reader {
     }
     return text;
   }
+
   count(count: number, stride: number, offset: bigint): void {
     this.bounds(offset, BigInt(count) * BigInt(stride));
     if (count > MAX_RECORDS)
@@ -159,6 +170,7 @@ class Reader {
         this.address('file', offset),
       );
   }
+
   basic(): BasicHeader {
     this.bounds(0n, 64n);
     if (this.u16(0n) !== 0x5a4d) this.fail('Missing DOS MZ signature', 0n);
@@ -210,13 +222,16 @@ class Parser extends Reader {
   ) {
     super(bytes, image, context);
   }
+
   id(kind: string, offset: bigint | number): string {
     return entityIdentity(this.slice.id, `pe:${kind}`, BigInt(offset));
   }
+
   range(space: Address['space'], offset: bigint, size: bigint): AddressRange {
     checkedEnd(offset, size);
     return { start: this.address(space, offset), size };
   }
+
   fact(offset: bigint, size: bigint, claim: string): string[] {
     const id = `evidence_${fingerprint([this.slice.id, offset, size, claim])}`;
     this.evidence.push({
@@ -229,6 +244,7 @@ class Parser extends Reader {
     });
     return [id];
   }
+
   header(
     kind: HeaderRecord['kind'],
     name: string,
@@ -244,6 +260,7 @@ class Parser extends Reader {
       evidence_ids: this.fact(offset, size, name),
     });
   }
+
   unsupported(feature: string, message: string, offset?: bigint): void {
     if (this.unsupportedFeatures.has(feature)) return;
     if (this.capabilities.length >= 1000)
@@ -263,6 +280,7 @@ class Parser extends Reader {
       ...(offset === undefined ? {} : { address: this.address('file', offset) }),
     });
   }
+
   /** Metadata reads must be backed by one contiguous mapping, never by virtual zero-fill. */
   file(rva: bigint, size: bigint): bigint {
     if (rva < 0n || rva + size > this.imageSize) this.fail('PE RVA range exceeds SizeOfImage');
@@ -276,6 +294,7 @@ class Parser extends Reader {
       );
     return mapping.file_offset + va - mapping.va;
   }
+
   memory(rva: bigint, size: bigint, executable = false): Address {
     if (size <= 0n || rva + size > this.imageSize) this.fail('Invalid PE memory range');
     const va = this.base + rva;
@@ -290,6 +309,7 @@ class Parser extends Reader {
       this.fail('PE reference is outside a suitable mapped region');
     return this.address('va', va);
   }
+
   rvaString(rva: bigint, endRva?: bigint): string {
     const file = this.file(rva, 1n);
     const mapping = this.mappings.find(
@@ -299,14 +319,17 @@ class Parser extends Reader {
     if (endRva !== undefined && file + endRva - rva < end) end = file + endRva - rva;
     return this.string(file, end);
   }
+
   vaRva(value: bigint): bigint {
     if (value < this.base || value - this.base >= this.imageSize)
       this.fail('PE VA reference is outside image');
     return value - this.base;
   }
+
   directory(index: number): Directory | undefined {
     return this.directories.find((d) => d.index === index && d.size !== 0n);
   }
+
   parseHeaders(h: BasicHeader): void {
     if (h.machine !== 0x8664 || h.magic !== 0x20b)
       throw new PELoadError('unsupported_target', 'Only AMD64 PE32+ images are supported');
@@ -586,6 +609,7 @@ class Parser extends Reader {
     this.count(count, stride, p);
     return p;
   }
+
   parseImports(delayed: boolean): void {
     const d = this.directory(delayed ? 13 : 1);
     if (!d) return;
@@ -687,6 +711,7 @@ class Parser extends Reader {
     if (!terminated)
       this.fail('Import descriptor directory lacks a terminating null descriptor', start);
   }
+
   parseExports(): void {
     const d = this.directory(0);
     if (!d) return;
@@ -765,6 +790,7 @@ class Parser extends Reader {
       }
     }
   }
+
   parseRelocations(): void {
     const d = this.directory(5);
     if (!d) return;
@@ -818,6 +844,7 @@ class Parser extends Reader {
       cursor += BigInt(size);
     }
   }
+
   parseExceptions(): void {
     const d = this.directory(3);
     if (!d) return;
@@ -850,6 +877,7 @@ class Parser extends Reader {
       this.unwind(unwind, begin, end, evidence_ids);
     }
   }
+
   unwind(initial: bigint, begin: bigint, end: bigint, evidence: readonly string[]): void {
     const visited = new Set<bigint>();
     let rva = initial;
@@ -975,6 +1003,7 @@ class Parser extends Reader {
     }
     throw new PELoadError('resource_limit', 'PE unwind chain exceeds 64 records');
   }
+
   parseTls(): void {
     const d = this.directory(9);
     if (!d) return;
@@ -1023,6 +1052,7 @@ class Parser extends Reader {
     }
     throw new PELoadError('resource_limit', 'TLS callback table exceeds 100000 entries');
   }
+
   parseDebug(): void {
     const d = this.directory(6);
     if (!d) return;
@@ -1087,6 +1117,7 @@ class Parser extends Reader {
       this.header('debug_record', 'IMAGE_DEBUG_DIRECTORY', p, 28n, fields);
     }
   }
+
   parseSymbols(h: BasicHeader): void {
     const pointer = BigInt(this.u32(h.coff + 8n)),
       count = this.u32(h.coff + 12n);
@@ -1149,6 +1180,7 @@ class Parser extends Reader {
         this.sections[i] = { ...section, name: longName(Number(section.name.slice(1))) };
     }
   }
+
   load(sha256: string): LoadedImage {
     const h = this.basic();
     this.parseHeaders(h);
@@ -1243,6 +1275,7 @@ export class PELoader implements Loader {
         : [],
     };
   }
+
   load(input: Parameters<Loader['load']>[0], context: OperationContext): LoadedImage {
     const inspection = this.inspect(input.bytes, input.image_id, context),
       slice = inspection.slices[0]!;

@@ -138,15 +138,18 @@ export class RuntimeReader {
       image.headers.some((header) => header.name === 'LC_DYLD_CHAINED_FIXUPS') ||
       image.diagnostics.length !== 0;
   }
+
   address(value: bigint): Address {
     return { image_id: this.image.id, space: 'va', value };
   }
+
   plus(address: bigint, offset: bigint): bigint {
     const value = address + offset;
     if (value < 0n || value >= 1n << 64n)
       throw new RuntimeIssue('malformed_image', 'Runtime metadata address overflows', address);
     return value;
   }
+
   section(address: bigint, size = 1n): Section {
     this.context.checkpoint(1);
     const end = address + size;
@@ -173,6 +176,7 @@ export class RuntimeReader {
       );
     return section;
   }
+
   file(address: bigint, size: bigint): bigint {
     this.section(address, size);
     const spans = this.image.address_map.spans(this.address(address), size),
@@ -200,16 +204,20 @@ export class RuntimeReader {
       );
     return span.file_offset;
   }
+
   u32(address: bigint): number {
     return this.image.bytes.u32(this.file(address, 4n));
   }
+
   u16(address: bigint): number {
     const offset = this.file(address, 2n);
     return this.image.bytes.at(Number(offset)) | (this.image.bytes.at(Number(offset + 1n)) << 8);
   }
+
   u64(address: bigint): bigint {
     return this.image.bytes.u64(this.file(address, 8n));
   }
+
   pointer(address: bigint): bigint | null {
     const offset = this.file(address, 8n);
     const fixup = this.fixups.get(address);
@@ -244,6 +252,7 @@ export class RuntimeReader {
       );
     return raw;
   }
+
   relative(address: bigint, indirectable = false): bigint | null {
     const raw = this.u32(address) | 0;
     if (raw === 0) return null;
@@ -251,6 +260,7 @@ export class RuntimeReader {
     const target = this.plus(address, BigInt(indirectable ? raw & ~1 : raw));
     return indirect ? this.pointer(target) : target;
   }
+
   text(address: bigint, symbolic = false, allowEmpty = false): string {
     const section = this.section(address),
       remaining = section.virtual_range.start.value + section.virtual_range.size - address;
@@ -336,6 +346,7 @@ export class RuntimeReader {
       address,
     );
   }
+
   executable(address: bigint): boolean {
     if (address % 4n !== 0n) return false;
     try {
@@ -356,6 +367,7 @@ export class RuntimeReader {
       return false;
     }
   }
+
   count(count: bigint, address: bigint): number {
     if (count > BigInt(this.limits.max_entries))
       throw new RuntimeIssue(
@@ -365,10 +377,12 @@ export class RuntimeReader {
       );
     return Number(count);
   }
+
   depth(depth: number, address: bigint): void {
     if (depth > this.limits.max_depth)
       throw new RuntimeIssue('resource_limit', 'Runtime metadata traversal depth reached', address);
   }
+
   attempt(action: () => void): void {
     try {
       action();
@@ -377,6 +391,7 @@ export class RuntimeReader {
       this.report(error);
     }
   }
+
   report(error: RuntimeIssue): void {
     this.partial = true;
     if (this.diagnostics.length < 256)
@@ -388,6 +403,7 @@ export class RuntimeReader {
         evidence_ids: [],
       });
   }
+
   add(
     kind: RuntimeKind,
     name: string,

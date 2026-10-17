@@ -234,6 +234,7 @@ export class X86Decoder implements Decoder {
   constructor(options: X86DecoderOptions = {}) {
     this.#formatter = options.formatting === false ? null : new Formatter(FormatterSyntax.Intel);
   }
+
   decode(request: DecodeRequest, context: OperationContext): DecodeResult {
     if (this.#disposed) throw new Error('X86Decoder is disposed');
     if (request.mode !== 'long64' || request.image.target.architecture !== 'x86_64')
@@ -447,6 +448,7 @@ export class X86Decoder implements Decoder {
       },
     };
   }
+
   format(instruction: DecodedInstruction): {
     readonly mnemonic: string;
     readonly operands: string;
@@ -459,6 +461,7 @@ export class X86Decoder implements Decoder {
       );
     return { ...result };
   }
+
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;

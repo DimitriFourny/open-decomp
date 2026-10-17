@@ -61,6 +61,7 @@ export class IRBuilder<Form extends FunctionIR['form'] = 'register'> {
     sliceIdSchema.parse(slice_id);
     entityIdSchema.parse(function_id);
   }
+
   block(
     birth: CanonicalValue,
     parameters: readonly DataType[] = [],
@@ -74,6 +75,7 @@ export class IRBuilder<Form extends FunctionIR['form'] = 'register'> {
     this.#blocks.push(block);
     return block;
   }
+
   finish(
     entry: BlockBuilder,
     returns: readonly DataType[] = [],
@@ -127,24 +129,29 @@ export class BlockBuilder {
     };
     this.#effect = this.effect_parameter;
   }
+
   /** Change current instruction origin before emitting its semantic nodes. */
   source(provenance: Provenance): this {
     this.#source = provenance;
     return this;
   }
+
   get effect(): Effect {
     return this.#effect;
   }
+
   #identity(kind: string): EntityId {
     if (this.#terminator) throw new TypeError('Cannot append after a terminator');
     return entityIdentity(this.slice_id, `ir.${kind}`, [this.id, this.#sequence++]);
   }
+
   #order(): { effect_in: Effect; effect_out: Effect } {
     const effect_in = this.#effect;
     const effect_out: Effect = { id: this.#identity('effect'), type: effectType };
     this.#effect = effect_out;
     return { effect_in, effect_out };
   }
+
   assign(type: DataType, expression: Expression): Value {
     this.budget?.nodes();
     const errors = expressionProblems(type, expression);
@@ -159,64 +166,83 @@ export class BlockBuilder {
     });
     return result;
   }
+
   constant(type: DataType, bits: bigint): Value {
     return this.assign(type, { kind: 'constant', bits: BigInt.asUintN(bitWidth(type), bits) });
   }
+
   address(address: Address): Value {
     return this.assign(integer(64), { kind: 'address', address });
   }
+
   int(op: IntegerOp, left: Value, right: Value): Value {
     return this.assign(left.type, { kind: 'integer', op, left, right });
   }
+
   unary(op: IntegerUnaryOp, value: Value): Value {
     return this.assign(value.type, { kind: 'integer_unary', op, value });
   }
+
   compare(op: IntegerPredicate, left: Value, right: Value): Value {
     return this.assign(integer(1), { kind: 'compare', op, left, right });
   }
+
   cast(op: CastOp, type: DataType, value: Value): Value {
     return this.assign(type, { kind: 'cast', op, value });
   }
+
   extract(value: Value, offset: number, bits: number): Value {
     return this.assign(integer(bits), { kind: 'extract', value, offset });
   }
+
   insert(base: Value, value: Value, offset: number): Value {
     return this.assign(base.type, { kind: 'insert', base, value, offset });
   }
+
   concat(values: readonly Value[]): Value {
     return this.assign(integer(values.reduce((sum, value) => sum + bitWidth(value.type), 0)), {
       kind: 'concat',
       values,
     });
   }
+
   select(condition: Value, when_true: Value, when_false: Value): Value {
     return this.assign(when_true.type, { kind: 'select', condition, when_true, when_false });
   }
+
   flag(op: 'add' | 'sub', flag: ArithmeticFlag, left: Value, right: Value, carry: Value): Value {
     return this.assign(integer(1), { kind: 'flag', op, flag, left, right, carry });
   }
+
   fp(op: FloatOp, left: Value, right: Value): Value {
     return this.assign(left.type, { kind: 'float', op, left, right });
   }
+
   fpCompare(op: FloatPredicate, left: Value, right: Value): Value {
     return this.assign(integer(1), { kind: 'float_compare', op, left, right });
   }
+
   pack(type: VectorType, lanes: readonly Value[]): Value {
     return this.assign(type, { kind: 'vector', lanes });
   }
+
   lane(value: Value, lane: number): Value {
     if (value.type.kind !== 'vector') throw new TypeError('Lane extraction needs a vector');
     return this.assign(value.type.element, { kind: 'vector_lane', vector: value, lane });
   }
+
   vectorInt(op: IntegerOp, left: Value, right: Value): Value {
     return this.assign(left.type, { kind: 'vector_integer', op, left, right });
   }
+
   vectorFloat(op: FloatOp, left: Value, right: Value): Value {
     return this.assign(left.type, { kind: 'vector_float', op, left, right });
   }
+
   indeterminate(type: DataType, state: 'unknown' | 'undefined', reason: string): Value {
     return this.assign(type, { kind: 'indeterminate', state, reason });
   }
+
   readRegister(register: RegisterDescriptor, type: DataType = integer(register.width_bits)): Value {
     this.budget?.nodes();
     const result: Value = { id: this.#identity('value'), type };
@@ -230,6 +256,7 @@ export class BlockBuilder {
     });
     return result;
   }
+
   writeRegister(register: RegisterDescriptor, value: Value): void {
     this.budget?.nodes();
     this.#instructions.push({
@@ -241,6 +268,7 @@ export class BlockBuilder {
       ...this.#order(),
     });
   }
+
   load(
     type: DataType,
     address: Value,
@@ -260,6 +288,7 @@ export class BlockBuilder {
     });
     return result;
   }
+
   store(
     address: Value,
     value: Value,
@@ -277,6 +306,7 @@ export class BlockBuilder {
       ...this.#order(),
     });
   }
+
   call(
     target: CallTarget,
     args: readonly Value[],
@@ -301,6 +331,7 @@ export class BlockBuilder {
     });
     return results;
   }
+
   unknown(reason: string, clobbers: CallClobbers): void {
     this.budget?.nodes();
     this.#instructions.push({
@@ -314,6 +345,7 @@ export class BlockBuilder {
       ...this.#order(),
     });
   }
+
   edge(target: BlockBuilder | EntityId, args: readonly Value[] = []): Edge {
     return {
       target: typeof target === 'string' ? target : target.id,
@@ -321,6 +353,7 @@ export class BlockBuilder {
       effect: this.#effect,
     };
   }
+
   /** Raw typed terminator API supports switches and unresolved/indirect boundaries as well. */
   terminate(terminator: TerminatorBody): void {
     this.budget?.limits.checkpoint?.(0);
@@ -331,15 +364,19 @@ export class BlockBuilder {
       effect: this.#effect,
     };
   }
+
   jump(target: BlockBuilder | EntityId, args: readonly Value[] = []): void {
     this.terminate({ kind: 'jump', edge: this.edge(target, args) });
   }
+
   branch(condition: Value, when_true: Edge, when_false: Edge): void {
     this.terminate({ kind: 'branch', condition, when_true, when_false });
   }
+
   return(values: readonly Value[] = []): void {
     this.terminate({ kind: 'return', values });
   }
+
   finish(): BasicBlock {
     if (!this.#terminator) throw new TypeError('Block has no terminator');
     return {

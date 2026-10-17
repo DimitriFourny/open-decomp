@@ -39,6 +39,7 @@ export class Reader {
     if (base < 0n || base + BigInt(size) > BigInt(bytes.length))
       malformed('Slice outside container');
   }
+
   range(p: number, n: number, end = this.size): void {
     if (
       !Number.isSafeInteger(p) ||
@@ -51,30 +52,36 @@ export class Reader {
     )
       malformed('Truncated or out-of-range Mach-O bytes');
   }
+
   byte(p: number): number {
     this.range(p, 1);
     return this.bytes.at(safe(this.base) + p);
   }
+
   u16(p: number): number {
     this.range(p, 2);
     return this.little
       ? this.byte(p) | (this.byte(p + 1) << 8)
       : (this.byte(p) << 8) | this.byte(p + 1);
   }
+
   u32(p: number): number {
     this.range(p, 4);
     return this.bytes.u32(this.base + BigInt(p), this.little);
   }
+
   u64(p: number): bigint {
     this.range(p, 8);
     return this.bytes.u64(this.base + BigInt(p), this.little);
   }
+
   fixed(p: number, n: number): string {
     this.range(p, n);
     let end = p;
     while (end < p + n && this.byte(end)) end++;
     return new TextDecoder().decode(this.bytes.read(this.base + BigInt(p), end - p));
   }
+
   string(p: number, end: number): { text: string; next: number } {
     this.range(p, 0, end);
     const start = p;
@@ -103,11 +110,13 @@ export class Cursor {
   ) {
     r.range(p, end - p);
   }
+
   byte(): number {
     this.r.context.checkpoint(1);
     this.r.range(this.p, 1, this.end);
     return this.r.byte(this.p++);
   }
+
   leb(signed = false): bigint {
     let value = 0n;
     for (let i = 0; i < 10; i++) {
@@ -119,11 +128,13 @@ export class Cursor {
     }
     return malformed('Unterminated LEB128');
   }
+
   string(): string {
     const result = this.r.string(this.p, this.end);
     this.p = result.next;
     return result.text;
   }
+
   rawString(): string {
     let value = '';
     while (true) {

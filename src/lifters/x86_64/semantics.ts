@@ -97,12 +97,15 @@ export class X86Semantics {
   ) {
     this.block = block;
   }
+
   get p(): X86Payload {
     return this.instruction.payload as X86Payload;
   }
+
   c(bits: number, value: bigint): Value {
     return this.block.constant(integer(bits), value);
   }
+
   resize(value: Value, width: number, signed = false): Value {
     const old = bitWidth(value.type);
     return old === width
@@ -113,6 +116,7 @@ export class X86Semantics {
           value,
         );
   }
+
   address(memory: Memory, lea = false): Value {
     const b = this.block;
     let address: Value;
@@ -156,6 +160,7 @@ export class X86Semantics {
     }
     return address;
   }
+
   width(operand: Operand): number {
     switch (operand.kind) {
       case 'register':
@@ -170,6 +175,7 @@ export class X86Semantics {
         throw new Unsupported('Far pointers');
     }
   }
+
   read(operand: Operand, width = this.width(operand), alignment = 1): Value {
     switch (operand.kind) {
       case 'register': {
@@ -197,6 +203,7 @@ export class X86Semantics {
         throw new Unsupported('Far pointers');
     }
   }
+
   write(operand: Operand, value: Value, alignment = 1): void {
     if (operand.kind === 'register')
       this.block.writeRegister(operand.register, this.resize(value, operand.register.width_bits));
@@ -208,12 +215,15 @@ export class X86Semantics {
       });
     else throw new Unsupported('Non-writable destination');
   }
+
   flag(name: Flag): Value {
     return this.block.readRegister(flagRegister(name));
   }
+
   setFlag(name: Flag, value: Value): void {
     this.block.writeRegister(flagRegister(name), value);
   }
+
   undefinedFlags(names: readonly Flag[]): void {
     for (const name of names)
       this.setFlag(
@@ -225,6 +235,7 @@ export class X86Semantics {
         ),
       );
   }
+
   condition(condition: string): Value {
     const b = this.block;
     switch (condition) {
@@ -281,6 +292,7 @@ export class X86Semantics {
         throw new Unsupported(`Condition ${condition}`);
     }
   }
+
   resultFlags(result: Value): void {
     const b = this.block,
       width = bitWidth(result.type),
@@ -289,6 +301,7 @@ export class X86Semantics {
     this.setFlag('sf', b.extract(result, width - 1, 1));
     this.setFlag('pf', b.flag('add', 'parity', result, zero, this.c(1, 0n)));
   }
+
   arithmetic(
     op: 'add' | 'sub',
     left: Value,
@@ -305,6 +318,7 @@ export class X86Semantics {
     this.resultFlags(value);
     return value;
   }
+
   /** Guard returns block parameters: data never leaks between IR blocks. */
   guard(bad: Value, values: readonly Value[], reason: string, trap: boolean): readonly Value[] {
     const origin = instructionProvenance(this.instruction);
@@ -319,6 +333,7 @@ export class X86Semantics {
     this.block = good;
     return good.parameters;
   }
+
   fpEnvironment(): void {
     const b = this.block,
       state = b.readRegister({
@@ -336,6 +351,7 @@ export class X86Semantics {
     );
     this.abstractFP();
   }
+
   fpStatus(): void {
     this.block.writeRegister(
       {
@@ -353,6 +369,7 @@ export class X86Semantics {
       ),
     );
   }
+
   multiply(signed: boolean): void {
     const operands = this.p.operands,
       dst = operands[0]!;
@@ -384,6 +401,7 @@ export class X86Semantics {
     this.setFlag('of', overflow);
     this.undefinedFlags(['sf', 'zf', 'af', 'pf']);
   }
+
   divide(signed: boolean): void {
     const operand = this.p.operands[0]!,
       width = this.width(operand),
@@ -430,6 +448,7 @@ export class X86Semantics {
     b.writeRegister(width === 8 ? gpr('rax', 8, 8) : gpr('rdx', width), values[1]!);
     this.undefinedFlags(['cf', 'of', 'sf', 'zf', 'af', 'pf']);
   }
+
   shift(op: 'shl' | 'lshr' | 'ashr' | 'rol' | 'ror'): void {
     const [dst, source] = this.p.operands,
       b = this.block,
@@ -502,6 +521,7 @@ export class X86Semantics {
       for (const [name, flag] of computed) this.setFlag(name, b.select(zero, old.get(name)!, flag));
     }
   }
+
   stackPush(value: Value): void {
     const b = this.block,
       sp = b.readRegister(this.abi.stack_pointer),
@@ -509,6 +529,7 @@ export class X86Semantics {
     b.writeRegister(this.abi.stack_pointer, next);
     b.store(next, value);
   }
+
   call(tail = false): void {
     const b = this.block,
       operand = this.p.operands[0]!;
@@ -527,6 +548,7 @@ export class X86Semantics {
     b.call(target, [], [], this.abi.unknown_call_clobbers);
     if (!tail) b.writeRegister(this.abi.stack_pointer, sp);
   }
+
   execute(): void {
     const p = this.p,
       m = p.mnemonic,

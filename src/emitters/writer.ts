@@ -25,6 +25,7 @@ export class Writer {
       throw new RangeError('Indent must be 1..8');
     context.checkpoint(0);
   }
+
   fail(message: string): never {
     throw new OperationError({
       code: 'resource_limit',
@@ -33,13 +34,16 @@ export class Writer {
       evidence_ids: [],
     });
   }
+
   guard(bytes: number): void {
     if (bytes > this.limit) this.fail('Pseudocode emission exceeds the output byte budget');
   }
+
   metadata(bytes: number): void {
     this.metadataBytes += bytes;
     this.guard(this.metadataBytes + this.bytes);
   }
+
   /** Bound variadic helper operands while formatting, rather than allocating a
    * potentially unbounded mapped array before join can check its size. */
   list<T>(items: readonly T[], format: (item: T) => string): string[] {
@@ -54,6 +58,7 @@ export class Writer {
     }
     return parts;
   }
+
   join(parts: Iterable<string>, separator = ', '): string {
     const collected: string[] = [];
     let bytes = 0;
@@ -66,6 +71,7 @@ export class Writer {
     }
     return collected.join(separator);
   }
+
   /** JSON-style data literals; slash and format controls are escaped even inside
    * comments, so target text cannot terminate comments or reorder displayed code. */
   quote(text: string): string {
@@ -94,21 +100,26 @@ export class Writer {
     parts.push('"');
     return parts.join('');
   }
+
   /** Syntax is selected before text is written, so spans cover the final dialect. */
   statement(depth: number, expression: string): void {
     this.line(depth, `${expression}${this.language === 'c-like' ? ';' : ''}`);
   }
+
   declaration(type: string, name: string, initializer = ''): string {
     return this.language === 'c-like'
       ? `${type} ${name}${initializer}`
       : `${name}: ${type}${initializer}`;
   }
+
   comment(depth: number, text: string): void {
     this.line(depth, this.language === 'c-like' ? `/* ${text} */` : `# ${text}`, false);
   }
+
   sequence(parts: readonly string[]): string {
     return this.language === 'c-like' ? `{${this.join(parts)}}` : `[${this.join(parts)}]`;
   }
+
   line(depth: number, text: string, code = true): void {
     this.context.checkpoint(1);
     if (depth > 256) this.fail('Pseudocode emission nesting exceeds 256');
@@ -121,6 +132,7 @@ export class Writer {
     this.offset += line.length;
     if (code) this.codeLines++;
   }
+
   helper(name: string, explanation: string): string {
     if (!this.helperNames.has(name)) {
       if (this.helpers.length >= 1000) this.fail('Pseudocode helper limit exceeded');
@@ -130,6 +142,7 @@ export class Writer {
     }
     return name;
   }
+
   map(
     origin: Origin,
     start: number,
@@ -175,10 +188,12 @@ export class Writer {
     });
     if (evidence.length > 1000) this.fail('Pseudocode mapping evidence limit exceeded');
   }
+
   private joinIds(a: readonly string[], b: readonly string[]): string[] {
     if (a.length + b.length > 10000) this.fail('Pseudocode mapping reference limit exceeded');
     return [...new Set([...a, ...b])];
   }
+
   text(): string {
     return this.parts.join('');
   }

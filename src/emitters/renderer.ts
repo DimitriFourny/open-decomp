@@ -174,6 +174,7 @@ export class Renderer {
       this.invalid('Structured function has no entry block');
     this.findLabels(input.function.body, [], 0);
   }
+
   private invalid(message: string): never {
     throw new OperationError({
       code: 'invalid_input',
@@ -182,6 +183,7 @@ export class Renderer {
       evidence_ids: [],
     });
   }
+
   private report(diagnostic: Diagnostic): void {
     this.context.checkpoint(1 + diagnostic.evidence_ids.length);
     if (this.diagnostics.length >= 1000 || diagnostic.evidence_ids.length > 1000)
@@ -196,6 +198,7 @@ export class Renderer {
       evidence_ids: this.options.include_evidence ? diagnostic.evidence_ids : [],
     });
   }
+
   private identifier(id: string, prefix: string): string {
     const existing = this.identifiers.get(id);
     if (existing) return existing.identifier;
@@ -215,6 +218,7 @@ export class Renderer {
     this.identifiers.set(id, { entity_id: id, identifier, original_name: original });
     return identifier;
   }
+
   private sourceIdentifier(id: string, preferred: string): string {
     const previous = this.identifiers.get(id);
     if (previous) return previous.identifier;
@@ -241,6 +245,7 @@ export class Renderer {
     });
     return name;
   }
+
   private local(value: Value): string {
     return this.program.source
       ? (this.identifiers.get(value.id)?.identifier ??
@@ -250,11 +255,13 @@ export class Renderer {
           ))
       : this.identifier(value.id, 'v');
   }
+
   private valueType(value: Value): string {
     const source = this.sourceValueTypes.get(value.id);
     if (source) return this.sourceType(source);
     return this.dataType(value.type);
   }
+
   private dataType(type: DataType): string {
     return this.program.source && type.kind === 'integer'
       ? type.bits === 1
@@ -262,6 +269,7 @@ export class Renderer {
         : `uint${type.bits}_t`
       : machineType(type);
   }
+
   private expression(expression: Expression, type: DataType): string {
     return expressionText(
       expression,
@@ -309,6 +317,7 @@ export class Renderer {
     this.writer.helper(helper, explanation);
     return `${helper}(${this.writer.join(args)})`;
   }
+
   private dataOrigin(id: string): Origin {
     return (
       this.origins.get(id) ?? {
@@ -322,6 +331,7 @@ export class Renderer {
       }
     );
   }
+
   private emitNotes(id: string, depth: number): void {
     for (const note of this.notes.get(id) ?? []) {
       this.context.checkpoint(1);
@@ -335,6 +345,7 @@ export class Renderer {
       this.mapped(this.dataOrigin(id), start, [id], note.evidence_ids);
     }
   }
+
   private semanticIds(origin: Origin): string[] {
     const node = this.statements.get(origin.id);
     if (!node) return [];
@@ -357,6 +368,7 @@ export class Renderer {
     this.context.checkpoint(ids.length);
     return ids;
   }
+
   private mapped(
     origin: Origin,
     start: number,
@@ -370,6 +382,7 @@ export class Renderer {
     this.context.checkpoint(subjects.length);
     this.writer.map({ ...origin, id: subjects[0] ?? origin.id }, start, subjects, evidence, end);
   }
+
   private map(
     origin: Origin,
     start: number,
@@ -391,6 +404,7 @@ export class Renderer {
       if (this.controls.has(contributor.id)) this.mappedControls.add(contributor.id);
     }
   }
+
   private addressKey(address: Address): string {
     return `${address.image_id}:${address.space}:${address.value}`;
   }
@@ -425,6 +439,7 @@ export class Renderer {
     const address = bits === null ? undefined : this.sourceAddressesByValue.get(bits);
     return address ? this.sourceAddress(address) : this.value(value);
   }
+
   private sourceCallee(node: Extract<Instruction, { kind: 'call' }>): string {
     if (node.target.kind === 'indirect') return this.value(node.target.value);
     const key = this.addressKey(node.target.address),
@@ -438,6 +453,7 @@ export class Renderer {
     this.sourceNames.set(key, name);
     return name;
   }
+
   private address(address: Address): string {
     return this.call(
       'image_address',
@@ -449,6 +465,7 @@ export class Renderer {
       ],
     );
   }
+
   private registerName(register: RegisterDescriptor): string {
     const root = register.root.slice(register.root.lastIndexOf(':') + 1);
     if (register.offset_bits === 0)
@@ -459,9 +476,11 @@ export class Renderer {
       return `${root}_high${register.width_bits}`;
     return `${root}_bits${register.offset_bits}_${register.offset_bits + register.width_bits - 1}`;
   }
+
   private registerKey(register: RegisterDescriptor): string {
     return this.writer.quote(`${register.root}:${register.offset_bits}:${register.width_bits}`);
   }
+
   private registers(bindings: readonly RegisterBinding[]): string {
     const parts: string[] = [];
     for (const binding of bindings) {
@@ -474,6 +493,7 @@ export class Renderer {
       parts,
     );
   }
+
   private clobbers(clobbers: CallClobbers): string {
     return this.call(
       'boundary',
@@ -489,6 +509,7 @@ export class Renderer {
       ],
     );
   }
+
   private values(values: readonly Value[]): string {
     return this.call(
       'explicit_values',
@@ -496,6 +517,7 @@ export class Renderer {
       this.writer.list(values, this.value),
     );
   }
+
   private sourceType(id: string, depth = 0): string {
     this.context.checkpoint(1);
     if (depth > 32) return this.identifier(id, 'type');
@@ -528,6 +550,7 @@ export class Renderer {
         return this.identifier(id, 'type');
     }
   }
+
   private storage(node: Extract<Instruction, { kind: 'load' | 'store' }>): string {
     const local = this.program.source?.locals.get(node.id);
     if (local)
@@ -561,6 +584,7 @@ export class Renderer {
     );
     return `(*(${node.access.volatile ? 'volatile ' : ''}${name} *)(uintptr_t)(${address}))`;
   }
+
   private sourceCall(node: Extract<Instruction, { kind: 'call' }>): string {
     const projection = this.program.calls.get(node.id)!;
     const args = projection.arguments.map((value, index) => {
@@ -599,6 +623,7 @@ export class Renderer {
       ? `${results.length === 1 ? this.local(results[0]!) : `(${this.writer.join(results.map((value) => this.local(value)))})`} = ${operation}`
       : operation;
   }
+
   private instruction(node: Instruction, depth: number): void {
     this.emitNotes(node.id, depth);
     const start = this.writer.offset;
@@ -796,6 +821,7 @@ export class Renderer {
         [...view.shape.evidence_ids, ...view.field.evidence_ids],
       );
   }
+
   private ordinaryTransfer(transfer: ParallelTransfer, nesting: readonly Nest[]): boolean {
     if (transfer.mode === 'next') return true;
     for (let i = nesting.length - 1; i >= 0; i--) {
@@ -810,6 +836,7 @@ export class Renderer {
     }
     return false;
   }
+
   private firstBlock(region: Region): string | null {
     this.context.checkpoint(1);
     if (region.kind === 'block') return region.id;
@@ -820,6 +847,7 @@ export class Renderer {
     }
     return null;
   }
+
   private findLabels(
     region: Region,
     nesting: readonly Nest[],
@@ -885,6 +913,7 @@ export class Renderer {
       arm(control.otherwise, nested);
     }
   }
+
   private transfer(transfer: ParallelTransfer, depth: number): void {
     const copies = this.program.transfers.get(transfer);
     if (!copies) this.invalid('Reconstructed transfer is missing');
@@ -981,6 +1010,7 @@ export class Renderer {
     else if (transfer.mode === 'break' || transfer.mode === 'continue')
       this.writer.statement(depth, transfer.mode);
   }
+
   private arm(arm: ControlArm, depth: number): void {
     const start = this.writer.codeLines;
     this.transfer(arm.transfer, depth);
@@ -988,6 +1018,7 @@ export class Renderer {
     if (this.language === 'python-like' && this.writer.codeLines === start)
       this.writer.statement(depth, 'pass');
   }
+
   private control(control: Control, block: BlockRegion, depth: number): void {
     this.emitNotes(control.id, depth);
     const start = this.writer.offset;
@@ -1111,6 +1142,7 @@ export class Renderer {
     }
     this.map(control, start, ids);
   }
+
   private sourceDefinitions(anchor: string, depth: number): void {
     for (const definition of this.program.source?.definitions?.get(anchor) ?? []) {
       this.context.checkpoint(1);
@@ -1125,6 +1157,7 @@ export class Renderer {
       this.mapped(this.dataOrigin(anchor), start, [value.id]);
     }
   }
+
   private region(region: Region, depth: number): void {
     this.context.checkpoint(1);
     if (region.kind === 'sequence') {
@@ -1157,6 +1190,7 @@ export class Renderer {
       ]);
     }
   }
+
   render(): EmissionResult {
     const w = this.writer;
     w.helper(

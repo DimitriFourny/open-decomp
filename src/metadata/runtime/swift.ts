@@ -14,6 +14,7 @@ export class SwiftRecovery {
   readonly attemptedFields = new Set<bigint>();
   readonly fieldRanges: { start: bigint; end: bigint }[] = [];
   constructor(readonly r: RuntimeReader) {}
+
   context(address: bigint, depth = 0): SwiftContext {
     const r = this.r;
     r.depth(depth, address);
@@ -105,6 +106,7 @@ export class SwiftRecovery {
       this.active.delete(address);
     }
   }
+
   fields(address: bigint, sectionEnd: bigint, checkOverlap = false): bigint {
     const r = this.r;
     this.attemptedFields.add(address);
@@ -192,6 +194,7 @@ export class SwiftRecovery {
     this.fieldRanges.push({ start: address, end });
     return end;
   }
+
   run(): void {
     const r = this.r;
     for (const section of r.sections)

@@ -17,6 +17,7 @@ export function number(value: bigint, label = 'offset'): number {
 /** Shared across contributions; charge decoded bytes and generated characters before allocation. */
 export class DwarfTextBudget {
   constructor(public remaining = DWARF_LIMITS.text) {}
+
   consume(size: number): void {
     if (!Number.isSafeInteger(size) || size < 0 || size > this.remaining) {
       this.remaining = 0;
@@ -46,10 +47,12 @@ export class DwarfReader {
     )
       throw new Error('Invalid reader bounds');
   }
+
   need(size: number): void {
     if (!Number.isSafeInteger(size) || size < 0 || size > this.end - this.position)
       throw new Error('Truncated DWARF data');
   }
+
   uint(size: number): bigint {
     this.need(size);
     if (![1, 2, 3, 4, 8].includes(size)) throw new Error(`Unsupported integer width ${size}`);
@@ -60,15 +63,19 @@ export class DwarfReader {
     this.position += size;
     return value;
   }
+
   u8(): number {
     return Number(this.uint(1));
   }
+
   u16(): number {
     return Number(this.uint(2));
   }
+
   u32(): number {
     return Number(this.uint(4));
   }
+
   leb(signed = false): bigint {
     let value = 0n,
       shift = 0n;
@@ -85,15 +92,18 @@ export class DwarfReader {
     }
     throw new Error('LEB128 exceeds 10-byte limit');
   }
+
   nleb(): number {
     return number(this.leb(), 'LEB128 value');
   }
+
   block(size: number): Uint8Array {
     this.need(size);
     const result = this.bytes.subarray(this.position, this.position + size);
     this.position += size;
     return result;
   }
+
   string(budget?: DwarfTextBudget): string {
     const start = this.position;
     try {
@@ -113,6 +123,7 @@ export class DwarfReader {
     this.position++;
     return result;
   }
+
   initialLength(): { start: number; end: number; offsetSize: number } {
     const start = this.position,
       first = this.u32();

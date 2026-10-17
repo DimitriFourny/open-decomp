@@ -36,14 +36,17 @@ export class QueryService {
   private constructor(pool: ProjectWorkerPool) {
     this.#pool = pool;
   }
+
   static async create(options: WorkerPoolOptions): Promise<QueryService> {
     return new QueryService(await ProjectWorkerPool.create(options));
   }
+
   #project(id: string): ProjectWorker {
     const project = this.#projects.get(id);
     if (!project) queryFailure('not_found', 'Project is not open in this client');
     return project;
   }
+
   /** Exposes the durable ticket directly. execute returns admission for long work
    * by default; wait:true requests the terminal response instead. */
   async submit<K extends WorkerOperation>(
@@ -65,6 +68,7 @@ export class QueryService {
       options,
     );
   }
+
   async execute<K extends ToolName>(
     operation: K,
     input: ToolInput<K>,
@@ -317,10 +321,12 @@ export class QueryService {
       releaseRequest?.();
     }
   }
+
   async readArtifact(input: ArtifactReadInput): Promise<ArtifactReadResult> {
     const args = artifactReadArgsSchema.parse(input);
     return this.#project(args.project_id).readArtifact(args);
   }
+
   async close(policy: 'wait' | 'cancel' | 'reject' = 'wait'): Promise<void> {
     await this.#pool.close(policy);
     this.#projects.clear();

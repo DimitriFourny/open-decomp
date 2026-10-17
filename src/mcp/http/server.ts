@@ -38,6 +38,7 @@ class RateBucket {
   constructor(readonly capacity: number) {
     this.#available = capacity;
   }
+
   take(): boolean {
     const now = performance.now();
     this.#available = Math.min(

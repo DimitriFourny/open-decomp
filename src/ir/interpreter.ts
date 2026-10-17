@@ -35,9 +35,11 @@ export class OracleMemory {
       end = region.base + BigInt(region.bytes.length);
     }
   }
+
   snapshot(): readonly MemoryRegion[] {
     return this.#regions.map((region) => ({ ...region, bytes: region.bytes.slice() }));
   }
+
   #locations(
     address: bigint,
     count: number,
@@ -72,6 +74,7 @@ export class OracleMemory {
     }
     return locations;
   }
+
   read(
     address: bigint,
     width: number,
@@ -86,6 +89,7 @@ export class OracleMemory {
     }
     return value;
   }
+
   write(
     address: bigint,
     width: number,

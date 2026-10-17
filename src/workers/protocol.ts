@@ -132,6 +132,7 @@ export class FrameDecoder {
   #body: Buffer | undefined;
   #used = 0;
   constructor(readonly receive: (value: unknown) => void) {}
+
   push(chunk: Buffer): void {
     let offset = 0;
     while (offset < chunk.length) {
@@ -158,6 +159,7 @@ export class FrameDecoder {
       }
     }
   }
+
   end(): void {
     if (this.#headerUsed || this.#body) throw new Error('Truncated worker frame');
   }

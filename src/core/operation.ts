@@ -7,6 +7,7 @@ export class OperationError extends Error {
     super(diagnostic.message);
     this.name = 'OperationError';
   }
+
   get code(): Diagnostic['code'] {
     return this.diagnostic.code;
   }

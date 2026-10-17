@@ -107,13 +107,16 @@ class Parser extends Reader {
   ) {
     super(bytes, image, context);
   }
+
   id(kind: string, offset: bigint | number): string {
     return entityIdentity(this.slice.id, `elf:${kind}`, BigInt(offset));
   }
+
   range(space: Address['space'], offset: bigint, size: bigint): AddressRange {
     this.end(offset, size);
     return { start: this.address(space, offset), size };
   }
+
   fact(offset: bigint, size: bigint, claim: string): readonly string[] {
     this.bounds(offset, size);
     const key = `${offset}:${size}:${claim}`,
@@ -132,6 +135,7 @@ class Parser extends Reader {
     this.proofs.set(key, proof);
     return proof;
   }
+
   header(
     kind: HeaderRecord['kind'],
     name: string,
@@ -148,6 +152,7 @@ class Parser extends Reader {
       evidence_ids: [...this.fact(offset, size, name), ...stringProof],
     });
   }
+
   own(offset: bigint, size: bigint, claim: string): void {
     if (size)
       this.hints.push({
@@ -157,6 +162,7 @@ class Parser extends Reader {
         evidence_ids: this.fact(offset, size, claim),
       });
   }
+
   unsupported(feature: string, message: string, p?: bigint): void {
     if (this.unsupportedFeatures.has(feature)) return;
     if (this.unsupportedFeatures.size >= 900)
@@ -176,6 +182,7 @@ class Parser extends Reader {
       ...(p === undefined ? {} : { address: this.address('file', p) }),
     });
   }
+
   mapping(va: bigint, size: bigint, backed = false): ImageMapping | undefined {
     this.end(va, size);
     let low = 0,
@@ -194,11 +201,13 @@ class Parser extends Reader {
       ? m
       : undefined;
   }
+
   file(va: bigint, size: bigint): bigint {
     const m = this.mapping(va, size, true);
     if (!m) this.fail('ELF metadata is unmapped, zero-filled, or crosses backing bounds');
     return m.file_offset + va - m.va;
   }
+
   name(strings: RawSection, index: number | bigint): string {
     if (strings.flags & 0x800n)
       throw new ELFLoadError('unsupported_target', 'Compressed ELF string tables are unsupported');
@@ -206,6 +215,7 @@ class Parser extends Reader {
       this.fail('ELF string index outside linked string table', strings.p);
     return this.string(strings.offset + BigInt(index), strings.offset + strings.size);
   }
+
   parseSegments(h: ELFHeader): void {
     this.header('elf_header', h.type === 2 ? 'ELF64 ET_EXEC' : 'ELF64 ET_DYN', 0n, 64n, [
       integer('EI_CLASS', 2),
@@ -309,6 +319,7 @@ class Parser extends Reader {
     );
     this.base = this.orderedMappings[0]!.va;
   }
+
   parseSections(h: ELFHeader): void {
     for (let i = 0; i < h.shnum; i++) {
       const p = h.shoff + BigInt(i) * 64n;
@@ -446,6 +457,7 @@ class Parser extends Reader {
       if (backed[i]!.offset < backed[i - 1]!.offset + backed[i - 1]!.size)
         this.fail('Overlapping file-backed ELF sections', backed[i]!.p);
   }
+
   parseSymbols(): void {
     for (const s of this.raw) {
       if (s.type !== 2 && s.type !== 11) continue;
@@ -557,6 +569,7 @@ class Parser extends Reader {
       this.symbolTables.set(s.index, records);
     }
   }
+
   parseDynamic(): void {
     const tables = this.raw.filter((s) => s.type === 6);
     if (tables.length > 1) this.fail('Multiple ELF dynamic sections');
@@ -705,6 +718,7 @@ class Parser extends Reader {
           s.p,
         );
   }
+
   parseVersions(): void {
     for (const s of this.raw) {
       if ([0x6ffffffe, 0x6fffffff].includes(s.type) && s.flags & 0x800n)
@@ -785,6 +799,7 @@ class Parser extends Reader {
       }
     }
   }
+
   importFor(
     table: number,
     index: number,
@@ -824,6 +839,7 @@ class Parser extends Reader {
     });
     this.importSymbols.add(symbol.record.id);
   }
+
   parseRelocations(): void {
     const slots = new Set<bigint>();
     for (const s of this.raw) {
@@ -986,6 +1002,7 @@ class Parser extends Reader {
         'Import slots are relocation-evidenced; PLT callable entries and lazy-binding execution are not reconstructed',
       );
   }
+
   load(sha256: string): LoadedImage {
     const h = this.basic();
     this.parseSegments(h);
@@ -1113,6 +1130,7 @@ export class ELFLoader implements Loader {
         : [],
     };
   }
+
   load(input: Parameters<Loader['load']>[0], context: OperationContext): LoadedImage {
     const inspection = this.inspect(input.bytes, input.image_id, context),
       slice = inspection.slices[0]!;

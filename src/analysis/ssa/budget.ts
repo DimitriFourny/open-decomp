@@ -20,6 +20,7 @@ export class AnalysisBudget {
     if (!Number.isSafeInteger(this.limit) || this.limit < 0)
       throw new RangeError('Analysis work limit must be a nonnegative safe integer');
   }
+
   charge(work = 1): void {
     this.work += work;
     if (this.work > this.limit)
@@ -32,6 +33,7 @@ export class AnalysisBudget {
       });
     this.options.checkpoint?.(work);
   }
+
   result<T>(value: T, error?: unknown): AnalysisResult<T> {
     if (
       error !== undefined &&

@@ -95,21 +95,26 @@ export class ArmSemantics {
     this.name = p.canonical_encoding.split('_')[0]!;
     this.bits = p.fields.sf === 1n ? 64 : 32;
   }
+
   field(name: string): number {
     const value = this.p.fields[name];
     if (value === undefined || value < 0n || value > 0xffffffffn)
       throw new Unsupported(`Missing or invalid canonical field ${name}`);
     return Number(value);
   }
+
   constant(bits: number, value: bigint | number): Value {
     return this.b.constant(integer(bits), BigInt(value));
   }
+
   read(name: string, bits = this.bits, sp = false): Value {
     return this.b.readRegister(gp(this.field(name), bits, sp));
   }
+
   put(value: Value, bits = this.bits, sp = false): void {
     this.b.writeRegister(gp(this.field('Rd'), bits, sp), value);
   }
+
   resize(value: Value, bits: number, signed = false): Value {
     const width = bitWidth(value.type);
     return width === bits
@@ -120,6 +125,7 @@ export class ArmSemantics {
           value,
         );
   }
+
   shift(value: Value, kind: number, amount: number): Value {
     if (amount >= bitWidth(value.type)) throw new Unsupported('Reserved immediate shift');
     return amount === 0
@@ -130,6 +136,7 @@ export class ArmSemantics {
           this.constant(bitWidth(value.type), amount),
         );
   }
+
   condition(code = this.field('cond')): Value {
     const f = this.b.readRegister(stateRegister('nzcv'));
     const n = this.b.extract(f, 31, 1),
@@ -164,6 +171,7 @@ export class ArmSemantics {
     }
     return code & 1 ? this.b.unary('not', result) : result;
   }
+
   flags(values: readonly Value[]): void {
     let packed = this.constant(32, 0);
     values.forEach((value, i) => {
@@ -171,6 +179,7 @@ export class ArmSemantics {
     });
     this.b.writeRegister(stateRegister('nzcv'), packed);
   }
+
   arithmetic(
     a: Value,
     c: Value,
@@ -196,6 +205,7 @@ export class ArmSemantics {
       );
     return result;
   }
+
   transferCondition(): Value {
     if (this.name === 'CBZ' || this.name === 'CBNZ')
       return this.b.compare(
@@ -212,6 +222,7 @@ export class ArmSemantics {
     if (this.name === 'B') return this.condition();
     throw new Unsupported('Unsupported conditional transfer');
   }
+
   execute(): boolean {
     const { b, p, name, bits } = this;
     const encoding = p.canonical_encoding;
@@ -465,11 +476,13 @@ export class ArmSemantics {
     if (this.memory()) return true;
     return this.simd();
   }
+
   authentication(): void {
     this.report(
       'Pointer authentication is abstracted to logical pointers: PAC bits, key/modifier checks, failure poisoning and authentication traps are not modeled.',
     );
   }
+
   memory(): boolean {
     const { b, p, name } = this;
     if (
@@ -531,6 +544,7 @@ export class ArmSemantics {
     if (writeback && memory.kind === 'memory') b.writeRegister(memory.base, writeback);
     return true;
   }
+
   simd(): boolean {
     const { b, p, name } = this;
     // These decoder families retain canonical fields even when one displayed
@@ -715,6 +729,7 @@ export class ArmSemantics {
     }
     return false;
   }
+
   fpStatus(): void {
     this.b.writeRegister(
       stateRegister('fpsr'),

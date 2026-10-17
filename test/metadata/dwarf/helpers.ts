@@ -14,6 +14,7 @@ export class Bytes {
     this.data.push(...values);
     return this;
   }
+
   uint(value: number | bigint, size = 4): this {
     let n = BigInt(value);
     for (let i = 0; i < size; i++) {
@@ -22,6 +23,7 @@ export class Bytes {
     }
     return this;
   }
+
   uleb(value: number | bigint): this {
     let n = BigInt(value);
     do {
@@ -31,6 +33,7 @@ export class Bytes {
     } while (n);
     return this;
   }
+
   sleb(value: number): this {
     let n = BigInt(value);
     while (true) {
@@ -41,18 +44,22 @@ export class Bytes {
       if (done) return this;
     }
   }
+
   string(value: string): this {
     this.data.push(...new TextEncoder().encode(value), 0);
     return this;
   }
+
   label(name: string): this {
     this.labels.set(name, this.data.length);
     return this;
   }
+
   ref(name: string): this {
     this.patches.push({ at: this.data.length, label: name });
     return this.uint(0);
   }
+
   finish(): Uint8Array {
     const result = Uint8Array.from(this.data),
       view = new DataView(result.buffer);

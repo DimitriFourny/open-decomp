@@ -37,8 +37,8 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "format": "node --import tsx scripts/format.ts",
+    "format:check": "node --import tsx scripts/format.ts --check",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "check": "bun run typecheck && bun run test && bun run build",
@@ -52,7 +52,10 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.3.1",
+    "@stylistic/eslint-plugin": "5.10.0",
     "@types/node": "24.19.2",
+    "@typescript-eslint/parser": "8.71.2",
+    "eslint": "10.13.0",
     "prettier": "3.9.10",
     "tsx": "4.20.6",
     "typescript": "5.9.3"
