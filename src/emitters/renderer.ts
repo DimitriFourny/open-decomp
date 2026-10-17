@@ -37,6 +37,7 @@ import { planSourceNames, sourceIdentifierStem } from '../reconstruction/source-
 import { expressionText, machineType } from './expressions.js';
 import { Writer } from './writer.js';
 import type { EmissionInput, EmissionResult } from './model.js';
+import { collectInferences } from './inference.js';
 
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
 type Nest =
@@ -57,6 +58,7 @@ export class Renderer {
   private readonly emittedNotes = new Set<string>();
   private readonly mappedStatements = new Set<string>();
   private readonly mappedControls = new Set<string>();
+  private readonly inferenceSites = new Map<string, { readonly start: number; readonly end: number }>();
   private readonly labels = new Set<string>();
   private readonly gotos = new Set<ParallelTransfer>();
   private readonly localValidation: LocalValidationSession;
@@ -228,7 +230,9 @@ export class Renderer {
     const previous = this.identifiers.get(id);
     if (previous) return previous.identifier;
     const stack = this.program.source?.stack;
-    const stem = stack?.kind === 'entry' && stack.base.id === id ? 'entry_sp' : sourceIdentifierStem(preferred);
+    const entryStack = (stack?.kind === 'entry' && stack.base.id === id) ||
+      this.program.parameter_registers.get(id)?.role === 'stack_pointer';
+    const stem = entryStack ? 'entry_sp' : sourceIdentifierStem(preferred);
     let name = stem,
       suffix = 1;
     while (this.usedSourceNames.has(name)) {
@@ -370,6 +374,7 @@ export class Renderer {
         depth,
         `note ${note.status}/${note.origin} id=${this.writer.quote(note.id)} subject=${this.writer.quote(id)} author=${this.writer.quote(note.author)}: ${this.writer.quote(note.value.value)}`,
       );
+      this.inferenceSites.set(id, { start, end: this.writer.offset });
       this.mapped(this.dataOrigin(id), start, [id], note.evidence_ids);
     }
   }
@@ -868,6 +873,7 @@ export class Renderer {
       }
     }
     this.writer.statement(depth, text);
+    this.inferenceSites.set(node.id, { start, end: this.writer.offset });
     if (this.program.source && node.kind === 'call') {
       const projection = this.program.calls.get(node.id)!;
       const returned = new Set(projection.results.map((value) => value.id));
@@ -1284,6 +1290,7 @@ export class Renderer {
         break;
       }
     }
+    this.inferenceSites.set(control.id, { start, end: this.writer.offset });
     this.map(control, start, ids);
   }
 
@@ -1421,6 +1428,7 @@ export class Renderer {
           signature?.evidence_ids ?? [],
           offset + length,
         );
+        this.inferenceSites.set(parameter.value.id, { start: offset, end: offset + length });
         offset += length + 2;
       }
     } else if (parameters.length) {
@@ -1442,6 +1450,7 @@ export class Renderer {
           source ? [parameter.value.id, source.id, source.type_id] : [parameter.value.id],
           signature?.evidence_ids ?? [],
         );
+        this.inferenceSites.set(parameter.value.id, { start, end: w.offset });
       }
       w.line(0, this.language === 'c-like' ? ') {' : `) -> ${returnType}:`);
     } else
@@ -1507,6 +1516,10 @@ export class Renderer {
     for (const record of this.localValidation.records)
       if (record.kind === 'control' && record.status === 'rejected')
         rejectTranslation(record, this.controls.get(record.subject) ?? this.input.function);
+    const inferences = collectInferences(
+      this.input, this.program, w.mappings, this.localValidation.records, w, this.context,
+      this.inferenceSites, this.sourceDataValue,
+    );
     return {
       emission: {
         language: this.language,
@@ -1517,6 +1530,7 @@ export class Renderer {
         mappings: w.mappings,
         helpers: w.helpers,
         local_validation: this.localValidation.records,
+        inferences,
       },
       diagnostics: this.diagnostics,
       coverage: {

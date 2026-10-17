@@ -1,0 +1,366 @@
+import type { Address, AddressRange, Emission, OperationContext, RecoveredType } from '../core/index.js';
+import type { Inference, InferenceStatus } from '../core/inference.js';
+import type { TypeStatus } from '../analysis/types/model.js';
+import { bitWidth, expressionOperands, type Origin, type Value } from '../ir/index.js';
+import type { Region } from '../presentation/index.js';
+import type { Reconstruction } from '../reconstruction/model.js';
+import type { LocalValidationRecord } from '../reconstruction/local-validation.js';
+import { sourceConstantValues, sourceDataValues } from '../reconstruction/source-data.js';
+import type { SourceAddress } from '../reconstruction/source-model.js';
+import type { EmissionInput } from './model.js';
+import type { Writer } from './writer.js';
+
+type Mapping = Emission['mappings'][number];
+type Details = Inference['details'];
+const confidence = (status: TypeStatus): InferenceStatus => status === 'candidate' ? 'inferred' : status;
+const identity = (address: Address) => ({ image_id: address.image_id, space: address.space, address: String(address.value) });
+
+/** Collect from semantic models and finalized mappings, never emitted text. The
+ * indexes are local to one render; no inference performs an all-IR/mapping scan. */
+export function collectInferences(
+  input: EmissionInput,
+  program: Reconstruction,
+  mappings: readonly Mapping[],
+  localValidation: readonly LocalValidationRecord[],
+  writer: Writer,
+  context: OperationContext,
+  sites?: ReadonlyMap<string, { readonly start: number; readonly end: number }>,
+  resolveData?: (value: Value) => SourceAddress | undefined,
+): readonly Inference[] {
+  const original = new Map<string, Origin>();
+  const loadResults = new Map<string, string>();
+  const catalog = new Set(input.types?.subjects ?? []);
+  const addOrigin = (origin: Origin, valueIds: readonly string[] = []): void => {
+    context.checkpoint(1 + valueIds.length);
+    original.set(origin.id, origin);
+    catalog.add(origin.id);
+    for (const id of valueIds) { original.set(id, origin); catalog.add(id); }
+  };
+  addOrigin(input.function);
+  const pending: Region[] = [input.function.body];
+  while (pending.length) {
+    context.checkpoint(1);
+    const region = pending.pop()!;
+    if (region.kind === 'sequence') { for (const child of region.regions) pending.push(child); continue; }
+    if (region.kind === 'loop') { pending.push(region.body); continue; }
+    addOrigin(region, region.parameters.map((value) => value.id));
+    for (const node of region.statements) {
+      const values: string[] = [];
+      if (node.kind === 'load') loadResults.set(node.result.id, node.id);
+      if ('result' in node) values.push(node.result.id);
+      if (node.kind === 'call') for (const value of node.results) values.push(value.id);
+      if (node.kind === 'call' || node.kind === 'unknown_effect')
+        for (const binding of node.register_outputs) values.push(binding.value.id);
+      addOrigin(node, values);
+    }
+    addOrigin(region.control);
+    const arm = (item: { readonly body?: Region }): void => { if (item.body) pending.push(item.body); };
+    if (region.control.kind === 'if') { arm(region.control.when_true); arm(region.control.when_false); }
+    if (region.control.kind === 'switch') {
+      for (const item of region.control.cases) arm(item.arm);
+      arm(region.control.otherwise);
+    }
+  }
+  const resolved = new Map<string, readonly string[]>();
+  const originals = (id: string, active = new Set<string>()): readonly string[] => {
+    context.checkpoint(1);
+    const cached = resolved.get(id);
+    if (cached) return cached;
+    if (active.has(id) || active.size >= 128) writer.fail('Inference origin graph limit exceeded');
+    active.add(id);
+    const origins = program.source?.value_origins?.get(id);
+    const result = new Set<string>();
+    if (origins?.length) {
+      for (const origin of origins) {
+        if (origin === id) { if (catalog.has(id)) result.add(id); }
+        else for (const subject of originals(origin, active)) result.add(subject);
+      }
+    } else if (catalog.has(id)) result.add(id);
+    active.delete(id);
+    const subjects = [...result];
+    resolved.set(id, subjects);
+    return subjects;
+  };
+  const bySubject = new Map<string, Set<Mapping>>();
+  const byInstruction = new Map<string, Set<Mapping>>();
+  const bySpan = new Map<string, Set<Mapping>>();
+  const siteStarts = sites && new Set([...sites.values()].map((site) => site.start));
+  const index = (table: Map<string, Set<Mapping>>, key: string, mapping: Mapping): void => {
+    const group = table.get(key) ?? new Set<Mapping>();
+    group.add(mapping);
+    table.set(key, group);
+  };
+  for (const mapping of mappings) {
+    context.checkpoint(1);
+    // Zero-output contributor coverage is mapped to the header by the renderer.
+    // It is provenance, not another visible declaration or value-use site.
+    if (siteStarts && !siteStarts.has(mapping.start) && mapping.statement_id !== input.function.id) continue;
+    index(bySubject, mapping.statement_id, mapping);
+    index(bySpan, `${mapping.start}:${mapping.end}`, mapping);
+    if (mapping.statement_id === input.function.id) continue;
+    for (const instruction of mapping.instruction_ids) {
+      context.checkpoint(1);
+      index(byInstruction, instruction, mapping);
+    }
+  }
+  const aliases = new Map<string, Set<string>>();
+  const alias = (subject: string, site: string): void => {
+    const group = aliases.get(subject) ?? new Set<string>();
+    group.add(site);
+    aliases.set(subject, group);
+  };
+  for (const parameter of program.parameters) {
+    for (const subject of originals(parameter.id)) alias(subject, parameter.id);
+  }
+  for (const [value, view] of program.source?.value_types ?? []) {
+    if (!program.live.has(value)) continue;
+    for (const subject of view.subject_ids ?? []) alias(subject, value);
+  }
+  for (const [node, view] of program.memory)
+    for (const subject of [view.field.id, ...(view.field.origin_ids ?? [])]) alias(subject, node);
+  const linked = new Map<string, readonly Mapping[]>();
+  const linksFor = (id: string): readonly Mapping[] => {
+    const previous = linked.get(id);
+    if (previous) return previous;
+    context.checkpoint(1);
+    const group = new Set<Mapping>();
+    const candidates = new Set([id, ...originals(id), ...(aliases.get(id) ?? [])]);
+    for (const subject of candidates) {
+      for (const mapping of bySubject.get(subject) ?? []) group.add(mapping);
+      const site = sites?.get(subject);
+      if (site) for (const mapping of bySpan.get(`${site.start}:${site.end}`) ?? []) group.add(mapping);
+      const origin = original.get(subject);
+      for (const instruction of origin?.provenance.instruction_ids ?? [])
+        for (const mapping of byInstruction.get(instruction) ?? []) group.add(mapping);
+    }
+    const rows = [...group];
+    linked.set(id, rows);
+    return rows;
+  };
+  const result: Inference[] = [];
+  const add = (subjects: readonly string[], status: InferenceStatus, explanation: string,
+    details: Details, evidence: readonly string[] = [], affectedSubjects: readonly string[] = subjects): void => {
+    context.checkpoint(1);
+    const links = new Set<Mapping>();
+    const subjectIds = new Set<string>();
+    for (const id of subjects)
+      for (const subject of originals(id)) subjectIds.add(subject);
+    for (const id of affectedSubjects)
+      for (const mapping of linksFor(id)) links.add(mapping);
+    if (!links.size || !subjectIds.size) return;
+    if (result.length >= 10000) writer.fail('Inference record limit exceeded');
+    const instructions = new Set<string>();
+    const proofs = new Set<string>(writer.evidence ? evidence : []);
+    const ranges = new Map<string, AddressRange>();
+    const spans = new Map<string, { start: number; end: number }>();
+    const provenance = (origin: Origin): void => {
+      for (const id of origin.provenance.instruction_ids) instructions.add(id);
+      if (writer.evidence) for (const id of origin.provenance.evidence_ids) proofs.add(id);
+      for (const range of origin.provenance.ranges)
+        ranges.set(`${range.start.image_id}:${range.start.space}:${range.start.value}:${range.size}`, range);
+    };
+    for (const id of subjectIds) {
+      context.checkpoint(1);
+      const origin = original.get(id);
+      if (origin) provenance(origin);
+      for (const contributor of program.origins.get(id) ?? []) provenance(contributor);
+    }
+    const hasInstructions = instructions.size > 0;
+    const hasRanges = ranges.size > 0;
+    for (const subject of affectedSubjects) {
+      const site = sites?.get(subject);
+      if (site && site.end > site.start) spans.set(`${site.start}:${site.end}`, site);
+    }
+    const hasSites = spans.size > 0;
+    for (const mapping of links) {
+      context.checkpoint(1);
+      if (!hasSites) spans.set(`${mapping.start}:${mapping.end}`, { start: mapping.start, end: mapping.end });
+      // Some declaration/field subjects have no own IR origin. Their exact use
+      // mapping is the provenance, not a guessed defining instruction.
+      if (!hasInstructions) for (const id of mapping.instruction_ids) instructions.add(id);
+      if (writer.evidence) for (const id of mapping.evidence_ids) proofs.add(id);
+      if (!hasRanges) for (const range of mapping.ranges)
+        ranges.set(`${range.start.image_id}:${range.start.space}:${range.start.value}:${range.size}`, range);
+    }
+    if (subjectIds.size > 10000 || instructions.size > 10000 || ranges.size > 10000 ||
+      proofs.size > 1000 || spans.size > 1000) writer.fail('Inference reference limit exceeded');
+    const record: Inference = {
+      id: `inference:${result.length}`, status, explanation, subject_ids: [...subjectIds],
+      evidence_ids: [...proofs], instruction_ids: [...instructions], ranges: [...ranges.values()],
+      output_spans: [...spans.values()], details,
+      review: { operation: 'function_get', view: 'metadata', function_id: input.function.id },
+    };
+    // Charge strings and structure once without serializing/copying the record.
+    const charge = (value: unknown): void => {
+      context.checkpoint(1);
+      if (typeof value === 'string') writer.metadata(Buffer.byteLength(value) + 8);
+      else if (typeof value === 'bigint' || typeof value === 'number') writer.metadata(32);
+      else if (Array.isArray(value)) { writer.metadata(2 + value.length); for (const item of value) charge(item); }
+      else if (value && typeof value === 'object') {
+        for (const [key, item] of Object.entries(value)) { writer.metadata(key.length + 4); charge(item); }
+      } else writer.metadata(5);
+    };
+    charge(record);
+    result.push(record);
+  };
+  const originalValues = (value: Value): readonly string[] => originals(value.id);
+  const constantValue = program.calls.size || program.tails.size
+    ? sourceConstantValues(program.expressions, context) : undefined;
+  const argumentDetails = (value: Value, ordinal: number) => {
+    const expression = program.expressions.get(value.id);
+    const bits = expression?.kind === 'constant'
+      ? BigInt.asUintN(bitWidth(value.type), expression.bits) : constantValue?.(value);
+    return { ordinal, value_ids: originalValues(value), width_bits: bitWidth(value.type),
+      constant_bits: bits === undefined ? null : String(bits) };
+  };
+  const incomingOffsets = new Map<string, bigint | null>();
+  if (input.types?.calls?.stack.state === 'complete')
+    for (const access of input.types.calls.stack.accesses) {
+      context.checkpoint(1);
+      if (access.kind !== 'read' || access.region !== 'incoming_candidate' || access.offset === null) continue;
+      const previous = incomingOffsets.get(access.node_id);
+      incomingOffsets.set(access.node_id, previous === undefined || previous === access.offset ? access.offset : null);
+    }
+  for (let ordinal = 0; ordinal < program.parameters.length; ordinal++) {
+    const value = program.parameters[ordinal]!;
+    const register = program.parameter_registers.get(value.id);
+    const offsets = new Set<bigint>();
+    for (const id of originalValues(value)) {
+      const load = loadResults.get(id), offset = load && incomingOffsets.get(load);
+      if (typeof offset === 'bigint') offsets.add(offset);
+    }
+    const stack = offsets.size === 1 ? offsets.values().next().value : undefined;
+    const parameter = program.signature?.signature.parameters[ordinal];
+    const role = register?.role === 'stack_pointer' ||
+      (program.source?.stack?.kind === 'entry' && program.source.stack.base.id === value.id)
+      ? 'entry_storage' : program.source ? 'observed_input' : 'physical_register';
+    add([value.id], program.signature ? confidence(program.signature.status) : 'inferred',
+      role === 'entry_storage'
+        ? 'Entry-backed storage environment, not an authored source argument; ordinal is its presentation position only.'
+        : program.signature ? 'Parameter follows the supplied source signature and its original machine storage.'
+        : 'Recovered incoming machine value used by the emitted body; this does not prove a complete source prototype.',
+      { kind: 'parameter', ordinal, role, value_ids: originalValues(value), machine_width_bits: bitWidth(value.type),
+        location: register ? { kind: 'register', root: register.root, offset_bits: register.offset_bits, width_bits: register.width_bits }
+          : stack !== undefined ? { kind: 'stack', offset: String(stack) } : { kind: 'unknown' },
+        source_type_id: parameter?.type_id ?? program.source?.value_types?.get(value.id)?.type_id ?? null },
+      program.signature?.evidence_ids);
+  }
+  const displayedAssociations = new Set<string>();
+  for (const view of program.source?.value_types?.values() ?? [])
+    for (const id of view.association_ids) displayedAssociations.add(id);
+  const definitions = new Map<string, RecoveredType | null>();
+  for (const record of input.types?.types ?? []) {
+    context.checkpoint(1);
+    definitions.set(record.id, definitions.has(record.id) ? null : record.definition);
+  }
+  for (const association of input.types?.associations ?? []) {
+    context.checkpoint(1);
+    const definition = definitions.get(association.type_id);
+    add([association.subject_id], confidence(association.status),
+      `Source type association from ${association.source}; ${association.status === 'hypothesis' ? 'an alternative, not an established fact' : 'confidence is retained independently of display'}.`,
+      { kind: 'type', association_ids: [association.id], type_id: association.type_id,
+        type_status: association.status, source: association.source, value_offset_bits: association.value_offset_bits,
+        type_kind: definition?.kind ?? null,
+        signed: definition?.kind === 'integer' ? definition.signed : null,
+        pointee_id: definition?.kind === 'pointer' ? definition.to : null,
+        machine_offset_bits: association.machine_offset_bits, width_bits: association.width_bits,
+        displayed: displayedAssociations.has(association.id) }, association.evidence_ids);
+  }
+  for (const [node, view] of program.memory) {
+    context.checkpoint(1);
+    const field = view.field;
+    add([node, field.id, ...(field.origin_ids ?? []), ...field.value_ids,
+      ...(view.shape.base.kind === 'value' ? [view.shape.base.value_id] : [])], 'inferred',
+    'Observed partial memory field; displacement and access width are known, object and index bounds are not.',
+    { kind: 'field', shape_id: view.shape.id, field_ids: field.origin_ids ?? [field.id], type_id: view.shape.type_id,
+      offset: String(field.offset), width_bits: field.width_bits, stride: field.stride === null ? null : String(field.stride),
+      dynamic: field.dynamic ?? field.stride !== null, bounds: 'unknown', call_target_ids: field.call_target_ids ?? [] },
+    [...view.shape.evidence_ids, ...field.evidence_ids], [node]);
+  }
+  const dataValue = resolveData ?? sourceDataValues(program.expressions, program.source?.addresses ?? [], context);
+  for (const id of program.live) {
+    context.checkpoint(1);
+    if (!linksFor(id).length) continue;
+    const value = program.values.get(id);
+    if (!value) continue;
+    const expression = program.expressions.get(id);
+    let operation: Extract<Details, { readonly kind: 'interpretation' }>['operation'] | null = null;
+    if (expression?.kind === 'integer' &&
+      (expression.op === 'sdiv' || expression.op === 'srem' || expression.op === 'ashr'))
+      operation = expression.op;
+    else if (expression?.kind === 'compare' &&
+      (expression.op === 'slt' || expression.op === 'sle' || expression.op === 'sgt' || expression.op === 'sge'))
+      operation = expression.op;
+    else if (expression?.kind === 'cast' &&
+      (expression.op === 'sign_extend' || expression.op === 'signed_to_float' || expression.op === 'float_to_signed'))
+      operation = expression.op;
+    if (operation !== null && expression) {
+      const operands = expressionOperands(expression);
+      add([id], 'established',
+        'Signed interpretation of this reconstructed bit-vector operation; widths describe reconstructed IR storage, not decoded instruction operand widths or a signed source declaration.',
+        { kind: 'interpretation', width_domain: 'reconstructed_ir', operation, signed: true,
+          operand_value_ids: operands.map(originalValues), operand_width_bits: operands.map((operand) => bitWidth(operand.type)),
+          result_width_bits: bitWidth(value.type) });
+    }
+    const item = dataValue(value);
+    if (!item) continue;
+    add([value.id], 'established', 'Exact symbolic/data address identity; literal bytes are shown only for immutable terminated strings. Unknown storage extents remain unknown.',
+      { kind: 'identity', value_ids: originalValues(value), identity: identity(item.address), name: item.name ?? null,
+        literal: item.string ?? null, encoding: item.string_encoding ?? null,
+        byte_length: item.string_byte_length === undefined ? null : String(item.string_byte_length),
+        mutable: item.object?.mutable ?? null, object_address: item.object ? String(item.object.address.value) : null,
+        object_offset: item.object ? String(item.object.offset) : null,
+        object_byte_length: item.object?.byte_length === undefined || item.object.byte_length === null ? null : String(item.object.byte_length) },
+      item.object?.evidence_ids);
+  }
+  for (const block of program.blocks.values()) for (const node of block.statements) {
+    context.checkpoint(1);
+    if (node.kind !== 'call') continue;
+    const projection = program.calls.get(node.id);
+    if (!projection) continue;
+    add([node.id, ...(node.target.kind === 'indirect' ? [node.target.value.id] : [])],
+      projection.signature ? confidence(projection.signature.status) : projection.kind === 'physical' ? 'unresolved' : 'inferred',
+      'Ordered known call arguments and exact target identity; incomplete arity does not mean zero trailing arguments. Local source projection does not prove callee behavior.',
+      { kind: 'call', call_id: node.id,
+        target: node.target.kind === 'direct' ? { kind: 'direct', identity: identity(node.target.address) }
+          : { kind: 'indirect', value_ids: originalValues(node.target.value) },
+        ordered_arguments: projection.arguments.map(argumentDetails),
+        result_width_bits: projection.results.map((value) => bitWidth(value.type)),
+        arity_complete: projection.kind !== 'physical' && projection.argument_list_complete !== false &&
+          (projection.argument_list_complete === true || (projection.kind === 'source' && projection.signature?.signature.variadic === false)),
+        signature_id: projection.signature?.id ?? null },
+      [...node.contract_evidence, ...(projection.signature?.evidence_ids ?? [])], [node.id]);
+  }
+  for (const [control, tail] of program.tails) {
+    context.checkpoint(1);
+    const projection = tail.boundary;
+    add([control], projection.signature ? confidence(projection.signature.status) : 'inferred',
+      'Terminal call target and observed ordered inputs. Result widths belong to the callee, not invented caller SSA results; unknown trailing arity remains open.',
+      { kind: 'call', call_id: control, target: { kind: 'direct', identity: identity(tail.target) },
+        ordered_arguments: projection.arguments.map(argumentDetails),
+        result_width_bits: tail.result_types.map(bitWidth),
+        arity_complete: projection.kind !== 'physical' && projection.argument_list_complete !== false &&
+          (projection.argument_list_complete === true || (projection.kind === 'source' && projection.signature?.signature.variadic === false)),
+        signature_id: projection.signature?.id ?? null }, projection.signature?.evidence_ids);
+  }
+  for (const record of localValidation) {
+    context.checkpoint(1);
+    add(record.subject_ids ?? [record.subject], record.status === 'verified' ? 'established' : record.status === 'rejected' ? 'conflicting' : 'unresolved',
+      'Local translation validation only: the stated fragment/scope is not whole-function equivalence, semantic coverage, or evidence of a source declaration.',
+      { kind: 'rewrite', validation_kind: record.kind, validation_subject: record.subject,
+        validation_status: record.status, scope: record.scope, reason: record.reason ?? null,
+        ...(record.counterexample ? { counterexample: record.counterexample } : {}) });
+  }
+  for (const conflict of input.types?.conflicts ?? []) {
+    add([conflict.subject_id], 'conflicting', 'Incompatible alternatives remain visible; no alternative is promoted to an established fact.',
+      { kind: 'conflict', alternatives: conflict.alternatives, reason: conflict.reason }, conflict.evidence_ids);
+  }
+  for (const annotation of input.annotations ?? []) {
+    add([annotation.entity_id], annotation.status === 'retracted' ? 'unresolved' : annotation.status,
+      annotation.status === 'retracted' ? 'This annotation was retracted and supplies no active fact.'
+        : 'Annotation confidence is retained; an assertion or hypothesis is not an analysis proof.',
+      { kind: 'annotation', annotation_id: annotation.id, annotation_status: annotation.status, annotation_kind: annotation.value.kind },
+      annotation.evidence_ids);
+  }
+  return result;
+}

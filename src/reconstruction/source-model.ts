@@ -90,11 +90,7 @@ export interface SourcePresentation {
   /** Explicit preconditions of supported FP projection, not modeled control state. */
   readonly assumptions?: readonly string[];
   readonly locals: ReadonlyMap<string, SourceLocal>;
-  readonly stack: {
-    readonly minimum_offset: bigint;
-    readonly size: bigint;
-    readonly alignment: number;
-  } | null;
+  readonly stack: SourceStackStorage | null;
   readonly stack_addresses: ReadonlyMap<string, bigint>;
   readonly addresses: readonly SourceAddress[];
   /** Whole source-call results may be assembled from multiple SSA register cells. */

@@ -754,6 +754,7 @@ export function planSource(
             .map((binding) => binding.value),
         );
         parameterNames.set(entryParameter.id, 'entry_sp');
+        parameterRegisters.set(entryParameter.id, abi.stack_pointer);
       }
       return entryParameter;
     },

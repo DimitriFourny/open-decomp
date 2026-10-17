@@ -119,7 +119,7 @@ Surfaces: `src/analysis/discovery/`, `src/service/queries/graphs.ts`, `src/servi
 
 Start these after the correctness/parity work they depend on. Existing evidence and annotation infrastructure should be extended, not duplicated.
 
-- [ ] **Explainable, trustworthy output:** expose why a parameter, type, field, string, call target, and high-level rewrite was inferred. Preserve exact instruction/source spans through simplification; show conflicts and assumptions beside the affected construct. Keep raw machine semantics accessible without forcing them into every pseudocode line.
+- [x] **Explainable, trustworthy output:** expose why a parameter, type, field, string, call target, and high-level rewrite was inferred. Preserve exact instruction/source spans through simplification; show conflicts and assumptions beside the affected construct. Keep raw machine semantics accessible without forcing them into every pseudocode line.
   - Success: an investigator can verify or challenge a specific inference from the emitted code without manually rediscovering its instruction provenance.
 - [ ] **Localized uncertainty:** render the understood body normally and isolate unresolved arguments, instructions, or effects in the smallest sound region. Consolidate repeated FP-environment assumptions into explicit function-level requirements while preserving affected control/effect dependencies.
   - Success: users can distinguish established computation, assumption-dependent computation, and unresolved behavior; shorter output does not hide uncertainty or weaken semantics.

@@ -283,7 +283,8 @@ export function planSourceNames(
   for (const value of program.values.values()) {
     if (!program.live.has(value.id) && !parameters.has(value.id)) continue;
     context.checkpoint(1);
-    if (program.source.stack?.kind === 'entry' && program.source.stack.base.id === value.id) {
+    if ((program.source.stack?.kind === 'entry' && program.source.stack.base.id === value.id) ||
+        program.parameter_registers.get(value.id)?.role === 'stack_pointer') {
       preferred.set(value.id, 'entry_sp'); continue;
     }
     if (supplied.has(value.id)) { preferred.set(value.id, supplied.get(value.id)!); continue; }
