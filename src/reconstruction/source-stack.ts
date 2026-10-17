@@ -1,4 +1,4 @@
-import { fingerprint, type OperationContext } from '../core/index.js';
+import { fingerprint, type OperationContext, type PresentationView } from '../core/index.js';
 import type { EmissionInput } from '../emitters/model.js';
 import { classifyStackRegion } from '../analysis/stack/index.js';
 import {
@@ -8,11 +8,12 @@ import {
   type DataType,
   type Expression,
   type Instruction,
+  type RegisterBinding,
   type Value,
 } from '../ir/index.js';
 import type { BlockRegion, ParallelTransfer } from '../presentation/index.js';
 import type { BoundaryProjection } from './model.js';
-import type { SourceLocal, SourceStackStorage } from './source-model.js';
+import type { FrameSaves, SourceLocal, SourceStackStorage } from './source-model.js';
 import { LocalValidationSession } from './local-validation.js';
 import { validateStackPromotion } from './local-storage-validation.js';
 
@@ -31,6 +32,7 @@ export function planSourceStack(
   incomingStack: (offset: bigint, type: DataType, contributors: readonly Value[]) => Value | null,
   entryStack: () => Value,
   validation = new LocalValidationSession(context),
+  view: PresentationView = 'checked',
 ) {
   const addresses = new Map<string, bigint>(),
     facts = input.types?.calls?.stack;
@@ -141,23 +143,35 @@ export function planSourceStack(
       }
   }
   let escaped = false,
-    unknownCallStorage = false;
+    unknownCallStorage = false,
+    // Frame saves rest on ABI conformance: an unresolved callee reads only
+    // argument registers/stack and never writes its caller's frame. Only an
+    // actual stack address in possible argument/result storage escapes them.
+    saveEscaped = view !== 'source';
+  const abi = input.source!.abi;
+  const preservedRoot = (root: string): boolean =>
+    abi.preserved.some((register) => register.root === root);
+  const argumentTainted = (bindings: readonly RegisterBinding[]): boolean =>
+    bindings.some(
+      (binding) =>
+        binding.register.root !== abi.stack_pointer.root &&
+        !preservedRoot(binding.register.root) &&
+        tainted.has(binding.value.id),
+    );
+  const callNodes: Extract<Instruction, { kind: 'call' }>[] = [];
   const accesses: { node: MemoryNode; block: string; offset: bigint; end: bigint; key: string }[] =
     [];
   for (const block of blocks.values()) {
     for (const node of block.statements) {
       context.checkpoint(1);
       if (node.kind === 'call') {
+        callNodes.push(node);
         const projection = calls.get(node.id)!;
-        const snapshot = facts?.snapshots.get(node.id);
-        const writtenStack = snapshot
-          ? snapshot.memory.size !== 0
-          : memory.some((access) => access.kind === 'store' && addresses.has(access.address.id));
-        // Register observations establish a prefix, not the absence of further
-        // stack arguments. Written bytes may also be saves or locals: retain the
-        // uncertainty instead of inventing an argument count from their extent.
-        if (projection.kind === 'inferred' && writtenStack)
-          calls.set(node.id, { ...projection, argument_list_complete: false });
+        if (
+          projection.arguments.some((value) => tainted.has(value.id)) ||
+          (projection.kind !== 'source' && argumentTainted(node.register_inputs))
+        )
+          saveEscaped = true;
       }
       if (node.kind === 'call' && calls.get(node.id)!.kind !== 'source') unknownCallStorage = true;
       if (
@@ -166,7 +180,7 @@ export function planSourceStack(
           calls.get(node.id)!.arguments.some((value) => tainted.has(value.id)))
       )
         escaped = true;
-      if (node.kind === 'unknown_effect') escaped = true;
+      if (node.kind === 'unknown_effect') escaped = saveEscaped = true;
       if (node.kind !== 'load' && node.kind !== 'store') continue;
       const offset = addresses.get(node.address.id),
         width = bitWidth(node.kind === 'load' ? node.result.type : node.value.type);
@@ -175,8 +189,8 @@ export function planSourceStack(
         tainted.has(node.value.id) &&
         (offset === undefined || offset >= 0n)
       )
-        escaped = true;
-      if (offset === undefined && tainted.has(node.address.id)) escaped = true;
+        escaped = saveEscaped = true;
+      if (offset === undefined && tainted.has(node.address.id)) escaped = saveEscaped = true;
       if (offset === undefined || width % 8) continue;
       const end = offset + BigInt(width / 8);
       accesses.push({ node, block: block.id, offset, end, key: `${offset}:${end}` });
@@ -185,7 +199,11 @@ export function planSourceStack(
       block.control.kind === 'return' &&
       returns.get(block.control.id)!.results.some((value) => tainted.has(value.id))
     )
-      escaped = true;
+      escaped = saveEscaped = true;
+    // Like private promotion, unmodeled exits do not observe frame-private
+    // bytes; an indirect target may still receive a stack address as argument.
+    if (block.control.kind === 'indirect' && argumentTainted(block.register_exit))
+      saveEscaped = true;
   }
   // Established ABI stack locations are outgoing argument storage at a call,
   // even when their entry-SP offsets are negative. They are not private spills.
@@ -247,6 +265,258 @@ export function planSourceStack(
         continue;
       eligible.add(key);
     }
+  // Source view: frame-private save/restore of an entry register. A slot is a
+  // save when (i) its only store writes the entry value of a preserved register
+  // or the link register, (ii) every return/tail exit restores that register
+  // from a dominated load of exactly this slot and no other access overlaps it,
+  // (iii) no stack address escapes and (iv) it is not established outgoing
+  // argument storage. Under ABI conformance callees never write it, so each
+  // reload equals the saved value and neither access is source-observable.
+  const saveStores = new Set<string>(),
+    saveReloads = new Set<string>(),
+    saveBytes = new Set<bigint>();
+  const exits = [...blocks.values()].filter(
+    (block) =>
+      block.control.kind === 'return' ||
+      (block.control.kind === 'indirect' && block.control.tail_call === true),
+  );
+  const position = (block: string, node: MemoryNode): number =>
+    blocks.get(block)!.statements.indexOf(node);
+  const dominates = (
+    first: (typeof accesses)[number],
+    second: (typeof accesses)[number],
+  ): boolean => {
+    if (first.block === second.block)
+      return position(first.block, first.node) < position(second.block, second.node);
+    for (
+      let id = blocks.get(second.block)!.dominator;
+      id !== null;
+      id = blocks.get(id)?.dominator ?? null
+    ) {
+      context.checkpoint(1);
+      if (id === first.block) return true;
+    }
+    return false;
+  };
+  if (!saveEscaped && exits.length) {
+    const entryCells = new Map(
+      entry.register_entry.map((binding) => [binding.value.id, binding.register]),
+    );
+    const loadsByResult = new Map<string, string>();
+    for (const access of accesses)
+      if (access.node.kind === 'load') loadsByResult.set(access.node.result.id, access.node.id);
+    type Bits = { readonly root: string; readonly low: number; readonly width: number };
+    // Exact entry bits through bitcasts, extracts and ordered concatenation only.
+    const entryBits = (value: Value, depth = 0): Bits | null => {
+      context.checkpoint(1);
+      const cell = entryCells.get(value.id);
+      if (cell) return { root: cell.root, low: cell.offset_bits, width: cell.width_bits };
+      const expression = depth < 16 ? expressions.get(value.id) : undefined;
+      const width = bitWidth(value.type);
+      if (expression?.kind === 'cast' && expression.op === 'bitcast')
+        return bitWidth(expression.value.type) === width
+          ? entryBits(expression.value, depth + 1)
+          : null;
+      if (expression?.kind === 'extract') {
+        const inner = entryBits(expression.value, depth + 1);
+        return inner && expression.offset + width <= inner.width
+          ? { root: inner.root, low: inner.low + expression.offset, width }
+          : null;
+      }
+      if (expression?.kind === 'concat') {
+        let result: Bits | null = null;
+        for (const part of expression.values) {
+          const bits = entryBits(part, depth + 1);
+          if (!bits) return null;
+          if (!result) result = bits;
+          else if (bits.root === result.root && bits.low === result.low + result.width)
+            result = { root: result.root, low: result.low, width: result.width + bits.width };
+          else return null;
+        }
+        return result;
+      }
+      return null;
+    };
+    // Bit offset within a reload of `members` on every incoming path, or null.
+    const reloadBits = (
+      value: Value,
+      members: ReadonlySet<string>,
+      active: Set<string>,
+      depth = 0,
+    ): number | null => {
+      context.checkpoint(1);
+      const load = loadsByResult.get(value.id);
+      if (load !== undefined) return members.has(load) ? 0 : null;
+      if (depth >= 32 || active.has(value.id)) return null;
+      const expression = expressions.get(value.id);
+      if (expression?.kind === 'cast' && expression.op === 'bitcast')
+        return bitWidth(expression.value.type) === bitWidth(value.type)
+          ? reloadBits(expression.value, members, active, depth + 1)
+          : null;
+      if (expression?.kind === 'extract') {
+        const inner = reloadBits(expression.value, members, active, depth + 1);
+        return inner === null ? null : inner + expression.offset;
+      }
+      const sources = expression ? undefined : incoming.get(value.id);
+      if (!sources?.length) return null;
+      active.add(value.id);
+      let result: number | null | undefined;
+      for (const source of sources) {
+        const bits = reloadBits(source, members, active, depth + 1);
+        if (bits === null || (result !== undefined && result !== bits)) {
+          result = null;
+          break;
+        }
+        result = bits;
+      }
+      active.delete(value.id);
+      return result ?? null;
+    };
+    for (const [key, group] of groups) {
+      context.checkpoint(group.length);
+      if (eligible.has(key)) continue;
+      const first = group[0]!;
+      const stores = group.filter((access) => access.node.kind === 'store'),
+        loads = group.filter((access) => access.node.kind === 'load');
+      const save = stores[0],
+        saved = save?.node.kind === 'store' ? save.node : null;
+      if (
+        !save ||
+        !saved ||
+        stores.length !== 1 ||
+        !loads.length ||
+        first.offset >= 0n ||
+        first.end > 0n ||
+        group.some(
+          (access) =>
+            access.node.access.volatile ||
+            access.node.access.endian !== saved.access.endian ||
+            (access.node.kind === 'load' && !sameType(access.node.result.type, saved.value.type)),
+        ) ||
+        accesses.some(
+          (access) => access.key !== key && access.offset < first.end && access.end > first.offset,
+        ) ||
+        outgoingRanges.some((range) => range.start < first.end && range.end > first.offset)
+      )
+        continue;
+      const bits = entryBits(saved.value);
+      if (
+        !bits ||
+        bits.width !== bitWidth(saved.value.type) ||
+        !(
+          abi.link_register?.root === bits.root ||
+          abi.preserved.some(
+            (register) =>
+              register.root === bits.root &&
+              register.offset_bits <= bits.low &&
+              register.offset_bits + register.width_bits >= bits.low + bits.width,
+          )
+        ) ||
+        loads.some((load) => !dominates(save, load))
+      )
+        continue;
+      const members = new Set(loads.map((load) => load.node.id));
+      const restored = exits.every((exit) => {
+        let covered = 0;
+        for (const binding of exit.register_exit) {
+          const register = binding.register;
+          if (
+            register.root !== bits.root ||
+            register.offset_bits + register.width_bits <= bits.low ||
+            register.offset_bits >= bits.low + bits.width
+          )
+            continue;
+          if (
+            register.offset_bits < bits.low ||
+            register.offset_bits + register.width_bits > bits.low + bits.width ||
+            reloadBits(binding.value, members, new Set()) !== register.offset_bits - bits.low
+          )
+            return false;
+          covered += register.width_bits;
+        }
+        return covered === bits.width;
+      });
+      if (
+        !restored ||
+        !validation.presentation(
+          'frame_save',
+          `stack:${key}`,
+          `frame-private save of ${bits.root}[${bits.low}:${bits.width}] at entry SP ${first.offset}; restored from this exact slot on every return/tail exit; nonescaping, nonoverlapping, not established outgoing argument storage`,
+          [save.node.id, ...members].slice(0, 64),
+        )
+      )
+        continue;
+      saveStores.add(save.node.id);
+      for (let byte = first.offset; byte < first.end; byte++) saveBytes.add(byte);
+      for (const load of loads) {
+        saveReloads.add(load.node.id);
+        if (load.node.kind === 'load')
+          alias(load.node.result, { kind: 'cast', op: 'bitcast', value: saved.value });
+      }
+    }
+    if (saveStores.size)
+      validation.requireAbi(
+        'frame_save',
+        [exits[0]!.control.id, ...saveStores],
+        'Frame save/restore elision assumes ABI conformance: callees preserve callee-saved registers and never write their caller’s frame outside outgoing argument storage, and the saved slots are not stack arguments. Each hidden store and reload remains in the checked view and the original mappings.',
+      );
+  }
+  // Source view: a non-volatile frame load dominated by a store covering its
+  // bytes cannot fault. If its result is dead, reconstruct() may drop it.
+  const deadReloadCandidates = new Set<string>();
+  if (view === 'source')
+    for (const load of accesses) {
+      if (load.node.kind !== 'load' || load.node.access.volatile || saveReloads.has(load.node.id))
+        continue;
+      context.checkpoint(accesses.length);
+      if (
+        accesses.some(
+          (store) =>
+            store.node.kind === 'store' &&
+            store.offset <= load.offset &&
+            store.end >= load.end &&
+            dominates(store, load),
+        )
+      )
+        deadReloadCandidates.add(load.node.id);
+    }
+  // Register observations establish a prefix, not the absence of further
+  // stack arguments. Written bytes may also be saves or locals: retain the
+  // uncertainty instead of inventing an argument count from their extent.
+  // Proven frame saves are not possible stack arguments.
+  for (const node of callNodes) {
+    context.checkpoint(1);
+    const projection = calls.get(node.id)!;
+    if (projection.kind !== 'inferred') continue;
+    const snapshot = facts?.snapshots.get(node.id);
+    let writtenStack = false;
+    if (snapshot)
+      for (const offset of snapshot.memory.keys()) {
+        context.checkpoint(1);
+        if (!saveBytes.has(offset)) {
+          writtenStack = true;
+          break;
+        }
+      }
+    else
+      writtenStack = memory.some(
+        (access) =>
+          access.kind === 'store' && addresses.has(access.address.id) && !saveStores.has(access.id),
+      );
+    // A source-view closure by complete callee reads (planner) also needs this
+    // caller to write no possible stack argument; it is recorded or withdrawn.
+    if (
+      writtenStack ||
+      (projection.argument_list_complete === true &&
+        !validation.presentation(
+          'arity_closure',
+          node.id,
+          'complete argument list: the fully analyzed nonrecursive callee reads no register beyond the observed prefix, no incoming stack and no escaping incoming-stack address; the caller writes no possible stack argument outside proven frame saves',
+          [node.id],
+        ))
+    )
+      calls.set(node.id, { ...projection, argument_list_complete: false });
+  }
   const byNode = new Map(accesses.map((access) => [access.node.id, access]));
   const predecessors = new Map<string, string[]>();
   for (const { transfer, block } of transfers) {
@@ -320,9 +590,10 @@ export function planSourceStack(
       }
     }
   }
-  const hidden = new Set<string>(),
+  const hidden = new Set<string>([...saveStores, ...saveReloads]),
     privateLoads = new Set<string>(),
     locals = new Map<string, SourceLocal>();
+  const saves: FrameSaves = { stores: saveStores, reloads: saveReloads, bytes: saveBytes };
   // An unchanged incoming slot is entry storage supplied by the caller, not a
   // byte array allocated by this function. Bind only exact, nonescaping accesses
   // to proven ABI scalar slots; partial/overlapping or modified storage retains
@@ -499,5 +770,7 @@ export function planSourceStack(
     frame,
     entryStorage,
     requiresEntry,
+    saves,
+    deadReloadCandidates,
   };
 }

@@ -89,6 +89,8 @@ const callContext = z.strictObject({
   aliases: z.array(z.array(contextRegister).min(2).max(64)).max(64),
   type_evidence_scope: z.string().regex(/^[a-f0-9]{64}$/),
 });
+/** Snake-case name of one source-view presentation rewrite rule. */
+export const presentationRuleSchema = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
 export const inferenceDetailsByKind = {
   parameter: z.strictObject({
     kind: z.literal('parameter'),
@@ -186,7 +188,15 @@ export const inferenceDetailsByKind = {
   }),
   rewrite: z.strictObject({
     kind: z.literal('rewrite'),
-    validation_kind: z.enum(['bitvector', 'parallel-copy', 'stack-promotion', 'control']),
+    validation_kind: z.enum([
+      'bitvector',
+      'parallel-copy',
+      'stack-promotion',
+      'control',
+      'presentation',
+    ]),
+    /** Presentation rule whose side conditions were checked (only for `presentation`). */
+    rule: presentationRuleSchema.optional(),
     validation_subject: z.string().min(1).max(1024),
     validation_status: z.enum(['verified', 'unverified', 'rejected']),
     scope: z.string().min(1).max(4096),
@@ -230,7 +240,7 @@ export const requirementSiteSchema = z.strictObject({
 });
 export const requirementSchema = z.strictObject({
   ...common,
-  kind: z.enum(['fp_environment', 'unresolved']),
+  kind: z.enum(['fp_environment', 'abi_conformance', 'unresolved']),
   sites: z.array(requirementSiteSchema).max(1000),
 });
 export type InferenceStatus = z.infer<typeof inferenceStatusSchema>;

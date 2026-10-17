@@ -17,7 +17,8 @@ export function validateEmittedControl(
   language: 'c-like' | 'python-like',
   validation: LocalValidationSession,
 ): void {
-  type Scope = { loop: string | null; after: string | null };
+  /** `test`: a do-while's test control, the only site whose `continue` repeats. */
+  type Scope = { loop: string | null; after: string | null; test?: string };
   let work = 0;
   const entry = (region: Region, fallback: string | null): string | null => {
     while (region.kind === 'sequence') {
@@ -47,8 +48,10 @@ export function validateEmittedControl(
       let actual = follow;
       if (action.kind === 'goto') actual = action.target;
       if (action.kind === 'break') actual = scopes.at(-1)?.after ?? null;
-      if (action.kind === 'continue')
-        actual = [...scopes].reverse().find((scope) => scope.loop !== null)?.loop ?? null;
+      if (action.kind === 'continue') {
+        const scope = [...scopes].reverse().find((item) => item.loop !== null);
+        actual = scope && (scope.test === undefined || scope.test === subject) ? scope.loop : null;
+      }
       return validateControlTarget(subject, transfer.target, actual);
     });
   };
@@ -85,9 +88,14 @@ export function validateEmittedControl(
         }
         walk(region.regions[i]!, next, scopes);
       }
-    } else if (region.kind === 'loop')
-      walk(region.body, region.header, [...scopes, { loop: region.header, after: follow }]);
-    else {
+    } else if (region.kind === 'loop') {
+      // Falling off a do-while body reaches its test, never the header directly.
+      const test = region.form?.kind === 'do_while' ? region.form.test : undefined;
+      walk(region.body, test === undefined ? region.header : null, [
+        ...scopes,
+        { loop: region.header, after: follow, ...(test === undefined ? {} : { test }) },
+      ]);
+    } else {
       const control = region.control;
       if (control.kind === 'jump') edge(control.transfer, follow, scopes, control.id);
       if (control.kind === 'if') {

@@ -53,6 +53,8 @@ export interface OpenBinaryOptions {
 }
 export interface DecompileOptions {
   readonly emitter?: 'c-like' | 'python-like';
+  /** `source` (default) applies proof-carrying presentation rewrites; `checked` prints every machine fact. */
+  readonly view?: 'source' | 'checked';
   readonly budget?: ToolInput<'function_decompile'>['budget'];
   readonly signal?: AbortSignal;
   readonly onProgress?: (job: WireJob) => void;
@@ -298,7 +300,14 @@ export class BinarySession {
         revision: this.revision,
         function_id: selected.id,
         wait: true,
-        ...(options.emitter === undefined ? {} : { options: { emitter: options.emitter } }),
+        ...(options.emitter === undefined && options.view === undefined
+          ? {}
+          : {
+              options: {
+                ...(options.emitter === undefined ? {} : { emitter: options.emitter }),
+                ...(options.view === undefined ? {} : { view: options.view }),
+              },
+            }),
         ...(options.budget === undefined ? {} : { budget: options.budget }),
       },
       call,

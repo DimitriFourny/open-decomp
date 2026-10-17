@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { nativeOracleSkip } from '../support/host-tools.js';
 import { openBinary, type BinarySession, type ToolResult } from '../../src/api/index.js';
 import type { WireEmission } from '../../src/core/index.js';
 import { acknowledgeRequirements, emittedFormals, execute } from '../emitters/c/support.js';
@@ -32,7 +33,7 @@ function bits(value: number): bigint {
 
 test(
   'source-built Mach-O scalar doubles stay live through public C/Python projection',
-  { skip: process.platform !== 'darwin' || process.arch !== 'arm64', timeout: 60000 },
+  { skip: nativeOracleSkip(), timeout: 60000 },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), 'open-decomp-float-regression-'));
     let session: BinarySession | undefined;
@@ -130,7 +131,7 @@ int main(void) {
       const consumerEmission: WireEmission = consumer.data.emission;
       const consumerFormals = emittedFormals(consumerEmission);
       const calls = new Map<string, (args: readonly bigint[]) => bigint>();
-      calls.set('_fixture_float', (args) => {
+      calls.set('fixture_float', (args) => {
         assert.equal(args.length, 2);
         const bytes = new DataView(new ArrayBuffer(8));
         bytes.setBigUint64(0, args[0]!, true);
@@ -166,7 +167,7 @@ int main(void) {
         assert.equal(observed.exit, 'machine_return');
         assert.deepEqual(observed.values, [expected[index]![1]!]);
         assert.deepEqual(observed.source_calls, [
-          { name: '_fixture_float', arguments: [bits(a), bits(b)] },
+          { name: 'fixture_float', arguments: [bits(a), bits(b)] },
         ]);
       }
     }

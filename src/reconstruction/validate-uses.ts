@@ -3,8 +3,9 @@ import { expressionOperands, type Origin, type Value } from '../ir/index.js';
 import type { ParallelTransfer } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
 
-/** Region SSA is block-local, but source rewrites may introduce shared locals.
- * Check their actual emission sites, not just membership in the SSA value map. */
+/** SSA values may be used in any dominated block, and source rewrites (phi-copy
+ * coalescing, tail duplication, shared locals) move or share emission sites.
+ * Check each value's actual emission sites, not just membership in the SSA value map. */
 export function validateEmittedUses(
   program: Reconstruction,
   reachable: ReadonlySet<string>,

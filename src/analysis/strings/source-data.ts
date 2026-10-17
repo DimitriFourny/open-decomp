@@ -385,11 +385,23 @@ export function recoverDataAddress(
       image.bytes.read(file, length),
     );
     if (text !== '' && !/^[\p{L}\p{M}\p{N}\p{P}\p{S}\p{Zs}\t\r\n]+$/u.test(text)) return result;
+    // A suffix of a neighbouring terminated string is a valid address but not
+    // that string's own literal: only a section start or a preceding NUL begins one.
+    const previous =
+      va.value === section.virtual_range.start.value
+        ? undefined
+        : image.address_map.translate({ ...va, space: 'va', value: va.value - 1n }, 'file');
+    const start =
+      previous === undefined ||
+      (previous.kind === 'mapped' &&
+        previous.address.value === file - 1n &&
+        image.bytes.at(Number(previous.address.value)) === 0);
     return {
       ...result,
       string: text,
       string_byte_length: BigInt(length),
       string_encoding: /^[\x00-\x7f]*$/.test(text) ? 'ascii' : 'utf8',
+      ...(start ? { string_start: true as const } : {}),
     };
   } catch {
     return result;

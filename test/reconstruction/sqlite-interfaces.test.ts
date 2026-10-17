@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
+import { nativeOracleSkip } from '../support/host-tools.js';
 import { openBinary, type BinarySession, type ToolResult } from '../../src/api/index.js';
 import {
   contentHash,
@@ -137,7 +138,7 @@ async function decompiled(
 // independent return/memory/logging/callback oracle, not a second IR evaluation.
 test(
   'actual SQLite interfaces preserve safety/logging/mutex inputs and full-width results under defaults',
-  { skip: process.platform !== 'darwin' || process.arch !== 'arm64', timeout: 180000 },
+  { skip: nativeOracleSkip(), timeout: 180000 },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), 'open-decomp-sqlite-interfaces-regression-'));
     const sessions: BinarySession[] = [];
@@ -285,7 +286,7 @@ test(
               return 0n;
             };
             const input = index === 0 ? 0n : dbAddress;
-            models.set('_sqlite3SafetyCheckOk', (args) => {
+            models.set('sqlite3SafetyCheckOk', (args) => {
               assert.deepEqual(args, [input]);
               if (input === 0n) {
                 trace += 'log:21:API call with NULL database connection pointer;';
@@ -295,7 +296,7 @@ test(
               if (sickOrOk()) trace += 'log:21:API call with unopened database connection pointer;';
               return 0n;
             });
-            models.set('_sqlite3SafetyCheckSickOrOk', (args) => {
+            models.set('sqlite3SafetyCheckSickOrOk', (args) => {
               assert.deepEqual(args, [input]);
               assert.notEqual(
                 input,
@@ -325,28 +326,28 @@ test(
               store(memory, dbAddress + 144n, load(memory, dbAddress + 144n, 4) ^ 0x55n, 4);
               return [];
             });
-            models.set('_sqlite3_log', (args, context) => {
+            models.set('sqlite3_log', (args, context) => {
               assert.ok(
                 args.length >= 2,
                 'Logging must retain its observed error-code/format prefix',
               );
               assert.equal(args[0], 21n);
               assert.equal(cstring(memory, args[1]!), '%s at line %d of [%.10s]');
-              // Darwin anonymous arguments are actual outgoing bytes. An unknown
-              // remainder is not an empty list or an established complete arity.
+              // Darwin anonymous arguments are actual outgoing bytes. The source
+              // view may pass a leading run of them as observed call arguments
+              // (their stores consumed); the rest are read from the outgoing
+              // slots. The trace below checks every value against the oracle.
+              // An unknown remainder is not an empty list or a complete arity.
               const sp = entrySp - (operation === 'limit' ? 80n : 64n);
-              const supplied = [
-                load(memory, sp, 8),
-                load(memory, sp + 8n, 8),
-                load(memory, sp + 16n, 8),
-              ];
               assert.ok(args.length <= 5);
-              args.slice(2).forEach((value, i) => assert.equal(value, supplied[i]));
+              const supplied = [0n, 8n, 16n].map((offset, i) =>
+                i + 2 < args.length ? args[i + 2]! : load(memory, sp + offset, 8),
+              );
               if (context.arguments_complete) assert.equal(args.length, 5);
               trace += `log:21:${cstring(memory, supplied[0]!)} at line ${Number(BigInt.asIntN(32, supplied[1]!))} of [${cstring(memory, supplied[2]!).slice(0, 10)}];`;
               return [];
             });
-            models.set('_sqlite3_incomplete', (args) => {
+            models.set('sqlite3_incomplete', (args) => {
               assert.deepEqual(args, [sql === null ? 0n : sqlAddress]);
               const result = oracle.get(`incomplete:${index}`)!;
               trace += result.trace;
@@ -399,11 +400,11 @@ test(
       for (const [index, value] of directValues.entries()) {
         for (let offset = -256; offset < 0; offset++) memory.set(entrySp + BigInt(offset), 0xa5);
         const models = new Map<string, SourceCallOracle>();
-        models.set('_fixture_stack', (args) => {
+        models.set('fixture_stack', (args) => {
           assert.deepEqual(args, [value]);
           return BigInt.asUintN(32, value + 7n);
         });
-        models.set('_fixture_arithmetic', (args) => {
+        models.set('fixture_arithmetic', (args) => {
           assert.deepEqual(args, [value, 2n]);
           return BigInt.asUintN(32, value + 6n) ^ 0x55n;
         });
@@ -422,11 +423,11 @@ test(
           [oracle.get(`direct:${index}`)!.result],
         );
         assert.equal(
-          observed.source_calls?.filter((call) => call.name === '_fixture_stack').length,
+          observed.source_calls?.filter((call) => call.name === 'fixture_stack').length,
           1,
         );
         assert.equal(
-          observed.source_calls?.filter((call) => call.name === '_fixture_arithmetic').length,
+          observed.source_calls?.filter((call) => call.name === 'fixture_arithmetic').length,
           1,
         );
       }

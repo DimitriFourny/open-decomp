@@ -20,12 +20,22 @@ export interface InferredCallee {
   readonly parameters: readonly RegisterDescriptor[];
   /** False records an observed prefix without closing the target's source arity. */
   readonly argument_list_complete?: boolean;
+  /** Basis on which a source view may close an open (`argument_list_complete:
+   * false`) observed argument list. `callee_reads`: the fully analyzed,
+   * nonrecursive callee reads no register outside `parameters`, no incoming stack
+   * and no escaping incoming-stack address; the caller must still prove that it
+   * prepares no possible stack argument. */
+  readonly argument_list_closure?: 'callee_reads';
   /** Observed incoming slots in callee-entry SP coordinates, not a full arity. */
   readonly stack_parameters?: readonly {
     readonly offset: bigint;
     readonly width_bits: number;
     readonly type: DataType;
   }[];
+  /** The callee lets a pointer into its incoming argument area escape (an
+   * escaping `va_list`), so it may read caller-written stack bytes beyond any
+   * observed stack parameter. Never a count of those bytes or arguments. */
+  readonly variadic_stack?: true;
   readonly returns: readonly RegisterDescriptor[];
   /** Lane types observed independently of architectural register capacity. */
   readonly parameter_types?: readonly DataType[];
@@ -42,6 +52,9 @@ export interface SourceAddress {
   readonly string?: string;
   readonly string_byte_length?: bigint;
   readonly string_encoding?: 'ascii' | 'utf8';
+  /** The string begins at a section start or right after a NUL byte: it is not
+   * the interior suffix of a neighbouring terminated string. */
+  readonly string_start?: true;
   /** Byte storage identity; an unknown extent is never inferred from a use. */
   readonly object?: {
     readonly address: Address;
@@ -91,6 +104,14 @@ export interface SourceTypeView {
   readonly subject_ids: readonly string[];
   readonly evidence_ids: readonly string[];
 }
+export interface FrameSaves {
+  /** Store statements saving an entry register value into a frame-private slot. */
+  readonly stores: ReadonlySet<string>;
+  /** Load statements restoring that exact slot. */
+  readonly reloads: ReadonlySet<string>;
+  /** Saved bytes in entry-SP coordinates, excluded from possible stack arguments. */
+  readonly bytes: ReadonlySet<bigint>;
+}
 /** Syntax-neutral source storage and interface information. All original SSA
  * identities and effects remain in the analyzed graph and source mappings. */
 export interface SourcePresentation {
@@ -109,6 +130,9 @@ export interface SourcePresentation {
   readonly locals: ReadonlyMap<string, SourceLocal>;
   readonly stack: SourceStackStorage | null;
   readonly stack_addresses: ReadonlyMap<string, bigint>;
+  /** Source view only: frame-private save/restore traffic of preserved registers
+   * and the frame record, hidden under an `abi_conformance` requirement. */
+  readonly frame_saves?: FrameSaves;
   readonly addresses: readonly SourceAddress[];
   /** Whole source-call results may be assembled from multiple SSA register cells. */
   readonly call_results?: ReadonlyMap<string, readonly Value[]>;

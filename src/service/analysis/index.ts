@@ -28,6 +28,7 @@ import {
 } from '../../analysis/types/index.js';
 import { recoverDebugInfo } from '../../metadata/debug/index.js';
 import { recoverLibraryContracts } from '../../metadata/library-contracts/index.js';
+import { cSourceName } from '../../metadata/symbols/c-names.js';
 import { structureControlFlow } from '../../presentation/index.js';
 import { emitC } from '../../emitters/c/index.js';
 import { emitPythonLike } from '../../emitters/python-like/index.js';
@@ -331,7 +332,12 @@ export async function executeDecompilation(
           message: 'Structuring omitted the presentation',
           evidence_ids: [],
         });
-      const names: { entity_id: string; name: string }[] = [];
+      const names: { entity_id: string; name: string; source_name?: string }[] = [];
+      const nativeName = (entity_id: string, name: string) => ({
+        entity_id,
+        name,
+        source_name: cSourceName(image.target.format, name),
+      });
       const nameDiagnostics: Diagnostic[] = [];
       const named = new Map<string, (typeof active.annotations)[number][]>();
       for (const annotation of active.annotations)
@@ -341,10 +347,9 @@ export async function executeDecompilation(
           named.set(annotation.entity_id, list);
         }
       if (!named.has(ir.id) && (loaded.function.display_name ?? loaded.function.original_name))
-        names.push({
-          entity_id: ir.id,
-          name: (loaded.function.display_name ?? loaded.function.original_name)!,
-        });
+        names.push(
+          nativeName(ir.id, (loaded.function.display_name ?? loaded.function.original_name)!),
+        );
       for (const [entity_id, annotations] of named) {
         const assertedNames = new Set(
           annotations.flatMap((annotation) =>
@@ -358,10 +363,9 @@ export async function executeDecompilation(
           entity_id === ir.id &&
           (loaded.function.display_name ?? loaded.function.original_name)
         )
-          names.push({
-            entity_id,
-            name: (loaded.function.display_name ?? loaded.function.original_name)!,
-          });
+          names.push(
+            nativeName(entity_id, (loaded.function.display_name ?? loaded.function.original_name)!),
+          );
         if (
           assertedNames.size !== 1 ||
           annotations.some((annotation) => annotation.status === 'hypothesis')
@@ -446,7 +450,7 @@ export async function executeDecompilation(
             });
           continue;
         }
-        names.push({ entity_id, name });
+        names.push(candidates.explicit ? { entity_id, name } : nativeName(entity_id, name));
       }
       const source = recoverSourceEvidence({
         scope,

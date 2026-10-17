@@ -2,11 +2,13 @@ import {
   OperationError,
   type Diagnostic,
   type OperationContext,
+  type PresentationView,
   type RegisterDescriptor,
 } from '../core/index.js';
 import type { EmissionInput } from '../emitters/model.js';
 import {
   expressionOperands,
+  type Instruction,
   type Origin,
   type RegisterBinding,
   type Value,
@@ -18,12 +20,14 @@ import { foldExpressions, identityOperand } from './expressions.js';
 import type {
   Assignment,
   BoundaryProjection,
+  ExitScratchSlice,
   MemoryView,
   Reconstruction,
   TailProjection,
 } from './model.js';
 import { planSource } from './source-planner.js';
 import { planSourceStack } from './source-stack.js';
+import { planVariadicStackArguments } from './source-variadic.js';
 import {
   normalizeSourceExpressions,
   sourceExpressionDemand,
@@ -48,8 +52,14 @@ function controlTransfers(control: Control): readonly ParallelTransfer[] {
 }
 /** The original structured SSA remains immutable. Reconstruction is a bounded
  * view: pure expression folding, demand-driven live phi copies, exact physical
- * snapshots and conservative source projections. No CFG is structured twice. */
-export function reconstruct(input: EmissionInput, context: OperationContext): Reconstruction {
+ * snapshots and conservative source projections. No CFG is structured twice.
+ * The `source` view additionally applies proof-carrying presentation rewrites
+ * (frame save elision, ABI-scratch exit slices); `checked` applies none. */
+export function reconstruct(
+  input: EmissionInput,
+  context: OperationContext,
+  view: PresentationView = 'checked',
+): Reconstruction {
   context.checkpoint(0);
   const blocks = new Map<string, BlockRegion>(),
     values = new Map<string, Value>();
@@ -152,7 +162,7 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
   const entryBindings = entry?.register_entry ?? [];
   const entryParameters = new Set(entry?.parameters.map((value) => value.id));
   const sourcePlan = input.source
-    ? planSource(input, blocks, values, expressions, owner, context)
+    ? planSource(input, blocks, values, expressions, owner, context, view)
     : null;
   const localValidation = new LocalValidationSession(context);
   const sourceStack = sourcePlan
@@ -168,8 +178,40 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
         sourcePlan.incomingStack,
         sourcePlan.entryStack,
         localValidation,
+        view,
       )
     : null;
+  if (sourcePlan)
+    for (const [id, tail] of sourcePlan.tails)
+      if (
+        tail.boundary.argument_list_complete &&
+        !localValidation.presentation(
+          'arity_closure',
+          id,
+          'complete tail-call argument list: the fully analyzed nonrecursive callee reads no register beyond the observed prefix, no incoming stack and no escaping incoming-stack address',
+          [id],
+        )
+      )
+        sourcePlan.tails.set(id, {
+          ...tail,
+          boundary: { ...tail.boundary, argument_list_complete: false },
+        });
+  // Source view only: Darwin variadic outgoing stores become trailing arguments
+  // of the one call that consumes them (store id -> call id).
+  const variadicStores =
+    sourcePlan && sourceStack && view === 'source'
+      ? planVariadicStackArguments(
+          input,
+          blocks,
+          sourcePlan.calls,
+          (id) =>
+            sourceStack.hidden.has(id) ||
+            sourceStack.locals.has(id) ||
+            sourceStack.saves.stores.has(id),
+          localValidation,
+          context,
+        )
+      : new Map<string, string>();
   let normalizationDemand: SourceExpressionDemand | undefined;
   if (sourcePlan) {
     // These roots deliberately overapproximate the liveness roots below, before
@@ -431,6 +473,111 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
         functionProjection = { ...projection, kind: 'physical', signature: null };
     }
   }
+  // Source view: an uncertain-overlay slice whose exit value is, on every path,
+  // a call clobber that is not part of that call's projected results, or the
+  // untouched entry value, is ABI scratch at return. It moves out of line with
+  // its source calls and is no liveness root. Locally computed slices stay.
+  if (sourcePlan && view === 'source') {
+    const clobbers = new Map<string, string>(),
+      resultCells = new Set<string>();
+    for (const block of blocks.values())
+      for (const node of block.statements) {
+        context.checkpoint(1);
+        if (node.kind !== 'call') continue;
+        for (const binding of node.register_outputs) clobbers.set(binding.value.id, node.id);
+        for (const value of calls.get(node.id)?.results ?? []) {
+          resultCells.add(value.id);
+          for (const origin of sourcePlan.presentation.value_origins?.get(value.id) ?? [])
+            resultCells.add(origin);
+        }
+      }
+    const entryRoots = new Map(
+      entryBindings.map((binding) => [binding.value.id, binding.register]),
+    );
+    // Sources of one exit slice, or null when any path computes it here.
+    const scratch = (
+      root: string,
+      start: Value,
+    ): { readonly sources: Set<string>; entry: boolean } | null => {
+      const result = { sources: new Set<string>(), entry: false };
+      const pending = [start],
+        seen = new Set<string>();
+      while (pending.length) {
+        context.checkpoint(1);
+        const value = pending.pop()!;
+        if (seen.has(value.id)) continue;
+        seen.add(value.id);
+        if (seen.size > 4096) return null;
+        const register = entryRoots.get(value.id);
+        if (register) {
+          if (register.root !== root) return null;
+          result.entry = true;
+          continue;
+        }
+        const call = clobbers.get(value.id);
+        if (call !== undefined) {
+          if (resultCells.has(value.id)) return null;
+          result.sources.add(call);
+          continue;
+        }
+        const expression = expressions.get(value.id);
+        if (expression) {
+          if (
+            (expression.kind === 'cast' &&
+              expression.op === 'bitcast' &&
+              bitWidth(expression.value.type) === bitWidth(value.type)) ||
+            expression.kind === 'extract'
+          )
+            pending.push(expression.value);
+          else if (expression.kind === 'concat') pending.push(...expression.values);
+          else return null;
+          continue;
+        }
+        const sources = parameterSources.get(value.id);
+        if (!sources?.length) return null;
+        pending.push(...sources);
+      }
+      return result;
+    };
+    for (const [id, projection] of returns) {
+      if (projection.kind !== 'inferred' || !projection.outputs.length) continue;
+      const outputs: BoundaryProjection['outputs'][number][] = [],
+        exitScratch: ExitScratchSlice[] = [];
+      for (const binding of projection.outputs) {
+        const found = scratch(binding.register.root, binding.value);
+        if (found)
+          exitScratch.push({
+            register: binding.register,
+            value: binding.value,
+            sources: [...found.sources],
+            entry: found.entry,
+          });
+        else outputs.push(binding);
+      }
+      if (
+        !exitScratch.length ||
+        !localValidation.presentation(
+          'exit_scratch',
+          id,
+          'possible-return slices whose exit value is only an unprojected call clobber or the entry value on every path; not liveness roots, not the proven written result storage',
+          [id, ...new Set(exitScratch.flatMap((slice) => slice.sources))].slice(0, 64),
+          exitScratch
+            .map(
+              ({ register, sources, entry }) =>
+                `${register.root}[${register.offset_bits}:${register.width_bits}] <- ${[...sources, ...(entry ? ['entry'] : [])].join(', ')}`,
+            )
+            .join('; '),
+        )
+      )
+        continue;
+      localValidation.requireAbi(
+        'exit_scratch',
+        [id],
+        'Treating these exit slices as unspecified assumes ABI conformance: callers read only the return storage of this function, and caller-saved registers hold no additional result. Each slice and its clobbering calls remain in the inference metadata and the checked view.',
+      );
+      returns.set(id, { ...projection, outputs, exit_scratch: exitScratch });
+    }
+  }
 
   const live = new Set<string>(),
     retained = new Set<string>();
@@ -450,15 +597,21 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
   const roots = new Map<string, Value[]>();
   const semanticRoots: Value[] = [],
     overlayOutputs: Value[] = [];
+  const deferredReloads: { node: Extract<Instruction, { kind: 'load' }>; block: string }[] = [];
   for (const block of blocks.values()) {
     for (const node of block.statements) {
       context.checkpoint(1);
       if (
         node.kind === 'assign' ||
         sourceStack?.hidden.has(node.id) ||
+        variadicStores.has(node.id) ||
         (node.kind === 'load' && sourceStack?.returnAddressLoads.has(node.result.id))
       )
         continue;
+      if (node.kind === 'load' && sourceStack?.deadReloadCandidates.has(node.id)) {
+        deferredReloads.push({ node, block: block.id });
+        continue;
+      }
       retained.add(node.id);
       const operands: Value[] = [];
       if (node.kind === 'write_register') operands.push(node.value);
@@ -508,25 +661,64 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
       list.push({ source: copy.source, block: block.id });
       incomingUses.set(copy.destination.id, list);
     }
-  for (let cursor = 0; cursor < liveQueue.length; cursor++) {
-    context.checkpoint(1);
-    const value = liveQueue[cursor]!,
-      expression = expressions.get(value.id);
-    const returnAddress = sourceStack?.returnAddressLoads.get(value.id);
-    if (returnAddress) {
-      retained.add(returnAddress.node.id);
-      roots.set(returnAddress.node.id, [returnAddress.node.address]);
-      use(returnAddress.node.address, returnAddress.block);
+  let liveCursor = 0;
+  const propagate = (): void => {
+    for (; liveCursor < liveQueue.length; liveCursor++) {
+      context.checkpoint(1);
+      const value = liveQueue[liveCursor]!,
+        expression = expressions.get(value.id);
+      const returnAddress = sourceStack?.returnAddressLoads.get(value.id);
+      if (returnAddress) {
+        retained.add(returnAddress.node.id);
+        roots.set(returnAddress.node.id, [returnAddress.node.address]);
+        use(returnAddress.node.address, returnAddress.block);
+      }
+      if (sourceStack?.addresses.has(value.id)) {
+        if (sourceStack.entryStorage && sourceStack.requiresEntry(value.id))
+          use(sourceStack.entryStorage, owner.get(value.id)!);
+        continue;
+      }
+      if (expression)
+        for (const operand of expressionOperands(expression)) use(operand, owner.get(value.id)!);
+      if (!sourcePlan || !expression || !identityOperand(value.type, expression))
+        for (const incoming of incomingUses.get(value.id) ?? [])
+          use(incoming.source, incoming.block);
     }
-    if (sourceStack?.addresses.has(value.id)) {
-      if (sourceStack.entryStorage && sourceStack.requiresEntry(value.id))
-        use(sourceStack.entryStorage, owner.get(value.id)!);
-      continue;
+  };
+  propagate();
+  // Source view: a dead non-volatile frame load dominated by a store covering
+  // its bytes cannot fault, so it is dropped; a live one is retained as usual.
+  if (deferredReloads.length) {
+    const restore = ({ node, block }: (typeof deferredReloads)[number]): void => {
+      retained.add(node.id);
+      const operands = sourceStack?.locals.has(node.id) ? [] : [node.address];
+      roots.set(node.id, operands);
+      for (const value of operands) use(value, block);
+      semanticRoots.push(...operands);
+    };
+    let pending = deferredReloads;
+    for (let changed = true; changed;) {
+      context.checkpoint(pending.length);
+      const live_ = pending.filter((item) => live.has(item.node.result.id));
+      changed = live_.length > 0;
+      live_.forEach(restore);
+      pending = pending.filter(
+        (item) => !live.has(item.node.result.id) && !retained.has(item.node.id),
+      );
+      propagate();
     }
-    if (expression)
-      for (const operand of expressionOperands(expression)) use(operand, owner.get(value.id)!);
-    if (!sourcePlan || !expression || !identityOperand(value.type, expression))
-      for (const incoming of incomingUses.get(value.id) ?? []) use(incoming.source, incoming.block);
+    if (
+      pending.length &&
+      !localValidation.presentation(
+        'dead_frame_reload',
+        input.function.id,
+        'dead non-volatile frame loads, each dominated by a store covering its bytes (so it cannot fault), are not printed',
+        pending.map((item) => item.node.id).slice(0, 64),
+      )
+    ) {
+      pending.forEach(restore);
+      propagate();
+    }
   }
   // An uncertain return overlay preserves machine state; reaching an ABI input
   // register only through it is not evidence that the register is a source input.
@@ -684,7 +876,8 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     for (const node of block.statements)
       if (!mapped.has(node.id)) {
         context.checkpoint(1);
-        origins.get(block.control.id)!.push(node);
+        // A consumed variadic store is printed as its call's trailing argument.
+        origins.get(variadicStores.get(node.id) ?? block.control.id)!.push(node);
         mapped.add(node.id);
       }
 
@@ -788,11 +981,12 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     }
     if (sourcePlan && block.control.kind === 'return') {
       const projection = returns.get(block.control.id);
-      if (projection?.kind === 'inferred' && projection.outputs.length)
+      const slices = [...(projection?.outputs ?? []), ...(projection?.exit_scratch ?? [])];
+      if (projection?.kind === 'inferred' && slices.length)
         unavailable(
           block.control,
           'The source return list is unresolved; changed possible ABI return storage is preserved as an uncertain physical overlay, not inferred aggregate fields: ' +
-            projection.outputs
+            slices
               .map(
                 ({ register }) =>
                   `${register.root}[${register.offset_bits}:${register.width_bits}]`,
@@ -818,10 +1012,12 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
           locals: sourceStack.locals,
           stack: sourceStack.frame(retained, live),
           stack_addresses: sourceStack.addresses,
+          ...(view === 'source' ? { frame_saves: sourceStack.saves } : {}),
         }
       : undefined;
   return {
     function: input.function,
+    view,
     blocks,
     values,
     expressions,

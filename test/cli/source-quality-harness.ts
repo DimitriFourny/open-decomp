@@ -349,8 +349,8 @@ function checkBehavior(
     const before = new Map(memory);
     let calls = 0;
     const sourceCalls = new Map<string, SourceCallOracle>();
-    if (scenario === 'effects')
-      sourceCalls.set('_quality_record', (args) => {
+    if (scenario === 'effects') {
+      const record: SourceCallOracle = (args) => {
         const expected = row.calls![calls++];
         assert.ok(expected, 'No additional call is authorized by the trusted source oracle');
         assert.deepEqual(args, [BigInt(`0x${expected.argument}`)]);
@@ -360,7 +360,10 @@ function checkBehavior(
           'Store/call ordering must match native source',
         );
         return BigInt(`0x${expected.result}`);
-      });
+      };
+      // The source view prints the C spelling; the checked view the Mach-O symbol.
+      sourceCalls.set('quality_record', record).set('_quality_record', record);
+    }
     const unknownValues = new Map<string, bigint>();
     if (entryStack) unknownValues.set('non-argument entry register', 0x1122334455667788n);
     const observed = execute(

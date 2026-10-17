@@ -18,6 +18,7 @@ import { recoverTypes } from '../../src/analysis/types/index.js';
 import { integer, type SSAForm } from '../../src/ir/index.js';
 import { builder, image, register, slice } from '../ir/support.js';
 import { emit } from '../emitters/c/support.js';
+import { nativeAndPythonOracleSkip } from '../support/host-tools.js';
 import { checkExecutableSource } from './source-executable.js';
 import { checkSourceNameConflicts } from './source-names-fixture.js';
 
@@ -168,67 +169,71 @@ test(
   checkSourceNameConflicts,
 );
 
-test('cross-dialect keywords, helper names and duplicate user display names cannot shadow real declarations', (t) => {
-  const directory = mkdtempSync(join(tmpdir(), 'open-decomp-user-names-'));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const b = builder('source-name-reserved'),
-    entry = b.block('entry'),
-    u64 = integer(64);
-  const rdi = register('rdi', 64, 0, 'replace_root', 'x86_64:rdi');
-  const rsi = register('rsi', 64, 0, 'replace_root', 'x86_64:rsi');
-  entry.return([entry.int('lshr', entry.readRegister(rdi), entry.readRegister(rsi))]);
-  const constructed = constructSSA(b.finish(entry, [u64]));
-  assert.equal(constructed.value.form, 'ssa');
-  const ir = constructed.value as SSAForm;
-  const physical = ir.register_states.find((state) => state.block === ir.entry)!.entry;
-  const first = physical.find((binding) => binding.register.root === rdi.root)!.value.id;
-  const second = physical.find((binding) => binding.register.root === rsi.root)!.value.id;
-  for (const name of [
-    'for',
-    'async',
-    'bv_lshr',
-    'transfer_0',
-    'stack_frame',
-    'entry_sp',
-    'true',
-    'repeated',
-  ])
-    for (const language of ['c-like', 'python-like'] as const) {
-      const output = emit(
-        ir,
-        {
-          source: { abi: sysvAMD64Abi, callees: [], addresses: [] },
-          names: [
-            { entity_id: first, name },
-            { entity_id: second, name },
-          ],
-        },
-        language,
-      );
-      const formals = emittedFormals(output.emission);
-      assert.equal(formals.length, 2);
-      assert.notEqual(formals[0]!.name, formals[1]!.name);
-      if (name !== 'repeated') assert.ok(formals.every((formal) => formal.name !== name));
-      const observation = execute(
-        output.emission,
-        new Map([
-          [formals[0]!.statement_id, 0x8000000000000000n],
-          [formals[1]!.statement_id, 63n],
-        ]),
-      );
-      assert.deepEqual(observation.values, [1n]);
-      checkExecutableSource(
-        output.emission,
-        [
+test(
+  'cross-dialect keywords, helper names and duplicate user display names cannot shadow real declarations',
+  { skip: nativeAndPythonOracleSkip() },
+  (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'open-decomp-user-names-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const b = builder('source-name-reserved'),
+      entry = b.block('entry'),
+      u64 = integer(64);
+    const rdi = register('rdi', 64, 0, 'replace_root', 'x86_64:rdi');
+    const rsi = register('rsi', 64, 0, 'replace_root', 'x86_64:rsi');
+    entry.return([entry.int('lshr', entry.readRegister(rdi), entry.readRegister(rsi))]);
+    const constructed = constructSSA(b.finish(entry, [u64]));
+    assert.equal(constructed.value.form, 'ssa');
+    const ir = constructed.value as SSAForm;
+    const physical = ir.register_states.find((state) => state.block === ir.entry)!.entry;
+    const first = physical.find((binding) => binding.register.root === rdi.root)!.value.id;
+    const second = physical.find((binding) => binding.register.root === rsi.root)!.value.id;
+    for (const name of [
+      'for',
+      'async',
+      'bv_lshr',
+      'transfer_0',
+      'stack_frame',
+      'entry_sp',
+      'true',
+      'repeated',
+    ])
+      for (const language of ['c-like', 'python-like'] as const) {
+        const output = emit(
+          ir,
           {
-            arguments: [0x8000000000000000n, 63n],
-            expected: 1n,
+            source: { abi: sysvAMD64Abi, callees: [], addresses: [] },
+            names: [
+              { entity_id: first, name },
+              { entity_id: second, name },
+            ],
           },
-        ],
-        directory,
-      );
-    }
-});
+          language,
+        );
+        const formals = emittedFormals(output.emission);
+        assert.equal(formals.length, 2);
+        assert.notEqual(formals[0]!.name, formals[1]!.name);
+        if (name !== 'repeated') assert.ok(formals.every((formal) => formal.name !== name));
+        const observation = execute(
+          output.emission,
+          new Map([
+            [formals[0]!.statement_id, 0x8000000000000000n],
+            [formals[1]!.statement_id, 63n],
+          ]),
+        );
+        assert.deepEqual(observation.values, [1n]);
+        checkExecutableSource(
+          output.emission,
+          [
+            {
+              arguments: [0x8000000000000000n, 63n],
+              expected: 1n,
+            },
+          ],
+          directory,
+        );
+      }
+  },
+);
 
 test('supplied prototype names outrank inferred operation roles and user display overrides remain authoritative', () => {
   const b = builder('source-prototype-role-names'),

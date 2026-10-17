@@ -1,4 +1,4 @@
-import type { Address, Diagnostic, RegisterDescriptor } from '../core/index.js';
+import type { Address, Diagnostic, PresentationView, RegisterDescriptor } from '../core/index.js';
 import type { SignatureAssociation, MemoryShape, ObservedField } from '../analysis/types/model.js';
 import type { DataType, Expression, Instruction, Origin, Value } from '../ir/index.js';
 import type { BlockRegion, ParallelTransfer, StructuredFunction } from '../presentation/index.js';
@@ -13,9 +13,24 @@ export interface BoundaryProjection {
   readonly arguments: readonly Value[];
   /** False preserves a known prefix without claiming that trailing source arguments are absent. */
   readonly argument_list_complete?: boolean;
+  /** Source view only: this many trailing `arguments` are observed Darwin
+   * variadic outgoing stack stores; a lower bound, never a closed arity. */
+  readonly variadic_stack_arguments?: number;
   readonly results: readonly Value[];
   readonly inputs: readonly { readonly register: RegisterDescriptor; readonly value: Value }[];
   readonly outputs: readonly { readonly register: RegisterDescriptor; readonly value: Value }[];
+  /** Source view only: changed possible-return slices whose exit value is an
+   * ABI-scratch call clobber or untouched entry bits on every path. They are not
+   * liveness roots and are rendered out of line; `sources` names each clobbering call. */
+  readonly exit_scratch?: readonly ExitScratchSlice[];
+}
+export interface ExitScratchSlice {
+  readonly register: RegisterDescriptor;
+  readonly value: Value;
+  /** Original call statements whose clobber may reach this exit slice. */
+  readonly sources: readonly string[];
+  /** True when the untouched entry value may also reach this exit slice. */
+  readonly entry: boolean;
 }
 /** Terminal call: results belong to the callee, not invented caller SSA cells. */
 export interface TailProjection {
@@ -31,6 +46,7 @@ export interface MemoryView {
 }
 export interface Reconstruction {
   readonly function: StructuredFunction;
+  readonly view: PresentationView;
   readonly source?: SourcePresentation;
   readonly blocks: ReadonlyMap<string, BlockRegion>;
   readonly values: ReadonlyMap<string, Value>;

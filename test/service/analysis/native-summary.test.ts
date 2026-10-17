@@ -105,20 +105,36 @@ test(
     assert.equal(expected.size, cases.length * 11);
     session = await openBinary(binary, { cachePath: join(root, 'cache') });
     const oracles = new Map<string, SourceCallOracle>();
+    // Checked view: observed native inputs never establish complete source arity.
+    // Source view: every other callee here is fully analyzed and register-only, so
+    // it closes with a recorded arity_closure inference. Recursive groups, stack
+    // arguments and the FPCR-guarded FP leaf (unknown effect/exit) stay open.
+    let view: 'source' | 'checked' = 'source';
+    let closures = 0;
+    const open = new Set(['recursive', 'mutual_a', 'mutual_b', 'stack_leaf', 'fp_leaf']);
     const register = (
       name: string,
       arity: number,
       oracle: (args: readonly bigint[]) => bigint,
     ): void => {
-      oracles.set(`_native_${name}`, (args, context) => {
-        assert.equal(
-          context.arguments_complete,
-          false,
-          'Observed native inputs do not establish complete source arity',
-        );
+      // The source view prints the C spelling, the checked view the Mach-O symbol.
+      const checkedOracle: SourceCallOracle = (args, context) => {
+        if (view === 'checked' || open.has(name))
+          assert.equal(
+            context.arguments_complete,
+            false,
+            `Observed native inputs do not establish complete source arity (${view} ${name})`,
+          );
+        else {
+          // Fully analyzed nonrecursive register-only callee: closed, with proof.
+          assert.equal(context.arguments_complete, true, `${view} ${name} closes`);
+          assert.ok(closures > 0, `${name} closed without an arity_closure inference`);
+        }
         assert.equal(args.length, arity, `No observed argument may be dropped for ${name}`);
         return oracle(args);
-      });
+      };
+      oracles.set(`native_${name}`, checkedOracle);
+      oracles.set(`_native_${name}`, checkedOracle);
     };
     register('leaf32', 1, ([value]) => leaf32(value!));
     register('leaf64', 1, ([value]) => leaf64(value!));
@@ -158,58 +174,68 @@ test(
     };
     const environment = new Map([['non-argument entry register', 0n]]);
     const stack = 0x9000n;
-    for (const emitter of ['c-like', 'python-like'] as const)
-      for (const [name, symbol] of Object.entries(names)) {
-        const result = await session.decompile({ name: `_native_${symbol}` }, { emitter });
-        assert.ok('data' in result && result.data.delivery === 'inline');
-        const emission = result.data.emission;
-        assert.doesNotMatch(
-          emission.text,
-          /bits outside source ABI result/,
-          'Architecturally written zero/sign extension must not become unknown upper bits',
-        );
-        for (const [index, value] of cases.entries()) {
-          const args =
-            name === 'preserved'
-              ? [value, u64(value + 17n)]
-              : name === 'recursive' || name === 'mutual'
-                ? [3n, value]
-                : name === 'fp'
-                  ? [BigInt(index), BigInt(index + 3), bits(1.25), bits(2.5, 32)]
-                  : name === 'vector'
-                    ? [
-                        BigInt.asUintN(32, value) |
-                          (BigInt.asUintN(32, value >> 32n) << 32n) |
-                          (BigInt(index) << 64n) |
-                          (BigInt.asUintN(32, ~value) << 96n),
-                      ]
-                    : [value];
-          for (const poison of [0xa5, 0x5a]) {
-            const memory = new Map<bigint, number>();
-            for (let offset = -512n; offset < 64n; offset++) memory.set(stack + offset, poison);
-            const observed = execute(
-              emission,
-              formals(emission, args, stack),
-              memory,
-              0n,
-              new Map(),
-              environment,
-              oracles,
-              acknowledgeRequirements(emission),
-            );
-            assert.equal(observed.exit, 'machine_return', `${emitter} ${name} ${index}`);
-            assert.deepEqual(
-              observed.values,
-              [expected.get(`${name}:${index}`)!],
-              `${emitter} ${name} ${index}`,
-            );
-            assert.ok(
-              observed.events.includes('call'),
-              `${name} must retain its native call effect`,
-            );
+    for (const selectedView of ['source', 'checked'] as const)
+      for (const emitter of ['c-like', 'python-like'] as const)
+        for (const [name, symbol] of Object.entries(names)) {
+          view = selectedView;
+          const result = await session.decompile(
+            { name: `_native_${symbol}` },
+            { emitter, view: selectedView },
+          );
+          assert.ok('data' in result && result.data.delivery === 'inline');
+          const emission = result.data.emission;
+          closures = (emission.inferences ?? []).filter(
+            (inference) =>
+              inference.details.kind === 'rewrite' && inference.details.rule === 'arity_closure',
+          ).length;
+          if (selectedView === 'checked') assert.equal(closures, 0);
+          assert.doesNotMatch(
+            emission.text,
+            /bits outside source ABI result/,
+            'Architecturally written zero/sign extension must not become unknown upper bits',
+          );
+          for (const [index, value] of cases.entries()) {
+            const args =
+              name === 'preserved'
+                ? [value, u64(value + 17n)]
+                : name === 'recursive' || name === 'mutual'
+                  ? [3n, value]
+                  : name === 'fp'
+                    ? [BigInt(index), BigInt(index + 3), bits(1.25), bits(2.5, 32)]
+                    : name === 'vector'
+                      ? [
+                          BigInt.asUintN(32, value) |
+                            (BigInt.asUintN(32, value >> 32n) << 32n) |
+                            (BigInt(index) << 64n) |
+                            (BigInt.asUintN(32, ~value) << 96n),
+                        ]
+                      : [value];
+            for (const poison of [0xa5, 0x5a]) {
+              const memory = new Map<bigint, number>();
+              for (let offset = -512n; offset < 64n; offset++) memory.set(stack + offset, poison);
+              const observed = execute(
+                emission,
+                formals(emission, args, stack),
+                memory,
+                0n,
+                new Map(),
+                environment,
+                oracles,
+                acknowledgeRequirements(emission),
+              );
+              assert.equal(observed.exit, 'machine_return', `${emitter} ${name} ${index}`);
+              assert.deepEqual(
+                observed.values,
+                [expected.get(`${name}:${index}`)!],
+                `${emitter} ${name} ${index}`,
+              );
+              assert.ok(
+                observed.events.includes('call'),
+                `${name} must retain its native call effect`,
+              );
+            }
           }
         }
-      }
   },
 );
 
@@ -256,7 +282,8 @@ for (const fixture of [
                 ? arithmeticOracle
                 : null;
           if (!oracle) continue;
-          if (name) callbacks.set(name, oracle);
+          // The source view prints the C spelling (Mach-O drops one underscore).
+          if (name) callbacks.set(name, oracle).set(plain!, oracle);
           callbacks.set(`0x${callee.entry.value.toString(16)}`, oracle);
         }
         const memory = new Map<bigint, number>(),

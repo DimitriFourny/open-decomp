@@ -4,10 +4,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
+import { nativeOracleSkip } from '../support/host-tools.js';
 
 test(
   'trusted integer conversion oracle covers native bits, flags, memory and both public dialects',
-  { skip: process.platform !== 'darwin' || process.arch !== 'arm64', timeout: 120000 },
+  { skip: nativeOracleSkip(), timeout: 120000 },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), 'open-decomp-integer-conversion-'));
     t.after(() => rm(root, { recursive: true, force: true }));

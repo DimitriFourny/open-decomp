@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
+import { nativeOracleSkip } from '../support/host-tools.js';
 import type { WireEmission } from '../../src/core/index.js';
 import { project } from '../service/analysis/support.js';
 import { emittedFormals, execute, type SourceCallOracle } from '../emitters/c/support.js';
@@ -43,7 +44,7 @@ function firstFormalDeclaration(emission: WireEmission): string {
 
 test(
   'source-built calls accumulate partial fields, strides and callback roles without erasing alias boundaries',
-  { skip: process.platform !== 'darwin' || process.arch !== 'arm64', timeout: 60000 },
+  { skip: nativeOracleSkip(), timeout: 60000 },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), 'open-decomp-memory-shapes-'));
     t.after(() => rm(root, { recursive: true, force: true }));
@@ -78,9 +79,15 @@ test(
       assert.ok('data' in response.result);
       const emission = p.payload(response.result).result.data.emission;
       assert.match(firstFormalDeclaration(emission), emitter === 'c-like' ? /\*/ : /pointer\[/);
+      // The memory-view annotation helper is machine-level checked-view detail.
+      const checked = await p.decompile(find('shape_consumer').id, {
+        options: { emitter, view: 'checked' },
+      });
+      assert.ok('data' in checked.result);
+      const checkedEmission = p.payload(checked.result).result.data.emission;
       assert.ok(
-        emission.helpers.some((helper) => helper.name === 'field_view'),
-        emission.text,
+        checkedEmission.helpers.some((helper) => helper.name === 'field_view'),
+        checkedEmission.text,
       );
       for (const line of lines.slice(0, 8)) {
         const [alias, index, expected, expectedA, expectedB] = line.split(' ').map(BigInt);
@@ -98,7 +105,7 @@ test(
         const order: string[] = [];
         const calls = new Map<string, SourceCallOracle>([
           [
-            '_shape_head',
+            'shape_head',
             (args) => {
               order.push('head');
               assert.deepEqual(
@@ -110,7 +117,7 @@ test(
             },
           ],
           [
-            '_shape_slot',
+            'shape_slot',
             (args) => {
               order.push('slot');
               assert.deepEqual(
@@ -122,7 +129,7 @@ test(
             },
           ],
           [
-            '_shape_callback',
+            'shape_callback',
             (args) => {
               order.push('callback');
               assert.deepEqual(args, [a]);
@@ -202,14 +209,14 @@ test(
         new Map([['non-argument entry register', 0n]]),
         new Map([
           [
-            '_shape_wide',
+            'shape_wide',
             (args: readonly bigint[]) => {
               assert.deepEqual(args, [0x5000n]);
               return 0x1234567887654321n;
             },
           ],
           [
-            '_shape_high',
+            'shape_high',
             (args: readonly bigint[]) => {
               assert.deepEqual(args, [0x5000n]);
               return 0x12345678n;

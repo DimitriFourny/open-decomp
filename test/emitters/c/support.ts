@@ -10,21 +10,38 @@ export function emit(
   input: SSAForm,
   extra: Omit<EmissionInput, 'function'> = {},
   language: 'c-like' | 'python-like' = 'c-like',
+  view: 'source' | 'checked' = 'source',
 ): EmissionResult {
   const structured = structureControlFlow(input, createOperationContext());
   assert.ok(structured.value);
   return (language === 'python-like' ? emitPythonLike : emitC)(
     { function: structured.value, ...extra },
-    { ...DEFAULT_ANALYSIS_OPTIONS, emitter: language },
+    { ...DEFAULT_ANALYSIS_OPTIONS, emitter: language, view },
     createOperationContext(),
   );
 }
 
 type Data = bigint | string | boolean | null | Data[] | { readonly [key: string]: Data };
+/** Static C type of an emitted expression (LP64: int is 32 bits, pointers are
+ * 64-bit addresses). `math` marks helper-defined mathematical integers (the
+ * documented checked-view helpers and Python-like ints), never C arithmetic. */
+type CType =
+  | { readonly kind: 'int'; readonly bits: number; readonly signed: boolean; readonly bool?: true }
+  | { readonly kind: 'pointer'; readonly to: Pointee | null }
+  | { readonly kind: 'math' };
+type Pointee = Extract<CType, { kind: 'int' }> | { readonly kind: 'struct'; readonly name: string };
+interface StructLayout {
+  readonly size: bigint;
+  readonly fields: ReadonlyMap<string, { readonly offset: bigint; readonly type: CType }>;
+}
+const MATH: CType = { kind: 'math' };
+const INT: Extract<CType, { kind: 'int' }> = { kind: 'int', bits: 32, signed: true };
+const unsignedType = (bits: number): CType => ({ kind: 'int', bits, signed: false });
 type Expr =
-  | { kind: 'literal'; value: Data }
+  | { kind: 'literal'; value: Data; ctype?: CType }
   | { kind: 'ref'; name: string }
-  | { kind: 'call'; name: string; args: Expr[] }
+  | { kind: 'call'; name: string; args: Expr[]; ctype?: CType }
+  | { kind: 'cast'; type: CType; value: Expr }
   | { kind: 'invoke'; target: Expr; args: Expr[] }
   | { kind: 'list'; values: Expr[] }
   | { kind: 'binary'; op: string; left: Expr; right: Expr }
@@ -37,6 +54,62 @@ type Op =
   | { kind: 'return'; expression: Expr }
   | { kind: 'effect'; expression: Expr };
 
+/** C integer promotion: every rank below int (bool, 8/16-bit) becomes int. */
+function promote(type: CType): CType {
+  return type.kind === 'int' && type.bits < 32
+    ? INT
+    : type.kind === 'pointer'
+      ? unsignedType(64)
+      : type;
+}
+/** C usual arithmetic conversions for two promoted integer operands. */
+function usualArithmetic(left: CType, right: CType): CType {
+  const a = promote(left),
+    b = promote(right);
+  if (a.kind !== 'int' || b.kind !== 'int') return MATH;
+  if (a.signed === b.signed) return a.bits >= b.bits ? a : b;
+  const unsigned = a.signed ? b : a,
+    signed = a.signed ? a : b;
+  return unsigned.bits >= signed.bits ? unsigned : signed;
+}
+/** Conversion as by assignment/cast: modular for every integer type (signed is
+ * implementation-defined; every supported compiler wraps), _Bool tests != 0. */
+function convert(value: bigint, type: CType): bigint {
+  if (type.kind === 'pointer') return BigInt.asUintN(64, value);
+  if (type.kind !== 'int') return value;
+  if (type.bool) return value === 0n ? 0n : 1n;
+  return type.signed ? BigInt.asIntN(type.bits, value) : BigInt.asUintN(type.bits, value);
+}
+class UndefinedBehavior extends Error {}
+/** Result types of documented helpers: fixed-width bit patterns are unsigned;
+ * mathematical helpers (signed_value, source calls) stay `math`. */
+function helperType(call: Extract<Expr, { kind: 'call' }>): CType {
+  const first = call.args[0],
+    literal = first?.kind === 'literal' ? first.value : undefined;
+  const named = (value: Data | undefined): CType => {
+    const match = typeof value === 'string' ? /^(?:bits|ieee|uint)(\d+)_t$/.exec(value) : null;
+    return value === 'bool'
+      ? { kind: 'int', bits: 1, signed: false, bool: true }
+      : match
+        ? unsignedType(Number(match[1]))
+        : MATH;
+  };
+  if (/^(?:fp_(?:eq|ne|lt|le|gt|ge|ordered|unordered)|flag_)/.test(call.name)) return INT;
+  if (/^(?:bv_|fp_|wrap$|extract_bits$|insert_bits$|concat_low_first$)/.test(call.name))
+    return typeof literal === 'bigint' ? unsignedType(Number(literal)) : MATH;
+  const view = call.args[1];
+  if (call.name === 'read_memory') return named(view?.kind === 'literal' ? view.value : undefined);
+  if (/^(?:bit_pattern$|cast_|vector_lane$|unknown_value$|undefined_value$)/.test(call.name))
+    return named(literal);
+  if (
+    /^(?:image_address|data_address|address_of|stack_slot|field_view|source_target|function_pointer)$/.test(
+      call.name,
+    )
+  )
+    return unsignedType(64);
+  return MATH;
+}
+
 interface EmittedText {
   readonly text: string;
   readonly ids: readonly string[];
@@ -45,6 +118,10 @@ interface EmittedText {
     readonly end: number;
     readonly semantic_refs: readonly number[];
   }[];
+  /** Source-view presentation records. `unaligned_access_permitted` documents,
+   * once per function, that plain scalar dereferences carry no alignment fault. */
+  readonly local_validation?:
+    readonly { readonly kind: string; readonly rule?: string | undefined }[] | undefined;
 }
 export interface EmittedFormal {
   readonly name: string;
@@ -130,11 +207,21 @@ class Parser {
   readonly ops: Op[] = [];
   readonly labels = new Map<string, number>();
   readonly headerEnd: number;
+  readonly python: boolean;
+  /** C declarations in scope: formals, body locals and partial struct layouts. */
+  readonly symbols = new Map<string, CType>();
+  readonly structs = new Map<string, StructLayout>();
+  returnType: CType = MATH;
+  private readonly types = new WeakMap<Expr, CType>();
   private position = 0;
   private switchId = 0;
-  private readonly loops: { start: number; breaks: number[] }[] = [];
+  /** Parsing bit_pattern arguments, whose hex payload is exact storage bits. */
+  private payload = false;
+  /** `continues` (do-while only) are patched to the loop test after its body. */
+  private readonly loops: { start: number; breaks: number[]; continues?: number[] }[] = [];
   constructor(text: string) {
-    if (/^def /m.test(text)) {
+    this.python = /^def /m.test(text);
+    if (this.python) {
       const lines = text.split('\n'),
         header = lines.findIndex((line) => line.startsWith('def '));
       const endHeader = lines.findIndex(
@@ -179,24 +266,103 @@ class Parser {
       return;
     }
     const token =
-      /\s+|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|<<|>>|[{}()[\],;:=?<>@+*/%&|^~!-]/gy;
-    let offset = 0,
-      headerEnd = -1;
+      /\s+|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|\.\.\.|->|==|!=|<=|>=|<<|>>|&&|\|\||[{}()[\],;:=?<>@+*/%&|^~!-]/gy;
+    let offset = 0;
+    const offsets: number[] = [];
     while (offset < text.length) {
       token.lastIndex = offset;
       const match = token.exec(text);
       assert.ok(match, `Unrecognized emitted token near ${text.slice(offset, offset + 80)}`);
       offset = token.lastIndex;
       if (!/^\s|^\/\*/.test(match[0])) {
-        if (match[0] === '{' && headerEnd < 0) headerEnd = match.index;
+        offsets.push(match.index);
         this.tokens.push(match[0]);
       }
     }
-    const start = this.tokens.indexOf('{');
+    // Partial struct declarations precede the function; the body opens at the
+    // first brace after them.
+    while (this.peek() === 'typedef' || this.peek() === 'struct') this.structDeclaration();
+    const start = this.tokens.indexOf('{', this.position);
     assert.ok(start >= 0);
-    this.headerEnd = headerEnd;
+    this.headerEnd = offsets[start]!;
+    this.header(start);
     this.position = start;
     this.block([]);
+  }
+
+  /** `[typedef] struct NAME { T field; uint8_t gap[N]; ... } [NAME];` laid out
+   * by C rules (each scalar at its natural alignment). */
+  private structDeclaration(): void {
+    if (this.peek() === 'typedef') this.take('typedef');
+    this.take('struct');
+    const name = this.take(),
+      fields = new Map<string, { offset: bigint; type: CType }>();
+    let offset = 0n,
+      alignment = 1n;
+    this.take('{');
+    while (this.peek() !== '}') {
+      const type = this.bodyType(false);
+      assert.ok(type && type.pointers === 0, 'Unsupported struct member type');
+      const field = this.cType(type);
+      assert.ok(field.kind === 'int' && !field.bool, 'Struct members are fixed-width integers');
+      const size = BigInt(field.bits / 8),
+        member = this.take();
+      let count = 1n;
+      if (this.peek() === '[') {
+        this.take('[');
+        count = BigInt(this.take());
+        this.take(']');
+      }
+      offset = ((offset + size - 1n) / size) * size;
+      if (size > alignment) alignment = size;
+      fields.set(member, { offset, type: field });
+      offset += size * count;
+      this.take(';');
+    }
+    this.take('}');
+    if (this.peek() === name) this.take(name);
+    this.take(';');
+    this.structs.set(name, { size: ((offset + alignment - 1n) / alignment) * alignment, fields });
+  }
+
+  /** Return and formal types of `R name(T a, U b) {`; unknown spellings stay mathematical. */
+  private header(end: number): void {
+    const open = this.tokens.indexOf('(', this.position);
+    if (open < 0 || open > end) return;
+    const result = this.bodyType(false);
+    if (result && this.position === open - 1) this.returnType = this.cType(result);
+    this.position = open + 1;
+    while (this.position < end && this.peek() !== ')') {
+      const type = this.bodyType(false);
+      if (!type || this.peek() === ')' || this.peek() === ',') return;
+      this.symbols.set(this.take(), this.cType(type));
+      if (this.peek() === ',') this.take(',');
+    }
+  }
+
+  private cType(type: { readonly scalar: string; readonly pointers: number }): CType {
+    const name = type.scalar,
+      integer = /^(u?)int(\d+)_t$/.exec(name),
+      bits = /^bits(\d+)_t$/.exec(name);
+    const scalar: CType =
+      name === 'bool'
+        ? { kind: 'int', bits: 1, signed: false, bool: true }
+        : name === 'char'
+          ? { kind: 'int', bits: 8, signed: true }
+          : name === 'uintptr_t'
+            ? unsignedType(64)
+            : integer
+              ? { kind: 'int', bits: Number(integer[2]), signed: !integer[1] }
+              : bits
+                ? unsignedType(Number(bits[1]))
+                : MATH;
+    if (type.pointers === 0) return scalar;
+    if (type.pointers > 1) return { kind: 'pointer', to: null };
+    if (scalar.kind === 'int') return { kind: 'pointer', to: scalar };
+    return {
+      kind: 'pointer',
+      to: this.structs.has(name) ? { kind: 'struct', name } : null,
+    };
   }
 
   private peek(): string {
@@ -224,18 +390,18 @@ class Parser {
 
   /** Source type syntax carries no host allocation or pointee bounds. Only
    * machine-width casts below give values numeric interpretation. */
-  private bodyType(python: boolean, depth = 0): { scalar: string; pointer: boolean } | null {
+  private bodyType(python: boolean, depth = 0): { scalar: string; pointers: number } | null {
     assert.ok(depth < 64, 'Source type annotation nesting limit');
     const start = this.position,
       token = this.take();
     const scalar =
       /^(?:bits\d+_t|u?int\d+_t|uintptr_t|bool|char|void|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t|type_\d+)$/;
-    let pointer = false;
+    let pointers = 0;
     if (python && token === 'pointer' && this.peek() === '[') {
       this.take('[');
       assert.ok(this.bodyType(python, depth + 1));
       this.take(']');
-      pointer = true;
+      pointers = 1;
     } else if ((token === 'array' || token === 'vector') && this.peek() === '<') {
       this.take('<');
       assert.ok(this.bodyType(python, depth + 1));
@@ -252,9 +418,9 @@ class Parser {
     if (!python)
       while (this.peek() === '*') {
         this.take('*');
-        pointer = true;
+        pointers++;
       }
-    return { scalar: token, pointer };
+    return { scalar: token, pointers };
   }
 
   private pythonStatement(): void {
@@ -428,7 +594,11 @@ class Parser {
       });
       return;
     }
-    if (token === '(' && this.peek() === '*') {
+    if (
+      (token === '(' && this.peek() === '*') ||
+      token === '*' ||
+      (/^[A-Za-z_]\w*$/.test(token) && (this.peek() === '[' || this.peek() === '->'))
+    ) {
       this.position--;
       this.memoryStatement(';');
       return;
@@ -462,6 +632,7 @@ class Parser {
     if (token === 'continue') {
       const loop = this.loops.at(-1);
       assert.ok(loop);
+      loop.continues?.push(this.ops.length);
       this.ops.push({ kind: 'jump', target: loop.start });
       this.take(';');
       return;
@@ -499,6 +670,32 @@ class Parser {
       for (const index of exits) {
         const op = this.ops[index]!;
         assert.equal(op.kind, 'jump');
+        if (op.kind === 'jump') op.target = this.ops.length;
+      }
+      return;
+    }
+    if (token === 'do') {
+      const start = this.ops.length,
+        exits: number[] = [],
+        continues: number[] = [];
+      this.loops.push({ start, breaks: exits, continues });
+      this.block(exits);
+      this.loops.pop();
+      const test = this.ops.length;
+      this.take('while');
+      this.take('(');
+      const condition = this.expression();
+      this.take(')');
+      this.take(';');
+      const leave: Op & { kind: 'test' } = { kind: 'test', condition, target: -1 };
+      this.ops.push(leave, { kind: 'jump', target: start });
+      leave.target = this.ops.length;
+      for (const index of continues) {
+        const op = this.ops[index]!;
+        if (op.kind === 'jump') op.target = test;
+      }
+      for (const index of exits) {
+        const op = this.ops[index]!;
         if (op.kind === 'jump') op.target = this.ops.length;
       }
       return;
@@ -563,8 +760,10 @@ class Parser {
     } else {
       this.position--;
       const type = this.bodyType(false);
-      if (type) names = [this.take()];
-      else {
+      if (type) {
+        names = [this.take()];
+        this.symbols.set(names[0]!, this.cType(type));
+      } else {
         this.take(token);
         names = [token];
       }
@@ -593,25 +792,50 @@ class Parser {
   }
 
   private expression(minimum = 0): Expr {
+    // Python `not` binds looser than comparisons; same semantics as C `!`.
+    if (this.python && minimum === 0 && this.peek() === 'not') {
+      this.take('not');
+      return { kind: 'unary', op: '!', value: this.expression(1) };
+    }
     let left = this.atom();
-    const precedence: Record<string, number> = {
-      '|': 1,
-      '^': 2,
-      '&': 3,
-      '==': 4,
-      '!=': 4,
-      '<': 5,
-      '<=': 5,
-      '>': 5,
-      '>=': 5,
-      '<<': 6,
-      '>>': 6,
-      '+': 7,
-      '-': 7,
-      '*': 8,
-      '/': 8,
-      '%': 8,
-    };
+    // Each dialect parses with its own grammar: Python's bitwise operators bind
+    // tighter than comparisons, C's looser.
+    const precedence: Record<string, number> = this.python
+      ? {
+          '==': 1,
+          '!=': 1,
+          '<': 1,
+          '<=': 1,
+          '>': 1,
+          '>=': 1,
+          '|': 2,
+          '^': 3,
+          '&': 4,
+          '<<': 5,
+          '>>': 5,
+          '+': 6,
+          '-': 6,
+          '*': 7,
+          '%': 7,
+        }
+      : {
+          '|': 1,
+          '^': 2,
+          '&': 3,
+          '==': 4,
+          '!=': 4,
+          '<': 5,
+          '<=': 5,
+          '>': 5,
+          '>=': 5,
+          '<<': 6,
+          '>>': 6,
+          '+': 7,
+          '-': 7,
+          '*': 8,
+          '/': 8,
+          '%': 8,
+        };
     while ((precedence[this.peek()] ?? -1) >= minimum) {
       const op = this.take(),
         right = this.expression(precedence[op]! + 1);
@@ -635,20 +859,128 @@ class Parser {
 
   private atom(): Expr {
     let expression = this.primary();
-    while (this.peek() === '(') {
-      this.take('(');
-      const args: Expr[] = [];
-      if (this.peek() !== ')') {
-        args.push(this.expression());
-        while (this.peek() === ',') {
-          this.take(',');
+    for (;;) {
+      if (this.peek() === '(') {
+        this.take('(');
+        const args: Expr[] = [];
+        if (this.peek() !== ')') {
           args.push(this.expression());
+          while (this.peek() === ',') {
+            this.take(',');
+            args.push(this.expression());
+          }
         }
-      }
-      this.take(')');
-      expression = { kind: 'invoke', target: expression, args };
+        this.take(')');
+        expression = { kind: 'invoke', target: expression, args };
+      } else if (!this.python && this.peek() === '[') {
+        this.take('[');
+        const index = this.expression();
+        this.take(']');
+        expression = this.dereference({ kind: 'binary', op: '+', left: expression, right: index });
+      } else if (!this.python && this.peek() === '->') {
+        this.take('->');
+        const type = this.typeOf(expression),
+          field = this.take();
+        assert.ok(
+          type.kind === 'pointer' && type.to?.kind === 'struct',
+          `${field}: not a struct pointer`,
+        );
+        const member = this.structs.get(type.to.name)!.fields.get(field);
+        assert.ok(member?.type.kind === 'int', `Undeclared struct member ${field}`);
+        expression = this.read(
+          {
+            kind: 'binary',
+            op: '+',
+            left: { kind: 'cast', type: unsignedType(64), value: expression },
+            right: { kind: 'literal', value: member.offset, ctype: unsignedType(64) },
+          },
+          member.type,
+        );
+      } else return expression;
     }
-    return expression;
+  }
+
+  /** Plain C dereference of a typed scalar pointer; alignment follows the
+   * function's documented target permission (see `local_validation`). */
+  private dereference(pointer: Expr): Expr {
+    const type = this.typeOf(pointer);
+    assert.ok(
+      type.kind === 'pointer' && type.to?.kind === 'int',
+      'Dereference of a non-scalar pointer',
+    );
+    return this.read(pointer, type.to);
+  }
+
+  private read(address: Expr, type: Extract<CType, { kind: 'int' }>): Expr {
+    assert.ok(type.bits % 8 === 0 && !type.bool);
+    return {
+      kind: 'call',
+      name: 'read_memory',
+      args: [
+        address,
+        { kind: 'literal', value: `bits${type.bits}_t` },
+        { kind: 'literal', value: 'little' },
+        { kind: 'literal', value: 'natural' },
+        { kind: 'literal', value: false },
+      ],
+      ctype: type,
+    };
+  }
+
+  /** Static C type (LP64); Python-like values are mathematical integers. */
+  typeOf(expression: Expr): CType {
+    if (this.python) return MATH;
+    const cached = this.types.get(expression);
+    if (cached) return cached;
+    let type: CType = MATH;
+    switch (expression.kind) {
+      case 'literal':
+        type = expression.ctype ?? MATH;
+        break;
+      case 'ref':
+        type = this.symbols.get(expression.name) ?? MATH;
+        break;
+      case 'cast':
+        type = expression.type;
+        break;
+      case 'call':
+        type = expression.ctype ?? helperType(expression);
+        break;
+      case 'unary':
+        type = expression.op === '!' ? INT : promote(this.typeOf(expression.value));
+        break;
+      case 'binary': {
+        const left = this.typeOf(expression.left),
+          right = this.typeOf(expression.right);
+        if (['==', '!=', '<', '<=', '>', '>='].includes(expression.op)) type = INT;
+        else if (expression.op === '<<' || expression.op === '>>') type = promote(left);
+        else if (expression.op === '-' && left.kind === 'pointer' && right.kind === 'pointer')
+          type = { kind: 'int', bits: 64, signed: true };
+        else if ((expression.op === '+' || expression.op === '-') && left.kind === 'pointer')
+          type = left;
+        else if (expression.op === '+' && right.kind === 'pointer') type = right;
+        else type = usualArithmetic(left, right);
+        break;
+      }
+      case 'select': {
+        const yes = this.typeOf(expression.yes),
+          no = this.typeOf(expression.no);
+        type = yes.kind === 'pointer' && no.kind === 'pointer' ? yes : usualArithmetic(yes, no);
+        break;
+      }
+    }
+    this.types.set(expression, type);
+    return type;
+  }
+
+  /** Element size for C pointer arithmetic; incomplete/partial types have none. */
+  elementSize(type: CType): bigint {
+    assert.ok(type.kind === 'pointer' && type.to, 'Pointer arithmetic on an incomplete type');
+    assert.ok(
+      type.to.kind === 'int' && type.to.bits % 8 === 0,
+      'Pointer arithmetic needs a sized scalar element',
+    );
+    return BigInt(type.to.bits / 8);
   }
 
   private primary(): Expr {
@@ -662,8 +994,12 @@ class Parser {
     }
     if (token === '*') {
       const pointer = this.atom();
-      assert.ok(pointer.kind === 'call' && pointer.name === '__pointer');
-      return { kind: 'call', name: 'read_memory', args: pointer.args };
+      if (pointer.kind === 'call' && pointer.name === '__pointer') {
+        const type = pointer.ctype;
+        assert.ok(type?.kind === 'pointer' && type.to?.kind === 'int');
+        return { kind: 'call', name: 'read_memory', args: pointer.args, ctype: type.to };
+      }
+      return this.dereference(pointer);
     }
     if (token === 'memory' && this.peek() === '.') {
       this.take('.');
@@ -689,41 +1025,68 @@ class Parser {
     if (token === '(') {
       if (
         this.peek() === 'volatile' ||
-        (/^(?:unaligned_)?u?int\d+_t$/.test(this.peek()) &&
+        (/^(?:unaligned_|aligned\d+_)?u?int\d+_t$/.test(this.peek()) &&
           this.tokens[this.position + 1] === '*' &&
           this.tokens[this.position + 2] === ')')
       ) {
         const volatile = this.peek() === 'volatile' ? (this.take(), true) : false;
         const type = this.take(),
-          match = /^(unaligned_)?u?int(\d+)_t$/.exec(type);
+          match = /^(?:(unaligned_)|aligned(\d+)_)?(u?)int(\d+)_t$/.exec(type);
         assert.ok(match);
         this.take('*');
         this.take(')');
+        const bits = Number(match[4]);
         return {
           kind: 'call',
           name: '__pointer',
           args: [
             this.atom(),
-            { kind: 'literal', value: `bits${match[2]}_t` },
+            { kind: 'literal', value: `bits${bits}_t` },
             { kind: 'literal', value: 'little' },
-            { kind: 'literal', value: match[1] ? 1n : BigInt(Number(match[2]) / 8) },
+            {
+              kind: 'literal',
+              value: match[1]
+                ? 1n
+                : match[2]
+                  ? BigInt(match[2])
+                  : this.python
+                    ? BigInt(bits / 8)
+                    : 'natural',
+            },
             { kind: 'literal', value: volatile },
           ],
+          // As a value this is an ordinary pointer conversion; `*` reads through it.
+          ctype: { kind: 'pointer', to: { kind: 'int', bits, signed: !match[3] } },
         };
       }
       const castStart = this.position,
-        type = this.bodyType(false);
+        type = this.python ? null : this.bodyType(false);
+      if (
+        type &&
+        this.peek() === '(' &&
+        this.tokens[this.position + 1] === '*' &&
+        this.tokens[this.position + 2] === ')' &&
+        this.tokens[this.position + 3] === '('
+      ) {
+        // Function-pointer cast `(R (*)(T, ...))target`: only the address bits
+        // reach the invocation; the prototype is presentation.
+        this.position += 4;
+        while (this.peek() !== ')') {
+          if (this.peek() === '...') this.take('...');
+          else assert.ok(this.bodyType(false), 'Unsupported function-pointer parameter');
+          if (this.peek() === ',') this.take(',');
+        }
+        this.take(')');
+        this.take(')');
+        return { kind: 'cast', type: { kind: 'pointer', to: null }, value: this.atom() };
+      }
       if (
         type &&
         this.peek() === ')' &&
-        (type.pointer || /^(?:u?int\d+_t|uintptr_t)$/.test(type.scalar))
+        (type.pointers > 0 || /^(?:u?int\d+_t|uintptr_t|bool)$/.test(type.scalar))
       ) {
         this.take(')');
-        return {
-          kind: 'call',
-          name: type.pointer || type.scalar === 'uintptr_t' ? 'uint64' : type.scalar.slice(0, -2),
-          args: [this.atom()],
-        };
+        return { kind: 'cast', type: this.cType(type), value: this.atom() };
       }
       this.position = castStart;
       const expression = this.expression();
@@ -753,12 +1116,34 @@ class Parser {
       return { kind: 'list', values };
     }
     if (token.startsWith('"')) return { kind: 'literal', value: JSON.parse(token) as string };
-    if (/^\d/.test(token)) return { kind: 'literal', value: BigInt(token) };
+    if (/^\d/.test(token)) {
+      const value = BigInt(token);
+      if (this.python) return { kind: 'literal', value };
+      // C11 6.4.4.1: decimal constants are signed; hex may be unsigned.
+      const hex = token.startsWith('0x');
+      // bit_pattern's payload is exact machine-storage bits, not a C constant.
+      if (hex && this.payload) return { kind: 'literal', value };
+      assert.ok(
+        value < 1n << 64n && (hex || value < 1n << 63n),
+        `Unrepresentable C constant ${token}`,
+      );
+      const ctype: CType =
+        value < 1n << 31n
+          ? INT
+          : hex && value < 1n << 32n
+            ? unsignedType(32)
+            : value < 1n << 63n
+              ? { kind: 'int', bits: 64, signed: true }
+              : unsignedType(64);
+      return { kind: 'literal', value, ctype };
+    }
     if (token === 'true' || token === 'false' || token === 'True' || token === 'False')
       return { kind: 'literal', value: token === 'true' || token === 'True' };
     if (this.peek() === '(') {
       this.take('(');
       const args: Expr[] = [];
+      const payload = this.payload;
+      this.payload = token === 'bit_pattern';
       if (this.peek() !== ')') {
         args.push(this.expression());
         while (this.peek() === ',') {
@@ -766,6 +1151,7 @@ class Parser {
           args.push(this.expression());
         }
       }
+      this.payload = payload;
       this.take(')');
       return { kind: 'call', name: token, args };
     }
@@ -860,6 +1246,15 @@ export function execute(
     parser = new Parser(text),
     environment = new Map<string, Data>(inputs),
     events: string[] = [];
+  const unalignedPermitted =
+    emission.local_validation?.some(
+      (record) => record.kind === 'presentation' && record.rule === 'unaligned_access_permitted',
+    ) ?? false;
+  // C assignment (and argument passing) converts to the declared object type.
+  const assign = (name: string, value: Data): void => {
+    const type = parser.symbols.get(name);
+    environment.set(name, typeof value === 'bigint' && type ? convert(value, type) : value);
+  };
   // Mappings supply only formal input identity; every operation below executes
   // parsed output independently of the analyzed IR and its reconstruction plan.
   for (const formal of emittedFormals(emission, parser.headerEnd)) {
@@ -867,7 +1262,7 @@ export function execute(
       ? formal.statement_id
       : formal.semantic_ids.find((id) => inputs.has(id));
     assert.ok(id, `Missing explicit input for ${formal.name}`);
-    environment.set(formal.name, inputs.get(id)!);
+    assign(formal.name, inputs.get(id)!);
   }
   const calls: { target: bigint; arguments: bigint[]; arguments_complete?: boolean }[] = [];
   const sourceCallsObserved: { name: string; arguments: bigint[] }[] = [];
@@ -937,6 +1332,8 @@ export function execute(
     scratch.setFloat64(0, value, true);
     return scratch.getBigUint64(0, true);
   };
+  const literals = new Map<string, bigint>();
+  let nextLiteralAddress = 0x6000000000000000n;
   const invokeSourceCall = (name: string, target: bigint | undefined, args: Data[]): Data => {
     const sourceCall =
       sourceCalls.get(name) ??
@@ -951,7 +1348,20 @@ export function execute(
         last['unresolved'] === 'unknown_argument_remainder');
     const prefix = remainder ? args.slice(0, -1) : args;
     if (prefix.includes(null)) throw new Boundary('unknown', []);
-    const arguments_ = prefix.map(number);
+    // A string literal argument is the address of its static, NUL-terminated
+    // UTF-8 bytes (C11 6.4.5), interned once per distinct literal.
+    const arguments_ = prefix.map((arg) => {
+      if (typeof arg !== 'string') return number(arg);
+      const interned = literals.get(arg);
+      if (interned !== undefined) return interned;
+      const bytes = [...Buffer.from(arg, 'utf8'), 0];
+      let base = nextLiteralAddress;
+      while (bytes.some((_, offset) => memory.has(base + BigInt(offset)))) base += 0x1000n;
+      bytes.forEach((byte, offset) => memory.set(base + BigInt(offset), byte));
+      nextLiteralAddress = base + BigInt(bytes.length + 15) - (BigInt(bytes.length + 15) % 16n);
+      literals.set(arg, base);
+      return base;
+    });
     const context = { arguments_complete: !remainder };
     events.push('call');
     sourceCallsObserved.push({ name, arguments: arguments_ });
@@ -1002,7 +1412,9 @@ export function execute(
       nextStackAddress = base + size + alignment;
       return base;
     }
-    if (name === 'stack_slot' || name === 'field_view') return args[0]!;
+    // Python-like function-pointer views carry only the target address bits.
+    if (name === 'stack_slot' || name === 'field_view' || name === 'function_pointer')
+      return args[0]!;
     if (name === 'source_target') return args[1]!;
     if (name === 'physical_inputs' || name === 'explicit_values' || name === 'boundary')
       return args;
@@ -1236,7 +1648,12 @@ export function execute(
         count = width(args[store ? 2 : 1]) / 8,
         endian = string(args[store ? 3 : 2]);
       events.push(store ? 'store' : 'load');
-      if (address % number(args[store ? 4 : 3]) !== 0n) throw new Boundary('fault', []);
+      const required = args[store ? 4 : 3];
+      // A plain C scalar dereference requires natural alignment unless the
+      // function documents that the target permits unaligned access.
+      const alignment =
+        required === 'natural' ? (unalignedPermitted ? 1n : BigInt(count)) : number(required);
+      if (address % alignment !== 0n) throw new Boundary('fault', []);
       for (let i = 0; i < count; i++)
         if (!memory.has(address + BigInt(i))) throw new Boundary('fault', []);
       let value = 0n;
@@ -1302,7 +1719,107 @@ export function execute(
     const target = typeof pointer === 'bigint' ? pointer : undefined;
     return invokeSourceCall(name, target, args);
   };
-  const evaluate = (expression: Expr): Data => {
+  /** Bit pattern of a C argument as passed to a helper or call boundary. */
+  const pattern = (value: Data, type: CType): Data =>
+    typeof value === 'bigint' && type.kind === 'int' && type.signed
+      ? BigInt.asUintN(type.bits, value)
+      : value;
+  const ub = (message: string): never => {
+    throw new UndefinedBehavior(`Emitted C has undefined behavior: ${message}`);
+  };
+  /** C11 6.5.5-6.5.12 for typed operands; `math` (helper arguments documented as
+   * mathematical, e.g. inside wrap, and Python-like ints) is unbounded. */
+  const binary = (op: string, left: bigint, right: bigint, lt: CType, rt: CType): bigint => {
+    const comparisons: Record<string, (a: bigint, b: bigint) => boolean> = {
+      '==': (a, b) => a === b,
+      '!=': (a, b) => a !== b,
+      '<': (a, b) => a < b,
+      '<=': (a, b) => a <= b,
+      '>': (a, b) => a > b,
+      '>=': (a, b) => a >= b,
+    };
+    if ((op === '+' || op === '-') && (lt.kind === 'pointer' || rt.kind === 'pointer')) {
+      if (lt.kind === 'pointer' && rt.kind === 'pointer') {
+        assert.equal(op, '-');
+        return BigInt.asIntN(64, left - right) / parser.elementSize(lt);
+      }
+      const [base, type, index, indexType] =
+        lt.kind === 'pointer' ? [left, lt, right, rt] : [right, rt, left, lt];
+      const offset = convert(index, promote(indexType)) * parser.elementSize(type);
+      return BigInt.asUintN(64, op === '+' ? base + offset : base - offset);
+    }
+    if (lt.kind === 'math' || rt.kind === 'math') {
+      if (comparisons[op]) return BigInt(comparisons[op](left, right));
+      switch (op) {
+        case '+':
+          return left + right;
+        case '-':
+          return left - right;
+        case '*':
+          return left * right;
+        case '&':
+          return left & right;
+        case '|':
+          return left | right;
+        case '^':
+          return left ^ right;
+        case '<<':
+          return left << right;
+        case '>>':
+          return left >> right;
+        case '/':
+          return left / right;
+        case '%':
+          return left % right;
+      }
+      throw new Error(`Unknown emitted operator ${op}`);
+    }
+    const range = (type: CType, value: bigint): bigint => {
+      assert.ok(type.kind === 'int');
+      if (!type.signed) return BigInt.asUintN(type.bits, value);
+      if (BigInt.asIntN(type.bits, value) !== value)
+        ub(`signed ${type.bits}-bit overflow in ${op}`);
+      return value;
+    };
+    if (op === '<<' || op === '>>') {
+      const type = promote(lt),
+        count = convert(right, promote(rt));
+      assert.ok(type.kind === 'int');
+      if (count < 0n || count >= BigInt(type.bits))
+        ub(`shift count ${count} for ${type.bits}-bit operand`);
+      const value = convert(left, type);
+      if (op === '>>') return value >> count;
+      if (value < 0n) ub('left shift of a negative value');
+      return range(type, value << count);
+    }
+    const type = usualArithmetic(lt, rt);
+    const a = convert(left, type),
+      b = convert(right, type);
+    if (comparisons[op]) return BigInt(comparisons[op](a, b));
+    switch (op) {
+      case '+':
+        return range(type, a + b);
+      case '-':
+        return range(type, a - b);
+      case '*':
+        return range(type, a * b);
+      case '&':
+        return range(type, a & b);
+      case '|':
+        return range(type, a | b);
+      case '^':
+        return range(type, a ^ b);
+      case '/':
+      case '%':
+        if (b === 0n) ub(`${op} by zero`);
+        return range(type, op === '/' ? a / b : a % b);
+    }
+    throw new Error(`Unknown emitted operator ${op}`);
+  };
+  const evaluate = (expression: Expr, math = false): Data => {
+    const typeOf = (node: Expr): CType => (math ? MATH : parser.typeOf(node));
+    const argumentsOf = (args: readonly Expr[], helper?: string): Data[] =>
+      args.map((arg) => pattern(evaluate(arg, math || helper === 'wrap'), typeOf(arg)));
     switch (expression.kind) {
       case 'literal':
         return expression.value;
@@ -1313,7 +1830,11 @@ export function execute(
         );
         return environment.get(expression.name)!;
       case 'list':
-        return expression.values.map(evaluate);
+        return expression.values.map((value) => evaluate(value, math));
+      case 'cast': {
+        const value = evaluate(expression.value, math);
+        return typeof value === 'bigint' ? convert(value, expression.type) : value;
+      }
       case 'call':
         if (expression.name === 'requirement_predicate') {
           assert.equal(expression.args.length, 5);
@@ -1336,70 +1857,51 @@ export function execute(
             ? supported
             : null;
         }
-        return helper(expression.name, expression.args.map(evaluate));
+        {
+          const value = helper(expression.name, argumentsOf(expression.args, expression.name));
+          return typeof value === 'bigint' && expression.ctype
+            ? convert(value, expression.ctype)
+            : value;
+        }
       case 'invoke': {
-        const bits = evaluate(expression.target);
+        const bits = evaluate(expression.target, math);
         if (bits === null) throw new Boundary('unknown', []);
         const target = BigInt.asUintN(64, number(bits));
-        return invokeSourceCall(`0x${target.toString(16)}`, target, expression.args.map(evaluate));
+        return invokeSourceCall(`0x${target.toString(16)}`, target, argumentsOf(expression.args));
       }
       case 'select': {
-        const condition = evaluate(expression.condition);
+        const condition = evaluate(expression.condition, math);
         if (condition === null) return null;
-        return evaluate(condition === 0n || condition === false ? expression.no : expression.yes);
+        const value = evaluate(
+          condition === 0n || condition === false ? expression.no : expression.yes,
+          math,
+        );
+        return typeof value === 'bigint' ? convert(value, typeOf(expression)) : value;
       }
       case 'unary': {
-        const value = evaluate(expression.value);
+        const value = evaluate(expression.value, math);
         if (value === null) return null;
-        const operand = number(value);
-        return expression.op === '-'
-          ? -operand
-          : expression.op === '~'
-            ? ~operand
-            : BigInt(operand === 0n);
+        const operand = number(value),
+          type = promote(typeOf(expression.value));
+        if (expression.op === '!') return BigInt(operand === 0n);
+        const result = expression.op === '-' ? -convert(operand, type) : ~convert(operand, type);
+        if (type.kind !== 'int') return result;
+        if (!type.signed) return BigInt.asUintN(type.bits, result);
+        if (BigInt.asIntN(type.bits, result) !== result)
+          ub(`signed overflow in unary ${expression.op}`);
+        return result;
       }
       case 'binary': {
-        const a = evaluate(expression.left),
-          b = evaluate(expression.right);
+        const a = evaluate(expression.left, math),
+          b = evaluate(expression.right, math);
         if (a === null || b === null) return null;
-        const left = number(a),
-          right = number(b);
-        switch (expression.op) {
-          case '+':
-            return left + right;
-          case '-':
-            return left - right;
-          case '*':
-            return left * right;
-          case '&':
-            return left & right;
-          case '|':
-            return left | right;
-          case '^':
-            return left ^ right;
-          case '<<':
-            return left << right;
-          case '>>':
-            return left >> right;
-          case '/':
-            return left / right;
-          case '%':
-            return left % right;
-          case '==':
-            return BigInt(left === right);
-          case '!=':
-            return BigInt(left !== right);
-          case '<':
-            return BigInt(left < right);
-          case '<=':
-            return BigInt(left <= right);
-          case '>':
-            return BigInt(left > right);
-          case '>=':
-            return BigInt(left >= right);
-          default:
-            throw new Error(`Unknown emitted operator ${expression.op}`);
-        }
+        return binary(
+          expression.op,
+          number(a),
+          number(b),
+          typeOf(expression.left),
+          typeOf(expression.right),
+        );
       }
     }
   };
@@ -1414,7 +1916,7 @@ export function execute(
             const value = evaluate(op.expression),
               values = op.tuple ? array(value) : [value];
             assert.equal(values.length, op.names.length);
-            op.names.forEach((name, index) => environment.set(name, values[index]!));
+            op.names.forEach((name, index) => assign(name, values[index]!));
           }
           break;
         case 'effect':
@@ -1448,7 +1950,12 @@ export function execute(
           if (typeof value === 'bigint' || Array.isArray(value))
             return {
               exit: 'machine_return',
-              values: (Array.isArray(value) ? value : [value]).map(number),
+              // `return` converts to the declared result type; observations
+              // are its ABI bit pattern.
+              values: (Array.isArray(value)
+                ? value
+                : [pattern(convert(value, parser.returnType), parser.returnType)]
+              ).map(number),
               registers: new Map(),
               memory,
               events,

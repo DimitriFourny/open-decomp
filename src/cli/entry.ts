@@ -8,7 +8,7 @@ const HELP = `Usage: open-decomp <command>
 
   functions BINARY [--name TEXT] [--json] [--cache PATH] [--slice ID]
   decompile BINARY (--function NAME|--id ID|--address SPACE:0x...)
-                   [--language c-like|python-like] [--json]
+                   [--language c-like|python-like] [--view source|checked] [--json]
                    [--cache PATH] [--slice ID]
   functions --help / decompile --help    Show command-specific options
 

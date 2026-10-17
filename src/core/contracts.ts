@@ -224,6 +224,9 @@ export interface AbiProfile extends ComponentIdentity {
   readonly layout: DataLayout;
   readonly stack_pointer: RegisterDescriptor;
   readonly preserved: readonly RegisterDescriptor[];
+  /** Register holding the return address at entry (none when it is pushed on the
+   * stack). Not preserved, but restoring it is part of returning to the caller. */
+  readonly link_register?: RegisterDescriptor;
   readonly stack_return_address_bytes: bigint;
   /** ABI capability only: not evidence that any local occupies the red zone. */
   readonly red_zone_bytes: bigint;

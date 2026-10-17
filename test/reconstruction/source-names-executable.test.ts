@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import type { StoredDecompilation } from '../../src/project/cache/index.js';
 import { project } from '../service/analysis/support.js';
+import { nativeAndPythonOracleSkip } from '../support/host-tools.js';
 import { checkExecutableSource, type ExecutableSourceCase } from './source-executable.js';
 
 type StoredEmission = StoredDecompilation['data']['emission'];
@@ -66,7 +67,7 @@ const memories: readonly ExecutableSourceCase[] = [
 // generated functions, executes an analyzed arbitrary target, or substitutes IR.
 test(
   'declared integer/structured-memory C and Python executable subset passes real syntax and runtime checks',
-  { timeout: 120000 },
+  { skip: nativeAndPythonOracleSkip(), timeout: 120000 },
   async (t) => {
     const directory = mkdtempSync(join(tmpdir(), 'open-decomp-source-identifiers-'));
     t.after(() => rmSync(directory, { recursive: true, force: true }));

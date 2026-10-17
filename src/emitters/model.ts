@@ -9,7 +9,13 @@ import type { SourceEvidence } from '../reconstruction/source-model.js';
 export interface EmissionInput {
   readonly function: StructuredFunction;
   readonly types?: TypeRecoveryResult;
-  readonly names?: readonly { readonly entity_id: string; readonly name: string }[];
+  /** `source_name` is the C spelling of a native linkage name (Mach-O drops its
+   * one leading underscore); asserted annotation names never carry one. */
+  readonly names?: readonly {
+    readonly entity_id: string;
+    readonly name: string;
+    readonly source_name?: string;
+  }[];
   /** Only active note annotations are rendered here; type recovery consumes type
    * assertions separately. The coordinator resolves active names into names. */
   readonly annotations?: readonly Annotation[];

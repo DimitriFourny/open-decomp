@@ -5,6 +5,7 @@ import {
   type AbiSignature,
   type AbiType,
   type OperationContext,
+  type PresentationView,
   type RegisterDescriptor,
 } from '../core/index.js';
 import type { EmissionInput } from '../emitters/model.js';
@@ -42,6 +43,7 @@ export function planSource(
   expressions: Map<string, Expression>,
   owner: Map<string, string>,
   context: OperationContext,
+  view: PresentationView = 'checked',
 ) {
   const evidence = input.source!,
     abi = evidence.abi,
@@ -466,13 +468,23 @@ export function planSource(
             ),
           )
           .filter((value): value is Value => value !== null);
+        // Source view: a complete-callee-reads basis closes the observed list;
+        // planSourceStack withdraws it if the caller writes possible stack arguments.
+        const closed =
+          view === 'source' &&
+          !missing &&
+          callee.parameter_state !== 'ambiguous' &&
+          callee.argument_list_closure === 'callee_reads' &&
+          !callee.variadic_stack;
         projection = {
           kind: callee.parameter_state === 'ambiguous' || missing ? 'physical' : 'inferred',
           signature: null,
           arguments: args,
-          ...(callee.argument_list_complete === false || missing
-            ? { argument_list_complete: false }
-            : {}),
+          ...(closed
+            ? { argument_list_complete: true }
+            : callee.argument_list_complete === false || missing
+              ? { argument_list_complete: false }
+              : {}),
           results: returned,
           inputs: [],
           outputs: node.register_outputs,
@@ -502,7 +514,14 @@ export function planSource(
         kind: callee.parameter_state === 'ambiguous' || args.missing ? 'physical' : 'inferred',
         signature: null,
         arguments: args.arguments,
-        argument_list_complete: false,
+        // A closed callee reads no stack, so no forwarded or newly written
+        // stack bytes can be further arguments of this tail transfer.
+        argument_list_complete:
+          view === 'source' &&
+          !args.missing &&
+          callee.parameter_state !== 'ambiguous' &&
+          callee.argument_list_closure === 'callee_reads' &&
+          !callee.variadic_stack,
         results: [],
         inputs: [],
         outputs: [],

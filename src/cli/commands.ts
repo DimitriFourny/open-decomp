@@ -13,6 +13,7 @@ interface Arguments {
   name?: string;
   selector?: FunctionSelector;
   emitter?: 'c-like' | 'python-like';
+  view?: 'source' | 'checked';
 }
 type ParsedArguments = Arguments | { help: Command };
 type FunctionsResult = ToolResult<'functions_find'>;
@@ -23,7 +24,7 @@ type AnalysisResult =
 const usage = {
   functions: 'open-decomp functions BINARY [--name TEXT] [--json] [--cache PATH] [--slice ID]',
   decompile:
-    'open-decomp decompile BINARY (--function NAME | --id ID | --address va:0x.../rva:0x.../file:0x...) [--language c-like|python-like] [--json] [--cache PATH] [--slice ID]',
+    'open-decomp decompile BINARY (--function NAME | --id ID | --address va:0x.../rva:0x.../file:0x...) [--language c-like|python-like] [--view source|checked] [--json] [--cache PATH] [--slice ID]',
 } as const;
 
 class UsageError extends Error {}
@@ -84,7 +85,9 @@ function parse(args: readonly string[]): ParsedArguments {
   const allowed = [
     '--cache',
     '--slice',
-    ...(command === 'functions' ? ['--name'] : ['--function', '--id', '--address', '--language']),
+    ...(command === 'functions'
+      ? ['--name']
+      : ['--function', '--id', '--address', '--language', '--view']),
   ];
   let json = false,
     positionalOnly = false;
@@ -155,6 +158,12 @@ function parse(args: readonly string[]): ParsedArguments {
     if (language !== 'c-like' && language !== 'python-like')
       throw new UsageError('--language must be c-like or python-like');
     result.emitter = language;
+  }
+  const view = values.get('--view');
+  if (view !== undefined) {
+    if (view !== 'source' && view !== 'checked')
+      throw new UsageError('--view must be source or checked');
+    result.view = view;
   }
   return result;
 }
@@ -281,6 +290,7 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
     else {
       const result = await session.decompile(parsed.selector!, {
         ...(parsed.emitter === undefined ? {} : { emitter: parsed.emitter }),
+        ...(parsed.view === undefined ? {} : { view: parsed.view }),
         signal: controller.signal,
         onProgress,
       });

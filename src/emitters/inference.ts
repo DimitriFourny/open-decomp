@@ -659,10 +659,13 @@ export function collectInferences(
         : record.status === 'rejected'
           ? 'conflicting'
           : 'unresolved',
-      'Local translation validation only: the stated fragment/scope is not whole-function equivalence, semantic coverage, or evidence of a source declaration.',
+      record.kind === 'presentation'
+        ? 'Source-view presentation rewrite: its stated side conditions were checked on the reconstruction; the elided or restated facts remain in this metadata, the requirements and the checked view.'
+        : 'Local translation validation only: the stated fragment/scope is not whole-function equivalence, semantic coverage, or evidence of a source declaration.',
       {
         kind: 'rewrite',
         validation_kind: record.kind,
+        ...(record.rule ? { rule: record.rule } : {}),
         validation_subject: record.subject,
         validation_status: record.status,
         scope: record.scope,

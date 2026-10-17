@@ -71,10 +71,10 @@ const castMeaning: Record<string, string> = {
 const fpMeaning =
   'IEEE binary32/64, nearest ties-even and gradual underflow; arithmetic NaNs canonicalize to 0x7fc00000/0x7ff8000000000000. No ambient exception/control-register behavior is invented.';
 
-/** Reconstruction chooses substitutions; formatting preserves width semantics.
- * Arithmetic is readable infix with explicit reduction where overflow matters.
- * Exact floating/vector/unknown operations retain documented semantic helpers. */
-export function expressionText(
+/** The checked view: every reduction and reinterpretation is spelled out and
+ * every compound form is fully parenthesized. Exact floating/vector/unknown
+ * operations retain documented semantic helpers. */
+function checkedExpressionText(
   expression: Expression,
   type: DataType,
   writer: Writer,
@@ -324,5 +324,515 @@ export function expressionText(
         'Arguments: machine type, inert reason text. An unavailable/undefined value, not zero, a fresh random number, or an established trap; dependencies remain indeterminate.',
         [writer.quote(machineType(type)), writer.quote(expression.reason)],
       );
+  }
+}
+
+/** Static type of a printed integer value. In C-like text it is the C type of
+ * the expression (LP64, 32-bit int); in Python-like text the value lies in
+ * [0, 2^bits) (signed: [-2^(bits-1), 2^(bits-1))). A printed value always
+ * equals its IR operand's unsigned bit pattern unless `signed` says otherwise. */
+export interface IntegerCType {
+  readonly bits: number;
+  readonly signed: boolean;
+}
+export interface Printed {
+  readonly text: string;
+  readonly precedence: number;
+  readonly ctype: IntegerCType | null;
+  /** The same value before its final modular reduction to its own unsigned
+   * width: a context that converts implicitly to exactly that unsigned type
+   * (C assignment/return) may print this instead. */
+  readonly unreduced?: Printed;
+  /** The same value at a narrower unsigned type (a zero extension): operators,
+   * comparisons and converting contexts may use it; call arguments keep the
+   * widening because variadic/unprototyped callees do not convert. */
+  readonly widened?: Printed;
+}
+/** Binding strength shared by both dialects; only binary operators differ. */
+export const PRIMARY = 16;
+export const UNARY = 14;
+export const CONDITIONAL = 3;
+const C_PRECEDENCE: Readonly<Record<string, number>> = {
+  '*': 13,
+  '/': 13,
+  '%': 13,
+  '+': 12,
+  '-': 12,
+  '<<': 11,
+  '>>': 11,
+  '<': 10,
+  '<=': 10,
+  '>': 10,
+  '>=': 10,
+  '==': 9,
+  '!=': 9,
+  '&': 8,
+  '^': 7,
+  '|': 6,
+};
+const PYTHON_PRECEDENCE: Readonly<Record<string, number>> = {
+  '*': 13,
+  '%': 13,
+  '+': 12,
+  '-': 12,
+  '<<': 11,
+  '>>': 11,
+  '&': 10,
+  '^': 9,
+  '|': 8,
+  '<': 7,
+  '<=': 7,
+  '>': 7,
+  '>=': 7,
+  '==': 7,
+  '!=': 7,
+};
+const INT: IntegerCType = { bits: 32, signed: true };
+/** C integer promotion (bool, 8- and 16-bit types become int). */
+function promote(type: IntegerCType): IntegerCType {
+  return type.bits < 32 ? INT : type;
+}
+/** C usual arithmetic conversions. */
+export function usualArithmetic(left: IntegerCType, right: IntegerCType): IntegerCType {
+  const a = promote(left),
+    b = promote(right);
+  if (a.signed === b.signed) return a.bits >= b.bits ? a : b;
+  const unsigned = a.signed ? b : a,
+    signed = a.signed ? a : b;
+  return unsigned.bits >= signed.bits ? unsigned : signed;
+}
+
+/** Source-view syntax shared by expression and memory printing. */
+export class SourcePrinter {
+  constructor(private readonly writer: Writer) {}
+
+  get python(): boolean {
+    return this.writer.language === 'python-like';
+  }
+
+  primary(text: string, ctype: IntegerCType | null = null): Printed {
+    return { text, precedence: PRIMARY, ctype };
+  }
+
+  group(value: Printed, minimum: number): string {
+    return value.precedence < minimum ? `(${value.text})` : value.text;
+  }
+
+  /** Left-associative infix by precedence, plus grouping where C compilers
+   * warn (-Wparentheses) or Python would chain comparisons. */
+  binary(op: string, left: Printed, right: Printed, ctype: IntegerCType | null): Printed {
+    const precedence = (this.python ? PYTHON_PRECEDENCE : C_PRECEDENCE)[op]!;
+    const bitwise = op === '&' || op === '|' || op === '^',
+      shift = op === '<<' || op === '>>',
+      comparison = /^[<>=!]=?$/.test(op);
+    const operand = (value: Printed, rightSide: boolean): string => {
+      const mixed =
+        value.precedence < UNARY &&
+        ((bitwise && value.precedence !== precedence) ||
+          shift ||
+          (comparison && (this.python ? value.precedence <= precedence : value.precedence < 11)));
+      return this.group(value, mixed ? UNARY : rightSide ? precedence + 1 : precedence);
+    };
+    return {
+      text: `${operand(left, false)} ${op} ${operand(right, true)}`,
+      precedence,
+      ctype,
+    };
+  }
+
+  /** Explicit conversion: C cast, or the documented Python-like reduction helper. */
+  cast(bits: number, signed: boolean, value: Printed): Printed {
+    if (bits === 1 && !signed)
+      return this.binary(
+        '&',
+        value,
+        this.literal(1n, 1),
+        this.python ? { bits: 1, signed: false } : usualArithmetic(value.ctype ?? INT, INT),
+      );
+    const ctype = { bits, signed };
+    if (!this.python)
+      return {
+        text: `(${signed ? 'int' : 'uint'}${bits}_t)${this.group(value, UNARY)}`,
+        precedence: UNARY,
+        ctype,
+      };
+    const helper = `${signed ? 'int' : 'uint'}${bits}`;
+    this.writer.helper(
+      helper,
+      signed
+        ? `Interpret the low ${bits} bits as a signed two's-complement value; unknown/undefined propagates.`
+        : `Reduce to an unsigned ${bits}-bit value; unknown/undefined propagates.`,
+    );
+    return this.primary(`${helper}(${value.text})`, ctype);
+  }
+
+  /** Reduce a value to exactly unsigned `bits` unless its type already is that. */
+  reduce(bits: number, value: Printed): Printed {
+    if (value.ctype && !value.ctype.signed && value.ctype.bits === bits) return value;
+    return { ...this.cast(bits, false, value), unreduced: value };
+  }
+
+  /** Integer constant of an IR width; small counts read as decimal, masks and
+   * bitwise operands (`bitwise`) as hex. */
+  literal(value: bigint, bits: number, bitwise = false): Printed {
+    const mask = value >= 15n && (value & (value + 1n)) === 0n;
+    const text =
+      value < (bitwise ? 10n : 256n) && !mask ? String(value) : `0x${value.toString(16)}`;
+    if (this.python)
+      return this.primary(text, { bits: Math.max(1, value.toString(2).length), signed: false });
+    // C has no integer constant wider than 64 bits: compose wider values from
+    // 64-bit chunks in the IR width, most significant first.
+    if (value >= 1n << 64n) {
+      const ctype = { bits, signed: false };
+      let result: Printed | null = null;
+      for (
+        let shift = BigInt(Math.ceil(value.toString(2).length / 64) - 1) * 64n;
+        shift >= 0n;
+        shift -= 64n
+      ) {
+        const chunk = this.literal((value >> shift) & ((1n << 64n) - 1n), 64, true);
+        if (!result) {
+          result = this.cast(bits, false, chunk);
+          continue;
+        }
+        result = this.binary('<<', result, this.literal(64n, 32), ctype);
+        if (chunk.text !== '0') result = this.binary('|', result, chunk, ctype);
+      }
+      return result!;
+    }
+    // C11 6.4.4.1: decimal constants are signed; hexadecimal may be unsigned.
+    const ctype: IntegerCType =
+      value < 1n << 31n
+        ? INT
+        : value < 1n << 32n
+          ? { bits: 32, signed: false }
+          : value < 1n << 63n
+            ? { bits: 64, signed: true }
+            : { bits: Math.max(64, bits), signed: false };
+    return this.primary(text, ctype);
+  }
+
+  /** Signed decimal constant for a signed comparison operand. */
+  signedLiteral(value: bigint): Printed {
+    const magnitude = this.literal(value < 0n ? -value : value, 64);
+    if (value >= 0n) return magnitude;
+    return {
+      text: `-${magnitude.text}`,
+      precedence: UNARY,
+      ctype: this.python ? null : magnitude.ctype,
+    };
+  }
+}
+
+export interface ExpressionOptions {
+  /** Source reconstruction: addresses print as source data references. */
+  readonly source?: { readonly address: (address: Address) => Printed };
+  /** `checked` keeps every machine-level reduction explicit (today's text). */
+  readonly view: 'source' | 'checked';
+  /** Proven constant value of an operand, when it prints as a literal. */
+  readonly constant?: (value: Value) => bigint | undefined;
+}
+
+/** Reconstruction chooses substitutions; formatting preserves width semantics.
+ * The source view prints C/Python arithmetic whose native semantics equal the
+ * IR bit-vector operation: reductions appear only where the dialect's own
+ * arithmetic would not already wrap at the operation width. */
+export function expressionText(
+  expression: Expression,
+  type: DataType,
+  writer: Writer,
+  name: (value: Value) => Printed,
+  options: ExpressionOptions,
+): Printed {
+  if (options.view === 'checked' || !options.source) {
+    const source = options.source;
+    return {
+      text: checkedExpressionText(
+        expression,
+        type,
+        writer,
+        (value) => name(value).text,
+        source && { address: (address) => source.address(address).text },
+      ),
+      precedence: PRIMARY,
+      ctype: null,
+    };
+  }
+  const printer = new SourcePrinter(writer),
+    python = printer.python,
+    width = bitWidth(type);
+  const helper = (): Printed => ({
+    text: checkedExpressionText(expression, type, writer, (value) => name(value).text, {
+      address: (address) => options.source!.address(address).text,
+    }),
+    precedence: PRIMARY,
+    ctype: type.kind === 'integer' ? { bits: width, signed: false } : null,
+  });
+  /** An integer operand with a known type; an unknown one is first reduced
+   * explicitly to its own width so every rule below starts from a typed value. */
+  const operand = (value: Value): Printed => {
+    const printed = name(value),
+      narrow = printed.widened ?? printed;
+    return narrow.ctype || value.type.kind !== 'integer'
+      ? narrow
+      : printer.cast(value.type.bits, false, narrow);
+  };
+  const range = (value: Printed, bits: number): IntegerCType =>
+    value.ctype ?? { bits, signed: false };
+  switch (expression.kind) {
+    case 'constant':
+      if (type.kind !== 'integer') return helper();
+      return printer.literal(BigInt.asUintN(width, expression.bits), width);
+    case 'address':
+      return options.source.address(expression.address);
+    case 'integer': {
+      if (expression.op === 'and' || expression.op === 'or' || expression.op === 'xor') {
+        const bitwise = (value: Value): Printed => {
+          const constant = options.constant?.(value);
+          return constant === undefined ? operand(value) : printer.literal(constant, width, true);
+        };
+        const left = bitwise(expression.left),
+          right = bitwise(expression.right),
+          l = range(left, width),
+          r = range(right, width);
+        // Bitwise results of non-negative operands never leave [0, 2^width).
+        const ctype = python
+          ? {
+              bits: expression.op === 'and' ? Math.min(l.bits, r.bits) : Math.max(l.bits, r.bits),
+              signed: false,
+            }
+          : usualArithmetic(l, r);
+        return printer.binary(
+          expression.op === 'and' ? '&' : expression.op === 'or' ? '|' : '^',
+          left,
+          right,
+          ctype,
+        );
+      }
+      if (expression.op === 'add' || expression.op === 'sub' || expression.op === 'mul') {
+        const op = expression.op === 'add' ? '+' : expression.op === 'sub' ? '-' : '*';
+        let left = operand(expression.left);
+        const right = operand(expression.right);
+        if (python) {
+          const l = range(left, width).bits,
+            r = range(right, width).bits;
+          // Python ints are unbounded: reduce unless the exact result fits.
+          const bits = op === '+' ? Math.max(l, r) + 1 : op === '*' ? l + r : Infinity;
+          const result = printer.binary(op, left, right, { bits, signed: false });
+          return bits <= width ? result : printer.reduce(width, result);
+        }
+        // Bound each operand's magnitude: a constant by its value, otherwise by
+        // its type (all printed operands are non-negative bit patterns).
+        const magnitude = (value: Value, printed: Printed): number => {
+          const constant = options.constant?.(value);
+          if (constant !== undefined) return constant.toString(2).length;
+          const known = range(printed, width);
+          return Math.min(width, known.signed ? known.bits - 1 : known.bits);
+        };
+        const lm = magnitude(expression.left, left),
+          rm = magnitude(expression.right, right),
+          needed = op === '*' ? lm + rm : Math.max(lm, rm) + 1;
+        const fits = (type: IntegerCType): boolean =>
+          needed <= (type.signed ? type.bits - 1 : type.bits);
+        let common = usualArithmetic(range(left, width), range(right, width));
+        // A non-negative exact result below 2^width needs no reduction at all.
+        if (op !== '-' && needed <= width && fits(common))
+          return printer.binary(op, left, right, common);
+        if (common.bits < width) {
+          left = printer.cast(width, false, left);
+          common = usualArithmetic(left.ctype!, range(right, width));
+        }
+        // Signed arithmetic (after promotion) must not overflow: widen the left
+        // operand to the unsigned type of the same rank when it could.
+        if (common.signed && !fits(common)) {
+          left = printer.cast(common.bits, false, left);
+          common = usualArithmetic(left.ctype!, range(right, width));
+        }
+        return printer.reduce(width, printer.binary(op, left, right, common));
+      }
+      const count = options.constant?.(expression.right);
+      if (
+        (expression.op === 'shl' || expression.op === 'lshr' || expression.op === 'ashr') &&
+        count !== undefined &&
+        count < BigInt(width) &&
+        type.kind === 'integer'
+      ) {
+        const amount = printer.literal(count, bitWidth(expression.right.type));
+        let left = operand(expression.left);
+        if (expression.op === 'lshr') {
+          const l = range(left, width);
+          return printer.binary(
+            '>>',
+            left,
+            amount,
+            python ? { bits: Math.max(1, l.bits - Number(count)), signed: false } : promote(l),
+          );
+        }
+        if (expression.op === 'ashr')
+          return printer.reduce(
+            width,
+            printer.binary(
+              '>>',
+              printer.cast(width, true, left),
+              amount,
+              python ? null : promote({ bits: width, signed: true }),
+            ),
+          );
+        if (python) {
+          const bits = range(left, width).bits + Number(count);
+          const result = printer.binary('<<', left, amount, { bits, signed: false });
+          return bits <= width ? result : printer.reduce(width, result);
+        }
+        let shifted = promote(range(left, width));
+        if (shifted.signed ? width + Number(count) > 31 : shifted.bits < width) {
+          left = printer.cast(Math.max(width, 32), false, left);
+          shifted = left.ctype!;
+        }
+        return printer.reduce(width, printer.binary('<<', left, amount, shifted));
+      }
+      return helper();
+    }
+    case 'integer_unary': {
+      if (expression.op !== 'neg' && expression.op !== 'not') return helper();
+      let value = operand(expression.value);
+      const symbol = expression.op === 'neg' ? '-' : '~';
+      if (python)
+        return printer.reduce(width, {
+          text: `${symbol}${printer.group(value, UNARY)}`,
+          precedence: UNARY,
+          ctype: null,
+        });
+      let ctype = promote(range(value, width));
+      if (!ctype.signed && ctype.bits < width) {
+        value = printer.cast(width, false, value);
+        ctype = value.ctype!;
+      }
+      return printer.reduce(width, {
+        text: `${symbol}${printer.group(value, UNARY)}`,
+        precedence: UNARY,
+        ctype,
+      });
+    }
+    case 'compare': {
+      const bits = bitWidth(expression.left.type);
+      const isSigned = expression.op.startsWith('s');
+      const side = (value: Value): Printed => {
+        const constant = options.constant?.(value);
+        if (isSigned) {
+          const signed = constant === undefined ? undefined : BigInt.asIntN(bits, constant);
+          return signed !== undefined && signed >= -(1n << 31n) && signed < 1n << 31n
+            ? printer.signedLiteral(signed)
+            : printer.cast(bits, true, operand(value));
+        }
+        return operand(value);
+      };
+      // Every unsigned-compare operand is its non-negative bit pattern, so any
+      // common C type compares the same values.
+      const left = side(expression.left),
+        right = side(expression.right);
+      return printer.binary(
+        comparisonOperators[expression.op],
+        left,
+        right,
+        python ? { bits: 1, signed: false } : INT,
+      );
+    }
+    case 'cast': {
+      if (expression.op === 'bitcast' && sameType(type, expression.value.type))
+        return name(expression.value);
+      if (type.kind !== 'integer' || expression.value.type.kind !== 'integer') return helper();
+      const value = operand(expression.value),
+        bits = expression.value.type.bits;
+      // Zero extension never changes the value: keep the widening spelled for
+      // non-converting contexts, offer the narrow operand to all others.
+      if (expression.op === 'zero_extend') {
+        const narrow = value.widened ?? value;
+        return python ? narrow : { ...printer.cast(width, false, narrow), widened: narrow };
+      }
+      if (expression.op === 'truncate') {
+        const known = range(value, bits);
+        return !known.signed && known.bits <= width ? value : printer.cast(width, false, value);
+      }
+      if (expression.op === 'sign_extend')
+        return printer.cast(width, false, printer.cast(bits, true, value));
+      return helper();
+    }
+    case 'extract': {
+      if (expression.value.type.kind !== 'integer' || type.kind !== 'integer') return helper();
+      const source = expression.value.type.bits;
+      let value = operand(expression.value);
+      if (expression.offset)
+        value = printer.binary(
+          '>>',
+          value,
+          printer.literal(BigInt(expression.offset), 32),
+          python
+            ? { bits: Math.max(1, range(value, source).bits - expression.offset), signed: false }
+            : promote(range(value, source)),
+        );
+      // The top slice of a value already lies within the result width.
+      return expression.offset + width >= source && !range(value, source).signed
+        ? python
+          ? { ...value, ctype: { bits: width, signed: false } }
+          : value
+        : printer.cast(width, false, value);
+    }
+    case 'concat': {
+      if (
+        type.kind !== 'integer' ||
+        !expression.values.every((value) => value.type.kind === 'integer')
+      )
+        return helper();
+      let offset = 0,
+        result: Printed | null = null;
+      for (const value of expression.values) {
+        writer.context.checkpoint(1);
+        let part = operand(value);
+        if (offset) {
+          // Shift within the full result width; each part is below 2^its width.
+          if (!python && (part.ctype!.signed || part.ctype!.bits < width))
+            part = printer.cast(width, false, part);
+          part = printer.binary(
+            '<<',
+            part,
+            printer.literal(BigInt(offset), 32),
+            python ? { bits: width, signed: false } : promote(part.ctype!),
+          );
+        }
+        result = result
+          ? printer.binary(
+              '|',
+              result,
+              part,
+              python ? { bits: width, signed: false } : usualArithmetic(result.ctype!, part.ctype!),
+            )
+          : part;
+        offset += bitWidth(value.type);
+      }
+      return result!;
+    }
+    case 'select': {
+      const condition = operand(expression.condition),
+        yes = operand(expression.when_true),
+        no = operand(expression.when_false);
+      const ctype =
+        yes.ctype && no.ctype
+          ? python
+            ? {
+                bits: Math.max(yes.ctype.bits, no.ctype.bits),
+                signed: yes.ctype.signed || no.ctype.signed,
+              }
+            : usualArithmetic(yes.ctype, no.ctype)
+          : null;
+      return {
+        text: python
+          ? `${printer.group(yes, CONDITIONAL + 1)} if ${printer.group(condition, CONDITIONAL + 1)} else ${printer.group(no, CONDITIONAL)}`
+          : `${printer.group(condition, CONDITIONAL + 1)} ? ${printer.group(yes, CONDITIONAL + 1)} : ${printer.group(no, CONDITIONAL)}`,
+        precedence: CONDITIONAL,
+        ctype,
+      };
+    }
+    default:
+      return helper();
   }
 }

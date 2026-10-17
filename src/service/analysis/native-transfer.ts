@@ -1,6 +1,11 @@
 import type { AbiProfile, OperationContext, RegisterDescriptor } from '../../core/index.js';
 import type { CallAnalysisResult } from '../../analysis/calls/index.js';
-import { inspectRegister, inspectStackMemory, type StackFact } from '../../analysis/stack/index.js';
+import {
+  classifyStackRegion,
+  inspectRegister,
+  inspectStackMemory,
+  type StackFact,
+} from '../../analysis/stack/index.js';
 import {
   bitWidth,
   sameType,
@@ -16,6 +21,7 @@ import {
   type RegisterTypeSlice,
 } from '../../reconstruction/source-register-types.js';
 import { createNativeInterfaceIndex, type NativeInterfaceIndex } from './native-entry.js';
+import { parameterRegisters } from './native-abi.js';
 import type { NativeInterface } from './native-worklist.js';
 
 /** Seed physical cells with independently observed scalar/vector lane types.
@@ -159,6 +165,43 @@ export function nativeStackParameters(
         ? 1
         : left.width_bits - right.width_bits,
   );
+}
+
+/** An exact pointer into this body's own incoming argument area that leaves it
+ * (an integer ABI argument register at a call or tail call, or a stored value)
+ * lets another body read caller-written stack bytes: the shape of an escaping
+ * `va_list` after `va_start`. Direct incoming reads are stack parameters
+ * instead. Partial stack recovery or inexact offsets never establish it. */
+export function nativeIncomingStackEscapes(
+  ir: SSAForm,
+  abi: AbiProfile,
+  analysis: CallAnalysisResult,
+  context: OperationContext,
+): boolean {
+  if (analysis.stack.state !== 'complete') return false;
+  const incoming = (fact: StackFact | undefined): boolean =>
+    fact?.value.kind === 'stack' &&
+    classifyStackRegion(abi, fact.value.offset, 1n) === 'incoming_candidate';
+  const roots = new Set(
+    parameterRegisters(abi)
+      .filter((register) => register.bank === 'integer')
+      .map((register) => register.root),
+  );
+  const passes = (id: string): boolean =>
+    analysis.stack.snapshots
+      .get(id)
+      ?.registers.some((row) => roots.has(row.register.root) && incoming(row.fact)) ?? false;
+  for (const block of ir.blocks) {
+    for (const node of block.instructions) {
+      context.checkpoint(1);
+      if (node.kind === 'store' && incoming(analysis.stack.values.get(node.value.id))) return true;
+      if (node.kind === 'call' && passes(node.id)) return true;
+    }
+    const terminator = block.terminator;
+    if (terminator.kind === 'indirect' && terminator.tail_call && passes(terminator.id))
+      return true;
+  }
+  return false;
 }
 
 /** Return contracts concern meaningful written storage, not the capacity of a

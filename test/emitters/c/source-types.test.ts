@@ -92,7 +92,15 @@ for (const language of ['c-like', 'python-like'] as const)
     assert.ok(header);
     assert.match(header, language === 'c-like' ? /^int32_t / : /-> int32_t:/);
     assert.match(header, language === 'c-like' ? /\*\s+[A-Za-z_]\w*/ : /:\s*pointer\[/);
-    assert.ok(output.emission.helpers.some((helper) => helper.name === 'field_view'));
+    // The memory-view annotation helper is machine-level checked-view detail.
+    assert.ok(
+      emit(
+        ssa,
+        { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } },
+        language,
+        'checked',
+      ).emission.helpers.some((helper) => helper.name === 'field_view'),
+    );
     assert.ok(
       expandEmission(output.emission).mappings.some((mapping) =>
         mapping.semantic_ids.includes('balance-field'),
@@ -316,7 +324,14 @@ for (const language of ['c-like', 'python-like'] as const)
       { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } },
       language,
     );
-    assert.ok(output.emission.helpers.some((helper) => helper.name === 'field_view'));
+    assert.ok(
+      emit(
+        ssa,
+        { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } },
+        language,
+        'checked',
+      ).emission.helpers.some((helper) => helper.name === 'field_view'),
+    );
     const entryBindings = ssa.register_states.find((state) => state.block === ssa.entry)!.entry;
     const parameters = [rdi.root, 'x86_64:rsi'].map((root) => {
       const id = entryBindings.find((binding) => binding.register.root === root)!.value.id;

@@ -248,8 +248,12 @@ export const analysisOptionsSchema = z.strictObject({
   emitter: z.enum(['c-like', 'python-like']).default('c-like'),
   include_evidence: z.boolean().default(true),
   indent: z.number().int().min(1).max(8).default(2),
+  /** `source` applies proof-carrying presentation rewrites (each recorded as a
+   * `presentation` rewrite inference); `checked` prints every machine-level fact. */
+  view: z.enum(['source', 'checked']).default('source'),
 });
 export const DEFAULT_ANALYSIS_OPTIONS = Object.freeze(analysisOptionsSchema.parse({}));
+export type PresentationView = z.infer<typeof analysisOptionsSchema>['view'];
 export const pageRequestSchema = z.strictObject({
   limit: z.number().int().min(1).max(1000).default(100),
   cursor: z.string().min(1).max(16_384).optional(),

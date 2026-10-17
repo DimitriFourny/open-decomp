@@ -64,12 +64,26 @@ export interface SequenceRegion {
   readonly kind: 'sequence';
   readonly regions: readonly Region[];
 }
+/** Source-view syntax of a loop, chosen after reconstruction (never by the
+ * structurer). Absent means generic `while (true)` with explicit transfers. */
+export type LoopForm =
+  /** Header block has no printed statements; its `if` is the loop test and the
+   * exit arm is the loop's lexical break. `enter` is the arm value staying inside. */
+  | { readonly kind: 'while'; readonly test: EntityId; readonly enter: boolean }
+  /** The lexically last block's `if` is the test; its repeat arm is the only
+   * edge to the header and its copies run before the test. Only `test` may continue. */
+  | {
+      readonly kind: 'do_while';
+      readonly test: EntityId;
+      readonly repeat: boolean;
+    };
 export interface LoopRegion {
   readonly kind: 'loop';
   /** Stable header identity, not an invented statement identity. */
   readonly header: EntityId;
   /** Generic single-entry loop: condition evaluation and effects stay in body. */
   readonly body: Region;
+  readonly form?: LoopForm;
 }
 export type Region = BlockRegion | SequenceRegion | LoopRegion;
 export interface StructuredFunction extends Origin {

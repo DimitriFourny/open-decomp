@@ -28,7 +28,7 @@ for (const fixture of [
       assert.ok('data' in full);
       assert.match(
         full.data.emission.text,
-        emitter === 'c-like' ? /char\s*\*\s+fn_/ : /-> pointer\[char\]:/,
+        emitter === 'c-like' ? /char\s*\*\s+fixture_string\(/ : /-> pointer\[char\]:/,
       );
       assert.equal(execute(full.data.emission).string_result, text);
       assert.ok(

@@ -8,7 +8,7 @@ for (const python of [false, true])
     const second = python ? 'count: uint64_t' : 'uint64_t count';
     const text = python
       ? `# A comment may contain { or ): without ending the header.\ndef sample(${first}, ${second}) -> uint64_t:\n  return uint64(address + count)\n`
-      : `/* A comment may contain { without opening the body. */\nuint64_t sample(${first}, ${second}) {\n  return ((uint64_t)(address + count));\n}\n`;
+      : `/* A comment may contain { without opening the body. */\nuint64_t sample(${first}, ${second}) {\n  return ((uint64_t)(((uintptr_t)(address)) + count));\n}\n`;
     const ids: string[] = [];
     const ref = (id: string) => {
       if (!ids.includes(id)) ids.push(id);

@@ -12,6 +12,7 @@ import { fpEnvironmentGuard } from '../lifters/arm64/semantics.js';
 import { x86FpEnvironmentGuard } from '../lifters/x86_64/semantics.js';
 import type { BlockRegion } from '../presentation/index.js';
 import type { Assignment, BoundaryProjection, Reconstruction } from './model.js';
+import type { AbiConformanceSite } from './local-validation.js';
 
 export const FP_ENVIRONMENT_REQUIREMENT =
   'FP arithmetic requires nearest-even rounding, gradual underflow and disabled exception traps; FPCR/FPSR/MXCSR status and exceptional environments are not modeled. Each original guard and ordered effect remains in place. Acknowledgment is specific to a requirement, site and exact state epoch, never a promise that unknown calls preserve the environment.';
@@ -392,6 +393,46 @@ export function sourceRequirementPredicates(
   return result;
 }
 
+/** One `abi_conformance` assumption per presentation rule, with one site per
+ * applied rewrite. Sites anchor at mapped original statements/controls. */
+export function abiConformanceRequirements(
+  functionId: string,
+  sites: readonly AbiConformanceSite[],
+  origin: (id: string) => Origin | undefined,
+  context: OperationContext,
+): readonly Requirement[] {
+  const byRule = new Map<
+    string,
+    { explanation: string; sites: RequirementSite[]; origins: Origin[] }
+  >();
+  for (const item of sites) {
+    context.checkpoint(1 + item.anchor_ids.length);
+    const origins = item.anchor_ids.flatMap((id) => origin(id) ?? []);
+    if (!origins.length) continue;
+    const row = byRule.get(item.rule) ?? { explanation: item.explanation, sites: [], origins: [] };
+    if (row.sites.length >= 1000) continue;
+    row.sites.push({
+      id: `site_${fingerprint([functionId, 'abi_conformance', item.rule, ...item.anchor_ids])}`,
+      subject_ids: [...new Set(origins.map((entry) => entry.id))],
+      evidence_ids: [...new Set(origins.flatMap((entry) => entry.provenance.evidence_ids))],
+      instruction_ids: [...new Set(origins.flatMap((entry) => entry.provenance.instruction_ids))],
+      state_epoch: item.rule,
+    });
+    row.origins.push(...origins);
+    byRule.set(item.rule, row);
+  }
+  return [...byRule].map(([rule, row]) => ({
+    id: `requirement_${fingerprint([functionId, 'abi_conformance', rule])}`,
+    kind: 'abi_conformance' as const,
+    status: 'assumption' as const,
+    explanation: row.explanation,
+    ...requirementReferences(row.sites, context),
+    ranges: row.origins.flatMap((entry) => entry.provenance.ranges),
+    output_spans: [],
+    sites: row.sites,
+  }));
+}
+
 /** Index mappings once. Only actual mapped output sites survive, with exact
  * original provenance and UTF-16 spans; no generated-text interpretation.
  * Mapping references resolve through the emission's own interned tables. */
@@ -400,8 +441,9 @@ export function sourceRequirementProofs(
   mappings: EmissionResult['emission']['mappings'],
   tables: { readonly ids: readonly string[]; readonly ranges: readonly AddressRange[] },
   context: OperationContext,
+  additional: readonly Requirement[] = [],
 ): readonly Requirement[] {
-  const requirements = program.source?.requirements ?? [];
+  const requirements = [...(program.source?.requirements ?? []), ...additional];
   if (!requirements.length) return [];
   const anchors = new Set(
     requirements.flatMap((record) => record.sites.map((site) => site.subject_ids[0]!)),

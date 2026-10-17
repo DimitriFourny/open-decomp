@@ -7,6 +7,7 @@ import {
   outputSpanSchema,
   emissionRefsSchema,
   evidenceRefIndexesSchema,
+  presentationRuleSchema,
 } from './inference.js';
 import {
   SCHEMA_VERSION,
@@ -131,7 +132,8 @@ export const sourceMappingSchema = z
       context.addIssue({ code: 'custom', message: 'Invalid output span' });
   });
 export const localValidationSchema = z.strictObject({
-  kind: z.enum(['bitvector', 'parallel-copy', 'stack-promotion', 'control']),
+  kind: z.enum(['bitvector', 'parallel-copy', 'stack-promotion', 'control', 'presentation']),
+  rule: presentationRuleSchema.optional(),
   subject: z.string().min(1).max(1024),
   subject_ids: z.array(z.string().min(1).max(1024)).max(64).optional(),
   status: z.enum(['verified', 'unverified', 'rejected']),
@@ -335,13 +337,14 @@ export const functionGetArgsSchema = z
           'conflict',
           'annotation',
           'fp_environment',
+          'abi_conformance',
           'unresolved',
           'source',
           'helper',
         ]),
       )
       .min(1)
-      .max(14)
+      .max(15)
       .optional(),
     include_quotes: z.boolean().optional(),
     detail: z.enum(['full', 'compact']).optional().describe('Disassembly only; omitted means full'),
@@ -862,7 +865,7 @@ const functionGetDataSchema = z
         )
         .max(10000),
       selection: z.strictObject({
-        kinds: z.array(z.string()).max(14).nullable(),
+        kinds: z.array(z.string()).max(15).nullable(),
         subject_id: entityIdSchema.nullable(),
         quotes: z.boolean(),
         counts: z.record(

@@ -2,13 +2,23 @@ import { OperationError, type OperationContext } from '../core/index.js';
 import { bitWidth, type Expression, type Origin, type Value } from '../ir/index.js';
 
 export interface LocalValidationRecord {
-  readonly kind: 'bitvector' | 'parallel-copy' | 'stack-promotion' | 'control';
+  readonly kind: 'bitvector' | 'parallel-copy' | 'stack-promotion' | 'control' | 'presentation';
+  /** Source-view presentation rule (only for `presentation`). */
+  readonly rule?: string;
   readonly subject: string;
   readonly subject_ids?: readonly string[];
   readonly status: 'verified' | 'unverified' | 'rejected';
   readonly scope: string;
   readonly reason?: string;
   readonly counterexample?: Readonly<Record<string, string>>;
+}
+
+/** One ABI-conformance assumption a source-view rewrite rests on. `anchor_ids[0]`
+ * is an original statement/control identity mapped in the emitted text. */
+export interface AbiConformanceSite {
+  readonly rule: string;
+  readonly anchor_ids: readonly string[];
+  readonly explanation: string;
 }
 
 export function rejectTranslation(record: LocalValidationRecord, origin: Origin): never {
@@ -356,6 +366,7 @@ export class LocalValidationSession {
     const key = JSON.stringify([
       record.kind,
       record.subject,
+      record.rule ?? null,
       record.scope,
       record.status,
       record.reason ?? null,
@@ -366,6 +377,40 @@ export class LocalValidationSession {
     this.#recorded.add(key);
     this.records.push(record);
     return record;
+  }
+
+  /** Record one source-view presentation rewrite whose side conditions the
+   * caller has already checked. Returns false (record bound reached) when the
+   * rewrite may not be applied; the caller must then keep the checked form. */
+  presentation(
+    rule: string,
+    subject: string,
+    scope: string,
+    subjectIds?: readonly string[],
+    reason?: string,
+  ): boolean {
+    const record = this.check(
+      'presentation',
+      subject,
+      scope,
+      () => ({
+        kind: 'presentation',
+        rule,
+        subject,
+        scope,
+        status: 'verified',
+        ...(reason ? { reason } : {}),
+      }),
+      subjectIds,
+    );
+    return record.status === 'verified';
+  }
+
+  /** ABI-conformance assumptions of applied rewrites, published as requirements. */
+  readonly abiConformance: AbiConformanceSite[] = [];
+  requireAbi(rule: string, anchorIds: readonly string[], explanation: string): void {
+    this.allowance.context.checkpoint(anchorIds.length);
+    if (anchorIds.length) this.abiConformance.push({ rule, anchor_ids: anchorIds, explanation });
   }
 }
 export function validateBitvectorCandidate(

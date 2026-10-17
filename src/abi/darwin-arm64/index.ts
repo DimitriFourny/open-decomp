@@ -39,7 +39,7 @@ import type {
  */
 export class DarwinArm64Abi implements AbiProfile {
   readonly name = 'Darwin ARM64 C ABI';
-  readonly version = '1.2.0';
+  readonly version = '1.3.0';
   readonly id = 'darwin-arm64' as const;
   readonly architecture = 'arm64' as const;
   readonly layout: DataLayout = Object.freeze({
@@ -62,6 +62,8 @@ export class DarwinArm64Abi implements AbiProfile {
   readonly red_zone_bytes = 128n;
   /** x18 is platform-reserved, not an allocatable callee-saved register. */
   readonly preserved: readonly RegisterDescriptor[] = PRESERVED;
+  /** x30 (LR); BL writes it and RET reads it. */
+  readonly link_register: RegisterDescriptor = X[30]!;
   /** Includes upper halves of v8-v15, never their preserved low 64 bits. */
   readonly unknown_call_clobbers = CLOBBERS;
 

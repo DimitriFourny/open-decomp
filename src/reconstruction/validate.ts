@@ -251,17 +251,25 @@ export function validateReconstruction(program: Reconstruction, context: Operati
 }
 
 type Nest =
-  | { readonly kind: 'loop'; readonly header: string; readonly follow: string | null }
+  | {
+      readonly kind: 'loop';
+      readonly header: string;
+      readonly follow: string | null;
+      /** do-while: only its test may `continue` (elsewhere it reaches the test). */
+      readonly test?: string;
+    }
   | { readonly kind: 'switch'; readonly follow: string | null };
 
 /** Independently derive the executable edge represented by each chosen syntax.
  * This is a publication check, not another structuring/rewrite algorithm. In
- * particular two exits from one loop cannot both mean its lexical successor. */
+ * particular two exits from one loop cannot both mean its lexical successor.
+ * `fallthrough` transfers print nothing and so reach their lexical follow. */
 export function validateRenderedTransfers(
   fn: StructuredFunction,
   gotos: ReadonlySet<ParallelTransfer>,
   language: 'c-like' | 'python-like',
   context: OperationContext,
+  fallthrough: ReadonlySet<ParallelTransfer> = new Set(),
 ): void {
   const entry = (region: Region, fallback: string | null): string | null => {
     for (;;) {
@@ -282,12 +290,13 @@ export function validateRenderedTransfers(
     context.checkpoint(1);
     let actual = follow;
     if (gotos.has(transfer)) actual = transfer.target;
+    else if (fallthrough.has(transfer)) actual = follow;
     else if (transfer.mode === 'continue') {
       actual = null;
       for (let i = nesting.length - 1; i >= 0; i--) {
         const scope = nesting[i]!;
         if (scope.kind === 'loop') {
-          actual = scope.header;
+          if (scope.test === undefined || scope.test === origin.id) actual = scope.header;
           break;
         }
       }
@@ -324,9 +333,11 @@ export function validateRenderedTransfers(
       return;
     }
     if (region.kind === 'loop') {
-      walk(region.body, region.header, [
+      // Falling off a do-while body reaches its test, never the header directly.
+      const test = region.form?.kind === 'do_while' ? region.form.test : undefined;
+      walk(region.body, test === undefined ? region.header : null, [
         ...nesting,
-        { kind: 'loop', header: region.header, follow },
+        { kind: 'loop', header: region.header, follow, ...(test === undefined ? {} : { test }) },
       ]);
       return;
     }

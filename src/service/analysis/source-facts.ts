@@ -55,6 +55,7 @@ import {
 } from './native-worklist.js';
 import {
   nativeCallInputs,
+  nativeIncomingStackEscapes,
   nativeReturnInterface,
   nativeStackParameters,
   nativeTypeSlices,
@@ -392,6 +393,39 @@ function observeParameters(
       { ...observedRegister, width_bits: type ? bitWidth(type) : observedRegister.width_bits },
     ];
   });
+  const variadicStack = nativeIncomingStackEscapes(ir, abi, analysis, context);
+  const stack_parameters = nativeStackParameters(ir, analysis, context, interfaceIndex);
+  // Complete by callee reads: nothing outside the observed register prefix can
+  // be read, directly or through a callee/tail target whose own list is closed.
+  // Recursive groups never close: their seeds are open and closure needs every
+  // dependency closed. Callers still require no possible caller stack argument.
+  const closedCallee = (callee: NativeInterface | undefined): boolean =>
+    callee?.argument_list_closure === 'callee_reads' &&
+    callee.parameter_state !== 'ambiguous' &&
+    !callee.variadic_stack;
+  const closure =
+    !ambiguous &&
+    !variadicStack &&
+    !stack_parameters.length &&
+    ir.blocks.every((block) => {
+      context.checkpoint(1);
+      return (
+        block.instructions.every(
+          (node) =>
+            node.kind !== 'call' ||
+            calls
+              .get(node.id)
+              ?.contracts.some(
+                (contract) =>
+                  contract.status === 'established' &&
+                  contract.layout.state === 'complete' &&
+                  contract.layout.argument_count !== null,
+              ) === true ||
+            closedCallee(interfaces.get(node.id)),
+        ) &&
+        (block.terminator.kind !== 'indirect' || closedCallee(interfaces.get(block.terminator.id)))
+      );
+    });
   return {
     parameters,
     parameter_types: parameters.map(
@@ -403,7 +437,9 @@ function observeParameters(
     ...(written_result === undefined ? {} : { written_result }),
     parameter_state: ambiguous ? 'ambiguous' : 'observed',
     argument_list_complete: false,
-    stack_parameters: nativeStackParameters(ir, analysis, context, interfaceIndex),
+    stack_parameters,
+    ...(closure ? { argument_list_closure: 'callee_reads' as const } : {}),
+    ...(variadicStack ? { variadic_stack: true as const } : {}),
     requirements: [
       ...new Set([
         ...(conditionalFpFailures.size || localFpEnvironment ? ['fp_environment' as const] : []),
@@ -730,14 +766,16 @@ function observeNativeUnit(
     );
     observed = { ...observed, context_assumptions: unit.context_assumptions };
   }
-  if (unit.budget_truncated)
+  if (unit.budget_truncated) {
+    const { argument_list_closure: _closure, ...truncated } = observed;
     observed = {
-      ...observed,
+      ...truncated,
       returns: [],
       return_types: [],
       written_result: { registers: [], types: [] },
       parameter_state: 'ambiguous',
     };
+  }
   if (!unit.types) return observed;
   const transfers = nativeShapeTransfers(unit, interfaces, context);
   const types = transfers.length
@@ -1020,7 +1058,12 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         summaryContext,
       );
       interfaces.set(dependency.call_id, observed);
-      const { parameter_shapes, written_result: _written, ...interface_ } = observed;
+      const {
+        parameter_shapes,
+        written_result: _written,
+        argument_list_closure,
+        ...interface_
+      } = observed;
       const proofIds = [...(summary?.evidence_ids ?? dependency.target.evidence_ids)];
       if (dependency.assumptions) {
         const readset = scope.dependencies?.finish();
@@ -1058,6 +1101,9 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         target: dependency.target.entry,
         target_subject_id: dependency.target.id,
         ...interface_,
+        // Only a complete summary (no limits, failures or inherited open
+        // dependencies) keeps its complete-by-callee-reads basis.
+        ...(argument_list_closure && summary?.complete ? { argument_list_closure } : {}),
         evidence_ids: proofIds,
       });
       summarized.add(dependency.call_id);
@@ -1173,19 +1219,39 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       // The callee record cites this unit's graph-refined function proofs even when
       // SSA preparation stopped, so its graph evidence is published either way.
       if (unit) evidence.push(...unit.evidence);
+      // The escape is a property of the prepared body; a context-specialized
+      // dependency is keyed by its context, not by the function identity.
+      const body =
+        unit ?? partialUnits.get(nativeContextKey(dependency.target.id, dependency.assumptions));
+      const variadicStack =
+        body?.ir &&
+        body.analysis &&
+        nativeIncomingStackEscapes(body.ir, abi, body.analysis, context)
+          ? body
+          : undefined;
+      if (variadicStack) {
+        observed = { ...observed, variadic_stack: true };
+        if (!unit) evidence.push(...variadicStack.evidence);
+      }
       observed = mergeNativeInterface(
         observed,
         observedCalls.find((call) => call.call_id === dependency.call_id),
         abi,
         context,
       );
-      const { parameter_shapes: _shapes, written_result: _written, ...interface_ } = observed;
+      // Unfinished worklists never close an argument list.
+      const {
+        parameter_shapes: _shapes,
+        written_result: _written,
+        argument_list_closure: _closure,
+        ...interface_
+      } = observed;
       callees.set(dependency.call_id, {
         call_id: dependency.call_id,
         target: dependency.target.entry,
         target_subject_id: dependency.target.id,
         ...interface_,
-        evidence_ids: unit?.evidence_ids ?? dependency.target.evidence_ids,
+        evidence_ids: (unit ?? variadicStack)?.evidence_ids ?? dependency.target.evidence_ids,
       });
     }
   }

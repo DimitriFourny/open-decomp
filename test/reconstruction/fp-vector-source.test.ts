@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
+import { nativeOracleSkip } from '../support/host-tools.js';
 import { openBinary, type BinarySession } from '../../src/api/index.js';
 import { acknowledgeRequirements, emittedFormals, execute } from '../emitters/c/support.js';
 
@@ -81,7 +82,7 @@ function formals(
 // as zero; this never supplies a missing source argument or a call remainder.
 test(
   'source-built Darwin varargs, vector lanes/results/stores and mixed calls survive both dialects',
-  { skip: process.platform !== 'darwin' || process.arch !== 'arm64', timeout: 120000 },
+  { skip: nativeOracleSkip(), timeout: 120000 },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), 'open-decomp-fp-vector-regression-'));
     let session: BinarySession | undefined;
@@ -213,7 +214,7 @@ test(
       const mixedEmission = mixed.data.emission;
       assert.doesNotMatch(mixedEmission.text, /unknown_arguments/);
       const calls = new Map<string, (args: readonly bigint[]) => bigint>();
-      calls.set('_fixture_mixed', (args) => {
+      calls.set('fixture_mixed', (args) => {
         assert.equal(args.length, 3);
         return floatBits(
           Number(BigInt.asUintN(32, args[0]!)) +
@@ -247,11 +248,11 @@ test(
           assert.deepEqual(observed.values, oracle.get(`mixed:${index}`));
           assert.deepEqual(observed.source_calls, [
             {
-              name: '_fixture_mixed',
+              name: 'fixture_mixed',
               arguments: [BigInt(count), floatBits(left, 64), floatBits(right, 64)],
             },
             {
-              name: '_fixture_mixed',
+              name: 'fixture_mixed',
               arguments: [
                 BigInt.asUintN(32, BigInt(count) + 1n),
                 floatBits(right, 64),
