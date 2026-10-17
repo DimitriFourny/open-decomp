@@ -174,7 +174,7 @@ for (const [observed, conformance] of [
     for (const language of ['c-like', 'python-like'] as const) {
       const emitted = emit(program, { types }, language).emission;
       if (observed !== null)
-        assert.ok(emitted.mappings.some((mapping) => mapping.evidence_ids.includes(alEvidence)));
+        assert.ok(emitted.mappings.some((mapping) => mapping.evidence_refs.some((ref) => emitted.evidence[ref] === alEvidence)));
     }
     assert.deepEqual(program, original);
   });

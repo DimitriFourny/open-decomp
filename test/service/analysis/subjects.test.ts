@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { entityIdentity, newIdentity } from '../../../src/core/index.js';
+import { entityIdentity, expandEmission, newIdentity } from '../../../src/core/index.js';
 import { project } from './support.js';
 
 for (const fixture of ['macho-arm64-symbols', 'corpus-symbols.dll'])
@@ -66,7 +66,7 @@ for (const fixture of ['macho-arm64-symbols', 'corpus-symbols.dll'])
         current.catalog.types.some((type) => type.id === declared && type.source === 'user'),
       );
       assert.ok(
-        current.result.data.emission.mappings.some(
+        expandEmission(current.result.data.emission).mappings.some(
           (mapping) => mapping.semantic_ids.includes(field.id) && mapping.evidence_ids.length,
         ),
       );
@@ -139,7 +139,7 @@ test(
       'a call-local signature is not the containing function signature',
     );
     const proofs = new Map(current.result.evidence.map((proof) => [proof.id, proof]));
-    const pending = current.result.data.emission.mappings
+    const pending = expandEmission(current.result.data.emission).mappings
       .filter((mapping) => mapping.semantic_ids.includes(call.id))
       .flatMap((mapping) => mapping.evidence_ids);
     const ancestry = new Set<string>();

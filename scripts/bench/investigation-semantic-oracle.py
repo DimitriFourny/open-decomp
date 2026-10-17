@@ -50,7 +50,8 @@ for name, material in by_name.items():
     if native:
         native_ids = {item['id'] for item in native['data']['items']}
         artifact = json.loads((root / 'private/projection/project/artifacts' / material['artifact_id']).read_text())
-        original_records = {item['id']: item for item in artifact['result']['data']['emission']['inferences']}
+        emitted = artifact['result']['data']['emission']
+        original_records = {item['id']: item for item in emitted['inferences']}
         assert native_ids and all(item['architecture'] == 'arm64' and item['size'] == 4
                                   for item in native['data']['items'])
         expected = {'investigation_mix': [(0x304, 'eor'), (0x308, 'add')],
@@ -71,7 +72,7 @@ for name, material in by_name.items():
                 assert 0 <= ref < len(page['references'])
             if semantic['details']['kind'] != 'parameter':
                 if native:
-                    assert native_ids.intersection(original_records[semantic['id']]['instruction_ids'])
+                    assert native_ids.intersection(emitted['ids'][ref] for ref in original_records[semantic['id']]['instruction_refs'])
                     assert semantic['instruction_refs']
                 else:
                     assert any(page['references'][ref] in instructions for ref in semantic['instruction_refs'])

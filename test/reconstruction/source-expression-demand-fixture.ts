@@ -37,7 +37,7 @@ export function checkSourceExpressionDemand(): { outcomes: number; scenarios: nu
     return values;
   };
   const originalSubjects = (ir: SSAForm, emission: Emission): void => {
-    const mapped = new Set(emission.mappings.flatMap((mapping) => [mapping.statement_id, ...mapping.semantic_ids]));
+    const mapped = new Set(emission.mappings.flatMap((mapping) => mapping.semantic_refs.map((ref) => emission.ids[ref]!)));
     for (const block of ir.blocks)
       for (const node of [...block.instructions, block.terminator])
         assert.ok(mapped.has(node.id), `Original subject lost from emitted provenance: ${node.id}`);

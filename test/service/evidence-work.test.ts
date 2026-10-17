@@ -41,23 +41,16 @@ test('source-data mapping memo retains exact and negative observations with canc
   assert.throws(() => lookup(known), { code: 'cancelled' });
 });
 
-test('typed emission closure includes inference and localized site proofs without scanning semantic IDs', () => {
+test('typed emission closure reads the cited evidence table without scanning semantic IDs', () => {
   const proofs = ['mapping', 'inference', 'requirement', 'site'].map((name) =>
     `evidence_${fingerprint(name)}`);
   const unrelated = Array<string>(20_000).fill(entityIdentity(slice, 'value', 'unrelated'));
-  const emission = {
-    mappings: [{ evidence_ids: [proofs[0]!], semantic_ids: unrelated }],
-    inferences: [{ evidence_ids: [proofs[1]!], subject_ids: unrelated }],
-    requirements: [{ evidence_ids: [proofs[2]!], subject_ids: unrelated,
-      sites: [{ evidence_ids: [proofs[3]!], instruction_ids: unrelated }] }],
-  };
+  // Every record cites proofs by index; the table states each cited proof once.
+  const emission = { ids: unrelated, evidence: proofs };
   assert.deepEqual([...emissionEvidenceReferences(emission,
     createOperationContext({ budget: { work: 8 } }))].sort(), [...proofs].sort());
   assert.deepEqual([...emissionEvidenceReferences(emission, createOperationContext())].sort(),
-    [...evidenceReferences(emission, createOperationContext())].sort());
-  assert.deepEqual([...emissionEvidenceReferences({
-    mappings: emission.mappings, inferences: undefined, requirements: undefined,
-  }, createOperationContext())], [proofs[0]!]);
+    [...evidenceReferences({ evidence_ids: proofs }, createOperationContext())].sort());
   const controller = new AbortController();
   controller.abort();
   assert.throws(() => emissionEvidenceReferences(emission,

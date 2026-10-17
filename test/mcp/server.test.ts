@@ -34,6 +34,7 @@ import type {
 import { QueryService } from '../../src/service/queries/index.js';
 import { SqliteProjectStore } from '../../src/project/store/index.js';
 import { createMcpServer, MCP_MAX_RESULT_BYTES } from '../../src/mcp/server.js';
+import { decodeNavigationText } from '../../src/mcp/navigation.js';
 import { artifactUri, ARTIFACT_URI_TEMPLATE } from '../../src/mcp/resources.js';
 import type { WorkerPoolOptions } from '../../src/workers/index.js';
 import { waitForWorkerPause } from '../workers/gate.js';
@@ -85,9 +86,9 @@ async function setup(t: TestContext, options: Partial<WorkerPoolOptions> = {}) {
     const text = response.content.find((item) => item.type === 'text');
     assert.ok(text?.type === 'text');
     assert.deepEqual(
-      JSON.parse(text.text),
+      decodeNavigationText(text.text),
       result,
-      'text-only consumers receive the complete core delivery envelope',
+      'text-only consumers receive every fact of the core delivery envelope',
     );
     assert.equal(
       response.isError === true,

@@ -249,8 +249,7 @@ function validateComputation(
   }
   for (const diagnostic of result.diagnostics)
     for (const id of diagnostic.evidence_ids) neededProofs.add(id);
-  for (const mapping of result.data.emission.mappings)
-    for (const id of mapping.evidence_ids) neededProofs.add(id);
+  for (const id of result.data.emission.evidence) neededProofs.add(id);
   for (const proof of proofs.values())
     for (const id of [...proof.derived_from, ...proof.conflicts_with]) neededProofs.add(id);
   // Walk durable proof dependencies too; an incomplete proof chain cannot authorize annotations.

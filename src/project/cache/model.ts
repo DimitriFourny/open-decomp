@@ -3,7 +3,7 @@ import type { SuppliedTypeRecord } from '../../analysis/types/index.js';
 import type { AnnotationSubject } from '../annotations/index.js';
 import type { AnalysisReadset } from './dependencies.js';
 
-export const ANALYSIS_ARTIFACT_VERSION = 1;
+export const ANALYSIS_ARTIFACT_VERSION = 2;
 export const ANALYSIS_ARTIFACT_MEDIA_TYPE = 'application/vnd.open-decomp.function+json';
 export const MAX_ANALYSIS_ARTIFACT_BYTES = 16 * 1024 * 1024;
 

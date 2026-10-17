@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createOperationContext } from '../../../src/core/index.js';
+import { createOperationContext, expandEmission } from '../../../src/core/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { simplifySSA } from '../../../src/analysis/values/index.js';
 import { DarwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
@@ -190,7 +190,7 @@ export function checkSourceWidths(): { observations: number; fixtures: number } 
     observations++;
     for (const [ir, emitted] of [[arithmetic, output], [width, wideOutput], [loop, loopOutput], [indexed, indexedOutput]] as const)
       for (const block of ir.blocks) for (const node of [...block.instructions, block.terminator]) {
-        const origins = new Set(emitted.emission.mappings.filter((mapping) => mapping.statement_id === node.id)
+        const origins = new Set(expandEmission(emitted.emission).mappings.filter((mapping) => mapping.statement_id === node.id)
           .flatMap((mapping) => mapping.instruction_ids));
         for (const id of node.provenance.instruction_ids) assert.ok(origins.has(id));
       }

@@ -46,7 +46,7 @@ try {
       const unresolved = emission.requirements?.find((requirement) => requirement.kind === 'unresolved' &&
         requirement.explanation.startsWith('The source return list is incomplete'));
       assert.ok(unresolved && unresolved.explanation.includes('arm64:v0[64:64]'));
-      assert.ok(unresolved.instruction_ids.length && unresolved.ranges.length && unresolved.output_spans.length);
+      assert.ok(unresolved.instruction_refs.length && unresolved.range_refs.length && unresolved.output_spans.length);
       evidence.push({ emitter, kind, diagnostics: result.diagnostics, emission });
       const formals = emittedFormals(emission).filter((formal) => formal.name !== 'entry_sp');
       assert.equal(formals.length, kind === 'scratch' ? 2 : 1, emission.text);

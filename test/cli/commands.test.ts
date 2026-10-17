@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { openBinary } from '../../src/api/index.js';
 import { toolSchemas } from '../../src/core/index.js';
 import type { ToolResult } from '../../src/core/index.js';
-import { runtimeBytes } from '../metadata/fixture.js';
+import { manyFunctions } from './many-functions.js';
 
 interface CommandOutput {
   code: number | null;
@@ -63,34 +63,6 @@ async function directory(t: TestContext): Promise<string> {
   return root;
 }
 
-/** Real Mach-O symbols and RET instructions force multiple CLI query pages and
- * duplicate-name selection without substituting a fake query service or SDK. */
-async function manyFunctions(root: string): Promise<string> {
-  const { bytes, u32, u64 } = runtimeBytes([]);
-  const command = 32 + bytes.readUInt32LE(36);
-  u32(16, 2);
-  u32(20, bytes.readUInt32LE(20) + 24);
-  u32(command, 2);
-  u32(command + 4, 24);
-  u32(command + 8, 0x5000);
-  u32(command + 12, 205);
-  u32(command + 16, 0x7000);
-  let stringOffset = 1;
-  for (let index = 0; index < 205; index++) {
-    const name = index >= 203 ? 'duplicate' : `task_${index.toString().padStart(3, '0')}`;
-    const symbol = 0x5000 + index * 16;
-    u32(symbol, stringOffset);
-    bytes[symbol + 4] = 0x0f;
-    bytes[symbol + 5] = 3;
-    u64(symbol + 8, 0x100006000n + BigInt(index * 4));
-    stringOffset += bytes.write(name, 0x7000 + stringOffset, 'utf8') + 1;
-    u32(0x6000 + index * 4, 0xd65f03c0);
-  }
-  u32(command + 20, stringOffset);
-  const binary = join(root, 'many-functions');
-  await writeFile(binary, bytes);
-  return binary;
-}
 function functionPages(output: CommandOutput): FunctionsOutput {
   assert.equal(output.signal, null, output.stderr);
   const value = JSON.parse(output.stdout) as FunctionsOutput;
@@ -269,6 +241,29 @@ test(
     assert.equal(incomplete.code, 2, incomplete.stderr);
     assert.equal(incomplete.stdout, '');
     assert.match(incomplete.stderr, /incomplete/i);
+  },
+);
+
+test(
+  'Mach-O C names resolve from the authoritative symbol table under a partial function index',
+  { timeout: 120_000 },
+  async (t) => {
+    const root = await directory(t),
+      binary = await manyFunctions(root, '_');
+    const cache = join(root, 'partial-cache');
+    const seeded = await openBinary(binary, { cachePath: cache, budget: { instructions: 1 } });
+    await seeded.close();
+    const resolved = await run(['decompile', binary, '--cache', cache, '--function', 'task_010']);
+    assert.ok(resolved.code === 0 || resolved.code === 2, resolved.stderr);
+    assert.notEqual(resolved.stdout, '', resolved.stderr);
+    assert.doesNotMatch(resolved.stderr, /incomplete|ambiguous|no function matches/i);
+    const ambiguous = await run(['decompile', binary, '--cache', cache, '--function', 'duplicate']);
+    assert.equal(ambiguous.code, 1, ambiguous.stderr);
+    assert.equal(ambiguous.stdout, '');
+    assert.match(ambiguous.stderr, /ambiguous/i);
+    const absent = await run(['decompile', binary, '--cache', cache, '--function', 'task_absent']);
+    assert.equal(absent.code, 2, absent.stderr);
+    assert.match(absent.stderr, /incomplete/i);
   },
 );
 

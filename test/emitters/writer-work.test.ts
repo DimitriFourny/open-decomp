@@ -20,11 +20,14 @@ test('mapping metadata reuses immutable provenance without losing references or 
   writer.line(0, 'return 42;');
   for (let index = 0; index < 500; index++) writer.map(origin, 0, [subject]);
   assert.equal(writer.mappings.length, 500);
+  assert.deepEqual(writer.ids.items, [origin.id, subject, ...instructions], 'each identity is stated once');
+  assert.deepEqual(writer.proofs.items, evidence);
+  assert.deepEqual(writer.ranges.items, ranges);
   for (const mapping of writer.mappings) {
-    assert.deepEqual(mapping.instruction_ids, instructions);
-    assert.deepEqual(mapping.evidence_ids, evidence);
-    assert.deepEqual(mapping.semantic_ids, [origin.id, subject]);
-    assert.deepEqual(mapping.ranges, ranges);
+    assert.deepEqual(mapping.instruction_refs.map((ref) => writer.ids.items[ref]), instructions);
+    assert.deepEqual(mapping.evidence_refs.map((ref) => writer.proofs.items[ref]), evidence);
+    assert.deepEqual(mapping.semantic_refs.map((ref) => writer.ids.items[ref]), [origin.id, subject]);
+    assert.deepEqual(mapping.range_refs.map((ref) => writer.ranges.items[ref]), ranges);
     assert.equal(mapping.start, 0);
     assert.equal(mapping.end, writer.offset);
   }
@@ -43,8 +46,8 @@ test('prepared mapping references preserve ordered proof subjects and become imm
   for (const id of [ids[0]!, ids[1]!, ids[1]!, ids[2]!, ids[3]!, ids[0]!]) references.add(id);
   writer.line(0, 'return 42;');
   writer.map(origin, 0, references);
-  assert.deepEqual(writer.mappings[0]!.semantic_ids, ids);
-  assert.ok(Object.isFrozen(writer.mappings[0]!.semantic_ids));
+  assert.deepEqual(writer.mappings[0]!.semantic_refs.map((ref) => writer.ids.items[ref]), ids);
+  assert.ok(Object.isFrozen(writer.mappings[0]!.semantic_refs));
   assert.throws(() => references.add(entityIdentity(slice, 'value', 'late')), TypeError);
   const wrongOwner = new Writer(context, 2, true);
   assert.throws(() => wrongOwner.map(origin, 0, references, [], 1), TypeError);

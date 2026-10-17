@@ -412,6 +412,8 @@ export class Renderer {
     evidence: readonly string[] = [],
     end = this.writer.offset,
   ): void {
+    // Empty spans publish nothing; never intern identities for them.
+    if (start === end) return;
     const contributors = this.program.source?.value_origins;
     const references = this.writer.references();
     for (const id of [origin.id, ...ids])
@@ -1537,14 +1539,15 @@ export class Renderer {
       if (record.kind === 'control' && record.status === 'rejected')
         rejectTranslation(record, this.controls.get(record.subject) ?? this.input.function);
     const requirements = sourceRequirementProofs(
-      this.program, w.mappings, this.context, (bytes) => w.metadata(bytes),
-    );
+      this.program, w.mappings, { ids: w.ids.items, ranges: w.ranges.items }, this.context,
+    ).map((record) => w.requirement(record));
     const inferences = collectInferences(
-      this.input, this.program, w.mappings, this.localValidation.records, w, this.context,
+      this.input, this.program, this.localValidation.records, w, this.context,
       this.inferenceSites, this.sourceDataValue,
     );
     const declarationSpan = { start: this.headerStart, end: this.headerEnd };
-    w.metadata(Buffer.byteLength(JSON.stringify(declarationSpan)));
+    const review = { operation: 'function_get', view: 'metadata', function_id: this.input.function.id } as const;
+    w.charge({ declarationSpan, review });
     return {
       emission: {
         language: this.language,
@@ -1552,12 +1555,16 @@ export class Renderer {
         text: w.text(),
         span_unit: 'utf16',
         reconstruction: 'pseudocode',
+        ids: w.ids.items,
+        evidence: w.proofs.items,
+        ranges: w.ranges.items,
         mappings: w.mappings,
         declaration_span: declarationSpan,
         helpers: w.helpers,
         local_validation: this.localValidation.records,
         inferences,
         requirements,
+        review,
       },
       diagnostics: this.diagnostics,
       coverage: {

@@ -137,12 +137,14 @@ try {
     check(page.data.items.length <= 1 && page.data.artifact_id === artifact.id &&
       page.artifacts[0].sha256 === artifact.sha256, 'bounded exact artifact page');
     check(new Set(page.data.references).size === page.data.references.length, 'page provenance interned exactly once');
+    const emitted = decompiled.data.emission;
     for (const reference of page.data.references) {
       if (reference.startsWith('entity_')) continue;
-      check(decompiled.data.emission.mappings.some((mapping) => mapping.instruction_ids.length === 1 &&
-        mapping.ranges.length === 1 && mapping.ranges[0].start.image_id === opened.data.image.id &&
-        `${mapping.ranges[0].start.space}:${mapping.ranges[0].start.value}+${mapping.ranges[0].size}` === reference),
-        'instruction address requires exact single-instruction original mapping');
+      check(emitted.mappings.some((mapping) => {
+        const range = emitted.ranges[mapping.range_refs[0]];
+        return mapping.instruction_refs.length === 1 && mapping.range_refs.length === 1 &&
+          range.start.image_id === opened.data.image.id && `${range.start.space}:${range.start.value}+${range.size}` === reference;
+      }), 'instruction address requires exact single-instruction original mapping');
     }
     all.push(...page.data.items.map((item) => originalProvenance(item, page.data.references)));
     next = page.data.page.next_cursor;
@@ -153,7 +155,7 @@ try {
   check(declaration && declaration.end > declaration.start, 'producer publishes exact declaration interval');
   const expectedQuoteCoverage = new Uint8Array(decompiled.data.emission.text.length);
   for (const mapping of decompiled.data.emission.mappings)
-    if (mapping.instruction_ids.length) expectedQuoteCoverage.fill(1, mapping.start, mapping.end);
+    if (mapping.instruction_refs.length) expectedQuoteCoverage.fill(1, mapping.start, mapping.end);
   expectedQuoteCoverage.fill(0, declaration.start, declaration.end);
   const actualQuoteCoverage = new Uint8Array(expectedQuoteCoverage.length);
   for (const item of all.filter((item) => item.kind === 'source')) actualQuoteCoverage.fill(1, item.span.start, item.span.end);
@@ -164,14 +166,14 @@ try {
   check(field.record.details.bounds === 'unknown', 'unknown bounds retained');
   const originalField = decompiled.data.emission.inferences.find((record) => record.id === field.record.id);
   const subject = originalField.details.field_ids[0];
-  const provenanceSubject = originalField.subject_ids[0];
+  const provenanceSubject = decompiled.data.emission.ids[originalField.subject_refs[0]];
   const provenanceReview = await call('function_get', { ...base, view: 'metadata', artifact_id: artifact.id, subject_id: provenanceSubject });
   check(provenanceReview.data?.reviewed_subject_id === provenanceSubject && provenanceReview.data.annotation_eligible === false,
     'original instruction provenance review does not grant annotation authority');
   const filtered = await call('function_get', { ...request, kinds: ['field'], subject_id: subject, page: { limit: 100 } });
   check(filtered.data.items.length > 0 && filtered.data.items.every((item) => item.kind === 'inference' &&
-    item.record.details.kind === 'field' && decompiled.data.emission.inferences.some((record) =>
-      record.id === item.record.id && record.subject_ids.includes(subject))), 'kind and original subject filtering');
+    item.record.details.kind === 'field' && decompiled.data.emission.inferences.some((record) => record.id === item.record.id &&
+      record.subject_refs.some((ref) => decompiled.data.emission.ids[ref] === subject))), 'kind and original subject filtering');
   check(filtered.data.items.every((item) => item.kind !== 'signature' &&
     (item.kind !== 'inference' || item.record.details.kind !== 'parameter')),
     'requesting field facts never silently adds all parameters or signature');

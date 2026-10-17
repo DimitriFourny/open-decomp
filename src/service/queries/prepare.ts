@@ -1,4 +1,9 @@
-import { OperationError, type LoadedImage, type OperationContext } from '../../core/index.js';
+import {
+  NATIVE_SYMBOL_TABLES_FEATURE,
+  OperationError,
+  type LoadedImage,
+  type OperationContext,
+} from '../../core/index.js';
 import type { PreparedImport } from '../../workers/runtime.js';
 import { Arm64Decoder } from '../../decoders/arm64/index.js';
 import { X86Decoder } from '../../decoders/x86_64/index.js';
@@ -43,12 +48,19 @@ export async function prepareQueryImport(
       message: 'Combined import capabilities exceed the 1,000-record wire bound',
       evidence_ids: [],
     });
-  const metadataPartial =
-    image.capabilities.some(
-      (capability) => capability.layer === 'format' && capability.status === 'partial',
-    ) ||
-    names.state === 'partial' ||
-    runtime.state === 'partial';
+  const formatPartial = image.capabilities.some(
+    (capability) => capability.layer === 'format' && capability.status === 'partial',
+  );
+  // A loader that reports its native symbol/export tables separately keeps unrelated partial
+  // metadata (unwind, CFI, relocations) from degrading name authority.
+  const nameTables = image.capabilities.find(
+    (capability) =>
+      capability.layer === 'format' && capability.feature === NATIVE_SYMBOL_TABLES_FEATURE,
+  );
+  const derivedNamesPartial = names.state === 'partial' || runtime.state === 'partial';
+  const metadataPartial = formatPartial || derivedNamesPartial;
+  const nativeNamesPartial =
+    (nameTables ? nameTables.status === 'partial' : formatPartial) || derivedNamesPartial;
   const decoder =
     image.target.architecture === 'arm64'
       ? new Arm64Decoder()
@@ -110,8 +122,9 @@ export async function prepareQueryImport(
       for (const item of references.strings?.strings ?? strings.strings)
         tx.putRecord(image.id, 'string', item);
       for (const item of references.references) tx.putRecord(image.id, 'reference', item);
-      for (const kind of ['symbol', 'import', 'export'] as const)
-        tx.setIndexState(image.id, kind, metadataPartial ? 'partial' : 'complete');
+      for (const kind of ['symbol', 'export'] as const)
+        tx.setIndexState(image.id, kind, nativeNamesPartial ? 'partial' : 'complete');
+      tx.setIndexState(image.id, 'import', metadataPartial ? 'partial' : 'complete');
       tx.setIndexState(
         image.id,
         'function',

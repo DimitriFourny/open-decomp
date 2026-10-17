@@ -29,7 +29,12 @@ const annotationId = `annotation_${'6'.repeat(64)}`;
 const address = { image_id: image, space: 'va', value: '0x1000' };
 const range = { start: address, size: '0x4' };
 const request = { project_id: project, revision: 3 };
-const page = { next_cursor: null, index_state: 'complete', order: 'address_id' };
+const page = {
+  next_cursor: null,
+  index_state: 'complete',
+  order: 'address_id',
+  evidence_delivery: 'by_reference',
+};
 const summary = {
   id: image,
   sha256: '2'.repeat(64),
@@ -122,6 +127,7 @@ const inputs: Record<ToolName, object> = {
   function_get: { ...request, function_id: entity },
   function_decompile: { ...request, function_id: entity },
   xrefs_get: { ...request, target: { kind: 'entity', id: entity } },
+  evidence_get: { ...request, evidence_ids: [`evidence_${'3'.repeat(64)}`] },
   memory_read: { ...request, address },
   annotations_apply: {
     project_id: project,
@@ -151,7 +157,7 @@ const success: Record<ToolName, object> = {
   functions_find: { state: 'complete', data: { items: [functionRecord], page } },
   function_get: {
     state: 'complete',
-    data: { view: 'metadata', function: functionRecord, reviewed_subject_id: entity, annotation_eligible: true, annotations: [], lineage: [] },
+    data: { view: 'metadata', evidence_delivery: 'by_reference', function: functionRecord, reviewed_subject_id: entity, annotation_eligible: true, annotations: [], lineage: [] },
   },
   function_decompile: {
     state: 'complete',
@@ -165,14 +171,19 @@ const success: Record<ToolName, object> = {
         text: 'return;',
         span_unit: 'utf16',
         reconstruction: 'pseudocode',
+        ids: [],
+        evidence: [],
+        ranges: [],
         mappings: [],
         helpers: [],
+        review: { operation: 'function_get', view: 'metadata', function_id: entity },
       },
       capabilities: [],
       cache: 'computed',
     },
   },
   xrefs_get: { state: 'empty', data: { items: [], page } },
+  evidence_get: { state: 'empty', data: { items: [], page } },
   memory_read: {
     state: 'complete',
     data: {
@@ -437,23 +448,26 @@ test('jobs cannot publish stale revisions and cancellation races have explicit o
   );
 });
 
-test('emitter spans refer to actual UTF-16 text bounds', () => {
+test('emitter spans refer to actual UTF-16 text bounds and emission tables', () => {
   const emission = {
     language: 'c-like',
     emitter_version: '1',
     text: 'return;',
     span_unit: 'utf16',
     reconstruction: 'pseudocode',
+    ids: [entity],
+    evidence: [],
+    ranges: [range],
     helpers: [],
+    review: { operation: 'function_get', view: 'metadata', function_id: entity },
     mappings: [
       {
-        statement_id: entity,
         start: 0,
         end: 7,
-        semantic_ids: [entity],
-        instruction_ids: [entity],
-        ranges: [range],
-        evidence_ids: [],
+        semantic_refs: [0],
+        instruction_refs: [0],
+        range_refs: [0],
+        evidence_refs: [],
       },
     ],
   };
@@ -463,6 +477,13 @@ test('emitter spans refer to actual UTF-16 text bounds', () => {
       .success,
     false,
   );
+  for (const mapping of [{ semantic_refs: [1] }, { semantic_refs: [] }, { range_refs: [1] }, { evidence_refs: [0] }])
+    assert.equal(emissionSchema.safeParse({ ...emission, mappings: [{ ...emission.mappings[0], ...mapping }] }).success,
+      false, 'every reference cites an existing table entry');
+  assert.equal(emissionSchema.safeParse({ ...emission, ids: [entity, entity] }).success, false,
+    'each identity is stated once');
+  assert.equal(emissionSchema.safeParse({ ...emission, ranges: [range, range] }).success, false,
+    'each range is stated once');
   const declaration = {
     ...emission,
     text: '\u{1d538}',
@@ -493,8 +514,12 @@ test('serialized output budgets and job/project bindings are enforced at deliver
         text: 'x'.repeat(4096),
         span_unit: 'utf16',
         reconstruction: 'pseudocode',
+        ids: [],
+        evidence: [],
+        ranges: [],
         mappings: [],
         helpers: [],
+        review: { operation: 'function_get', view: 'metadata', function_id: entity },
       },
       capabilities: [],
       cache: 'computed',

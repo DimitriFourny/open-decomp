@@ -70,9 +70,9 @@ try {
           requirement.explanation.startsWith('The source return list is incomplete'));
         assert.ok(unresolved && unresolved.status === 'unresolved');
         assert.ok(unresolved.explanation.includes('arm64:x1[0:64]'));
-        assert.ok(unresolved.instruction_ids.length && unresolved.ranges.length && unresolved.output_spans.length);
+        assert.ok(unresolved.instruction_refs.length && unresolved.range_refs.length && unresolved.output_spans.length);
         assert.ok(unresolved.sites.every((site) => emission.mappings.some((mapping) =>
-          mapping.statement_id === site.subject_ids[0])), 'Uncertainty must attach to the original return boundary');
+          mapping.semantic_refs[0] === site.subject_refs[0])), 'Uncertainty must attach to the original return boundary');
       }
       if (name === 'scalar')
         assert.ok(!result.diagnostics.some((diagnostic) => diagnostic.message.startsWith('The source return list is unresolved')));

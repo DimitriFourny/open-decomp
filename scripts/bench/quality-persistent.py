@@ -386,6 +386,8 @@ async def session(args, config, item, lane, iteration, lifecycle, project=None, 
                                 if inference.get('details', {}).get('kind') == 'call'
                                 and 'context_assumptions' in inference['details']],
                             'inferences': inferences, 'requirements': emit.get('requirements'),
+                            # inference/requirement *_refs index these per-emission tables
+                            'reference_tables': {key: emit.get(key) for key in ('ids', 'evidence', 'ranges')},
                             'local_validation': emit.get('local_validation'), 'helpers': emit.get('helpers'),
                             'signature': (semantic.get('data') or {}).get('signature'),
                             'capabilities': (semantic.get('data') or {}).get('capabilities'),
@@ -405,7 +407,8 @@ async def session(args, config, item, lane, iteration, lifecycle, project=None, 
                     quality.save(metadata_path, emitted_metadata)
                     sample['emission_metadata'] = {'path': str(metadata_path.relative_to(args.output)),
                                                    'sha256': quality.digest(metadata_path)}
-                    for field in ('component_metadata', 'context_metadata', 'inferences', 'requirements', 'local_validation'):
+                    for field in ('component_metadata', 'context_metadata', 'inferences', 'requirements',
+                                  'reference_tables', 'local_validation'):
                         encoded = json.dumps(emitted_metadata[field], sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
                         sample[field + '_sha256'] = hashlib.sha256(encoded).hexdigest()
                 if text:
@@ -622,7 +625,8 @@ def observation_control(runs, items, repeats, selected_functions):
     perturbation = defaultdict(list)
     fields = ('is_error', 'operation_state', 'semantic_state', 'reason', 'failure_code',
               'coverage', 'cache', 'cache_identity_scope', 'component_metadata_sha256',
-              'context_metadata_sha256', 'inferences_sha256', 'requirements_sha256', 'local_validation_sha256')
+              'context_metadata_sha256', 'inferences_sha256', 'requirements_sha256', 'reference_tables_sha256',
+              'local_validation_sha256')
     for key in sorted(controls.keys() | observed.keys()):
         control, instrumented = controls.get(key), observed.get(key)
         left = {row['name']: row for row in control['functions']} if control else {}

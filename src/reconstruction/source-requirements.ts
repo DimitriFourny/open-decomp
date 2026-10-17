@@ -1,4 +1,4 @@
-import { fingerprint, OperationError, type OperationContext, type RegisterDescriptor } from '../core/index.js';
+import { fingerprint, OperationError, type AddressRange, type OperationContext, type RegisterDescriptor } from '../core/index.js';
 import type { Requirement, RequirementSite } from '../core/inference.js';
 import type { EmissionInput, EmissionResult } from '../emitters/model.js';
 import { registerStateAt, type Expression, type Origin } from '../ir/index.js';
@@ -230,12 +230,13 @@ export function sourceRequirementPredicates(requirements: readonly Requirement[]
 }
 
 /** Index mappings once. Only actual mapped output sites survive, with exact
- * original provenance and UTF-16 spans; no generated-text interpretation. */
+ * original provenance and UTF-16 spans; no generated-text interpretation.
+ * Mapping references resolve through the emission's own interned tables. */
 export function sourceRequirementProofs(
   program: Reconstruction,
   mappings: EmissionResult['emission']['mappings'],
+  tables: { readonly ids: readonly string[]; readonly ranges: readonly AddressRange[] },
   context: OperationContext,
-  metadata?: (bytes: number) => void,
 ): readonly Requirement[] {
   const requirements = program.source?.requirements ?? [];
   if (!requirements.length) return [];
@@ -246,9 +247,10 @@ export function sourceRequirementProofs(
   // references or index unrelated subjects for these exact original anchors.
   for (const mapping of mappings) {
     context.checkpoint(1);
-    if (!anchors.has(mapping.statement_id)) continue;
-    const rows = bySubject.get(mapping.statement_id) ?? [];
-    rows.push(mapping); bySubject.set(mapping.statement_id, rows);
+    const statement = tables.ids[mapping.semantic_refs[0]!]!;
+    if (!anchors.has(statement)) continue;
+    const rows = bySubject.get(statement) ?? [];
+    rows.push(mapping); bySubject.set(statement, rows);
   }
   const liveOrigins = new Set<string>();
   for (const [value, origins] of program.source?.value_origins ?? []) {
@@ -274,7 +276,7 @@ export function sourceRequirementProofs(
             evidence_ids: site.evidence_ids, entity_id: site.subject_ids[0] });
         emitted = true;
         spans.set(`${mapping.start}:${mapping.end}`, { start: mapping.start, end: mapping.end });
-        for (const range of mapping.ranges) mappedRanges.add(rangeKey(range));
+        for (const ref of mapping.range_refs) mappedRanges.add(rangeKey(tables.ranges[ref]!));
       }
       return emitted;
     });
@@ -292,24 +294,10 @@ export function sourceRequirementProofs(
           evidence_ids: requirement.evidence_ids, entity_id: requirement.subject_ids[0] });
       ranges.set(key, range);
     }
-    const record: Requirement = { ...requirement, sites, ...requirementReferences(sites, context),
+    result.push({ ...requirement, sites, ...requirementReferences(sites, context),
       ranges: [...ranges.values()],
       output_spans: [...spans.values()].sort((a, b) => a.start - b.start || a.end - b.end),
-    };
-    if (metadata) {
-      const pending: unknown[] = [record];
-      while (pending.length) {
-        context.checkpoint(1);
-        const item = pending.pop();
-        if (typeof item === 'string') metadata(Buffer.byteLength(item) + 8);
-        else if (typeof item === 'bigint' || typeof item === 'number') metadata(32);
-        else if (Array.isArray(item)) { metadata(2 + item.length); pending.push(...item); }
-        else if (item && typeof item === 'object') {
-          for (const [key, value] of Object.entries(item)) { metadata(key.length + 4); pending.push(value); }
-        } else metadata(5);
-      }
-    }
-    result.push(record);
+    });
   }
   return result;
 }

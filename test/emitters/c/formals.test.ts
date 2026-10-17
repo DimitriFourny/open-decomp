@@ -9,12 +9,18 @@ for (const python of [false, true])
     const text = python
       ? `# A comment may contain { or ): without ending the header.\ndef sample(${first}, ${second}) -> uint64_t:\n  return uint64(address + count)\n`
       : `/* A comment may contain { without opening the body. */\nuint64_t sample(${first}, ${second}) {\n  return ((uint64_t)(address + count));\n}\n`;
+    const ids: string[] = [];
+    const ref = (id: string) => {
+      if (!ids.includes(id)) ids.push(id);
+      return ids.indexOf(id);
+    };
     const span = (declaration: string, id: string, semantic: string) => ({
       start: text.indexOf(declaration), end: text.indexOf(declaration) + declaration.length,
-      statement_id: id, semantic_ids: [semantic],
+      semantic_refs: [ref(id), ref(semantic)],
     });
     const emission = {
       text,
+      ids,
       mappings: [
         span(second, 'count-value', 'original-count'),
         span(first, 'address-value', 'original-address'),
@@ -34,8 +40,7 @@ for (const python of [false, true])
 test('a repeated name in distinct parameter declarations is rejected rather than silently merged', () => {
   const text = 'uint64_t sample(uint64_t duplicate, uint64_t duplicate) { return 0; }';
   const first = text.indexOf('uint64_t duplicate'), second = text.indexOf('uint64_t duplicate', first + 1);
-  assert.throws(() => emittedFormals({ text, mappings: [first, second].map((start, index) => ({
-    start, end: start + 'uint64_t duplicate'.length,
-    statement_id: `input-${index}`, semantic_ids: [],
+  assert.throws(() => emittedFormals({ text, ids: ['input-0', 'input-1'], mappings: [first, second].map((start, index) => ({
+    start, end: start + 'uint64_t duplicate'.length, semantic_refs: [index],
   })) }));
 });

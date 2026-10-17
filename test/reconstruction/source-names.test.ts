@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { StoredDecompilation } from '../../src/project/cache/index.js';
 import { emittedFormals, execute, type EmittedFormal, type SourceCallOracle } from '../emitters/c/support.js';
 import { project } from '../service/analysis/support.js';
-import { createOperationContext, entityIdentity } from '../../src/core/index.js';
+import { createOperationContext, entityIdentity, expandEmission } from '../../src/core/index.js';
 import { sysvAMD64Abi } from '../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../src/analysis/ssa/index.js';
 import { recoverTypes } from '../../src/analysis/types/index.js';
@@ -253,7 +253,7 @@ test('established field names reach loaded scalar locals without inventing a com
     const output = emit(ir, { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } }, language);
     assert.ok(output.identifiers.some((identifier) => identifier.identifier === 'balance'),
       'the supplied field name, not a guessed author variable name, describes this exact load');
-    assert.ok(output.emission.mappings.some((mapping) => mapping.semantic_ids.includes('source-balance-field')));
+    assert.ok(expandEmission(output.emission).mappings.some((mapping) => mapping.semantic_ids.includes('source-balance-field')));
     const parameter = emittedFormals(output.emission)[0]!;
     for (const value of [0n, 0x8000000000000000n, 0xffffffffffffffffn]) {
       const memory = new Map<bigint, number>();

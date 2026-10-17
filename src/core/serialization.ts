@@ -17,7 +17,8 @@ import {
   type Job,
   type WireJob,
 } from './tools.js';
-import { encodeRange, decodeRange } from './addresses.js';
+import { encodeRange, decodeRange, type AddressRange } from './addresses.js';
+import type { ExpandedInference, ExpandedRequirement } from './inference.js';
 import { encodeDiagnostic, decodeDiagnostic } from './validation.js';
 
 export function decodeTypeDefinition(input: z.input<typeof typeDefinitionSchema>): RecoveredType {
@@ -103,48 +104,60 @@ export function decodeArtifact(value: WireArtifact): Artifact {
   const parsed = artifactSchema.parse(value);
   return { ...parsed, size: parseHexU64(parsed.size) };
 }
+/** Only the interned range table carries hex integers; every record cites it by index. */
 export function encodeEmission(value: Emission): WireEmission {
-  const { inferences, requirements, ...rest } = value;
-  return emissionSchema.parse({
-    ...rest,
-    mappings: value.mappings.map((mapping) => ({
-      ...mapping,
-      ranges: mapping.ranges.map(encodeRange),
-    })),
-    ...(inferences && {
-      inferences: inferences.map((record) => ({
-        ...record,
-        ranges: record.ranges.map(encodeRange),
-      })),
-    }),
-    ...(requirements && {
-      requirements: requirements.map((record) => ({
-        ...record,
-        ranges: record.ranges.map(encodeRange),
-      })),
-    }),
-  });
+  return emissionSchema.parse({ ...value, ranges: value.ranges.map(encodeRange) });
 }
 export function decodeEmission(value: WireEmission): Emission {
-  const { inferences, requirements, ...parsed } = emissionSchema.parse(value);
+  const parsed = emissionSchema.parse(value);
+  return { ...parsed, ranges: parsed.ranges.map(decodeRange) };
+}
+type WireRange = WireEmission['ranges'][number];
+export interface ExpandedSourceMapping<Range = WireRange> {
+  readonly statement_id: string;
+  readonly start: number;
+  readonly end: number;
+  readonly semantic_ids: readonly string[];
+  readonly instruction_ids: readonly string[];
+  readonly ranges: readonly Range[];
+  readonly evidence_ids: readonly string[];
+}
+/** Consumer view with every table reference replaced by its identity/range. */
+export type ExpandedEmission<Range = WireRange> = Omit<Emission, 'ids' | 'evidence' | 'ranges' | 'mappings' | 'inferences' | 'requirements'> & {
+  readonly mappings: readonly ExpandedSourceMapping<Range>[];
+  readonly inferences?: readonly ExpandedInference<Range>[];
+  readonly requirements?: readonly ExpandedRequirement<Range>[];
+};
+type CompactEmission<Range> = Omit<Emission, 'ranges'> & { readonly ranges: readonly Range[] };
+/** Expand the canonical compact emission (wire or internal ranges) into string
+ * identities. A view only: nothing is added, dropped or reordered. */
+export function expandEmission(value: WireEmission): ExpandedEmission;
+export function expandEmission(value: Emission): ExpandedEmission<AddressRange>;
+export function expandEmission<Range>(value: CompactEmission<Range>): ExpandedEmission<Range> {
+  const { ids, evidence, ranges, mappings, inferences, requirements, ...rest } = value;
+  const lookup = <T>(table: readonly T[], refs: readonly number[]): T[] => refs.map((ref) => {
+    if (!Number.isInteger(ref) || ref < 0 || ref >= table.length) throw new RangeError('Emission reference is outside its table');
+    return table[ref]!;
+  });
+  const references = (record: { readonly subject_refs: readonly number[]; readonly evidence_refs: readonly number[];
+    readonly instruction_refs: readonly number[] }) => ({
+    subject_ids: lookup(ids, record.subject_refs), evidence_ids: lookup(evidence, record.evidence_refs),
+    instruction_ids: lookup(ids, record.instruction_refs),
+  });
   return {
-    ...parsed,
-    mappings: parsed.mappings.map((mapping) => ({
-      ...mapping,
-      ranges: mapping.ranges.map(decodeRange),
-    })),
-    ...(inferences && {
-      inferences: inferences.map((record) => ({
-        ...record,
-        ranges: record.ranges.map(decodeRange),
-      })),
+    ...rest,
+    mappings: mappings.map(({ semantic_refs, instruction_refs, range_refs, evidence_refs, ...span }) => {
+      const semantic_ids = lookup(ids, semantic_refs);
+      return { statement_id: semantic_ids[0]!, ...span, semantic_ids, instruction_ids: lookup(ids, instruction_refs),
+        ranges: lookup(ranges, range_refs), evidence_ids: lookup(evidence, evidence_refs) };
     }),
-    ...(requirements && {
-      requirements: requirements.map((record) => ({
-        ...record,
-        ranges: record.ranges.map(decodeRange),
-      })),
-    }),
+    ...(inferences && { inferences: inferences.map(({ subject_refs, evidence_refs, instruction_refs, range_refs, ...record }) =>
+      ({ ...record, ...references({ subject_refs, evidence_refs, instruction_refs }), ranges: lookup(ranges, range_refs) })) }),
+    ...(requirements && { requirements: requirements.map(({ subject_refs, evidence_refs, instruction_refs, range_refs, sites, ...record }) => ({
+      ...record, ...references({ subject_refs, evidence_refs, instruction_refs }), ranges: lookup(ranges, range_refs),
+      sites: sites.map(({ subject_refs, evidence_refs, instruction_refs, ...site }) =>
+        ({ ...site, ...references({ subject_refs, evidence_refs, instruction_refs }) })),
+    })) }),
   };
 }
 export function encodeJob(value: Job): WireJob {

@@ -5,6 +5,7 @@ import {
   DEFAULT_BUDGET,
   contentHash,
   createOperationContext,
+  expandEmission,
   entityIdentity,
   newIdentity,
   toolSchemas,
@@ -54,7 +55,7 @@ for (const fixture of [
       for (const proof of full.evidence)
         for (const parent of [...proof.derived_from, ...proof.conflicts_with])
           assert.ok(proofIds.has(parent));
-      for (const mapping of full.data.emission.mappings)
+      for (const mapping of expandEmission(full.data.emission).mappings)
         for (const proof of mapping.evidence_ids) assert.ok(proofIds.has(proof));
       const scope = { store: p.state.store, context: createOperationContext() };
       const graph = loadFunctionGraph(scope, 2, loadFunctionScope(scope, 2, fn.id));
@@ -127,7 +128,7 @@ for (const fixture of [
       evaluate(full.data.emission);
       for (const instruction of graph.instructions)
         assert.ok(
-          full.data.emission.mappings.some((mapping) =>
+          expandEmission(full.data.emission).mappings.some((mapping) =>
             mapping.instruction_ids.includes(instruction.id),
           ),
         );
@@ -142,11 +143,11 @@ for (const fixture of [
       evaluate(pythonFull.data.emission);
       for (const instruction of graph.instructions)
         assert.ok(
-          pythonFull.data.emission.mappings.some((mapping) =>
+          expandEmission(pythonFull.data.emission).mappings.some((mapping) =>
             mapping.instruction_ids.includes(instruction.id),
           ),
         );
-      for (const mapping of pythonFull.data.emission.mappings) {
+      for (const mapping of expandEmission(pythonFull.data.emission).mappings) {
         assert.ok(
           mapping.start >= 0 &&
             mapping.end > mapping.start &&
@@ -161,7 +162,7 @@ for (const fixture of [
       assert.equal(restyled.result.data.cache, 'computed');
       assert.notEqual(restyled.result.artifacts[0]!.id, python.result.artifacts[0]!.id);
       assert.ok(
-        restyledFull.data.emission.mappings.every((mapping) => mapping.evidence_ids.length === 0),
+        expandEmission(restyledFull.data.emission).mappings.every((mapping) => mapping.evidence_ids.length === 0),
       );
       evaluate(restyledFull.data.emission);
       const repeated = await p.decompile(fn.id, {}, 29000);
@@ -322,7 +323,7 @@ for (const fixture of [
         changedPayload.catalog.types.some((type) => type.id === typeId && type.source === 'user'),
       );
       assert.ok(
-        changedPayload.result.data.emission.mappings.some(
+        expandEmission(changedPayload.result.data.emission).mappings.some(
           (mapping) =>
             mapping.semantic_ids.includes(fn.id) &&
             mapping.evidence_ids.some((id) =>
@@ -338,7 +339,7 @@ for (const fixture of [
       assert.notEqual(pythonChanged.result.artifacts[0]!.id, python.result.artifacts[0]!.id);
       assert.equal(pythonChangedFull.data.signature?.return_type, typeId);
       assert.ok(
-        pythonChangedFull.data.emission.mappings.some(
+        expandEmission(pythonChangedFull.data.emission).mappings.some(
           (mapping) =>
             mapping.semantic_ids.includes(fn.id) &&
             mapping.evidence_ids.some((id) =>
@@ -413,7 +414,7 @@ for (const fixture of [
         assert.equal(full.coverage.find((item) => item.layer === 'lift')?.state, 'partial');
         assert.ok(full.diagnostics.some((item) => item.code === 'unavailable_semantics'));
         assert.ok(
-          full.data.emission.mappings.some((mapping) =>
+          expandEmission(full.data.emission).mappings.some((mapping) =>
             mapping.ranges.some((range) => {
               const address = p.image.address_map.translate(
                 { ...range.start, value: BigInt(range.start.value) },
@@ -424,7 +425,7 @@ for (const fixture of [
           ),
         );
         const inputs = new Map(
-          full.data.emission.mappings.flatMap((mapping) =>
+          expandEmission(full.data.emission).mappings.flatMap((mapping) =>
             mapping.semantic_ids.map((id) => [id, 0n] as const),
           ),
         );
@@ -521,7 +522,7 @@ test('suppressing wire evidence preserves the trusted catalog needed to annotate
   assert.deepEqual(hidden.result.evidence, []);
   const full = p.payload(hidden.result);
   assert.ok(
-    full.result.data.emission.mappings.every((mapping) => mapping.evidence_ids.length === 0),
+    expandEmission(full.result.data.emission).mappings.every((mapping) => mapping.evidence_ids.length === 0),
   );
   const field = full.catalog.subjects.find((subject) => subject.kind === 'field')!;
   const catalog = await readAnnotationCatalog(

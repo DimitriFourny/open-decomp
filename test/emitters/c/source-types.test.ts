@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createOperationContext } from '../../../src/core/index.js';
+import { createOperationContext, expandEmission } from '../../../src/core/index.js';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { recoverTypes, type TypeRecoveryOptions } from '../../../src/analysis/types/index.js';
@@ -54,11 +54,11 @@ for (const language of ['c-like', 'python-like'] as const)
     assert.match(header, language === 'c-like' ? /^int32_t / : /-> int32_t:/);
     assert.match(header, language === 'c-like' ? /\*\s+[A-Za-z_]\w*/ : /:\s*pointer\[/);
     assert.ok(output.emission.helpers.some((helper) => helper.name === 'field_view'));
-    assert.ok(output.emission.mappings.some((mapping) =>
+    assert.ok(expandEmission(output.emission).mappings.some((mapping) =>
       mapping.semantic_ids.includes('balance-field')), 'preserve exact declared field identity');
     assert.ok(types.types.some((type) => type.id === 'partial-record' &&
       type.definition.kind === 'structure' && type.definition.size === null));
-    const parameter = output.emission.mappings.find((mapping) =>
+    const parameter = expandEmission(output.emission).mappings.find((mapping) =>
       mapping.semantic_ids.includes(binding.value.id));
     assert.ok(parameter);
     for (const bits of [0n, 0x7fffffffn, 0x80000000n, 0xffffffffn]) {
@@ -83,7 +83,7 @@ for (const language of ['c-like', 'python-like'] as const)
       language === 'c-like' ? line.includes(' fn_') : line.startsWith('def '))!;
     assert.match(ambiguousHeader, language === 'c-like' ? /uint64_t\s+[A-Za-z_]\w*/ : /:\s*uint64_t/);
     assert.equal(ambiguous.emission.helpers.some((helper) => helper.name === 'field_view'), false);
-    assert.equal(ambiguous.emission.mappings.some((mapping) => mapping.semantic_ids.includes('balance-field')), false);
+    assert.equal(expandEmission(ambiguous.emission).mappings.some((mapping) => mapping.semantic_ids.includes('balance-field')), false);
     const hypothesis = recoverTypes(ssa, sysvAMD64Abi, createOperationContext(), {
       ...options, bindings: [{ subject_id: binding.value.id, type_id: 'record-pointer',
         source: 'llm', status: 'hypothesis', evidence_ids: [evidence] }],
@@ -93,7 +93,7 @@ for (const language of ['c-like', 'python-like'] as const)
     const hypotheticalHeader = hypothetical.emission.text.split('\n').find((line) =>
       language === 'c-like' ? line.includes(' fn_') : line.startsWith('def '))!;
     assert.match(hypotheticalHeader, language === 'c-like' ? /^uint32_t / : /-> uint32_t:/);
-    assert.equal(hypothetical.emission.mappings.some((mapping) => mapping.semantic_ids.includes('balance-field')), false);
+    assert.equal(expandEmission(hypothetical.emission).mappings.some((mapping) => mapping.semantic_ids.includes('balance-field')), false);
   });
 
 for (const language of ['c-like', 'python-like'] as const)
@@ -119,7 +119,7 @@ for (const language of ['c-like', 'python-like'] as const)
     const entryBindings = ssa.register_states.find((state) => state.block === ssa.entry)!.entry;
     const parameters = [rdi.root, 'x86_64:rsi'].map((root) => {
       const id = entryBindings.find((binding) => binding.register.root === root)!.value.id;
-      const mapping = output.emission.mappings.find((entry) => entry.semantic_ids.includes(id));
+      const mapping = expandEmission(output.emission).mappings.find((entry) => entry.semantic_ids.includes(id));
       assert.ok(mapping);
       return mapping;
     });
@@ -168,7 +168,7 @@ for (const language of ['c-like', 'python-like'] as const)
     const entryBindings = ssa.register_states.find((state) => state.block === ssa.entry)!.entry;
     const parameters = [rdi.root, 'x86_64:rsi'].map((root) => {
       const id = entryBindings.find((binding) => binding.register.root === root)!.value.id;
-      const mapping = output.emission.mappings.find((entry) => entry.semantic_ids.includes(id));
+      const mapping = expandEmission(output.emission).mappings.find((entry) => entry.semantic_ids.includes(id));
       assert.ok(mapping);
       return mapping;
     });
@@ -219,7 +219,7 @@ for (const language of ['c-like', 'python-like'] as const)
     const header = output.emission.text.split('\n').find((line) =>
       language === 'c-like' ? line.includes(' fn_') : line.startsWith('def '))!;
     assert.match(header, language === 'c-like' ? /^uint32_t\* / : /-> pointer\[uint32_t\]:/);
-    const parameter = output.emission.mappings.find((mapping) =>
+    const parameter = expandEmission(output.emission).mappings.find((mapping) =>
       mapping.semantic_ids.includes(binding.value.id))!;
     for (const address of [0n, 0x123456789abcdef0n, 0xffffffffffffffffn]) {
       const memory = new Map<bigint, number>();
@@ -252,7 +252,7 @@ for (const language of ['c-like', 'python-like'] as const)
     const header = output.emission.text.split('\n').find((line) =>
       language === 'c-like' ? line.includes(' fn_') : line.startsWith('def '))!;
     assert.match(header, language === 'c-like' ? /^uint64_t / : /-> uint64_t:/);
-    const parameter = output.emission.mappings.find((mapping) =>
+    const parameter = expandEmission(output.emission).mappings.find((mapping) =>
       mapping.semantic_ids.includes(binding.value.id))!;
     for (const bits of [0x12345678ffffffffn, 0x8000000000000000n, 0xffffffffffffffffn])
       assert.deepEqual(execute(output.emission,
@@ -318,7 +318,7 @@ for (const language of ['c-like', 'python-like'] as const)
       source: { abi: sysvAMD64Abi, callees: [], addresses: [] } }, language);
     const parameters = [rdi.root, rsi.root, rdx.root].map((root) => {
       const id = entryBindings.find((binding) => binding.register.root === root)!.value.id;
-      const mapping = output.emission.mappings.find((entry) => entry.semantic_ids.includes(id));
+      const mapping = expandEmission(output.emission).mappings.find((entry) => entry.semantic_ids.includes(id));
       assert.ok(mapping);
       return mapping;
     });

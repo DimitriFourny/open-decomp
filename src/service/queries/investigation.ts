@@ -1,5 +1,5 @@
 import { fingerprint, type Artifact, type OperationContext, type ProjectStore, type ToolArgs,
-  type ToolResult, type WireInference, type WireRequirement } from '../../core/index.js';
+  type ToolResult, type WireEmission, type WireInference, type WireRequirement } from '../../core/index.js';
 import { readAnalysisArtifact, type AnalysisArtifactPayload } from '../../project/cache/index.js';
 import { acceptsAnalysisIdentity } from '../analysis/versions.js';
 import { resolveDurableSubject } from '../../project/annotations/subjects.js';
@@ -13,7 +13,7 @@ export interface SelectedInvestigationArtifact {
   readonly payload: AnalysisArtifactPayload;
 }
 type InvestigationData = Extract<Extract<ToolResult<'function_get'>, { data: unknown }>['data'], { view: 'investigation' }>;
-export type InvestigationInstructionLocations = ReadonlyMap<string, WireInference['ranges'][number] | null>;
+export type InvestigationInstructionLocations = ReadonlyMap<string, WireEmission['ranges'][number] | null>;
 type InvestigationItem = InvestigationData['items'][number];
 type PreparedInvestigationItem =
   | { kind: 'source'; span: { start: number; end: number }; text: string; mapping_indexes: number[]; instruction_ids: string[] }
@@ -59,6 +59,12 @@ function compactDetails(details: WireInference['details']): Extract<Investigatio
   }
 }
 
+/** Exact identity lookup in one artifact table; -1 when the artifact cites it nowhere. */
+function tableIndex(scope: Scope, table: readonly string[], id: string): number {
+  scope.context.checkpoint(1 + table.length);
+  return table.indexOf(id);
+}
+
 /** Select only a published handle indexed under this original function. The cache
  * reader verifies the complete file hash, catalog, identity and proof closure.
  * No graph reconstruction, emitter dispatch or generated-text inference occurs. */
@@ -102,13 +108,10 @@ export function reviewedSubject(scope: Scope, args: Args, loaded: LoadedFunction
     const emission = selected.payload.result.data.emission;
     if (!emission.inferences || !emission.requirements)
       queryFailure('invalid_input', 'Artifact lacks required structured investigation metadata');
-    for (const record of emission.inferences) {
+    const ref = tableIndex(scope, emission.ids, id);
+    for (const record of [...emission.inferences, ...emission.requirements]) {
       scope.context.checkpoint(1);
-      if (record.subject_ids.includes(id)) return { id, annotation_eligible: false };
-    }
-    for (const record of emission.requirements) {
-      scope.context.checkpoint(1);
-      if (record.subject_ids.includes(id)) return { id, annotation_eligible: false };
+      if (record.subject_refs.includes(ref)) return { id, annotation_eligible: false };
     }
     queryFailure('invalid_input', 'Subject is absent from the trusted function artifact scope');
   }
@@ -125,14 +128,18 @@ export function investigationItems(scope: Scope, args: Args, payload: AnalysisAr
     queryFailure('invalid_input', 'Artifact lacks required structured investigation metadata');
   const inferences = emission.inferences, requirements = emission.requirements;
   const kinds = args.kinds ? new Set(args.kinds) : null;
-  const includes = (kind: NonNullable<Args['kinds']>[number], subjects: readonly string[]) =>
-    (!kinds || kinds.has(kind)) && (!args.subject_id || subjects.includes(args.subject_id));
+  // An absent subject has no table index (-1) and therefore cites no record.
+  const subject = args.subject_id === undefined ? undefined : tableIndex(scope, emission.ids, args.subject_id);
+  const includes = (kind: NonNullable<Args['kinds']>[number], subjects: readonly number[] | 'function') =>
+    (!kinds || kinds.has(kind)) && (subject === undefined ||
+      (subjects === 'function' ? args.subject_id === args.function_id : subjects.includes(subject)));
+  const identities = (refs: readonly number[]) => refs.map((ref) => emission.ids[ref]!);
   const items: PreparedInvestigationItem[] = [];
-  const instructionLocations = new Map<string, WireInference['ranges'][number] | null>();
+  const instructionLocations = new Map<string, WireEmission['ranges'][number] | null>();
   for (const mapping of emission.mappings) {
     scope.context.checkpoint(1);
-    if (mapping.instruction_ids.length !== 1 || mapping.ranges.length !== 1) continue;
-    const id = mapping.instruction_ids[0]!, range = mapping.ranges[0]!;
+    if (mapping.instruction_refs.length !== 1 || mapping.range_refs.length !== 1) continue;
+    const id = emission.ids[mapping.instruction_refs[0]!]!, range = emission.ranges[mapping.range_refs[0]!]!;
     const prior = instructionLocations.get(id);
     if (prior === undefined) instructionLocations.set(id, range);
     else if (prior && (prior.start.image_id !== range.start.image_id || prior.start.space !== range.start.space ||
@@ -146,8 +153,8 @@ export function investigationItems(scope: Scope, args: Args, payload: AnalysisAr
   const selectedMappings = quoteSource
     ? emission.mappings.flatMap((mapping, index) => {
       scope.context.checkpoint(1);
-      if (mapping.end <= mapping.start || !mapping.instruction_ids.length ||
-        (args.subject_id && mapping.statement_id !== args.subject_id && !mapping.semantic_ids.includes(args.subject_id)))
+      if (mapping.end <= mapping.start || !mapping.instruction_refs.length ||
+        (subject !== undefined && !mapping.semantic_refs.includes(subject)))
         return [];
       // Subtract the producer's exact declaration interval only. Root-ID note
       // mappings, body effects, and portions outside that interval are retained.
@@ -176,17 +183,17 @@ export function investigationItems(scope: Scope, args: Args, payload: AnalysisAr
     const mapping_indexes: number[] = [], instructions = new Set<string>();
     let retained = 0;
     for (const selected of active) {
-      scope.context.checkpoint(1 + selected.mapping.instruction_ids.length + selected.mapping.evidence_ids.length);
+      scope.context.checkpoint(1 + selected.mapping.instruction_refs.length + selected.mapping.evidence_refs.length);
       if (selected.end <= start) continue;
       active[retained++] = selected;
       mapping_indexes.push(selected.index);
-      for (const id of selected.mapping.instruction_ids) instructions.add(id);
+      for (const ref of selected.mapping.instruction_refs) instructions.add(emission.ids[ref]!);
     }
     active.length = retained;
     items.push({ kind: 'source', span: { start, end }, text: emission.text.slice(start, end),
       mapping_indexes, instruction_ids: [...instructions] });
   }
-  if (includes('signature', [args.function_id])) {
+  if (includes('signature', 'function')) {
     const compactSignature = signature ? { abi: signature.abi, variadic: signature.variadic,
       noreturn: signature.noreturn, parameter_count: signature.parameters.length } : null;
     items.push({ kind: 'signature', status: 'inferred', signature: compactSignature,
@@ -202,20 +209,20 @@ export function investigationItems(scope: Scope, args: Args, payload: AnalysisAr
   const omittedKinds: Partial<Record<WireRequirement['kind'], number>> = {};
   for (const record of inferences) {
     scope.context.checkpoint(1);
-    if (includes(record.details.kind, record.subject_ids)) {
+    if (includes(record.details.kind, record.subject_refs)) {
       items.push({ kind: 'inference', record: { id: record.id, status: record.status,
-        details: compactDetails(record.details), instruction_ids: record.instruction_ids } });
+        details: compactDetails(record.details), instruction_ids: identities(record.instruction_refs) } });
       selectedInferences++;
     } else omittedStatuses[record.status] = (omittedStatuses[record.status] ?? 0) + 1;
   }
   for (const record of requirements) {
     scope.context.checkpoint(1);
     if (record.kind === 'unresolved') totalSites += record.sites.length;
-    if (includes(record.kind, record.subject_ids)) {
+    if (includes(record.kind, record.subject_refs)) {
       items.push({ kind: 'requirement', record: { id: record.id, status: record.status,
-        kind: record.kind, explanation: record.explanation, instruction_ids: record.instruction_ids,
-        sites: record.sites.map(({ subject_ids: _subjects, evidence_ids: _proofs,
-          instruction_ids: _instructions, predicate_value_id: _predicate, ...site }) => site) } });
+        kind: record.kind, explanation: record.explanation, instruction_ids: identities(record.instruction_refs),
+        sites: record.sites.map(({ subject_refs: _subjects, evidence_refs: _proofs,
+          instruction_refs: _instructions, predicate_value_id: _predicate, ...site }) => site) } });
       selectedRequirements++;
       if (record.kind === 'unresolved') selectedSites += record.sites.length;
     } else omittedKinds[record.kind] = (omittedKinds[record.kind] ?? 0) + 1;
@@ -223,7 +230,7 @@ export function investigationItems(scope: Scope, args: Args, payload: AnalysisAr
   // Every actual helper of the immutable artifact, in artifact order; the
   // semantic_domain label keeps the renderer-contract status explicit.
   let selectedHelpers = 0;
-  if (includes('helper', [args.function_id]))
+  if (includes('helper', 'function'))
     for (const [artifact_helper_index, helper] of emission.helpers.entries()) {
       scope.context.checkpoint(1);
       items.push({ kind: 'helper', artifact_helper_index, name: helper.name, explanation: helper.explanation,

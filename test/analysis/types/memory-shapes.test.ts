@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createOperationContext } from '../../../src/core/index.js';
+import { createOperationContext, expandEmission } from '../../../src/core/index.js';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { recoverTypes, refineMemoryShapes, parameterMemoryShapes, type MemoryShapeTransfer, type TypeRecoveryResult } from '../../../src/analysis/types/index.js';
@@ -186,7 +186,7 @@ for (const language of ['c-like', 'python-like'] as const)
     const output = emit(ssa, { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } }, language);
     const formals = emittedFormals(output.emission).filter((formal) => formal.name !== 'entry_sp');
     assert.equal(formals.length, 1);
-    const declaration = output.emission.mappings.find((mapping) => mapping.statement_id === formals[0]!.statement_id)!;
+    const declaration = expandEmission(output.emission).mappings.find((mapping) => mapping.statement_id === formals[0]!.statement_id)!;
     assert.match(output.emission.text.slice(declaration.start, declaration.end),
       language === 'c-like' ? /\*/ : /pointer\[/);
     const memory = new Map(Array.from({ length: 4 }, (_, byte) => [0x3008n + BigInt(byte), byte === 0 ? 37 : 0]));

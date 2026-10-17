@@ -15,18 +15,19 @@ type Details = Inference['details'];
 const confidence = (status: TypeStatus): InferenceStatus => status === 'candidate' ? 'inferred' : status;
 const identity = (address: Address) => ({ image_id: address.image_id, space: address.space, address: String(address.value) });
 
-/** Collect from semantic models and finalized mappings, never emitted text. The
- * indexes are local to one render; no inference performs an all-IR/mapping scan. */
+/** Collect from semantic models and the writer's finalized mappings, never
+ * emitted text. Records cite the writer's interned tables directly. The indexes
+ * are local to one render; no inference performs an all-IR/mapping scan. */
 export function collectInferences(
   input: EmissionInput,
   program: Reconstruction,
-  mappings: readonly Mapping[],
   localValidation: readonly LocalValidationRecord[],
   writer: Writer,
   context: OperationContext,
   sites?: ReadonlyMap<string, { readonly start: number; readonly end: number }>,
   resolveData?: (value: Value) => SourceAddress | undefined,
 ): readonly Inference[] {
+  const mappings = writer.mappings;
   const original = new Map<string, Origin>();
   const loadResults = new Map<string, string>();
   const catalog = new Set(input.types?.subjects ?? []);
@@ -86,24 +87,26 @@ export function collectInferences(
     resolved.set(id, subjects);
     return subjects;
   };
-  const bySubject = new Map<string, Set<Mapping>>();
-  const byInstruction = new Map<string, Set<Mapping>>();
+  const bySubject = new Map<number, Set<Mapping>>();
+  const byInstruction = new Map<number, Set<Mapping>>();
   const bySpan = new Map<string, Set<Mapping>>();
   const siteStarts = sites && new Set([...sites.values()].map((site) => site.start));
-  const index = (table: Map<string, Set<Mapping>>, key: string, mapping: Mapping): void => {
+  const index = <K>(table: Map<K, Set<Mapping>>, key: K, mapping: Mapping): void => {
     const group = table.get(key) ?? new Set<Mapping>();
     group.add(mapping);
     table.set(key, group);
   };
+  const functionRef = writer.findId(input.function.id);
   for (const mapping of mappings) {
     context.checkpoint(1);
+    const statement = mapping.semantic_refs[0]!;
     // Zero-output contributor coverage is mapped to the header by the renderer.
     // It is provenance, not another visible declaration or value-use site.
-    if (siteStarts && !siteStarts.has(mapping.start) && mapping.statement_id !== input.function.id) continue;
-    index(bySubject, mapping.statement_id, mapping);
+    if (siteStarts && !siteStarts.has(mapping.start) && statement !== functionRef) continue;
+    index(bySubject, statement, mapping);
     index(bySpan, `${mapping.start}:${mapping.end}`, mapping);
-    if (mapping.statement_id === input.function.id) continue;
-    for (const instruction of mapping.instruction_ids) {
+    if (statement === functionRef) continue;
+    for (const instruction of mapping.instruction_refs) {
       context.checkpoint(1);
       index(byInstruction, instruction, mapping);
     }
@@ -149,12 +152,15 @@ export function collectInferences(
     const group = new Set<Mapping>();
     const candidates = new Set([id, ...originals(id), ...(aliases.get(id) ?? [])]);
     for (const subject of candidates) {
-      for (const mapping of bySubject.get(subject) ?? []) group.add(mapping);
+      const ref = writer.findId(subject);
+      if (ref !== undefined) for (const mapping of bySubject.get(ref) ?? []) group.add(mapping);
       const site = sites?.get(subject);
       if (site) for (const mapping of bySpan.get(`${site.start}:${site.end}`) ?? []) group.add(mapping);
       const origin = original.get(subject);
-      for (const instruction of origin?.provenance.instruction_ids ?? [])
-        for (const mapping of byInstruction.get(instruction) ?? []) group.add(mapping);
+      for (const instruction of origin?.provenance.instruction_ids ?? []) {
+        const instructionRef = writer.findId(instruction);
+        if (instructionRef !== undefined) for (const mapping of byInstruction.get(instructionRef) ?? []) group.add(mapping);
+      }
     }
     const rows = [...group];
     linked.set(id, rows);
@@ -172,15 +178,16 @@ export function collectInferences(
       for (const mapping of linksFor(id)) links.add(mapping);
     if (!links.size || !subjectIds.size) return;
     if (result.length >= 10000) writer.fail('Inference record limit exceeded');
-    const instructions = new Set<string>();
-    const proofs = new Set<string>(writer.evidence ? evidence : []);
-    const ranges = new Map<string, AddressRange>();
+    // Provenance lists are interned once per immutable origin array; records
+    // union table indexes, never re-keyed identity or range strings.
+    const instructions = new Set<number>();
+    const proofs = new Set<number>(writer.evidence ? evidence.map((id) => writer.proof(id)) : []);
+    const ranges = new Set<number>();
     const spans = new Map<string, { start: number; end: number }>();
     const provenance = (origin: Origin): void => {
-      for (const id of origin.provenance.instruction_ids) instructions.add(id);
-      if (writer.evidence) for (const id of origin.provenance.evidence_ids) proofs.add(id);
-      for (const range of origin.provenance.ranges)
-        ranges.set(`${range.start.image_id}:${range.start.space}:${range.start.value}:${range.size}`, range);
+      for (const ref of writer.idRefs(origin.provenance.instruction_ids)) instructions.add(ref);
+      if (writer.evidence) for (const id of origin.provenance.evidence_ids) proofs.add(writer.proof(id));
+      for (const ref of writer.rangeRefs(origin.provenance.ranges)) ranges.add(ref);
     };
     for (const id of subjectIds) {
       context.checkpoint(1);
@@ -200,31 +207,24 @@ export function collectInferences(
       if (!hasSites) spans.set(`${mapping.start}:${mapping.end}`, { start: mapping.start, end: mapping.end });
       // Some declaration/field subjects have no own IR origin. Their exact use
       // mapping is the provenance, not a guessed defining instruction.
-      if (!hasInstructions) for (const id of mapping.instruction_ids) instructions.add(id);
-      if (writer.evidence) for (const id of mapping.evidence_ids) proofs.add(id);
-      if (!hasRanges) for (const range of mapping.ranges)
-        ranges.set(`${range.start.image_id}:${range.start.space}:${range.start.value}:${range.size}`, range);
+      if (!hasInstructions) for (const ref of mapping.instruction_refs) instructions.add(ref);
+      if (writer.evidence) for (const ref of mapping.evidence_refs) proofs.add(ref);
+      if (!hasRanges) for (const ref of mapping.range_refs) ranges.add(ref);
     }
     if (subjectIds.size > 10000 || instructions.size > 10000 || ranges.size > 10000 ||
       proofs.size > 1000 || spans.size > 1000) writer.fail('Inference reference limit exceeded');
+    // Each union touches at least its result; charge that real work in bulk.
+    context.checkpoint(subjectIds.size + instructions.size + proofs.size + ranges.size);
     const record: Inference = {
-      id: `inference:${result.length}`, status, explanation, subject_ids: [...subjectIds],
-      evidence_ids: [...proofs], instruction_ids: [...instructions], ranges: [...ranges.values()],
+      id: `inference:${result.length}`, status, explanation,
+      subject_refs: [...subjectIds].map((id) => writer.id(id)),
+      evidence_refs: [...proofs], instruction_refs: [...instructions], range_refs: [...ranges],
       output_spans: [...spans.values()], details,
-      review: { operation: 'function_get', view: 'metadata', function_id: input.function.id,
-        subject_id: subjectIds.values().next().value! },
     };
-    // Charge strings and structure once without serializing/copying the record.
-    const charge = (value: unknown): void => {
-      context.checkpoint(1);
-      if (typeof value === 'string') writer.metadata(Buffer.byteLength(value) + 8);
-      else if (typeof value === 'bigint' || typeof value === 'number') writer.metadata(32);
-      else if (Array.isArray(value)) { writer.metadata(2 + value.length); for (const item of value) charge(item); }
-      else if (value && typeof value === 'object') {
-        for (const [key, item] of Object.entries(value)) { writer.metadata(key.length + 4); charge(item); }
-      } else writer.metadata(5);
-    };
-    charge(record);
+    // Charge strings and structure once without serializing/copying the record;
+    // index lists have a known serialized bound.
+    writer.charge({ id: record.id, status, explanation, output_spans: record.output_spans, details });
+    writer.chargeRefs(record.subject_refs, record.evidence_refs, record.instruction_refs, record.range_refs);
     result.push(record);
   };
   const originalValues = (value: Value): readonly string[] => originals(value.id);

@@ -1,5 +1,8 @@
 import { z } from 'zod';
-import { inferenceSchema, requirementSchema, inferenceDetailsByKind, requirementSiteSchema, outputSpanSchema } from './inference.js';
+import {
+  inferenceSchema, requirementSchema, inferenceDetailsByKind, requirementSiteSchema, outputSpanSchema,
+  emissionRefsSchema, evidenceRefIndexesSchema,
+} from './inference.js';
 import {
   SCHEMA_VERSION,
   projectIdSchema,
@@ -14,7 +17,7 @@ import {
   targetSchema,
   diagnosticSchema,
   evidenceSchema,
-  evidenceRefsSchema,
+  evidenceIdSchema,
   capabilitySchema,
   coverageSchema,
   versionsSchema,
@@ -56,6 +59,7 @@ export const toolNameSchema = z.enum([
   'function_get',
   'function_decompile',
   'xrefs_get',
+  'evidence_get',
   'memory_read',
   'annotations_apply',
   'analysis_status',
@@ -106,15 +110,16 @@ export const jobSchema = z
   });
 export type WireJob = z.infer<typeof jobSchema>;
 export type Job = Internal<WireJob>;
+/** One emitted span. `semantic_refs[0]` is the mapped statement; every
+ * `*_refs` entry indexes the emission's `ids`, `evidence` or `ranges` table. */
 export const sourceMappingSchema = z
   .strictObject({
-    statement_id: entityIdSchema,
     start: revisionSchema,
     end: revisionSchema,
-    semantic_ids: z.array(entityIdSchema).max(10000),
-    instruction_ids: z.array(entityIdSchema).max(10000),
-    ranges: z.array(rangeSchema).max(10000),
-    evidence_ids: evidenceRefsSchema,
+    semantic_refs: emissionRefsSchema.min(1),
+    instruction_refs: emissionRefsSchema,
+    range_refs: emissionRefsSchema,
+    evidence_refs: evidenceRefIndexesSchema,
   })
   .superRefine((mapping, context) => {
     if (mapping.end < mapping.start)
@@ -129,6 +134,10 @@ export const localValidationSchema = z.strictObject({
   reason: z.string().min(1).max(8192).optional(),
   counterexample: z.record(z.string().max(1024), z.string().max(8192)).optional(),
 });
+/** Canonical compact emission. Each distinct entity identity, proof identity and
+ * binary range is stated once in `ids`, `evidence` and `ranges`; mappings,
+ * inferences and requirements cite them by index. Every inference subject is
+ * reviewable through `review` with `subject_id` = `ids[subject_refs[0]]`. */
 export const emissionSchema = z
   .strictObject({
     language: z.enum(['c-like', 'python-like']),
@@ -136,6 +145,9 @@ export const emissionSchema = z
     text: z.string().max(16_777_216),
     span_unit: z.literal('utf16'),
     reconstruction: z.literal('pseudocode'),
+    ids: z.array(entityIdSchema).max(1_000_000),
+    evidence: z.array(evidenceIdSchema).max(10000),
+    ranges: z.array(rangeSchema).max(1_000_000),
     mappings: z.array(sourceMappingSchema).max(100000),
     declaration_span: outputSpanSchema.optional(),
     local_validation: z.array(localValidationSchema).max(1000).optional(),
@@ -144,16 +156,40 @@ export const emissionSchema = z
     helpers: z
       .array(z.strictObject({ name: z.string().min(1), explanation: z.string().min(1).max(8192) }))
       .max(1000),
+    review: z.strictObject({
+      operation: z.literal('function_get'), view: z.literal('metadata'), function_id: entityIdSchema,
+    }),
   })
   .superRefine((emission, context) => {
-    if (emission.mappings.some((mapping) => mapping.end > emission.text.length))
-      context.addIssue({ code: 'custom', message: 'Source mapping exceeds emitted text' });
+    const unique = (path: 'ids' | 'evidence' | 'ranges', keys: readonly string[]): void => {
+      if (new Set(keys).size !== keys.length)
+        context.addIssue({ code: 'custom', path: [path], message: 'Emission reference tables are duplicate-free' });
+    };
+    unique('ids', emission.ids);
+    unique('evidence', emission.evidence);
+    unique('ranges', emission.ranges.map((range) =>
+      `${range.start.image_id}:${range.start.space}:${BigInt(range.start.value)}:${BigInt(range.size)}`));
+    const bounded = (refs: readonly number[], table: readonly unknown[]) => refs.every((ref) => ref < table.length);
+    const references = (record: { subject_refs?: readonly number[]; semantic_refs?: readonly number[];
+      instruction_refs: readonly number[]; evidence_refs: readonly number[]; range_refs?: readonly number[] }) =>
+      bounded(record.subject_refs ?? record.semantic_refs ?? [], emission.ids) &&
+      bounded(record.instruction_refs, emission.ids) && bounded(record.evidence_refs, emission.evidence) &&
+      bounded(record.range_refs ?? [], emission.ranges);
+    for (const mapping of emission.mappings) {
+      if (mapping.end > emission.text.length)
+        context.addIssue({ code: 'custom', message: 'Source mapping exceeds emitted text' });
+      if (!references(mapping))
+        context.addIssue({ code: 'custom', message: 'Source mapping reference is outside its emission table' });
+    }
     if (emission.declaration_span && emission.declaration_span.end > emission.text.length)
       context.addIssue({ code: 'custom', message: 'Declaration span exceeds emitted text' });
     for (const records of [emission.inferences, emission.requirements])
-      for (const record of records ?? [])
+      for (const record of records ?? []) {
         if (record.output_spans.some((span) => span.end > emission.text.length))
           context.addIssue({ code: 'custom', message: 'Inference span exceeds emitted text' });
+        if (!references(record) || ('sites' in record && !record.sites.every(references)))
+          context.addIssue({ code: 'custom', message: 'Inference reference is outside its emission table' });
+      }
   });
 export type WireEmission = z.infer<typeof emissionSchema>;
 export type Emission = Internal<WireEmission>;
@@ -174,6 +210,9 @@ const pageInfoSchema = z.strictObject({
   next_cursor: z.string().min(1).max(16384).nullable(),
   index_state: z.enum(['complete', 'partial', 'not_started']),
   order: z.enum(['address_id', 'name_id', 'id']),
+  /** inline: result.evidence holds the records; by_reference: ids resolve through evidence_get;
+   * artifact: ids resolve inside the selected analysis artifact. */
+  evidence_delivery: z.enum(['inline', 'by_reference', 'artifact']),
 });
 
 export const projectOpenArgsSchema = z.strictObject({
@@ -290,6 +329,14 @@ export const xrefsGetArgsSchema = z.strictObject({
     .max(7)
     .default(['call', 'tail_call', 'branch', 'read', 'write', 'address', 'unknown']),
   include_unresolved: z.boolean().default(true),
+  ...paging,
+});
+/** Navigation results carry evidence IDs; the records themselves are fetched here. `closure`
+ * also returns every record reachable through derived_from/conflicts_with. */
+export const evidenceGetArgsSchema = z.strictObject({
+  ...requestContext,
+  evidence_ids: z.array(evidenceIdSchema).min(1).max(1000),
+  derivation: z.enum(['direct', 'closure']).default('direct'),
   ...paging,
 });
 export const memoryReadArgsSchema = z
@@ -607,7 +654,7 @@ const investigationItemSchema = z.discriminatedUnion('kind', [
   }),
   z.strictObject({
     kind: z.literal('requirement'), record: requirementSchema.pick({ id: true, status: true, kind: true, explanation: true }).extend({
-      sites: z.array(requirementSiteSchema.omit({ subject_ids: true, evidence_ids: true, instruction_ids: true, predicate_value_id: true })).max(1000),
+      sites: z.array(requirementSiteSchema.omit({ subject_refs: true, evidence_refs: true, instruction_refs: true, predicate_value_id: true })).max(1000),
       instruction_refs: instructionRefsSchema,
     }),
   }),
@@ -656,6 +703,7 @@ const investigationDiagnosticSchema = diagnosticSchema.omit({
 const functionGetDataSchema = z.discriminatedUnion('view', [
   z.strictObject({
     view: z.literal('metadata'),
+    evidence_delivery: z.literal('by_reference'),
     function: functionSchema,
     reviewed_subject_id: entityIdSchema,
     annotation_eligible: z.boolean(),
@@ -911,6 +959,9 @@ export function projectDecompilationArtifactResult(
 export const xrefsGetResultSchema = resultSchema(
   z.strictObject({ items: z.array(referenceSchema).max(1000), page: pageInfoSchema }),
 );
+export const evidenceGetResultSchema = resultSchema(
+  z.strictObject({ items: z.array(evidenceSchema).max(1000), page: pageInfoSchema }),
+);
 export const memoryReadResultSchema = resultSchema(memoryDataSchema);
 export const annotationsApplyResultSchema = resultSchema(
   z
@@ -974,6 +1025,10 @@ export interface ToolSchemaRegistry {
     output: typeof functionDecompileResultSchema;
   };
   xrefs_get: { input: typeof xrefsGetArgsSchema; output: typeof xrefsGetResultSchema };
+  evidence_get: {
+    input: typeof evidenceGetArgsSchema;
+    output: typeof evidenceGetResultSchema;
+  };
   memory_read: { input: typeof memoryReadArgsSchema; output: typeof memoryReadResultSchema };
   annotations_apply: {
     input: typeof annotationsApplyArgsSchema;
@@ -998,6 +1053,7 @@ export const toolSchemas: ToolSchemaRegistry = {
   function_get: { input: functionGetArgsSchema, output: functionGetResultSchema },
   function_decompile: { input: functionDecompileArgsSchema, output: functionDecompileResultSchema },
   xrefs_get: { input: xrefsGetArgsSchema, output: xrefsGetResultSchema },
+  evidence_get: { input: evidenceGetArgsSchema, output: evidenceGetResultSchema },
   memory_read: { input: memoryReadArgsSchema, output: memoryReadResultSchema },
   annotations_apply: { input: annotationsApplyArgsSchema, output: annotationsApplyResultSchema },
   analysis_status: { input: analysisStatusArgsSchema, output: analysisStatusResultSchema },

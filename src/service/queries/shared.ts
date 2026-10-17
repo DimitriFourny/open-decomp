@@ -19,7 +19,7 @@ export function queryEnvelope(
       loader: null,
       decoder: null,
       lifter: null,
-      analysis: 'navigation/1',
+      analysis: 'navigation/2',
       abi: null,
       emitter: null,
     },

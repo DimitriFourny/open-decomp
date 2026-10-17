@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createOperationContext, DEFAULT_ANALYSIS_OPTIONS } from '../../../src/core/index.js';
+import { createOperationContext, DEFAULT_ANALYSIS_OPTIONS, expandEmission } from '../../../src/core/index.js';
 import { DarwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { simplifySSA } from '../../../src/analysis/values/index.js';
@@ -41,7 +41,7 @@ test('SQLite initialized fast path retains DMB ISH ordering through source proje
     for (const emit of [emitC, emitPythonLike]) {
       const output = emit(input, DEFAULT_ANALYSIS_OPTIONS, createOperationContext());
       assert.match(output.emission.text, /memory_fence\("inner_shareable", "acquire_release", "reads_writes"\)/);
-      const mapping = output.emission.mappings.find((item) => item.statement_id === fence.id);
+      const mapping = expandEmission(output.emission).mappings.find((item) => item.statement_id === fence.id);
       assert.ok(mapping);
       assert.ok(mapping.instruction_ids.includes(graph.instructions[0]!.id));
       assert.doesNotMatch(output.emission.text, /opaque_effect|Unsupported ARM64/);

@@ -104,7 +104,7 @@ function investigationResult(items: unknown[], helpers = items.length, kinds: st
       analysis_diagnostics: [], references: [],
       selection: { kinds, subject_id: null, quotes: false, counts: counts({ total: helpers, selected: items.length }),
         omitted_inference_statuses: {}, omitted_requirement_kinds: {} },
-      helpers: [], page: { next_cursor: null, index_state: 'complete', order: 'id' },
+      helpers: [], page: { next_cursor: null, index_state: 'complete', order: 'id', evidence_delivery: 'artifact' },
     },
   };
 }
@@ -142,7 +142,8 @@ test('helper pages keep the shared 1000-item bound and selection counts must rep
 });
 
 const emission = {
-  text: 'return;\n', declaration_span: { start: 0, end: 1 }, mappings: [], inferences: [], requirements: [],
+  text: 'return;\n', declaration_span: { start: 0, end: 1 }, ids: [], evidence: [], ranges: [],
+  mappings: [], inferences: [], requirements: [],
   helpers: [{ name: 'field_view', explanation: 'First contract' }, { name: 'trunc_div', explanation: 'Second contract' }],
 };
 const payload = { result: { data: { emission, signature: null } } } as unknown as Parameters<typeof investigationItems>[2];

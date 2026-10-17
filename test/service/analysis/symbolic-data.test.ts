@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AddressMap, createOperationContext, type LoadedImage } from '../../../src/core/index.js';
+import { AddressMap, createOperationContext, expandEmission, type LoadedImage } from '../../../src/core/index.js';
 import { recoverDataAddress } from '../../../src/analysis/strings/source-data.js';
 import { navigationBytes } from '../../analysis/navigation-fixture.js';
 import { execute } from '../../emitters/c/support.js';
@@ -19,7 +19,7 @@ for (const fixture of ['macho-arm64-symbols', 'libcorpus-arm64-symbols.dylib', '
       assert.ok('data' in full);
       assert.match(full.data.emission.text, emitter === 'c-like' ? /char\s*\*\s+fn_/ : /-> pointer\[char\]:/);
       assert.equal(execute(full.data.emission).string_result, text);
-      assert.ok(full.data.emission.mappings.some((mapping) => mapping.semantic_ids.length));
+      assert.ok(expandEmission(full.data.emission).mappings.some((mapping) => mapping.semantic_ids.length));
     }
   });
 

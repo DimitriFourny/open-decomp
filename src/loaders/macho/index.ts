@@ -9,6 +9,7 @@ import {
   type OperationContext,
   type Diagnostic,
   type ImageMapping,
+  NATIVE_SYMBOL_TABLES_FEATURE,
 } from '../../core/index.js';
 import { MachOError, Reader, malformed, safe, vmEnd, type Payload } from './reader.js';
 import { State } from './state.js';
@@ -95,7 +96,7 @@ const SUBTYPES: Record<number, string> = { 0: 'arm64', 1: 'arm64v8', 2: 'arm64e'
  */
 export class MachOLoader implements Loader {
   readonly name = 'open-decomp-macho';
-  readonly version = '1.0.3';
+  readonly version = '1.0.4';
   readonly format = 'macho' as const;
   inspect(
     bytes: ImmutableBytes,
@@ -657,9 +658,15 @@ function parseImage(
         ),
       });
   }
-  s.optional('Symbols/indirect imports', () => readSymbols(s, symtab, indirect));
+  const diagnosticsBeforeNames = s.diagnostics.length;
+  const symbolsRead = s.optional('Symbols/indirect imports', () =>
+    readSymbols(s, symtab, indirect),
+  );
   const exportPayload = exports?.size ? exports : legacyExports;
-  if (exportPayload) s.optional('Exports', () => readExports(s, exportPayload));
+  const exportsRead = exportPayload
+    ? s.optional('Exports', () => readExports(s, exportPayload))
+    : true;
+  const nameTableDiagnostics = s.diagnostics.slice(diagnosticsBeforeNames);
   readDyld(s, streams, chained);
   readHints(s, addressMap, starts, data);
   readRelocations(s);
@@ -681,6 +688,13 @@ function parseImage(
       feature: 'Mach-O ARM64 thin/fat static metadata',
       status: s.diagnostics.length ? 'partial' : 'supported',
       limitations: s.diagnostics.map((diagnostic) => diagnostic.message),
+    },
+    {
+      layer: 'format',
+      feature: NATIVE_SYMBOL_TABLES_FEATURE,
+      status:
+        symbolsRead && exportsRead && nameTableDiagnostics.length === 0 ? 'supported' : 'partial',
+      limitations: nameTableDiagnostics.map((diagnostic) => diagnostic.message),
     },
   ];
   return {

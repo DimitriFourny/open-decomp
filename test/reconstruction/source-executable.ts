@@ -128,7 +128,7 @@ export function checkExecutableSource(
       if (memory) {
         runners.push(`uint${memory.bits}_t values_${index}[] = {${memory.values.length ? memory.values.map(integer).join(', ') : '0'}};`);
         const first = formals[0]!;
-        const mapping = emission.mappings.find((mapping) => mapping.statement_id === first.statement_id);
+        const mapping = emission.mappings.find((mapping) => emission.ids[mapping.semantic_refs[0]!] === first.statement_id);
         assert.ok(mapping);
         const declaration = emission.text.slice(mapping.start, mapping.end);
         arguments_[0] = declaration.includes('*') ? `(void *)values_${index}` : `(uintptr_t)values_${index}`;

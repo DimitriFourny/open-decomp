@@ -5,6 +5,7 @@ import {
   DEFAULT_ANALYSIS_OPTIONS,
   OperationError,
   decodeEmission,
+  expandEmission,
   encodeEmission,
   entityIdentity,
   type Annotation,
@@ -59,7 +60,7 @@ for (const language of ['c-like', 'python-like'] as const)
       const final = optimized.value.blocks[0]!.instructions.find(
         (node) => node.kind === 'assign' && node.result.id === sum.id,
       )!;
-      const mapping = output.emission.mappings.find((item) => item.statement_id === final.id)!;
+      const mapping = expandEmission(output.emission).mappings.find((item) => item.statement_id === final.id)!;
       assert.ok(mapping);
       assert.deepEqual(
         new Set(mapping.instruction_ids),
@@ -83,7 +84,7 @@ for (const language of ['c-like', 'python-like'] as const)
       assert.deepEqual(decodeEmission(encodeEmission(output.emission)), output.emission);
       assert.equal(output.coverage.statements, output.coverage.mapped_statements);
       assert.equal(output.coverage.controls, output.coverage.mapped_controls);
-      for (const span of output.emission.mappings) {
+      for (const span of expandEmission(output.emission).mappings) {
         assert.ok(
           span.start >= 0 && span.end > span.start && span.end <= output.emission.text.length,
         );
@@ -143,7 +144,7 @@ for (const language of ['c-like', 'python-like'] as const)
         ids.map((id) => id.original_name),
         ['return', 'return'],
       );
-      const note = output.emission.mappings.find((mapping) =>
+      const note = expandEmission(output.emission).mappings.find((mapping) =>
         mapping.evidence_ids.includes(notes[0]!.evidence_ids[0]!),
       )!;
       assert.ok(note);
@@ -154,7 +155,7 @@ for (const language of ['c-like', 'python-like'] as const)
         .map((text) => JSON.parse(text) as string);
       assert.ok(literals.includes(hostile), 'the complete note must survive data escaping');
       assert.equal(
-        output.emission.mappings.some((mapping) =>
+        expandEmission(output.emission).mappings.some((mapping) =>
           mapping.evidence_ids.includes(notes[1]!.evidence_ids[0]!),
         ),
         false,
@@ -378,6 +379,6 @@ for (const language of ['c-like', 'python-like'] as const)
         createOperationContext(),
       );
       assert.deepEqual(execute(withoutEvidence).values, [42n]);
-      assert.ok(withoutEvidence.mappings.every((mapping) => mapping.evidence_ids.length === 0));
+      assert.ok(withoutEvidence.mappings.every((mapping) => mapping.evidence_refs.length === 0));
     });
   });

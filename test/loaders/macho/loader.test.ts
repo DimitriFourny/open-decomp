@@ -6,6 +6,7 @@ import {
   contentHash,
   imageIdentity,
   ImmutableBytes,
+  NATIVE_SYMBOL_TABLES_FEATURE,
   OperationError,
   type LoadedImage,
 } from '../../../src/core/index.js';
@@ -898,4 +899,37 @@ test('chained offsets, page starts, and payload tables cannot escape their bound
   }
   bytes.writeUInt32LE(0xfffffff0, p + 4);
   assert.ok(load(bytes).diagnostics.some((record) => record.code === 'malformed_image'));
+});
+
+test('native symbol-table completeness is reported independently of unrelated optional metadata', () => {
+  const tables = (loaded: LoadedImage) =>
+    loaded.capabilities.find((capability) => capability.feature === NATIVE_SYMBOL_TABLES_FEATURE);
+  assert.equal(tables(load(fixture))?.status, 'supported');
+  // An unterminated function-start stream degrades the format capability, not the symbol tables.
+  const starts = command(0x26, 16);
+  starts.writeUInt32LE(0x800, 8);
+  starts.writeUInt32LE(4, 12);
+  const unrelatedBytes = image([starts]);
+  unrelatedBytes.fill(0xff, 0x800, 0x804);
+  const unrelated = load(unrelatedBytes);
+  assert.equal(
+    unrelated.capabilities.find((capability) => capability.feature.startsWith('Mach-O'))?.status,
+    'partial',
+  );
+  assert.ok(unrelated.diagnostics.some((diagnostic) => diagnostic.message.startsWith('Function starts:')));
+  assert.equal(tables(unrelated)?.status, 'supported');
+  assert.deepEqual(tables(unrelated)?.limitations, []);
+  // A symbol whose name lies outside the string table makes name authority partial, with the reason.
+  const symtab = command(2, 24);
+  symtab.writeUInt32LE(0x900, 8);
+  symtab.writeUInt32LE(1, 12);
+  symtab.writeUInt32LE(0xa00, 16);
+  symtab.writeUInt32LE(16, 20);
+  const brokenBytes = image([symtab]);
+  brokenBytes.writeUInt32LE(0x1000, 0x900);
+  brokenBytes[0x904] = 0x0f;
+  brokenBytes[0x905] = 1;
+  const broken = load(brokenBytes);
+  assert.equal(tables(broken)?.status, 'partial');
+  assert.ok(tables(broken)!.limitations.length > 0);
 });

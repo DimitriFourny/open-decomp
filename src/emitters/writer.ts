@@ -1,32 +1,54 @@
-import { OperationError, type Emission, type OperationContext } from '../core/index.js';
+import { OperationError, type AddressRange, type Emission, type EmissionRequirement, type OperationContext,
+  type Requirement } from '../core/index.js';
 import type { Origin } from '../ir/index.js';
 
-const NO_IDS: readonly string[] = [];
+const NO_REFS: readonly number[] = Object.freeze([]);
+/** Upper bound of one serialized table index plus separator ("999999,"). */
+const REF_BYTES = 7;
 
-/** One-pass normalized IDs and exact metadata lengths, owned by one writer. */
+/** One-pass normalized subject references, owned by one writer. Identities are
+ * interned into the writer's table as they are added; duplicates are dropped. */
 class MappingReferences {
-  private readonly seen = new Set<string>();
+  private readonly seen = new Set<number>();
   private readonly items: string[] = [];
+  private readonly indexes: number[] = [];
   private sealed = false;
-  characters = 0;
-  bytes = 0;
   constructor(readonly owner: Writer) {}
   get ids(): readonly string[] { return this.items; }
   add(id: string): void {
     this.owner.context.checkpoint(1);
     if (this.sealed) throw new TypeError('Published mapping references are immutable');
-    if (this.seen.has(id)) return;
-    this.seen.add(id);
+    const ref = this.owner.id(id);
+    if (this.seen.has(ref)) return;
+    this.seen.add(ref);
     this.items.push(id);
-    this.characters += id.length;
-    this.bytes += Buffer.byteLength(id);
-    this.owner.guard(this.bytes);
+    this.indexes.push(ref);
   }
-  seal(): readonly string[] {
+  seal(): readonly number[] {
     this.sealed = true;
-    return Object.freeze(this.items);
+    Object.freeze(this.items);
+    return Object.freeze(this.indexes);
   }
 }
+
+/** First-use interning of one emission's identity, proof and range tables. */
+class InternTable<T> {
+  readonly items: T[] = [];
+  private readonly indexes = new Map<string, number>();
+  constructor(private readonly writer: Writer, private readonly limit: number, private readonly bytes: (item: T) => number) {}
+  find(key: string): number | undefined { return this.indexes.get(key); }
+  add(key: string, item: T): number {
+    const known = this.indexes.get(key);
+    if (known !== undefined) return known;
+    if (this.items.length >= this.limit) this.writer.fail('Pseudocode reference table limit exceeded');
+    this.writer.metadata(this.bytes(item));
+    this.indexes.set(key, this.items.length);
+    this.items.push(item);
+    return this.items.length - 1;
+  }
+}
+const rangeKey = (range: AddressRange): string =>
+  `${range.start.image_id}:${range.start.space}:${range.start.value}:${range.size}`;
 
 /** UTF-16 offsets and UTF-8 resource accounting deliberately use different units.
  * Temporary lists/strings are bounded before joining; no silent truncation. */
@@ -34,9 +56,15 @@ export class Writer {
   private readonly parts: string[] = [];
   readonly mappings: Emission['mappings'][number][] = [];
   readonly helpers: Emission['helpers'][number][] = [];
+  /** Emission `ids`, `evidence` and `ranges` tables in first-use order. */
+  readonly ids = new InternTable<string>(this, 1_000_000, (id) => Buffer.byteLength(id) + 3);
+  readonly proofs = new InternTable<string>(this, 10000, (id) => Buffer.byteLength(id) + 3);
+  readonly ranges = new InternTable<AddressRange>(this, 1_000_000, () => 160);
   private readonly helperNames = new Set<string>();
-  private readonly idUnions = new WeakMap<readonly string[], readonly string[]>();
-  private readonly referenceLengths = new WeakMap<readonly string[], { readonly characters: number; readonly bytes: number }>();
+  private readonly idUnions = new WeakMap<readonly string[], readonly number[]>();
+  private readonly proofUnions = new WeakMap<readonly string[], readonly number[]>();
+  private readonly idLists = new WeakMap<readonly string[], readonly number[]>();
+  private readonly rangeLists = new WeakMap<readonly AddressRange[], readonly number[]>();
   private bytes = 0;
   private metadataBytes = 0;
   offset = 0;
@@ -176,6 +204,85 @@ export class Writer {
     return new MappingReferences(this);
   }
 
+  /** Table index of one entity identity, interned on first use. */
+  id(value: string): number {
+    return this.ids.add(value, value);
+  }
+
+  /** Table index of one proof identity, interned on first use. */
+  proof(value: string): number {
+    return this.proofs.add(value, value);
+  }
+
+  /** Table index of one binary range, interned on first use. */
+  range(value: AddressRange): number {
+    return this.ranges.add(rangeKey(value), value);
+  }
+
+  /** Existing table index of an identity; lookups never grow the published table. */
+  findId(value: string): number | undefined {
+    return this.ids.find(value);
+  }
+
+  /** Charge a structured metadata value once without serializing or copying it. */
+  charge(value: unknown): void {
+    this.context.checkpoint(1);
+    if (typeof value === 'string') this.metadata(Buffer.byteLength(value) + 8);
+    else if (typeof value === 'bigint' || typeof value === 'number') this.metadata(32);
+    else if (Array.isArray(value)) {
+      this.metadata(2 + value.length);
+      for (const item of value) this.charge(item);
+    } else if (value && typeof value === 'object') {
+      for (const [key, item] of Object.entries(value)) { this.metadata(key.length + 4); this.charge(item); }
+    } else this.metadata(5);
+  }
+
+  /** Serialized index lists have a known bound; no per-element walk is needed. */
+  chargeRefs(...lists: readonly (readonly number[])[]): void {
+    this.context.checkpoint(1);
+    let refs = 0;
+    for (const list of lists) refs += list.length;
+    this.metadata(lists.length * 24 + refs * REF_BYTES);
+  }
+
+  /** Intern an identity list in order, without changing its multiplicity. */
+  idRefs(ids: readonly string[]): readonly number[] {
+    return this.refs(this.ids, this.idLists, ids, (id) => id);
+  }
+
+  /** Intern a proof list in order, without changing its multiplicity. */
+  proofRefs(ids: readonly string[]): readonly number[] {
+    return this.refs(this.proofs, undefined, ids, (id) => id);
+  }
+
+  /** Intern a range list in order, without changing its multiplicity. */
+  rangeRefs(ranges: readonly AddressRange[]): readonly number[] {
+    return this.refs(this.ranges, this.rangeLists, ranges, rangeKey);
+  }
+
+  /** Cite one source requirement and its sites through this emission's tables. */
+  requirement(record: Requirement): EmissionRequirement {
+    const { subject_ids, evidence_ids, instruction_ids, ranges, sites, ...facts } = record;
+    this.charge(facts);
+    const compact: EmissionRequirement = {
+      id: facts.id, status: facts.status, explanation: facts.explanation,
+      subject_refs: this.idRefs(subject_ids), evidence_refs: this.proofRefs(evidence_ids),
+      instruction_refs: this.idRefs(instruction_ids), range_refs: this.rangeRefs(ranges),
+      output_spans: facts.output_spans, kind: facts.kind,
+      sites: sites.map(({ subject_ids: subjects, evidence_ids: proofs, instruction_ids: instructions, ...site }) => {
+        this.charge(site);
+        const refs = { subject_refs: this.idRefs(subjects), evidence_refs: this.proofRefs(proofs),
+          instruction_refs: this.idRefs(instructions) };
+        this.chargeRefs(refs.subject_refs, refs.evidence_refs, refs.instruction_refs);
+        return { id: site.id, ...refs, state_epoch: site.state_epoch,
+          ...(site.predicate_value_id === undefined ? {} : { predicate_value_id: site.predicate_value_id }),
+          ...(site.supported_predicate_value === undefined ? {} : { supported_predicate_value: site.supported_predicate_value }) };
+      }),
+    };
+    this.chargeRefs(compact.subject_refs, compact.evidence_refs, compact.instruction_refs, compact.range_refs);
+    return compact;
+  }
+
   map(
     origin: Origin,
     start: number,
@@ -197,63 +304,63 @@ export class Writer {
     )
       this.fail('Pseudocode mapping cardinality limit exceeded');
     const evidence = this.evidence
-      ? this.joinIds(origin.provenance.evidence_ids, extraEvidence)
-      : NO_IDS;
-    const semantic = prepared ? prepared.seal() : this.joinIds([origin.id], semanticInput);
-    if (prepared) this.guard(prepared.bytes);
-    this.metadata(
-      64 +
-        (prepared?.characters ?? this.referenceLength(semantic)) +
-        this.referenceLength(origin.provenance.instruction_ids) +
-        this.referenceLength(evidence) +
-        origin.provenance.ranges.length * 160,
-    );
+      ? this.union(this.proofs, this.proofUnions, origin.provenance.evidence_ids, extraEvidence)
+      : NO_REFS;
+    if (evidence.length > 1000) this.fail('Pseudocode mapping evidence limit exceeded');
+    const semantic = prepared ? prepared.seal() : this.union(this.ids, this.idUnions, [origin.id], semanticInput);
+    const instructions = this.idRefs(origin.provenance.instruction_ids);
+    const ranges = this.rangeRefs(origin.provenance.ranges);
+    this.metadata(32 + REF_BYTES * (semantic.length + instructions.length + ranges.length + evidence.length));
     this.mappings.push({
-      statement_id: origin.id,
       start,
       end,
-      semantic_ids: semantic,
-      instruction_ids: origin.provenance.instruction_ids,
-      ranges: origin.provenance.ranges,
-      evidence_ids: evidence,
+      semantic_refs: semantic,
+      instruction_refs: instructions,
+      range_refs: ranges,
+      evidence_refs: evidence,
     });
-    if (evidence.length > 1000) this.fail('Pseudocode mapping evidence limit exceeded');
   }
 
   /** IDs/provenance are immutable during one render. Reuse empty-right unions
-   * and lengths instead of repeatedly allocating concatenated metadata strings. */
-  private joinIds(a: readonly string[], b: readonly string[]): readonly string[] {
+   * instead of re-interning the same provenance list for every mapping. */
+  private union(
+    table: InternTable<string>,
+    cache: WeakMap<readonly string[], readonly number[]>,
+    a: readonly string[],
+    b: readonly string[],
+  ): readonly number[] {
     if (a.length + b.length > 10000) this.fail('Pseudocode mapping reference limit exceeded');
     if (b.length === 0) {
-      const cached = this.idUnions.get(a);
+      const cached = cache.get(a);
       if (cached) { this.context.checkpoint(0); return cached; }
     }
-    const ids = new Set<string>();
+    const refs = new Set<number>();
     for (let index = 0; index < a.length + b.length; index++) {
       this.context.checkpoint(1);
-      ids.add(index < a.length ? a[index]! : b[index - a.length]!);
+      const id = index < a.length ? a[index]! : b[index - a.length]!;
+      refs.add(table.add(id, id));
     }
-    const result = [...ids];
-    if (b.length === 0) this.idUnions.set(a, result);
+    const result = Object.freeze([...refs]);
+    if (b.length === 0) cache.set(a, result);
     return result;
   }
 
-  private referenceLength(ids: readonly string[]): number {
-    const cached = this.referenceLengths.get(ids);
-    if (cached) {
-      this.context.checkpoint(0);
-      this.guard(cached.bytes);
-      return cached.characters;
-    }
-    let characters = 0, bytes = 0;
-    for (const id of ids) {
+  private refs<T>(
+    table: InternTable<T>,
+    cache: WeakMap<readonly T[], readonly number[]> | undefined,
+    items: readonly T[],
+    key: (item: T) => string,
+  ): readonly number[] {
+    const cached = cache?.get(items);
+    if (cached) { this.context.checkpoint(0); return cached; }
+    const result: number[] = [];
+    for (const item of items) {
       this.context.checkpoint(1);
-      characters += id.length;
-      bytes += Buffer.byteLength(id);
-      this.guard(bytes);
+      result.push(table.add(key(item), item));
     }
-    this.referenceLengths.set(ids, { characters, bytes });
-    return characters;
+    Object.freeze(result);
+    cache?.set(items, result);
+    return result;
   }
 
   text(): string {

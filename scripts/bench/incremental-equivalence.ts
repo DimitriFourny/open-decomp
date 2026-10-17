@@ -5,9 +5,10 @@ import {
   type CanonicalValue, type WireEvidence,
 } from '../../src/core/index.js';
 import { analysisReadsetSchema } from '../../src/project/cache/dependencies.js';
+import { ANALYSIS_ARTIFACT_VERSION } from '../../src/project/cache/model.js';
 
 const payloadSchema = z.strictObject({
-  format_version: z.literal(1), identity: cacheIdentitySchema,
+  format_version: z.literal(ANALYSIS_ARTIFACT_VERSION), identity: cacheIdentitySchema,
   result: functionDecompileResultSchema,
   catalog: z.strictObject({ subjects: z.array(z.json()), types: z.array(z.json()), evidence: z.array(evidenceSchema) }),
   dependencies: analysisReadsetSchema.optional(),
@@ -66,6 +67,9 @@ export function canonicalIncrementalComputation(payload: IncrementalWirePayload)
       assert.ok(Array.isArray(value));
       return value.map((id) => { assert.equal(typeof id, 'string'); return fingerprint(proofValue(id)); }).sort();
     }
+    // The emission proof table is cited by index, so its order is preserved.
+    if (field === 'evidence' && Array.isArray(value) && value.every((id) => typeof id === 'string'))
+      return value.map((id: string) => fingerprint(proofValue(id)));
     if (Array.isArray(value)) return value.map((item) => normalize(item));
     if (value !== null && typeof value === 'object') {
       const result: { [key: string]: CanonicalValue } = {};

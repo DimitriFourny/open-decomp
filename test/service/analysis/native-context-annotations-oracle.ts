@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { entityIdentity, newIdentity, type ToolResult, type WireEmission } from '../../../src/core/index.js';
+import { entityIdentity, expandEmission, newIdentity, type ToolResult, type WireEmission } from '../../../src/core/index.js';
 import { QueryService } from '../../../src/service/queries/index.js';
 
 // Actual public operations, not a repository test runner. The image is never executed.
@@ -28,11 +28,11 @@ try {
   const decompile = async (function_id: string) => {
     const result = await service.execute('function_decompile', { project_id, revision, function_id, wait: true });
     assert.ok('data' in result && result.data.delivery === 'inline', JSON.stringify(result));
-    assert.ok(result.data.emission.inferences);
+    assert.ok(expandEmission(result.data.emission).inferences);
     return { result, emission: result.data.emission };
   };
   const initialCallee = await decompile(callee.id), initialCaller = await decompile(caller.id);
-  const parameter = initialCallee.emission.inferences!.find((inference) =>
+  const parameter = expandEmission(initialCallee.emission).inferences!.find((inference) =>
     inference.details.kind === 'parameter' && inference.details.ordinal === 0);
   assert.ok(parameter && parameter.details.kind === 'parameter');
   const subject_id = parameter.details.value_ids[0]!;

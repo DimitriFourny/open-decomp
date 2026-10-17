@@ -103,9 +103,11 @@ export class State {
       this.diagnostics.push({ code, severity: 'warning', message, evidence_ids });
   }
 
-  optional(label: string, parse: () => void): void {
+  /** Returns false when the optional metadata was malformed and only a diagnostic remains. */
+  optional(label: string, parse: () => void): boolean {
     try {
       parse();
+      return true;
     } catch (error) {
       // Cancellation/resource errors from the host must never become optional metadata warnings.
       if (
@@ -115,6 +117,7 @@ export class State {
       )
         throw error;
       this.warn(`${label}: ${error.message}`, error.diagnostic.code);
+      return false;
     }
   }
 

@@ -112,9 +112,18 @@ Choose exactly one selector: `{name}`, `{id}`, or `{address: {space, value}}`. O
 
 The method waits for the operation and assembles artifact-backed output automatically. It validates page metadata, size, SHA-256 and the stored result's request binding. The returned inline result retains the **semantic** state, diagnostics, coverage and source mappings. Consequently, a returned object can exceed `budget.output_bytes`: that field bounds individual service delivery, not the assembled artifact. The existing 16 MiB analysis-artifact limit still applies. Output is C-like or Python-like **pseudocode**, not recovered original source or necessarily executable code.
 
+`result.data.emission` is the canonical compact form: each entity identity, proof identity and binary range is stated once in `emission.ids`, `emission.evidence` and `emission.ranges`, and mappings, inferences and requirements cite those tables by `*_refs` index (`semantic_refs[0]` is a mapping's statement). Call `expandEmission(result.data.emission)` from `open-decomp/api` when you want the string-identity view with `statement_id`, `semantic_ids`, `subject_ids`, `instruction_ids`, `evidence_ids` and `ranges`; it adds, drops or reorders nothing.
+
+```ts
+import { expandEmission } from 'open-decomp/api';
+if ('data' in result && result.data.delivery === 'inline')
+  for (const mapping of expandEmission(result.data.emission).mappings)
+    console.log(mapping.statement_id, mapping.start, mapping.end, mapping.evidence_ids);
+```
+
 Do not equate a resolved promise with complete analysis. `complete`, `partial`, `failed`, `unsupported` and `cancelled` remain distinct shared result states. Partial results retain their reason; unresolved machine semantics are not suppressed. Check for `data` before reading pseudocode.
 
-Selection considers currently indexed functions. A single known match can be analyzed even when whole-image discovery is incomplete. Multiple matches raise `FunctionSelectionError` with `reason: 'ambiguous'` and `candidates`. No matches produce `not_found` only for an exhausted complete index; otherwise the reason is `incomplete`. These errors do not prove anything about undiscovered functions.
+Selection by `{id}` or `{address}` accepts the single indexed function. Selection by `{name}` matches the native name or its C spelling (Mach-O symbols carry one leading underscore: `sqlite3_limit` and `_sqlite3_limit` both name `_sqlite3_limit`). When the function index is complete, one match resolves, several raise `FunctionSelectionError` with `reason: 'ambiguous'` and `candidates`, and none is `not_found`. When the function index is partial, a name is resolved only through the complete native symbol and export tables (the `Native symbol and export tables` format capability, which unrelated partial metadata such as DWARF CFI does not degrade): exactly one defining address with exactly one indexed function there resolves; two or more defining addresses, or a second indexed function carrying the name, are `ambiguous`; anything else, including a name known only from the partial index, or a symbol whose function is not yet indexed, is `incomplete` with the candidates found. These errors do not prove anything about undiscovered functions.
 
 Opening failures that return a service envelope throw `BinaryOpenError`, carrying `result`, `projectPath` and `reused`. Filesystem, invalid-argument and integrity errors can throw directly. Failed/unsupported function-resolution queries throw their diagnostic as `OperationError`; ordinary decompilation operation failures remain result envelopes. Cancellation can reject during local hashing, selection or artifact assembly, or return an operation's cancelled state; always close in `finally`.
 
@@ -122,4 +131,4 @@ Opening failures that return a service envelope throw `BinaryOpenError`, carryin
 
 ## Advanced integration
 
-`ToolInput`, `ToolResult`, `WireJob`, `QueryCallOptions` and the task-oriented API's option/query/selector types are exported from `open-decomp/api`, with TypeScript declarations. The existing root `open-decomp` entry exposes lower-level `QueryService`, schemas and engine components; use it when you need annotations, memory reads, durable asynchronous jobs or direct project ownership. See the [core contracts](CORE.md). Remote clients should use MCP rather than treating the local API as an authenticated network service.
+`ToolInput`, `ToolResult`, `WireJob`, `QueryCallOptions`, `expandEmission` with its `Expanded*` view types, and the task-oriented API's option/query/selector types are exported from `open-decomp/api`, with TypeScript declarations. The existing root `open-decomp` entry exposes lower-level `QueryService`, schemas and engine components; use it when you need annotations, memory reads, durable asynchronous jobs or direct project ownership. See the [core contracts](CORE.md). Remote clients should use MCP rather than treating the local API as an authenticated network service.

@@ -393,10 +393,10 @@ async function boundedAnalysis(
     );
     const data = resultData(payload.result);
     assert.ok(disassembly.view === 'disassembly' && data.delivery === 'inline');
-    for (const instruction of disassembly.items)
-      assert.ok(
-        data.emission.mappings.some((mapping) => mapping.instruction_ids.includes(instruction.id)),
-      );
+    for (const instruction of disassembly.items) {
+      const ref = data.emission.ids.indexOf(instruction.id);
+      assert.ok(data.emission.mappings.some((mapping) => mapping.instruction_refs.includes(ref)));
+    }
     const cached = await callMcpTool(client, 'function_decompile', {
       ...scope,
       function_id: fn.id,
@@ -488,17 +488,18 @@ async function unsupportedEffects(
     assert.ok(payload.result.diagnostics.some((item) => item.code === 'unavailable_semantics'));
     const data = resultData(payload.result);
     assert.ok(data.delivery === 'inline');
+    const instructionRef = data.emission.ids.indexOf(instruction.id);
     assert.ok(
       data.emission.mappings.some(
         (mapping) =>
-          mapping.instruction_ids.includes(instruction.id) &&
-          mapping.ranges.some(
-            (range) =>
-              range.start.image_id === image.id &&
+          mapping.instruction_refs.includes(instructionRef) &&
+          mapping.range_refs.some((ref) => {
+            const range = data.emission.ranges[ref]!;
+            return range.start.image_id === image.id &&
               range.start.space === instruction.bytes.start.space &&
               range.start.value === instruction.bytes.start.value &&
-              range.size === instruction.bytes.size,
-          ),
+              range.size === instruction.bytes.size;
+          }),
       ),
       'The unsupported instruction must retain its exact original byte provenance',
     );

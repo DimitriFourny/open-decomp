@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   createOperationContext,
+  expandEmission,
   decodeEmission,
   encodeEmission,
   type AbiProfile,
@@ -116,7 +117,7 @@ function check(
     }
     for (const block of ir.blocks)
       for (const node of [...block.instructions, block.terminator]) {
-        const mapped = output.emission.mappings.filter(
+        const mapped = expandEmission(output.emission).mappings.filter(
           (mapping) => mapping.statement_id === node.id,
         );
         const instructions = new Set(mapped.flatMap((mapping) => mapping.instruction_ids));

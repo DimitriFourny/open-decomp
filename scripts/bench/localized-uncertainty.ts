@@ -64,7 +64,7 @@ for (const text of [
   ['def fn():', '    if requirement_predicate("r", "s", "e", 0x0, 0x1):',
     '        return 0x1', '    else:', '        return 0x2', ''].join('\n'),
 ]) {
-  const observed = execute({ text, mappings: [] }, new Map(), new Map(), 0n, new Map(), new Map(), new Map(),
+  const observed = execute({ text, ids: [], mappings: [] }, new Map(), new Map(), 0n, new Map(), new Map(), new Map(),
     [{ requirement_id: 'r', site_id: 's', state_epoch: 'e' }]);
   assert.deepEqual(observed.values, [2n]); observations++;
 }
@@ -81,11 +81,12 @@ try {
         for (const span of requirement.output_spans)
           assert.ok(emission.mappings.some((mapping) => mapping.start === span.start && mapping.end === span.end),
             'Every requirement span resolves to an exact original mapping');
+        // Sites and mappings cite the same emission ids table, so refs compare exactly.
         for (const site of requirement.sites) {
-          assert.ok(emission.mappings.some((mapping) => mapping.statement_id === site.subject_ids[0]),
+          assert.ok(emission.mappings.some((mapping) => mapping.semantic_refs[0] === site.subject_refs[0]),
             'Every site anchors an actual emitted original statement/control');
-          for (const instruction of site.instruction_ids)
-            assert.ok(emission.mappings.some((mapping) => mapping.instruction_ids.includes(instruction)),
+          for (const instruction of site.instruction_refs)
+            assert.ok(emission.mappings.some((mapping) => mapping.instruction_refs.includes(instruction)),
               'Every affected machine instruction remains accessible in original mappings');
         }
       }
@@ -100,7 +101,7 @@ try {
     const unknown = run(mixed, [pointer, 7n, 1n]);
     assert.equal(unknown.exit, 'unknown'); assert.equal(word(unknown.memory), 10n);
     assert.deepEqual(unknown.events, ['store', 'unknown']);
-    assert.ok(mixed.requirements?.some((item) => item.kind === 'unresolved' && item.instruction_ids.length > 0)); observations++;
+    assert.ok(mixed.requirements?.some((item) => item.kind === 'unresolved' && item.instruction_refs.length > 0)); observations++;
 
     const arithmetic = await get('fp');
     const requirements = arithmetic.requirements!.filter((item) => item.kind === 'fp_environment');

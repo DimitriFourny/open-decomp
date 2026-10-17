@@ -1,3 +1,4 @@
+import { cSourceName } from '../symbols/c-names.js';
 import {
   entityIdentity,
   fingerprint,
@@ -178,10 +179,7 @@ export function recoverLibraryContracts(
   for (const imported of image.imports) {
     context.checkpoint(1);
     if (imported.original_name === null || imported.library === null) continue;
-    const name =
-      image.target.format === 'macho' && imported.original_name.startsWith('_')
-        ? imported.original_name.slice(1)
-        : imported.original_name;
+    const name = cSourceName(image.target.format, imported.original_name);
     const declaration = Object.hasOwn(catalog, name) ? catalog[name] : undefined;
     if (!declaration || !identifiesLibrary(imported.library, declaration, image.target.format))
       continue;

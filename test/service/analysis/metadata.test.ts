@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   createOperationContext,
+  expandEmission,
   entityIdentity,
   newIdentity,
   type AnnotationEdit,
@@ -124,7 +125,7 @@ test(
       'embedded bytes do not acquire a fabricated external artifact',
     );
     assert.ok(
-      result.data.emission.mappings.some(
+      expandEmission(result.data.emission).mappings.some(
         (mapping) => mapping.semantic_ids.includes(fn.id) && mapping.evidence_ids.length,
       ),
     );
@@ -162,7 +163,7 @@ for (const fixture of [
       const call = baseline.catalog.subjects.find(
         (subject) =>
           subject.kind === 'call' &&
-          baseline.result.data.emission.mappings.some(
+          expandEmission(baseline.result.data.emission).mappings.some(
             (mapping) =>
               mapping.statement_id === subject.id &&
               mapping.instruction_ids.includes(reference.from_instruction!),
@@ -225,7 +226,7 @@ for (const fixture of [
         ),
       );
       assert.ok(
-        changed.result.data.emission.mappings.some(
+        expandEmission(changed.result.data.emission).mappings.some(
           (mapping) =>
             mapping.semantic_ids.includes(call.id) && mapping.evidence_ids.includes(proof.id),
         ),

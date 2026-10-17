@@ -344,6 +344,9 @@ export const referenceSchema = z.strictObject({
 export type FunctionRecord = Internal<z.infer<typeof functionSchema>>;
 export type StringRecord = Internal<z.infer<typeof stringRecordSchema>>;
 export type ReferenceRecord = Internal<z.infer<typeof referenceSchema>>;
+/** A loader that emits this format capability reports the completeness of its native symbol and
+ * export tables independently of unrelated metadata (unwind, CFI, relocations). */
+export const NATIVE_SYMBOL_TABLES_FEATURE = 'Native symbol and export tables';
 export const annotationValueSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('name'), value: z.string().min(1).max(1024) }),
   z.strictObject({ kind: z.literal('note'), value: z.string().min(1).max(65536) }),

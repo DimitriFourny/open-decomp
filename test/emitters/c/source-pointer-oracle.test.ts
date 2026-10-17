@@ -26,10 +26,11 @@ const programs = {
 } as const;
 
 function emission(text: string) {
-  return { text, mappings: ['address', 'input'].map((name) => {
+  const ids = ['address', 'input'];
+  return { text, ids, mappings: ids.map((name, ref) => {
     const start = text.indexOf(name);
     const annotation = text.startsWith('def ') ? ': uint64_t'.length : 0;
-    return { start, end: start + name.length + annotation, statement_id: name, semantic_ids: [name] };
+    return { start, end: start + name.length + annotation, semantic_refs: [ref] };
   }) };
 }
 
@@ -54,5 +55,5 @@ for (const language of ['c-like', 'python-like'] as const)
     const text = language === 'c-like'
       ? 'uint64_t pointer_bits(void) { type_3* uninitialized; return ((uintptr_t)(uninitialized)); }'
       : 'def pointer_bits() -> uint64_t:\n  uninitialized: pointer[type_3]\n  return uint64(uninitialized)\n';
-    assert.throws(() => execute({ text, mappings: [] }), /Undeclared\/uninitialized emitted value/);
+    assert.throws(() => execute({ text, ids: [], mappings: [] }), /Undeclared\/uninitialized emitted value/);
   });

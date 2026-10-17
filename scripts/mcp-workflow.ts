@@ -511,10 +511,16 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
         );
         assert.ok(reference?.from_function && reference.from_instruction);
         assert.ok(reference.evidence_ids.length > 0);
-        assert.ok(
-          reference.evidence_ids.every((id) =>
-            references.evidence.some((proof) => proof.id === id),
-          ),
+        assert.deepEqual(references.evidence, [], 'navigation delivers evidence by reference');
+        const proofs = resultData(
+          await callMcpTool(client, 'evidence_get', {
+            ...scope(),
+            evidence_ids: reference.evidence_ids,
+          }),
+        );
+        assert.deepEqual(
+          proofs.items.map((proof) => proof.id).toSorted(),
+          [...new Set(reference.evidence_ids)].toSorted(),
         );
         const metadata = resultData(
           await callMcpTool(client, 'function_get', {
@@ -642,15 +648,13 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
           );
         }
         for (const instruction of arithmetic.items) {
+          const ref = baselineData.emission.ids.indexOf(instruction.id);
           assert.ok(
-            baselineData.emission.mappings.some((mapping) =>
-              mapping.instruction_ids.includes(instruction.id),
-            ),
+            baselineData.emission.mappings.some((mapping) => mapping.instruction_refs.includes(ref)),
           );
         }
-        for (const mapping of baselineData.emission.mappings) {
-          assert.ok(mapping.evidence_ids.every((id) => proofIds.has(id)));
-        }
+        // Every cited proof (mapping, inference or requirement) is stated once in the table.
+        assert.ok(baselineData.emission.evidence.every((id) => proofIds.has(id)));
         await assert.rejects(
           client.readResource({
             uri: `open-decomp://artifact/${handle.project_id}/${handle.revision}/${handle.id}?offset=0x0&length=4093&extra=forbidden`,
@@ -820,7 +824,7 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
           assert.ok(data.delivery === 'inline');
           assert.equal(data.emission.language, emitter);
           assert.equal(data.signature?.return_type, type_id);
-          assert.ok(data.emission.mappings.some((mapping) => mapping.instruction_ids.length > 0));
+          assert.ok(data.emission.mappings.some((mapping) => mapping.instruction_refs.length > 0));
           const cachedEmission: ToolResult<'function_decompile'> = await callMcpTool(
             client,
             'function_decompile',

@@ -39,11 +39,11 @@ type Op =
 
 interface EmittedText {
   readonly text: string;
+  readonly ids: readonly string[];
   readonly mappings: readonly {
     readonly start: number;
     readonly end: number;
-    readonly statement_id: string;
-    readonly semantic_ids: readonly string[];
+    readonly semantic_refs: readonly number[];
   }[];
 }
 export interface EmittedFormal {
@@ -780,19 +780,18 @@ export function emittedFormals(
     if (!python && !declaration.endsWith(',') &&
         !/^\s*[,)]/.test(emission.text.slice(mapping.end, headerEnd)))
       continue;
+    // semantic_refs[0] is the mapped statement; all cite the emission's ids table.
+    const semantic = mapping.semantic_refs.map((ref) => emission.ids[ref]!);
     const name = match[1]!, previous = declarations.get(name);
     if (previous) {
       assert.ok(mapping.start < previous.end && mapping.end > previous.start,
         `Duplicate formal declaration ${name}`);
       declarations.set(name, {
-        formal: { ...previous.formal, semantic_ids: [...new Set([
-          ...previous.formal.semantic_ids, mapping.statement_id, ...mapping.semantic_ids,
-        ])] },
+        formal: { ...previous.formal, semantic_ids: [...new Set([...previous.formal.semantic_ids, ...semantic])] },
         start: Math.min(previous.start, mapping.start), end: Math.max(previous.end, mapping.end),
       });
     } else declarations.set(name, {
-      formal: { name, statement_id: mapping.statement_id,
-        semantic_ids: [...new Set([mapping.statement_id, ...mapping.semantic_ids])] },
+      formal: { name, statement_id: semantic[0]!, semantic_ids: [...new Set(semantic)] },
       start: mapping.start, end: mapping.end,
     });
   }

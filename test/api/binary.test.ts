@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { BinaryOpenError, FunctionSelectionError, openBinary } from '../../src/api/index.js';
 import type { BinarySession, ToolResult } from '../../src/api/index.js';
+import { manyFunctions } from '../cli/many-functions.js';
 import { SqliteProjectStore } from '../../src/project/store/index.js';
 
 async function setup(t: TestContext) {
@@ -143,6 +144,55 @@ test(
     );
     await session.close();
     await assert.rejects(session.findFunctions(), { code: 'invalid_input' });
+  },
+);
+
+test(
+  'C names resolve through the authoritative symbol table under a partial function index, and ambiguity stays honest',
+  { timeout: 120000 },
+  async (t) => {
+    const { root, sessions } = await setup(t);
+    const binary = await manyFunctions(root, '_');
+    const partial = await openBinary(binary, {
+      cachePath: join(root, 'partial'),
+      budget: { instructions: 1 },
+    });
+    sessions.push(partial);
+    const native = await partial.findFunctions({
+      query: { text: '_task_010', match: 'exact', case_sensitive: true },
+    });
+    assert.ok('data' in native && native.data.page.index_state === 'partial');
+    assert.equal(native.data.items.length, 1);
+    const selected = await partial.decompile({ name: 'task_010' });
+    assert.equal(emission(selected).function_id, native.data.items[0]!.id);
+    assert.equal(
+      emission(await partial.decompile({ name: '_task_010' })).function_id,
+      native.data.items[0]!.id,
+    );
+    await assert.rejects(
+      partial.decompile({ name: 'duplicate' }),
+      (error) =>
+        error instanceof FunctionSelectionError &&
+        error.reason === 'ambiguous' &&
+        error.candidates.length === 2,
+    );
+    await assert.rejects(
+      partial.decompile({ name: 'task_absent' }),
+      (error) =>
+        error instanceof FunctionSelectionError &&
+        error.reason === 'incomplete' &&
+        error.candidates.length === 0,
+    );
+    const complete = await openBinary(binary, { cachePath: join(root, 'complete') });
+    sessions.push(complete);
+    assert.equal(
+      emission(await complete.decompile({ name: 'task_010' })).function_id,
+      native.data.items[0]!.id,
+    );
+    await assert.rejects(
+      complete.decompile({ name: 'task_absent' }),
+      (error) => error instanceof FunctionSelectionError && error.reason === 'not_found',
+    );
   },
 );
 

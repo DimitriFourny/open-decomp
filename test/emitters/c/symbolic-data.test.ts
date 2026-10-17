@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AddressMap, createOperationContext } from '../../../src/core/index.js';
+import { AddressMap, createOperationContext, expandEmission } from '../../../src/core/index.js';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { recoverDataAddress } from '../../../src/analysis/strings/source-data.js';
@@ -47,7 +47,7 @@ for (const language of ['c-like', 'python-like'] as const)
         }, language);
         assert.match(output.emission.text, /data_address\("lookup_/);
         assert.doesNotMatch(output.emission.text, /expand 32-byte k/);
-        assert.ok(output.emission.mappings.some((mapping) =>
+        assert.ok(expandEmission(output.emission).mappings.some((mapping) =>
           mapping.evidence_ids.includes('data-table-origin')));
         for (const offset of [0n, 15n, 127n, 255n, 256n]) {
           const memory = new Map<bigint, number>();

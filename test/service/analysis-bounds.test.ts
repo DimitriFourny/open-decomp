@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { type Budget, type ResultEnvelope, type ToolResult } from '../../src/core/index.js';
+import { expandEmission, type Budget, type ResultEnvelope, type ToolResult } from '../../src/core/index.js';
 import { QueryService } from '../../src/service/queries/index.js';
 import { SqliteProjectStore } from '../../src/project/store/index.js';
 
@@ -115,7 +115,7 @@ for (const fixture of [
       );
       for (const instruction of disassembly.items)
         assert.ok(
-          payload.emission.mappings.some((mapping) =>
+          expandEmission(payload.emission).mappings.some((mapping) =>
             mapping.instruction_ids.includes(instruction.id),
           ),
         );

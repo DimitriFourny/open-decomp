@@ -127,16 +127,17 @@ ABI argument lists distinguish a known prefix from a complete list of actual arg
 
 ## Tool schemas and application API
 
-All 13 MCP tools expose concrete input/output JSON Schemas, structured content and readable JSON text. Requests reject extra keys. Machine integers/addresses are unsigned hexadecimal strings, not JSON numbers; an address includes `image_id`, `space: "va" | "rva" | "file"` and `value`. `file` is original-container offset, including a selected fat-slice offset; `va` is static/unslid and `rva` is image-relative. Ranges are half-open. Memory views distinguish real bytes, zero-fill and unmapped holes.
+All 14 MCP tools expose concrete input/output JSON Schemas and structured content with a text block (for navigation tools a lossless compact projection decoded by `decodeNavigationText`; see [CORE.md](CORE.md)). Requests reject extra keys. Machine integers/addresses are unsigned hexadecimal strings, not JSON numbers; an address includes `image_id`, `space: "va" | "rva" | "file"` and `value`. `file` is original-container offset, including a selected fat-slice offset; `va` is static/unslid and `rva` is image-relative. Ranges are half-open. Memory views distinguish real bytes, zero-fill and unmapped holes.
 
 | Tool                                             | Main purpose                                                                                      |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
 | `project_open`, `project_close`                  | Import/resume, owner/job close policy and persistence.                                            |
 | `binary_info`                                    | Summary, headers, sections, mappings, entries, relocations, hints and capabilities.               |
-| `symbols_find`, `strings_find`, `functions_find` | Snapshot-bound filtered/paged navigation. Matching is exact/prefix/contains, not arbitrary regex. |
+| `symbols_find`, `strings_find`, `functions_find` | Snapshot-bound filtered/paged navigation. Matching is exact/prefix/contains, not arbitrary regex; Mach-O names also match their C spelling (leading underscore removed). |
 | `function_get`                                   | Metadata, structured disassembly with gaps, or CFG.                                               |
 | `function_decompile`                             | Bounded homemade analysis and C-like or Python-like output with source/evidence mappings.         |
 | `xrefs_get`                                      | Incoming/outgoing references, including unresolved edges.                                         |
+| `evidence_get`                                   | Resolve evidence IDs delivered by navigation results to records, optionally with ancestors.       |
 | `memory_read`                                    | Bounded byte/integer/float/pointer interpretations; machine bits remain hexadecimal.              |
 | `annotations_apply`                              | Atomic revision-checked assertion edits.                                                          |
 | `analysis_status`, `analysis_cancel`             | Durable job inspection and cancellation.                                                          |

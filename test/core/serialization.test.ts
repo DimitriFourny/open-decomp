@@ -11,6 +11,7 @@ import {
   encodeArtifact,
   decodeEmission,
   encodeEmission,
+  expandEmission,
   decodeJob,
   encodeJob,
 } from '../../src/core/serialization.js';
@@ -83,22 +84,22 @@ test('artifact, job and emitted source-map codecs round-trip full-width metadata
     text: 'return;',
     span_unit: 'utf16',
     reconstruction: 'pseudocode',
+    ids: [entity],
+    evidence: [],
+    ranges: [{ start: { image_id: image, space: 'va', value: '0xfffffffffffffff0' }, size: '0x4' }],
     helpers: [],
+    review: { operation: 'function_get', view: 'metadata', function_id: entity },
     mappings: [
-      {
-        statement_id: entity,
-        start: 0,
-        end: 7,
-        semantic_ids: [entity],
-        instruction_ids: [entity],
-        ranges: [
-          { start: { image_id: image, space: 'va', value: '0xfffffffffffffff0' }, size: '0x4' },
-        ],
-        evidence_ids: [],
-      },
+      { start: 0, end: 7, semantic_refs: [0], instruction_refs: [0], range_refs: [0], evidence_refs: [] },
     ],
   });
   assert.deepEqual(encodeEmission(decodeEmission(emission)), emission);
+  assert.equal(decodeEmission(emission).ranges[0]!.start.value, 0xfffffffffffffff0n);
+  assert.deepEqual(expandEmission(emission).mappings, [{
+    statement_id: entity, start: 0, end: 7, semantic_ids: [entity], instruction_ids: [entity],
+    ranges: emission.ranges, evidence_ids: [],
+  }]);
+  assert.throws(() => expandEmission({ ...emission, mappings: [{ ...emission.mappings[0]!, range_refs: [1] }] }), RangeError);
   const job = jobSchema.parse({
     id: `job_${'1'.repeat(64)}`,
     project_id: project,

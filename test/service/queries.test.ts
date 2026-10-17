@@ -123,8 +123,19 @@ for (const fixture of [
         (item) => item.kind === 'address' && item.from_function !== null,
       );
       assert.ok(reference?.from_function && reference.from_instruction);
-      assert.ok(
-        reference.evidence_ids.every((id) => xrefs.evidence.some((evidence) => evidence.id === id)),
+      assert.deepEqual(xrefs.evidence, [], 'navigation delivers evidence by reference');
+      assert.equal(data(xrefs).page.evidence_delivery, 'by_reference');
+      assert.ok(reference.evidence_ids.length > 0);
+      const resolved = data(
+        await service.execute('evidence_get', {
+          project_id: scope.project_id,
+          revision: scope.revision,
+          evidence_ids: reference.evidence_ids,
+        }),
+      );
+      assert.deepEqual(
+        resolved.items.map((item) => item.id).toSorted(),
+        [...new Set(reference.evidence_ids)].toSorted(),
       );
       const metadata = data(
         await service.execute('function_get', {
@@ -291,6 +302,124 @@ for (const fixture of [
       if (old.state === 'failed') assert.equal(old.error.code, 'not_found');
     },
   );
+
+for (const fixture of [
+  { name: 'macho-arm64-symbols', native: '_fixture_arithmetic', underscore: true },
+  { name: 'corpus-symbols.dll', native: 'fixture_arithmetic', underscore: false },
+])
+  test(
+    `real child ${fixture.name}: name queries apply the platform C-symbol convention only to symbol names`,
+    { timeout: 60000 },
+    async (t) => {
+      const { root, service } = await setup(t);
+      const opened = await service.execute('project_open', {
+        wait: true,
+        source: {
+          kind: 'import',
+          input_path: join(fixtures, fixture.name),
+          project_path: join(root, 'project'),
+        },
+      });
+      const image = openedImage(opened);
+      const scope = { project_id: opened.project_id!, revision: opened.revision!, image_id: image.id };
+      const exact = (text: string) => ({ text, match: 'exact' as const, case_sensitive: true });
+      const find = async (text: string) =>
+        data(await service.execute('functions_find', { ...scope, query: exact(text) })).items;
+      const symbols = async (text: string) =>
+        data(await service.execute('symbols_find', { ...scope, kinds: ['symbol'], query: exact(text) }))
+          .items;
+      assert.equal((await find(fixture.native)).length, 1);
+      assert.equal((await symbols(fixture.native)).length, 1);
+      // The C spelling is the native spelling minus the Mach-O underscore; no other format has one.
+      assert.equal((await find('fixture_arithmetic')).length, 1);
+      assert.equal((await symbols('fixture_arithmetic')).length, 1);
+      assert.equal((await find('_fixture_arithmetic')).length, fixture.underscore ? 1 : 0);
+      assert.equal((await find('__fixture_arithmetic')).length, 0);
+      assert.equal(
+        data(
+          await service.execute('strings_find', {
+            ...scope,
+            query: { text: '_', match: 'exact', case_sensitive: true },
+          }),
+        ).items.length,
+        0,
+      );
+    },
+  );
+
+test(
+  'navigation delivers evidence by ID and evidence_get resolves direct records, closures and pages',
+  { timeout: 60000 },
+  async (t) => {
+    const { root, service } = await setup(t);
+    const opened = await service.execute('project_open', {
+      wait: true,
+      source: {
+        kind: 'import',
+        input_path: join(fixtures, 'macho-arm64-symbols'),
+        project_path: join(root, 'project'),
+      },
+    });
+    const image = openedImage(opened);
+    const base = { project_id: opened.project_id!, revision: opened.revision! };
+    const functions = await service.execute('functions_find', { ...base, image_id: image.id });
+    assert.deepEqual(functions.evidence, []);
+    const found = data(functions);
+    assert.equal(found.page.evidence_delivery, 'by_reference');
+    const fn = found.items.find((item) => item.evidence_ids.length > 0)!;
+    assert.ok(fn);
+    const direct = data(
+      await service.execute('evidence_get', { ...base, evidence_ids: fn.evidence_ids }),
+    );
+    assert.deepEqual(
+      direct.items.map((item) => item.id).toSorted(),
+      [...new Set(fn.evidence_ids)].toSorted(),
+    );
+    const closure = async (limit: number) => {
+      const ids: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = data(
+          await service.execute('evidence_get', {
+            ...base,
+            evidence_ids: fn.evidence_ids,
+            derivation: 'closure',
+            page: { limit, ...(cursor === undefined ? {} : { cursor }) },
+          }),
+        );
+        ids.push(...page.items.map((item) => item.id));
+        cursor = page.page.next_cursor ?? undefined;
+      } while (cursor !== undefined);
+      return ids;
+    };
+    const whole = await closure(1000),
+      paged = await closure(1);
+    assert.deepEqual(paged, whole);
+    assert.equal(new Set(whole).size, whole.length);
+    assert.ok(whole.length > direct.items.length, 'closure reaches derived records');
+    const all = data(
+      await service.execute('evidence_get', {
+        ...base,
+        evidence_ids: fn.evidence_ids,
+        derivation: 'closure',
+      }),
+    );
+    for (const record of all.items)
+      for (const id of [...record.derived_from, ...record.conflicts_with])
+        assert.ok(whole.includes(id), 'closure is transitively complete');
+    const absent = await service.execute('evidence_get', {
+      ...base,
+      evidence_ids: [fn.evidence_ids[0]!, `evidence_${'0'.repeat(64)}`],
+    });
+    assert.ok(absent.state === 'failed' && absent.error.code === 'not_found');
+    const metadata = data(await service.execute('function_get', { ...base, function_id: fn.id }));
+    assert.ok(metadata.view === 'metadata' && metadata.evidence_delivery === 'by_reference');
+    const cfg = data(
+      await service.execute('function_get', { ...base, function_id: fn.id, view: 'cfg' }),
+    );
+    assert.ok(cfg.view === 'cfg' && cfg.page.evidence_delivery === 'inline');
+  },
+);
 
 for (const fixture of [
   { name: 'macho-arm64-symbols', imported: '_puts', instruction: 0x100000aa8n },

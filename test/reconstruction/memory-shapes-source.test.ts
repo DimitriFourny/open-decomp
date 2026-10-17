@@ -32,7 +32,7 @@ function inputs(emission: WireEmission, values: readonly bigint[]): Map<string, 
 function firstFormalDeclaration(emission: WireEmission): string {
   const formal = emittedFormals(emission).find((formal) => formal.name !== 'entry_sp');
   assert.ok(formal);
-  const mapping = emission.mappings.find((mapping) => mapping.statement_id === formal.statement_id);
+  const mapping = emission.mappings.find((mapping) => emission.ids[mapping.semantic_refs[0]!] === formal.statement_id);
   assert.ok(mapping);
   return emission.text.slice(mapping.start, mapping.end);
 }

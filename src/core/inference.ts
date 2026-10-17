@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { annotationIdSchema, entityIdSchema, evidenceRefsSchema, imageIdSchema, rangeSchema, type Internal } from './primitives.js';
+import type { AddressRange } from './addresses.js';
+import { annotationIdSchema, entityIdSchema, imageIdSchema, rangeSchema, type Internal } from './primitives.js';
 
 /** Presentation confidence is not semantic coverage or a translation proof. */
 export const inferenceStatusSchema = z.enum([
@@ -10,14 +11,18 @@ export const outputSpanSchema = z.strictObject({
   end: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
 }).refine((span) => span.end > span.start, 'Output spans must be nonempty UTF-16 intervals');
 const ids = z.array(entityIdSchema).max(10000);
+/** Index into one emission's interned `ids`, `evidence` or `ranges` table. */
+export const emissionRefSchema = z.int().min(0).max(999_999);
+export const emissionRefsSchema = z.array(emissionRefSchema).max(10000);
+export const evidenceRefIndexesSchema = z.array(emissionRefSchema).max(1000);
 const common = {
   id: z.string().min(1).max(1024),
   status: inferenceStatusSchema,
   explanation: z.string().min(1).max(8192),
-  subject_ids: ids,
-  evidence_ids: evidenceRefsSchema,
-  instruction_ids: ids,
-  ranges: z.array(rangeSchema).max(10000),
+  subject_refs: emissionRefsSchema,
+  evidence_refs: evidenceRefIndexesSchema,
+  instruction_refs: emissionRefsSchema,
+  range_refs: emissionRefsSchema,
   output_spans: z.array(outputSpanSchema).min(1).max(1000),
 };
 const width = z.number().int().min(1).max(65536);
@@ -121,16 +126,12 @@ export const inferenceDetailsSchema = z.discriminatedUnion('kind', [
   inferenceDetailsByKind.conflict,
   inferenceDetailsByKind.annotation,
 ]);
-export const inferenceSchema = z.strictObject({
-  ...common, details: inferenceDetailsSchema,
-  review: z.strictObject({
-    operation: z.literal('function_get'), view: z.literal('metadata'), function_id: entityIdSchema,
-    subject_id: entityIdSchema,
-  }),
-});
+/** `subject_refs`/`instruction_refs` index `emission.ids`, `evidence_refs`
+ * index `emission.evidence`, `range_refs` index `emission.ranges`. */
+export const inferenceSchema = z.strictObject({ ...common, details: inferenceDetailsSchema });
 export const requirementSiteSchema = z.strictObject({
-  id: z.string().min(1).max(1024), subject_ids: ids, evidence_ids: evidenceRefsSchema,
-  instruction_ids: ids, state_epoch: z.string().min(1).max(1024), predicate_value_id: entityIdSchema.optional(),
+  id: z.string().min(1).max(1024), subject_refs: emissionRefsSchema.min(1), evidence_refs: evidenceRefIndexesSchema,
+  instruction_refs: emissionRefsSchema, state_epoch: z.string().min(1).max(1024), predicate_value_id: entityIdSchema.optional(),
   supported_predicate_value: z.boolean().optional(),
 });
 export const requirementSchema = z.strictObject({
@@ -142,5 +143,21 @@ export type InferenceStatus = z.infer<typeof inferenceStatusSchema>;
 export type WireInference = z.infer<typeof inferenceSchema>;
 export type Inference = Internal<WireInference>;
 export type WireRequirement = z.infer<typeof requirementSchema>;
-export type Requirement = Internal<WireRequirement>;
-export type RequirementSite = Internal<z.infer<typeof requirementSiteSchema>>;
+export type EmissionRequirement = Internal<WireRequirement>;
+type WireRange = z.infer<typeof rangeSchema>;
+type ReferenceKeys = 'subject_refs' | 'evidence_refs' | 'instruction_refs' | 'range_refs';
+/** String-identity view of one record's table references (see `expandEmission`). */
+export interface ExpandedReferences<Range> {
+  readonly subject_ids: readonly string[];
+  readonly evidence_ids: readonly string[];
+  readonly instruction_ids: readonly string[];
+  readonly ranges: readonly Range[];
+}
+export type ExpandedInference<Range = WireRange> = Omit<Inference, ReferenceKeys> & ExpandedReferences<Range>;
+export type ExpandedRequirementSite = Omit<Internal<z.infer<typeof requirementSiteSchema>>, Exclude<ReferenceKeys, 'range_refs'>> &
+  Omit<ExpandedReferences<never>, 'ranges'>;
+export type ExpandedRequirement<Range = WireRange> = Omit<EmissionRequirement, ReferenceKeys | 'sites'> &
+  ExpandedReferences<Range> & { readonly sites: readonly ExpandedRequirementSite[] };
+/** Producer-side source requirement model: original identities and internal ranges. */
+export type Requirement = ExpandedRequirement<AddressRange>;
+export type RequirementSite = ExpandedRequirementSite;

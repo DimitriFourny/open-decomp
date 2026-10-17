@@ -35,9 +35,11 @@ try {
       for (const record of emission.local_validation) {
         if (record.kind !== 'parallel-copy' && record.kind !== 'stack-promotion') continue;
         assert.ok(record.subject_ids?.length, 'storage/copy checks retain original mapped consumer subjects');
-        for (const id of record.subject_ids)
-          assert.ok(emission.mappings.some((mapping) => mapping.statement_id === id || mapping.semantic_ids.includes(id)),
+        for (const id of record.subject_ids) {
+          const ref = emission.ids.indexOf(id);
+          assert.ok(emission.mappings.some((mapping) => mapping.semantic_refs.includes(ref)),
             `Validation subject has no emitted provenance mapping: ${id}`);
+        }
       }
       const formals = emittedFormals(emission);
       for (let i = 0; i < inputs.length; i++) {

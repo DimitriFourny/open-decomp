@@ -23,10 +23,12 @@ import type {
   ProjectStore,
   ResultMetadata,
   StoredRecordKinds,
+  Target,
   ToolArgs,
   ToolName,
   ToolResult,
 } from '../../core/index.js';
+import { cSourceName } from '../../metadata/symbols/c-names.js';
 import type { WorkerHandler } from '../../workers/runtime.js';
 import { wireValue } from '../../project/store/encoding.js';
 import { MAX_FRAME_BYTES } from '../../workers/protocol.js';
@@ -61,17 +63,25 @@ type Query = {
   readonly match: 'exact' | 'prefix' | 'contains';
   readonly case_sensitive: boolean;
 };
-function matches(query: Query, ...values: readonly (string | null)[]): boolean {
+/** Symbol names match natively or by their C source spelling (one Mach-O underscore removed);
+ * a null format compares literal text only. */
+function matches(
+  query: Query,
+  format: Target['format'] | null,
+  ...values: readonly (string | null)[]
+): boolean {
   if (query.text === '' && query.match !== 'exact') return true;
   const text = query.case_sensitive ? query.text : query.text.toLowerCase();
   return values.some((value) => {
     if (value === null) return false;
-    const candidate = query.case_sensitive ? value : value.toLowerCase();
-    return query.match === 'exact'
-      ? candidate === text
-      : query.match === 'prefix'
-        ? candidate.startsWith(text)
-        : candidate.includes(text);
+    return (format === null ? [value] : [value, cSourceName(format, value)]).some((name) => {
+      const candidate = query.case_sensitive ? name : name.toLowerCase();
+      return query.match === 'exact'
+        ? candidate === text
+        : query.match === 'prefix'
+          ? candidate.startsWith(text)
+          : candidate.includes(text);
+    });
   });
 }
 function addressKey(address: Address | null, id: string): string {
@@ -228,7 +238,7 @@ function paginate<T>(
   partialReason: 'budget' | 'incomplete_index' = 'incomplete_index',
   details?: Pick<ResultMetadata, 'coverage' | 'diagnostics'> & Partial<Pick<ResultMetadata, 'artifacts'>>,
   localEvidence: readonly Evidence[] = [],
-  evidenceDelivery: 'inline' | 'artifact_references' = 'inline',
+  evidenceDelivery: 'inline' | 'by_reference' | 'artifact' = 'by_reference',
   projectPage?: (items: readonly T[]) => object,
 ): unknown {
   const { binding, after } = scope.paging ?? pageState(operation, args);
@@ -256,13 +266,15 @@ function paginate<T>(
     const data = {
       ...extra,
       ...wireValue(projectPage ? projectPage(selected) : { items: selected }) as object,
-      page: { next_cursor, index_state: state, order },
+      page: { next_cursor, index_state: state, order, evidence_delivery: evidenceDelivery },
     };
     const metadata = {
       ...envelope,
       ...details,
-      evidence: evidenceDelivery === 'artifact_references' ? [] :
-        resultEvidence(scope, args.revision, [data, details?.diagnostics], localEvidence),
+      evidence:
+        evidenceDelivery === 'inline'
+          ? resultEvidence(scope, args.revision, [data, details?.diagnostics], localEvidence)
+          : [],
     };
     const result =
       state !== 'complete'
@@ -459,7 +471,7 @@ async function dispatch(
         for (const [index, item] of candidates.entries()) {
           const location = 'slot' in item ? (item.callable_entry ?? item.slot) : item.address;
           const presented = presentedItems[index]!;
-          if (matches(args.query, item.original_name, item.display_name, presented.display_name))
+          if (matches(args.query, image.target.format, item.original_name, item.display_name, presented.display_name))
             output.push({ kind, [kind]: presented, id: item.id, location });
         }
       }
@@ -484,7 +496,7 @@ async function dispatch(
         args,
         page.items.filter((item) => {
           if (
-            !matches(args.query, item.text) ||
+            !matches(args.query, null, item.text) ||
             !args.encodings.includes(item.encoding) ||
             (args.status !== 'all' && item.status !== args.status)
           )
@@ -521,7 +533,7 @@ async function dispatch(
       const presentedItems = presentNames(scope, args.revision, candidates);
       for (const [index, item] of candidates.entries()) {
         const presented = presentedItems[index]!;
-        if (matches(args.query, item.original_name, item.display_name, presented.display_name))
+        if (matches(args.query, image.target.format, item.original_name, item.display_name, presented.display_name))
           selected.push(presented);
       }
       return paginate(scope, operation, args, selected, page.state, (item) =>
@@ -550,7 +562,7 @@ async function dispatch(
             })),
           }, 'id', 'incomplete_index',
           { coverage: result.coverage, diagnostics: [],
-            artifacts: [encodeArtifact(selected.artifact)] }, [], 'artifact_references',
+            artifacts: [encodeArtifact(selected.artifact)] }, [], 'artifact',
           (items) => investigationPage(items, projection.instructionLocations));
       }
       if (args.view === 'metadata') {
@@ -563,6 +575,7 @@ async function dispatch(
         );
         const data = {
           view: 'metadata',
+          evidence_delivery: 'by_reference',
           reviewed_subject_id: subject.id,
           annotation_eligible: subject.annotation_eligible,
           function: wireValue({
@@ -575,7 +588,7 @@ async function dispatch(
         return {
           ...envelope,
           artifacts: selected ? [encodeArtifact(selected.artifact)] : [],
-          evidence: resultEvidence(scope, args.revision, data),
+          evidence: [],
           diagnostics:
             assertedNames.size > 1
               ? [
@@ -626,6 +639,7 @@ async function dispatch(
           partialReason,
           details,
           graph.evidence,
+          'inline',
         );
       return paginate(
         scope,
@@ -639,6 +653,7 @@ async function dispatch(
         partialReason,
         details,
         graph.evidence,
+        'inline',
       );
     }
     case 'xrefs_get': {
@@ -691,6 +706,60 @@ async function dispatch(
         queryFailure('not_found', 'Reference target is absent from the requested snapshot');
       return paginate(scope, operation, args, output, state, (item) =>
         addressKey(item.from, item.id),
+      );
+    }
+    case 'evidence_get': {
+      const args = toolSchemas.evidence_get.input.parse(input);
+      const requested = new Set(args.evidence_ids);
+      const found = new Map<string, Evidence>();
+      const seen = new Set(requested);
+      const absent = new Set<string>();
+      let pending = [...requested];
+      while (pending.length) {
+        scope.context.checkpoint(1);
+        const batch = pending.slice(0, 1000);
+        pending = pending.slice(1000);
+        const records = scope.store.readEvidence(batch, args.revision);
+        for (const record of records) {
+          scope.context.checkpoint(1);
+          found.set(record.id, record);
+          if (args.derivation === 'closure')
+            for (const dependency of [...record.derived_from, ...record.conflicts_with])
+              if (!seen.has(dependency)) {
+                seen.add(dependency);
+                pending.push(dependency);
+              }
+        }
+        for (const id of batch) if (!found.has(id)) absent.add(id);
+        if (seen.size > 10000)
+          queryFailure('resource_limit', 'Evidence closure exceeds the traversal bound');
+      }
+      if ([...requested].some((id) => absent.has(id)))
+        queryFailure('not_found', 'Requested evidence is absent from the requested snapshot');
+      return paginate(
+        scope,
+        operation,
+        args,
+        [...found.values()],
+        'complete',
+        (item) => item.id,
+        {},
+        'id',
+        'incomplete_index',
+        {
+          coverage: [],
+          diagnostics: absent.size
+            ? [
+                {
+                  code: 'not_found',
+                  severity: 'warning',
+                  message:
+                    'Derived or conflicting evidence referenced by returned records is absent from the requested snapshot',
+                  evidence_ids: [...absent].slice(0, 1000),
+                },
+              ]
+            : [],
+        },
       );
     }
     case 'memory_read':

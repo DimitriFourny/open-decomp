@@ -13,6 +13,7 @@ import {
   type FunctionRecord,
 } from '../../src/core/index.js';
 import { createMcpServer, MCP_MAX_RESULT_BYTES } from '../../src/mcp/server.js';
+import { decodeNavigationText } from '../../src/mcp/navigation.js';
 import { SqliteProjectStore } from '../../src/project/store/index.js';
 import { QueryService } from '../../src/service/queries/index.js';
 import { fixtureImage } from '../metadata/fixture.js';
@@ -102,7 +103,7 @@ for (const limit of [20, 1000])
         assert.ok(result.data.items.length > 0);
         const text = response.content.find((item) => item.type === 'text');
         assert.ok(text?.type === 'text');
-        assert.deepEqual(JSON.parse(text.text), result);
+        assert.deepEqual(decodeNavigationText(text.text), result);
         ids.push(...result.data.items.map((fn) => fn.id));
         cursor = result.data.page.next_cursor ?? undefined;
         if (cursor) {
