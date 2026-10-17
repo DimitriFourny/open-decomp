@@ -32,14 +32,17 @@
  * Memory endian is explicit, alignment is required (1 permits unaligned access).
  *
  * Every state access (including register/memory reads) consumes/produces the
- * linear effect token. Edge arguments carry values simultaneously, including at
- * loop backedges; each block has its own effect parameter. Data references are
- * block-local: cross-block values MUST pass through typed block parameters.
- * This region-SSA convention makes joins/unreachable blocks unambiguous without
- * a dominance solver. SSA construction eliminates architectural register nodes
- * while retaining the effect chain and explicit disjoint register-slice state.
- * Each block's register_states entry binds physical inputs to parameters; exit
- * bindings remain observable roots even with no reconstructed formal returns.
+ * linear effect token. Edge arguments carry merged values simultaneously,
+ * including at loop backedges; each block has its own effect parameter, and
+ * effect tokens stay block-local. A data value is available after its
+ * definition and in every block its block strictly dominates (computeDominance;
+ * unreachable components are separately rooted). SSA construction eliminates
+ * architectural register nodes while retaining the effect chain and explicit
+ * disjoint register-slice state: parameters exist only where definitions meet.
+ * register_states entry rows bind every cell at roots and only merged/rebound
+ * cells elsewhere; exit rows bind every cell at function exits and only cells
+ * rebound in other blocks. Full per-block state is derived (registerStateAt).
+ * Rows remain observable roots even with no reconstructed formal returns.
  * Calls/unknown effects expose register_inputs/register_outputs independently
  * of source arguments/results. Loads/stores snapshot register_inputs so a fault
  * preserves earlier physical writes. Bindings use preserve_other_bits; partial
@@ -60,5 +63,6 @@ export * from './model.js';
 export * from './provenance.js';
 export * from './builder.js';
 export * from './verify.js';
+export * from './dominance.js';
 export * from './semantics.js';
 export * from './interpreter.js';

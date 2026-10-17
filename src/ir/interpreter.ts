@@ -267,14 +267,15 @@ export function evaluateIR(ir: FunctionIR, options: EvaluationOptions = {}): Eva
     options.context?.checkpoint(1);
   };
   try {
+    // Dominance SSA: a value's latest execution is visible in dominated blocks.
+    const values = new Map<string, RuntimeValue>();
+    const get = (value: Value): RuntimeValue => {
+      const found = values.get(value.id);
+      if (!found) throw new TypeError('Invalid value reference after verification');
+      return found;
+    };
     for (;;) {
-      const values = new Map<string, RuntimeValue>();
       block.parameters.forEach((parameter, index) => values.set(parameter.id, incoming[index]!));
-      const get = (value: Value): RuntimeValue => {
-        const found = values.get(value.id);
-        if (!found) throw new TypeError('Invalid local value reference after verification');
-        return found;
-      };
       for (const instruction of block.instructions) {
         if ('register_inputs' in instruction)
           for (const binding of instruction.register_inputs)
@@ -404,6 +405,7 @@ export function evaluateIR(ir: FunctionIR, options: EvaluationOptions = {}): Eva
           }
         }
       }
+      // Rebound (or, at exits, all) cells; unlisted cells already hold their state.
       for (const binding of states.get(block.id)?.exit ?? [])
         writeRegister(binding.register, get(binding.value));
       const terminator = block.terminator;

@@ -1,6 +1,7 @@
 import type { EntityId } from '../../core/index.js';
 import {
   bitWidth,
+  computeDominance,
   evaluateExpression,
   expressionOperands,
   mergeProvenanceSources,
@@ -13,6 +14,8 @@ import type {
   Expression,
   Instruction,
   IntegerPredicate,
+  Provenance,
+  RegisterBinding,
   SSAForm,
   Terminator,
   Value,
@@ -70,6 +73,7 @@ function propagate(
   const users = new Map<EntityId, Set<EntityId>>();
   const phiUsers = new Map<EntityId, { edge: Edge; index: number }[]>();
   const operands = new Map<EntityId, readonly Value[]>();
+  const home = new Map<EntityId, EntityId>();
   const connect = (index: Map<EntityId, Set<EntityId>>, value: Value, block: EntityId): void => {
     budget.charge();
     const row = index.get(value.id) ?? new Set<EntityId>();
@@ -80,6 +84,7 @@ function propagate(
     budget.charge();
     for (const node of block.instructions) {
       budget.charge();
+      for (const result of instructionResults(node)) home.set(result.id, block.id);
       if (node.kind !== 'assign') continue;
       const values = expressionOperands(node.expression);
       operands.set(node.id, values);
@@ -111,9 +116,10 @@ function propagate(
       const id = notifications[cursor]!;
       for (const block of users.get(id) ?? []) {
         budget.charge();
-        // Local SSA uses follow their definitions. Phi delivery below also
-        // schedules the active block when a backedge changes an entry value.
-        if (block !== active) enqueue(block);
+        // Uses of the active block's own definitions follow them in order.
+        // Dominating definitions changed by loop delivery reschedule users,
+        // and phi delivery below also schedules the active block itself.
+        if (block !== active || home.get(id) !== active) enqueue(block);
       }
       for (const { edge, index } of phiUsers.get(id) ?? []) {
         budget.charge();
@@ -348,7 +354,10 @@ export function recoverComparison(
  * Conservative optimizer. Folding uses the trusted bit-vector/FP primitives;
  * unknown/undefined values are never treated as algebraic numbers. Loads, stores,
  * calls and unknown effects are retained even with dead results. No alias guess
- * or signature inference occurs. On interruption the last complete graph is returned.
+ * or signature inference occurs. Block parameters whose incoming values are all
+ * one dominating value (or the parameter itself) are replaced by that value;
+ * their architectural entry bindings remain. On interruption the last complete
+ * graph is returned.
  */
 export function simplifySSA(
   input: SSAForm,
@@ -357,7 +366,7 @@ export function simplifySSA(
   const budget = new AnalysisBudget(options);
   let current = input;
   try {
-    let changed = true;
+    let changed = true, first = true;
     while (changed) {
       budget.charge();
       const analysis = {
@@ -368,8 +377,13 @@ export function simplifySSA(
       propagate(current, budget, analysis);
       const rewritten = rewrite(current, analysis, budget);
       const copies = propagateCopies(rewritten.value, budget);
-      changed = rewritten.changed || copies.changed;
-      current = copies.value;
+      // Parameters become trivial only when edges or values change.
+      const trivial = first || rewritten.changed || copies.changed
+        ? eliminateTrivialParameters(copies.value, budget)
+        : { value: copies.value, changed: false };
+      first = false;
+      changed = rewritten.changed || copies.changed || trivial.changed;
+      current = trivial.value;
     }
     return budget.result(current);
   } catch (error) {
@@ -388,7 +402,7 @@ function rewrite(
     for (const node of block.instructions)
       if (node.kind === 'assign') definitions.set(node.result.id, node);
   const states = new Map(input.register_states.map((state) => [state.block, state]));
-  const blocks: BasicBlock[] = [];
+  const rewritten: { block: BasicBlock; nodes: Instruction[]; terminator: Terminator }[] = [];
   for (const block of input.blocks) {
     budget.charge();
     if (!analysis.reachable_blocks.has(block.id)) {
@@ -489,28 +503,63 @@ function rewrite(
         changed = true;
       }
     }
-    const live = new Set(
-      [
-        ...terminatorOperands(terminator),
-        ...(states.get(block.id)?.exit ?? []).map((binding) => binding.value),
-      ].map((value) => value.id),
-    );
+    rewritten.push({ block, nodes, terminator });
+  }
+  // Global liveness: effects, control, edges and architectural rows are roots;
+  // values may be used in any block their definition dominates.
+  const live = new Set<EntityId>();
+  const pending: Value[] = [];
+  const use = (value: Value): void => {
+    if (live.has(value.id)) return;
+    live.add(value.id);
+    pending.push(value);
+  };
+  for (const { block, nodes, terminator } of rewritten) {
+    budget.charge(1 + nodes.length);
+    for (const node of nodes) if (node.kind !== 'assign') instructionOperands(node).forEach(use);
+    terminatorOperands(terminator).forEach(use);
+    const state = states.get(block.id);
+    for (const binding of state?.entry ?? []) use(binding.value);
+    for (const binding of state?.exit ?? []) use(binding.value);
+  }
+  while (pending.length) {
+    const definition = definitions.get(pending.pop()!.id);
+    if (!definition) continue;
+    budget.charge();
+    expressionOperands(definition.expression).forEach(use);
+  }
+  // A block parameter used anywhere except its own block's terminator keeps
+  // that block on every path; edge threading must not bypass it.
+  const owners = new Map<EntityId, EntityId>();
+  for (const { block } of rewritten)
+    for (const parameter of block.parameters) owners.set(parameter.id, block.id);
+  const pinned = new Set<EntityId>();
+  const pin = (value: Value, terminatorOf?: EntityId): void => {
+    const owner = owners.get(value.id);
+    if (owner !== undefined && owner !== terminatorOf) pinned.add(owner);
+  };
+  const blocks: BasicBlock[] = [];
+  for (const { block, nodes, terminator } of rewritten) {
     const kept: Instruction[] = [];
-    let provenance = block.provenance;
+    const removed: Provenance[] = [];
     for (let i = nodes.length - 1; i >= 0; i--) {
       budget.charge();
       const node = nodes[i]!;
       if (node.kind === 'assign' && !live.has(node.result.id)) {
         changed = true;
-        provenance = mergeProvenanceSources([provenance, node.provenance], (work) =>
-          budget.charge(work),
-        );
+        removed.push(node.provenance);
         continue;
       }
       kept.push(node);
-      for (const value of instructionOperands(node)) live.add(value.id);
+      for (const value of instructionOperands(node)) pin(value);
     }
     kept.reverse();
+    for (const value of terminatorOperands(terminator)) pin(value, block.id);
+    const state = states.get(block.id);
+    for (const binding of [...(state?.entry ?? []), ...(state?.exit ?? [])]) pin(binding.value);
+    // One ordered union per block (same order as successive pairwise merges).
+    const provenance = removed.length === 0 ? block.provenance
+      : mergeProvenanceSources([block.provenance, ...removed], (work) => budget.charge(work));
     blocks.push({ ...block, provenance, instructions: kept, terminator });
   }
   const byId = new Map(blocks.map((block) => [block.id, block]));
@@ -523,7 +572,12 @@ function rewrite(
         budget.charge();
         visited.add(edge.target);
         const target = byId.get(edge.target);
-        if (!target || target.instructions.length !== 0 || target.id === input.entry) break;
+        const row = states.get(edge.target);
+        // Only an empty pass-through block whose parameters feed nothing but
+        // its own terminator, and which records no architectural state, is
+        // bypassed; dominated users and derived state stay unchanged.
+        if (!target || target.instructions.length !== 0 || target.id === input.entry ||
+          pinned.has(target.id) || row?.entry.length || row?.exit.length) break;
         const substitution = new Map(
           target.parameters.map((parameter, index) => [parameter.id, edge.arguments[index]!]),
         );
@@ -531,8 +585,7 @@ function rewrite(
         let next: Edge;
         if (term.kind === 'jump') next = term.edge;
         else if (term.kind === 'branch') {
-          const condition = substitution.get(term.condition.id);
-          if (!condition) break;
+          const condition = substitution.get(term.condition.id) ?? term.condition;
           const fact = analysis.facts.get(condition.id);
           if (fact?.kind === 'constant') next = fact.bits === 0n ? term.when_false : term.when_true;
           else if (known && condition.id === known.value.id)
@@ -543,7 +596,7 @@ function rewrite(
         if (visited.has(next.target)) return initial;
         edge = {
           target: next.target,
-          arguments: next.arguments.map((value) => substitution.get(value.id)!),
+          arguments: next.arguments.map((value) => substitution.get(value.id) ?? value),
           effect: initial.effect,
         };
         provenance = mergeProvenanceSources(
@@ -592,155 +645,254 @@ function rewrite(
   };
 }
 
+/** Rewrites every data reference; definitions, effects and identities are unchanged. */
+function mapInstruction(node: Instruction, map: (value: Value) => Value): Instruction {
+  const bindings = (rows: readonly RegisterBinding[]): RegisterBinding[] =>
+    rows.map((binding) => ({ ...binding, value: map(binding.value) }));
+  switch (node.kind) {
+    case 'assign':
+      return { ...node, expression: mapExpression(node.expression, map) };
+    case 'load':
+      return { ...node, address: map(node.address), register_inputs: bindings(node.register_inputs) };
+    case 'store':
+      return { ...node, address: map(node.address), value: map(node.value),
+        register_inputs: bindings(node.register_inputs) };
+    case 'write_register':
+      return { ...node, value: map(node.value) };
+    case 'call':
+      return {
+        ...node,
+        target: node.target.kind === 'indirect' ? { ...node.target, value: map(node.target.value) } : node.target,
+        arguments: node.arguments.map(map),
+        register_inputs: bindings(node.register_inputs),
+      };
+    case 'unknown_effect':
+      return { ...node, register_inputs: bindings(node.register_inputs) };
+    default:
+      return node;
+  }
+}
+
+function mapTerminator(
+  terminator: Terminator,
+  map: (value: Value) => Value,
+  edge: (edge: Edge) => Edge,
+): Terminator {
+  switch (terminator.kind) {
+    case 'return':
+      return { ...terminator, values: terminator.values.map(map) };
+    case 'indirect':
+      return { ...terminator, target: map(terminator.target) };
+    case 'jump':
+      return { ...terminator, edge: edge(terminator.edge) };
+    case 'branch':
+      return { ...terminator, condition: map(terminator.condition),
+        when_true: edge(terminator.when_true), when_false: edge(terminator.when_false) };
+    case 'switch':
+      return { ...terminator, value: map(terminator.value),
+        cases: terminator.cases.map((item) => ({ ...item, edge: edge(item.edge) })),
+        otherwise: edge(terminator.otherwise) };
+    default:
+      return terminator;
+  }
+}
+
+function mapStates(
+  states: SSAForm['register_states'],
+  map: (value: Value) => Value,
+  budget: AnalysisBudget,
+): SSAForm['register_states'] {
+  return states.map((state) => {
+    budget.charge();
+    return {
+      ...state,
+      entry: state.entry.map((binding) => ({ ...binding, value: map(binding.value) })),
+      exit: state.exit.map((binding) => ({ ...binding, value: map(binding.value) })),
+    };
+  });
+}
+
+/**
+ * Same-type bitcasts alias their operand everywhere it is referenced. A removed
+ * copy's origin (e.g. the register write it records) joins its own block and
+ * same-block consumers; dominated blocks reference the value, not the write.
+ */
 function propagateCopies(
   input: SSAForm,
   budget: AnalysisBudget,
 ): { value: SSAForm; changed: boolean } {
-  let changed = false;
-  const states = new Map(input.register_states.map((state) => [state.block, state]));
-  const blocks = input.blocks.map((block) => {
-    const aliases = new Map<EntityId, Value>();
-    const origins = new Map<EntityId, Assignment['provenance']>();
-    const map = (value: Value): Value => aliases.get(value.id) ?? value;
-    const nodes: Instruction[] = [];
-    let provenance = block.provenance;
-    for (const original of block.instructions) {
+  const copies = new Map<EntityId, { node: Assignment; source: Value; block: EntityId }>();
+  for (const block of input.blocks)
+    for (const node of block.instructions) {
       budget.charge();
-      let node = original;
-      const operands = instructionOperands(node);
-      if (operands.some((value) => aliases.has(value.id))) {
-        const source = mergeProvenanceSources(
-          [
-            node.provenance,
-            ...operands.flatMap((value) => {
-              const origin = origins.get(value.id);
-              return origin ? [origin] : [];
-            }),
-          ],
-          (work) => budget.charge(work),
-        );
-        switch (node.kind) {
-          case 'assign':
-            node = { ...node, provenance: source, expression: mapExpression(node.expression, map) };
-            break;
-          case 'load':
-            node = {
-              ...node,
-              provenance: source,
-              address: map(node.address),
-              register_inputs: node.register_inputs.map((binding) => ({
-                ...binding,
-                value: map(binding.value),
-              })),
-            };
-            break;
-          case 'store':
-            node = {
-              ...node,
-              provenance: source,
-              address: map(node.address),
-              value: map(node.value),
-              register_inputs: node.register_inputs.map((binding) => ({
-                ...binding,
-                value: map(binding.value),
-              })),
-            };
-            break;
-          case 'write_register':
-            node = { ...node, provenance: source, value: map(node.value) };
-            break;
-          case 'call':
-            node = {
-              ...node,
-              provenance: source,
-              target:
-                node.target.kind === 'indirect'
-                  ? { ...node.target, value: map(node.target.value) }
-                  : node.target,
-              arguments: node.arguments.map(map),
-              register_inputs: node.register_inputs.map((binding) => ({
-                ...binding,
-                value: map(binding.value),
-              })),
-            };
-            break;
-          case 'unknown_effect':
-            node = {
-              ...node,
-              provenance: source,
-              register_inputs: node.register_inputs.map((binding) => ({
-                ...binding,
-                value: map(binding.value),
-              })),
-            };
-            break;
-        }
-      }
       if (
         node.kind === 'assign' &&
         node.expression.kind === 'cast' &&
         node.expression.op === 'bitcast' &&
         sameType(node.result.type, node.expression.value.type)
-      ) {
-        aliases.set(node.result.id, node.expression.value);
-        origins.set(node.result.id, node.provenance);
-        provenance = mergeProvenanceSources([provenance, node.provenance], (work) =>
-          budget.charge(work),
-        );
-        changed = true;
-      } else nodes.push(node);
+      )
+        copies.set(node.result.id, { node, source: node.expression.value, block: block.id });
     }
-    const edge = (value: Edge): Edge => ({ ...value, arguments: value.arguments.map(map) });
-    let terminator = block.terminator;
-    const source = mergeProvenanceSources(
-      [
-        terminator.provenance,
-        ...terminatorOperands(terminator).flatMap((value) => {
-          const origin = origins.get(value.id);
-          return origin ? [origin] : [];
-        }),
-      ],
-      (work) => budget.charge(work),
-    );
-    switch (terminator.kind) {
-      case 'return':
-        terminator = { ...terminator, values: terminator.values.map(map) };
-        break;
-      case 'indirect':
-        terminator = { ...terminator, target: map(terminator.target) };
-        break;
-      case 'jump':
-        terminator = { ...terminator, edge: edge(terminator.edge) };
-        break;
-      case 'branch':
-        terminator = {
-          ...terminator,
-          condition: map(terminator.condition),
-          when_true: edge(terminator.when_true),
-          when_false: edge(terminator.when_false),
-        };
-        break;
-      case 'switch':
-        terminator = {
-          ...terminator,
-          value: map(terminator.value),
-          cases: terminator.cases.map((item) => ({ ...item, edge: edge(item.edge) })),
-          otherwise: edge(terminator.otherwise),
-        };
-        break;
+  if (copies.size === 0) return { value: input, changed: false };
+  // Final value and the origin of the copy chain prefix within the copy's block.
+  const resolved = new Map<EntityId, { value: Value; origin: Provenance }>();
+  const resolve = (value: Value): { value: Value; origin: Provenance } | undefined => {
+    const chain: { node: Assignment; source: Value; block: EntityId }[] = [];
+    let id = value.id;
+    for (let copy = copies.get(id); copy && !resolved.has(id); copy = copies.get(id)) {
+      budget.charge();
+      chain.push(copy);
+      id = copy.source.id;
     }
-    const state = states.get(block.id);
-    if (state)
-      states.set(block.id, {
-        ...state,
-        exit: state.exit.map((binding) => ({ ...binding, value: map(binding.value) })),
+    let tail = resolved.get(id), tailBlock = copies.get(id)?.block;
+    for (let i = chain.length - 1; i >= 0; i--) {
+      const { node, source, block } = chain[i]!;
+      tail = {
+        value: tail?.value ?? source,
+        origin: tail && tailBlock === block
+          ? mergeProvenanceSources([node.provenance, tail.origin], (work) => budget.charge(work))
+          : node.provenance,
+      };
+      tailBlock = block;
+      resolved.set(node.result.id, tail);
+    }
+    return tail;
+  };
+  const map = (value: Value): Value => resolve(value)?.value ?? value;
+  const rewrite = (values: readonly Value[], block: EntityId): { aliased: boolean; sources: Provenance[] } => {
+    let aliased = false;
+    const sources: Provenance[] = [];
+    for (const value of values) {
+      const copy = copies.get(value.id);
+      if (!copy) continue;
+      aliased = true;
+      const origin = resolve(value)!.origin;
+      if (copy.block === block) sources.push(origin);
+    }
+    return { aliased, sources };
+  };
+  const blocks = input.blocks.map((block) => {
+    const nodes: Instruction[] = [];
+    const removed: Provenance[] = [];
+    for (const node of block.instructions) {
+      budget.charge();
+      if (node.kind === 'assign' && copies.has(node.result.id)) {
+        removed.push(resolve(node.result)!.origin);
+        continue;
+      }
+      const { aliased, sources } = rewrite(instructionOperands(node), block.id);
+      nodes.push(!aliased ? node : {
+        ...mapInstruction(node, map),
+        provenance: sources.length === 0 ? node.provenance
+          : mergeProvenanceSources([node.provenance, ...sources], (work) => budget.charge(work)),
       });
+    }
+    const terminator = block.terminator;
+    const { aliased, sources } = rewrite(terminatorOperands(terminator), block.id);
     return {
       ...block,
-      provenance,
+      provenance: removed.length === 0 ? block.provenance
+        : mergeProvenanceSources([block.provenance, ...removed], (work) => budget.charge(work)),
       instructions: nodes,
-      terminator: { ...terminator, provenance: source },
+      terminator: !aliased ? terminator : {
+        ...mapTerminator(terminator, map, (edge) => ({ ...edge, arguments: edge.arguments.map(map) })),
+        provenance: sources.length === 0 ? terminator.provenance
+          : mergeProvenanceSources([terminator.provenance, ...sources], (work) => budget.charge(work)),
+      },
     };
   });
-  return { value: { ...input, blocks, register_states: [...states.values()] }, changed };
+  return {
+    value: { ...input, blocks, register_states: mapStates(input.register_states, map, budget) },
+    changed: true,
+  };
+}
+
+/**
+ * A non-root block parameter whose incoming edge values are one value v or the
+ * parameter itself is v: the first entry along every path carries v from a
+ * non-dominated predecessor, so v's definition dominates the block. Its
+ * parameter/edge slots disappear; architectural entry bindings now name v.
+ */
+function eliminateTrivialParameters(
+  input: SSAForm,
+  budget: AnalysisBudget,
+): { value: SSAForm; changed: boolean } {
+  const dominance = computeDominance(input, (work) => budget.charge(work));
+  const byId = new Map(input.blocks.map((block) => [block.id, block]));
+  const incoming = new Map<EntityId, Value[]>();
+  for (const block of input.blocks)
+    if (dominance.idom(block.id) !== null)
+      for (const parameter of block.parameters) {
+        budget.charge();
+        incoming.set(parameter.id, []);
+      }
+  const users = new Map<EntityId, EntityId[]>();
+  for (const block of input.blocks)
+    for (const edge of successors(block.terminator)) {
+      const target = byId.get(edge.target);
+      for (const [index, argument] of edge.arguments.entries()) {
+        budget.charge();
+        const parameter = target?.parameters[index];
+        const sources = parameter && incoming.get(parameter.id);
+        if (!sources) continue;
+        sources.push(argument);
+        const list = users.get(argument.id) ?? [];
+        list.push(parameter.id);
+        users.set(argument.id, list);
+      }
+    }
+  const replacement = new Map<EntityId, Value>();
+  const find = (value: Value): Value => {
+    let current = value;
+    for (let next = replacement.get(current.id); next; next = replacement.get(current.id)) {
+      budget.charge();
+      current = next;
+    }
+    return current;
+  };
+  const pending = [...incoming.keys()];
+  while (pending.length) {
+    budget.charge();
+    const id = pending.pop()!;
+    if (replacement.has(id)) continue;
+    let unique: Value | undefined, trivial = true;
+    for (const argument of incoming.get(id)!) {
+      budget.charge();
+      const value = find(argument);
+      if (value.id === id || value.id === unique?.id) continue;
+      if (unique) {
+        trivial = false;
+        break;
+      }
+      unique = value;
+    }
+    if (!trivial || !unique) continue;
+    replacement.set(id, unique);
+    // Parameters fed by this one may now be trivial too, including after a
+    // later replacement of `unique` itself.
+    const dependents = users.get(id) ?? [];
+    pending.push(...dependents);
+    users.set(unique.id, [...(users.get(unique.id) ?? []), ...dependents]);
+  }
+  if (replacement.size === 0) return { value: input, changed: false };
+  const kept = new Map(input.blocks.map((block) => [block.id,
+    block.parameters.map((parameter) => !replacement.has(parameter.id))]));
+  const edge = (value: Edge): Edge => {
+    const slots = kept.get(value.target);
+    budget.charge(value.arguments.length);
+    return { ...value, arguments: value.arguments.filter((_, index) => slots?.[index] ?? true).map(find) };
+  };
+  const blocks = input.blocks.map((block) => {
+    budget.charge(block.instructions.length + 1);
+    return {
+      ...block,
+      parameters: block.parameters.filter((parameter) => !replacement.has(parameter.id)),
+      instructions: block.instructions.map((node) => mapInstruction(node, find)),
+      terminator: mapTerminator(block.terminator, find, edge),
+    };
+  });
+  return {
+    value: { ...input, blocks, register_states: mapStates(input.register_states, find, budget) },
+    changed: true,
+  };
 }

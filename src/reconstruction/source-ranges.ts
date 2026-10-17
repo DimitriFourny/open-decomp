@@ -214,9 +214,13 @@ export function normalizeSourceRanges(
   };
   const inverse: Record<string, string> = { eq: 'ne', ne: 'eq', ult: 'uge', ule: 'ugt', ugt: 'ule', uge: 'ult' };
   const swapped: Record<string, string> = { eq: 'eq', ne: 'ne', ult: 'ugt', ule: 'uge', ugt: 'ult', uge: 'ule' };
+  // Blocks read dominating parameter facts directly; any fact change makes
+  // every block last evaluated under an older version stale.
+  let version = 0;
+  const evaluated = new Map<string, number>();
   const join = (destination: Value, incoming: Range): boolean => {
     const previous = facts.get(destination.id);
-    if (!previous) { facts.set(destination.id, incoming); updates.set(destination.id, 1); return true; }
+    if (!previous) { facts.set(destination.id, incoming); updates.set(destination.id, 1); version++; return true; }
     let minimum = previous.minimum < incoming.minimum ? previous.minimum : incoming.minimum;
     let maximum = previous.maximum > incoming.maximum ? previous.maximum : incoming.maximum;
     const defined = previous.defined && incoming.defined;
@@ -228,6 +232,36 @@ export function normalizeSourceRanges(
       if (maximum > previous.maximum) maximum = mask(bitWidth(destination.type));
     }
     facts.set(destination.id, { minimum, maximum, defined }); updates.set(destination.id, count + 1);
+    version++;
+    return true;
+  };
+  // Dominance SSA: an edge-established range for a value referenced across
+  // blocks holds at the target's entry. Entry constraints join over incoming
+  // edges; a value constrained on only some edges is unconstrained there.
+  const inherited = new Map<string, ReadonlyMap<string, Range>>();
+  const inheritedUpdates = new Map<string, number>();
+  const inherit = (target: string, constraints: ReadonlyMap<string, Range>): boolean => {
+    const previous = inherited.get(target);
+    if (!previous) { inherited.set(target, new Map(constraints)); return true; }
+    const count = inheritedUpdates.get(target) ?? 0;
+    const next = new Map<string, Range>();
+    let changed = false;
+    for (const [id, before] of previous) {
+      context.checkpoint(1);
+      const incoming = constraints.get(id);
+      if (!incoming) { changed = true; continue; }
+      const minimum = before.minimum < incoming.minimum ? before.minimum : incoming.minimum;
+      const maximum = before.maximum > incoming.maximum ? before.maximum : incoming.maximum;
+      const defined = before.defined && incoming.defined;
+      if (minimum === before.minimum && maximum === before.maximum && defined === before.defined) {
+        next.set(id, before); continue;
+      }
+      changed = true;
+      // Widen a repeatedly growing loop constraint to no constraint.
+      if (count < 2) next.set(id, { minimum, maximum, defined });
+    }
+    if (!changed) return false;
+    inherited.set(target, next); inheritedUpdates.set(target, count + 1);
     return true;
   };
   const propagate = (transfer: ParallelTransfer, constraints: ReadonlyMap<string, Range>): void => {
@@ -240,23 +274,37 @@ export function normalizeSourceRanges(
       if (!range) return;
       incoming.push({ destination: copy.destination, range });
     }
-    let changed = !reachable.has(transfer.target);
+    let changed = !reachable.has(transfer.target) || (evaluated.get(transfer.target) ?? -1) < version;
     for (const { destination, range } of incoming) {
       context.checkpoint(1);
       changed = join(destination, range) || changed;
     }
+    changed = inherit(transfer.target, constraints) || changed;
     reachable.add(transfer.target);
     if (changed && !queued.has(transfer.target)) { pending.push(transfer.target); queued.add(transfer.target); }
   };
   for (let cursor = 0; cursor < pending.length; cursor++) {
     context.checkpoint(1);
-    const id = pending[cursor]!; queued.delete(id);
+    const id = pending[cursor]!; queued.delete(id); evaluated.set(id, version);
     const control = blocks.get(id)!.control;
-    if (control.kind === 'jump') propagate(control.transfer, new Map());
+    // Values (re)defined in this block, including its parameters rebound by
+    // the incoming transfer, are new instances: older constraints do not apply.
+    const base = new Map(inherited.get(id) ?? []);
+    if (base.size) {
+      const block = blocks.get(id)!;
+      for (const value of block.parameters) base.delete(value.id);
+      for (const node of block.statements) {
+        context.checkpoint(1);
+        if ('result' in node) base.delete(node.result.id);
+        if (node.kind === 'call') for (const value of node.results) base.delete(value.id);
+        if ('register_outputs' in node) for (const binding of node.register_outputs) base.delete(binding.value.id);
+      }
+    }
+    if (control.kind === 'jump') propagate(control.transfer, base);
     else if (control.kind === 'if') {
       const condition = resolve(control.condition), comparison = expressions.get(condition.id);
       for (const [truth, arm] of [[true, control.when_true], [false, control.when_false]] as const) {
-        const constraints = new Map<string, Range>(), cache = new Map<string, Fact>();
+        const constraints = new Map(base), cache = new Map<string, Fact>();
         const selected = evaluate(condition, constraints, cache);
         if (!selected || (truth ? selected.maximum === 0n : selected.minimum > 0n)) continue;
         constraints.set(condition.id, exact(truth ? 1n : 0n));
@@ -277,10 +325,10 @@ export function normalizeSourceRanges(
       const value = resolve(control.value);
       for (const item of control.cases) {
         context.checkpoint(1);
-        const constraints = new Map<string, Range>();
+        const constraints = new Map(base);
         if (refine(value, 'eq', item.bits, constraints, new Map())) propagate(item.arm.transfer, constraints);
       }
-      const constraints = new Map<string, Range>();
+      const constraints = new Map(base);
       let possible = true;
       for (const item of control.cases) {
         context.checkpoint(1);

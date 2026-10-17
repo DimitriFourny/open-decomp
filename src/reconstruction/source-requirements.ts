@@ -1,7 +1,7 @@
-import { fingerprint, OperationError, type OperationContext } from '../core/index.js';
+import { fingerprint, OperationError, type OperationContext, type RegisterDescriptor } from '../core/index.js';
 import type { Requirement, RequirementSite } from '../core/inference.js';
 import type { EmissionInput, EmissionResult } from '../emitters/model.js';
-import type { Expression, Origin } from '../ir/index.js';
+import { registerStateAt, type Expression, type Origin } from '../ir/index.js';
 import { fpEnvironmentGuard } from '../lifters/arm64/semantics.js';
 import { x86FpEnvironmentGuard } from '../lifters/x86_64/semantics.js';
 import type { BlockRegion } from '../presentation/index.js';
@@ -74,6 +74,19 @@ export function planSourceRequirements(
   });
   // Recognize only the lifter's exact guard/failure contract and original SSA
   // mask source. Similar-looking user predicates are not environment proofs.
+  // The control register's block-exit state is derived along dominators.
+  const rows = {
+    idom: (id: string) => blocks.get(id)?.dominator ?? null,
+    entry: (id: string) => blocks.get(id)?.register_entry ?? [],
+    exit: (id: string) => blocks.get(id)?.register_exit ?? [],
+  };
+  const exitState = (block: string, matches: (register: RegisterDescriptor) => boolean): string | undefined => {
+    const cell = blocks.get(input.function.entry)?.register_entry.find((binding) => {
+      context.checkpoint(1);
+      return matches(binding.register);
+    })?.register;
+    return cell && registerStateAt(rows, block, cell, 'exit', (work) => context.checkpoint(work))?.value.id;
+  };
   for (const block of blocks.values()) {
     context.checkpoint(1);
     const control = block.control;
@@ -91,14 +104,7 @@ export function planSourceRequirements(
     if (zero?.kind !== 'constant' || zero.bits !== 0n || masked?.kind !== 'integer' || masked.op !== 'and') continue;
     const mask = definitions.get(masked.right.id)?.expression;
     if (mask?.kind !== 'constant' || mask.bits !== fpEnvironmentGuard.mask) continue;
-    let controlState: string | undefined;
-    for (const binding of block.register_exit) {
-      context.checkpoint(1);
-      if (binding.register.root === fpEnvironmentGuard.control_root) {
-        controlState = binding.value.id;
-        break;
-      }
-    }
+    const controlState = exitState(block.id, (register) => register.root === fpEnvironmentGuard.control_root);
     if (controlState === undefined) continue;
     let state = masked.left;
     const stateOrigins: Origin[] = [];
@@ -136,15 +142,10 @@ export function planSourceRequirements(
     if (comparison?.kind !== 'compare' || comparison.op !== 'ne') continue;
     const expected = definitions.get(comparison.right.id)?.expression;
     if (expected?.kind !== 'constant' || expected.bits !== x86FpEnvironmentGuard.supported_bits) continue;
-    let controlState: string | undefined;
-    for (const binding of block.register_exit) {
-      context.checkpoint(1);
-      if (binding.register.root === x86FpEnvironmentGuard.control_root &&
-          binding.register.offset_bits === x86FpEnvironmentGuard.offset_bits &&
-          binding.register.width_bits === x86FpEnvironmentGuard.width_bits) {
-        controlState = binding.value.id; break;
-      }
-    }
+    const controlState = exitState(block.id, (register) =>
+      register.root === x86FpEnvironmentGuard.control_root &&
+      register.offset_bits === x86FpEnvironmentGuard.offset_bits &&
+      register.width_bits === x86FpEnvironmentGuard.width_bits);
     if (controlState === undefined) continue;
     let state = comparison.left;
     const stateOrigins: Origin[] = [];

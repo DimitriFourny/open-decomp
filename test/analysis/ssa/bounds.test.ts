@@ -20,9 +20,22 @@ function registerGraph(blocks: number, roots: number) {
   return build.finish(entry, [integer(32)]);
 }
 
-test('SSA block-by-register expansion fails transactionally under a node budget', () => {
+test('SSA parameters scale with merges, not blocks times registers', () => {
+  const result = constructSSA(registerGraph(64, 64));
+  assert.equal(result.state, 'complete');
+  if (result.value.form !== 'ssa') throw new TypeError('Expected SSA');
+  assert.deepEqual(verifyIR(result.value), []);
+  const [entry, ...rest] = result.value.blocks;
+  assert.equal(entry!.parameters.length, 64, 'The entry binds every physical input');
+  assert.ok(rest.every((block) => block.parameters.length === 0), 'A chain has no merges');
+  assert.ok(result.value.register_states.slice(1).every((row) =>
+    row.entry.length === 0 && (row.exit.length === 0 || row.exit.length === 64)));
+});
+
+test('SSA construction fails transactionally under a node budget', () => {
   const input = registerGraph(64, 64);
-  const context = createOperationContext({ budget: { ir_nodes: 512 } });
+  // Minimal SSA needs 64 entry parameters, 64 reads and 64 block reservations.
+  const context = createOperationContext({ budget: { ir_nodes: 256 } });
   const result = constructSSA(input, {
     max_ir_nodes: context.budget.ir_nodes,
     checkpoint: (work) => context.checkpoint(work),

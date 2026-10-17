@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createOperationContext } from '../../../src/core/index.js';
 import { constructSSA, type AnalysisResult } from '../../../src/analysis/ssa/index.js';
-import { evaluateIR, integer, verifyIR, type RegisterIR, type SSAForm, type TrustedCall } from '../../../src/ir/index.js';
+import { computeDominance, evaluateIR, integer, registerStateAt, verifyIR, type RegisterIR, type SSAForm, type TrustedCall } from '../../../src/ir/index.js';
 import { builder, image, register, returned } from '../../ir/support.js';
 
 const i64 = integer(64);
@@ -44,13 +44,18 @@ test('source tracking retains actual writes and observable capabilities without 
     'Actual uses do not mutate ABI capacity');
   assert.equal(full.register_states[0]!.entry.length, 67);
   assert.equal(source.register_states[0]!.entry.length, 3);
+  assert.deepEqual(source.register_states[0]!.entry.map((binding) => binding.register.root),
+    [written.root, result.root, preserved.root]);
+  // Only the entry binds state; every other block derives it from dominators.
+  const derived = (ir: SSAForm, block: string, root: string) => {
+    const dominance = computeDominance(ir), rows = new Map(ir.register_states.map((row) => [row.block, row]));
+    return registerStateAt({ idom: (id) => dominance.idom(id), entry: (id) => rows.get(id)!.entry,
+      exit: (id) => rows.get(id)!.exit }, block, { root, offset_bits: 0, width_bits: 64 }, 'entry')?.value.id;
+  };
   for (const row of source.register_states) {
-    assert.deepEqual(row.entry.map((binding) => binding.register.root),
-      [written.root, result.root, preserved.root]);
-    const original = full.register_states.find((state) => state.block === row.block)!;
-    assert.deepEqual(row.entry.map((binding) => binding.value.id),
-      original.entry.filter((binding) => capabilities.has(binding.register.root) ||
-        binding.register.root === written.root).map((binding) => binding.value.id));
+    if (row.block !== source.entry) assert.deepEqual(row.entry, []);
+    for (const root of [written.root, result.root, preserved.root])
+      assert.equal(derived(source, row.block, root), derived(full, row.block, root));
   }
   const originalCall = input.blocks[0]!.instructions.find((node) => node.kind === 'call')!;
   const sourceCall = source.blocks[0]!.instructions.find((node) => node.kind === 'call')!;

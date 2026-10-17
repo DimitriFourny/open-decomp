@@ -9,6 +9,7 @@ import type {
 import { bitWidth, evaluateExpression, expressionOperands, successors } from '../../ir/index.js';
 import type { Edge, Expression, RegisterBinding, SSAForm, Value } from '../../ir/index.js';
 import { AnalysisBudget, type AnalysisOptions } from '../ssa/budget.js';
+import { instructionResults } from '../effects/index.js';
 
 export type Initialization = 'initialized' | 'uninitialized' | 'maybe_initialized' | 'unknown';
 export type StackValue =
@@ -471,17 +472,27 @@ export function recoverStack(
       noteStackBindings(row.entry);
       noteStackBindings(row.exit);
     }
-    for (const block of input.blocks)
+    // Values may be used in any block their definition dominates. A changed
+    // fact reschedules those remote users as well as dependent edges.
+    const owner = new Map<EntityId, EntityId>();
+    for (const block of input.blocks) {
+      budget.charge(block.parameters.length);
+      for (const parameter of block.parameters) owner.set(parameter.id, block.id);
       for (const node of block.instructions) {
         budget.charge();
         if ('register_inputs' in node) noteStackBindings(node.register_inputs);
         if ('register_outputs' in node) noteStackBindings(node.register_outputs);
+        for (const value of instructionResults(node)) owner.set(value.id, block.id);
       }
+    }
+    let active: EntityId | undefined;
+    const remoteUsers = new Map<EntityId, Set<EntityId>>();
     const values = new Map<EntityId, StackFact>();
     const edgeUsers = new Map<EntityId, { edge: Edge; index: number }[]>();
     const dirtyEdges = new Map<Edge, Set<number>>();
     const dirtyParameters = new Map<EntityId, Set<number>>();
     const transferred = new Set<EntityId>();
+    const pendingBlocks = stackWorklist(input, budget);
     const publish = (id: EntityId, fact: StackFact): StackFact => {
       const previous = values.get(id);
       if (previous && sameFact(previous, fact)) return previous;
@@ -491,6 +502,10 @@ export function recoverStack(
         const row = dirtyEdges.get(edge) ?? new Set<number>();
         row.add(index);
         dirtyEdges.set(edge, row);
+      }
+      for (const user of remoteUsers.get(id) ?? []) {
+        budget.charge();
+        if (user !== active && transferred.has(user)) pendingBlocks.add(user);
       }
       return fact;
     };
@@ -525,7 +540,6 @@ export function recoverStack(
     });
     const initial: State = { parameters, memory: new Map(), memory_shared: false, escaped: false, aliased: false };
     const incoming = new Map<EntityId, State>([[input.entry, initial]]);
-    const pendingBlocks = stackWorklist(input, budget);
     pendingBlocks.add(input.entry);
     const snapshots = new Map<EntityId, StackSnapshot>();
     const accesses: StackAccess[] = [];
@@ -537,6 +551,12 @@ export function recoverStack(
       aliased: false,
     };
     const get = (value: Value): StackFact => {
+      const home = active === undefined ? undefined : owner.get(value.id);
+      if (home !== undefined && home !== active) {
+        const users = remoteUsers.get(value.id) ?? new Set<EntityId>();
+        users.add(active!);
+        remoteUsers.set(value.id, users);
+      }
       const fact = values.get(value.id) ?? unknown;
       if (stackValues.has(value.id) && !isStack(fact.value) && fact.value.kind !== 'undefined') {
         return publish(value.id, { ...fact, value: { kind: 'dynamic_stack' } });
@@ -695,6 +715,7 @@ export function recoverStack(
         incomingState = incoming.get(id)!;
       incomingState.memory_shared = true;
       const state: State = { ...incomingState };
+      active = id;
       if (!transferred.has(id)) {
         budget.charge(block.parameters.length);
         block.parameters.forEach((parameter, index) =>
@@ -839,15 +860,21 @@ export function recoverStack(
         if (outputs.some((fact) => isStack(fact.value))) state.escaped = true;
       }
       if (record) {
+        // Sparse rows: every block-boundary architectural value appears in
+        // some block's entry/exit row (or is a parameter), so frame bounds
+        // over all rows equal bounds over each block's full derived state.
         const exit = snapshot(state, rows.get(id)!.exit);
+        const merged = snapshot(state, rows.get(id)!.entry);
         snapshots.set(block.terminator.id, exit);
-        if (
-          exit.registers.some((binding) => binding.register.root === abi.stack_pointer.root) &&
-          exit.stack_pointer.value.kind !== 'stack'
-        )
-          frame.dynamic = true;
+        for (const boundary of [exit, merged])
+          if (
+            boundary.registers.some((binding) => binding.register.root === abi.stack_pointer.root) &&
+            boundary.stack_pointer.value.kind !== 'stack'
+          )
+            frame.dynamic = true;
         for (const fact of [
           ...exit.registers.map((binding) => binding.fact),
+          ...merged.registers.map((binding) => binding.fact),
           ...block.parameters.map(get),
         ]) {
           if (fact.value.kind === 'stack') {

@@ -106,13 +106,13 @@ export function observeSelectedWork(observation: Observation): () => void {
         replace('for (const cell of cells) {', `for (const cell of cells) { ${probe('ssa_cell_iteration')}`);
         replace('const identity = (...birth: readonly (string | number)[]): EntityId =>',
           `${probe('ssa_root_inventory', '{ function: input.id, roots: [...cellsByRoot].map(([root, row]) => ({ root, cells: row.length })), actual_read_write_roots: [...new Set(input.blocks.flatMap(block => block.instructions.filter(node => node.kind === "read_register" || node.kind === "write_register").map(node => node.register.root)))] }')} const identity = (...birth: readonly (string | number)[]): EntityId =>`);
-        replace('const state = new Map(entry.map((binding) => [key(binding.register), binding.value]));',
-          'const state = new Map(entry.map((binding) => [key(binding.register), binding.value])); let __stateVersion = 0, __snapshotVersion = 0;');
-        replace('state.set(', '(__stateVersion++, state).set(', 3);
-        replace('const snapshot = (): RegisterBinding[] =>\n      cells.map((cell) => {',
+        replace('const state = new Map<string, Value>();',
+          'const state = new Map<string, Value>(); let __stateVersion = 0, __snapshotVersion = 0;');
+        replace('state.set(', '(__stateVersion++, state).set(', 2);
+        replace('const snapshot = (): RegisterBinding[] =>\n    cells.map((cell) => {',
           `const snapshot = (): RegisterBinding[] => { ${probe('ssa_snapshot', '{ cells: cells.length, reusable: __snapshotVersion === __stateVersion }')} __snapshotVersion = __stateVersion; return cells.map((cell) => {`);
-        replace('return { register: cell, value: state.get(key(cell))! };\n      });',
-          'return { register: cell, value: state.get(key(cell))! };\n      }); };');
+        replace('return { register: cell, value: state.get(key(cell))! };\n    });',
+          'return { register: cell, value: state.get(key(cell))! };\n    }); };');
       } else if (kind === 'ir_verification') {
         replace('const local = new Map<string, IRType>();',
           `const local = new Map<string, IRType>();

@@ -64,7 +64,7 @@ test('builders reject incompatible widths, malformed slices and vector lane shap
   rejected(replaceInstructions(program, instructions), 'type');
 });
 
-test('verifier rejects missing, forward, cross-block and conflicting-type value references', () => {
+test('verifier rejects missing, forward, nondominating and conflicting-type value references', () => {
   const ir = baseProgram();
   const nodes = [...ir.blocks[0]!.instructions];
   const first = nodes[0]!,
@@ -87,11 +87,22 @@ test('verifier rejects missing, forward, cross-block and conflicting-type value 
     ]),
     'type',
   );
+  const dominated = builder('dominated-use');
+  const top = dominated.block('entry'),
+    below = dominated.block('successor');
+  const available = top.constant(i32, 7n);
+  top.jump(below);
+  below.return([available]);
+  assert.doesNotThrow(() => dominated.finish(top, [i32]), 'A dominating definition is available');
   const joined = builder('cross-block');
   const a = joined.block('entry'),
-    b = joined.block('successor');
-  const leaked = a.constant(i32, 7n);
-  a.jump(b);
+    left = joined.block('left'),
+    right = joined.block('right'),
+    b = joined.block('join');
+  a.branch(a.constant(integer(1), 1n), a.edge(left), a.edge(right));
+  const leaked = left.constant(i32, 7n);
+  left.jump(b);
+  right.jump(b);
   b.return([leaked]);
   assert.throws(() => joined.finish(a, [i32]), IRValidationError);
 });
@@ -303,8 +314,10 @@ test('canonical binding layouts retain reordered, cloned and overlapping descrip
   })) };
   const reports = verifyIR(overlap).filter((problem) => problem.message === 'Overlapping SSA register bindings');
   assert.equal(reports.filter((problem) => problem.node === program.id).length, 1);
-  for (const block of program.blocks)
-    assert.equal(reports.filter((problem) => problem.node === block.id).length, 2);
+  // Each nonempty row naming the overlapping cell reports it once.
+  for (const state of program.register_states)
+    assert.equal(reports.filter((problem) => problem.node === state.block).length,
+      Number(state.entry.length > 0) + Number(state.exit.length > 0));
 });
 
 test('descriptor validation reuses only frozen flat cells and retains mutable clone diagnostics', () => {
@@ -337,12 +350,14 @@ test('descriptor validation reuses only frozen flat cells and retains mutable cl
   const changed = verifyIR(mutableProgram).filter((problem) =>
     problem.message === 'Overlapping SSA register bindings');
   assert.equal(changed.filter((problem) => problem.node === program.id).length, 1);
-  for (const block of program.blocks)
-    assert.equal(changed.filter((problem) => problem.node === block.id).length, 2);
+  for (const state of program.register_states)
+    assert.equal(changed.filter((problem) => problem.node === state.block).length,
+      Number(state.entry.length > 0) + Number(state.exit.length > 0));
   const invalid = Object.freeze({ ...first, write_rule: 'replace_root' as const });
   const repeated = verifyIR(replace(invalid)).filter((problem) =>
     problem.message === 'replace_root must cover the root');
   assert.equal(repeated.filter((problem) => problem.node === program.id).length, 1);
-  for (const block of program.blocks)
-    assert.equal(repeated.filter((problem) => problem.node === block.id).length, 2);
+  for (const state of program.register_states)
+    assert.equal(repeated.filter((problem) => problem.node === state.block).length,
+      Number(state.entry.length > 0) + Number(state.exit.length > 0));
 });

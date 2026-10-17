@@ -7,6 +7,7 @@ import {
 } from '../core/index.js';
 import type { CallClobbers, RegisterDescriptor } from '../core/index.js';
 import { bitWidth, expressionOperands, sameType, successors, validType } from './model.js';
+import { computeDominance } from './dominance.js';
 import type {
   DataType,
   Effect,
@@ -195,9 +196,12 @@ export function expressionProblems(type: DataType, e: Expression): readonly stri
 }
 
 /**
- * Region SSA: definitions are block-local, with simultaneous edge arguments at joins/loops.
- * This stronger rule avoids implicit dominance assumptions, including unreachable blocks.
- * A single linear effect chain orders registers, memory and calls; forks occur only at terminators.
+ * Dominance SSA: a data value is available after its definition in its own
+ * block and in every block its block strictly dominates. Dominance includes
+ * unreachable components (each rooted separately), so no component reads
+ * another's values. Joins/loops merge only through simultaneous edge arguments.
+ * Effect tokens remain block-local: a single linear effect chain orders
+ * registers, memory and calls; forks occur only at terminators.
  */
 export function verifyIR(
   ir: FunctionIR,
@@ -380,6 +384,29 @@ export function verifyIR(
       report('register', node, 'SSA architectural-state coverage mismatch');
   };
   tracked = masks(layout, ir.id);
+  const trackedCells = new Set(
+    layoutDescriptors.map((r) => `${r.root}:${r.offset_bits}:${r.width_bits}`),
+  );
+  // Sparse rows (merge entries and rebound exits) bind distinct tracked cells.
+  const partialRow = (bindings: readonly RegisterBinding[], node: string): void => {
+    const seen = new Set<string>();
+    for (const binding of bindings) {
+      checkpoint?.(1);
+      const r = binding.register;
+      if (!register(r, node)) continue;
+      const cell = `${r.root}:${r.offset_bits}:${r.width_bits}`;
+      if (r.write_rule !== 'preserve_other_bits' || r.role === 'zero' || !trackedCells.has(cell))
+        report('register', node, 'SSA state rows bind only tracked disjoint register cells');
+      if (seen.has(cell)) report('register', node, 'Overlapping SSA register bindings');
+      seen.add(cell);
+      if (binding.value.type.kind !== 'integer' || bitWidth(binding.value.type) !== r.width_bits)
+        report('type', node, 'SSA register binding requires an equal-width integer value');
+    }
+  };
+  const dominance = computeDominance(ir, checkpoint);
+  // Cross-block references are resolved after every definition is known.
+  const definedIn = new Map<string, { readonly block: string; readonly type: IRType }>();
+  const remote: { readonly value: Value; readonly block: string; readonly node: string }[] = [];
   for (const block of ir.blocks) {
     origin(block);
     const local = new Map<string, IRType>();
@@ -387,11 +414,14 @@ export function verifyIR(
       identify(v.id);
       if (!validType(v.type)) report('type', v.id, 'Invalid definition type');
       local.set(v.id, v.type);
+      if (v.type.kind !== 'effect' && !definedIn.has(v.id))
+        definedIn.set(v.id, { block: block.id, type: v.type });
     };
     const reference = (v: Value | Effect, node: string): void => {
       checkpoint?.(1);
       const type = local.get(v.id);
-      if (!type) report('reference', node, `Undefined, forward or cross-block value ${v.id}`);
+      if (!type && v.type.kind !== 'effect') remote.push({ value: v as Value, block: block.id, node });
+      else if (!type) report('reference', node, `Undefined, forward or nondominating value ${v.id}`);
       else if (!sameType(type, v.type))
         report('type', node, 'Reference type differs from its definition');
     };
@@ -412,14 +442,20 @@ export function verifyIR(
     let effect = block.effect_parameter;
     const state = states.get(block.id);
     if (state) {
-      sameMasks(masks(state.entry, block.id), tracked, block.id);
-      const parameters = new Set(block.parameters.map((parameter) => parameter.id)),
-        assigned = new Set<string>();
-      for (const binding of state.entry) {
-        reference(binding.value, block.id);
-        if (!parameters.has(binding.value.id) || assigned.has(binding.value.id))
-          report('register', block.id, 'SSA entry bindings require distinct block parameters');
-        assigned.add(binding.value.id);
+      if (dominance.idom(block.id) === null) {
+        // Roots (and joins of separately rooted components) define every cell.
+        sameMasks(masks(state.entry, block.id), tracked, block.id);
+        const parameters = new Set(block.parameters.map((parameter) => parameter.id)),
+          assigned = new Set<string>();
+        for (const binding of state.entry) {
+          reference(binding.value, block.id);
+          if (!parameters.has(binding.value.id) || assigned.has(binding.value.id))
+            report('register', block.id, 'SSA entry bindings require distinct block parameters');
+          assigned.add(binding.value.id);
+        }
+      } else {
+        partialRow(state.entry, block.id);
+        for (const binding of state.entry) reference(binding.value, block.id);
       }
     }
     for (const instruction of block.instructions) {
@@ -556,7 +592,10 @@ export function verifyIR(
       }
     }
     if (state) {
-      sameMasks(masks(state.exit, block.id), tracked, block.id);
+      // Function exits observe every cell; other blocks list rebound cells.
+      if (successors(block.terminator).length === 0)
+        sameMasks(masks(state.exit, block.id), tracked, block.id);
+      else partialRow(state.exit, block.id);
       for (const binding of state.exit) reference(binding.value, block.id);
     }
     const t = block.terminator;
@@ -612,6 +651,13 @@ export function verifyIR(
           report('type', t.id, 'Edge argument type mismatch');
       });
     }
+  }
+  for (const { value, block, node } of remote) {
+    const definition = definedIn.get(value.id);
+    if (!definition || definition.block === block || !dominance.dominates(definition.block, block))
+      report('reference', node, `Undefined, forward or nondominating value ${value.id}`);
+    else if (!sameType(definition.type, value.type))
+      report('type', node, 'Reference type differs from its definition');
   }
   return problems;
 }

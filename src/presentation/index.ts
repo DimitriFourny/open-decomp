@@ -1,6 +1,6 @@
 import type { EntityId, OperationContext } from '../core/index.js';
 import { AnalysisBudget } from '../analysis/ssa/budget.js';
-import { successors } from '../ir/index.js';
+import { computeDominance, successors } from '../ir/index.js';
 import type { BasicBlock, Edge, SSAForm } from '../ir/index.js';
 import type {
   BlockRegion,
@@ -39,7 +39,9 @@ type Atom = {
  * retain labels when a transfer cannot be expressed by its structured syntax.
  *
  * Statements retain identity, provenance, effect tokens and boundary snapshots;
- * block register exits remain observable even for empty returns. Coverage includes
+ * function-exit register rows remain observable even for empty returns, and
+ * every block records its immediate dominator for derived register state.
+ * Coverage includes
  * unreachable blocks. No untouched CFG is embedded in the output. Work bounds cover
  * graph traversal, copies and region construction; depth is capped at 64. Exhaustion
  * or cancellation returns null transactionally, never a truncated presentation.
@@ -81,6 +83,8 @@ export function structureControlFlow(
         predecessors.get(edge.target)!.push(block.id);
       }
     }
+    // Sparse register rows derive full block state along immediate dominators.
+    const dominance = computeDominance(input, (work) => budget.charge(work));
     const transfer = (edge: Edge, scopes: readonly LoopScope[]): ParallelTransfer => {
       const target = blocks.get(edge.target)!;
       let mode: ParallelTransfer['mode'] = 'goto',
@@ -151,6 +155,7 @@ export function structureControlFlow(
         provenance: block.provenance,
         parameters: block.parameters,
         effect_parameter: block.effect_parameter,
+        dominator: dominance.idom(id),
         register_entry: state.entry,
         register_exit: state.exit,
         statements: block.instructions,

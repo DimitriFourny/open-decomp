@@ -1,6 +1,6 @@
 import { fingerprint } from '../../core/index.js';
 import type { EntityId, RegisterDescriptor } from '../../core/index.js';
-import { bitWidth, integer, mergeProvenanceSources } from '../../ir/index.js';
+import { bitWidth, computeDominance, integer, mergeProvenanceSources, successors } from '../../ir/index.js';
 import type {
   BasicBlock,
   DataType,
@@ -28,13 +28,16 @@ export interface SSAConstructionOptions extends AnalysisOptions {
    * read/write root stays whole; omission retains the full machine view. */
   readonly observable_register_masks?: ReadonlyMap<string, bigint>;
 }
-
 /**
- * Region SSA: every block receives architectural cells as explicit parameters.
- * All predecessor edges, including backedges and unreachable components, pass
- * their final cells simultaneously. No dominance guesses or register-name rules.
+ * Minimal region SSA over architectural cells. A block receives a cell parameter
+ * only where definitions of that cell meet (iterated dominance frontier); other
+ * uses reference the dominating definition directly. The entry and every
+ * unreachable-component root bind every cell. All predecessor edges, including
+ * backedges and unreachable components, pass their merged cells simultaneously.
  * Cells split at every access boundary, retaining known unaffected slices across
- * partial writes/call clobbers. Entry/exit and call snapshots are semantic roots.
+ * partial writes/call clobbers. Entry/exit and call snapshots are semantic roots;
+ * non-exit blocks record only the cells they rebind, so full per-block state is
+ * derived along dominators (registerStateAt), never materialized per block.
  * Register effects disappear; memory/call/unknown effect order is unchanged.
  */
 export function constructSSA(
@@ -159,30 +162,115 @@ function build(input: RegisterIR, budget: AnalysisBudget,
   }
   const identity = (...birth: readonly (string | number)[]): EntityId =>
     `entity_${fingerprint(['register-ssa', input.id, ...birth])}`;
-  const entries = new Map<EntityId, readonly RegisterBinding[]>();
-  for (const block of input.blocks) {
-    capacity.block(block.parameters.length + cells.length);
-    entries.set(
-      block.id,
-      cells.map((cell) => {
-        budget.charge();
-        return {
-          register: cell,
-          value: { id: identity(block.id, 'entry', key(cell)), type: integer(cell.width_bits) },
-        };
-      }),
-    );
-  }
-  const states: SSAForm['register_states'][number][] = [];
-  const blocks: BasicBlock[] = [];
-  for (const block of input.blocks) {
+  const cellIndex = new Map(cells.map((cell, index) => [key(cell), index]));
+  const matching = (descriptor: RegisterDescriptor): Cell[] => {
     budget.charge();
-    const entry = entries.get(block.id)!;
-    const state = new Map(entry.map((binding) => [key(binding.register), binding.value]));
+    return (cellsByRoot.get(descriptor.root) ?? []).filter((cell) => {
+      budget.charge();
+      return (
+        cell.offset_bits >= descriptor.offset_bits &&
+        cell.offset_bits + cell.width_bits <= descriptor.offset_bits + descriptor.width_bits
+      );
+    });
+  };
+  // Cells each block may rebind: written slices, zero-extended roots and clobbers.
+  const definitions = cells.map(() => new Set<number>());
+  input.blocks.forEach((block, index) => {
+    for (const node of block.instructions) {
+      budget.charge();
+      if (node.kind === 'write_register' && node.register.write_rule !== 'discard') {
+        const { root, offset_bits: low, width_bits: width, write_rule: rule } = node.register;
+        for (const cell of cellsByRoot.get(root) ?? []) {
+          budget.charge();
+          if (rule === 'zero_extend_root' ||
+            (cell.offset_bits >= low && cell.offset_bits + cell.width_bits <= low + width))
+            definitions[cellIndex.get(key(cell))!]!.add(index);
+        }
+      } else if (node.kind === 'call' || node.kind === 'unknown_effect')
+        for (const descriptor of [...node.clobbers.registers, ...node.clobbers.flags])
+          for (const cell of matching(descriptor)) definitions[cellIndex.get(key(cell))!]!.add(index);
+    }
+  });
+  // Minimal SSA: a block receives a cell parameter only on the iterated
+  // dominance frontier of that cell's definitions. Blocks without a dominator
+  // (the entry and every unreachable-component root) bind every cell.
+  const dominance = computeDominance(input, (work) => budget.charge(work));
+  const slots = new Map(input.blocks.map((block, index) => [block.id, index]));
+  const idoms = input.blocks.map((block) => {
+    const parent = dominance.idom(block.id);
+    return parent === null ? -1 : slots.get(parent)!;
+  });
+  const predecessors = input.blocks.map((): number[] => []);
+  input.blocks.forEach((block, index) => {
+    for (const edge of successors(block.terminator)) {
+      budget.charge();
+      const target = slots.get(edge.target);
+      if (target !== undefined) predecessors[target]!.push(index);
+    }
+  });
+  const frontier = input.blocks.map((): number[] => []);
+  predecessors.forEach((incoming, index) => {
+    if (incoming.length < 2 || idoms[index] === -1) return;
+    for (const predecessor of incoming)
+      for (let runner = predecessor; runner !== -1 && runner !== idoms[index]; runner = idoms[runner]!) {
+        budget.charge();
+        if (frontier[runner]!.at(-1) !== index) frontier[runner]!.push(index);
+      }
+  });
+  const parameterCells = idoms.map((parent) => (parent === -1 ? cells.map((_, cell) => cell) : []));
+  const unrooted = idoms.flatMap((parent, index) => (parent === -1 ? [index] : []));
+  definitions.forEach((blocksDefining, cell) => {
+    const pending = [...blocksDefining, ...unrooted], seen = new Set(pending), placed = new Set<number>();
+    while (pending.length) {
+      budget.charge();
+      for (const join of frontier[pending.pop()!]!) {
+        budget.charge();
+        if (placed.has(join)) continue;
+        placed.add(join);
+        parameterCells[join]!.push(cell);
+        if (!seen.has(join)) {
+          seen.add(join);
+          pending.push(join);
+        }
+      }
+    }
+  });
+  // Rename along the dominator tree. Undo records restore the dominating state.
+  const state = new Map<string, Value>();
+  const undo: [string, Value | undefined][] = [];
+  const set = (cell: string, value: Value): void => {
+    undo.push([cell, state.get(cell)]);
+    state.set(cell, value);
+  };
+  const snapshot = (): RegisterBinding[] =>
+    cells.map((cell) => {
+      budget.charge();
+      return { register: cell, value: state.get(key(cell))! };
+    });
+  const blocks: BasicBlock[] = new Array(input.blocks.length);
+  const states: SSAForm['register_states'][number][] = new Array(input.blocks.length);
+  const visit = (index: number): void => {
+    budget.charge();
+    const block = input.blocks[index]!;
+    capacity.block(block.parameters.length + parameterCells[index]!.length);
+    const entry = parameterCells[index]!.map((slot): RegisterBinding => {
+      budget.charge();
+      const cell = cells[slot]!;
+      const value = { id: identity(block.id, 'entry', key(cell)), type: integer(cell.width_bits) };
+      set(key(cell), value);
+      return { register: cell, value };
+    });
+    // Block-entry value of every cell rebound in this block.
+    const rebound = new Map<string, Value | undefined>();
+    const write = (cell: string, value: Value): void => {
+      if (!rebound.has(cell)) rebound.set(cell, state.get(cell));
+      set(cell, value);
+    };
     const nodes: Instruction[] = [];
     let effect = block.effect_parameter;
     let sequence = 0;
-    let source = block.provenance;
+    // Register writes disappear; their origins join the terminator once.
+    const writes: Provenance[] = [];
     const assign = (type: DataType, expression: Expression, provenance: Provenance): Value => {
       capacity.nodes();
       const id = identity(block.id, 'generated', sequence++);
@@ -190,21 +278,6 @@ function build(input: RegisterIR, budget: AnalysisBudget,
       nodes.push({ kind: 'assign', id, result: value, expression, provenance });
       return value;
     };
-    const matching = (descriptor: RegisterDescriptor): Cell[] => {
-      budget.charge();
-      return (cellsByRoot.get(descriptor.root) ?? []).filter((cell) => {
-        budget.charge();
-        return (
-          cell.offset_bits >= descriptor.offset_bits &&
-          cell.offset_bits + cell.width_bits <= descriptor.offset_bits + descriptor.width_bits
-        );
-      });
-    };
-    const snapshot = (): RegisterBinding[] =>
-      cells.map((cell) => {
-        budget.charge();
-        return { register: cell, value: state.get(key(cell))! };
-      });
     for (const node of block.instructions) {
       budget.charge();
       if (node.kind === 'read_register') {
@@ -236,7 +309,7 @@ function build(input: RegisterIR, budget: AnalysisBudget,
         });
       } else if (node.kind === 'write_register') {
         const descriptor = node.register;
-        source = mergeProvenanceSources([source, node.provenance], (work) => budget.charge(work));
+        writes.push(node.provenance);
         if (descriptor.write_rule === 'discard') continue;
         const raw =
           node.value.type.kind === 'integer'
@@ -265,12 +338,12 @@ function build(input: RegisterIR, budget: AnalysisBudget,
                     node.provenance,
                   );
             // Keep the write's source even when its value was defined elsewhere.
-            state.set(
+            write(
               key(cell),
               assign(value.type, { kind: 'cast', op: 'bitcast', value }, node.provenance),
             );
           } else if (descriptor.write_rule === 'zero_extend_root')
-            state.set(
+            write(
               key(cell),
               assign(integer(cell.width_bits), { kind: 'constant', bits: 0n }, node.provenance),
             );
@@ -291,7 +364,7 @@ function build(input: RegisterIR, budget: AnalysisBudget,
             type: integer(cell.width_bits),
           };
           outputs.push({ register: cell, value });
-          state.set(key(cell), value);
+          write(key(cell), value);
         }
         capacity.nodes();
         nodes.push({
@@ -314,21 +387,31 @@ function build(input: RegisterIR, budget: AnalysisBudget,
         nodes.push(node);
       }
     }
-    const exit = snapshot();
+    // Function exits observe every cell; other blocks list only rebound cells.
+    const exit = successors(block.terminator).length === 0
+      ? snapshot()
+      : [...rebound]
+          .filter(([cell, initial]) => {
+            budget.charge();
+            return state.get(cell) !== initial;
+          })
+          .map(([cell]) => cellIndex.get(cell)!)
+          .sort((a, b) => a - b)
+          .map((slot): RegisterBinding => ({ register: cells[slot]!, value: state.get(key(cells[slot]!))! }));
     const edge = (old: Edge): Edge => {
-      budget.charge(1 + old.arguments.length + exit.length);
+      const target = parameterCells[slots.get(old.target) ?? -1] ?? [];
+      budget.charge(1 + old.arguments.length + target.length);
       return {
         ...old,
-        arguments: [...old.arguments, ...exit.map((binding) => binding.value)],
+        arguments: [...old.arguments, ...target.map((slot) => state.get(key(cells[slot]!))!)],
         effect,
       };
     };
     let terminator: Terminator = {
       ...block.terminator,
       effect,
-      provenance: mergeProvenanceSources([block.terminator.provenance, source], (work) =>
-        budget.charge(work),
-      ),
+      provenance: mergeProvenanceSources([block.terminator.provenance, block.provenance, ...writes],
+        (work) => budget.charge(work)),
     };
     switch (terminator.kind) {
       case 'jump':
@@ -349,13 +432,37 @@ function build(input: RegisterIR, budget: AnalysisBudget,
         };
         break;
     }
-    blocks.push({
+    blocks[index] = {
       ...block,
       parameters: [...block.parameters, ...entry.map((binding) => binding.value)],
       instructions: nodes,
       terminator,
-    });
-    states.push({ block: block.id, entry, exit });
+    };
+    states[index] = { block: block.id, entry, exit };
+  };
+  const children = input.blocks.map((): number[] => []);
+  idoms.forEach((parent, index) => {
+    if (parent !== -1) children[parent]!.push(index);
+  });
+  for (const start of unrooted) {
+    const stack = [{ index: start, cursor: 0, marker: undo.length }];
+    visit(start);
+    while (stack.length) {
+      const frame = stack[stack.length - 1]!;
+      const child = children[frame.index]![frame.cursor++];
+      if (child !== undefined) {
+        stack.push({ index: child, cursor: 0, marker: undo.length });
+        visit(child);
+        continue;
+      }
+      stack.pop();
+      while (undo.length > frame.marker) {
+        budget.charge();
+        const [cell, previous] = undo.pop()!;
+        if (previous === undefined) state.delete(cell);
+        else state.set(cell, previous);
+      }
+    }
   }
   return { ...input, form: 'ssa', blocks, register_states: states };
 }

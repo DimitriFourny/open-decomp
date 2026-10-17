@@ -276,7 +276,10 @@ export interface RegisterIR extends FunctionBody {
 }
 export interface SSAForm extends FunctionBody {
   readonly form: 'ssa';
-  /** One row per block. Entry bindings reference parameters; exit bindings are observable DCE roots. */
+  /** One row per block. Entry rows bind every tracked cell to distinct parameters at
+   * dominator-tree roots, elsewhere only merged/rebound cells; exit rows bind every
+   * cell at function exits, elsewhere only cells rebound in the block. Unlisted cells
+   * inherit the immediate dominator's exit (registerStateAt). Rows are observable roots. */
   readonly register_states: readonly {
     readonly block: EntityId;
     readonly entry: readonly RegisterBinding[];

@@ -50,7 +50,12 @@ export interface BlockRegion extends Origin {
   /** The stable SSA block identity is also its explicit presentation label. */
   readonly parameters: readonly Value[];
   readonly effect_parameter: Effect;
+  /** Immediate SSA dominator, null at roots. Values it dominates are visible here. */
+  readonly dominator: EntityId | null;
+  /** Cells merged/rebound at entry (every cell at roots). Others inherit the
+   * dominator's exit state; see registerStateAt. */
   readonly register_entry: readonly RegisterBinding[];
+  /** Every cell at function exits; elsewhere only cells rebound in this block. */
   readonly register_exit: readonly RegisterBinding[];
   readonly statements: readonly Instruction[];
   readonly control: Control;
