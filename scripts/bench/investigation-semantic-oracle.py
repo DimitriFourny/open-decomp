@@ -76,6 +76,23 @@ for name, material in by_name.items():
                 else:
                     assert any(page['references'][ref] in instructions for ref in semantic['instruction_refs'])
                 linked += 1
+# Paged helper contracts are renderer pseudocode semantic contracts. Compare every paged item with the
+# immutable artifact's own helper list (no generated-text parsing or repair).
+helper_domain = 'renderer pseudocode semantic contract; not original source or an executable helper definition'
+helper_proof = {}
+for name, material in by_name.items():
+    emission = json.loads((root / 'private/projection/project/artifacts' / material['artifact_id']).read_text())[
+        'result']['data']['emission']
+    paged = [(record['artifact_helper_index'], record['name'], record['explanation'])
+             for page in material['pages'] for record in page['records'] if record['kind'] == 'helper']
+    assert paged == [(index, helper['name'], helper['explanation']) for index, helper in enumerate(emission['helpers'])], name
+    for page in material['pages']:
+        counts = page['selection']['counts']['helpers']
+        assert counts == {'total': len(emission['helpers']), 'selected': len(emission['helpers'])}, name
+        assert all(record['semantic_domain'] == helper_domain
+                   for record in page['records'] if record['kind'] == 'helper')
+    helper_proof[name] = [helper['name'] for helper in emission['helpers']]
+assert any(helper_proof.values()), 'No frozen function exposed actual helper contracts'
 result = {'selected_functions': len(by_name), 'source_and_instruction_assertions': 'passed',
     'instruction_linked_nonparameter_records': linked, 'target_executed': False,
     'known_constant_call_bits': '7', 'open_call_arity_preserved': True,
@@ -83,6 +100,7 @@ result = {'selected_functions': len(by_name), 'source_and_instruction_assertions
     'signed_division_width_domains': {'machine_register_bits_gold': 64, 'ir_result_bits': sdiv['result_width_bits'],
                                     'domains_not_equated': True},
     'native_instruction_workflow': all(material['native'] is not None for material in by_name.values()),
+    'helper_contracts_by_function': helper_proof, 'helper_contract_domain': helper_domain,
     'blind_answer_score': None, 'equivalence_claim': False}
 (root / 'private/trusted-semantic-oracle.json').write_text(json.dumps(result, indent=2) + '\n')
 print(json.dumps(result))

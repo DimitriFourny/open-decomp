@@ -111,7 +111,7 @@ async def record(args, tool, questions):
                     row['model_text_bytes'] = 0
                     row['structured_answering_payload_bytes'] = 0
                     while True:
-                        filters = {'kinds': list(dict.fromkeys(FOCUSED_KINDS[name] + ['source', 'unresolved', 'fp_environment', 'conflict', 'annotation']))} if args.projection_mode == 'focused' else {}
+                        filters = {'kinds': list(dict.fromkeys(FOCUSED_KINDS[name] + ['source', 'helper', 'unresolved', 'fp_environment', 'conflict', 'annotation']))} if args.projection_mode == 'focused' else {}
                         value, call_record, failed = await client.call('function_get', {**selected, **filters,
                             'view': 'investigation', 'artifact_id': artifact['id'], 'include_quotes': True,
                             'page': {'limit': 25, **({'cursor': cursor} if cursor else {})}})

@@ -253,7 +253,7 @@ export const functionGetArgsSchema = z.strictObject({
   artifact_id: artifactSchema.shape.id.optional(),
   subject_id: entityIdSchema.optional(),
   kinds: z.array(z.enum(['signature', 'parameter', 'type', 'interpretation', 'field', 'identity',
-    'call', 'rewrite', 'conflict', 'annotation', 'fp_environment', 'unresolved', 'source'])).min(1).max(13).optional(),
+    'call', 'rewrite', 'conflict', 'annotation', 'fp_environment', 'unresolved', 'source', 'helper'])).min(1).max(14).optional(),
   include_quotes: z.boolean().optional(),
   detail: z.enum(['full', 'compact']).optional().describe('Disassembly only; omitted means full'),
   ...paging,
@@ -579,6 +579,8 @@ const investigationDetailsSchema = z.discriminatedUnion('kind', [
   inferenceDetailsByKind.conflict.omit({ alternatives: true }).extend({ alternative_count: z.int().min(0) }),
   inferenceDetailsByKind.annotation,
 ]);
+/** Field validators come from the emission itself (emissionSchema is refined, so only its shape is shared). */
+const emissionHelperSchema = emissionSchema.shape.helpers.element;
 const investigationItemSchema = z.discriminatedUnion('kind', [
   z.strictObject({
     kind: z.literal('source'), span: z.strictObject({ start: z.int().min(0), end: z.int().min(1) }),
@@ -591,6 +593,12 @@ const investigationItemSchema = z.discriminatedUnion('kind', [
       .extend({ parameter_count: z.int().min(0).max(10000) }).nullable(),
     parameters: z.array(compactParameterSchema).max(10000),
     locator: z.literal('result.data.signature'),
+  }),
+  z.strictObject({
+    kind: z.literal('helper'), artifact_helper_index: z.int().min(0).max(999),
+    name: emissionHelperSchema.shape.name, explanation: emissionHelperSchema.shape.explanation,
+    semantic_domain: z.literal('renderer pseudocode semantic contract; not original source or an executable helper definition'),
+    locator: z.literal('result.data.emission.helpers[artifact_helper_index] in the selected artifact'),
   }),
   z.strictObject({
     kind: z.literal('inference'), record: inferenceSchema.pick({ id: true, status: true }).extend({
@@ -674,9 +682,9 @@ const functionGetDataSchema = z.discriminatedUnion('view', [
     references: z.array(z.union([entityIdSchema,
       z.string().regex(/^(va|rva|file):0x[0-9a-f]{1,16}\+0x[0-9a-f]{1,16}$/)])).max(10000),
     selection: z.strictObject({
-      kinds: z.array(z.string()).max(13).nullable(), subject_id: entityIdSchema.nullable(),
+      kinds: z.array(z.string()).max(14).nullable(), subject_id: entityIdSchema.nullable(),
       quotes: z.boolean(),
-      counts: z.record(z.enum(['inferences', 'requirements', 'unresolved_sites', 'source_mappings']),
+      counts: z.record(z.enum(['inferences', 'requirements', 'unresolved_sites', 'source_mappings', 'helpers']),
         z.strictObject({ total: z.int().min(0), selected: z.int().min(0) })),
       omitted_inference_statuses: z.partialRecord(inferenceSchema.shape.status, z.int().min(0)),
       omitted_requirement_kinds: z.partialRecord(requirementSchema.shape.kind, z.int().min(0)),
@@ -689,7 +697,7 @@ const functionGetDataSchema = z.discriminatedUnion('view', [
   if (new Set(data.references).size !== data.references.length)
     context.addIssue({ code: 'custom', path: ['references'], message: 'Page provenance references must be unique' });
   for (const [index, item] of data.items.entries()) {
-    if (item.kind === 'signature') continue;
+    if (item.kind === 'signature' || item.kind === 'helper') continue;
     const record = item.kind === 'source' ? item : item.record;
     for (const ref of record.instruction_refs)
       if (data.references[ref] === undefined)

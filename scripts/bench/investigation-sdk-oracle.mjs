@@ -36,6 +36,7 @@ async function call(name, args) {
     check(JSON.stringify(model.scope.inferences) === JSON.stringify([counts.inferences.selected, counts.inferences.total]) &&
       JSON.stringify(model.scope.requirements) === JSON.stringify([counts.requirements.selected, counts.requirements.total]) &&
       JSON.stringify(model.scope.unresolved_sites) === JSON.stringify([counts.unresolved_sites.selected, counts.unresolved_sites.total]) &&
+      JSON.stringify(model.scope.helpers) === JSON.stringify([counts.helpers.selected, counts.helpers.total]) &&
       JSON.stringify(model.scope.omitted_statuses) === JSON.stringify(result.data.selection.omitted_inference_statuses) &&
       JSON.stringify(model.scope.omitted_requirements) === JSON.stringify(result.data.selection.omitted_requirement_kinds),
       'compact text preserves selected/omitted uncertainty scope');
@@ -49,6 +50,10 @@ async function call(name, args) {
     const modelQuotes = model.items.filter((item) => item.kind === 'source');
     check(JSON.stringify(modelQuotes.map((item) => [item.span, item.text])) ===
       JSON.stringify(coreQuotes.map((item) => [item.span, item.text])), 'model source quotations unchanged from strict structured data');
+    const coreHelpers = result.data.items.filter((item) => item.kind === 'helper');
+    const modelHelpers = model.items.filter((item) => item.kind === 'helper');
+    check(JSON.stringify(modelHelpers) === JSON.stringify(coreHelpers),
+      'model helper items (index, exact name, untruncated explanation, semantic-domain label, locator) unchanged from strict structured data');
     for (const item of model.items.filter((item) => item.kind === 'inference' && item.record.details.kind === 'field')) {
       const core = result.data.items.find((candidate) => candidate.kind === 'inference' && candidate.record.id === item.record.id);
       check(['offset', 'width_bits', 'stride', 'dynamic', 'bounds'].every((field) =>
@@ -58,7 +63,7 @@ async function call(name, args) {
   return result;
 }
 function originalProvenance(item, references) {
-  if (item.kind === 'signature') return item;
+  if (item.kind === 'signature' || item.kind === 'helper') return item;
   if (item.kind === 'source') return { ...item, instruction_ids: item.instruction_refs.map((index) => references[index]) };
   return { ...item, record: { ...item.record, instruction_ids: item.record.instruction_refs.map((index) => references[index]) } };
 }
@@ -187,6 +192,61 @@ try {
     'bounded original mapped output quotations remain exact');
   check(quoted.data.selection.counts.inferences.total >= quoted.data.selection.counts.inferences.selected,
     'selected scope does not hide omitted inference extent');
+  // Paged helper contracts are compared with the immutable artifact bytes (hash-checked), never with
+  // another query projection: every actual helper of the artifact, exact names/explanations, original indexes.
+  const helperProof = [];
+  const helperDomain = 'renderer pseudocode semantic contract; not original source or an executable helper definition';
+  for (const name of ['investigation_field', 'investigation_mix', 'investigation_caller', 'investigation_signed', 'investigation_callback']) {
+    const located = await call('functions_find', { ...scope, image_id: opened.data.image.id,
+      query: { text: '_' + name, match: 'exact', case_sensitive: true } });
+    check(located.data.items.length === 1, `exact frozen function ${name}`);
+    const target = located.data.items[0];
+    const body = await call('function_decompile', { ...scope, function_id: target.id, wait: true });
+    const handle = body.artifacts[0];
+    const bytes = await readFile(join(output, 'project', 'artifacts', handle.id));
+    check(createHash('sha256').update(bytes).digest('hex') === handle.sha256, `${name} immutable artifact bytes match published hash`);
+    const original = JSON.parse(bytes).result.data.emission;
+    const helperRequest = { ...scope, function_id: target.id, view: 'investigation', artifact_id: handle.id, kinds: ['helper'] };
+    const paged = [];
+    let helperCursor;
+    do {
+      const page = await call('function_get', { ...helperRequest, page: { limit: 1, ...(helperCursor ? { cursor: helperCursor } : {}) } });
+      check(page.data?.view === 'investigation' && page.data.items.length <= 1 && page.data.items.every((item) => item.kind === 'helper') &&
+        page.data.references.length === 0 && page.data.artifact_id === handle.id && page.artifacts[0].sha256 === handle.sha256,
+        `${name} helper-only page: no signature/source/inference records, no proof aliases, exact artifact`);
+      check(page.data.selection.counts.helpers.total === original.helpers.length &&
+        page.data.selection.counts.helpers.selected === original.helpers.length,
+        `${name} selection counts every actual helper`);
+      check(JSON.stringify(page.data.helpers) === JSON.stringify(original.helpers.map((helper, index) =>
+        ({ name: helper.name, artifact_helper_index: index }))), `${name} discovery menu matches original helper indexes`);
+      paged.push(...page.data.items);
+      helperCursor = page.data.page.next_cursor;
+    } while (helperCursor);
+    check(JSON.stringify(paged.map((item) => [item.artifact_helper_index, item.name, item.explanation])) ===
+      JSON.stringify(original.helpers.map((helper, index) => [index, helper.name, helper.explanation])),
+      `${name} paged helper contracts equal every original artifact helper with exact untruncated names/explanations`);
+    check(paged.every((item) => item.semantic_domain === helperDomain && item.explanation.length > 0 && item.explanation.length <= 8192),
+      `${name} helpers are labelled renderer contracts and keep full explanations`);
+    const allKinds = [];
+    let allCursor;
+    do {
+      const page = await call('function_get', { ...helperRequest, kinds: undefined, include_quotes: true,
+        page: { limit: 100, ...(allCursor ? { cursor: allCursor } : {}) } });
+      check(page.data?.view === 'investigation' && page.data.selection.kinds === null, `${name} default selection includes all kinds`);
+      allKinds.push(...page.data.items);
+      allCursor = page.data.page.next_cursor;
+    } while (allCursor);
+    check(allKinds.filter((item) => item.kind === 'helper').length === original.helpers.length &&
+      allKinds.some((item) => item.kind === 'source') && allKinds.some((item) => item.kind === 'signature'),
+      `${name} default paged selection retains source, signature and every helper`);
+    helperProof.push({ function: name, helpers: original.helpers.length, helper_names: original.helpers.map((helper) => helper.name) });
+  }
+  check(helperProof.some((entry) => entry.helpers > 0),
+    'at least one frozen function exposes actual helper contracts to the paged consumer; none were selected favorably');
+  const noHelpers = await call('function_get', { ...request, kinds: ['signature'], page: { limit: 100 } });
+  check(noHelpers.data.selection.counts.helpers.selected === 0 && noHelpers.data.items.every((item) => item.kind !== 'helper') &&
+    noHelpers.data.selection.counts.helpers.total === decompiled.data.emission.helpers.length,
+    'unrequested helper kind is omitted while its total extent stays visible');
   const cursor = [...cursors][0];
   const changed = await call('function_get', { ...request, kinds: ['call'], page: { limit: 1, cursor } });
   check(changed.state === 'failed' && changed.error.code === 'stale_cursor', 'cursor rejects changed filter');
@@ -244,7 +304,7 @@ try {
     item.span.start >= notedBody.data.emission.declaration_span.end), 'exact declaration alone is excluded despite same-root note mappings');
   await call('project_close', { project_id: scope.project_id });
   const result = { checks, selected_records: all.length, pages: all.length, annotation_states: ['hypothesis','asserted','retracted'],
-    target_executed: false, repository_suite_run: false, sdk: '@modelcontextprotocol/client 2.3.1' };
+    helper_proof: helperProof, target_executed: false, repository_suite_run: false, sdk: '@modelcontextprotocol/client 2.3.1' };
   await writeFile(join(output, 'result.json'), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result));
 } catch (error) {

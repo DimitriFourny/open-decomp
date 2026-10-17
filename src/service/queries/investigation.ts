@@ -18,6 +18,7 @@ type InvestigationItem = InvestigationData['items'][number];
 type PreparedInvestigationItem =
   | { kind: 'source'; span: { start: number; end: number }; text: string; mapping_indexes: number[]; instruction_ids: string[] }
   | Extract<InvestigationItem, { kind: 'signature' }>
+  | Extract<InvestigationItem, { kind: 'helper' }>
   | { kind: 'inference'; record: Omit<Extract<InvestigationItem, { kind: 'inference' }>['record'], 'instruction_refs'> & { instruction_ids: string[] } }
   | { kind: 'requirement'; record: Omit<Extract<InvestigationItem, { kind: 'requirement' }>['record'], 'instruction_refs'> & { instruction_ids: string[] } };
 
@@ -219,12 +220,24 @@ export function investigationItems(scope: Scope, args: Args, payload: AnalysisAr
       if (record.kind === 'unresolved') selectedSites += record.sites.length;
     } else omittedKinds[record.kind] = (omittedKinds[record.kind] ?? 0) + 1;
   }
+  // Every actual helper of the immutable artifact, in artifact order; the
+  // semantic_domain label keeps the renderer-contract status explicit.
+  let selectedHelpers = 0;
+  if (includes('helper', [args.function_id]))
+    for (const [artifact_helper_index, helper] of emission.helpers.entries()) {
+      scope.context.checkpoint(1);
+      items.push({ kind: 'helper', artifact_helper_index, name: helper.name, explanation: helper.explanation,
+        semantic_domain: 'renderer pseudocode semantic contract; not original source or an executable helper definition',
+        locator: 'result.data.emission.helpers[artifact_helper_index] in the selected artifact' });
+      selectedHelpers++;
+    }
   const selection: InvestigationData['selection'] = {
     kinds: args.kinds ?? null, subject_id: args.subject_id ?? null, quotes: args.include_quotes !== false,
     counts: { inferences: { total: inferences.length, selected: selectedInferences },
       requirements: { total: requirements.length, selected: selectedRequirements },
       unresolved_sites: { total: totalSites, selected: selectedSites },
-      source_mappings: { total: emission.mappings.length, selected: selectedMappingIds.size } },
+      source_mappings: { total: emission.mappings.length, selected: selectedMappingIds.size },
+      helpers: { total: emission.helpers.length, selected: selectedHelpers } },
     omitted_inference_statuses: omittedStatuses, omitted_requirement_kinds: omittedKinds,
   };
   return { items, selection, helpers: emission.helpers.map((helper, index) =>
@@ -249,7 +262,7 @@ export function investigationPage(items: readonly PreparedInvestigationItem[], l
   });
   return {
     items: items.map((item) => {
-      if (item.kind === 'signature') return item;
+      if (item.kind === 'signature' || item.kind === 'helper') return item;
       if (item.kind === 'source') {
         const { instruction_ids, ...quotation } = item;
         return { ...quotation, instruction_refs: intern(instruction_ids) };

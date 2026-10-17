@@ -84,6 +84,7 @@ export function investigationText(result: InvestigationResult): string | undefin
       inferences: [count.inferences.selected, count.inferences.total],
       requirements: [count.requirements.selected, count.requirements.total],
       unresolved_sites: [count.unresolved_sites.selected, count.unresolved_sites.total],
+      helpers: [count.helpers.selected, count.helpers.total],
       omitted_statuses: data.selection.omitted_inference_statuses,
       omitted_requirements: data.selection.omitted_requirement_kinds },
     coverage_incomplete: result.coverage.filter((coverage) => coverage.state !== 'complete'),
