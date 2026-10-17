@@ -426,8 +426,10 @@ async function unsupportedEffects(
       file: 'macho-arm64-symbols',
       offset: 1396,
       address: '0x100000574',
-      encoding: 'bf3b03d5',
-      operation: 'dmb ish',
+      // DMB ISH (d5033bbf) is a supported memory_fence since 098a336 (docs/ARM64.md);
+      // DSB ISH remains an unsupported barrier family (test/lifters/arm64/barrier.test.ts).
+      encoding: '9f3b03d5',
+      operation: 'dsb ish',
     },
     {
       file: 'corpus-symbols.dll',
@@ -454,7 +456,8 @@ async function unsupportedEffects(
         view: 'disassembly',
       }),
     );
-    assert.ok(disassembly.view === 'disassembly' && disassembly.detail === 'full');
+    // Omitted `detail` is the full form (tools.ts disassembly schema); only compact is tagged.
+    assert.ok(disassembly.view === 'disassembly' && disassembly.detail !== 'compact');
     const instruction = disassembly.items.find((item) => item.address.value === scenario.address);
     assert.ok(instruction);
     assert.equal(
