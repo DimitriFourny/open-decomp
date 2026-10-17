@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "scope": "P3.4 native-context source-known questions frozen before inspecting comparator outputs; not held-out and not a behavioral-equivalence proof by themselves",
+  "source": "test/service/analysis/native-context-source.c",
+  "input_policy": "Exact retained analyzed image from the product's 60-case oracle run, not independently recompiled and never executed; source/debug/types/annotations not supplied to either MCP",
+  "questions": [
+    {
+      "id": "two-context-callback",
+      "functions": ["context_two", "context_choose", "context_increment", "context_double"],
+      "question": "Which arguments and callback targets are passed by the two calls, which record bytes are selected, and what is returned? Distinguish per-call context from the generic callee interface.",
+      "source_gold": "First call passes mode 0, the unchanged record pointer and context_increment; second passes mode 1, the same record pointer and context_double. The generic choose function reads record offset 0 for mode zero and offset 8 otherwise, then calls the supplied callback. The caller returns (left+7)+(right*2) modulo 2^64. Two distinct contexts must not overwrite one another, and constant-assumed arguments remain real passed arguments."
+    },
+    {
+      "id": "recursive-bounded-context",
+      "functions": ["context_recursive", "context_recursive_caller"],
+      "question": "What recursive arguments/results are required, what does the fixed-count caller return, and how is a context limit distinguished from complete semantics?",
+      "source_gold": "For supported source executions recursive(count,value) returns value+6*count+3 modulo 2^64. The caller passes count 9 and its incoming value, giving value+57. A bounded context fallback must retain the generic call/effects and explicit limitation, not drop an argument, invent complete recursion, or seed a return-width contract solely from demand."
+    },
+    {
+      "id": "identity-alias-layout",
+      "functions": ["context_alias", "context_same"],
+      "question": "Are the two pointer arguments identical, which offsets/widths are read, and what layout/object-bound claims are actually justified?",
+      "source_gold": "context_same passes the identical record pointer twice. context_alias reads 64 bits at a+0 and 64 bits at b+8 and returns their modular sum. Identity is proven for this call; distinct unknown pointers are not thereby disjoint. Observed extents do not prove the complete author structure or object bounds."
+    },
+    {
+      "id": "overlapping-widths",
+      "functions": ["context_conflict", "context_conflict_caller"],
+      "question": "Which 64-bit and byte reads overlap, do both effects survive, and is a conflicting/partial interpretation kept separate from a fabricated layout?",
+      "source_gold": "The caller passes the same address as uint64 pointer and unsigned-byte pointer. The callee adds the 64-bit value and its first byte; on the analyzed little-endian target the caller returns value+(value&255) modulo 2^64. Both read interpretations at offset zero must remain. Their overlapping widths must not become two disjoint fields or a guessed complete author layout."
+    },
+    {
+      "id": "two-word-return",
+      "functions": ["context_words", "context_words_caller"],
+      "question": "Which two 64-bit result words are established and how does the caller use each? Distinguish preservation of the computation from attractive source typing.",
+      "source_gold": "The callee returns first=value+11 modulo 2^64 and second=value XOR 0xfedcba9876543210. The caller returns their modular sum. Darwin ARM64 carries this 16-byte source structure in two general-purpose result words; neither word may be dropped or misclassified as an unrelated SIMD scalar. A raw aggregate/container may preserve behavior without recovering the original source structure."
+    }
+  ],
+  "value_cases_hex": ["0x0", "0x1", "0x7fffffff", "0x80000000", "0xffffffffffffffff", "0x1234567887654321"],
+  "record_case": "left=value; right=(value+17) modulo 2^64",
+  "annotations": "Annotation hypotheses/assertions/corrections/retractions and dependency provenance are separate native-context evidence; none is injected into this equal-access comparator run.",
+  "assessment_rules": [
+    "Retain all twelve functions, all raw responses, partial states, missing facts and counterexamples.",
+    "Source and independently inspected instructions are the oracle; Ghidra is a comparator, not truth.",
+    "A shorter or more pleasant output is not proof of correctness; a metadata advantage is not whole-engine equivalence.",
+    "Report comparator strengths and equivalent behavior as well as product improvements; no universal or performance win claim."
+  ]
+}

@@ -37,8 +37,10 @@ import {
 import { typeReferences } from '../../project/annotations/subjects.js';
 import {
   MAX_ANALYSIS_ARTIFACT_BYTES,
+  createAnalysisReadset,
   runCachedDecompilation,
   type AnalysisComputation,
+  type AnalysisDependencyCollector,
   type StoredDecompilation,
 } from '../../project/cache/index.js';
 import { loadFunctionGraph, loadFunctionScope, records } from '../queries/scope.js';
@@ -55,12 +57,15 @@ export interface AnalysisScope {
   readonly context: OperationContext;
   readonly job_id: string;
   readonly max_result_bytes?: number;
+  readonly dependencies?: AnalysisDependencyCollector;
 }
 
 export async function executeDecompilation(
   args: ToolArgs<'function_decompile'>,
   scope: AnalysisScope,
 ): Promise<ToolResult<'function_decompile'>> {
+  const dependencies = createAnalysisReadset(scope.store, args.revision, scope.context);
+  scope = { ...scope, store: dependencies.store, dependencies };
   const { store, context } = scope;
   if (args.project_id !== store.project_id)
     throw new OperationError({
@@ -89,6 +94,7 @@ export async function executeDecompilation(
     {
       ...scope,
       identity,
+      delivery: args.delivery,
       inline_limit: Math.min(
         args.budget.output_bytes,
         scope.max_result_bytes ?? Infinity,
@@ -104,6 +110,10 @@ export async function executeDecompilation(
         checkpoint: (work) => context.checkpoint(work),
         progress: (phase, completed, total) => context.progress(phase, completed, total),
       };
+      // Graph/navigation helpers can serve immutable indexes without re-reading the store.
+      // Record their complete native fact/frontier scopes even on those helper cache hits.
+      for (const kind of ['function', 'reference', 'symbol', 'import', 'export'] as const)
+        dependencies.recordRecordScope(image.id, kind);
       context.progress('decode', 0, 7);
       const graph = loadFunctionGraph(scope, args.revision, loaded);
       if (graph.gaps.some((gap) => gap.reason === 'budget'))
@@ -243,10 +253,11 @@ export async function executeDecompilation(
         ...calls.subjects,
       ]);
       const annotationService = new AnnotationService(store);
-      let active = annotationService.active(args.revision, fullContext, {
+      let active = dependencies.annotationView(() => annotationService.active(args.revision, fullContext, {
         catalog: trusted,
         entity_ids: [...selected],
-      });
+        on_dependencies: dependencies.recordAnnotationScope,
+      }));
       let expanded = false;
       for (const type of active.types) {
         if (!selected.has(type.id)) {
@@ -261,10 +272,11 @@ export async function executeDecompilation(
             }
       }
       if (expanded)
-        active = annotationService.active(args.revision, fullContext, {
+        active = dependencies.annotationView(() => annotationService.active(args.revision, fullContext, {
           catalog: trusted,
           entity_ids: [...selected],
-        });
+          on_dependencies: dependencies.recordAnnotationScope,
+        }));
       const asserted = active.annotations.some(
         (annotation) => annotation.value.kind === 'type' || annotation.value.kind === 'signature',
       );
@@ -361,19 +373,61 @@ export async function executeDecompilation(
         const name = subject.display_name ?? subject.original_name;
         if (name) nativeNames.set(subject.id, name);
       }
-      const resolvedNames = new Map(names.map((item) => [item.entity_id, item.name]));
+      const callNames = new Map<string, {
+        readonly asserted: Set<string>;
+        readonly hypotheses: Set<string>;
+        readonly native: Set<string>;
+        readonly evidence: Set<string>;
+        explicit: boolean;
+      }>();
       for (const [subject, uses] of calls.calls_by_subject) {
         context.checkpoint(1 + uses.length);
-        // Ambiguous/hypothetical annotations must not silently select a native alias.
-        const name =
-          resolvedNames.get(subject) ?? (named.has(subject) ? undefined : nativeNames.get(subject));
-        if (!name) continue;
-        if (!resolvedNames.has(subject)) names.push({ entity_id: subject, name });
-        for (const use of uses)
-          if (!named.has(use.call_id)) names.push({ entity_id: use.call_id, name });
+        const annotations = named.get(subject), native = nativeNames.get(subject);
+        for (const use of uses) {
+          let candidates = callNames.get(use.call_id);
+          if (!candidates) {
+            candidates = { asserted: new Set(), hypotheses: new Set(), native: new Set(), evidence: new Set(), explicit: false };
+            callNames.set(use.call_id, candidates);
+          }
+          if (annotations) {
+            candidates.explicit = true;
+            for (const annotation of annotations)
+              if (annotation.value.kind === 'name') {
+                (annotation.status === 'asserted' ? candidates.asserted : candidates.hypotheses)
+                  .add(annotation.value.value);
+                for (const proof of annotation.evidence_ids) candidates.evidence.add(proof);
+              }
+          } else if (native) candidates.native.add(native);
+        }
+      }
+      for (const [entity_id, candidates] of callNames) {
+        context.checkpoint(1);
+        if (named.has(entity_id)) continue;
+        // A function and its export/import aliases can identify the same call.
+        // One explicit assertion overrides native aliases, not another assertion
+        // or a competing hypothesis; unresolved explicit names never fall back.
+        const chosen = candidates.explicit ? candidates.asserted : candidates.native;
+        const name = chosen.size === 1 ? chosen.values().next().value : undefined;
+        let competing = false;
+        if (candidates.explicit)
+          for (const hypothesis of candidates.hypotheses)
+            if (hypothesis !== name) competing = true;
+        if (name === undefined || competing) {
+          if (candidates.explicit)
+            nameDiagnostics.push({
+              code: 'conflicting_evidence',
+              severity: 'info',
+              message: 'Callee alias names lack a unique unopposed assertion; native aliases do not resolve explicit hypotheses or conflicts',
+              entity_id,
+              evidence_ids: [...candidates.evidence],
+            });
+          continue;
+        }
+        names.push({ entity_id, name });
       }
       const source = recoverSourceEvidence({
         scope,
+        identity,
         revision: args.revision,
         image,
         ir,

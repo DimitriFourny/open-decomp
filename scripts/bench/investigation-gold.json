@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "trusted_source": "scripts/bench/investigation-corpus.c",
+  "not_for_blind_answerers": true,
+  "answers": [
+    {"function": "investigation_mix", "facts": ["Two ordered 64-bit inputs x then y", "Return (x XOR 0x35) plus y modulo 2^64"], "uncertainty": ["Machine-only observations do not prove exact source parameter names, signedness, or no extra unused inputs"]},
+    {"function": "investigation_caller", "facts": ["Direct call investigation_mix with x then constant 7", "64-bit result plus constant 3"], "uncertainty": ["Distinguish observed argument prefix from proven complete source arity"]},
+    {"function": "investigation_field", "facts": ["Record stride 16 bytes", "Unsigned 32-bit count at offset 4", "64-bit total at offset 8", "Return total plus zero-extended count"], "uncertainty": ["No bounds check or array length available", "Source field names and structure declaration not recoverable from stripped type metadata alone"]},
+    {"function": "investigation_signed", "facts": ["Signed 64-bit division x by y"], "uncertainty": ["C source requires nonzero divisor and excludes INT64_MIN divided by -1", "Instruction behavior is not proof of these source preconditions", "Do not invent an explicit check"]},
+    {"function": "investigation_callback", "facts": ["Indirect call through first input", "Second input supplied as observed first argument", "64-bit observed result plus 1"], "uncertainty": ["Exact target unknown", "No complete arity proof from the binary", "Do not infer extra callback parameters"]}
+  ]
+}

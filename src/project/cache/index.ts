@@ -44,8 +44,15 @@ import {
   type AnalysisComputation,
   type StoredDecompilation,
 } from './model.js';
+import {
+  analysisReadsetSchema,
+  analysisReuseScope,
+  validateAnalysisReadset,
+  type AnalysisDependencyCollector,
+} from './dependencies.js';
 
 export * from './model.js';
+export * from './dependencies.js';
 
 const subjectSchema = z.strictObject({
   id: entityIdSchema,
@@ -89,6 +96,7 @@ const payloadSchema = z.strictObject({
   identity: cacheIdentitySchema,
   result: functionDecompileResultSchema,
   catalog: catalogSchema,
+  dependencies: analysisReadsetSchema.optional(),
 });
 
 function fail(
@@ -268,6 +276,7 @@ function validateComputation(
   return {
     result: result as StoredDecompilation,
     catalog: { ...catalog, evidence: [...proofs.values()] },
+    ...(computation.dependencies === undefined ? {} : { dependencies: analysisReadsetSchema.parse(computation.dependencies) }),
   };
 }
 
@@ -276,6 +285,7 @@ function loadPayload(
   artifact: Artifact,
   context: OperationContext,
   expected?: CacheIdentity,
+  historical = false,
 ): AnalysisArtifactPayload {
   context.checkpoint(1);
   if (
@@ -295,7 +305,7 @@ function loadPayload(
     (expected && cacheIdentityKey(wire.identity) !== cacheIdentityKey(expected))
   )
     fail('invalid_input', 'Analysis artifact identity mismatch');
-  const indexed = store.findArtifact(wire.identity);
+  const indexed = historical ? store.findHistoricalArtifact(wire.identity) : store.findArtifact(wire.identity);
   if (!indexed || fingerprint(encodeArtifact(indexed)) !== fingerprint(encodeArtifact(artifact)))
     fail('invalid_input', 'Analysis payload does not match its published cache key');
   const computation = validateComputation(
@@ -303,6 +313,7 @@ function loadPayload(
     wire.identity,
     {
       result: wire.result as StoredDecompilation,
+      ...(wire.dependencies === undefined ? {} : { dependencies: wire.dependencies }),
       catalog: {
         subjects: wire.catalog.subjects,
         types: wire.catalog.types.map((record) => ({
@@ -317,11 +328,19 @@ function loadPayload(
   return { format_version: ANALYSIS_ARTIFACT_VERSION, identity: wire.identity, ...computation };
 }
 
+/** Exact published artifact reader shared by trusted investigation/catalog consumers. */
+export function readAnalysisArtifact(
+  store: ProjectStore, artifact: Artifact, context: OperationContext, expected?: CacheIdentity,
+): AnalysisArtifactPayload {
+  return loadPayload(store, artifact, context, expected);
+}
+
 function delivery(
   result: StoredDecompilation,
   artifact: Artifact,
   cache: 'hit' | 'computed',
   limit: number,
+  preference: 'auto' | 'artifact',
 ): ToolResult<'function_decompile'> {
   const handle = encodeArtifact(artifact);
   const inline = functionDecompileResultSchema.parse({
@@ -329,6 +348,12 @@ function delivery(
     artifacts: [handle],
     data: { ...result.data, cache },
   });
+  if (preference === 'artifact') {
+    const requested = projectDecompilationArtifactResult(inline, 'requested');
+    if (Buffer.byteLength(JSON.stringify(requested)) > limit)
+      fail('resource_limit', 'Output budget cannot contain the requested artifact metadata');
+    return requested;
+  }
   if (Buffer.byteLength(JSON.stringify(inline)) <= limit) return inline;
   const bounded = projectDecompilationArtifactResult(inline);
   if (Buffer.byteLength(JSON.stringify(bounded)) > limit)
@@ -343,6 +368,8 @@ export async function runCachedDecompilation(
     readonly identity: CacheIdentity;
     readonly context: OperationContext;
     readonly inline_limit: number;
+    readonly delivery?: 'auto' | 'artifact';
+    readonly dependencies?: AnalysisDependencyCollector;
   },
   compute: () => AnalysisComputation | Promise<AnalysisComputation>,
 ): Promise<ToolResult<'function_decompile'>> {
@@ -355,7 +382,7 @@ export async function runCachedDecompilation(
   const existing = store.findArtifact(identity);
   if (existing) {
     const payload = loadPayload(store, existing, context, identity);
-    const response = delivery(payload.result, existing, 'hit', limit);
+    const response = delivery(payload.result, existing, 'hit', limit, input.delivery ?? 'auto');
     const job = activeJob(store, job_id, identity, context);
     store.saveJob({
       ...job,
@@ -366,12 +393,36 @@ export async function runCachedDecompilation(
     });
     return response;
   }
-  const computation = validateComputation(store, identity, await compute(), context);
+  let reused = false;
+  let candidate: AnalysisComputation | undefined;
+  const dependencyStore = input.dependencies?.source ?? store;
+  for (const artifact of store.findReuseCandidates(identity, 8)) {
+    activeJob(store, job_id, identity, context);
+    const payload = loadPayload(dependencyStore, artifact, context, undefined, true);
+    if (analysisReuseScope(payload.identity) !== analysisReuseScope(identity))
+      fail('invalid_input', 'Analysis reuse candidate escapes its immutable scope');
+    if (payload.dependencies === undefined ||
+      !validateAnalysisReadset(dependencyStore, identity.annotation_revision, payload.dependencies, context))
+      continue;
+    context.progress('dependency-reuse', 0, 1);
+    candidate = {
+      result: { ...payload.result, revision: identity.annotation_revision },
+      catalog: payload.catalog,
+      dependencies: payload.dependencies,
+    };
+    reused = true;
+    break;
+  }
+  let computation = validateComputation(store, identity, candidate ?? await compute(), context);
+  if (!reused && input.dependencies !== undefined)
+    computation = { ...computation, dependencies: input.dependencies.finish() };
+  if (reused) context.progress('dependency-reuse', 1, 1);
   const bytes = Buffer.from(
     JSON.stringify({
       format_version: ANALYSIS_ARTIFACT_VERSION,
       identity,
       result: computation.result,
+      ...(computation.dependencies === undefined ? {} : { dependencies: computation.dependencies }),
       catalog: {
         subjects: computation.catalog.subjects,
         types: computation.catalog.types.map((record) => ({
@@ -396,7 +447,7 @@ export async function runCachedDecompilation(
     sha256: contentHash(bytes),
     schema_version: SCHEMA_VERSION,
   };
-  const response = delivery(computation.result, provisional, 'computed', limit);
+  const response = delivery(computation.result, provisional, reused ? 'hit' : 'computed', limit, input.delivery ?? 'auto');
   if (!('data' in response)) fail('invalid_input', 'Invalid prepared analysis delivery');
   activeJob(store, job_id, identity, context);
   const publication = await store.publishArtifact({
@@ -405,6 +456,7 @@ export async function runCachedDecompilation(
     media_type: ANALYSIS_ARTIFACT_MEDIA_TYPE,
     bytes,
     cache: identity,
+    ...(computation.dependencies === undefined ? {} : { reuse_scope: analysisReuseScope(identity) }),
     analysis_ids: [
       ...new Set([
         identity.function_id,

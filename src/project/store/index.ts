@@ -96,7 +96,7 @@ import {
 } from './image-metadata.js';
 
 // Persistence migrations are independent of the public wire/artifact schema version.
-const STORE_SCHEMA_VERSION = 4;
+const STORE_SCHEMA_VERSION = 5;
 const annotationActorSchema = annotationSchema.pick({ author: true, origin: true });
 const MAX_IMAGE_BYTES = 512 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
@@ -270,6 +270,8 @@ export class SqliteProjectStore implements ProjectStore {
           ${IMAGE_METADATA_TABLE}
           CREATE TABLE records(kind TEXT NOT NULL, id TEXT NOT NULL, image_id TEXT NOT NULL REFERENCES images(image_id), revision INTEGER NOT NULL, text_value TEXT NOT NULL, address_space TEXT, address_value TEXT, payload BLOB NOT NULL, PRIMARY KEY(kind,id,revision)) STRICT;
           CREATE INDEX records_query ON records(image_id,kind,id,revision);
+          CREATE INDEX records_scope_revision ON records(image_id,kind,revision DESC);
+          CREATE INDEX loaded_images_revision ON loaded_images(image_id,revision DESC);
           CREATE TABLE indexes(image_id TEXT NOT NULL, kind TEXT NOT NULL, revision INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY(image_id,kind,revision)) STRICT;
           CREATE TABLE evidence(id TEXT NOT NULL, revision INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(id,revision)) STRICT;
           CREATE TABLE types(id TEXT NOT NULL, revision INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(id,revision)) STRICT;
@@ -281,6 +283,7 @@ export class SqliteProjectStore implements ProjectStore {
           CREATE TABLE jobs(id TEXT PRIMARY KEY, payload BLOB NOT NULL) STRICT;
           CREATE TABLE artifacts(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, job_id TEXT NOT NULL, cache_key TEXT NOT NULL UNIQUE, payload BLOB NOT NULL) STRICT;
           CREATE TABLE analysis_artifacts(revision INTEGER NOT NULL, analysis_id TEXT NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(revision,analysis_id,artifact_id)) STRICT;
+          CREATE TABLE analysis_reuse(scope TEXT NOT NULL, revision INTEGER NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(scope,revision DESC,artifact_id)) STRICT;
           PRAGMA user_version=${STORE_SCHEMA_VERSION};`);
         db.prepare('INSERT INTO metadata VALUES (1,?,0)').run(newIdentity('project'));
         db.exec('COMMIT');
@@ -295,22 +298,27 @@ export class SqliteProjectStore implements ProjectStore {
             db.exec(
               'CREATE TABLE analysis_artifacts(revision INTEGER NOT NULL, analysis_id TEXT NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(revision,analysis_id,artifact_id)) STRICT;',
             );
-          db.exec(IMAGE_METADATA_TABLE);
-          const imageQuery = `SELECT image_id,slice_id,revision,CASE WHEN length(payload)<=${MAX_RECORD_BYTES} THEN payload ELSE NULL END AS payload FROM loaded_images`;
-          const nextImage = db.prepare(
-            `${imageQuery} WHERE (image_id,slice_id,revision)>(?,?,?) ORDER BY image_id,slice_id,revision LIMIT 1`,
-          );
-          let row = db.prepare(`${imageQuery} ORDER BY image_id,slice_id,revision LIMIT 1`).get();
-          while (row) {
-            const imageId = stringField(row, 'image_id'),
-              sliceId = stringField(row, 'slice_id'),
-              revision = numberField(row, 'revision');
-            const metadata = decodeStored<ImageMetadata>(row['payload']);
-            if (metadata.id !== imageId || metadata.selected_slice_id !== sliceId)
-              fail('invalid_input', 'Stored image identity mismatch');
-            writeImageMetadata(db, metadata, revision);
-            row = nextImage.get(imageId, sliceId, revision);
+          if (version < 4) {
+            db.exec(IMAGE_METADATA_TABLE);
+            const imageQuery = `SELECT image_id,slice_id,revision,CASE WHEN length(payload)<=${MAX_RECORD_BYTES} THEN payload ELSE NULL END AS payload FROM loaded_images`;
+            const nextImage = db.prepare(
+              `${imageQuery} WHERE (image_id,slice_id,revision)>(?,?,?) ORDER BY image_id,slice_id,revision LIMIT 1`,
+            );
+            let row = db.prepare(`${imageQuery} ORDER BY image_id,slice_id,revision LIMIT 1`).get();
+            while (row) {
+              const imageId = stringField(row, 'image_id'),
+                sliceId = stringField(row, 'slice_id'),
+                revision = numberField(row, 'revision');
+              const metadata = decodeStored<ImageMetadata>(row['payload']);
+              if (metadata.id !== imageId || metadata.selected_slice_id !== sliceId)
+                fail('invalid_input', 'Stored image identity mismatch');
+              writeImageMetadata(db, metadata, revision);
+              row = nextImage.get(imageId, sliceId, revision);
+            }
           }
+          db.exec(`CREATE INDEX records_scope_revision ON records(image_id,kind,revision DESC);
+            CREATE INDEX loaded_images_revision ON loaded_images(image_id,revision DESC);
+            CREATE TABLE analysis_reuse(scope TEXT NOT NULL, revision INTEGER NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(scope,revision DESC,artifact_id)) STRICT;`);
           db.exec(`PRAGMA user_version=${STORE_SCHEMA_VERSION}; COMMIT;`);
         } catch (error) {
           db.exec('ROLLBACK');
@@ -458,6 +466,27 @@ export class SqliteProjectStore implements ProjectStore {
     const image = { ...metadata, bytes, address_map };
     validateImage(image);
     return image;
+  }
+
+  /** Indexed change tokens cover positive and negative native-record/index/image reads. */
+  readRecordScopeVersion(imageId: string, kind: RecordKind, revision: number): string {
+    this.#revision(revision);
+    imageIdSchema.parse(imageId);
+    if (!Object.hasOwn(RECORD_SCHEMAS, kind)) fail('invalid_input', 'Unknown record kind');
+    const record = this.#db.prepare(
+      'SELECT revision FROM records WHERE image_id=? AND kind=? AND revision<=? ORDER BY revision DESC LIMIT 1',
+    ).get(imageId, kind, revision);
+    const index = this.#db.prepare(
+      'SELECT revision,state FROM indexes WHERE image_id=? AND kind=? AND revision<=? ORDER BY revision DESC LIMIT 1',
+    ).get(imageId, kind, revision);
+    const image = this.#db.prepare(
+      'SELECT revision FROM loaded_images WHERE image_id=? AND revision<=? ORDER BY revision DESC LIMIT 1',
+    ).get(imageId, revision);
+    return fingerprint([
+      record ? numberField(record, 'revision') : null,
+      index ? [numberField(index, 'revision'), stringField(index, 'state')] : null,
+      image ? numberField(image, 'revision') : null,
+    ]);
   }
 
   queryRecords<K extends RecordKind>(
@@ -995,6 +1024,38 @@ export class SqliteProjectStore implements ProjectStore {
     encodeArtifact(artifact);
     return artifact;
   }
+  findHistoricalArtifact(identity: CacheIdentity): Artifact | null {
+    this.#revision(identity.annotation_revision);
+    if (identity.annotation_revision !== identity.evidence_revision)
+      fail('invalid_input', 'Historical analysis revisions disagree');
+    const key = cacheIdentityKey(cacheIdentitySchema.parse(identity));
+    const row = this.#db.prepare('SELECT payload FROM artifacts WHERE cache_key=?').get(key);
+    if (!row) return null;
+    const artifact = decodeStored<Artifact>(row['payload']);
+    encodeArtifact(artifact);
+    if (artifact.project_id !== this.project_id || artifact.revision !== identity.annotation_revision)
+      fail('invalid_input', 'Historical analysis scope mismatch');
+    return artifact;
+  }
+
+  findReuseCandidates(identity: CacheIdentity, limit: number): readonly Artifact[] {
+    cacheIdentitySchema.parse(identity);
+    this.#revision(identity.annotation_revision);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 8)
+      fail('invalid_input', 'Invalid analysis reuse candidate bound');
+    const scope = cacheIdentityKey({ ...identity, annotation_revision: 0, evidence_revision: 0 });
+    const rows = this.#db.prepare(
+      'SELECT a.payload FROM analysis_reuse r JOIN artifacts a ON a.id=r.artifact_id WHERE r.scope=? AND r.revision<? ORDER BY r.revision DESC,r.artifact_id LIMIT ?',
+    ).all(scope, identity.annotation_revision, limit);
+    return rows.map((row) => {
+      const artifact = decodeStored<Artifact>(row['payload']);
+      encodeArtifact(artifact);
+      if (artifact.project_id !== this.project_id || artifact.revision >= identity.annotation_revision)
+        fail('invalid_input', 'Analysis reuse index scope mismatch');
+      return artifact;
+    });
+  }
+
 
   findAnalysisArtifacts(query: {
     readonly revision: number;
@@ -1081,6 +1142,7 @@ export class SqliteProjectStore implements ProjectStore {
     bytes: Uint8Array;
     cache: CacheIdentity;
     analysis_ids?: readonly string[];
+    reuse_scope?: string;
   }): Promise<
     | { state: 'published'; artifact: Artifact }
     | { state: 'stale' | 'cancelled'; current_revision: number }
@@ -1106,6 +1168,9 @@ export class SqliteProjectStore implements ProjectStore {
       fail('resource_limit', 'Too many analysis artifact identities');
     const analysisIds = [...new Set(input.analysis_ids ?? [])];
     for (const id of analysisIds) z.union([entityIdSchema, evidenceIdSchema]).parse(id);
+    if (input.reuse_scope !== undefined &&
+      input.reuse_scope !== cacheIdentityKey({ ...input.cache, annotation_revision: 0, evidence_revision: 0 }))
+      fail('invalid_input', 'Analysis reuse index does not match its immutable scope');
     const artifact: Artifact = {
       id: newIdentity('artifact'),
       project_id: this.project_id,
@@ -1125,6 +1190,9 @@ export class SqliteProjectStore implements ProjectStore {
         .run(artifact.id, current, job.id, cacheIdentityKey(input.cache), encodeStored(artifact));
       const index = this.#db.prepare('INSERT INTO analysis_artifacts VALUES (?,?,?)');
       for (const id of analysisIds) index.run(current, id, artifact.id);
+      if (input.reuse_scope !== undefined)
+        this.#db.prepare('INSERT INTO analysis_reuse VALUES (?,?,?)')
+          .run(input.reuse_scope, current, artifact.id);
       this.saveJob({
         ...job,
         state: 'completed',

@@ -1,12 +1,12 @@
-import { OperationError, type AbiProfile, type Evidence, type FunctionRecord, type Lifter, type LoadedImage, type OperationContext, type ReferenceRecord } from '../../core/index.js';
+import { fingerprint, OperationError, type AbiProfile, type Evidence, type FunctionRecord, type Lifter, type LoadedImage, type OperationContext, type ReferenceRecord } from '../../core/index.js';
 import { constructSSA } from '../../analysis/ssa/index.js';
 import { simplifySSA } from '../../analysis/values/index.js';
 import { recoverTypes, type SuppliedTypeRecord, type TypeRecoveryResult } from '../../analysis/types/index.js';
 import { observePreparedCallInterfaces } from '../../analysis/calls/observed.js';
-import { observeCallResultDemands } from '../../analysis/calls/result-demands.js';
+import { createCallResultDemandIndex, observeCallResultDemands, type CallResultDemandIndex } from '../../analysis/calls/result-demands.js';
 import type { CallAnalysisResult, SuppliedCallContract } from '../../analysis/calls/index.js';
 import { analyzeCalls } from '../../analysis/calls/index.js';
-import type { RegisterIR, SSAForm } from '../../ir/index.js';
+import type { RegisterIR, SSAForm, Value } from '../../ir/index.js';
 import type { DebugRecovery } from '../../metadata/debug/index.js';
 import type { LibraryContracts } from '../../metadata/library-contracts/index.js';
 import type { InferredCallee } from '../../reconstruction/source-model.js';
@@ -18,6 +18,9 @@ import { boundIR, requirePass } from './passes.js';
 import type { NativeDependency, NativeInterface, NativeSummaryUnit } from './native-worklist.js';
 import { nativeRegisterPrefix } from './native-register-prefix.js';
 import { parameterRegisters } from './native-abi.js';
+import { nativeCallContext, type NativeContext } from './native-context.js';
+import { nativeAnnotations } from './native-annotations.js';
+import type { AnalysisReadset } from '../../project/cache/dependencies.js';
 
 export interface NativePreparationInput {
   readonly scope: AnalysisScope;
@@ -36,30 +39,53 @@ export interface PreparedNativeUnit extends NativeSummaryUnit {
   readonly analysis: CallAnalysisResult | null;
   readonly observed_calls: readonly InferredCallee[];
   readonly entry_prefix?: NativeInterface;
+  readonly context_assumptions?: NativeContext;
+  readonly dependency_readset?: AnalysisReadset;
+  readonly demand_index?: CallResultDemandIndex;
 }
 
 /** Resolve exact direct calls and discovery-established direct tails only. The
  * graph loader remains intraprocedural; this list drives the separate worklist. */
 export function nativeDependencies(
-  input: Pick<NativePreparationInput, 'image' | 'functions' | 'references' | 'components'>,
+  input: Pick<NativePreparationInput, 'image' | 'functions' | 'references' | 'components' | 'scope' | 'revision' | 'native_types'>,
   ir: RegisterIR | SSAForm,
   context: OperationContext,
+  knownConstants?: ReadonlyMap<string, bigint>,
+  recoverContexts = true,
+  demandIndex?: CallResultDemandIndex,
 ): readonly NativeDependency[] {
   const index = nativeCallIndex(input.image, input.functions, input.references, context);
-  const demand = ir.form === 'ssa' ? observeCallResultDemands(ir, input.components.abi, context) : new Map();
+  const demand = ir.form === 'ssa' ? observeCallResultDemands(ir, input.components.abi, context, [], demandIndex) : new Map();
   const result: NativeDependency[] = [];
   const definitions = new Map(ir.blocks.flatMap((block) => block.instructions.flatMap((node) =>
     node.kind === 'assign' ? [[node.result.id, node.expression] as const] : [])));
-  const constant = sourceConstantValues(definitions, context, input.image.id);
+  const sourceConstant = sourceConstantValues(definitions, context, input.image.id);
+  const constant = (value: Value) => knownConstants?.get(value.id) ?? sourceConstant(value);
+  const scope = fingerprint([input.scope.store.project_id, input.revision, input.image.sha256,
+    input.native_types.map((record) => [record.id, record.status, record.evidence_ids])]);
+  const callerProofs = input.functions.find((fn) => fn.id === ir.id)?.evidence_ids ?? [];
+  const states = ir.form === 'ssa' ? new Map(ir.register_states.map((state) => [state.block, state])) : new Map();
   for (const block of ir.blocks) {
     for (const node of block.instructions) {
       context.checkpoint(1);
-      if (node.kind !== 'call' || node.target.kind !== 'direct') continue;
-      const address = node.target.address, key = `${address.image_id}:${address.space}:${address.value}`;
+      if (node.kind !== 'call') continue;
+      const value = node.target.kind === 'indirect' ? constant(node.target.value) : undefined;
+      const address = node.target.kind === 'direct' ? node.target.address : value !== undefined
+        ? { image_id: input.image.id, space: 'va' as const, value } : undefined;
+      if (!address) continue;
+      const key = `${address.image_id}:${address.space}:${address.value}`;
       if (index.imports_by_address.has(key)) continue;
-      const targets = index.functions_by_address.get(key);
-      if (targets?.length === 1) result.push({ call_id: node.id, target: targets[0]!,
-        return_demand: demand.get(node.id) ?? [] });
+      const targets = index.functions_by_address.get(key) ?? [];
+      input.scope.dependencies?.recordFunctionQuery(input.image.id, address, targets);
+      for (const target of targets) input.scope.dependencies?.recordFunction(input.image.id, target.id, target);
+      if (targets.length === 1) {
+        const assumptions = recoverContexts ? nativeCallContext(node.register_inputs, parameterRegisters(input.components.abi),
+          definitions, scope, context, input.image.id, knownConstants) : undefined;
+        result.push({ call_id: node.id, target: targets[0]!, return_demand: demand.get(node.id) ?? [],
+          evidence_ids: [...new Set([...callerProofs, ...node.provenance.evidence_ids])],
+          original_subject_ids: [ir.id, node.id, ...node.provenance.instruction_ids],
+          ...(assumptions ? { assumptions } : {}) });
+      }
     }
     const control = block.terminator;
     if (control.kind !== 'indirect' || !control.tail_call) continue;
@@ -67,8 +93,17 @@ export function nativeDependencies(
     if (target === undefined) continue;
     const key = `${input.image.id}:va:${target}`;
     if (index.imports_by_address.has(key)) continue;
-    const targets = index.functions_by_address.get(key);
-    if (targets?.length === 1) result.push({ call_id: control.id, target: targets[0]! });
+    const targets = index.functions_by_address.get(key) ?? [];
+    input.scope.dependencies?.recordFunctionQuery(input.image.id, { image_id: input.image.id, space: 'va', value: target }, targets);
+    for (const fn of targets) input.scope.dependencies?.recordFunction(input.image.id, fn.id, fn);
+    if (targets.length === 1) {
+      const assumptions = recoverContexts ? nativeCallContext(states.get(block.id)?.exit ?? [], parameterRegisters(input.components.abi),
+        definitions, scope, context, input.image.id, knownConstants) : undefined;
+      result.push({ call_id: control.id, target: targets[0]!,
+        evidence_ids: [...new Set([...callerProofs, ...control.provenance.evidence_ids])],
+        original_subject_ids: [ir.id, control.id, ...control.provenance.instruction_ids],
+        ...(assumptions ? { assumptions } : {}) });
+    }
   }
   return result;
 }
@@ -83,6 +118,7 @@ export function prepareNativeUnit(
   libraryContracts: readonly SuppliedCallContract[],
 ): PreparedNativeUnit {
   const { image, revision, components, scope } = input, abi = components.abi;
+  input.scope.dependencies?.recordFunction(input.image.id, fn.id, fn);
   const graph = loadFunctionGraph({ ...scope, context }, revision, { image, function: fn });
   const evidence: readonly Evidence[] = graph.evidence ?? [];
   const base = { function: fn, instructions: graph.instructions.length, blocks: graph.blocks.length,
@@ -152,6 +188,16 @@ export function prepareNativeUnit(
       contracts: [...libraryContracts, ...declarations.contracts], resolutions: calls.resolutions });
     const failure = types.diagnostics.find((diagnostic) => diagnostic.code === 'cancelled' || diagnostic.code === 'resource_limit');
     if (failure) throw new OperationError(failure);
+    const active = nativeAnnotations(input, ir, types, calls, local);
+    if (active.annotations.length || active.types.length !== input.native_types.length) {
+      types = recoverTypes(ir, abi, local, { image_id: image.id, slice_id: image.selected_slice_id, revision,
+        entry_address: fn.entry, debug: input.debug, library: input.library,
+        max_work: local.remainingWork?.() ?? 0, types: active.types, annotations: active.annotations,
+        signatures: active.declarations.signatures,
+        contracts: [...libraryContracts, ...active.declarations.contracts], resolutions: calls.resolutions });
+      const failure = types.diagnostics.find((item) => item.code === 'cancelled' || item.code === 'resource_limit');
+      if (failure) throw new OperationError(failure);
+    }
     if (types.state !== 'complete') reasons.push(
       `native optional type/stack semantics incomplete: ${types.diagnostics[0]?.message ?? 'no complete type representation'}`);
   } catch (error) {
@@ -178,8 +224,9 @@ export function prepareNativeUnit(
       analysis = null;
     }
   }
-  const observed_calls = observePreparedCallInterfaces(ir, abi, analysis, context);
-  const dependencies = nativeDependencies(input, ir, context);
+  const demand_index = createCallResultDemandIndex(ir, abi, context);
+  const observed_calls = observePreparedCallInterfaces(ir, abi, analysis, context, demand_index);
+  const dependencies = nativeDependencies(input, ir, context, undefined, true, demand_index);
   return { ...base, blocks: Math.max(base.blocks, lifted.ir.blocks.length, ir.blocks.length),
-    nodes, required_nodes: requiredNodes, ir, types, analysis, observed_calls, dependencies, reasons };
+    nodes, required_nodes: requiredNodes, ir, types, analysis, observed_calls, dependencies, reasons, demand_index };
 }

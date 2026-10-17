@@ -107,9 +107,12 @@ export function nativeReturnInterface(
    * from a base case without treating an unknown call clobber as that candidate. */
   seed = false,
   demandedReturns: readonly RegisterDescriptor[] = [],
+  assumedEntry = false,
 ): Pick<NativeInterface, 'returns' | 'return_types' | 'written_result'> {
   const states = new Map(ir.register_states.map((state) => [state.block, state]));
   const entry = states.get(ir.entry)?.entry ?? [];
+  const assumed = new Set(assumedEntry ? ir.blocks.find((block) => block.id === ir.entry)!.instructions
+    .flatMap((node) => node.kind === 'assign' ? [node.result.id] : []) : []);
   const expressions = new Map<string, Expression>(), values = new Map<string, Value>();
   const sources = new Map<string, Value[]>(), copies: StorageCopy[] = [];
   const blocks = new Map(ir.blocks.map((block) => [block.id, block]));
@@ -146,6 +149,15 @@ export function nativeReturnInterface(
     abi.classifyCall({ returns: { kind: 'pointer' }, parameters: [], variadic: false, fixed_parameter_count: 0 }),
     abi.classifyCall({ returns: { kind: 'float', bits: 64 }, parameters: [], variadic: false, fixed_parameter_count: 0 }),
   ].flatMap((layout) => layout.returns.filter((location) => location.kind === 'register'));
+  const word = abi.layout.pointer_bits, bytes = BigInt(word / 8);
+  const aggregate = abi.classifyCall({ returns: { kind: 'aggregate', size: bytes * 2n, alignment: Number(bytes),
+    fields: [{ offset: 0n, type: { kind: 'integer', bits: word, signed: false } },
+      { offset: bytes, type: { kind: 'integer', bits: word, signed: false } }] },
+    parameters: [], variadic: false, fixed_parameter_count: 0 });
+  for (const location of aggregate.returns) {
+    if (location.kind !== 'register' || primary.some((item) => item.register.root === location.register.root)) continue;
+    if (demandedReturns.some((register) => register.root === location.register.root)) primary.push(location);
+  }
   const exits = ir.blocks.filter((block) => block.terminator.kind === 'return');
   const tails = ir.blocks.filter((block) => block.terminator.kind === 'indirect' && block.terminator.tail_call);
   if (!exits.length && !tails.length) return { returns: [], return_types: [] };
@@ -157,6 +169,13 @@ export function nativeReturnInterface(
       const item = pending.pop()!, key = `${item.value.id}:${item.start}:${item.width}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      // Prologue constants are assumptions about entry storage, not native
+      // writes. They cannot seed recursive write/extension guarantees.
+      if (assumed.has(item.value.id)) {
+        if (!allowEntry) return false;
+        authored = true;
+        continue;
+      }
       const output = outputs.get(item.value.id);
       if (output) {
         const low = output.binding.register.offset_bits + item.start, high = low + item.width;

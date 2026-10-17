@@ -262,6 +262,7 @@ test('artifact-only delivery is bounded before publication and later inline hits
     revision: 2,
     function_id: p.fn.id,
     wait: true,
+    delivery: 'auto' as const,
     options: p.identity.options,
     budget: p.identity.budget,
   };
@@ -692,7 +693,7 @@ test('schema-2 migration preserves artifacts, jobs, revisions and removal actors
   const db = new DatabaseSync(join(p.state.path, 'project.sqlite'));
   const { bytes: _bytes, address_map: _map, ...legacyMetadata } = p.image;
   db.prepare('UPDATE loaded_images SET payload=?').run(encodeStored(legacyMetadata));
-  db.exec('DROP TABLE analysis_artifacts; DROP TABLE loaded_image_records; PRAGMA user_version=2;');
+  db.exec('DROP TABLE analysis_artifacts; DROP TABLE loaded_image_records; DROP TABLE analysis_reuse; DROP INDEX records_scope_revision; DROP INDEX loaded_images_revision; PRAGMA user_version=2;');
   db.close();
   p.state.store = SqliteProjectStore.open(p.state.path, 'resume');
   assert.equal(p.state.store.snapshot().revision, snapshot.revision);

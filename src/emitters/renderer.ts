@@ -1414,9 +1414,13 @@ export class Renderer {
           ? this.language === 'c-like'
             ? `${this.program.source.return_pointer === 'char' ? 'char' : 'uint8_t'} *`
             : `pointer[${this.program.source.return_pointer === 'char' ? 'char' : 'uint8_t'}]`
-          : this.program.source.return_type
-            ? this.dataType(this.program.source.return_type)
-            : hasTailCall ? 'unknown_result' : 'void'
+          : this.program.source.return_types?.length
+            ? this.language === 'c-like'
+              ? `tuple<${w.join(this.program.source.return_types.map((type) => this.dataType(type)))}>`
+              : `tuple[${w.join(this.program.source.return_types.map((type) => this.dataType(type)))}]`
+            : this.program.source.return_type
+              ? this.dataType(this.program.source.return_type)
+              : hasTailCall ? 'unknown_result' : 'void'
         : 'physical_result';
     this.headerStart = w.offset;
     if (this.program.source && parameters.length <= 4) {
@@ -1543,6 +1547,7 @@ export class Renderer {
         span_unit: 'utf16',
         reconstruction: 'pseudocode',
         mappings: w.mappings,
+        declaration_span: declarationSpan,
         helpers: w.helpers,
         local_validation: this.localValidation.records,
         inferences,

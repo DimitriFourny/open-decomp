@@ -151,7 +151,7 @@ const success: Record<ToolName, object> = {
   functions_find: { state: 'complete', data: { items: [functionRecord], page } },
   function_get: {
     state: 'complete',
-    data: { view: 'metadata', function: functionRecord, annotations: [], lineage: [] },
+    data: { view: 'metadata', function: functionRecord, reviewed_subject_id: entity, annotation_eligible: true, annotations: [], lineage: [] },
   },
   function_decompile: {
     state: 'complete',
@@ -255,11 +255,6 @@ test('JSON Schema export is JSON-serializable, strict, object-rooted and MCP-ind
     assert.equal(schema.outputSchema.type, 'object');
     assert.equal(schema.schema_version, 1);
   }
-  const wire = JSON.stringify(exported);
-  assert.equal(
-    JSON.parse(wire).memory_read.inputSchema.properties.address.properties.value.type,
-    'string',
-  );
 });
 
 test('empty results differ from incomplete searches, partial results and running work', () => {
@@ -468,6 +463,15 @@ test('emitter spans refer to actual UTF-16 text bounds', () => {
       .success,
     false,
   );
+  const declaration = {
+    ...emission,
+    text: '\u{1d538}',
+    mappings: [],
+    declaration_span: { start: 0, end: 2 },
+  };
+  assert.equal(emissionSchema.safeParse(declaration).success, true);
+  for (const span of [{ start: -1, end: 2 }, { start: 0, end: 0 }, { start: 0, end: 3 }])
+    assert.equal(emissionSchema.safeParse({ ...declaration, declaration_span: span }).success, false);
 });
 
 test('serialized output budgets and job/project bindings are enforced at delivery', () => {

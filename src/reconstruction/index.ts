@@ -619,6 +619,14 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
             : 'The source call interface is unresolved; physical arguments and effects remain explicit.',
         );
     }
+    if (sourcePlan && block.control.kind === 'return') {
+      const projection = returns.get(block.control.id);
+      if (projection?.kind === 'inferred' && projection.outputs.length)
+        unavailable(block.control,
+          'The source return list is unresolved; changed possible ABI return storage is preserved as an uncertain physical overlay, not inferred aggregate fields: ' +
+          projection.outputs.map(({ register }) =>
+            `${register.root}[${register.offset_bits}:${register.width_bits}]`).join(', '));
+    }
     if (block.control.kind === 'unknown' || block.control.kind === 'indirect')
       unavailable(
         block.control,

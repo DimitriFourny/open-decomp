@@ -50,6 +50,7 @@ An explicit slice selection uses `<sha256>.<slice_id>` instead of `<sha256>.defa
 - First use imports the immutable image and builds navigation indexes. Later opens resume them without importing or discovering functions again.
 - The binary is still read to verify its content hash on every open. Unchanged timestamps or file sizes are not trusted as identity.
 - Decompilation reuses the existing versioned artifact cache. `result.data.cache` is `computed` or `hit`; emitter, options, budgets, target, revisions and component versions remain part of its identity.
+- Annotation edits still advance the global exact-snapshot identity. The core service may validate a complete positive/negative dependency ledger and publish a new artifact at the new revision for unchanged computation; old proofs keep their actual history. Legacy artifacts without ledgers conservatively recompute across revisions. This is not permission to reuse a stale target, component, option or budget scope.
 - Changed bytes select a new project. The old project is retained; restoring the old bytes can reuse it again.
 - `cachePath` overrides the cache **root**, not an individual project path. Use it for read-only input directories or to keep sidecars elsewhere. Relative paths resolve against the current directory. There is no silent fallback to another location.
 - Sidecars contain a copy of the input and potentially sensitive pseudocode. There is no automatic eviction. Do not delete a project while another process owns it.

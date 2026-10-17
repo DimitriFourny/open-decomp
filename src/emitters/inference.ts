@@ -1,6 +1,6 @@
 import type { Address, AddressRange, Emission, OperationContext, RecoveredType } from '../core/index.js';
 import type { Inference, InferenceStatus } from '../core/inference.js';
-import type { TypeStatus } from '../analysis/types/model.js';
+import type { MemoryShape, ObservedField, TypeStatus } from '../analysis/types/model.js';
 import { bitWidth, expressionOperands, type Origin, type Value } from '../ir/index.js';
 import type { Region } from '../presentation/index.js';
 import type { Reconstruction } from '../reconstruction/model.js';
@@ -30,6 +30,11 @@ export function collectInferences(
   const original = new Map<string, Origin>();
   const loadResults = new Map<string, string>();
   const catalog = new Set(input.types?.subjects ?? []);
+  const nativeCallees = new Map(input.source?.callees.map((callee) => [callee.call_id, callee]) ?? []);
+  for (const callee of nativeCallees.values()) {
+    context.checkpoint(1);
+    if (callee.target_subject_id) catalog.add(callee.target_subject_id);
+  }
   const addOrigin = (origin: Origin, valueIds: readonly string[] = []): void => {
     context.checkpoint(1 + valueIds.length);
     original.set(origin.id, origin);
@@ -118,6 +123,24 @@ export function collectInferences(
   }
   for (const [node, view] of program.memory)
     for (const subject of [view.field.id, ...(view.field.origin_ids ?? [])]) alias(subject, node);
+  // Index transported field uses before any linksFor memoization.
+  const transferredFields: { readonly shape: MemoryShape; readonly field: ObservedField; readonly call: string }[] = [];
+  const transferredSites = new Map<string, Set<string>>();
+  for (const transfer of input.source?.memory_transfers ?? [])
+    for (const field of transfer.parameter_shape.fields) {
+      context.checkpoint(1);
+      const calls = transferredSites.get(field.id) ?? new Set<string>();
+      calls.add(transfer.call_id); transferredSites.set(field.id, calls);
+    }
+  for (const shape of input.types?.shapes ?? [])
+    for (const field of shape.fields) {
+      context.checkpoint(1);
+      const calls = new Set((field.origin_ids ?? []).flatMap((id) => [...(transferredSites.get(id) ?? [])]));
+      for (const call of calls) {
+        alias(field.id, call); alias(shape.id, call);
+        transferredFields.push({ shape, field, call });
+      }
+    }
   const linked = new Map<string, readonly Mapping[]>();
   const linksFor = (id: string): readonly Mapping[] => {
     const previous = linked.get(id);
@@ -188,7 +211,8 @@ export function collectInferences(
       id: `inference:${result.length}`, status, explanation, subject_ids: [...subjectIds],
       evidence_ids: [...proofs], instruction_ids: [...instructions], ranges: [...ranges.values()],
       output_spans: [...spans.values()], details,
-      review: { operation: 'function_get', view: 'metadata', function_id: input.function.id },
+      review: { operation: 'function_get', view: 'metadata', function_id: input.function.id,
+        subject_id: subjectIds.values().next().value! },
     };
     // Charge strings and structure once without serializing/copying the record.
     const charge = (value: unknown): void => {
@@ -277,6 +301,16 @@ export function collectInferences(
       dynamic: field.dynamic ?? field.stride !== null, bounds: 'unknown', call_target_ids: field.call_target_ids ?? [] },
     [...view.shape.evidence_ids, ...field.evidence_ids], [node]);
   }
+  // A transported field is observed through the original caller boundary, not
+  // a fabricated local load. Reuse the portable shape's existing origin IDs.
+  for (const { shape, field, call } of transferredFields)
+    add([call, field.id, shape.id, ...(field.origin_ids ?? []),
+      ...(shape.base.kind === 'value' ? [shape.base.value_id] : [])], 'inferred',
+    'Callee-observed partial memory field transported through this exact caller argument; no local load, source field name, object size, or index bound is asserted.',
+    { kind: 'field', shape_id: shape.id, field_ids: field.origin_ids ?? [field.id], type_id: shape.type_id,
+      offset: String(field.offset), width_bits: field.width_bits, stride: field.stride === null ? null : String(field.stride),
+      dynamic: field.dynamic ?? field.stride !== null, bounds: 'unknown', call_target_ids: field.call_target_ids ?? [] },
+    [...shape.evidence_ids, ...field.evidence_ids], [call]);
   const dataValue = resolveData ?? sourceDataValues(program.expressions, program.source?.addresses ?? [], context);
   for (const id of program.live) {
     context.checkpoint(1);
@@ -318,7 +352,17 @@ export function collectInferences(
     if (node.kind !== 'call') continue;
     const projection = program.calls.get(node.id);
     if (!projection) continue;
-    add([node.id, ...(node.target.kind === 'indirect' ? [node.target.value.id] : [])],
+    const native = nativeCallees.get(node.id);
+    const assumptions = native?.context_assumptions;
+    const contextAssumptions = assumptions ? {
+      constants: assumptions.constants.map(({ register, bits }) => ({ register: {
+        root: register.root, offset_bits: register.offset_bits, width_bits: register.width_bits }, bits: String(bits) })),
+      aliases: assumptions.aliases.map((group) => group.map((register) => ({
+        root: register.root, offset_bits: register.offset_bits, width_bits: register.width_bits }))),
+      type_evidence_scope: assumptions.type_evidence_scope,
+    } : undefined;
+    add([node.id, ...(native?.target_subject_id ? [native.target_subject_id] : []),
+      ...(node.target.kind === 'indirect' ? [node.target.value.id] : [])],
       projection.signature ? confidence(projection.signature.status) : projection.kind === 'physical' ? 'unresolved' : 'inferred',
       'Ordered known call arguments and exact target identity; incomplete arity does not mean zero trailing arguments. Local source projection does not prove callee behavior.',
       { kind: 'call', call_id: node.id,
@@ -328,20 +372,32 @@ export function collectInferences(
         result_width_bits: projection.results.map((value) => bitWidth(value.type)),
         arity_complete: projection.kind !== 'physical' && projection.argument_list_complete !== false &&
           (projection.argument_list_complete === true || (projection.kind === 'source' && projection.signature?.signature.variadic === false)),
-        signature_id: projection.signature?.id ?? null },
-      [...node.contract_evidence, ...(projection.signature?.evidence_ids ?? [])], [node.id]);
+        signature_id: projection.signature?.id ?? null,
+        ...(contextAssumptions ? { context_assumptions: contextAssumptions } : {}) },
+      [...node.contract_evidence, ...(projection.signature?.evidence_ids ?? []), ...(native?.evidence_ids ?? [])], [node.id]);
   }
   for (const [control, tail] of program.tails) {
     context.checkpoint(1);
     const projection = tail.boundary;
-    add([control], projection.signature ? confidence(projection.signature.status) : 'inferred',
+    const native = nativeCallees.get(control);
+    const assumptions = native?.context_assumptions;
+    const contextAssumptions = assumptions ? {
+      constants: assumptions.constants.map(({ register, bits }) => ({ register: {
+        root: register.root, offset_bits: register.offset_bits, width_bits: register.width_bits }, bits: String(bits) })),
+      aliases: assumptions.aliases.map((group) => group.map((register) => ({
+        root: register.root, offset_bits: register.offset_bits, width_bits: register.width_bits }))),
+      type_evidence_scope: assumptions.type_evidence_scope,
+    } : undefined;
+    add([control, ...(native?.target_subject_id ? [native.target_subject_id] : [])], projection.signature ? confidence(projection.signature.status) : 'inferred',
       'Terminal call target and observed ordered inputs. Result widths belong to the callee, not invented caller SSA results; unknown trailing arity remains open.',
       { kind: 'call', call_id: control, target: { kind: 'direct', identity: identity(tail.target) },
         ordered_arguments: projection.arguments.map(argumentDetails),
         result_width_bits: tail.result_types.map(bitWidth),
         arity_complete: projection.kind !== 'physical' && projection.argument_list_complete !== false &&
           (projection.argument_list_complete === true || (projection.kind === 'source' && projection.signature?.signature.variadic === false)),
-        signature_id: projection.signature?.id ?? null }, projection.signature?.evidence_ids);
+        signature_id: projection.signature?.id ?? null,
+        ...(contextAssumptions ? { context_assumptions: contextAssumptions } : {}) },
+      [...(projection.signature?.evidence_ids ?? []), ...(native?.evidence_ids ?? [])], [control]);
   }
   for (const record of localValidation) {
     context.checkpoint(1);

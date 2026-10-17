@@ -31,8 +31,21 @@ const argument = z.strictObject({
   ordinal: z.number().int().min(0).max(9999), value_ids: ids, width_bits: width,
   constant_bits: z.string().regex(/^[0-9]+$/).max(20000).nullable(),
 });
-export const inferenceDetailsSchema = z.discriminatedUnion('kind', [
-  z.strictObject({
+const contextRegister = z.strictObject({
+  root: z.string().min(1).max(1024), offset_bits: z.number().int().min(0), width_bits: width,
+});
+const callContext = z.strictObject({
+  constants: z.array(z.strictObject({
+    register: contextRegister, bits: z.string().regex(/^[0-9]+$/).max(20000),
+  }).refine((value) => /^[0-9]+$/.test(value.bits) && Number.isInteger(value.register.width_bits) &&
+    value.register.width_bits >= 1 && value.register.width_bits <= 65536 &&
+    BigInt(value.bits) < (1n << BigInt(value.register.width_bits)),
+    'Context constants must cover a whole ABI carrier without out-of-width bits')).max(64),
+  aliases: z.array(z.array(contextRegister).min(2).max(64)).max(64),
+  type_evidence_scope: z.string().regex(/^[a-f0-9]{64}$/),
+});
+export const inferenceDetailsByKind = {
+  parameter: z.strictObject({
     kind: z.literal('parameter'), ordinal: z.number().int().min(0).max(9999),
     role: z.enum(['entry_storage', 'observed_input', 'physical_register']),
     value_ids: ids, machine_width_bits: width,
@@ -43,7 +56,7 @@ export const inferenceDetailsSchema = z.discriminatedUnion('kind', [
     ]),
     source_type_id: entityIdSchema.nullable(),
   }),
-  z.strictObject({
+  type: z.strictObject({
     kind: z.literal('type'), association_ids: ids, type_id: entityIdSchema,
     type_status: z.enum(['candidate', 'established', 'asserted', 'hypothesis', 'conflicting']),
     source: z.enum(['analysis', 'debug', 'library', 'user', 'llm']),
@@ -52,26 +65,26 @@ export const inferenceDetailsSchema = z.discriminatedUnion('kind', [
     value_offset_bits: z.number().int().min(0), machine_offset_bits: z.number().int().min(0), width_bits: width.nullable(),
     displayed: z.boolean(),
   }),
-  z.strictObject({
+  interpretation: z.strictObject({
     kind: z.literal('interpretation'),
     width_domain: z.literal('reconstructed_ir'),
     operation: z.enum(['sdiv', 'srem', 'ashr', 'slt', 'sle', 'sgt', 'sge', 'sign_extend', 'signed_to_float', 'float_to_signed']),
     signed: z.literal(true), operand_value_ids: z.array(ids).max(2),
     operand_width_bits: z.array(width).max(2), result_width_bits: width,
   }),
-  z.strictObject({
+  field: z.strictObject({
     kind: z.literal('field'), shape_id: entityIdSchema, field_ids: ids, type_id: entityIdSchema,
     offset: decimal, width_bits: width, stride: decimal.nullable(), dynamic: z.boolean(),
     bounds: z.literal('unknown'), call_target_ids: ids,
   }),
-  z.strictObject({
+  identity: z.strictObject({
     kind: z.literal('identity'), value_ids: ids, identity: identity,
     name: z.string().max(1024).nullable(), literal: z.string().max(1048576).nullable(),
     encoding: z.enum(['ascii', 'utf8']).nullable(), byte_length: decimal.nullable(),
     mutable: z.boolean().nullable(), object_address: decimal.nullable(), object_offset: decimal.nullable(),
     object_byte_length: decimal.nullable(),
   }),
-  z.strictObject({
+  call: z.strictObject({
     kind: z.literal('call'), call_id: entityIdSchema,
     target: z.discriminatedUnion('kind', [
       z.strictObject({ kind: z.literal('direct'), identity }),
@@ -80,24 +93,37 @@ export const inferenceDetailsSchema = z.discriminatedUnion('kind', [
     ordered_arguments: z.array(argument).max(10000),
     result_width_bits: z.array(width).max(10000), arity_complete: z.boolean(),
     signature_id: entityIdSchema.nullable(),
+    context_assumptions: callContext.optional(),
   }),
-  z.strictObject({
+  rewrite: z.strictObject({
     kind: z.literal('rewrite'), validation_kind: z.enum(['bitvector', 'parallel-copy', 'stack-promotion', 'control']),
     validation_subject: z.string().min(1).max(1024), validation_status: z.enum(['verified', 'unverified', 'rejected']),
     scope: z.string().min(1).max(4096), reason: z.string().max(8192).nullable(),
     counterexample: z.record(z.string(), z.string()).optional(),
   }),
-  z.strictObject({ kind: z.literal('conflict'), alternatives: ids, reason: z.string().min(1).max(8192) }),
-  z.strictObject({
+  conflict: z.strictObject({ kind: z.literal('conflict'), alternatives: ids, reason: z.string().min(1).max(8192) }),
+  annotation: z.strictObject({
     kind: z.literal('annotation'), annotation_id: annotationIdSchema,
     annotation_status: z.enum(['hypothesis', 'asserted', 'retracted']),
     annotation_kind: z.enum(['name', 'note', 'type', 'signature']),
   }),
+} as const;
+export const inferenceDetailsSchema = z.discriminatedUnion('kind', [
+  inferenceDetailsByKind.parameter,
+  inferenceDetailsByKind.type,
+  inferenceDetailsByKind.interpretation,
+  inferenceDetailsByKind.field,
+  inferenceDetailsByKind.identity,
+  inferenceDetailsByKind.call,
+  inferenceDetailsByKind.rewrite,
+  inferenceDetailsByKind.conflict,
+  inferenceDetailsByKind.annotation,
 ]);
 export const inferenceSchema = z.strictObject({
   ...common, details: inferenceDetailsSchema,
   review: z.strictObject({
     operation: z.literal('function_get'), view: z.literal('metadata'), function_id: entityIdSchema,
+    subject_id: entityIdSchema,
   }),
 });
 export const requirementSiteSchema = z.strictObject({

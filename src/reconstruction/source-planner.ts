@@ -26,6 +26,7 @@ import type { SignatureAssociation } from '../analysis/types/model.js';
 import { registerTypeSlices, registerTypes, unchangedStorage, type StorageCopy } from './source-register-types.js';
 import { sourceStackArgumentParts } from './source-stack-arguments.js';
 import { planSourceRequirements } from './source-requirements.js';
+import { possibleAbiReturnStorage } from '../analysis/calls/return-storage.js';
 
 /** Source ABI abstraction: architectural snapshots are retained in the input,
  * not treated as extra source arguments or memory-fault observables. */
@@ -584,6 +585,7 @@ export function planSource(
       });
   }
   let returnType: DataType | null = null;
+  const possibleReturnStorage = possibleAbiReturnStorage(abi);
   for (const block of blocks.values())
     if (block.control.kind === 'return') {
       const control = block.control;
@@ -601,6 +603,13 @@ export function planSource(
               )!,
             ]
           : [];
+      }
+      if (!functionSignature && !returned.length && evidence.function_returns?.registers.length) {
+        const observed = evidence.function_returns;
+        const results = observed.registers.map((register, index) => bind(
+          `${control.id}:observed-result:${index}`, block.register_exit, locations(register),
+          observed.types[index] ?? integer(register.width_bits), block.id));
+        if (results.every((value) => value !== null)) returned = results as Value[];
       }
       if (!functionSignature && !returned.length) {
         const floating = floatLayout.returns.flatMap((location) => {
@@ -659,13 +668,52 @@ export function planSource(
         }
       }
       if (returned.length === 1) returnType = returned[0]!.type;
+      // Without a supplied prototype, an unclassified changed ABI return cell
+      // is still observable machine storage. Preserve it as an uncertain entry
+      // overlay, not as another inferred source/aggregate result.
+      const knownReturnStorage = [...(evidence.function_returns?.registers ?? [])];
+      for (const value of returned) {
+        const primary = value.type.kind === 'float' || value.type.kind === 'vector' ? floatLayout : layout;
+        for (const location of primary.returns)
+          if (location.kind === 'register') knownReturnStorage.push({
+            ...location.register, width_bits: bitWidth(value.type),
+          });
+      }
+      const uncertainOutputs: RegisterBinding[] = [];
+      if (!functionSignature) for (const binding of block.register_exit) {
+        context.checkpoint(1);
+        const capability = possibleReturnStorage.find((register) => register.root === binding.register.root);
+        if (!capability || unchangedStorage(binding.value,
+          entry.register_entry.find((initial) => initial.register.id === binding.register.id)?.value.id,
+          expressions, storageSources, context)) continue;
+        let uncovered = [{ low: Math.max(binding.register.offset_bits, capability.offset_bits),
+          high: Math.min(binding.register.offset_bits + binding.register.width_bits,
+            capability.offset_bits + capability.width_bits) }];
+        for (const known of knownReturnStorage) {
+          if (known.root !== binding.register.root) continue;
+          const low = known.offset_bits, high = low + known.width_bits;
+          uncovered = uncovered.flatMap((range) => [
+            ...(range.low < low ? [{ low: range.low, high: Math.min(range.high, low) }] : []),
+            ...(range.high > high ? [{ low: Math.max(range.low, high), high: range.high }] : []),
+          ]);
+        }
+        for (const { low, high } of uncovered) {
+          if (low >= high) continue;
+          const width = high - low;
+          const value = low === binding.register.offset_bits && width === binding.register.width_bits
+            ? binding.value : make(`${control.id}:uncertain-return:${binding.value.id}:${low}:${width}`,
+              integer(width), block.id, { kind: 'extract', value: binding.value,
+                offset: low - binding.register.offset_bits });
+          uncertainOutputs.push({ value, register: { ...binding.register, offset_bits: low, width_bits: width } });
+        }
+      }
       returns.set(control.id, {
         kind: functionSignature ? 'source' : 'inferred',
         signature: functionSignature?.signature ?? null,
         arguments: [],
         results: returned,
         inputs: [],
-        outputs: [],
+        outputs: uncertainOutputs,
       });
     }
   if (
@@ -711,12 +759,17 @@ export function planSource(
       item?.object !== undefined || item?.string !== undefined)
     ? returnedData.every((item) => item!.string !== undefined) ? 'char' as const : 'byte' as const
     : undefined;
+  const resultTypes = [...returns.values()].map((boundary) => boundary.results.map((value) => value.type));
+  const tuple = resultTypes[0];
+  const returnTypes = tuple && tuple.length > 1 && resultTypes.every((types) => types.length === tuple.length &&
+    types.every((type, index) => sameType(type, tuple[index]!))) ? tuple : undefined;
   const presentation: SourcePresentation = {
     inferred: !functionSignature,
     parameter_names: parameterNames,
     return_type: returnType,
+    ...(returnTypes ? { return_types: returnTypes } : {}),
     ...(returnPointer === undefined ? {} : { return_pointer: returnPointer }),
-    requirements: planSourceRequirements(input, blocks, expressions, originalDefinitions, calls, context),
+    requirements: planSourceRequirements(input, blocks, expressions, originalDefinitions, calls, returns, context),
     locals: new Map(),
     stack: null,
     stack_addresses: new Map(),

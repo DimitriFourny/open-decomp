@@ -2,6 +2,7 @@ import { OperationError, type Evidence, type FunctionRecord, type OperationConte
 import type { InferredCallee } from '../../reconstruction/source-model.js';
 import type { NativeParameterShape } from '../../analysis/types/memory-shapes.js';
 import type { DataType } from '../../ir/index.js';
+import { nativeContextKey, type NativeContext } from './native-context.js';
 
 export type NativeInterface = Omit<InferredCallee, 'call_id' | 'evidence_ids'> & {
   readonly parameter_shapes?: readonly NativeParameterShape[];
@@ -16,6 +17,9 @@ export interface NativeDependency {
   readonly call_id: string;
   readonly target: FunctionRecord;
   readonly return_demand?: readonly RegisterDescriptor[];
+  readonly assumptions?: NativeContext;
+  readonly evidence_ids?: readonly string[];
+  readonly original_subject_ids?: readonly string[];
 }
 export interface NativeSummaryCapacity {
   readonly instructions: number;
@@ -41,6 +45,8 @@ export interface NativeSummary {
 export interface NativeWorklistResult<U extends NativeSummaryUnit> {
   readonly units: ReadonlyMap<string, U>;
   readonly summaries: ReadonlyMap<string, NativeSummary>;
+  /** Requested context key to the effective (possibly generic) bounded unit. */
+  readonly context_keys: ReadonlyMap<string, string>;
   readonly remaining: NativeSummaryCapacity;
   readonly complete: boolean;
 }
@@ -60,6 +66,10 @@ const unresolved = (): NativeInterface => ({
  * all transported evidence/types (not just register names) participate. */
 export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
   readonly roots: readonly FunctionRecord[];
+  readonly root_dependencies?: readonly NativeDependency[];
+  readonly max_contexts_per_function?: number;
+  readonly max_contexts?: number;
+  readonly specialize?: (baseline: U, assumptions: NativeContext, context: OperationContext) => U;
   readonly context: OperationContext;
   readonly capacity: NativeSummaryCapacity;
   readonly max_functions: number;
@@ -79,7 +89,11 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
 }): NativeWorklistResult<U> {
   const { context } = options;
   const units = new Map<string, U>(), summaries = new Map<string, NativeSummary>();
-  const scheduled = new Set<string>(), pending: FunctionRecord[] = [];
+  const scheduled = new Set<string>();
+  const pending: { readonly fn: FunctionRecord; readonly key: string; readonly assumptions?: NativeContext }[] = [];
+  const baselines = new Map<string, U>(), contextKeys = new Map<string, string>();
+  const contextCounts = new Map<string, number>(), fallbackReasons = new Map<string, string>();
+  let contextCount = 0;
   const failures = new Map<string, string[]>(), parents = new Map<string, Set<string>>();
   const refinements = new Map<string, number>(), refinementLimits = new Map<string, string>();
   const demands = new Map<string, Map<string, RegisterDescriptor>>();
@@ -95,25 +109,40 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
   };
   for (const [id, registers] of options.return_demands ?? []) demand(id, registers);
   let remaining = { ...options.capacity };
-  const schedule = (fn: FunctionRecord): void => {
+  const schedule = (fn: FunctionRecord, assumptions?: NativeContext): string => {
     context.checkpoint(1);
-    if (scheduled.has(fn.id)) return;
-    scheduled.add(fn.id);
-    pending.push(fn);
+    const requested = nativeContextKey(fn.id, assumptions);
+    const prior = contextKeys.get(requested);
+    if (prior) return prior;
+    const count = contextCounts.get(fn.id) ?? 0;
+    if (assumptions && (!options.specialize || count >= (options.max_contexts_per_function ?? 4) ||
+        contextCount >= (options.max_contexts ?? 64))) {
+      fallbackReasons.set(fn.id, 'native context limit: conservative generic interface');
+      assumptions = undefined;
+    }
+    const key = nativeContextKey(fn.id, assumptions);
+    contextKeys.set(requested, key);
+    if (scheduled.has(key)) return key;
+    if (assumptions) { contextCounts.set(fn.id, count + 1); contextCount++; }
+    scheduled.add(key);
+    pending.push({ fn, key, ...(assumptions ? { assumptions } : {}) });
+    return key;
   };
   for (const root of options.roots) schedule(root);
+  for (const dependency of options.root_dependencies ?? [])
+    demand(schedule(dependency.target, dependency.assumptions), dependency.return_demand ?? []);
   for (let cursor = 0; cursor < pending.length; cursor++) {
-    const fn = pending[cursor]!;
+    const { fn, key, assumptions } = pending[cursor]!;
     context.checkpoint(1);
-    const prepared = options.preloaded?.get(fn.id);
-    if (units.size >= options.max_functions) {
-      failures.set(fn.id, [`native dependency function limit (${options.max_functions})`]);
+    const prepared = baselines.get(fn.id) ?? options.preloaded?.get(fn.id);
+    if (!baselines.has(fn.id) && baselines.size >= options.max_functions) {
+      failures.set(key, [`native dependency function limit (${options.max_functions})`]);
       continue;
     }
     if (!prepared && (remaining.instructions <= 0 || remaining.blocks <= 0 || remaining.nodes <= 0)) {
       const exhausted = (['instructions', 'blocks', 'nodes'] as const)
         .filter((resource) => remaining[resource] <= 0);
-      failures.set(fn.id, [`native dependency ${exhausted.join('/')} capacity exhausted`]);
+      failures.set(key, [`native dependency ${exhausted.join('/')} capacity exhausted`]);
       continue;
     }
     const bounded: OperationContext = { ...context, budget: { ...context.budget,
@@ -131,26 +160,42 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
         (details.resource === 'instructions' && details.limit === remaining.instructions));
       if (!(error instanceof OperationError) || error.code !== 'resource_limit' || !local) throw error;
       context.checkpoint(0);
-      failures.set(fn.id, [`native dependency ${details.resource} limit (${details.limit})`]);
+      failures.set(key, [`native dependency ${details.resource} limit (${details.limit})`]);
       continue;
     }
     if (!prepared && (unit.instructions > remaining.instructions || unit.blocks > remaining.blocks ||
         unit.required_nodes > remaining.nodes)) {
-      failures.set(fn.id, ['native dependency loader exceeded its reserved instruction/block/IR capacity']);
+      failures.set(key, ['native dependency loader exceeded its reserved instruction/block/IR capacity']);
       continue;
     }
     if (!prepared) remaining = { instructions: remaining.instructions - unit.instructions,
       blocks: remaining.blocks - unit.blocks, nodes: remaining.nodes - unit.nodes };
-    units.set(fn.id, unit);
+    baselines.set(fn.id, unit);
+    if (assumptions && options.specialize) {
+      try {
+        unit = options.specialize(unit, assumptions, { ...context, budget: { ...context.budget,
+          ir_nodes: remaining.nodes, blocks: remaining.blocks } });
+        remaining = { ...remaining, nodes: remaining.nodes - unit.nodes, blocks: remaining.blocks - unit.blocks };
+      } catch (error) {
+        const details = error instanceof OperationError ? error.diagnostic.details : undefined;
+        if (!(error instanceof OperationError) || error.code !== 'resource_limit' || details?.kind !== 'limit' ||
+          !((details.resource === 'ir_nodes' && details.limit === remaining.nodes) ||
+            (details.resource === 'blocks' && details.limit === remaining.blocks))) throw error;
+        context.checkpoint(0);
+        unit = baselines.get(fn.id)!;
+        fallbackReasons.set(key, `native context ${details.resource} capacity: conservative generic interface`);
+      }
+    }
+    units.set(key, unit);
     // An incomplete graph must not turn its visible calls into a complete closure.
     options.on_partial?.(units, summaries);
     for (const dependency of unit.dependencies) {
       context.checkpoint(1);
-      const callers = parents.get(dependency.target.id) ?? new Set<string>();
-      callers.add(fn.id);
-      parents.set(dependency.target.id, callers);
-      demand(dependency.target.id, dependency.return_demand ?? []);
-      schedule(dependency.target);
+      const dependencyKey = schedule(dependency.target, dependency.assumptions);
+      const callers = parents.get(dependencyKey) ?? new Set<string>();
+      callers.add(key);
+      parents.set(dependencyKey, callers);
+      demand(dependencyKey, dependency.return_demand ?? []);
     }
   }
   for (const [id, unit] of units) summaries.set(id, {
@@ -176,7 +221,8 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
     const dependencies = new Map<string, NativeInterface>();
     for (const dependency of unit.dependencies) {
       context.checkpoint(1);
-      dependencies.set(dependency.call_id, summaries.get(dependency.target.id)?.observed ?? unresolved());
+      const key = contextKeys.get(nativeContextKey(dependency.target.id, dependency.assumptions)) ?? dependency.target.id;
+      dependencies.set(dependency.call_id, summaries.get(key)?.observed ?? unresolved());
     }
     const observed = options.observe(unit, dependencies, context, [...(demands.get(id)?.values() ?? [])]),
       previous = summaries.get(id)!;
@@ -197,6 +243,7 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
   for (const [id, unit] of units) {
     reasons.set(id, new Set([
       ...unit.reasons,
+      ...(fallbackReasons.has(id) ? [fallbackReasons.get(id)!] : []),
       ...(refinementLimits.has(id) ? [refinementLimits.get(id)!] : []),
       ...(unit.budget_truncated ? ['native dependency graph instruction budget truncated'] : []),
     ]));
@@ -208,8 +255,8 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
     reasonQueued.delete(id);
     let changed = false;
     for (const dependency of unit.dependencies) {
-      const inherited = reasons.get(dependency.target.id) ?? new Set(failures.get(dependency.target.id) ??
-        ['native dependency interface unavailable']);
+      const key = contextKeys.get(nativeContextKey(dependency.target.id, dependency.assumptions)) ?? dependency.target.id;
+      const inherited = reasons.get(key) ?? new Set(failures.get(key) ?? ['native dependency interface unavailable']);
       for (const reason of inherited) {
         context.checkpoint(1);
         const qualified = `${dependency.target.original_name ?? dependency.target.id}: ${reason}`;
@@ -234,8 +281,9 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
       summary.observed.parameter_state !== 'ambiguous' });
   }
   for (const [id, limits] of failures) summaries.set(id, {
-    observed: unresolved(), evidence_ids: pending.find((fn) => fn.id === id)?.evidence_ids ?? [],
+    observed: unresolved(), evidence_ids: pending.find((entry) => entry.key === id)?.fn.evidence_ids ?? [],
     reasons: limits, complete: false,
   });
-  return { units, summaries, remaining, complete: [...summaries.values()].every((summary) => summary.complete) };
+  return { units, summaries, context_keys: contextKeys, remaining,
+    complete: [...summaries.values()].every((summary) => summary.complete) };
 }

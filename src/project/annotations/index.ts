@@ -367,6 +367,8 @@ export class AnnotationService {
     options: {
       readonly catalog?: TrustedSemanticCatalog;
       readonly entity_ids?: readonly string[];
+      /** Reports effective query keys, including empty subjects and absent shared declarations. */
+      readonly on_dependencies?: (subjects: readonly string[] | null, type_ids: readonly string[]) => void;
     } = {},
   ): ActiveAnnotationView {
     const snapshot = this.store.snapshot(revision);
@@ -451,6 +453,7 @@ export class AnnotationService {
         pending.push(...typeReferences(record.definition));
       }
     }
+    options.on_dependencies?.(selected === null ? null : [...selected], [...seen]);
     context.checkpoint(0);
     return { project_id: snapshot.project_id, revision, annotations, types };
   }

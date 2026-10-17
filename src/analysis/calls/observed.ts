@@ -1,7 +1,7 @@
 import type { AbiProfile, OperationContext, RegisterDescriptor } from '../../core/index.js';
 import { integer, type DataType, type Instruction, type RegisterBinding, type SSAForm, type Value } from '../../ir/index.js';
 import type { CallAnalysisResult } from './index.js';
-import { observeCallResultDemands } from './result-demands.js';
+import { observeCallResultDemands, type CallResultDemandIndex } from './result-demands.js';
 import { preparedCallArguments } from './argument-preparation.js';
 
 export interface ObservedCall {
@@ -29,6 +29,7 @@ export function observePreparedCallInterfaces(
   abi: AbiProfile,
   analysis: CallAnalysisResult | null,
   context: OperationContext,
+  demandIndex?: CallResultDemandIndex,
 ): readonly ObservedCall[] {
   if (!analysis || analysis.state !== 'complete') return [];
   const facts = new Map(analysis.calls.map((call) => [call.node_id, call]));
@@ -92,7 +93,7 @@ export function observePreparedCallInterfaces(
     }
     prefixes.set(call.id, prefix);
   }
-  const demanded = observeCallResultDemands(ir, abi, context, roots);
+  const demanded = observeCallResultDemands(ir, abi, context, roots, demandIndex);
   return calls.map((call): ObservedCall => {
     context.checkpoint(1);
     const parameters = prefixes.get(call.id)!;

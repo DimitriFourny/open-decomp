@@ -352,6 +352,8 @@ export interface ProjectStore {
   }): Promise<{ readonly image_id: string; readonly existing: boolean }>;
   readImage(imageId: string): ImmutableBytes;
   readLoadedImage(imageId: string, sliceId: string, revision?: number): LoadedImage;
+  /** Indexed immutable native-query change token, including absent records and index state. */
+  readRecordScopeVersion(imageId: string, kind: keyof StoredRecordKinds, revision: number): string;
   queryRecords<K extends keyof StoredRecordKinds>(
     query: RecordQuery<K>,
   ): {
@@ -383,6 +385,10 @@ export interface ProjectStore {
   readSignature(functionId: string, revision: number): Signature | null;
   readLineage(entityId: string, revision: number): readonly z.infer<typeof lineageSchema>[];
   findArtifact(identity: CacheIdentity): Artifact | null;
+  /** Internal historical lookup; never authorizes a current-snapshot cache hit. */
+  findHistoricalArtifact(identity: CacheIdentity): Artifact | null;
+  /** Bounded, indexed candidates only. Callers must validate complete readsets before reuse. */
+  findReuseCandidates(identity: CacheIdentity, limit: number): readonly Artifact[];
   /** Exact-snapshot lookup of published analysis catalogs by semantic/type/evidence IDs.
    * An old catalog is not authorization to annotate an entity in a newer revision. */
   findAnalysisArtifacts(query: {
@@ -399,6 +405,7 @@ export interface ProjectStore {
     readonly bytes: Uint8Array;
     readonly cache: CacheIdentity;
     readonly analysis_ids?: readonly string[];
+    readonly reuse_scope?: string;
   }): Promise<
     | { readonly state: 'published'; readonly artifact: Artifact }
     | { readonly state: 'stale' | 'cancelled'; readonly current_revision: number }

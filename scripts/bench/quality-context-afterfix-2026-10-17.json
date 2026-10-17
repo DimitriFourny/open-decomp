@@ -1,0 +1,1477 @@
+{
+  "schema": 1,
+  "status": "After-fix source/interface/layout functional comparison, all12 retained; not uniform complete/aggregate/readability/performance claim",
+  "input": {
+    "bytes": 17432,
+    "executed": false,
+    "original": "/var/folders/pr/b1h1pv9502gd_lzq6gwyh2_40000gn/T/native-context-oracle-oUgeh1/analyzed",
+    "retained": "analyzed",
+    "sha256": "42b42f7f43425706d5382aa8d624699bd6ff40d21a359e3a97e71dad292fbf03",
+    "trusted_oracle_macro": false
+  },
+  "source": {
+    "license": "MIT; LICENSE",
+    "path": "native-context-source.c",
+    "sha256": "a624593b89e50810b421896f79365482625f580802cbae719934142974100bb4"
+  },
+  "actual": {
+    "outputs": {
+      "open-decomp C": 12,
+      "open-decomp Python": 12,
+      "ghidra C": 12
+    },
+    "all_addresses_match": true,
+    "source_hash_stable": true,
+    "source_hash_index_sha256": "49a2d7a1384dc52797d8ad854b1ff882f1aebb184d76d0ef0eea1e51717a73f8",
+    "all_closes_success": true,
+    "all_server_exit_zero": true
+  },
+  "assessment": {
+    "schema": 1,
+    "status": "AFTER-FIX all12 functional recording; original omission repaired by explicit partial physical return overlay, not guessed aggregate",
+    "input_sha256": "42b42f7f43425706d5382aa8d624699bd6ff40d21a359e3a97e71dad292fbf03",
+    "source_sha256": "a624593b89e50810b421896f79365482625f580802cbae719934142974100bb4",
+    "source_questions": "frozen-source-questions.md",
+    "additional_harness_questions": "harness-source-questions.json",
+    "retained_scope": {
+      "functions": 12,
+      "open_decomp_texts": 24,
+      "ghidra_texts": 12,
+      "matched_addresses": 12,
+      "analyzed_binary_executed": false,
+      "types_debug_source_annotations_supplied": false
+    },
+    "native_oracle_binding": {
+      "outcomes": 84,
+      "trusted_native": 48,
+      "dialects": 2,
+      "all14_actual_MCP_texts_byte_match_independently_evaluated_API_text": true,
+      "text_identity": [
+        {
+          "oracle_case": "c-like:two",
+          "MCP_text_equals_independently_evaluated_text": true
+        },
+        {
+          "oracle_case": "c-like:recursive",
+          "MCP_text_equals_independently_evaluated_text": true
+        },
+        {
+          "oracle_case": "c-like:same",
+          "MCP_text_equals_independently_evaluated_text": true
+        },
+        {
+          "oracle_case": "c-like:conflict",
+          "MCP_text_equals_independently_evaluated_text": true
+        },
+        {
+          "oracle_case": "c-like:words",
+          "MCP_text_equals_independently_evaluated_text": true
+        },
+        {
+          "oracle_case": "c-like:words_direct",
+          "MCP_text_equals_independently_evaluated_text": true
+        },
+        {
+          "oracle_case": "c-like:scalar",
+          "MCP_text_equals_independently_evaluated_text": true
+        },
+        {
+          "oracle_case": "python-like:two",
+          "MCP_text_equals_independently_evaluated_text": true
+        },
+        {
+          "oracle_case": "python-like:recursive",
+          "MCP_text_equals_independently_evaluated_text": true
+        },
+        {
+          "oracle_case": "python-like:same",
+          "MCP_text_equals_independently_evaluated_text": true
+        },
+        {
+          "oracle_case": "python-like:conflict",
+          "MCP_text_equals_independently_evaluated_text": true
+        },
+        {
+          "oracle_case": "python-like:words",
+          "MCP_text_equals_independently_evaluated_text": true
+        },
+        {
+          "oracle_case": "python-like:words_direct",
+          "MCP_text_equals_independently_evaluated_text": true
+        },
+        {
+          "oracle_case": "python-like:scalar",
+          "MCP_text_equals_independently_evaluated_text": true
+        }
+      ],
+      "oracle_public_image_ids": [
+        "image_42b42f7f43425706d5382aa8d624699bd6ff40d21a359e3a97e71dad292fbf03"
+      ],
+      "oracle_public_image_identity_matches_exact_retained_image": true,
+      "analyzed_image_path_in_latest_oracle_report": null,
+      "note": "Latest report did not retain its temporary path; canonical public image identities and all14 exact text matches bind the evidence to this image/output."
+    },
+    "families": [
+      {
+        "id": "two-distinct-caller-contexts",
+        "source_fact": "Calls pass (0,same_record,increment) and (1,same_record,double).",
+        "open_decomp": "Both ordered whole64bit mode/callback carriers retained; per-call context_assumptions publish distinct constants. Source output uses raw target addresses and unknown_argument_remainder; not complete inferred arity.",
+        "ghidra": "Both exact calls and named callback identities retained clearly in context_two.c lines8-10. This source fact is available from comparator and is NOT a unique product win.",
+        "evidence": [
+          "open-decomp/context_two-c-like.emission.json",
+          "ghidra/context_two.c"
+        ]
+      },
+      {
+        "id": "callback-result-and-contextual-fields",
+        "source_fact": "Mode0 reads record+0 and mode1 record+8; callback result is returned.",
+        "open_decomp": "Generic context_choose preserves callback result; caller context metadata transports64bit fields at offsets0/8 with bounds unknown.",
+        "ghidra": "context_choose.c declares void, invokes callback and returns without its result. Its generic offset choice0/8 is nevertheless explicit and correct; combining caller and callee exposes mode/callback facts without our metadata representation.",
+        "evidence": [
+          "open-decomp/context_choose.c",
+          "open-decomp/context_two-c-like.emission.json",
+          "ghidra/context_choose.c"
+        ]
+      },
+      {
+        "id": "recursive-context-limit",
+        "source_fact": "Caller passes9,value and returns value+57 mod2^64.",
+        "open_decomp": "Caller retains both arguments and live64bit result; partial diagnostic explicitly says native context limit: conservative generic interface.",
+        "ghidra": "Recursive callee has clear correct recurrence and two arguments. recursive_caller.c retains9/value but declares void and drops the source return.",
+        "evidence": [
+          "open-decomp/context_recursive_caller.c",
+          "ghidra/context_recursive.c",
+          "ghidra/context_recursive_caller.c"
+        ]
+      },
+      {
+        "id": "identity-alias-compatible-layout",
+        "source_fact": "Same pointer twice;64bit reads at offsets0/8; no object-bound conclusion.",
+        "open_decomp": "Live caller result plus identity-alias context and transported partial fields/bounds unknown.",
+        "ghidra": "Alias callee clearly shows offset8 plus first word and same caller passes identical actuals. same.c declares void and drops caller return; its pointer-identity/access facts are still useful comparator strengths.",
+        "evidence": [
+          "open-decomp/context_same-c-like.emission.json",
+          "ghidra/context_alias.c",
+          "ghidra/context_same.c"
+        ]
+      },
+      {
+        "id": "overlapping-byte-and-word",
+        "source_fact": "Same address supplies64bit and8bit reads at offset0; value+(value&255).",
+        "open_decomp": "Both widths and alias identity retained; explicit overlapping_accesses conflicting alternatives without guessed full layout, live64bit caller result.",
+        "ghidra": "Conflict callee clearly preserves both reads with byte* and long*; caller preserves identical pointers but declares void and drops return. No claim comparator cannot expose overlap.",
+        "evidence": [
+          "open-decomp/context_conflict_caller-c-like.emission.json",
+          "ghidra/context_conflict.c",
+          "ghidra/context_conflict_caller.c"
+        ]
+      },
+      {
+        "id": "two-word-return-caller-and-direct-callee",
+        "source_fact": "ActualX0=value+11 andX1=value XOR0xfedcba9876543210; caller consumes both64bit words.",
+        "open_decomp": "Caller retains actual input and independently consumed64+64 result words. Generic direct callee now retains primary plus known64 X1 XOR in an explicit immutable-entry physical overlay, with actual partial state and canonical unresolved-return site/effect Requirement. It does not infer source aggregate arity absent caller constraint. Scalar caller remains scalar with explicit possible residual physical storage, not a tuple source return.",
+        "ghidra": "Direct context_words preserves both halves of16byte container (awkward pseudocode, not original author structure). Caller adds both halves but declares no parameter and calls context_words() without the required actual input. Direct-callee result retention is a comparator strength against product.",
+        "evidence": [
+          "open-decomp/context_words.c",
+          "open-decomp/context_words.py",
+          "open-decomp/0040.response.json",
+          "open-decomp/0041.response.json",
+          "open-decomp/context_words_caller-c-like.emission.json",
+          "ghidra/context_words.c",
+          "ghidra/context_words_caller.c",
+          "context-words-return.disassembly.txt"
+        ]
+      }
+    ],
+    "blocking_counterexamples": [],
+    "limits": [
+      "This is a mixed source-backed interface/layout/result comparison, not uniform correctness/parity or a readability/performance score.",
+      "No scalar FP source case exists in this12-function fixture. It establishes no FP recovery advantage; generic possible-secondary-return fixes must separately preserve FP-bank and scalar-return rules.",
+      "Annotation hypothesis/correction/retraction/dependency evidence is separate and not injected here.",
+      "No heldout source/results inspected or used in this P3.4 task; full prospective/normalized performance runs remain on hold."
+    ],
+    "repaired_counterexamples": [
+      {
+        "function": "context_words",
+        "pre_fix": "Only primary value+11, semantic complete, X1 XOR dropped in BOTH dialects.",
+        "post_fix": "Primary remains scalar; known64 X1 XOR retained in physical_inputs overlay; actual semantic partial with canonical unresolved Requirement attached to original RET site/effect. No authored aggregate guessed.",
+        "evidence": [
+          "open-decomp/context_words.c",
+          "open-decomp/context_words.py",
+          "open-decomp/context_words-c-like.emission.json",
+          "open-decomp/context_words-python-like.emission.json"
+        ],
+        "source_gold": "Two observed result channels are independently known from source/instructions and exercised84-outcome proof."
+      }
+    ],
+    "actual_functional_advantages": [
+      {
+        "fact": "Actual source call argument and incoming value retained where comparator drops them",
+        "product": "context_words_caller has incoming arg0 and calls context_words(arg0, unknown_argument_remainder()), consumes both64bit outputs.",
+        "comparator": "context_words_caller(void) calls context_words() with no actual; the retained source loses the source-required incoming value.",
+        "proof": "Frozen source question6; retained caller instruction BL leaves incomingX0 unchanged and ADD consumesX0/X1;14 exact MCP/oracle text matches and84 source/native outcomes; raw call metadata result_width_bits[64,64]. See context-words-caller.disassembly.txt and context-words-return.disassembly.txt.",
+        "scope": "Exact default source-workflow response, not inability of manual prototype repair or other Ghidra queries."
+      },
+      {
+        "fact": "Source callback/recursive/alias caller return computations preserved where comparator omits them",
+        "product": "Generic callback return and three wrapper returns are explicit/live64bit values; recursive fallback honestly partial.",
+        "comparator": "context_choose, context_recursive_caller, context_same and context_conflict_caller are declared void and return no source value in retained C.",
+        "proof": "Frozen source questions2-5 and preserved caller source/native cases; raw before/after comparator text unchanged.",
+        "scope": "Not a global equivalence proof; no source/type annotations supplied."
+      },
+      {
+        "fact": "Cross-function partial layout and overlap proofs are published at caller with provenance, rather than requiring manual source composition",
+        "product": "Caller catalog/inferences carry mode-specific64bit offsets0/8, identity aliases, overlapping8/64 alternatives and unknown bounds.",
+        "comparator": "Retained caller responses expose primitive undefined8 input/calls but no corresponding caller partial record; callee C DOES expose underlying offsets/widths and can answer these facts manually.",
+        "proof": "Actual native-context call/field/conflict inference metadata with original ranges, not guessed author names or object size.",
+        "scope": "A response/provenance advantage, NOT a claim Ghidra engine cannot recover layouts or aliases."
+      }
+    ],
+    "retained_comparator_strengths": [
+      "Same correct mode/callback actuals and shared pointers; named callback source clearer than product raw addresses/unknown remainder.",
+      "Alias and overlap callee reads are correct and plainly visible; these facts are not exclusive product discoveries.",
+      "Recursive callee recurrence is clear; direct aggregate callee keeps both halves without our physical overlay helper.",
+      "Ghidra text is often substantially less cluttered; no readability score or general source-quality win computed."
+    ],
+    "supplementary_FP_guard_evidence": {
+      "reported_outcomes": 24,
+      "trusted_native_answers": 12,
+      "dialects": 2,
+      "source": "supplementary-FP-boundary-source.c",
+      "report": "supplementary-FP-boundary-oracle-results.json",
+      "scope": "Separate trusted-source oracle guard for scalarD0 primary + possibleGPscratch, unchangedGP exclusion, known V0 upper-zero preservation, and unknown call result storage. NOT paired pinned-Ghidra FP evidence and not an FP superiority claim."
+    },
+    "comparison_control": {
+      "all12_Ghidra_before_after_texts_identical": true,
+      "pairs": [
+        {
+          "name": "context_increment",
+          "pre_and_postfix_comparator_text_identical": true
+        },
+        {
+          "name": "context_double",
+          "pre_and_postfix_comparator_text_identical": true
+        },
+        {
+          "name": "context_choose",
+          "pre_and_postfix_comparator_text_identical": true
+        },
+        {
+          "name": "context_two",
+          "pre_and_postfix_comparator_text_identical": true
+        },
+        {
+          "name": "context_recursive",
+          "pre_and_postfix_comparator_text_identical": true
+        },
+        {
+          "name": "context_recursive_caller",
+          "pre_and_postfix_comparator_text_identical": true
+        },
+        {
+          "name": "context_alias",
+          "pre_and_postfix_comparator_text_identical": true
+        },
+        {
+          "name": "context_same",
+          "pre_and_postfix_comparator_text_identical": true
+        },
+        {
+          "name": "context_conflict",
+          "pre_and_postfix_comparator_text_identical": true
+        },
+        {
+          "name": "context_conflict_caller",
+          "pre_and_postfix_comparator_text_identical": true
+        },
+        {
+          "name": "context_words",
+          "pre_and_postfix_comparator_text_identical": true
+        },
+        {
+          "name": "context_words_caller",
+          "pre_and_postfix_comparator_text_identical": true
+        }
+      ],
+      "historical_pre_fix_archive": "quality-context-prefx-2026-10-17.tar.gz",
+      "historical_pre_fix_sha256": "ee8355e8971621648ae8a6b12d418bcf2e401270a2c35b22ec7e892eac8dcde7",
+      "functional_only": true,
+      "performance_claim": false,
+      "heldout_access_for_this_task": false,
+      "final_version_cutover": "Parent pipeline9/stack5/types6/reconstruction22/emitter22 cutover pending; this source checkpoint must not be relabeled."
+    },
+    "proof_replay_snapshots": {
+      "analysis_build_source": "native-context-source.c",
+      "expanded_trusted_macro_and_same12_analyzed_bodies": "proof-native-context-source.c",
+      "actual84_case_runner": "proof-native-context-oracle.ts",
+      "supplementary24_FP_runner": "supplementary-FP-boundary-oracle.ts",
+      "scope": "Expanded source macro adds trusted gold outputs; public proof image identity is still exact original image_42b42f7...; source snapshot hashes retained."
+    }
+  },
+  "archive": {
+    "path": "quality-context-afterfix-2026-10-17.tar.gz",
+    "bytes": 1953875,
+    "sha256": "2e6cd9f4430748eb5913bac09433810b988e226a8cfded48db4171c9b695bcec",
+    "files": [
+      {
+        "path": "LICENSE",
+        "bytes": 1081,
+        "sha256": "225a830013ac15a31827d8d1e63d81563c769dd02a0fff5ccd158696cba9c47c"
+      },
+      {
+        "path": "analyzed",
+        "bytes": 17432,
+        "sha256": "42b42f7f43425706d5382aa8d624699bd6ff40d21a359e3a97e71dad292fbf03"
+      },
+      {
+        "path": "assessment.json",
+        "bytes": 14882,
+        "sha256": "068ab88a6ecf7e43ff9dd1439af81ef86dff67ce8d6b13d8aee4a6ffe592ce05"
+      },
+      {
+        "path": "comparison.json",
+        "bytes": 243503,
+        "sha256": "cbac8746f1bf5a5cbe9eb5b11eae065c4b9d4a45f51940d225a8ca094b5a99b0"
+      },
+      {
+        "path": "context-words-caller.disassembly.txt",
+        "bytes": 870,
+        "sha256": "b39c2ee1ebe38d34eba797aed83ac8bfabce90b022c0adeb9036b42a233887f7"
+      },
+      {
+        "path": "context-words-return.disassembly.txt",
+        "bytes": 850,
+        "sha256": "a14844cd9843e909cbb9f93a07aeb93a471e425f9ba0c61556fb2b0b08f13f04"
+      },
+      {
+        "path": "frozen-source-questions.md",
+        "bytes": 3602,
+        "sha256": "cb87f11986c4db3e0f822ede788b5789790b92f27a0c3b566c62ad01f0bca047"
+      },
+      {
+        "path": "ghidra/0001.request.json",
+        "bytes": 224,
+        "sha256": "df40de91890c17af1d851749fb6e753d9779f6d23893c68b7ea6ccebea08fbfb"
+      },
+      {
+        "path": "ghidra/0001.response.json",
+        "bytes": 423,
+        "sha256": "3a6803deb47d43a001b217a163a5bac480093e4f298d1d1f80561c072376e85a"
+      },
+      {
+        "path": "ghidra/0002.request.json",
+        "bytes": 76,
+        "sha256": "9d2c25011becd4610370daff19fb91cafe891394d20080993ce44a0f6b413da1"
+      },
+      {
+        "path": "ghidra/0002.response.json",
+        "bytes": 56182,
+        "sha256": "2f4fcc030027a983e66e26125631f86828f79c56aa9ae015adcbdf7698c25f80"
+      },
+      {
+        "path": "ghidra/0003.request.json",
+        "bytes": 262,
+        "sha256": "5073175ab40eae79ad46de18f95bf8143c2289d507c33d7a241d387ec90eb29b"
+      },
+      {
+        "path": "ghidra/0003.response.json",
+        "bytes": 509,
+        "sha256": "3d51b7d9d064b428ffa38759c7d31276218923bc39a60f7ce2951762a0bacb95"
+      },
+      {
+        "path": "ghidra/0004.request.json",
+        "bytes": 226,
+        "sha256": "2781a6f91da1a3d14345015043cd129d6f4ecf859ee437ad77a51a92fb67c30d"
+      },
+      {
+        "path": "ghidra/0004.response.json",
+        "bytes": 956,
+        "sha256": "d8526a792f50dcec17836ad3e736ff3871e9994cf8ae0485f048751ade143e35"
+      },
+      {
+        "path": "ghidra/0005.request.json",
+        "bytes": 250,
+        "sha256": "c2a6534e4b11179df71eb8f7713acab46a1655a55dbd9090b6dfd769bc6c0d75"
+      },
+      {
+        "path": "ghidra/0005.response.json",
+        "bytes": 572,
+        "sha256": "d59b0e7dbc896c553aedebac108fa7fd344b26d17e390897c3756993e6c58efe"
+      },
+      {
+        "path": "ghidra/0006.request.json",
+        "bytes": 223,
+        "sha256": "01ec47500f5fb02ce48200344b7596ecd728f695933360e3504301df735a2959"
+      },
+      {
+        "path": "ghidra/0006.response.json",
+        "bytes": 944,
+        "sha256": "5a75ba8de5b5c488f66d9321c3f0391c74dc31cedd1f91e6e4ef55dcab739cc5"
+      },
+      {
+        "path": "ghidra/0007.request.json",
+        "bytes": 250,
+        "sha256": "2eec6ac4cdbc7eccc9a2e959686e654482798b49ede0749aef73fb637b4c6a5a"
+      },
+      {
+        "path": "ghidra/0007.response.json",
+        "bytes": 562,
+        "sha256": "b9a9e3676e4f1de9fabd8116a695547d44352a1538ec2b839b059008b97b607e"
+      },
+      {
+        "path": "ghidra/0008.request.json",
+        "bytes": 223,
+        "sha256": "6acd1f80dc55675fee8969a65549ab2401f47ee3012d3fa7cdc9aeb26a694a36"
+      },
+      {
+        "path": "ghidra/0008.response.json",
+        "bytes": 944,
+        "sha256": "03eed5b6065f9bc9740b043cb794cea8cef9097fa70ba1cd4836c280e766504e"
+      },
+      {
+        "path": "ghidra/0009.request.json",
+        "bytes": 250,
+        "sha256": "495d1fdf288dc122287cf83f756418690482f1ff8d29ed8db98c611a8b1609ae"
+      },
+      {
+        "path": "ghidra/0009.response.json",
+        "bytes": 849,
+        "sha256": "ebc3ec5614a5a35921f5a5ced59fb643f18dba9108faeb9bf2209a4e80bb6c4d"
+      },
+      {
+        "path": "ghidra/0010.request.json",
+        "bytes": 221,
+        "sha256": "90cae6865d174c054e46e79e562853434792865faed456d8dbedb3b94ba223ba"
+      },
+      {
+        "path": "ghidra/0010.response.json",
+        "bytes": 933,
+        "sha256": "da6296ecbf0133f6cefef0b10b6252f72ebb5d26ed6b63413266d63993c71674"
+      },
+      {
+        "path": "ghidra/0011.request.json",
+        "bytes": 251,
+        "sha256": "0f8eb7ff8bc1294365663f166c7b26327cec031fc3812234fe7f0dd9b95b4a6a"
+      },
+      {
+        "path": "ghidra/0011.response.json",
+        "bytes": 864,
+        "sha256": "25aabf614f6e1341567517859687f36d7c9df6ae650912ddbd0bee66116cda4d"
+      },
+      {
+        "path": "ghidra/0012.request.json",
+        "bytes": 227,
+        "sha256": "1cc3f948a334ed693dd111e976261647437b651faa086e818a1b3083d1a5f01a"
+      },
+      {
+        "path": "ghidra/0012.response.json",
+        "bytes": 1785,
+        "sha256": "cad0f0cdfd7296cfe37b617c83aa7483cfb66f6678136498512377a7e0faec10"
+      },
+      {
+        "path": "ghidra/0013.request.json",
+        "bytes": 251,
+        "sha256": "ba35a179849afd934b7a49b4a91d122dde00191496b8743616e6f1b8c6f6659c"
+      },
+      {
+        "path": "ghidra/0013.response.json",
+        "bytes": 863,
+        "sha256": "156a89e66ff20daae9d0e0255ba5e125a14c33cb68a8836d4218b421b91e3993"
+      },
+      {
+        "path": "ghidra/0014.request.json",
+        "bytes": 234,
+        "sha256": "c1470b831b637e5b86b4110e93353a2e5fa0be22987c642af1b4d30a4674d123"
+      },
+      {
+        "path": "ghidra/0014.response.json",
+        "bytes": 985,
+        "sha256": "b5a69aa96a2ca5ed63167ec382cea3e01054f388d6708b9caa4d0983103aba1e"
+      },
+      {
+        "path": "ghidra/0015.request.json",
+        "bytes": 251,
+        "sha256": "b9d38ef74cc5132384cc8c049406af0db86398bfe3505499452cf964b3b287db"
+      },
+      {
+        "path": "ghidra/0015.response.json",
+        "bytes": 658,
+        "sha256": "40b727ae5147f17949dc171a11646ef83cd9da4e375a881f9564d48e8bb84f97"
+      },
+      {
+        "path": "ghidra/0016.request.json",
+        "bytes": 223,
+        "sha256": "83bb024d6d684cbdfb6caf7b85e1bcf7a703e0bcd6b9441ef22b9bebc61ad22a"
+      },
+      {
+        "path": "ghidra/0016.response.json",
+        "bytes": 941,
+        "sha256": "21bc905af8c5f7103ae209deed4ed0a0f6c359c045f22ac64d2a369efc4ba818"
+      },
+      {
+        "path": "ghidra/0017.request.json",
+        "bytes": 251,
+        "sha256": "b51eaf31141c31626855135c079a1d5c0f972fbaa4729f51aeda6cc2ddfb489c"
+      },
+      {
+        "path": "ghidra/0017.response.json",
+        "bytes": 629,
+        "sha256": "8dba76da729f153bb45cbe5b35f6573be71bd500e5c4584c35c4becae3865efa"
+      },
+      {
+        "path": "ghidra/0018.request.json",
+        "bytes": 222,
+        "sha256": "cb4e6ed862536dd1458ff0939ee595b11f97156617eb7dc45a7e7a5773c1c493"
+      },
+      {
+        "path": "ghidra/0018.response.json",
+        "bytes": 937,
+        "sha256": "b8e78ffed27ff2a23090ec8460e3777e12cd4d625ff0d4876f23b8b15b8391c2"
+      },
+      {
+        "path": "ghidra/0019.request.json",
+        "bytes": 251,
+        "sha256": "05477778c662a1840ebc0266d3285b688989eb8ffb14c61d0a77140a19eafb29"
+      },
+      {
+        "path": "ghidra/0019.response.json",
+        "bytes": 614,
+        "sha256": "8da068a029fb0f021c93713600c16fad2ebfff72b6f5eff4f55e8146900c4700"
+      },
+      {
+        "path": "ghidra/0020.request.json",
+        "bytes": 226,
+        "sha256": "59c27ba2c18416b33eb05d22f2c383edfb053e549b2c62c1238fceceee45abcf"
+      },
+      {
+        "path": "ghidra/0020.response.json",
+        "bytes": 1777,
+        "sha256": "60a4885712e50c89342c6874a82fe7c3f86e0a613f9843ef62ccfad78bc64482"
+      },
+      {
+        "path": "ghidra/0021.request.json",
+        "bytes": 251,
+        "sha256": "05a90c6b0425170649665faaf2460c8bb4b98df168a76dfb3bd72c10f322793b"
+      },
+      {
+        "path": "ghidra/0021.response.json",
+        "bytes": 629,
+        "sha256": "b2648b94bb3314a1d3b86fe149b5785d59993a161809cbbaa1bb9de74126010c"
+      },
+      {
+        "path": "ghidra/0022.request.json",
+        "bytes": 233,
+        "sha256": "b5008aa8bbb6e27654bda1a66317051629c118ec7e905603032f37afc26d7e17"
+      },
+      {
+        "path": "ghidra/0022.response.json",
+        "bytes": 981,
+        "sha256": "5b7398f53dfdf4ecc293b6fb6e826a4dac5a2f053aa6d3209081316c25ae8c0d"
+      },
+      {
+        "path": "ghidra/0023.request.json",
+        "bytes": 251,
+        "sha256": "dd4819e4419862348c88e247d830f0911a60027ca11e3ac6e603a29ba1abda41"
+      },
+      {
+        "path": "ghidra/0023.response.json",
+        "bytes": 664,
+        "sha256": "1e71d0aaf51141887232c638ef6f0dad41b40c6a183b6b4a2d80da63109e0082"
+      },
+      {
+        "path": "ghidra/0024.request.json",
+        "bytes": 223,
+        "sha256": "d612a3897492583653da689cb2679a63943091d7deaa42de92b64e743cf17951"
+      },
+      {
+        "path": "ghidra/0024.response.json",
+        "bytes": 1753,
+        "sha256": "837cdd6a195b25a12f277cd33ec7a8f838193b358a52769404687c28fec6fa76"
+      },
+      {
+        "path": "ghidra/0025.request.json",
+        "bytes": 251,
+        "sha256": "3a77974db68d06afadb32ae1f8d1b98443fc131b2246336ac6d44cc81d1fd485"
+      },
+      {
+        "path": "ghidra/0025.response.json",
+        "bytes": 801,
+        "sha256": "25e99906caa82637348594a8b08c0aff9affe099cfa2fa44165824363f01cee3"
+      },
+      {
+        "path": "ghidra/0026.request.json",
+        "bytes": 230,
+        "sha256": "8a1abf863f399af976ab8bc20a3d2b8bc7ab0e50de7961fc12bc4b0be0778424"
+      },
+      {
+        "path": "ghidra/0026.response.json",
+        "bytes": 969,
+        "sha256": "e4d56aab0b9ae96645e8edb71eb8454d45ff6e1ee264fa4621ed67bc657a7481"
+      },
+      {
+        "path": "ghidra/0027.request.json",
+        "bytes": 251,
+        "sha256": "5531a2beaf786b51f4b70c4f04faa621a38b66a43eee81a41223f31db47aeaf6"
+      },
+      {
+        "path": "ghidra/0027.response.json",
+        "bytes": 726,
+        "sha256": "a7b791f735a987b2443c6980dd27cf78bc923fc6a68de86d276573fb3f978e09"
+      },
+      {
+        "path": "ghidra/0028.request.json",
+        "bytes": 189,
+        "sha256": "3d2c643608f86ab2b09b054927c22a3d47b7d98fe9e1ee75769978357b794b68"
+      },
+      {
+        "path": "ghidra/0028.response.json",
+        "bytes": 299,
+        "sha256": "2eab3c48249b02e8c448cb81940db9b7343765925207f7a5f48e144029243a9a"
+      },
+      {
+        "path": "ghidra/calls.json",
+        "bytes": 4137,
+        "sha256": "3933259a7afd47437b575c83edfdc202a8d47c2fe6c782568a5e4b31e32c7ffb"
+      },
+      {
+        "path": "ghidra/context_alias.c",
+        "bytes": 99,
+        "sha256": "e48346d8241371a84ec38eb0e542b3a3f8a175e728c0a35741370fb61807e100"
+      },
+      {
+        "path": "ghidra/context_choose.c",
+        "bytes": 198,
+        "sha256": "b46b80b2d6b540fe7b13bb26d0a9134bafb8e02da19023c26fba318bc8197274"
+      },
+      {
+        "path": "ghidra/context_conflict.c",
+        "bytes": 96,
+        "sha256": "b2c9ea08292a02b574c44e9be24c4891ea4997acb4fe60d83880aa253952cc4d"
+      },
+      {
+        "path": "ghidra/context_conflict_caller.c",
+        "bytes": 105,
+        "sha256": "2fddd2b722834e47ef426a50297f53be100bb6d7d971e33f18503f4a88f92739"
+      },
+      {
+        "path": "ghidra/context_double.c",
+        "bytes": 65,
+        "sha256": "caa1541f7bc984883c0aaa94e9cfd918323d433962a9d034a7f0ec8f0edd85a1"
+      },
+      {
+        "path": "ghidra/context_increment.c",
+        "bytes": 67,
+        "sha256": "f11f31ca59bd144bab181e8228ff3f7ac334aad121700f9da1de25adc5ffb163"
+      },
+      {
+        "path": "ghidra/context_recursive.c",
+        "bytes": 203,
+        "sha256": "f0fdc91dd42e19661bd528f325d25ddee0c388231bfa39ecc521f8a705c203e2"
+      },
+      {
+        "path": "ghidra/context_recursive_caller.c",
+        "bytes": 101,
+        "sha256": "62fbf4e6215943001395219109bbfcc5765f4e718b4c82f9e2341e7cad67fd70"
+      },
+      {
+        "path": "ghidra/context_same.c",
+        "bytes": 91,
+        "sha256": "15552e26f9f9c51551573e36c7e8c667327a9de400bff1b20b6f78ee932097b2"
+      },
+      {
+        "path": "ghidra/context_two.c",
+        "bytes": 211,
+        "sha256": "07c7d3c85720e820e1312ef01f40f0f916729cf3f2589aa065d519245ecf1e87"
+      },
+      {
+        "path": "ghidra/context_words.c",
+        "bytes": 179,
+        "sha256": "25ee6bc9e1ac47c71572ecfd90af49eaa88d83bf790865112619e91c5c8639ab"
+      },
+      {
+        "path": "ghidra/context_words_caller.c",
+        "bytes": 136,
+        "sha256": "f4ea6efb399d85a5736907e5f10aa0d701879e6280c6963abac0f535e7dda7a8"
+      },
+      {
+        "path": "ghidra/invocation.json",
+        "bytes": 669,
+        "sha256": "692f5109c4a2f400ac95939bb5deeb84c2a49b61a2a1a5a77e5c109cdfe581b2"
+      },
+      {
+        "path": "ghidra/stderr.txt",
+        "bytes": 2276,
+        "sha256": "4a129e88f139ddab59f6b04440685bdc68010d21951ec31ad307b1faac200fdd"
+      },
+      {
+        "path": "ghidra/tools.json",
+        "bytes": 56182,
+        "sha256": "2f4fcc030027a983e66e26125631f86828f79c56aa9ae015adcbdf7698c25f80"
+      },
+      {
+        "path": "harness-source-questions.json",
+        "bytes": 4753,
+        "sha256": "037b0e3689a323fcdfcf3618d041a3cc494103f2968d2e401e80043d9ef72b9e"
+      },
+      {
+        "path": "native-context-source.c",
+        "bytes": 2667,
+        "sha256": "a624593b89e50810b421896f79365482625f580802cbae719934142974100bb4"
+      },
+      {
+        "path": "open-decomp/0001.request.json",
+        "bytes": 224,
+        "sha256": "df40de91890c17af1d851749fb6e753d9779f6d23893c68b7ea6ccebea08fbfb"
+      },
+      {
+        "path": "open-decomp/0001.response.json",
+        "bytes": 1171,
+        "sha256": "e859c5965dd82b422187bd0b01165405b01e9919d9aa9f4fdff8de2ae8ff3f04"
+      },
+      {
+        "path": "open-decomp/0002.request.json",
+        "bytes": 76,
+        "sha256": "9d2c25011becd4610370daff19fb91cafe891394d20080993ce44a0f6b413da1"
+      },
+      {
+        "path": "open-decomp/0002.response.json",
+        "bytes": 885870,
+        "sha256": "482dc0ace5e742085c7467a1e5dcbc6431fff6bbb83d552b1756b8092309005f"
+      },
+      {
+        "path": "open-decomp/0003.request.json",
+        "bytes": 632,
+        "sha256": "2c27013bb2338abd5b4f61a985cca5a8e81d5c8be25daf7105c713be26a9bb2e"
+      },
+      {
+        "path": "open-decomp/0003.response.json",
+        "bytes": 4777,
+        "sha256": "c99e0d63e948bb01ed65438e9b4015cd97e3c56c567cd51130c765b79f3c662d"
+      },
+      {
+        "path": "open-decomp/0004.request.json",
+        "bytes": 247,
+        "sha256": "d81465df63136f68e9a3320bc4f32b2fb4d653ca38fce68a690264f5aaed21b4"
+      },
+      {
+        "path": "open-decomp/0004.response.json",
+        "bytes": 4781,
+        "sha256": "b9c2ff2292cca7f7f0a7c7cdab8c99dda829ff59f2e85ec62b0ee3644f73f32c"
+      },
+      {
+        "path": "open-decomp/0005.request.json",
+        "bytes": 508,
+        "sha256": "6b15a75d808e8e9566aa874405d06f90dd865ac8dc3a0a425c34ef544dba3c7c"
+      },
+      {
+        "path": "open-decomp/0005.response.json",
+        "bytes": 17917,
+        "sha256": "59ac73b7fa8ae13c07a537132ac36e8f74a2fdd9afe4092a0b467da90891f873"
+      },
+      {
+        "path": "open-decomp/0006.request.json",
+        "bytes": 624,
+        "sha256": "527b70b585ae728d891b123e726b099dc533536fb298fe0335e4d4db903ee2cb"
+      },
+      {
+        "path": "open-decomp/0006.response.json",
+        "bytes": 33887,
+        "sha256": "bd55ebee06b4bece05035ad71bd7134ebe405e2dda10c4e8b6760bb55c6b1d63"
+      },
+      {
+        "path": "open-decomp/0007.request.json",
+        "bytes": 629,
+        "sha256": "b6ad0a0ea3ef835f0c5ddc90ece33841fec14f1b1f8f12bc1a38e62eb2e8eea0"
+      },
+      {
+        "path": "open-decomp/0007.response.json",
+        "bytes": 34236,
+        "sha256": "5cfb4825eb21aa12aaa263cb79d9a89710e451ad6cf5b494f0f7e8e4a76cbe99"
+      },
+      {
+        "path": "open-decomp/0008.request.json",
+        "bytes": 505,
+        "sha256": "ab2050051973393b86e6fb2796719f43a60e5afaddd73a8de0b5145901316334"
+      },
+      {
+        "path": "open-decomp/0008.response.json",
+        "bytes": 14352,
+        "sha256": "7275b366536e922c9549ee90da9077e6ea025ee9b9bb0882fedc07b32f45fb52"
+      },
+      {
+        "path": "open-decomp/0009.request.json",
+        "bytes": 624,
+        "sha256": "51246c9feb82d87db5d44cf9df142d57c739d8142e0b579a31f25faf819a4347"
+      },
+      {
+        "path": "open-decomp/0009.response.json",
+        "bytes": 43983,
+        "sha256": "4c6ab087e5f535fbb806fdf4da2b6ae26828dfbb95c241c06b08338c17107f02"
+      },
+      {
+        "path": "open-decomp/0010.request.json",
+        "bytes": 630,
+        "sha256": "b7c50aa1db2abed1684c08a30d9b1f8b0f6b355bf659380e8b15ca4359286598"
+      },
+      {
+        "path": "open-decomp/0010.response.json",
+        "bytes": 44087,
+        "sha256": "40042bc9ffccf2a517a93362d2b8e977aaf818856d7991e8ab6643a3cf08077f"
+      },
+      {
+        "path": "open-decomp/0011.request.json",
+        "bytes": 506,
+        "sha256": "e92b6c6ccf653b401b802375325c56c8e3f7365db37612d8375f5d74e2ac935b"
+      },
+      {
+        "path": "open-decomp/0011.response.json",
+        "bytes": 21640,
+        "sha256": "8e1e98039891bff21578ffcd5e2d0cd6a661b3da64f55e0be8359884bb494844"
+      },
+      {
+        "path": "open-decomp/0012.request.json",
+        "bytes": 625,
+        "sha256": "ed3c2e260a165c70531ce213dd2d1857f98b9a21624e096e60afe3d9c0da11fe"
+      },
+      {
+        "path": "open-decomp/0012.response.json",
+        "bytes": 637121,
+        "sha256": "3b836659e20ed3817d3217def3bc83ae431ea8ed73e0bd8ddffbb120a81ecc9e"
+      },
+      {
+        "path": "open-decomp/0013.request.json",
+        "bytes": 630,
+        "sha256": "a0b79f15a953c64a4e0232a2eab1c3ad0fa81609d6c07b88adb54d9dcbdece6e"
+      },
+      {
+        "path": "open-decomp/0013.response.json",
+        "bytes": 637352,
+        "sha256": "cea4173d6081844abfa11ddc718e9911a60db424b2d2cfb1959c94b3fbce7953"
+      },
+      {
+        "path": "open-decomp/0014.request.json",
+        "bytes": 503,
+        "sha256": "b0332adf4cf79235a4c25892e8826883cda0a6614d3f47fe77397d5d375c8d3e"
+      },
+      {
+        "path": "open-decomp/0014.response.json",
+        "bytes": 17894,
+        "sha256": "51ab25262169125897d0303fc7d033ca24b433fa99533667ce5be610ebc17446"
+      },
+      {
+        "path": "open-decomp/0015.request.json",
+        "bytes": 625,
+        "sha256": "45801ce98a4f8101446052bf279c44f54ea03a0b938cc2ffb6c6c0ed2a6cd950"
+      },
+      {
+        "path": "open-decomp/0015.response.json",
+        "bytes": 4746,
+        "sha256": "14e487207954cde5a7a4e1008c3fa9bdc341bf06fb44cc4736b3470b71242ec4"
+      },
+      {
+        "path": "open-decomp/0016.request.json",
+        "bytes": 294,
+        "sha256": "248b70bb103473a1bad3b11ee96ed5e2836360efdb17d2dfd457b6697f99aee4"
+      },
+      {
+        "path": "open-decomp/0016.response.json",
+        "bytes": 552833,
+        "sha256": "2cdef478985b22b5e29f2d4bd7ee3f5111744bf0e3d50b751d630b0233ce3cab"
+      },
+      {
+        "path": "open-decomp/0017.request.json",
+        "bytes": 298,
+        "sha256": "5b6b6f72db1dee513d017d156919898c03446845a2b160eaab3e963b46c7dfec"
+      },
+      {
+        "path": "open-decomp/0017.response.json",
+        "bytes": 343463,
+        "sha256": "fc3860ebf31fe8c4c9e9ff6de145cf6675f43a48617e4f464f565d6aa757825c"
+      },
+      {
+        "path": "open-decomp/0018.request.json",
+        "bytes": 630,
+        "sha256": "d546862111a124c260c6c90cb4c448df75030909ceb4d0e7751c9f02ebf50b94"
+      },
+      {
+        "path": "open-decomp/0018.response.json",
+        "bytes": 4776,
+        "sha256": "d89b86e16fcbfe7fd809450e6349609fc8e8687d94f463b6c70fb334e8c95e96"
+      },
+      {
+        "path": "open-decomp/0019.request.json",
+        "bytes": 294,
+        "sha256": "683f71e83639421781a9ea60099511409a3e007383a944f9d013f6484dbcdc46"
+      },
+      {
+        "path": "open-decomp/0019.response.json",
+        "bytes": 552840,
+        "sha256": "bfc630a809b11758df06969699719a3e90cc343a2934efd9764e3414c06250cc"
+      },
+      {
+        "path": "open-decomp/0020.request.json",
+        "bytes": 298,
+        "sha256": "e77e40651f38bdf5b4d3b379bef7ffa5b16fcf29b407af8363150094543323ce"
+      },
+      {
+        "path": "open-decomp/0020.response.json",
+        "bytes": 343384,
+        "sha256": "a49d1b9e8a4648eb06fe00114b90232a2cf96f6e94d55b8afae23abd03288abe"
+      },
+      {
+        "path": "open-decomp/0021.request.json",
+        "bytes": 509,
+        "sha256": "3a7c2e10673a935f95e8cab0420f376e98a2071f4801cb1d582d0a81eb73d187"
+      },
+      {
+        "path": "open-decomp/0021.response.json",
+        "bytes": 21654,
+        "sha256": "c71661a6fe296585d12e9d19b9340bbb561a746a09a29f876d8bc6ef85554ad0"
+      },
+      {
+        "path": "open-decomp/0022.request.json",
+        "bytes": 625,
+        "sha256": "4b92840ebfa9049f808240a129721a9cecb66ed9e7d51aa3920943e67f2ad3c5"
+      },
+      {
+        "path": "open-decomp/0022.response.json",
+        "bytes": 580235,
+        "sha256": "27c0033049b108c3c71fa614306991b6ab2ebfeb81d7544cc6489dcf15173c3d"
+      },
+      {
+        "path": "open-decomp/0023.request.json",
+        "bytes": 630,
+        "sha256": "3af8700079c2979430d13b5d0f33e4683373ed94794aee8670582b09b3149d14"
+      },
+      {
+        "path": "open-decomp/0023.response.json",
+        "bytes": 580461,
+        "sha256": "34b9f4be138ab4c99ce108f1462ef1c97ff0437568c93385838f07ccceec6a25"
+      },
+      {
+        "path": "open-decomp/0024.request.json",
+        "bytes": 516,
+        "sha256": "9392e6c14a4f5b6d1a62b7e404c2345e4b7026faf768bc8d84847e2dbb256491"
+      },
+      {
+        "path": "open-decomp/0024.response.json",
+        "bytes": 14395,
+        "sha256": "c3a834c390e7ee2950d1f40890685ae4a8c719e8419cd6561c12be26005a386d"
+      },
+      {
+        "path": "open-decomp/0025.request.json",
+        "bytes": 625,
+        "sha256": "734512ba4fd4e37478cdf55dbe760537277b6abfb19d68aad3706454b4dacb9e"
+      },
+      {
+        "path": "open-decomp/0025.response.json",
+        "bytes": 544271,
+        "sha256": "3ff81629f6be6b9cb78d0f567c6b9e7e36ae9999f9fdd4f69ce568bbc7db6800"
+      },
+      {
+        "path": "open-decomp/0026.request.json",
+        "bytes": 630,
+        "sha256": "339736cec97de24c26eb5778c432db15aa7bd7772fa63e44fc07b4c33418a89e"
+      },
+      {
+        "path": "open-decomp/0026.response.json",
+        "bytes": 544378,
+        "sha256": "12d1762f51a75fdbfd80305271a5d551ee947d2b593aefd0cf9efa8c5603d2e4"
+      },
+      {
+        "path": "open-decomp/0027.request.json",
+        "bytes": 505,
+        "sha256": "0a132f8dfc438fb63b781b3b44fe388000fdef8ee0b77dabe4f12e8fcfc60968"
+      },
+      {
+        "path": "open-decomp/0027.response.json",
+        "bytes": 19769,
+        "sha256": "0af553efbe27edcc2239d0cd1fc5b47922943ca067f524b150f90db0affc8b92"
+      },
+      {
+        "path": "open-decomp/0028.request.json",
+        "bytes": 625,
+        "sha256": "a08167ed7d97281fdb7a8c193a51f2a14507db88c1052e81eeb3b3c7281ba0b7"
+      },
+      {
+        "path": "open-decomp/0028.response.json",
+        "bytes": 123592,
+        "sha256": "2538222500946e5744120a56058614d09e0dad475d4996c73e3e6314ff59e356"
+      },
+      {
+        "path": "open-decomp/0029.request.json",
+        "bytes": 630,
+        "sha256": "42498965ac560444a82d0b8c1595b312f30305bfc5e104dc30f7c52a86a3bea3"
+      },
+      {
+        "path": "open-decomp/0029.response.json",
+        "bytes": 123831,
+        "sha256": "a2bf677914d54394e8351c9d38a96442314d1cdef29aca0a059a5dabef1f5fb9"
+      },
+      {
+        "path": "open-decomp/0030.request.json",
+        "bytes": 504,
+        "sha256": "09a70cb87e70d6e62a1e676547fffe4c23aae1098e6a8b4e2adfdc1d06c2fc1c"
+      },
+      {
+        "path": "open-decomp/0030.response.json",
+        "bytes": 17898,
+        "sha256": "38c57f0f5461f5c4784a00095f1bd8ede41494314da2e762145f9869c0ac838c"
+      },
+      {
+        "path": "open-decomp/0031.request.json",
+        "bytes": 625,
+        "sha256": "e6b43a6f7bb8ad8025b3e2ecfff3d3c0c6dc7e20cb2c9be6fd51ba7c083af13f"
+      },
+      {
+        "path": "open-decomp/0031.response.json",
+        "bytes": 498758,
+        "sha256": "0307cbffe803c4f8b0bc7a9dddb97caae261623e51ce4c8d7d859821d3aa531a"
+      },
+      {
+        "path": "open-decomp/0032.request.json",
+        "bytes": 630,
+        "sha256": "4834d0e5bc1545c90cdd705e4f86a83eb993a52f27fd086b91022207e756adaf"
+      },
+      {
+        "path": "open-decomp/0032.response.json",
+        "bytes": 498931,
+        "sha256": "556d33d33b7235d3ad3f5f453ac0a222177453711d45e3c0581faf952a98906e"
+      },
+      {
+        "path": "open-decomp/0033.request.json",
+        "bytes": 508,
+        "sha256": "aaf4048a5e75d9a5a432d6cb94223ad15b3348a02861a01e246c83a85b04547a"
+      },
+      {
+        "path": "open-decomp/0033.response.json",
+        "bytes": 19783,
+        "sha256": "c55e75a3a2aa7563d491a1c7b1752e1fb77996d8f0c1e609a1103b514da80bdb"
+      },
+      {
+        "path": "open-decomp/0034.request.json",
+        "bytes": 625,
+        "sha256": "c683a074a9873f6b22310acfb2a6ce51f4847c52f7114c11080689d62d9a9b53"
+      },
+      {
+        "path": "open-decomp/0034.response.json",
+        "bytes": 133291,
+        "sha256": "9bc90682ae58a9db7a7d15e57b62019efe74c4285d9f275ec703eabfc4f42c86"
+      },
+      {
+        "path": "open-decomp/0035.request.json",
+        "bytes": 630,
+        "sha256": "f778d4a95e6bed8d8cc9e84cfba98d736df7cbf3c9a1d4fb15a6d327ab1da1e8"
+      },
+      {
+        "path": "open-decomp/0035.response.json",
+        "bytes": 133818,
+        "sha256": "ce173acda7cbf785f6991c0d4e87f61f9991c975cdce25a8b6798977cc6dc4df"
+      },
+      {
+        "path": "open-decomp/0036.request.json",
+        "bytes": 515,
+        "sha256": "4316b18d1e3a315d8025b5912f10a25226fe13758dd6a586a3a657becd39c3d2"
+      },
+      {
+        "path": "open-decomp/0036.response.json",
+        "bytes": 17944,
+        "sha256": "d817e0214e33b0b63790f5669bc398d7c8bdbf73d7a8ef12ac5bd30329d7a6eb"
+      },
+      {
+        "path": "open-decomp/0037.request.json",
+        "bytes": 625,
+        "sha256": "7f6e621d2150b8171122bb27b491c475288709bbe9e7d27d00d7ea5310f475aa"
+      },
+      {
+        "path": "open-decomp/0037.response.json",
+        "bytes": 507427,
+        "sha256": "169dbcc9b65c9d5d534fb2f2ba1e9f4eba8511ad16d801c1069aa4d4c315a01f"
+      },
+      {
+        "path": "open-decomp/0038.request.json",
+        "bytes": 630,
+        "sha256": "d95cc35331a0875fe016bf6d91f2aade5594ba769e7945664f9fa0c6179687e4"
+      },
+      {
+        "path": "open-decomp/0038.response.json",
+        "bytes": 507544,
+        "sha256": "3b6647d94779edd7312222915d6ca3b196af91cda4a536c215b0e4eeac82c9fe"
+      },
+      {
+        "path": "open-decomp/0039.request.json",
+        "bytes": 505,
+        "sha256": "bcf7f91bb64eff4327b8fa28c28d0f5df1f232b972acb1a51b4f394d52269637"
+      },
+      {
+        "path": "open-decomp/0039.response.json",
+        "bytes": 19769,
+        "sha256": "6e909a75a52af450dc5d39cab9dfaf8117e82a93b7c07e90550f8bc2507ed8a1"
+      },
+      {
+        "path": "open-decomp/0040.request.json",
+        "bytes": 625,
+        "sha256": "1e04d043c73c79b9b047c20c1006e62eb554746d26da3e2263d83ed4217aa802"
+      },
+      {
+        "path": "open-decomp/0040.response.json",
+        "bytes": 93125,
+        "sha256": "b282e52148780c434b8c2dbf1f5c537ef607ca463c3713dacfce76866cf9bfc4"
+      },
+      {
+        "path": "open-decomp/0041.request.json",
+        "bytes": 630,
+        "sha256": "8c71c497edd123a87f82531287e90535288ae5a23d6347621f1e14b872304dd3"
+      },
+      {
+        "path": "open-decomp/0041.response.json",
+        "bytes": 93490,
+        "sha256": "5f1717e5865a1aa851852c843b4d7ec0e2d95135754b6689b037b1cfeb62e5c7"
+      },
+      {
+        "path": "open-decomp/0042.request.json",
+        "bytes": 512,
+        "sha256": "c369c791b47eeaa88028e61aeaf7f81edb5b31d14a0066203eaf8edfdff1ee4e"
+      },
+      {
+        "path": "open-decomp/0042.response.json",
+        "bytes": 17932,
+        "sha256": "1a7602fa4114887f2eff0915c44c110a8f4dc0f2dbbc36390657dbb0e45f5234"
+      },
+      {
+        "path": "open-decomp/0043.request.json",
+        "bytes": 625,
+        "sha256": "37ad20e72657a6f7da04fa1e0a5f3abcea095636d6b503675c6aec429621277f"
+      },
+      {
+        "path": "open-decomp/0043.response.json",
+        "bytes": 437757,
+        "sha256": "e862b1c1ef8369f18c9cefafa6bb47f381966d2c4f18195bd958a6f5c9c187a3"
+      },
+      {
+        "path": "open-decomp/0044.request.json",
+        "bytes": 630,
+        "sha256": "22c9abedd5ea4a6de7d502d1e77acd3cc379b40874737711551756b3829d17d3"
+      },
+      {
+        "path": "open-decomp/0044.response.json",
+        "bytes": 437972,
+        "sha256": "bb4576869700ff119dd8bff76a4fb565b5c11bd8f480383d002ce806b1f9b226"
+      },
+      {
+        "path": "open-decomp/0045.request.json",
+        "bytes": 282,
+        "sha256": "c66794aae33fba1fc1feeec8a74f2d8e94779a6bfb5bbecf9cc519bece1d773a"
+      },
+      {
+        "path": "open-decomp/0045.response.json",
+        "bytes": 1828,
+        "sha256": "1fd8f57eba0aea627fc8bce6ff4db5ddf65ffa34f8bad70d147c4e0d7dd0d7d5"
+      },
+      {
+        "path": "open-decomp/calls.json",
+        "bytes": 6649,
+        "sha256": "76e820ea1bac59e80816379a4a7824ea94b8655d224de2f3094f75528eb4e145"
+      },
+      {
+        "path": "open-decomp/context_alias-c-like.emission.json",
+        "bytes": 57158,
+        "sha256": "4d707cd48fc384230fc90350888b5a9fabd79f5512ee4bffa1fae954c6a4ddb0"
+      },
+      {
+        "path": "open-decomp/context_alias-python-like.emission.json",
+        "bytes": 57251,
+        "sha256": "408c755cc25caf42896034046f620e187406cd63de412490d60ead46b9be4750"
+      },
+      {
+        "path": "open-decomp/context_alias.c",
+        "bytes": 402,
+        "sha256": "4e04a35bfbd66bd86c6e31b47084522d7abba4f12a95a8528049eaa2ec11e3ae"
+      },
+      {
+        "path": "open-decomp/context_alias.py",
+        "bytes": 344,
+        "sha256": "46040576d15124fee8782963f91400460d3a04b118203d015330a742a3fa50da"
+      },
+      {
+        "path": "open-decomp/context_choose-c-like.emission.json",
+        "bytes": 299049,
+        "sha256": "6f3694acc819f0e27e221b35f1d59851f060e1d2ce0326741d565405d71f069a"
+      },
+      {
+        "path": "open-decomp/context_choose-python-like.emission.json",
+        "bytes": 299131,
+        "sha256": "9c2c6efffcf4a6f7c5540cdb032720e1df6fd127713fac4cea9a90ddfbf70d14"
+      },
+      {
+        "path": "open-decomp/context_choose.c",
+        "bytes": 1595,
+        "sha256": "101f160eb54bb84c04e709204d2b7b566009a5b0f00613543836a11ca5a18e12"
+      },
+      {
+        "path": "open-decomp/context_choose.py",
+        "bytes": 1421,
+        "sha256": "9fdb1841d8c9ff9678dabba41d33b277b9fe05f60f94f85e63514fa1b6ac2cf7"
+      },
+      {
+        "path": "open-decomp/context_conflict-c-like.emission.json",
+        "bytes": 61979,
+        "sha256": "f3d3a1a55fa7cec078c090a5ca60601a3840504bcdbd8bfd9731ff8524e9ea8b"
+      },
+      {
+        "path": "open-decomp/context_conflict-python-like.emission.json",
+        "bytes": 62209,
+        "sha256": "be02f4e1f961de40b115f9a5163b262ebb8b4e9470c0737aeb980d927119cf40"
+      },
+      {
+        "path": "open-decomp/context_conflict.c",
+        "bytes": 400,
+        "sha256": "a7d6f8d1c6afbcf37ff8a97bb82c262a56f05864cc20d9e7051ded543ec88d1f"
+      },
+      {
+        "path": "open-decomp/context_conflict.py",
+        "bytes": 346,
+        "sha256": "dd07f9443aa2131c85cec40e7539b2e1f5377da9f82138050193b35344853d5a"
+      },
+      {
+        "path": "open-decomp/context_conflict_caller-c-like.emission.json",
+        "bytes": 222823,
+        "sha256": "3b48b9bafe7a72b0dccf708754865a81852b5dc29ef79360dd005993c2e6dab6"
+      },
+      {
+        "path": "open-decomp/context_conflict_caller-python-like.emission.json",
+        "bytes": 222848,
+        "sha256": "f76eada8a98e48ccec5bf6df139a3c819733cb04acccd7ac204030f1a9089270"
+      },
+      {
+        "path": "open-decomp/context_conflict_caller.c",
+        "bytes": 1450,
+        "sha256": "d2f604de96890771f89c8892862b006f8f6be63d14ca01648e3bed57d9a142b6"
+      },
+      {
+        "path": "open-decomp/context_conflict_caller.py",
+        "bytes": 1303,
+        "sha256": "a82ab8b212e0b402f46d5c1563b0902e016790b59bd8a3be19515a85552733de"
+      },
+      {
+        "path": "open-decomp/context_double-c-like.emission.json",
+        "bytes": 18134,
+        "sha256": "b91876994516d979b692159c8625b3996bf3a129512fc25862156439bfe3e2a0"
+      },
+      {
+        "path": "open-decomp/context_double-python-like.emission.json",
+        "bytes": 18166,
+        "sha256": "de4adcb9884df62eda07baaf18b31ec658a236a3401b3795608cb86e3f7c3c39"
+      },
+      {
+        "path": "open-decomp/context_double.c",
+        "bytes": 152,
+        "sha256": "735ed1c681102b5de701a91ed8efd89c693ad81923f2dcbe6d4eb5daa1c95817"
+      },
+      {
+        "path": "open-decomp/context_double.py",
+        "bytes": 157,
+        "sha256": "d80f0bd2a33434816f271be4a2b0e31a5eeabe50c8457e6f68af097e124cb405"
+      },
+      {
+        "path": "open-decomp/context_increment-c-like.emission.json",
+        "bytes": 13133,
+        "sha256": "d89f0b3d9bd4f13bae14e2f75c06f1528f13b8c000b6000769f37eb08b83bb3d"
+      },
+      {
+        "path": "open-decomp/context_increment-python-like.emission.json",
+        "bytes": 13281,
+        "sha256": "bb45573d4cc2f4d6a103df3763b1012bf6ae1bf3995eb4e8d4cbbdad43eed104"
+      },
+      {
+        "path": "open-decomp/context_increment.c",
+        "bytes": 134,
+        "sha256": "de8dad31ad279ad6c14477ea7f8f668205ffcfc1c4bc4b1a3f87963c28404fbd"
+      },
+      {
+        "path": "open-decomp/context_increment.py",
+        "bytes": 133,
+        "sha256": "8edcbd5047b402c364708de2de0f644f6475564653d341f94958d4c198065378"
+      },
+      {
+        "path": "open-decomp/context_recursive-c-like.emission.json",
+        "bytes": 273670,
+        "sha256": "b0bcf2c397d566d12ba5e0305dffdaf3c357ee3c56802ef3b10da421e8c9834d"
+      },
+      {
+        "path": "open-decomp/context_recursive-python-like.emission.json",
+        "bytes": 273750,
+        "sha256": "6ecb003c04877f1aa445426dab3dd48ea6a56f331afc0dce118c250e49e078d7"
+      },
+      {
+        "path": "open-decomp/context_recursive.c",
+        "bytes": 1615,
+        "sha256": "68521c6932916c45d4c4a9936fcf84283f97d1fdc8366dea7a1d82948ac78eee"
+      },
+      {
+        "path": "open-decomp/context_recursive.py",
+        "bytes": 1436,
+        "sha256": "299108d8b2c9d7561a1fa4593fd07a8b4c68e18db76b772c115ede647d4d351b"
+      },
+      {
+        "path": "open-decomp/context_recursive_caller-c-like.emission.json",
+        "bytes": 244825,
+        "sha256": "9ae78c9862b4a9193456e98340eade8c799407722eda696b6fd7641faef63bfb"
+      },
+      {
+        "path": "open-decomp/context_recursive_caller-python-like.emission.json",
+        "bytes": 244845,
+        "sha256": "22804df9570e786222610359ed3297aaf8ece8b2a6f35f009b4e9fd8b2f09401"
+      },
+      {
+        "path": "open-decomp/context_recursive_caller.c",
+        "bytes": 1449,
+        "sha256": "2e531340750e498da19e597c08835bceeae17aeae0a6d22f3e5aa33d318c4161"
+      },
+      {
+        "path": "open-decomp/context_recursive_caller.py",
+        "bytes": 1302,
+        "sha256": "215199d1cb19b36ca3de35ca7f71f24078ed3ae9c3a171e6906f59acbc99f111"
+      },
+      {
+        "path": "open-decomp/context_same-c-like.emission.json",
+        "bytes": 220687,
+        "sha256": "c50181e6bb5d6c97232629d2edc6dfd5ac63daa7fef6dca259961ccb287f13cf"
+      },
+      {
+        "path": "open-decomp/context_same-python-like.emission.json",
+        "bytes": 220740,
+        "sha256": "c7599a5ab6cf867eae1db3fde5b7359d5c3fbe96fc581bb2b89981607629676f"
+      },
+      {
+        "path": "open-decomp/context_same.c",
+        "bytes": 1474,
+        "sha256": "1422c87a04c113c5dc946b36af04d584aa4ba18ab4da8e132467f115f8dc1e1d"
+      },
+      {
+        "path": "open-decomp/context_same.py",
+        "bytes": 1321,
+        "sha256": "02a9e6c613d47bc308f9f1aa05619d17f6f30d1eb3c8d92f15fa6972ea5296a1"
+      },
+      {
+        "path": "open-decomp/context_two-c-like.artifact.json",
+        "bytes": 843787,
+        "sha256": "eb1cb46a2da853c6689924055494d97801e8d7a583de1c8fe108e3c1d56bffd1"
+      },
+      {
+        "path": "open-decomp/context_two-c-like.emission.json",
+        "bytes": 660559,
+        "sha256": "e62e38ff882b28ddd0c5fe29c58d4134c3dc107878ba3c0c434c9e438111324a"
+      },
+      {
+        "path": "open-decomp/context_two-python-like.artifact.json",
+        "bytes": 843700,
+        "sha256": "7b52d55a94d35e9aeb3bfc719bdcecbf3740bc56cee3eec0568381080424ba75"
+      },
+      {
+        "path": "open-decomp/context_two-python-like.emission.json",
+        "bytes": 660489,
+        "sha256": "df233a718964540c445c64a8c2e1b93c6ca0aa94920022c00f580a1fc8ea4328"
+      },
+      {
+        "path": "open-decomp/context_two.c",
+        "bytes": 2245,
+        "sha256": "59310a6aec4353e8e8fb7c9fe24901b6a0b845835526850359d61fab872197f2"
+      },
+      {
+        "path": "open-decomp/context_two.py",
+        "bytes": 1921,
+        "sha256": "8ec7e49212c312eafe1604acf6ecab9d416924913198ce11c5284d02bcd38112"
+      },
+      {
+        "path": "open-decomp/context_words-c-like.emission.json",
+        "bytes": 42078,
+        "sha256": "642f933d4bcb07368f859df96055ba3fda4c963a769edf7fe2a6e11c09caf384"
+      },
+      {
+        "path": "open-decomp/context_words-python-like.emission.json",
+        "bytes": 42234,
+        "sha256": "e563350b5e0c025abe1f65cf0ec786328d3fc0329d3a7f183118084fd4bef3c2"
+      },
+      {
+        "path": "open-decomp/context_words.c",
+        "bytes": 229,
+        "sha256": "73bb0b85f9ac60fdc0b5c0c0cb1d20df0380976fc0f989b14ab613aad58b328a"
+      },
+      {
+        "path": "open-decomp/context_words.py",
+        "bytes": 228,
+        "sha256": "a25318f02205a438cce7b99a1e520d4391e29e710ba6aae3f228239fb4fd8ed5"
+      },
+      {
+        "path": "open-decomp/context_words_caller-c-like.emission.json",
+        "bytes": 201582,
+        "sha256": "6ce1c97d98660ee90c87490f71d99663855c7b5629234e72abeb7a3d77dede07"
+      },
+      {
+        "path": "open-decomp/context_words_caller-python-like.emission.json",
+        "bytes": 201656,
+        "sha256": "32b976594d75fa05ae80e7e0111d5db50e9586e7ed28c24f15d93aa93262eab2"
+      },
+      {
+        "path": "open-decomp/context_words_caller.c",
+        "bytes": 1443,
+        "sha256": "df229490945e970a4b96511256e70481c68edcc5cbda1a68c1113abb3c992580"
+      },
+      {
+        "path": "open-decomp/context_words_caller.py",
+        "bytes": 1291,
+        "sha256": "3954b47296fb9e42bd61f1ed8abf3db74bed492a785716bf76b36e46ff51af60"
+      },
+      {
+        "path": "open-decomp/invocation.json",
+        "bytes": 321,
+        "sha256": "6ce750df580a18525ae9f955db57666c79d67c9787c13667cd57c7043e38fd4d"
+      },
+      {
+        "path": "open-decomp/stderr.txt",
+        "bytes": 191,
+        "sha256": "5b4e541f6d61d61eaa73a5b087904ec5055cefe2f3c9469f9aa2aa7513484cdc"
+      },
+      {
+        "path": "open-decomp/tools.json",
+        "bytes": 885870,
+        "sha256": "482dc0ace5e742085c7467a1e5dcbc6431fff6bbb83d552b1756b8092309005f"
+      },
+      {
+        "path": "product-native-oracle-results.json",
+        "bytes": 851083,
+        "sha256": "102e20750a0f41f4e09306f4aaaa3fa31456c814a573ea862af75a35272d65b5"
+      },
+      {
+        "path": "proof-native-context-oracle.ts",
+        "bytes": 10964,
+        "sha256": "619ee95ac3a4faaaa76cbac49c4732c4085a064a0264de7791525de4eec25ed7"
+      },
+      {
+        "path": "proof-native-context-source.c",
+        "bytes": 2987,
+        "sha256": "e88cdf59869f07133f7bd0f63cc38139f75ecaa21d4d06362ed4d593d5f6c10d"
+      },
+      {
+        "path": "supplementary-FP-boundary-oracle-results.json",
+        "bytes": 457312,
+        "sha256": "2574497f927aceae291fffeeef9b54871717c37e7ea9e6d2dc847e781ce3ee3f"
+      },
+      {
+        "path": "supplementary-FP-boundary-oracle.ts",
+        "bytes": 5144,
+        "sha256": "fd43dc6419c56f2eba8546df6b51f917ebcf0e4a923798b53ff3f4a2695c09e8"
+      },
+      {
+        "path": "supplementary-FP-boundary-source.c",
+        "bytes": 2121,
+        "sha256": "6bbb05fd5b8feb3316574aea08413a4bb04c7a2d5e913e57ebb7d89932d6f60b"
+      }
+    ],
+    "exclusions": "Project DBs and duplicate stdout/wire/run.json; full run objects remain in comparison.json."
+  },
+  "uncompressed": "/Users/df0/Documents/open-decomp-quality-context-afterfix-final-2026-10-17",
+  "pre_fix_archive_immutable": true,
+  "prospective_and_performance_release": false
+}

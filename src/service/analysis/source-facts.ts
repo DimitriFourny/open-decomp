@@ -1,6 +1,7 @@
 import type {
   AbiProfile,
   Address,
+  CacheIdentity,
   Diagnostic,
   Evidence,
   FunctionRecord,
@@ -13,6 +14,7 @@ import type {
 import { fingerprint, OperationError, U64_LIMIT, type CanonicalValue } from '../../core/index.js';
 import type { CallAnalysisResult, SuppliedCallContract } from '../../analysis/calls/index.js';
 import { observePreparedCallInterfaces } from '../../analysis/calls/observed.js';
+import { createCallResultDemandIndex } from '../../analysis/calls/result-demands.js';
 import { recoverDataAddress } from '../../analysis/strings/source-data.js';
 import { sourceConstantValues } from '../../reconstruction/source-data.js';
 import { inspectRegister, type StackFact } from '../../analysis/stack/index.js';
@@ -38,9 +40,12 @@ import { parameterRegisters } from './native-abi.js';
 import { fpEnvironmentGuard } from '../../lifters/arm64/semantics.js';
 import { registerTypeSlices, registerTypes, type StorageCopy } from '../../reconstruction/source-register-types.js';
 import { needsSourceFpEnvironment } from '../../reconstruction/source-requirements.js';
+import { nativeContextKey } from './native-context.js';
+import { prepareNativeContext } from './native-context-prepare.js';
 
 interface SourceFactsInput {
   readonly scope: AnalysisScope;
+  readonly identity?: CacheIdentity;
   readonly revision: number;
   readonly image: LoadedImage;
   readonly ir: SSAForm;
@@ -106,6 +111,7 @@ function observeParameters(
   interfaces: ReadonlyMap<string, NativeInterface>,
   seed: boolean,
   demandedReturns: readonly RegisterDescriptor[],
+  assumedEntry = false,
 ): ObservedInterface {
   const candidates = parameterRegisters(abi),
     byRoot = new Map(candidates.map((register) => [register.root, register]));
@@ -237,7 +243,7 @@ function observeParameters(
     else if (terminator.kind === 'return') for (const value of terminator.values) use(value);
   }
   for (const fact of nativeCallInputs(analysis, interfaces, context)) note(fact);
-  const { returns, return_types, written_result } = nativeReturnInterface(ir, abi, analysis, interfaces, context, seed, demandedReturns);
+  const { returns, return_types, written_result } = nativeReturnInterface(ir, abi, analysis, interfaces, context, seed, demandedReturns, assumedEntry);
   const exits = ir.blocks.filter((block) => block.terminator.kind === 'return');
   for (const exit of exits) {
     const snapshot = analysis.stack.snapshots.get(exit.terminator.id);
@@ -263,7 +269,7 @@ function observeParameters(
     parameter_types: parameters.map((register): DataType =>
       inputTypes.get(register.root) ?? { kind: 'integer', bits: register.width_bits }),
     returns,
-    return_types,
+    ...(return_types === undefined ? {} : { return_types }),
     ...(written_result === undefined ? {} : { written_result }),
     parameter_state: ambiguous ? 'ambiguous' : 'observed',
     argument_list_complete: false,
@@ -487,9 +493,10 @@ function observeNativeUnit(
     interfaces.set(observed.call_id, mergeNativeInterface(interfaces.get(observed.call_id), observed, input.components.abi, context));
   let observed: NativeInterface;
   if (unit.analysis) observed = observeParameters(unit.ir, input.components.abi, unit.analysis,
-    context, interfaces, seed, demandedReturns);
+    context, interfaces, seed, demandedReturns, unit.context_assumptions !== undefined);
   else {
-    const result = nativeReturnInterface(unit.ir, input.components.abi, null, interfaces, context, seed, demandedReturns);
+    const result = nativeReturnInterface(unit.ir, input.components.abi, null, interfaces, context, seed, demandedReturns,
+      unit.context_assumptions !== undefined);
     const parameters = nativeEntryRegisters(unit.ir, parameterRegisters(input.components.abi), interfaces,
       result.returns, context);
     const localFpEnvironment = unit.ir.blocks.some((block) => block.instructions.some((node) => {
@@ -502,6 +509,13 @@ function observeNativeUnit(
         ...(localFpEnvironment ? ['fp_environment' as const] : []),
         ...[...interfaces.values()].flatMap((callee) => callee.requirements ?? []),
       ])] };
+  }
+  if (unit.context_assumptions) {
+    const assumed = [...unit.context_assumptions.constants.map((item) => item.register),
+      ...unit.context_assumptions.aliases.flat()];
+    observed = mergeNativeInterface(observed, { parameters: assumed, returns: [],
+      parameter_state: 'observed', argument_list_complete: false }, input.components.abi, context);
+    observed = { ...observed, context_assumptions: unit.context_assumptions };
   }
   if (unit.budget_truncated) observed = { ...observed, returns: [], return_types: [],
     written_result: { registers: [], types: [] }, parameter_state: 'ambiguous' };
@@ -524,9 +538,10 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   const { scope, components, image, revision } = input,
     { context } = scope, abi = components.abi;
   const callees: InferredCallee[] = [], diagnostics: Diagnostic[] = [], evidence: Evidence[] = [];
-  const observedCalls = observePreparedCallInterfaces(input.ir, abi, input.types.calls, context);
+  const demand_index = createCallResultDemandIndex(input.ir, abi, context);
+  const observedCalls = observePreparedCallInterfaces(input.ir, abi, input.types.calls, context, demand_index);
   callees.push(...observedCalls);
-  const dependencies = nativeDependencies(input, input.ir, context);
+  let dependencies = nativeDependencies(input, input.ir, context, undefined, false, demand_index);
   const targets = new Map<string, FunctionRecord>();
   for (const dependency of dependencies) targets.set(dependency.target.id, dependency.target);
   const selectedNodes = input.ir.blocks.reduce(
@@ -577,6 +592,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   const identity = fingerprint({ revision, image: image.sha256, slice: image.selected_slice_id,
     target: image.target, versions: pipelineVersions(image.target, 'c-like'),
     lifter: `${components.lifter.name}/${components.lifter.version}`, abi: `${abi.id}/${abi.version}`,
+    identity: input.identity ?? null, budget: input.identity?.budget ?? context.budget, capacity, native_types: input.native_types,
   } as unknown as CanonicalValue);
   let cached = nativeSummaries.get(image);
   if (!cached || cached.identity !== identity || cached.functions !== input.functions || cached.references !== input.references) {
@@ -589,6 +605,8 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     observed_calls: observedCalls, dependencies, instructions: input.instruction_count, blocks: input.ir.blocks.length,
     nodes: selectedNodes, required_nodes: input.required_nodes ?? selectedNodes, evidence: input.types.evidence,
     evidence_ids: selected.evidence_ids, reasons: input.coverage_reasons, budget_truncated: false,
+    demand_index,
+    ...(scope.dependencies ? { dependency_readset: scope.dependencies.finish() } : {}),
   } : undefined;
   if (selectedUnit && input.required_nodes !== undefined && input.types.state === 'complete' &&
     selectedUnit.analysis?.state === 'complete' && !selectedUnit.reasons.length && !cached.summaries.has(input.ir.id)) {
@@ -598,6 +616,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     }
   }
   let memory_transfers: readonly MemoryShapeTransfer[] = [];
+  let function_returns: SourceEvidence['function_returns'];
   let partialUnits: ReadonlyMap<string, PreparedNativeUnit> = new Map();
   let partialSummaries: ReadonlyMap<string, NativeSummary> = new Map();
   const returnDemands = new Map<string, RegisterDescriptor[]>();
@@ -606,9 +625,14 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     known.push(...(dependency.return_demand ?? [])); returnDemands.set(dependency.target.id, known);
   }
   try {
+    // Constant/identity discovery is optional native work too, not an extra
+    // unmetered pass before the existing shared half-remaining allowance.
+    dependencies = nativeDependencies(input, input.ir, worklistContext, undefined, true, demand_index);
     const result = nativeDependencyWorklist({
-      roots: [...targets.values()], context: worklistContext, capacity, max_functions: 64, max_refinements: 64,
-      return_demands: returnDemands,
+      roots: [], root_dependencies: dependencies, context: worklistContext, capacity,
+      max_functions: 64, max_refinements: 64, max_contexts_per_function: 4, max_contexts: 64,
+      specialize: (baseline, assumptions, boundedContext) =>
+        prepareNativeContext(input, baseline, assumptions, boundedContext, libraryContracts),
       on_partial(units, summaries) { partialUnits = units; partialSummaries = summaries; },
       ...(selectedUnit ? { preloaded: new Map([[input.ir.id, selectedUnit]]) } : {}),
       load(fn, boundedContext) {
@@ -617,10 +641,19 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
           unit.blocks > boundedContext.budget.blocks || unit.required_nodes > boundedContext.budget.ir_nodes)) unit = undefined;
         if (unit) {
           boundedContext.checkpoint(1 + unit.dependencies.length + unit.evidence.length);
+          if (scope.dependencies && unit.dependency_readset) scope.dependencies.replay(unit.dependency_readset);
+          else if (scope.dependencies) {
+            cached.summaries.delete(fn.id);
+            cached.units -= unit.instructions + unit.nodes + unit.evidence.length;
+            unit = undefined;
+          }
+        }
+        if (unit) {
           context.progress('native_summary_cache', 1, 1);
           return unit;
         }
         unit = prepareNativeUnit(input, fn, boundedContext, libraryContracts);
+        if (scope.dependencies) unit = { ...unit, dependency_readset: scope.dependencies.finish() };
         if (!unit.budget_truncated && !unit.reasons.length && unit.analysis?.state === 'complete' &&
           !cached.summaries.has(fn.id)) {
           const units = unit.instructions + unit.nodes + unit.evidence.length;
@@ -637,19 +670,42 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     for (const unit of result.units.values()) evidence.push(...unit.evidence);
     const interfaces = new Map<string, NativeInterface>();
     for (const dependency of dependencies) {
-      const summary = result.summaries.get(dependency.target.id);
+      const key = result.context_keys.get(nativeContextKey(dependency.target.id, dependency.assumptions)) ?? dependency.target.id;
+      const summary = result.summaries.get(key);
       const observed = mergeNativeInterface(summary?.observed,
         observedCalls.find((call) => call.call_id === dependency.call_id), abi, summaryContext);
       interfaces.set(dependency.call_id, observed);
       const { parameter_shapes, written_result: _written, ...interface_ } = observed;
-      callees.push({ call_id: dependency.call_id, target: dependency.target.entry, ...interface_,
-        evidence_ids: summary?.evidence_ids ?? dependency.target.evidence_ids });
+      const proofIds = [...(summary?.evidence_ids ?? dependency.target.evidence_ids)];
+      if (dependency.assumptions) {
+        const readset = scope.dependencies?.finish();
+        const proof: Evidence = {
+          id: `evidence_${fingerprint([image.id, revision, dependency.call_id, key, 'context-use'])}`,
+          origin: { kind: 'analysis', analyzer: 'native-context', version: '1', rule: 'proven whole ABI caller context use' },
+          claim: `Original semantic subjects ${(dependency.original_subject_ids ?? [input.ir.id, dependency.call_id]).join(', ')}; ` +
+            `callee ${dependency.target.id}; requested ${nativeContextKey(dependency.target.id, dependency.assumptions)}; ` +
+            `effective ${key}; constants ${dependency.assumptions.constants.map(({ register, bits }) =>
+              `${register.root}[${register.offset_bits}:${register.width_bits}]=${bits}`).join(', ')}; ` +
+            `identity aliases ${dependency.assumptions.aliases.map((group) => group.map((register) => register.root).join('=')).join(', ')}; ` +
+            `type/evidence scope ${dependency.assumptions.type_evidence_scope}; ` +
+            `complete positive/negative dependency scope ${readset ? fingerprint(readset as unknown as CanonicalValue) : 'unavailable (no reuse ledger)'}; ` +
+            `result storage ${observed.returns.map((register) => `${register.root}:${register.width_bits}`).join(', ')}; ` +
+            'input assumptions do not establish complete source arity, disjoint aliases, object bounds, or source field names',
+          derived_from: [...new Set([...proofIds, ...(dependency.evidence_ids ?? [])])],
+          conflicts_with: [], revision,
+        };
+        evidence.push(proof); proofIds.push(proof.id);
+      }
+      callees.push({ call_id: dependency.call_id, target: dependency.target.entry,
+        target_subject_id: dependency.target.id, ...interface_,
+        evidence_ids: proofIds });
       for (const shape of parameter_shapes ?? []) evidence.push(...shape.evidence);
       if (summary?.reasons.length) diagnostics.push({ code: 'unavailable_semantics', severity: 'warning',
         message: `Native callee ${dependency.target.original_name ?? dependency.target.id} remains partial: ${summary.reasons.join('; ')}`,
         entity_id: dependency.target.id, evidence_ids: dependency.target.evidence_ids });
     }
     if (selectedUnit) memory_transfers = nativeShapeTransfers(selectedUnit, interfaces, summaryContext);
+    function_returns = nativeReturnInterface(input.ir, abi, input.types.calls, interfaces, summaryContext).written_result;
   } catch (error) {
     const details = error instanceof OperationError ? error.diagnostic.details : undefined;
     if (!(error instanceof OperationError) || error.code !== 'resource_limit' || details?.kind !== 'limit' ||
@@ -687,10 +743,12 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       }
       observed = mergeNativeInterface(observed, observedCalls.find((call) => call.call_id === dependency.call_id), abi, context);
       const { parameter_shapes: _shapes, written_result: _written, ...interface_ } = observed;
-      callees.push({ call_id: dependency.call_id, target: dependency.target.entry, ...interface_,
+      callees.push({ call_id: dependency.call_id, target: dependency.target.entry,
+        target_subject_id: dependency.target.id, ...interface_,
         evidence_ids: unit?.evidence_ids ?? dependency.target.evidence_ids });
     }
   }
   return { abi, callees, diagnostics, evidence, addresses: sourceAddresses(input), memory_transfers,
+    ...(function_returns === undefined ? {} : { function_returns }),
     call_argument_counts: actualArgumentCounts(input.types.calls, input.library, context) };
 }

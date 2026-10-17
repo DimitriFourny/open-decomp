@@ -2,12 +2,14 @@ import type { AbiProfile, Address, Diagnostic, Evidence, RegisterDescriptor } fr
 import type { DataType, Instruction, Value } from '../ir/index.js';
 import type { MemoryShapeTransfer } from '../analysis/types/memory-shapes.js';
 import type { Requirement } from '../core/inference.js';
+import type { NativeContext } from '../service/analysis/native-context.js';
 
 /** Observed native callee inputs, not a user-supplied or proven source prototype. */
 export interface InferredCallee {
   readonly call_id: string;
   /** Exact native dependency identity; absent for unresolved callback targets. */
   readonly target?: Address;
+  readonly target_subject_id?: string;
   readonly parameter_state?: 'observed' | 'ambiguous';
   readonly parameters: readonly RegisterDescriptor[];
   /** False records an observed prefix without closing the target's source arity. */
@@ -22,6 +24,7 @@ export interface InferredCallee {
   /** Lane types observed independently of architectural register capacity. */
   readonly parameter_types?: readonly DataType[];
   readonly return_types?: readonly DataType[];
+  readonly context_assumptions?: NativeContext;
   /** Preconditions of these observations; absent means no inferred FP condition. */
   readonly requirements?: readonly 'fp_environment'[];
   readonly evidence_ids: readonly string[];
@@ -55,6 +58,11 @@ export interface SourceEvidence {
   readonly memory_transfers?: readonly MemoryShapeTransfer[];
   /** Proven complete actual counts for contextual variadic calls. */
   readonly call_argument_counts?: ReadonlyMap<string, number>;
+  /** Actual proven written result storage, not an inferred author aggregate. */
+  readonly function_returns?: {
+    readonly registers: readonly RegisterDescriptor[];
+    readonly types: readonly DataType[];
+  };
 }
 export interface SourceLocal {
   readonly id: string;
@@ -83,6 +91,8 @@ export interface SourcePresentation {
   readonly inferred: boolean;
   readonly parameter_names: ReadonlyMap<string, string>;
   readonly return_type: DataType | null;
+  /** Multiple observed result words are a typed tuple, never an invented SIMD/source struct. */
+  readonly return_types?: readonly DataType[];
   /** Source pointer interpretation, separate from the machine result bit width. */
   readonly return_pointer?: 'char' | 'byte';
   readonly value_types?: ReadonlyMap<string, SourceTypeView>;

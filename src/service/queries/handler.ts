@@ -5,6 +5,7 @@ import {
   decodeCursor,
   decodeRange,
   encodeCursor,
+  encodeArtifact,
   encodeDiagnostic,
   encodeSigned,
   fingerprint,
@@ -38,6 +39,7 @@ import {
   type IndexState,
 } from './scope.js';
 import { executeDecompilation, executeAnnotations } from '../analysis/index.js';
+import { investigationArtifact, investigationItems, investigationPage, reviewedSubject } from './investigation.js';
 
 type PageArgs = {
   project_id: string;
@@ -182,7 +184,10 @@ function paginate<T>(
   extra: Record<string, unknown> = {},
   order: 'address_id' | 'id' = 'address_id',
   partialReason: 'budget' | 'incomplete_index' = 'incomplete_index',
-  details?: Pick<ResultMetadata, 'coverage' | 'diagnostics'>,
+  details?: Pick<ResultMetadata, 'coverage' | 'diagnostics'> & Partial<Pick<ResultMetadata, 'artifacts'>>,
+  localEvidence: readonly Evidence[] = [],
+  evidenceDelivery: 'inline' | 'artifact_references' = 'inline',
+  projectPage?: (items: readonly T[]) => object,
 ): unknown {
   const { binding, after } = scope.paging ?? pageState(operation, args);
   const candidates: { item: T; key: string }[] = [];
@@ -205,15 +210,17 @@ function paginate<T>(
           after: [count ? candidates[count - 1]!.key : after],
         })
       : null;
+    const selected = candidates.slice(0, count).map((entry) => entry.item);
     const data = {
       ...extra,
-      items: wireValue(candidates.slice(0, count).map((entry) => entry.item)),
+      ...wireValue(projectPage ? projectPage(selected) : { items: selected }) as object,
       page: { next_cursor, index_state: state, order },
     };
     const metadata = {
       ...envelope,
       ...details,
-      evidence: resultEvidence(scope, args.revision, data),
+      evidence: evidenceDelivery === 'artifact_references' ? [] :
+        resultEvidence(scope, args.revision, [data, details?.diagnostics], localEvidence),
     };
     const result =
       state !== 'complete'
@@ -477,8 +484,26 @@ async function dispatch(
       const args = toolSchemas.function_get.input.parse(input);
       const loaded = loadFunctionScope(scope, args.revision, args.function_id),
         fn = loaded.function;
+      const selected = args.artifact_id ? investigationArtifact(scope, args, loaded) : undefined;
+      if (args.view === 'investigation') {
+        if (!selected) queryFailure('invalid_input', 'An explicit analysis artifact is required');
+        if (args.subject_id) reviewedSubject(scope, args, loaded, selected);
+        const result = selected.payload.result;
+        const projection = investigationItems(scope, args, selected.payload);
+        return paginate(scope, operation, args, projection.items,
+          'complete', (_item, index) => index.toString().padStart(10, '0'), {
+            view: 'investigation', function_id: fn.id, artifact_id: selected.artifact.id,
+            record_lookup: 'original emission inference/requirement IDs and mapping indexes in the selected artifact',
+            analysis_state: result.state, proof_delivery: 'artifact_references',
+            selection: projection.selection, helpers: projection.helpers,
+          }, 'id', 'incomplete_index',
+          { coverage: result.coverage, diagnostics: result.diagnostics,
+            artifacts: [encodeArtifact(selected.artifact)] }, [], 'artifact_references',
+          (items) => investigationPage(items, projection.instructionLocations));
+      }
       if (args.view === 'metadata') {
-        const annotations = scope.store.readAnnotations(fn.id, args.revision);
+        const subject = reviewedSubject(scope, args, loaded, selected);
+        const annotations = scope.store.readAnnotations(subject.id, args.revision);
         const assertedNames = new Set(
           annotations.flatMap((item) =>
             item.status === 'asserted' && item.value.kind === 'name' ? [item.value.value] : [],
@@ -486,15 +511,18 @@ async function dispatch(
         );
         const data = {
           view: 'metadata',
+          reviewed_subject_id: subject.id,
+          annotation_eligible: subject.annotation_eligible,
           function: wireValue({
             ...presentName(scope, args.revision, fn),
             signature: scope.store.readSignature(fn.id, args.revision) ?? fn.signature,
           }),
           annotations: wireValue(annotations),
-          lineage: scope.store.readLineage(fn.id, args.revision),
+          lineage: scope.store.readLineage(subject.id, args.revision),
         };
         return {
           ...envelope,
+          artifacts: selected ? [encodeArtifact(selected.artifact)] : [],
           evidence: resultEvidence(scope, args.revision, data),
           diagnostics:
             assertedNames.size > 1

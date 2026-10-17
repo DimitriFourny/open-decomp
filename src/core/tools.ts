@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { inferenceSchema, requirementSchema } from './inference.js';
+import { inferenceSchema, requirementSchema, inferenceDetailsByKind, requirementSiteSchema, outputSpanSchema } from './inference.js';
 import {
   SCHEMA_VERSION,
   projectIdSchema,
@@ -136,6 +136,7 @@ export const emissionSchema = z
     span_unit: z.literal('utf16'),
     reconstruction: z.literal('pseudocode'),
     mappings: z.array(sourceMappingSchema).max(100000),
+    declaration_span: outputSpanSchema.optional(),
     local_validation: z.array(localValidationSchema).max(1000).optional(),
     inferences: z.array(inferenceSchema).max(10000).optional(),
     requirements: z.array(requirementSchema).max(1000).optional(),
@@ -146,6 +147,8 @@ export const emissionSchema = z
   .superRefine((emission, context) => {
     if (emission.mappings.some((mapping) => mapping.end > emission.text.length))
       context.addIssue({ code: 'custom', message: 'Source mapping exceeds emitted text' });
+    if (emission.declaration_span && emission.declaration_span.end > emission.text.length)
+      context.addIssue({ code: 'custom', message: 'Declaration span exceeds emitted text' });
     for (const records of [emission.inferences, emission.requirements])
       for (const record of records ?? [])
         if (record.output_spans.some((span) => span.end > emission.text.length))
@@ -245,13 +248,29 @@ export const functionsFindArgsSchema = z.strictObject({
 export const functionGetArgsSchema = z.strictObject({
   ...requestContext,
   function_id: entityIdSchema,
-  view: z.enum(['metadata', 'disassembly', 'cfg']).default('metadata'),
+  view: z.enum(['metadata', 'disassembly', 'cfg', 'investigation']).default('metadata'),
+  artifact_id: artifactSchema.shape.id.optional(),
+  subject_id: entityIdSchema.optional(),
+  kinds: z.array(z.enum(['signature', 'parameter', 'type', 'interpretation', 'field', 'identity',
+    'call', 'rewrite', 'conflict', 'annotation', 'fp_environment', 'unresolved', 'source'])).min(1).max(13).optional(),
+  include_quotes: z.boolean().optional(),
   ...paging,
+}).superRefine((args, context) => {
+  if (args.view === 'investigation' && args.artifact_id === undefined)
+    context.addIssue({ code: 'custom', path: ['artifact_id'], message: 'Investigation requires an explicit published artifact' });
+  if (args.view !== 'investigation' && args.kinds !== undefined)
+    context.addIssue({ code: 'custom', path: ['kinds'], message: 'Kind filters require investigation view' });
+  if (args.view !== 'investigation' && args.include_quotes)
+    context.addIssue({ code: 'custom', path: ['include_quotes'], message: 'Output quotations require investigation view' });
+  if (args.view !== 'metadata' && args.view !== 'investigation' &&
+    (args.subject_id !== undefined || args.artifact_id !== undefined))
+    context.addIssue({ code: 'custom', message: 'Subject and artifact scope require metadata or investigation view' });
 });
 export const functionDecompileArgsSchema = z.strictObject({
   ...requestContext,
   function_id: entityIdSchema,
   wait: z.boolean().default(false),
+  delivery: z.enum(['auto', 'artifact']).default('auto'),
   options: analysisOptionsSchema.default(DEFAULT_ANALYSIS_OPTIONS),
 });
 export const xrefsGetArgsSchema = z.strictObject({
@@ -534,10 +553,59 @@ const symbolItemSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('import'), import: importSchema }),
   z.strictObject({ kind: z.literal('export'), export: exportSchema }),
 ]);
+const instructionRefsSchema = z.array(z.int().min(0)).max(10000);
+const compactParameterSchema = inferenceDetailsByKind.parameter.omit({ value_ids: true, source_type_id: true })
+  .extend({ source_type_known: z.boolean() });
+const compactCallSchema = inferenceDetailsByKind.call.omit({ call_id: true, signature_id: true }).extend({
+  signature_known: z.boolean(),
+  target: z.discriminatedUnion('kind', [
+    inferenceDetailsByKind.call.shape.target.options[0],
+    inferenceDetailsByKind.call.shape.target.options[1].omit({ value_ids: true }),
+  ]),
+  ordered_arguments: z.array(inferenceDetailsByKind.call.shape.ordered_arguments.element.omit({ value_ids: true })).max(10000),
+});
+const investigationDetailsSchema = z.discriminatedUnion('kind', [
+  compactParameterSchema,
+  inferenceDetailsByKind.type.omit({ association_ids: true, type_id: true, pointee_id: true }).extend({ pointee_known: z.boolean() }),
+  inferenceDetailsByKind.interpretation.omit({ operand_value_ids: true }),
+  inferenceDetailsByKind.field.omit({ shape_id: true, field_ids: true, type_id: true }),
+  inferenceDetailsByKind.identity.omit({ value_ids: true }),
+  compactCallSchema,
+  inferenceDetailsByKind.rewrite,
+  inferenceDetailsByKind.conflict.omit({ alternatives: true }).extend({ alternative_count: z.int().min(0) }),
+  inferenceDetailsByKind.annotation,
+]);
+const investigationItemSchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('source'), span: z.strictObject({ start: z.int().min(0), end: z.int().min(1) }),
+    text: z.string().max(512), mapping_indexes: z.array(z.int().min(0)).max(100000),
+    instruction_refs: instructionRefsSchema,
+  }),
+  z.strictObject({
+    kind: z.literal('signature'), status: z.literal('inferred'),
+    signature: signatureSchema.omit({ return_type: true, parameters: true, evidence_ids: true })
+      .extend({ parameter_count: z.int().min(0).max(10000) }).nullable(),
+    parameters: z.array(compactParameterSchema).max(10000),
+    locator: z.literal('result.data.signature'),
+  }),
+  z.strictObject({
+    kind: z.literal('inference'), record: inferenceSchema.pick({ id: true, status: true }).extend({
+      details: investigationDetailsSchema, instruction_refs: instructionRefsSchema,
+    }),
+  }),
+  z.strictObject({
+    kind: z.literal('requirement'), record: requirementSchema.pick({ id: true, status: true, kind: true, explanation: true }).extend({
+      sites: z.array(requirementSiteSchema.omit({ subject_ids: true, evidence_ids: true, instruction_ids: true, predicate_value_id: true })).max(1000),
+      instruction_refs: instructionRefsSchema,
+    }),
+  }),
+]);
 const functionGetDataSchema = z.discriminatedUnion('view', [
   z.strictObject({
     view: z.literal('metadata'),
     function: functionSchema,
+    reviewed_subject_id: entityIdSchema,
+    annotation_eligible: z.boolean(),
     annotations: z.array(annotationSchema).max(1000),
     lineage: z.array(lineageSchema).max(1000),
   }),
@@ -561,7 +629,39 @@ const functionGetDataSchema = z.discriminatedUnion('view', [
     items: z.array(cfgBlockSchema).max(1000),
     page: pageInfoSchema,
   }),
-]);
+  z.strictObject({
+    view: z.literal('investigation'),
+    function_id: entityIdSchema,
+    artifact_id: artifactSchema.shape.id,
+    record_lookup: z.literal('original emission inference/requirement IDs and mapping indexes in the selected artifact'),
+    items: z.array(investigationItemSchema).max(1000),
+    analysis_state: z.enum(['complete', 'partial']),
+    proof_delivery: z.literal('artifact_references'),
+    references: z.array(z.union([entityIdSchema,
+      z.string().regex(/^(va|rva|file):0x[0-9a-f]{1,16}\+0x[0-9a-f]{1,16}$/)])).max(10000),
+    selection: z.strictObject({
+      kinds: z.array(z.string()).max(13).nullable(), subject_id: entityIdSchema.nullable(),
+      quotes: z.boolean(),
+      counts: z.record(z.enum(['inferences', 'requirements', 'unresolved_sites', 'source_mappings']),
+        z.strictObject({ total: z.int().min(0), selected: z.int().min(0) })),
+      omitted_inference_statuses: z.partialRecord(inferenceSchema.shape.status, z.int().min(0)),
+      omitted_requirement_kinds: z.partialRecord(requirementSchema.shape.kind, z.int().min(0)),
+    }),
+    helpers: z.array(z.strictObject({ name: z.string().min(1), artifact_helper_index: z.int().min(0) })).max(1000),
+    page: pageInfoSchema,
+  }),
+]).superRefine((data, context) => {
+  if (data.view !== 'investigation') return;
+  if (new Set(data.references).size !== data.references.length)
+    context.addIssue({ code: 'custom', path: ['references'], message: 'Page provenance references must be unique' });
+  for (const [index, item] of data.items.entries()) {
+    if (item.kind === 'signature') continue;
+    const record = item.kind === 'source' ? item : item.record;
+    for (const ref of record.instruction_refs)
+      if (data.references[ref] === undefined)
+        context.addIssue({ code: 'custom', path: ['items', index, 'instruction_refs'], message: 'Invalid instruction proof reference' });
+  }
+});
 export const memorySegmentSchema = z.discriminatedUnion('kind', [
   z.strictObject({
     kind: z.literal('mapped'),
@@ -698,24 +798,19 @@ export const functionDecompileResultSchema = resultSchema(
       delivery: z.literal('artifact'),
       function_id: entityIdSchema,
       artifact_id: artifactSchema.shape.id,
+      delivery_reason: z.enum(['requested', 'output_limit']),
       cache: z.enum(['hit', 'computed']),
     }),
   ]),
 ).superRefine((result, context) => {
   if (!('data' in result)) return;
   const data = result.data;
-  if (
-    data.delivery === 'artifact' &&
-    (result.state !== 'partial' ||
-      result.reason !== 'output_limit' ||
-      !result.artifacts.some((artifact) => artifact.id === data.artifact_id))
-  ) {
-    context.addIssue({
-      code: 'custom',
-      message:
-        'Artifact-only decompilation requires an output-limited partial result and its published artifact',
-    });
-  }
+  if (data.delivery !== 'artifact') return;
+  if (!result.artifacts.some((artifact) => artifact.id === data.artifact_id) ||
+    (data.delivery_reason === 'output_limit' && (result.state !== 'partial' || result.reason !== 'output_limit')) ||
+    (data.delivery_reason === 'requested' && (result.state !== 'complete' &&
+      (result.state !== 'partial' || result.reason === 'output_limit'))))
+    context.addIssue({ code: 'custom', message: 'Artifact delivery requires its published handle and truthful requested/overflow state' });
 });
 
 /** A transport may deliver the published analysis rather than repeat its large
@@ -723,6 +818,7 @@ export const functionDecompileResultSchema = resultSchema(
  * in that artifact; this envelope reports only the separate delivery limitation. */
 export function projectDecompilationArtifactResult(
   result: ToolResult<'function_decompile'>,
+  reason: 'output_limit' | 'requested' = 'output_limit',
 ): ToolResult<'function_decompile'> {
   if (!('data' in result) || result.data.delivery === 'artifact') return result;
   const artifact = result.artifacts.find(
@@ -733,6 +829,12 @@ export function projectDecompilationArtifactResult(
   );
   if (!artifact)
     throw new RangeError('Artifact delivery requires a published analysis for the same snapshot');
+  if (reason === 'requested')
+    return functionDecompileResultSchema.parse({
+      ...result, evidence: [], artifacts: [artifact],
+      data: { delivery: 'artifact', delivery_reason: 'requested',
+        function_id: result.data.function_id, artifact_id: artifact.id, cache: result.data.cache },
+    });
   return functionDecompileResultSchema.parse({
     schema_version: result.schema_version,
     project_id: result.project_id,
@@ -757,6 +859,7 @@ export function projectDecompilationArtifactResult(
     ],
     data: {
       delivery: 'artifact',
+      delivery_reason: 'output_limit',
       function_id: result.data.function_id,
       artifact_id: artifact.id,
       cache: result.data.cache,
@@ -870,9 +973,9 @@ export function exportToolJsonSchemas() {
       name,
       {
         schema_version: SCHEMA_VERSION,
-        inputSchema: z.toJSONSchema(schemas.input, { target: 'draft-2020-12', io: 'input' }),
+        inputSchema: z.toJSONSchema(schemas.input, { target: 'draft-2020-12', io: 'input', reused: 'ref' }),
         outputSchema: {
-          ...z.toJSONSchema(schemas.output, { target: 'draft-2020-12', io: 'output' }),
+          ...z.toJSONSchema(schemas.output, { target: 'draft-2020-12', io: 'output', reused: 'ref' }),
           type: 'object' as const,
         },
       },

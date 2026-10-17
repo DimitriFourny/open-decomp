@@ -42,6 +42,7 @@ export function planSourceRequirements(
   expressions: ReadonlyMap<string, Expression>,
   definitions: ReadonlyMap<string, Assignment>,
   calls: ReadonlyMap<string, BoundaryProjection>,
+  returns: ReadonlyMap<string, BoundaryProjection>,
   context: OperationContext,
 ): readonly Requirement[] {
   const records: Requirement[] = [], fpSites: RequirementSite[] = [], fpOrigins: Origin[] = [];
@@ -197,6 +198,15 @@ export function planSourceRequirements(
       records.push(record('unresolved', control.kind === 'unknown' ? control.reason :
         'Indirect target or source interface remains unresolved; original target, arguments, boundary effects and result uncertainty are retained.',
       [site(control, control.effect.id)], [control]));
+    if (control.kind === 'return') {
+      const projection = returns.get(control.id);
+      if (projection?.kind === 'inferred' && projection.outputs.length)
+        records.push(record('unresolved',
+          'The source return list is incomplete. Known primary results remain separate from changed possible ABI return storage, preserved as an immutable-entry overlay rather than an authored aggregate: ' +
+          projection.outputs.map(({ register }) =>
+            `${register.root}[${register.offset_bits}:${register.width_bits}]`).join(', '),
+          [site(control, control.effect.id)], [control]));
+    }
   }
   if (fpSites.length) records.unshift(record('fp_environment', FP_ENVIRONMENT_REQUIREMENT, fpSites, fpOrigins));
   return records;

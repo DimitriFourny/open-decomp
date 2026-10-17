@@ -1,6 +1,7 @@
 import type { CacheIdentity, Evidence, ResultMetadata, ToolResult } from '../../core/index.js';
 import type { SuppliedTypeRecord } from '../../analysis/types/index.js';
 import type { AnnotationSubject } from '../annotations/index.js';
+import type { AnalysisReadset } from './dependencies.js';
 
 export const ANALYSIS_ARTIFACT_VERSION = 1;
 export const ANALYSIS_ARTIFACT_MEDIA_TYPE = 'application/vnd.open-decomp.function+json';
@@ -31,6 +32,8 @@ export interface AnalysisCatalogData {
 export interface AnalysisComputation {
   readonly result: StoredDecompilation;
   readonly catalog: AnalysisCatalogData;
+  /** Absent on pre-ledger artifacts; those are exact-revision-only. */
+  readonly dependencies?: AnalysisReadset;
 }
 export interface AnalysisArtifactPayload extends AnalysisComputation {
   readonly format_version: typeof ANALYSIS_ARTIFACT_VERSION;
