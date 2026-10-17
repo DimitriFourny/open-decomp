@@ -1,7 +1,30 @@
-import type { AbiProfile, Address, DecodedInstruction, Diagnostic, FunctionGraph, Lifter, OperationContext } from '../../core/index.js';
+import type {
+  AbiProfile,
+  Address,
+  DecodedInstruction,
+  Diagnostic,
+  FunctionGraph,
+  Lifter,
+  OperationContext,
+} from '../../core/index.js';
 import { OperationError } from '../../core/index.js';
-import { IRBuilder, instructionProvenance, integer, mergeProvenanceSources, type BlockBuilder, type RegisterIR } from '../../ir/index.js';
-import { ArmSemantics, Unsupported, fpControlMask, gp, needsFpGuard, stateRegister, unknownClobbers } from './semantics.js';
+import {
+  IRBuilder,
+  instructionProvenance,
+  integer,
+  mergeProvenanceSources,
+  type BlockBuilder,
+  type RegisterIR,
+} from '../../ir/index.js';
+import {
+  ArmSemantics,
+  Unsupported,
+  fpControlMask,
+  gp,
+  needsFpGuard,
+  stateRegister,
+  unknownClobbers,
+} from './semantics.js';
 
 export interface Arm64LiftResult {
   readonly ir: RegisterIR;
@@ -39,19 +62,75 @@ export class Arm64Lifter implements Lifter<RegisterIR> {
   lift(graph: FunctionGraph, abi: AbiProfile, context: OperationContext): Arm64LiftResult {
     if (abi.architecture !== 'arm64') throw new TypeError('ARM64 lifter requires an ARM64 ABI');
     context.checkpoint(0);
-    if (graph.instructions.length > context.budget.instructions) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Lift input exceeds the instruction budget', evidence_ids: [], details: { kind: 'limit', resource: 'instructions', limit: context.budget.instructions, consumed: graph.instructions.length } });
-    if (graph.blocks.length > context.budget.blocks) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Lift input exceeds the block budget', evidence_ids: [], details: { kind: 'limit', resource: 'blocks', limit: context.budget.blocks, consumed: graph.blocks.length } });
-    if (graph.blocks.length * 3 > context.budget.ir_nodes) throw new OperationError({ code: 'resource_limit', severity: 'error', message: 'Lift input exceeds the minimum IR node budget', evidence_ids: [], details: { kind: 'limit', resource: 'ir_nodes', limit: context.budget.ir_nodes, consumed: graph.blocks.length * 3 } });
+    if (graph.instructions.length > context.budget.instructions)
+      throw new OperationError({
+        code: 'resource_limit',
+        severity: 'error',
+        message: 'Lift input exceeds the instruction budget',
+        evidence_ids: [],
+        details: {
+          kind: 'limit',
+          resource: 'instructions',
+          limit: context.budget.instructions,
+          consumed: graph.instructions.length,
+        },
+      });
+    if (graph.blocks.length > context.budget.blocks)
+      throw new OperationError({
+        code: 'resource_limit',
+        severity: 'error',
+        message: 'Lift input exceeds the block budget',
+        evidence_ids: [],
+        details: {
+          kind: 'limit',
+          resource: 'blocks',
+          limit: context.budget.blocks,
+          consumed: graph.blocks.length,
+        },
+      });
+    if (graph.blocks.length * 3 > context.budget.ir_nodes)
+      throw new OperationError({
+        code: 'resource_limit',
+        severity: 'error',
+        message: 'Lift input exceeds the minimum IR node budget',
+        evidence_ids: [],
+        details: {
+          kind: 'limit',
+          resource: 'ir_nodes',
+          limit: context.budget.ir_nodes,
+          consumed: graph.blocks.length * 3,
+        },
+      });
     context.checkpoint(graph.instructions.length + graph.blocks.length);
-    const instructions = new Map(graph.instructions.map(instruction => [instruction.id, instruction]));
-    const provenance = graph.instructions.length ? mergeProvenanceSources(graph.instructions.map(instructionProvenance), work => context.checkpoint(work))
-      : { instruction_ids: [], ranges: graph.function.ranges, evidence_ids: graph.function.evidence_ids, synthetic: ['Discovered function with no decoded instructions'] };
+    const instructions = new Map(
+      graph.instructions.map((instruction) => [instruction.id, instruction]),
+    );
+    const provenance = graph.instructions.length
+      ? mergeProvenanceSources(graph.instructions.map(instructionProvenance), (work) =>
+          context.checkpoint(work),
+        )
+      : {
+          instruction_ids: [],
+          ranges: graph.function.ranges,
+          evidence_ids: graph.function.evidence_ids,
+          synthetic: ['Discovered function with no decoded instructions'],
+        };
     const build = new IRBuilder(graph.slice_id, graph.function.id, provenance, 'register', context);
     const blocks = new Map<string, BlockBuilder>();
     const byAddress = new Map<bigint, BlockBuilder>();
     for (const block of graph.blocks) {
-      const sources = block.instructions.map(id => instructions.get(id)).filter((value): value is DecodedInstruction => value !== undefined);
-      const result = build.block(['discovered', block.id], [], sources.length ? mergeProvenanceSources(sources.map(instructionProvenance), work => context.checkpoint(work)) : provenance);
+      const sources = block.instructions
+        .map((id) => instructions.get(id))
+        .filter((value): value is DecodedInstruction => value !== undefined);
+      const result = build.block(
+        ['discovered', block.id],
+        [],
+        sources.length
+          ? mergeProvenanceSources(sources.map(instructionProvenance), (work) =>
+              context.checkpoint(work),
+            )
+          : provenance,
+      );
       blocks.set(block.id, result);
       if (sources[0]) byAddress.set(sources[0].address.value, result);
     }
@@ -61,83 +140,167 @@ export class Arm64Lifter implements Lifter<RegisterIR> {
     let completed = 0;
     const report = (instruction: DecodedInstruction, message: string): void => {
       reasons.add(message);
-      diagnostics.push({ code: 'unavailable_semantics', severity: 'warning', message, address: instruction.address, evidence_ids: [...instruction.evidence_ids] });
+      diagnostics.push({
+        code: 'unavailable_semantics',
+        severity: 'warning',
+        message,
+        address: instruction.address,
+        evidence_ids: [...instruction.evidence_ids],
+      });
     };
-    const unknown = (block: BlockBuilder, reason: string): void => { block.unknown(reason, unknownClobbers); reasons.add(reason); };
+    const unknown = (block: BlockBuilder, reason: string): void => {
+      block.unknown(reason, unknownClobbers);
+      reasons.add(reason);
+    };
     for (const discovered of graph.blocks) {
       let block = blocks.get(discovered.id)!;
       let terminated = false;
       for (const id of discovered.instructions) {
         context.checkpoint(1);
         const instruction = instructions.get(id);
-        if (!instruction) { unknown(block, 'Discovery references a missing instruction'); block.terminate({ kind: 'unknown', reason: 'Missing discovered instruction' }); terminated = true; break; }
+        if (!instruction) {
+          unknown(block, 'Discovery references a missing instruction');
+          block.terminate({ kind: 'unknown', reason: 'Missing discovered instruction' });
+          terminated = true;
+          break;
+        }
         const source = instructionProvenance(instruction);
         block.source(source);
         const payload = instruction.payload;
         try {
-          if (instruction.validity !== 'valid' || payload?.architecture !== 'arm64' || payload.behavior === 'unknown' || payload.behavior === 'undefined') throw new Unsupported('Instruction is invalid, unavailable or lacks ARM64 semantics');
+          if (
+            instruction.validity !== 'valid' ||
+            payload?.architecture !== 'arm64' ||
+            payload.behavior === 'unknown' ||
+            payload.behavior === 'undefined'
+          )
+            throw new Unsupported('Instruction is invalid, unavailable or lacks ARM64 semantics');
           if (needsFpGuard(payload)) {
             const supported = build.block(['fp-supported', instruction.id], [], source);
             const unsupported = build.block(['fp-unsupported', instruction.id], [], source);
             const control = block.readRegister(stateRegister('fpcr'));
             const masked = block.int('and', control, block.constant(integer(32), fpControlMask));
-            block.branch(block.compare('eq', masked, block.constant(integer(32), 0n)), block.edge(supported), block.edge(unsupported));
-            unsupported.unknown('Unsupported FPCR rounding, flush or trapping environment', unknownClobbers);
+            block.branch(
+              block.compare('eq', masked, block.constant(integer(32), 0n)),
+              block.edge(supported),
+              block.edge(unsupported),
+            );
+            unsupported.unknown(
+              'Unsupported FPCR rounding, flush or trapping environment',
+              unknownClobbers,
+            );
             unsupported.terminate({ kind: 'unknown', reason: 'Unsupported FPCR environment' });
             block = supported;
           }
-          const semantic = new ArmSemantics(block, instruction, payload, message => report(instruction, message));
-          const name = semantic.name, flow = instruction.flow;
+          const semantic = new ArmSemantics(block, instruction, payload, (message) =>
+            report(instruction, message),
+          );
+          const name = semantic.name,
+            flow = instruction.flow;
           const authenticated = /^(BRAA|BRAB|BLRAA|BLRAB|RETAA|RETAB)/.test(name);
           if (authenticated) semantic.authentication();
-          if (flow.kind === 'call' && ['BL', 'BLR', 'BLRAA', 'BLRAB', 'BLRAAZ', 'BLRABZ'].includes(name)) {
-            const target = flow.target ? { kind: 'direct' as const, address: flow.target } : { kind: 'indirect' as const, value: semantic.read('Rn', 64) };
+          if (
+            flow.kind === 'call' &&
+            ['BL', 'BLR', 'BLRAA', 'BLRAB', 'BLRAAZ', 'BLRABZ'].includes(name)
+          ) {
+            const target = flow.target
+              ? { kind: 'direct' as const, address: flow.target }
+              : { kind: 'indirect' as const, value: semantic.read('Rn', 64) };
             block.writeRegister(gp(30), block.address(flow.fallthrough));
             block.call(target, [], [], abi.unknown_call_clobbers);
           } else if (flow.kind === 'return' && (name === 'RET' || authenticated)) {
-            if (name === 'RET' && semantic.field('Rn') !== 30) block.terminate({ kind: 'indirect', target: semantic.read('Rn', 64), reason: 'Return through non-link register' });
+            if (name === 'RET' && semantic.field('Rn') !== 30)
+              block.terminate({
+                kind: 'indirect',
+                target: semantic.read('Rn', 64),
+                reason: 'Return through non-link register',
+              });
             else block.return();
             terminated = true;
           } else if (flow.kind === 'indirect_branch' && (name === 'BR' || authenticated)) {
-            block.terminate({ kind: 'indirect', target: semantic.read('Rn', 64), reason: authenticated ? 'Authenticated logical-pointer transfer' : 'Indirect branch target is unresolved' }); terminated = true;
+            block.terminate({
+              kind: 'indirect',
+              target: semantic.read('Rn', 64),
+              reason: authenticated
+                ? 'Authenticated logical-pointer transfer'
+                : 'Indirect branch target is unresolved',
+            });
+            terminated = true;
           } else if (flow.kind === 'branch' && ['B', 'CBZ', 'CBNZ', 'TBZ', 'TBNZ'].includes(name)) {
             const targetBlock = (address: Address): BlockBuilder => {
-              const found = byAddress.get(address.value); if (found) return found;
-              const exit = build.block(['external-exit', instruction.id, address.value], [], source);
+              const found = byAddress.get(address.value);
+              if (found) return found;
+              const exit = build.block(
+                ['external-exit', instruction.id, address.value],
+                [],
+                source,
+              );
               byAddress.set(address.value, exit);
-              exit.terminate({ kind: 'indirect', target: exit.address(address), reason: discovered.edges.some(edge => edge.kind === 'tail_call' && edge.target?.value === address.value) ? 'Discovered tail-call exit' : 'Branch leaves discovered function' });
+              exit.terminate({
+                kind: 'indirect',
+                target: exit.address(address),
+                reason: discovered.edges.some(
+                  (edge) => edge.kind === 'tail_call' && edge.target?.value === address.value,
+                )
+                  ? 'Discovered tail-call exit'
+                  : 'Branch leaves discovered function',
+              });
               return exit;
             };
             const target = targetBlock(flow.target);
-            if (flow.conditional && flow.fallthrough) block.branch(semantic.transferCondition(), block.edge(target), block.edge(targetBlock(flow.fallthrough)));
+            if (flow.conditional && flow.fallthrough)
+              block.branch(
+                semantic.transferCondition(),
+                block.edge(target),
+                block.edge(targetBlock(flow.fallthrough)),
+              );
             else block.jump(target);
             terminated = true;
           } else if (flow.kind === 'trap' && ['BRK', 'HLT', 'UDF'].includes(name)) {
-            block.terminate({ kind: 'trap', reason: flow.reason }); terminated = true;
-          } else if (!semantic.execute()) throw new Unsupported(`Unsupported ARM64 encoding ${payload.canonical_encoding}`);
+            block.terminate({ kind: 'trap', reason: flow.reason });
+            terminated = true;
+          } else if (!semantic.execute())
+            throw new Unsupported(`Unsupported ARM64 encoding ${payload.canonical_encoding}`);
           completed++;
         } catch (error) {
           if (!(error instanceof Unsupported)) throw error;
-          report(instruction, error.message); unknown(block, error.message);
+          report(instruction, error.message);
+          unknown(block, error.message);
           if (instruction.flow.kind !== 'fallthrough' && instruction.flow.kind !== 'call') {
-            block.terminate({ kind: 'unknown', reason: error.message }); terminated = true;
+            block.terminate({ kind: 'unknown', reason: error.message });
+            terminated = true;
           }
         }
         if (terminated) break;
       }
       if (!terminated) {
-        const edges = discovered.edges.filter(edge => edge.kind !== 'call');
-        const successor = edges.length === 1 && edges[0]!.to !== null ? blocks.get(edges[0]!.to!) : undefined;
+        const edges = discovered.edges.filter((edge) => edge.kind !== 'call');
+        const successor =
+          edges.length === 1 && edges[0]!.to !== null ? blocks.get(edges[0]!.to!) : undefined;
         if (successor) block.jump(successor);
-        else { unknown(block, 'Discovered block has an unresolved exit or decode gap'); block.terminate({ kind: 'unknown', reason: 'Unresolved discovered continuation' }); }
+        else {
+          unknown(block, 'Discovered block has an unresolved exit or decode gap');
+          block.terminate({ kind: 'unknown', reason: 'Unresolved discovered continuation' });
+        }
       }
     }
     if (!entry) {
       entry = build.block(['missing-entry'], [], provenance);
-      unknown(entry, 'Function entry has no discovered block'); entry.terminate({ kind: 'unknown', reason: 'Missing discovered entry' });
+      unknown(entry, 'Function entry has no discovered block');
+      entry.terminate({ kind: 'unknown', reason: 'Missing discovered entry' });
     }
     const ir = build.finish(entry);
     if (graph.gaps.length) reasons.add('Discovery contains undecoded byte gaps');
-    return { ir, diagnostics, coverage: { layer: 'lift', state: reasons.size ? 'partial' : 'complete', completed_units: completed, total_units: graph.instructions.length, reasons: [...reasons] } };
+    return {
+      ir,
+      diagnostics,
+      coverage: {
+        layer: 'lift',
+        state: reasons.size ? 'partial' : 'complete',
+        completed_units: completed,
+        total_units: graph.instructions.length,
+        reasons: [...reasons],
+      },
+    };
   }
 }

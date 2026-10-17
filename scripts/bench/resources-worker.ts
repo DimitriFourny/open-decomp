@@ -11,13 +11,25 @@ import type { WorkerMemory } from './resources-metrics.js';
 const directory = process.env['OPEN_DECOMP_RESOURCE_BENCH_DIRECTORY'] ?? '';
 if (!directory) throw new Error('Resource benchmark telemetry directory is required');
 function record(job_id: string | null, phase: string): void {
-  const observation: WorkerMemory = { pid: process.pid, job_id, phase, uptime_ms: process.uptime() * 1000, memory: memoryFacts() };
-  writeFileSync(join(directory, `${process.pid}-${job_id ?? 'opened'}.json`), JSON.stringify(observation));
+  const observation: WorkerMemory = {
+    pid: process.pid,
+    job_id,
+    phase,
+    uptime_ms: process.uptime() * 1000,
+    memory: memoryFacts(),
+  };
+  writeFileSync(
+    join(directory, `${process.pid}-${job_id ?? 'opened'}.json`),
+    JSON.stringify(observation),
+  );
 }
 const handler: WorkerHandler = {
   async execute(operation, args, scope) {
-    try { return await queryWorkerHandler.execute(operation, args, scope); }
-    finally { record(scope.job_id, 'handler_settled_before_runtime_validation_and_delivery'); }
+    try {
+      return await queryWorkerHandler.execute(operation, args, scope);
+    } finally {
+      record(scope.job_id, 'handler_settled_before_runtime_validation_and_delivery');
+    }
   },
   prepareImport: queryWorkerHandler.prepareImport!,
 };

@@ -6,13 +6,22 @@ export const ANALYSIS_ARTIFACT_VERSION = 1;
 export const ANALYSIS_ARTIFACT_MEDIA_TYPE = 'application/vnd.open-decomp.function+json';
 export const MAX_ANALYSIS_ARTIFACT_BYTES = 16 * 1024 * 1024;
 
-export type InlineDecompileData = Extract<Extract<ToolResult<'function_decompile'>, { data: unknown }>['data'], { delivery: 'inline' }>;
+export type InlineDecompileData = Extract<
+  Extract<ToolResult<'function_decompile'>, { data: unknown }>['data'],
+  { delivery: 'inline' }
+>;
 /** Full semantic result. Output-limited delivery is a separate envelope pointing here;
  * neither a shortened emission nor a self-referencing artifact handle is stored here. */
-export type StoredDecompilation = ResultMetadata & (
-  | { readonly state: 'complete'; readonly data: InlineDecompileData }
-  | { readonly state: 'partial'; readonly reason: 'budget' | 'incomplete_index' | 'unsupported_subset'; readonly continuation: null; readonly data: InlineDecompileData }
-);
+export type StoredDecompilation = ResultMetadata &
+  (
+    | { readonly state: 'complete'; readonly data: InlineDecompileData }
+    | {
+        readonly state: 'partial';
+        readonly reason: 'budget' | 'incomplete_index' | 'unsupported_subset';
+        readonly continuation: null;
+        readonly data: InlineDecompileData;
+      }
+  );
 
 export interface AnalysisCatalogData {
   readonly subjects: readonly AnnotationSubject[];

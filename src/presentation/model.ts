@@ -1,5 +1,13 @@
 import type { Diagnostic, EntityId } from '../core/index.js';
-import type { DataType, Effect, Instruction, Origin, RegisterBinding, Terminator, Value } from '../ir/index.js';
+import type {
+  DataType,
+  Effect,
+  Instruction,
+  Origin,
+  RegisterBinding,
+  Terminator,
+  Value,
+} from '../ir/index.js';
 
 /** All sources are read before any destination is written, including the effect. */
 export interface ParallelTransfer {
@@ -17,9 +25,25 @@ export interface ControlArm {
   readonly body?: Region;
 }
 export type Control =
-  | (Origin & { readonly kind: 'jump'; readonly effect: Effect; readonly transfer: ParallelTransfer })
-  | (Origin & { readonly kind: 'if'; readonly effect: Effect; readonly condition: Value; readonly when_true: ControlArm; readonly when_false: ControlArm })
-  | (Origin & { readonly kind: 'switch'; readonly effect: Effect; readonly value: Value; readonly cases: readonly { readonly bits: bigint; readonly arm: ControlArm }[]; readonly otherwise: ControlArm })
+  | (Origin & {
+      readonly kind: 'jump';
+      readonly effect: Effect;
+      readonly transfer: ParallelTransfer;
+    })
+  | (Origin & {
+      readonly kind: 'if';
+      readonly effect: Effect;
+      readonly condition: Value;
+      readonly when_true: ControlArm;
+      readonly when_false: ControlArm;
+    })
+  | (Origin & {
+      readonly kind: 'switch';
+      readonly effect: Effect;
+      readonly value: Value;
+      readonly cases: readonly { readonly bits: bigint; readonly arm: ControlArm }[];
+      readonly otherwise: ControlArm;
+    })
   | Extract<Terminator, { readonly kind: 'return' | 'indirect' | 'trap' | 'unknown' }>;
 export interface BlockRegion extends Origin {
   readonly kind: 'block';
@@ -59,10 +83,16 @@ export interface StructuringOptions {
   /** Maximum nesting, 1..64. Deeper shapes retain explicit labeled transfers. */
   readonly max_depth?: number;
 }
-export type StructuringResult = {
-  readonly state: 'complete'; readonly value: StructuredFunction;
-  readonly diagnostics: readonly Diagnostic[]; readonly work: number;
-} | {
-  readonly state: 'partial'; readonly value: null;
-  readonly diagnostics: readonly Diagnostic[]; readonly work: number;
-};
+export type StructuringResult =
+  | {
+      readonly state: 'complete';
+      readonly value: StructuredFunction;
+      readonly diagnostics: readonly Diagnostic[];
+      readonly work: number;
+    }
+  | {
+      readonly state: 'partial';
+      readonly value: null;
+      readonly diagnostics: readonly Diagnostic[];
+      readonly work: number;
+    };

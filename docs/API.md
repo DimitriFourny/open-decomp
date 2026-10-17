@@ -65,13 +65,13 @@ Automatically discovered cache roots and project leaves must be directories, not
 openBinary(inputPath: string, options?: OpenBinaryOptions): Promise<BinarySession>
 ```
 
-| Option | Meaning |
-| --- | --- |
-| `cachePath?: string` | Cache-root override. Missing directories are created. |
-| `sliceId?: string` | Explicit validated slice ID, for example from universal-image metadata. |
-| `budget?` | Partial shared budget for the initial import/project summary; unspecified fields use core defaults. |
-| `signal?: AbortSignal` | Cancels opening/importing. Pass a signal separately for later operations. |
-| `onProgress?: (job: WireJob) => void` | Import progress; optional, not a durable status record. |
+| Option                                | Meaning                                                                                             |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `cachePath?: string`                  | Cache-root override. Missing directories are created.                                               |
+| `sliceId?: string`                    | Explicit validated slice ID, for example from universal-image metadata.                             |
+| `budget?`                             | Partial shared budget for the initial import/project summary; unspecified fields use core defaults. |
+| `signal?: AbortSignal`                | Cancels opening/importing. Pass a signal separately for later operations.                           |
+| `onProgress?: (job: WireJob) => void` | Import progress; optional, not a durable status record.                                             |
 
 Session properties are `inputPath`, `cachePath`, `projectPath`, `reused`, `opened`, `image`, `projectId` and `revision`. `opened` is the original `project_open` envelope, preserving import diagnostics and coverage. `reused` describes project reuse, not whether a particular decompilation is a cache hit.
 

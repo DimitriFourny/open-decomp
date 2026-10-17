@@ -9,10 +9,27 @@ export { X86Decoder } from './decoders/x86_64/index.js';
 export { DarwinArm64Abi, darwinArm64Abi } from './abi/darwin-arm64/index.js';
 export { WindowsX64Abi, windowsX64Abi } from './abi/windows-x64/index.js';
 export { SysVAMD64Abi, sysvAMD64Abi } from './abi/sysv-amd64/index.js';
-export { discoverFunctions, type DiscoveryInput, type DiscoveryResult } from './analysis/discovery/index.js';
+export {
+  discoverFunctions,
+  type DiscoveryInput,
+  type DiscoveryResult,
+} from './analysis/discovery/index.js';
 export * as DWARF from './metadata/dwarf/index.js';
-export { recoverDebugInfo, debugContextAt, variableLocationsAt, type DebugRecovery, type ExternalDebugInput } from './metadata/debug/index.js';
-export { ProjectWorkerPool, ProjectWorker, type JobTicket, type JobOutcome, type WorkRequest, type WorkerSnapshot } from './workers/index.js';
+export {
+  recoverDebugInfo,
+  debugContextAt,
+  variableLocationsAt,
+  type DebugRecovery,
+  type ExternalDebugInput,
+} from './metadata/debug/index.js';
+export {
+  ProjectWorkerPool,
+  ProjectWorker,
+  type JobTicket,
+  type JobOutcome,
+  type WorkRequest,
+  type WorkerSnapshot,
+} from './workers/index.js';
 export { runProjectWorker, type WorkerHandler, type PreparedImport } from './workers/runtime.js';
 export { Arm64Lifter, type Arm64LiftResult } from './lifters/arm64/index.js';
 export { X86Lifter, type X86LiftResult } from './lifters/x86_64/index.js';
@@ -24,16 +41,53 @@ export { buildReferenceIndex, searchReferences } from './analysis/references/ind
 export { recoverTargets } from './analysis/targets/index.js';
 export * as Stack from './analysis/stack/index.js';
 export * as Calls from './analysis/calls/index.js';
-export { structureControlFlow, type StructuredFunction, type StructuringOptions, type StructuringResult } from './presentation/index.js';
-export { demangleName, decorateImageNames, type NamePresentation, type NamedImageMetadata } from './metadata/symbols/index.js';
-export { recoverCodeViewReferences, type CodeViewReference, type CodeViewReferences, type PdbIdentity } from './metadata/codeview/index.js';
-export { recoverLibraryContracts, type LibraryContract, type LibraryContracts, type LibraryType } from './metadata/library-contracts/index.js';
-export { recoverRuntimeMetadata, type RuntimeRecord, type RuntimeMetadata, type RuntimeKind } from './metadata/runtime/index.js';
+export {
+  structureControlFlow,
+  type StructuredFunction,
+  type StructuringOptions,
+  type StructuringResult,
+} from './presentation/index.js';
+export {
+  demangleName,
+  decorateImageNames,
+  type NamePresentation,
+  type NamedImageMetadata,
+} from './metadata/symbols/index.js';
+export {
+  recoverCodeViewReferences,
+  type CodeViewReference,
+  type CodeViewReferences,
+  type PdbIdentity,
+} from './metadata/codeview/index.js';
+export {
+  recoverLibraryContracts,
+  type LibraryContract,
+  type LibraryContracts,
+  type LibraryType,
+} from './metadata/library-contracts/index.js';
+export {
+  recoverRuntimeMetadata,
+  type RuntimeRecord,
+  type RuntimeMetadata,
+  type RuntimeKind,
+} from './metadata/runtime/index.js';
 export * as TypeAnalysis from './analysis/types/index.js';
 export { QueryService, type QueryCallOptions } from './service/queries/index.js';
 export type { EmissionInput, EmissionResult } from './emitters/model.js';
 export { CEmitter, emitC, C_EMITTER_VERSION } from './emitters/c/index.js';
-export { PythonLikeEmitter, emitPythonLike, PYTHON_LIKE_EMITTER_VERSION } from './emitters/python-like/index.js';
-export { AnnotationService, createTrustedSemanticCatalog, resolveDurableSubject, type AnnotationCommitHook, type AnnotationSubject, type ActiveAnnotationView, type TrustedSemanticCatalog } from './project/annotations/index.js';
+export {
+  PythonLikeEmitter,
+  emitPythonLike,
+  PYTHON_LIKE_EMITTER_VERSION,
+} from './emitters/python-like/index.js';
+export {
+  AnnotationService,
+  createTrustedSemanticCatalog,
+  resolveDurableSubject,
+  type AnnotationCommitHook,
+  type AnnotationSubject,
+  type ActiveAnnotationView,
+  type TrustedSemanticCatalog,
+} from './project/annotations/index.js';
 export { startHttpServer, type HttpServerHandle } from './mcp/http/server.js';
 export { loadHttpConfig, type HttpConfig } from './mcp/http/config.js';

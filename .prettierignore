@@ -1,0 +1,11 @@
+# Prettier also respects the root .gitignore.
+
+# Package-manager output and third-party snapshots.
+bun.lock
+vendor/
+licenses/
+
+# Fixture bytes, manifests and hash-bound generation recipes.
+/fixtures/
+/scripts/fixtures/
+/test/**/fixtures/

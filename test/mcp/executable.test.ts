@@ -20,10 +20,16 @@ interface CliProcess {
 }
 
 function launch(t: TestContext, args: readonly string[]): CliProcess {
-  const child = spawn(process.execPath, ['--import', 'tsx', entry, ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['--import', 'tsx', entry, ...args], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
   const output = { stdout: '', stderr: '' };
-  child.stdout.on('data', (chunk: Buffer) => { output.stdout += chunk.toString('utf8'); });
-  child.stderr.on('data', (chunk: Buffer) => { output.stderr += chunk.toString('utf8'); });
+  child.stdout.on('data', (chunk: Buffer) => {
+    output.stdout += chunk.toString('utf8');
+  });
+  child.stderr.on('data', (chunk: Buffer) => {
+    output.stderr += chunk.toString('utf8');
+  });
   const closed = once(child, 'close');
   t.after(async () => {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
@@ -39,66 +45,111 @@ async function listening(server: CliProcess): Promise<URL> {
       const address = /listening on (https?:\/\/\S+)/.exec(line)?.[1];
       if (address) return new URL(address);
     }
-  } finally { lines.close(); }
+  } finally {
+    lines.close();
+  }
   throw new Error(`HTTP process exited before listening: ${server.output.stderr}`);
 }
 
+test(
+  'unified executable requires explicit commands and rejects malformed transport options',
+  { timeout: 60000 },
+  async (t) => {
+    for (const args of [
+      ['--root', '/tmp'],
+      ['--help', 'extra'],
+      ['mcp'],
+      ['mcp', 'stop'],
+      ['mcp', 'start', '--transport'],
+      ['mcp', 'start', '--transport', 'unknown'],
+      ['mcp', 'start', '--transport', 'stdio', '--transport', 'http'],
+      ['mcp', 'start', '--transport', 'http'],
+      ['mcp', 'start', '--transport', 'http', '--config', '--help'],
+    ]) {
+      const server = launch(t, args);
+      await server.closed;
+      assert.equal(server.child.exitCode, 1);
+      assert.equal(server.output.stdout, '');
+      assert.ok(server.output.stderr.length > 0 && server.output.stderr.length < 4096);
+    }
+  },
+);
 
-test('unified executable requires explicit commands and rejects malformed transport options', { timeout: 60000 }, async t => {
-  for (const args of [['--root', '/tmp'], ['--help', 'extra'], ['mcp'], ['mcp', 'stop'], ['mcp', 'start', '--transport'], ['mcp', 'start', '--transport', 'unknown'], ['mcp', 'start', '--transport', 'stdio', '--transport', 'http'], ['mcp', 'start', '--transport', 'http'], ['mcp', 'start', '--transport', 'http', '--config', '--help']]) {
-    const server = launch(t, args);
+test(
+  'HTTP startup errors do not disclose private configuration or credentials',
+  { timeout: 30000 },
+  async (t) => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-private-cli-')));
+    t.after(async () => {
+      await rm(root, { recursive: true, force: true });
+    });
+    const secret = randomBytes(32).toString('base64url');
+    const config = join(root, `${secret}.json`);
+    await writeFile(config, JSON.stringify({ principals: [], credential: secret }));
+    const server = launch(t, ['mcp', 'start', '--transport', 'http', '--config', config]);
     await server.closed;
     assert.equal(server.child.exitCode, 1);
     assert.equal(server.output.stdout, '');
     assert.ok(server.output.stderr.length > 0 && server.output.stderr.length < 4096);
-  }
-});
+    assert.ok(!server.output.stderr.includes(root));
+    assert.ok(!server.output.stderr.includes(secret));
+    assert.ok(!server.output.stderr.includes('credential'));
+  },
+);
 
-test('HTTP startup errors do not disclose private configuration or credentials', { timeout: 30000 }, async t => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-private-cli-')));
-  t.after(async () => { await rm(root, { recursive: true, force: true }); });
-  const secret = randomBytes(32).toString('base64url');
-  const config = join(root, `${secret}.json`);
-  await writeFile(config, JSON.stringify({ principals: [], credential: secret }));
-  const server = launch(t, ['mcp', 'start', '--transport', 'http', '--config', config]);
-  await server.closed;
-  assert.equal(server.child.exitCode, 1);
-  assert.equal(server.output.stdout, '');
-  assert.ok(server.output.stderr.length > 0 && server.output.stderr.length < 4096);
-  assert.ok(!server.output.stderr.includes(root));
-  assert.ok(!server.output.stderr.includes(secret));
-  assert.ok(!server.output.stderr.includes('credential'));
-});
-
-test('unified HTTP executable stays in foreground, serves the SDK and shuts down on termination', {
-  timeout: 60000,
-  skip: process.platform === 'win32' ? 'Windows child.kill does not deliver catchable POSIX signals' : false,
-}, async t => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-http-cli-')));
-  t.after(async () => { await rm(root, { recursive: true, force: true }); });
-  const projects = join(root, 'projects'), inputs = join(root, 'inputs');
-  await Promise.all([mkdir(projects), mkdir(inputs)]);
-  const token = randomBytes(32).toString('base64url');
-  const config = join(root, 'private.json');
-  await writeFile(config, JSON.stringify({ port: 0, principals: [{
-    id: 'analyst', token_sha256: createHash('sha256').update(token).digest('hex'),
-    project_root: projects, input_roots: [inputs],
-  }] }));
-  const server = launch(t, ['mcp', 'start', '--transport', 'http', '--config', config]);
-  const address = await listening(server);
-  assert.equal(server.child.exitCode, null);
-  const client = new Client({ name: 'unified-http-cli-test', version: '0.1.0' });
-  try {
-    await client.connect(new StreamableHTTPClientTransport(address, {
-      requestInit: { headers: { authorization: `Bearer ${token}` } },
-    }));
-    await client.ping();
-    assert.ok((await client.listTools()).tools.length > 0);
-  } finally { await client.close(); }
-  server.child.kill('SIGTERM');
-  await server.closed;
-  assert.equal(server.child.exitCode, 0, server.output.stderr);
-  assert.equal(server.child.signalCode, null);
-  assert.equal(server.output.stdout, '');
-  assert.ok(!server.output.stderr.includes(token));
-});
+test(
+  'unified HTTP executable stays in foreground, serves the SDK and shuts down on termination',
+  {
+    timeout: 60000,
+    skip:
+      process.platform === 'win32'
+        ? 'Windows child.kill does not deliver catchable POSIX signals'
+        : false,
+  },
+  async (t) => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-http-cli-')));
+    t.after(async () => {
+      await rm(root, { recursive: true, force: true });
+    });
+    const projects = join(root, 'projects'),
+      inputs = join(root, 'inputs');
+    await Promise.all([mkdir(projects), mkdir(inputs)]);
+    const token = randomBytes(32).toString('base64url');
+    const config = join(root, 'private.json');
+    await writeFile(
+      config,
+      JSON.stringify({
+        port: 0,
+        principals: [
+          {
+            id: 'analyst',
+            token_sha256: createHash('sha256').update(token).digest('hex'),
+            project_root: projects,
+            input_roots: [inputs],
+          },
+        ],
+      }),
+    );
+    const server = launch(t, ['mcp', 'start', '--transport', 'http', '--config', config]);
+    const address = await listening(server);
+    assert.equal(server.child.exitCode, null);
+    const client = new Client({ name: 'unified-http-cli-test', version: '0.1.0' });
+    try {
+      await client.connect(
+        new StreamableHTTPClientTransport(address, {
+          requestInit: { headers: { authorization: `Bearer ${token}` } },
+        }),
+      );
+      await client.ping();
+      assert.ok((await client.listTools()).tools.length > 0);
+    } finally {
+      await client.close();
+    }
+    server.child.kill('SIGTERM');
+    await server.closed;
+    assert.equal(server.child.exitCode, 0, server.output.stderr);
+    assert.equal(server.child.signalCode, null);
+    assert.equal(server.output.stdout, '');
+    assert.ok(!server.output.stderr.includes(token));
+  },
+);

@@ -37,15 +37,14 @@ Each project has one exclusive owner: close a CLI/API/MCP session before opening
 
 Text decompilation goes to stdout; progress, cache/project information and diagnostics go to stderr. `--json` emits `{project_path,reused,result}`. For function listing, `result` is `{pages:[...]}`, preserving each original schema envelope while consuming all cursors. Decompilation returns the full result envelope, automatically assembling and checking artifact-backed output. Results remain pseudocode, with partial/unknown semantics intact.
 
-| Exit code | Meaning |
-| --- | --- |
-| `0` | Complete or empty requested result. |
-| `2` | Semantic partial result, including an exhausted incomplete index. |
-| `1` | Usage, filesystem, integrity or operation error; unsupported/cancelled operation. |
-| `130`, `143` | Interrupted by SIGINT or SIGTERM; owned workers are closed. |
+| Exit code    | Meaning                                                                           |
+| ------------ | --------------------------------------------------------------------------------- |
+| `0`          | Complete or empty requested result.                                               |
+| `2`          | Semantic partial result, including an exhausted incomplete index.                 |
+| `1`          | Usage, filesystem, integrity or operation error; unsupported/cancelled operation. |
+| `130`, `143` | Interrupted by SIGINT or SIGTERM; owned workers are closed.                       |
 
 For Node.js/TypeScript applications, use the small **`open-decomp/api`** entry: `openBinary()`, `findFunctions()`, `decompile()` and `close()`. It shares the CLI's persistent cache and the MCP service's contracts. See [API.md](API.md) for runnable usage patterns, lifecycle, paging, errors and cache policy.
-
 
 ## Launch and configure local MCP
 
@@ -66,11 +65,16 @@ A typical MCP host configuration is below; the outer configuration location/shap
       "command": "/absolute/path/to/node",
       "args": [
         "/absolute/app/node_modules/open-decomp/dist/src/cli/entry.js",
-        "mcp", "start",
-        "--root", "/absolute/inputs",
-        "--root", "/absolute/projects",
-        "--max-workers", "2",
-        "--max-queued", "16"
+        "mcp",
+        "start",
+        "--root",
+        "/absolute/inputs",
+        "--root",
+        "/absolute/projects",
+        "--max-workers",
+        "2",
+        "--max-queued",
+        "16"
       ]
     }
   }
@@ -79,13 +83,13 @@ A typical MCP host configuration is below; the outer configuration location/shap
 
 For intended WSL use, the MCP process must execute Linux Node and the installed entry inside WSL, with Linux-visible absolute input/project paths. How an outer Windows MCP host launches WSL is host-specific; the configuration above describes the process inside that Linux environment. Native `C:\\...\\node.exe` launch is not the product execution model.
 
-| CLI option | Contract |
-| --- | --- |
-| `--transport stdio` | Optional explicit stdio selection; stdio is the default for `mcp start`. |
-| `--root PATH` | Repeatable, at most 64 existing authorized directories; at least one required. No cwd/home root is implicit. |
-| `--max-workers N` | Persistent project workers, 1–32, default 2. Open projects consume owners; close unused ones. |
-| `--max-queued N` | Queued jobs per worker, 0–1,024, default 16. |
-| `--help`, `--version` | Print to stderr, not protocol stdout. |
+| CLI option            | Contract                                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `--transport stdio`   | Optional explicit stdio selection; stdio is the default for `mcp start`.                                     |
+| `--root PATH`         | Repeatable, at most 64 existing authorized directories; at least one required. No cwd/home root is implicit. |
+| `--max-workers N`     | Persistent project workers, 1–32, default 2. Open projects consume owners; close unused ones.                |
+| `--max-queued N`      | Queued jobs per worker, 0–1,024, default 16.                                                                 |
+| `--help`, `--version` | Print to stderr, not protocol stdout.                                                                        |
 
 For stdio, stdout must remain protocol traffic; help, version and diagnostics use stderr. The SDK owns framing and version negotiation. EOF and catchable termination signals cancel/reap project owners; use `project_close` for an orderly durable close before disconnecting.
 
@@ -125,17 +129,17 @@ ABI argument lists distinguish a known prefix from a complete list of actual arg
 
 All 13 MCP tools expose concrete input/output JSON Schemas, structured content and readable JSON text. Requests reject extra keys. Machine integers/addresses are unsigned hexadecimal strings, not JSON numbers; an address includes `image_id`, `space: "va" | "rva" | "file"` and `value`. `file` is original-container offset, including a selected fat-slice offset; `va` is static/unslid and `rva` is image-relative. Ranges are half-open. Memory views distinguish real bytes, zero-fill and unmapped holes.
 
-| Tool | Main purpose |
-| --- | --- |
-| `project_open`, `project_close` | Import/resume, owner/job close policy and persistence. |
-| `binary_info` | Summary, headers, sections, mappings, entries, relocations, hints and capabilities. |
+| Tool                                             | Main purpose                                                                                      |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `project_open`, `project_close`                  | Import/resume, owner/job close policy and persistence.                                            |
+| `binary_info`                                    | Summary, headers, sections, mappings, entries, relocations, hints and capabilities.               |
 | `symbols_find`, `strings_find`, `functions_find` | Snapshot-bound filtered/paged navigation. Matching is exact/prefix/contains, not arbitrary regex. |
-| `function_get` | Metadata, structured disassembly with gaps, or CFG. |
-| `function_decompile` | Bounded homemade analysis and C-like or Python-like output with source/evidence mappings. |
-| `xrefs_get` | Incoming/outgoing references, including unresolved edges. |
-| `memory_read` | Bounded byte/integer/float/pointer interpretations; machine bits remain hexadecimal. |
-| `annotations_apply` | Atomic revision-checked assertion edits. |
-| `analysis_status`, `analysis_cancel` | Durable job inspection and cancellation. |
+| `function_get`                                   | Metadata, structured disassembly with gaps, or CFG.                                               |
+| `function_decompile`                             | Bounded homemade analysis and C-like or Python-like output with source/evidence mappings.         |
+| `xrefs_get`                                      | Incoming/outgoing references, including unresolved edges.                                         |
+| `memory_read`                                    | Bounded byte/integer/float/pointer interpretations; machine bits remain hexadecimal.              |
+| `annotations_apply`                              | Atomic revision-checked assertion edits.                                                          |
+| `analysis_status`, `analysis_cancel`             | Durable job inspection and cancellation.                                                          |
 
 Read the [core contract reference](CORE.md) for detailed tool semantics, result states, codecs, cache rules and schema/storage distinctions. The installed root ESM export includes `toolSchemas`, `exportToolJsonSchemas()`, request/response validators, `QueryService`, loaders, decoders, lifters and other engine APIs; TypeScript declarations ship with the compiled entry. For programmatic schema export:
 
@@ -172,16 +176,16 @@ Use hexadecimal `offset`, length at most 524,288 bytes, and the returned next UR
 
 ## Limits and semantic coverage
 
-| Request bound | Default | Maximum |
-| --- | ---: | ---: |
-| Page items | 100 | 1,000 |
-| Memory-read bytes | 4,096 | 1,048,576 |
-| Instructions | 10,000 | 1,000,000 |
-| Blocks | 10,000 | 100,000 |
-| IR nodes | 100,000 | 10,000,000 |
+| Request bound         |   Default |     Maximum |
+| --------------------- | --------: | ----------: |
+| Page items            |       100 |       1,000 |
+| Memory-read bytes     |     4,096 |   1,048,576 |
+| Instructions          |    10,000 |   1,000,000 |
+| Blocks                |    10,000 |     100,000 |
+| IR nodes              |   100,000 |  10,000,000 |
 | Cumulative work units | 1,000,000 | 100,000,000 |
-| Deadline milliseconds | 30,000 | 300,000 |
-| Output bytes | 1,048,576 | 16,777,216 |
+| Deadline milliseconds |    30,000 |     300,000 |
+| Output bytes          | 1,048,576 |  16,777,216 |
 
 Minimum output budget is 1,024 bytes. Defaults use conservative unknown calls, bounded indirect-target recovery, evidence included, C-like output and two-space indentation. Raising a budget is not proof of completeness and does not silently extend already-published partial function ranges. Full analysis artifacts are limited to 16 MiB. Image storage separately bounds individual records at 16 MiB, aggregate encoded metadata at 64 MiB and facts at one million; these are serialized-data bounds, **not process-memory ceilings**.
 
@@ -198,19 +202,19 @@ Unsupported instructions are not no-ops or invented guaranteed traps. Unknown ef
 
 ## Troubleshooting
 
-| Symptom | Action / boundary |
-| --- | --- |
-| No connection / CLI usage error | Use the installed stdio entry and correct Node executable; create authorized root directories first. Check stderr; do not redirect logs into protocol stdout. |
-| Access denied / path outside roots | Authorize the narrow input/project directories and use actual absolute paths. Cursors/artifact IDs do not confer filesystem authority. |
-| Worker/queue resource limit | Drain replies, inspect/cancel jobs and close unused projects. Increase only the documented CLI/request limits when appropriate. |
-| Empty search under partial indexes | Inspect `page.index_state`, result reason and diagnostics. Zero returned items under an incomplete index are not evidence of absence. |
-| Stale revision/cursor or unavailable derived ID | Adopt the acknowledged current revision, restart the query and reanalyze before editing derived-only IDs. Do not replay uncertain mutations. |
-| Failed import / image null after resume | Inspect saved jobs/diagnostics; ordinary reopen does not retry. Close, then use explicit matching import repair if eligible, or create a fresh project. |
-| Output limit / large pseudocode | Follow the artifact link and chunk metadata. Increasing inline budget cannot override the MCP frame ceiling. |
-| Partial/unsupported decompilation | Inspect per-layer coverage and original instruction evidence. Recognition/demangling does not establish semantics; do not erase unknown boundaries. |
-| Experimental SQLite warning | Expected stderr under the exercised Node runtime; it is not protocol output. Do not suppress unrelated SQLite corruption/resource diagnostics. |
-| Missing `dist/vendor/a64js` or WASM after install | Reject the incomplete artifact. Help-only success is inadequate; rebuild/package from the maintained driver and verify the resulting bytes, without source-tree fallbacks. |
-| High RSS or slow large input | Consult measured profiles and budgets; workers/serialized limits are not a hard heap sandbox. Reduce workload/isolate the process rather than claiming full-image completion. |
+| Symptom                                           | Action / boundary                                                                                                                                                             |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No connection / CLI usage error                   | Use the installed stdio entry and correct Node executable; create authorized root directories first. Check stderr; do not redirect logs into protocol stdout.                 |
+| Access denied / path outside roots                | Authorize the narrow input/project directories and use actual absolute paths. Cursors/artifact IDs do not confer filesystem authority.                                        |
+| Worker/queue resource limit                       | Drain replies, inspect/cancel jobs and close unused projects. Increase only the documented CLI/request limits when appropriate.                                               |
+| Empty search under partial indexes                | Inspect `page.index_state`, result reason and diagnostics. Zero returned items under an incomplete index are not evidence of absence.                                         |
+| Stale revision/cursor or unavailable derived ID   | Adopt the acknowledged current revision, restart the query and reanalyze before editing derived-only IDs. Do not replay uncertain mutations.                                  |
+| Failed import / image null after resume           | Inspect saved jobs/diagnostics; ordinary reopen does not retry. Close, then use explicit matching import repair if eligible, or create a fresh project.                       |
+| Output limit / large pseudocode                   | Follow the artifact link and chunk metadata. Increasing inline budget cannot override the MCP frame ceiling.                                                                  |
+| Partial/unsupported decompilation                 | Inspect per-layer coverage and original instruction evidence. Recognition/demangling does not establish semantics; do not erase unknown boundaries.                           |
+| Experimental SQLite warning                       | Expected stderr under the exercised Node runtime; it is not protocol output. Do not suppress unrelated SQLite corruption/resource diagnostics.                                |
+| Missing `dist/vendor/a64js` or WASM after install | Reject the incomplete artifact. Help-only success is inadequate; rebuild/package from the maintained driver and verify the resulting bytes, without source-tree fallbacks.    |
+| High RSS or slow large input                      | Consult measured profiles and budgets; workers/serialized limits are not a hard heap sandbox. Reduce workload/isolate the process rather than claiming full-image completion. |
 
 ## Updating and backing up projects
 
@@ -232,6 +236,17 @@ bun run smoke:mcp
 ```
 
 `check` runs typecheck, tests and compilation using the existing `tsc`, Node `node:test` and `tsx` toolchain. Run tests with `bun run test`, **not `bun test`**; Bun is not the application or test runtime. The release harness is the maintained official-SDK client driving the actual compiled server; its `--server-entry PATH --fixtures PATH` options select another entry/corpus. Fixture `bin`, sibling `manifest.json`, `elf-manifest.json` and `malformed` inputs must agree. It never executes analyzed binaries. General fixture rebuild/native trusted-execution commands are separate explicit developer actions documented in [FIXTURES.md](FIXTURES.md), not install/service behavior.
+
+Formatting uses the exact-pinned local Prettier development dependency; the pinned Bun 1.4.3 does not provide `bun fmt`. From the repository root:
+
+```sh
+bun run format        # Rewrite supported first-party files
+bun run format:check  # Check without writing; exits 1 for formatting differences
+```
+
+`.prettierrc.json` uses two-space indentation, single quotes, semicolons, trailing commas and a 100-column print width. `.prettierignore` excludes the Bun lockfile, vendored code, license snapshots, fixture corpora and hash-bound fixture generation recipes; `.gitignore` also applies. Prettier-aware editors use the same local dependency and configuration.
+
+Formatting is separate from `bun run check`; run `bun run format:check` alongside the typecheck, tests and build to verify code style.
 
 Produce and verify a private artifact:
 

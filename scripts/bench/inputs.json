@@ -7,11 +7,30 @@
     "workingDirectory": "repository root",
     "runtime": "Node.js 24 with the repository development dependencies installed (tsx); no additional dependency",
     "hosts": ["macOS arm64", "Windows x86-64"],
-    "macosExtractor": { "executable": "/usr/bin/unzip", "arguments": ["-p", "<verified-archive-absolute-path>", "<pinned-member>"] },
-    "windowsExtractor": { "executable": "%SystemRoot%\\System32\\tar.exe", "arguments": ["-xOf", "<verified-archive-absolute-path>", "<pinned-member>"], "prerequisite": "Windows inbox bsdtar with ZIP support (current Windows 10/11); SystemRoot must identify the Windows installation." },
-    "bounds": { "downloadDeadlineMsPerArchive": 120000, "extractionDeadlineMsPerArchive": 30000, "maximumArchiveBytes": 8388608, "maximumBinaryBytes": 8388608, "redirects": "rejected", "retries": 0 },
+    "macosExtractor": {
+      "executable": "/usr/bin/unzip",
+      "arguments": ["-p", "<verified-archive-absolute-path>", "<pinned-member>"]
+    },
+    "windowsExtractor": {
+      "executable": "%SystemRoot%\\System32\\tar.exe",
+      "arguments": ["-xOf", "<verified-archive-absolute-path>", "<pinned-member>"],
+      "prerequisite": "Windows inbox bsdtar with ZIP support (current Windows 10/11); SystemRoot must identify the Windows installation."
+    },
+    "bounds": {
+      "downloadDeadlineMsPerArchive": 120000,
+      "extractionDeadlineMsPerArchive": 30000,
+      "maximumArchiveBytes": 8388608,
+      "maximumBinaryBytes": 8388608,
+      "redirects": "rejected",
+      "retries": 0
+    },
     "behavior": "Uses only these reviewed pins, verifies exact archive size/SHA3-256/SHA256 before extraction, extracts only the named sqlite3 member to bounded stdout, verifies exact binary size/SHA256 and format/ISA headers, and publishes under ignored .local/benchmark-inputs. Existing cached archives must match pins or setup fails explicitly. Never runs downloaded programs, changes executable permissions, or removes quarantine attributes. Both target formats are prepared on either supported host.",
-    "benchmarkArguments": ["--large-macho", ".local/benchmark-inputs/sqlite-3.54.0/macos-arm64/sqlite3", "--large-pe", ".local/benchmark-inputs/sqlite-3.54.0/windows-x64/sqlite3.exe"],
+    "benchmarkArguments": [
+      "--large-macho",
+      ".local/benchmark-inputs/sqlite-3.54.0/macos-arm64/sqlite3",
+      "--large-pe",
+      ".local/benchmark-inputs/sqlite-3.54.0/windows-x64/sqlite3.exe"
+    ],
     "benchmarkCommand": "node dist/scripts/bench/pipeline.js --fixtures fixtures/bin --large-macho .local/benchmark-inputs/sqlite-3.54.0/macos-arm64/sqlite3 --large-pe .local/benchmark-inputs/sqlite-3.54.0/windows-x64/sqlite3.exe",
     "measurementStatus": "Input preparation and metadata inspection only; no SQLite product benchmark or successful-stage result is claimed here."
   },
@@ -63,7 +82,12 @@
         "sizeBytes": 6982216,
         "sha3_256": "8d1ccff873455c7f83c6e03ee253e81406d0e432ca9e7247ed6183929a824b33",
         "sha256": "63cb06e952a83fd140139b008ed5b47496608161c62f8cd17bc96e8beb1de029",
-        "observedMembers": ["sqldiff.exe", "sqlite3_analyzer.exe", "sqlite3_rsync.exe", "sqlite3.exe"]
+        "observedMembers": [
+          "sqldiff.exe",
+          "sqlite3_analyzer.exe",
+          "sqlite3_rsync.exe",
+          "sqlite3.exe"
+        ]
       },
       "binary": {
         "member": "sqlite3.exe",
@@ -72,7 +96,12 @@
         "sha256": "1d4dbbc37396c5de744e1a732540b8bc83cd89888f47e86365b726e5a813c5e7",
         "format": "pe",
         "architecture": "x86_64",
-        "headerFacts": { "dosSignature": "MZ", "peSignatureHex": "50450000", "coffMachine": "0x8664", "optionalHeaderMagic": "0x20b" },
+        "headerFacts": {
+          "dosSignature": "MZ",
+          "peSignatureHex": "50450000",
+          "coffMachine": "0x8664",
+          "optionalHeaderMagic": "0x20b"
+        },
         "fileIdentification": "PE32+ executable (console) x86-64, for MS Windows"
       }
     }

@@ -1,8 +1,19 @@
-import type { Address, Annotation, Diagnostic, Evidence, RecoveredType, Signature } from '../../core/index.js';
+import type {
+  Address,
+  Annotation,
+  Diagnostic,
+  Evidence,
+  RecoveredType,
+  Signature,
+} from '../../core/index.js';
 import type { DataType } from '../../ir/index.js';
 import type { DebugRecovery } from '../../metadata/debug/index.js';
 import type { LibraryContracts } from '../../metadata/library-contracts/index.js';
-import type { CallAnalysisOptions, CallAnalysisResult, ContractObservation } from '../calls/index.js';
+import type {
+  CallAnalysisOptions,
+  CallAnalysisResult,
+  ContractObservation,
+} from '../calls/index.js';
 
 export type TypeSource = 'analysis' | 'debug' | 'library' | 'user' | 'llm';
 export type TypeStatus = 'candidate' | 'established' | 'asserted' | 'hypothesis' | 'conflicting';
@@ -76,7 +87,8 @@ export interface TypeConflict {
   readonly subject_id: string;
   readonly alternatives: readonly string[];
   readonly evidence_ids: readonly string[];
-  readonly reason: 'incompatible_types' | 'incompatible_signatures' | 'overlapping_accesses' | 'layout_mismatch';
+  readonly reason:
+    'incompatible_types' | 'incompatible_signatures' | 'overlapping_accesses' | 'layout_mismatch';
 }
 export interface TypeRecoveryOptions extends CallAnalysisOptions {
   readonly slice_id: string;

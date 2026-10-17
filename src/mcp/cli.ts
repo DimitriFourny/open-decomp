@@ -1,11 +1,20 @@
-import { serveStdio, StdioServerTransport, type StdioServerHandle } from '@modelcontextprotocol/server/stdio';
+import {
+  serveStdio,
+  StdioServerTransport,
+  type StdioServerHandle,
+} from '@modelcontextprotocol/server/stdio';
 import type { JSONRPCMessage } from '@modelcontextprotocol/server';
 import { Writable } from 'node:stream';
 import { write as writeFd } from 'node:fs';
 import { QueryService } from '../service/queries/index.js';
 import type { WorkerPoolOptions } from '../workers/index.js';
 import { createMcpServer } from './server.js';
-import { MAX_MCP_INPUT_BYTES, MAX_MCP_PENDING_OUTPUTS, MAX_MCP_REQUEST_ID_BYTES, MAX_MCP_PENDING_REQUESTS } from './limits.js';
+import {
+  MAX_MCP_INPUT_BYTES,
+  MAX_MCP_PENDING_OUTPUTS,
+  MAX_MCP_REQUEST_ID_BYTES,
+  MAX_MCP_PENDING_REQUESTS,
+} from './limits.js';
 
 export const MCP_VERSION = '0.1.0';
 const OUTPUT_STALL_MS = 30_000;
@@ -37,9 +46,11 @@ export function parseCliArguments(args: readonly string[]): CliOptions {
       action = flag === '--help' ? 'help' : 'version';
       continue;
     }
-    if (flag !== '--root' && flag !== '--max-workers' && flag !== '--max-queued') throw new Error('Unknown CLI argument');
+    if (flag !== '--root' && flag !== '--max-workers' && flag !== '--max-queued')
+      throw new Error('Unknown CLI argument');
     const value = args[++index];
-    if (!value || value.startsWith('--') || value.includes('\0')) throw new Error(`Missing or malformed value for ${flag}`);
+    if (!value || value.startsWith('--') || value.includes('\0'))
+      throw new Error(`Missing or malformed value for ${flag}`);
     if (flag === '--root') {
       if (roots.length === 64) throw new Error('At most 64 authorized roots are permitted');
       roots.push(value);
@@ -47,7 +58,12 @@ export function parseCliArguments(args: readonly string[]): CliOptions {
     }
     if (!/^(0|[1-9][0-9]*)$/.test(value)) throw new Error(`Expected an integer for ${flag}`);
     const limit = Number(value);
-    if (!Number.isSafeInteger(limit) || limit < (flag === '--max-workers' ? 1 : 0) || limit > (flag === '--max-workers' ? 32 : 1024)) throw new Error(`Invalid resource limit for ${flag}`);
+    if (
+      !Number.isSafeInteger(limit) ||
+      limit < (flag === '--max-workers' ? 1 : 0) ||
+      limit > (flag === '--max-workers' ? 32 : 1024)
+    )
+      throw new Error(`Invalid resource limit for ${flag}`);
     if (flag === '--max-workers') {
       if (max_workers !== undefined) throw new Error('Duplicate --max-workers');
       max_workers = limit;
@@ -58,7 +74,14 @@ export function parseCliArguments(args: readonly string[]): CliOptions {
   }
   if (action !== 'serve') return { action };
   if (!roots.length) throw new Error('At least one explicit --root PATH is required');
-  return { action, pool: { authorized_roots: roots, ...(max_workers === undefined ? {} : { max_workers }), ...(max_queued === undefined ? {} : { max_queued }) } };
+  return {
+    action,
+    pool: {
+      authorized_roots: roots,
+      ...(max_workers === undefined ? {} : { max_workers }),
+      ...(max_queued === undefined ? {} : { max_queued }),
+    },
+  };
 }
 
 /** Keep SDK parsing/framing intact while observing every transport-close path. */
@@ -75,19 +98,34 @@ class OwnedStdioTransport extends StdioServerTransport {
       // SDK send must await the write callback even for a small blocked frame.
       highWaterMark: 1,
       write: (chunk: Buffer, _encoding, callback) => {
-        if (chunk.byteLength > MAX_MCP_INPUT_BYTES) { callback(new Error('MCP output frame exceeds 2 MiB')); return; }
+        if (chunk.byteLength > MAX_MCP_INPUT_BYTES) {
+          callback(new Error('MCP output frame exceeds 2 MiB'));
+          return;
+        }
         // POSIX pipes are nonblocking: their stream owns readiness/EAGAIN handling.
-        if (process.platform !== 'win32') { process.stdout.write(chunk, callback); return; }
+        if (process.platform !== 'win32') {
+          process.stdout.write(chunk, callback);
+          return;
+        }
         // Windows process.stdout pipe writes can block the event loop, preventing
         // the stall deadline and owned-worker shutdown from running. Keep the OS
         // write asynchronous; the single SDK send still owns backpressure.
         let offset = 0;
         const written = (error: NodeJS.ErrnoException | null, count: number): void => {
           this.#pendingWrite = false;
-          if (error) { callback(error); return; }
+          if (error) {
+            callback(error);
+            return;
+          }
           offset += count;
-          if (offset === chunk.byteLength) { callback(); return; }
-          if (count === 0) { callback(new Error('MCP output write made no progress')); return; }
+          if (offset === chunk.byteLength) {
+            callback();
+            return;
+          }
+          if (count === 0) {
+            callback(new Error('MCP output write made no progress'));
+            return;
+          }
           this.#pendingWrite = true;
           writeFd(1, chunk, offset, chunk.byteLength - offset, null, written);
         };
@@ -101,19 +139,28 @@ class OwnedStdioTransport extends StdioServerTransport {
   }
   accept(message: JSONRPCMessage): boolean {
     if (this.#closing) return false;
-    if ('id' in message && typeof message.id === 'string' && Buffer.byteLength(message.id) > MAX_MCP_REQUEST_ID_BYTES) {
+    if (
+      'id' in message &&
+      typeof message.id === 'string' &&
+      Buffer.byteLength(message.id) > MAX_MCP_REQUEST_ID_BYTES
+    ) {
       throw new Error('MCP request ID exceeds 1,024 bytes');
     }
     if ('method' in message && 'id' in message) {
       if (this.#requests.has(message.id)) throw new Error('MCP request ID is already pending');
-      if (this.#requests.size >= MAX_MCP_PENDING_REQUESTS) throw new Error('MCP pending request limit exceeded; drain responses before submitting more work');
+      if (this.#requests.size >= MAX_MCP_PENDING_REQUESTS)
+        throw new Error(
+          'MCP pending request limit exceeded; drain responses before submitting more work',
+        );
       this.#requests.add(message.id);
     }
     return true;
   }
   override send(message: JSONRPCMessage): Promise<void> {
     if (this.#pendingOutput >= MAX_MCP_PENDING_OUTPUTS) {
-      const error = new Error('MCP output queue limit exceeded; the client is not draining responses');
+      const error = new Error(
+        'MCP output queue limit exceeded; the client is not draining responses',
+      );
       this.onerror?.(error);
       void this.close().catch(() => {});
       return Promise.reject(error);
@@ -122,14 +169,21 @@ class OwnedStdioTransport extends StdioServerTransport {
     // One SDK send owns backpressure listeners at a time. The bounded queue keeps
     // messages, not repeatedly serialized copies, until the previous write drains.
     const sent = this.#outputTail.then(async () => {
-      const timer = setTimeout(() => this.#output.destroy(new Error('MCP output stalled for 30 seconds')), OUTPUT_STALL_MS);
-      try { await super.send(message); }
-      finally { clearTimeout(timer); }
+      const timer = setTimeout(
+        () => this.#output.destroy(new Error('MCP output stalled for 30 seconds')),
+        OUTPUT_STALL_MS,
+      );
+      try {
+        await super.send(message);
+      } finally {
+        clearTimeout(timer);
+      }
     });
     this.#outputTail = sent.catch(() => {});
     return sent.finally(() => {
       this.#pendingOutput--;
-      if ('id' in message && message.id !== undefined && !('method' in message)) this.#requests.delete(message.id);
+      if ('id' in message && message.id !== undefined && !('method' in message))
+        this.#requests.delete(message.id);
     });
   }
   override async close(): Promise<void> {
@@ -140,7 +194,8 @@ class OwnedStdioTransport extends StdioServerTransport {
     process.stdin.destroy();
     // EOF can arrive after the peer receives a frame but before its Windows
     // write callback runs. Keep that send and its existing deadline alive.
-    if (process.platform === 'win32' && this.#pendingWrite && !this.#output.destroyed) await this.#outputTail;
+    if (process.platform === 'win32' && this.#pendingWrite && !this.#output.destroyed)
+      await this.#outputTail;
     this.#output.destroy(new Error('MCP connection closed'));
     process.stdout.destroy();
     this.#closed();
@@ -167,18 +222,28 @@ export async function runStdio(args: readonly string[]): Promise<void> {
   let handle: StdioServerHandle | undefined;
   let reportedError = false;
   const stop = (): Promise<void> => {
-    shutdown ??= Promise.resolve().then(async () => {
-      try { await transport.close(); await handle?.close(); }
-      finally {
-        await service.close('cancel');
-        process.off('SIGINT', onSignal);
-        process.off('SIGTERM', onSignal);
-      }
-    }).then(() => {
-      // This entry owns the process. Node stdio can retain a blocked write after
-      // destroy; exit only after every worker has released its durable project.
-      transport.exit();
-    }, error => { report(error); transport.exit(); });
+    shutdown ??= Promise.resolve()
+      .then(async () => {
+        try {
+          await transport.close();
+          await handle?.close();
+        } finally {
+          await service.close('cancel');
+          process.off('SIGINT', onSignal);
+          process.off('SIGTERM', onSignal);
+        }
+      })
+      .then(
+        () => {
+          // This entry owns the process. Node stdio can retain a blocked write after
+          // destroy; exit only after every worker has released its durable project.
+          transport.exit();
+        },
+        (error) => {
+          report(error);
+          transport.exit();
+        },
+      );
     return shutdown;
   };
   const report = (error: unknown): void => {
@@ -186,23 +251,36 @@ export async function runStdio(args: readonly string[]): Promise<void> {
     if (!reportedError) {
       reportedError = true;
       const message = error instanceof Error ? error.message : 'MCP transport failure';
-      process.stderr.write(`open-decomp mcp start: ${message.replace(/[\r\n\x00-\x1f\x7f]/g, ' ').slice(0, 512)}\n`);
+      process.stderr.write(
+        `open-decomp mcp start: ${message.replace(/[\r\n\x00-\x1f\x7f]/g, ' ').slice(0, 512)}\n`,
+      );
     }
   };
-  const onSignal = (): void => { void stop().catch(report); };
-  const transport = new OwnedStdioTransport(() => { void stop().catch(report); });
+  const onSignal = (): void => {
+    void stop().catch(report);
+  };
+  const transport = new OwnedStdioTransport(() => {
+    void stop().catch(report);
+  });
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
   try {
     handle = serveStdio(() => createMcpServer(service), {
       transport,
-      onerror: error => { report(error); void stop().catch(report); },
+      onerror: (error) => {
+        report(error);
+        void stop().catch(report);
+      },
       maxSubscriptions: 16,
     });
     const receive = transport.onmessage;
-    transport.onmessage = message => {
-      try { if (transport.accept(message)) receive?.(message); }
-      catch (error) { report(error); void transport.close().catch(report); }
+    transport.onmessage = (message) => {
+      try {
+        if (transport.accept(message)) receive?.(message);
+      } catch (error) {
+        report(error);
+        void transport.close().catch(report);
+      }
     };
   } catch (error) {
     await stop();

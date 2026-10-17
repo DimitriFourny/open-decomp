@@ -8,17 +8,17 @@ Full dependency notices are retained verbatim under [licenses/](../licenses/), w
 
 Exact package versions are pinned by the source `bun.lock`. Archive SHA256/SHA512 integrity, the `bun.lock` digest, Node/Bun tool versions, original source package metadata and archive inventory are bound by the produced archive's sibling schema-version-2 `<archive>.release.json` manifest. Its `bun_pack` inventory records file paths, sizes, modes, SHA256 hashes and bundled package names. An installed run is a separate verification event; documentation bundled inside that archive is only its build-time snapshot. Historical npm-built release manifests remain evidence for their original sealed archives.
 
-| Component | Version / revision | Applicable notices retained here |
-| --- | --- | --- |
-| a64js transformed decoder runtime | `aa0e547ca5313779c87e1e52d75687b12e985615` | [MIT code license](../vendor/a64js/LICENSE), [snapshot provenance](../vendor/a64js/README.md), [source/output hashes](../vendor/a64js/snapshot.json); generated-data review below. |
-| `iced-x86` | 1.21.0 | [MIT](../licenses/iced-x86/LICENSE.txt), copyright 2018–present iced project and contributors. Official Node/WASM decoder; no native addon. |
-| `@modelcontextprotocol/core` | 2.3.1 | [Full licensing-transition notice and license](../licenses/@modelcontextprotocol/core/LICENSE); see below. |
-| `@modelcontextprotocol/server` | 2.3.1 | [Full licensing-transition notice and license](../licenses/@modelcontextprotocol/server/LICENSE); see below. |
-| `zod` | 4.6.7 | [MIT](../licenses/zod/LICENSE). |
-| `gecko-profiler-demangle` | 0.4.0 | [MIT](../licenses/gecko-profiler-demangle/LICENSE-MIT) OR [Apache-2.0](../licenses/gecko-profiler-demangle/LICENSE-APACHE); both exact texts retained. Used for local Itanium C++ demangling. |
-| `llvm-msvc-demangle` | 0.2.0 | [MIT wrapper](../licenses/llvm-msvc-demangle/LICENSE), [LLVM/runtime notices](../licenses/llvm-msvc-demangle/THIRD_PARTY_NOTICES.md) and full texts below. Used for Microsoft C++ demangling. |
-| `swift-demangle-wasm` | 1.0.2 | [MIT wrapper](../licenses/swift-demangle-wasm/LICENSE), copyright 2025 Yuta Saito; [exact package NOTICE](../licenses/swift-demangle-wasm/NOTICE), [actual upstream Swift license and Runtime Library Exception](../licenses/swift-demangle-wasm/Swift-LICENSE.txt). See discrepancy/source boundary below. |
-| `@bjorn3/browser_wasi_shim` | 0.4.2 | [MIT](../licenses/@bjorn3/browser_wasi_shim/LICENSE-MIT) OR [Apache-2.0](../licenses/@bjorn3/browser_wasi_shim/LICENSE-APACHE); transitive Swift WASI runtime. |
+| Component                         | Version / revision                         | Applicable notices retained here                                                                                                                                                                                                                                                                            |
+| --------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| a64js transformed decoder runtime | `aa0e547ca5313779c87e1e52d75687b12e985615` | [MIT code license](../vendor/a64js/LICENSE), [snapshot provenance](../vendor/a64js/README.md), [source/output hashes](../vendor/a64js/snapshot.json); generated-data review below.                                                                                                                          |
+| `iced-x86`                        | 1.21.0                                     | [MIT](../licenses/iced-x86/LICENSE.txt), copyright 2018–present iced project and contributors. Official Node/WASM decoder; no native addon.                                                                                                                                                                 |
+| `@modelcontextprotocol/core`      | 2.3.1                                      | [Full licensing-transition notice and license](../licenses/@modelcontextprotocol/core/LICENSE); see below.                                                                                                                                                                                                  |
+| `@modelcontextprotocol/server`    | 2.3.1                                      | [Full licensing-transition notice and license](../licenses/@modelcontextprotocol/server/LICENSE); see below.                                                                                                                                                                                                |
+| `zod`                             | 4.6.7                                      | [MIT](../licenses/zod/LICENSE).                                                                                                                                                                                                                                                                             |
+| `gecko-profiler-demangle`         | 0.4.0                                      | [MIT](../licenses/gecko-profiler-demangle/LICENSE-MIT) OR [Apache-2.0](../licenses/gecko-profiler-demangle/LICENSE-APACHE); both exact texts retained. Used for local Itanium C++ demangling.                                                                                                               |
+| `llvm-msvc-demangle`              | 0.2.0                                      | [MIT wrapper](../licenses/llvm-msvc-demangle/LICENSE), [LLVM/runtime notices](../licenses/llvm-msvc-demangle/THIRD_PARTY_NOTICES.md) and full texts below. Used for Microsoft C++ demangling.                                                                                                               |
+| `swift-demangle-wasm`             | 1.0.2                                      | [MIT wrapper](../licenses/swift-demangle-wasm/LICENSE), copyright 2025 Yuta Saito; [exact package NOTICE](../licenses/swift-demangle-wasm/NOTICE), [actual upstream Swift license and Runtime Library Exception](../licenses/swift-demangle-wasm/Swift-LICENSE.txt). See discrepancy/source boundary below. |
+| `@bjorn3/browser_wasi_shim`       | 0.4.2                                      | [MIT](../licenses/@bjorn3/browser_wasi_shim/LICENSE-MIT) OR [Apache-2.0](../licenses/@bjorn3/browser_wasi_shim/LICENSE-APACHE); transitive Swift WASI runtime.                                                                                                                                              |
 
 Node 24.22.0, Bun 1.4.3 for package management, Node's SQLite implementation, operating-system libraries and the user's MCP host are separate prerequisites, not bundled application runtimes. Bun does not replace Node as the application/test runtime. The source-only acceptance client `@modelcontextprotocol/client` 2.3.1 and build/test dependencies are not shipped production dependencies; their own installed/source notices still apply when using the development checkout. Do not infer their inclusion in the application archive.
 
@@ -81,11 +81,11 @@ The exact lockfile integrity value, including punctuation, is authoritative; see
 
 These SHA256 values were read from the pinned dependency assets during notice preparation. They identify payloads, not a claim that an installed application/host test passed or that a WASM source revision is known.
 
-| Package asset | SHA256 |
-| --- | --- |
-| `gecko-profiler-demangle/index_bg.wasm` | `9b98fbf2aaeb718905b3ff1a7f66de96c3ad261f47487c60d9735772923a1a2a` |
+| Package asset                                     | SHA256                                                             |
+| ------------------------------------------------- | ------------------------------------------------------------------ |
+| `gecko-profiler-demangle/index_bg.wasm`           | `9b98fbf2aaeb718905b3ff1a7f66de96c3ad261f47487c60d9735772923a1a2a` |
 | `llvm-msvc-demangle/dist/llvm-msvc-demangle.wasm` | `ecf93c031232ab9737965f3b157c2d83696e0c4752f7044ee5cc1b50c8c1dfec` |
-| `swift-demangle-wasm/dist/swift-demangle.wasm` | `fa6a1978ec5b3d30eb0a458f8d9625668213ec5889145baf9ae4c0deaa651790` |
+| `swift-demangle-wasm/dist/swift-demangle.wasm`    | `fa6a1978ec5b3d30eb0a458f8d9625668213ec5889145baf9ae4c0deaa651790` |
 
 Demangling is bounded local display decoration. Neither a demangled name nor the presence of a WASM payload establishes ABI signatures, type layouts or instruction-semantic support.
 

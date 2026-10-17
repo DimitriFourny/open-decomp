@@ -12,12 +12,20 @@ export class PythonLikeEmitter implements Emitter<EmissionInput> {
   readonly name = 'reconstructed-python-like';
   readonly version = PYTHON_LIKE_EMITTER_VERSION;
   readonly language = 'python-like' as const;
-  emit(input: EmissionInput, options: Options, context: OperationContext): EmissionResult['emission'] {
+  emit(
+    input: EmissionInput,
+    options: Options,
+    context: OperationContext,
+  ): EmissionResult['emission'] {
     return emitPythonLike(input, options, context).emission;
   }
 }
 
 /** Produces final-dialect UTF-16 spans alongside reconstructed provenance. */
-export function emitPythonLike(input: EmissionInput, options: Options, context: OperationContext): EmissionResult {
+export function emitPythonLike(
+  input: EmissionInput,
+  options: Options,
+  context: OperationContext,
+): EmissionResult {
   return new Renderer(input, options, context, 'python-like', PYTHON_LIKE_EMITTER_VERSION).render();
 }

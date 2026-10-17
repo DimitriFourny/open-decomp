@@ -13,14 +13,21 @@ export class CEmitter implements Emitter<EmissionInput> {
   readonly name = 'reconstructed-c';
   readonly version = C_EMITTER_VERSION;
   readonly language = 'c-like' as const;
-  emit(input: EmissionInput, options: Options, context: OperationContext): EmissionResult['emission'] {
+  emit(
+    input: EmissionInput,
+    options: Options,
+    context: OperationContext,
+  ): EmissionResult['emission'] {
     return emitC(input, options, context).emission;
   }
 }
 
 /** One render produces both the core artifact and richer reconstruction metadata.
  * Exhausted/cancelled operations throw OperationError and publish no partial text. */
-export function emitC(input: EmissionInput, options: Options, context: OperationContext): EmissionResult {
+export function emitC(
+  input: EmissionInput,
+  options: Options,
+  context: OperationContext,
+): EmissionResult {
   return new Renderer(input, options, context, 'c-like', C_EMITTER_VERSION).render();
 }
-

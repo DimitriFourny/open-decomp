@@ -40,7 +40,8 @@ async function runMcp(args: readonly string[]): Promise<void> {
     if (specified) throw new Error('Duplicate --transport');
     specified = true;
     const value = args[++index];
-    if (value !== 'stdio' && value !== 'http') throw new Error('Expected --transport stdio or --transport http');
+    if (value !== 'stdio' && value !== 'http')
+      throw new Error('Expected --transport stdio or --transport http');
     transport = value;
   }
   if (transport === 'http') {
@@ -48,7 +49,9 @@ async function runMcp(args: readonly string[]): Promise<void> {
       await runHttpCli(transportArgs);
     } catch {
       // Private configuration and TLS errors may contain credentials or paths.
-      process.stderr.write('open-decomp mcp start: startup or shutdown failed; inspect the private configuration, TLS files and bind permissions\n');
+      process.stderr.write(
+        'open-decomp mcp start: startup or shutdown failed; inspect the private configuration, TLS files and bind permissions\n',
+      );
       process.exitCode = 1;
     }
     return;
@@ -78,6 +81,8 @@ async function main(args: readonly string[]): Promise<void> {
 
 void main(process.argv.slice(2)).catch((error: unknown) => {
   const message = error instanceof Error ? error.message : 'Unable to run command';
-  process.stderr.write(`open-decomp: ${message.replace(/[\r\n\x00-\x1f\x7f]/g, ' ').slice(0, 512)}\n`);
+  process.stderr.write(
+    `open-decomp: ${message.replace(/[\r\n\x00-\x1f\x7f]/g, ' ').slice(0, 512)}\n`,
+  );
   process.exitCode = 1;
 });

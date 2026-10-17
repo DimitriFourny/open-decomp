@@ -7,14 +7,26 @@ test('work accounting survives phase changes and rejects work beyond the shared 
   context.checkpoint(2);
   context.progress('next-pass', 0, 1);
   context.checkpoint(1);
-  assert.throws(() => context.checkpoint(1), error => error instanceof OperationError && error.code === 'resource_limit' && error.diagnostic.details?.kind === 'limit' && error.diagnostic.details.consumed === 4);
+  assert.throws(
+    () => context.checkpoint(1),
+    (error) =>
+      error instanceof OperationError &&
+      error.code === 'resource_limit' &&
+      error.diagnostic.details?.kind === 'limit' &&
+      error.diagnostic.details.consumed === 4,
+  );
   assert.throws(() => context.checkpoint(-1), RangeError);
 });
 
 test('aborting an operation stops zero-cost checkpoints and progress publication', () => {
   const controller = new AbortController();
   const phases: string[] = [];
-  const context = createOperationContext({ signal: controller.signal, onProgress: phase => { phases.push(phase); } });
+  const context = createOperationContext({
+    signal: controller.signal,
+    onProgress: (phase) => {
+      phases.push(phase);
+    },
+  });
   context.progress('decode', 1, 2);
   controller.abort();
   assert.throws(() => context.checkpoint(0), { code: 'cancelled' });

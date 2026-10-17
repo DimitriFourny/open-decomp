@@ -2,14 +2,27 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { X86Decoder } from '../../../src/decoders/x86_64/index.js';
-import { createOperationContext as operation, OperationError, type DecodeResult, type DecodedInstruction, type LoadedImage, type X86Payload } from '../../../src/core/index.js';
+import {
+  createOperationContext as operation,
+  OperationError,
+  type DecodeResult,
+  type DecodedInstruction,
+  type LoadedImage,
+  type X86Payload,
+} from '../../../src/core/index.js';
 import { imageFromBytes, region } from './helpers.js';
 
 function decode(bytes: readonly number[]): DecodeResult {
   const decoder = new X86Decoder({ formatting: false });
   const image = imageFromBytes(Uint8Array.from(bytes));
-  try { return decoder.decode({ image, regions: [region(image)], features: [], mode: 'long64' }, operation()); }
-  finally { decoder.dispose(); }
+  try {
+    return decoder.decode(
+      { image, regions: [region(image)], features: [], mode: 'long64' },
+      operation(),
+    );
+  } finally {
+    decoder.dispose();
+  }
 }
 function x86(instruction: DecodedInstruction | undefined): X86Payload {
   assert.ok(instruction);
@@ -35,7 +48,9 @@ test('RIP-relative loads preserve signed displacement, target, and exact referen
 });
 
 test('address override, SIB scale, FS override, and LEA address-only effects stay distinct', () => {
-  const [load, lea] = decode([0x64, 0x67, 0x48, 0x8b, 0x44, 0x8b, 0xf0, 0x48, 0x8d, 0x04, 0x8b]).instructions;
+  const [load, lea] = decode([
+    0x64, 0x67, 0x48, 0x8b, 0x44, 0x8b, 0xf0, 0x48, 0x8d, 0x04, 0x8b,
+  ]).instructions;
   const memory = x86(load).operands[1];
   assert.ok(memory?.kind === 'memory');
   assert.equal(memory.memory.address_bits, 32);
@@ -52,7 +67,9 @@ test('address override, SIB scale, FS override, and LEA address-only effects sta
 });
 
 test('EAX zero-extends its root, while AH replaces only bits 8 through 15', () => {
-  const [eax, ah, ax] = decode([0xb8, 0x78, 0x56, 0x34, 0x12, 0xb4, 0xab, 0x66, 0xb8, 0x34, 0x12]).instructions;
+  const [eax, ah, ax] = decode([
+    0xb8, 0x78, 0x56, 0x34, 0x12, 0xb4, 0xab, 0x66, 0xb8, 0x34, 0x12,
+  ]).instructions;
   const destination = x86(eax).operands[0];
   assert.ok(destination?.kind === 'register');
   assert.equal(destination.register.root, 'x86_64:rax');
@@ -65,26 +82,58 @@ test('EAX zero-extends its root, while AH replaces only bits 8 through 15', () =
   assert.equal(high.register.width_bits, 8);
   assert.equal(high.register.write_rule, 'preserve_other_bits');
   assert.equal(x86(ax).operand_bits, 16);
-  assert.ok(x86(eax).registers.some((r) => !r.implicit && r.register.id === 'x86_64:eax' && r.register.write_rule === 'zero_extend_root'));
+  assert.ok(
+    x86(eax).registers.some(
+      (r) =>
+        !r.implicit &&
+        r.register.id === 'x86_64:eax' &&
+        r.register.write_rule === 'zero_extend_root',
+    ),
+  );
 });
 
 test('MUL and DIV expose accumulator/high-half dependencies and undefined flags', () => {
   const [mul, div] = decode([0xf7, 0xe3, 0xf7, 0xf3]).instructions;
   for (const instruction of [mul, div]) {
     const p = x86(instruction);
-    assert.ok(p.registers.some((r) => r.implicit && r.register.root === 'x86_64:rax' && r.access.includes('read')));
-    assert.ok(p.registers.some((r) => r.implicit && r.register.id === 'x86_64:edx' && r.access.includes('write') && r.register.write_rule === 'zero_extend_root'));
-    assert.ok(p.registers.some((r) => !r.implicit && r.register.id === 'x86_64:ebx' && r.access === 'read'));
+    assert.ok(
+      p.registers.some(
+        (r) => r.implicit && r.register.root === 'x86_64:rax' && r.access.includes('read'),
+      ),
+    );
+    assert.ok(
+      p.registers.some(
+        (r) =>
+          r.implicit &&
+          r.register.id === 'x86_64:edx' &&
+          r.access.includes('write') &&
+          r.register.write_rule === 'zero_extend_root',
+      ),
+    );
+    assert.ok(
+      p.registers.some((r) => !r.implicit && r.register.id === 'x86_64:ebx' && r.access === 'read'),
+    );
   }
   assert.equal(x86(mul).flags.written, (1n << 0n) | (1n << 11n));
   assert.equal(x86(mul).flags.undefined, (1n << 2n) | (1n << 4n) | (1n << 6n) | (1n << 7n));
   assert.equal(x86(div).flags.undefined, 0x8d5n);
-  assert.ok(x86(div).registers.some((r) => r.implicit && r.register.root === 'x86_64:rdx' && r.access.includes('read')));
+  assert.ok(
+    x86(div).registers.some(
+      (r) => r.implicit && r.register.root === 'x86_64:rdx' && r.access.includes('read'),
+    ),
+  );
 });
 
 test('CMOV reads flags, with unconditional 32-bit zero-extension but conditional 64-bit writes', () => {
-  const [branch, cmov, cmov64] = decode([0x76, 0xfe, 0x0f, 0x4f, 0xc3, 0x48, 0x0f, 0x4f, 0xc3]).instructions;
-  assert.deepEqual(branch?.flow, { kind: 'branch', target: { ...branch!.address, value: 0x1000n }, conditional: true, fallthrough: { ...branch!.address, value: 0x1002n } });
+  const [branch, cmov, cmov64] = decode([
+    0x76, 0xfe, 0x0f, 0x4f, 0xc3, 0x48, 0x0f, 0x4f, 0xc3,
+  ]).instructions;
+  assert.deepEqual(branch?.flow, {
+    kind: 'branch',
+    target: { ...branch!.address, value: 0x1000n },
+    conditional: true,
+    fallthrough: { ...branch!.address, value: 0x1002n },
+  });
   assert.equal(x86(branch).flags.read, 0x41n);
   assert.equal(x86(branch).flags.written, 0n);
   assert.equal(x86(cmov).flags.read, 0x8c0n);
@@ -100,7 +149,10 @@ test('CMOV reads flags, with unconditional 32-bit zero-extension but conditional
 
 test('direct/indirect calls, branches, returns and proven UD2 traps have discovery flow', () => {
   const result = decode([0xe8, 0xfb, 0xff, 0xff, 0xff, 0xff, 0xd0, 0xff, 0xe0, 0xc3, 0x0f, 0x0b]);
-  assert.deepEqual(result.instructions.map((i) => i.flow.kind), ['call', 'call', 'indirect_branch', 'return', 'trap']);
+  assert.deepEqual(
+    result.instructions.map((i) => i.flow.kind),
+    ['call', 'call', 'indirect_branch', 'return', 'trap'],
+  );
   const direct = result.instructions[0]!.flow;
   assert.ok(direct.kind === 'call');
   assert.equal(direct.target?.value, 0x1000n);
@@ -109,11 +161,21 @@ test('direct/indirect calls, branches, returns and proven UD2 traps have discove
   assert.ok(indirect.kind === 'call');
   assert.equal(indirect.target, null);
   assert.equal(indirect.indirect, true);
-  assert.ok(x86(result.instructions[0]).memory.some((m) => m.base?.id === 'x86_64:rsp' && m.displacement === -8n && m.access === 'write' && m.access_bits === 64));
+  assert.ok(
+    x86(result.instructions[0]).memory.some(
+      (m) =>
+        m.base?.id === 'x86_64:rsp' &&
+        m.displacement === -8n &&
+        m.access === 'write' &&
+        m.access_bits === 64,
+    ),
+  );
 });
 
 test('opcode variants and sign-extended immediate widths survive normalization', () => {
-  const [short, full] = decode([0x48, 0x83, 0xc0, 0xff, 0x48, 0x05, 0xff, 0xff, 0xff, 0xff]).instructions;
+  const [short, full] = decode([
+    0x48, 0x83, 0xc0, 0xff, 0x48, 0x05, 0xff, 0xff, 0xff, 0xff,
+  ]).instructions;
   assert.notEqual(x86(short).encoding, x86(full).encoding);
   const small = x86(short).operands[1];
   const large = x86(full).operands[1];
@@ -127,7 +189,9 @@ test('opcode variants and sign-extended immediate widths survive normalization',
 });
 
 test('raw duplicate/ignored prefixes and VEX prefix bytes are preserved without confusing REX', () => {
-  const [ignored, vector] = decode([0x66, 0x66, 0x40, 0x66, 0x90, 0xc5, 0xf8, 0x57, 0xc0]).instructions;
+  const [ignored, vector] = decode([
+    0x66, 0x66, 0x40, 0x66, 0x90, 0xc5, 0xf8, 0x57, 0xc0,
+  ]).instructions;
   assert.deepEqual(x86(ignored).prefixes.bytes, [0x66, 0x66, 0x40, 0x66]);
   assert.equal(x86(ignored).prefixes.rex, null);
   assert.deepEqual(x86(vector).prefixes.bytes, [0xc5, 0xf8]);
@@ -163,160 +227,402 @@ test('invalid bytes and truncated encodings do not become proven traps or paddin
 });
 
 test('known data, zero-fill, unmapped holes and instruction budgets stay distinct', () => {
-  const initial = imageFromBytes(Uint8Array.from([0x90, 0x90, 0xc3]), { mappings: [{ id: 'code', va: 0x1000n, memory_size: 5n, file_offset: 0n, file_size: 3n, permissions: ['execute'] }] });
-  const image = { ...initial, hints: [{ kind: 'data' as const, range: region(initial, 0x1001n, 1), encoding: 'bytes' as const, evidence_ids: [] }] };
+  const initial = imageFromBytes(Uint8Array.from([0x90, 0x90, 0xc3]), {
+    mappings: [
+      {
+        id: 'code',
+        va: 0x1000n,
+        memory_size: 5n,
+        file_offset: 0n,
+        file_size: 3n,
+        permissions: ['execute'],
+      },
+    ],
+  });
+  const image = {
+    ...initial,
+    hints: [
+      {
+        kind: 'data' as const,
+        range: region(initial, 0x1001n, 1),
+        encoding: 'bytes' as const,
+        evidence_ids: [],
+      },
+    ],
+  };
   const decoder = new X86Decoder({ formatting: false });
   try {
-    const result = decoder.decode({ image, regions: [region(image, 0x1000n, 7)], features: [], mode: 'long64' }, operation());
-    assert.deepEqual(result.instructions.map((i) => i.address.value), [0x1000n, 0x1002n]);
-    assert.deepEqual(result.gaps.map((g) => [g.reason, g.range.size]), [['data', 1n], ['unmapped', 2n], ['unmapped', 2n]]);
-    const limited = decoder.decode({ image, regions: [region(image)], features: [], mode: 'long64' }, operation({ budget: { instructions: 1 } }));
+    const result = decoder.decode(
+      { image, regions: [region(image, 0x1000n, 7)], features: [], mode: 'long64' },
+      operation(),
+    );
+    assert.deepEqual(
+      result.instructions.map((i) => i.address.value),
+      [0x1000n, 0x1002n],
+    );
+    assert.deepEqual(
+      result.gaps.map((g) => [g.reason, g.range.size]),
+      [
+        ['data', 1n],
+        ['unmapped', 2n],
+        ['unmapped', 2n],
+      ],
+    );
+    const limited = decoder.decode(
+      { image, regions: [region(image)], features: [], mode: 'long64' },
+      operation({ budget: { instructions: 1 } }),
+    );
     assert.equal(limited.instructions.length, 1);
     assert.ok(limited.gaps.some((g) => g.reason === 'budget'));
-  } finally { decoder.dispose(); }
+  } finally {
+    decoder.dispose();
+  }
 });
 
 test('prepared data survives failed and cancelled preparation, changing windows and same-byte snapshots', () => {
   const initial = imageFromBytes(Uint8Array.from([0xc3, 0x90, 0xc3, 0x90, 0xc3, 0x90, 0xc3, 0xc3]));
   const entry = region(initial).start;
-  const image: LoadedImage = { ...initial, hints: [
-    { kind: 'data', range: region(initial, 0x1001n, 1), encoding: 'bytes', evidence_ids: [] },
-    ...Array.from({ length: 128 }, () => ({ kind: 'function' as const, address: entry, size: null, evidence_ids: [] })),
-    { kind: 'data', range: { start: { ...entry, space: 'file', value: 5n }, size: 1n }, encoding: 'bytes', evidence_ids: [] },
-  ] };
-  const request = { image, regions: [region(image, 0x1000n, 1)], features: [], mode: 'long64' as const };
+  const image: LoadedImage = {
+    ...initial,
+    hints: [
+      { kind: 'data', range: region(initial, 0x1001n, 1), encoding: 'bytes', evidence_ids: [] },
+      ...Array.from({ length: 128 }, () => ({
+        kind: 'function' as const,
+        address: entry,
+        size: null,
+        evidence_ids: [],
+      })),
+      {
+        kind: 'data',
+        range: { start: { ...entry, space: 'file', value: 5n }, size: 1n },
+        encoding: 'bytes',
+        evidence_ids: [],
+      },
+    ],
+  };
+  const request = {
+    image,
+    regions: [region(image, 0x1000n, 1)],
+    features: [],
+    mode: 'long64' as const,
+  };
   const decoder = new X86Decoder({ formatting: false });
   try {
-    assert.throws(() => decoder.decode(request, operation({ budget: { work: 16 } })),
-      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit');
+    assert.throws(
+      () => decoder.decode(request, operation({ budget: { work: 16 } })),
+      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit',
+    );
     // Abort at the final preparation checkpoint, without timers or replacing the adapter.
     const controller = new AbortController();
     const cancelling = operation({ signal: controller.signal });
     let zeroChecks = 0;
-    assert.throws(() => decoder.decode(request, { ...cancelling, checkpoint(work) {
-      if (work === 0 && ++zeroChecks === 2) controller.abort();
-      cancelling.checkpoint(work);
-    } }), (error: unknown) => error instanceof OperationError && error.code === 'cancelled');
+    assert.throws(
+      () =>
+        decoder.decode(request, {
+          ...cancelling,
+          checkpoint(work) {
+            if (work === 0 && ++zeroChecks === 2) controller.abort();
+            cancelling.checkpoint(work);
+          },
+        }),
+      (error: unknown) => error instanceof OperationError && error.code === 'cancelled',
+    );
     // Neither failure may install a partial or unchecked entry.
-    assert.throws(() => decoder.decode(request, operation({ budget: { work: 16 } })),
-      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit');
+    assert.throws(
+      () => decoder.decode(request, operation({ budget: { work: 16 } })),
+      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit',
+    );
     const first = decoder.decode(request, operation({ budget: { work: 1_000 } }));
     assert.equal(first.instructions[0]?.flow.kind, 'return');
     const whole = { ...request, regions: [region(image)] };
     // This budget cannot rescan all 128 non-data hints, but covers real cached partition work.
     const cached = decoder.decode(whole, operation({ budget: { work: 64 } }));
-    assert.deepEqual(cached.instructions.map(instruction => instruction.address.value), [0x1000n, 0x1002n, 0x1003n, 0x1004n, 0x1006n, 0x1007n]);
-    assert.deepEqual(cached.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]), [['data', 0x1001n, 1n], ['data', 0x1005n, 1n]]);
+    assert.deepEqual(
+      cached.instructions.map((instruction) => instruction.address.value),
+      [0x1000n, 0x1002n, 0x1003n, 0x1004n, 0x1006n, 0x1007n],
+    );
+    assert.deepEqual(
+      cached.gaps.map((gap) => [gap.reason, gap.range.start.value, gap.range.size]),
+      [
+        ['data', 0x1001n, 1n],
+        ['data', 0x1005n, 1n],
+      ],
+    );
     assert.deepEqual(cached.instructions[0], first.instructions[0]);
-    const shifted = decoder.decode({ ...whole, regions: [region(image, 0x1004n, 3)] }, operation({ budget: { work: 32 } }));
-    assert.deepEqual(shifted.instructions.map(instruction => instruction.address.value), [0x1004n, 0x1006n]);
-    assert.deepEqual(shifted.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]), [['data', 0x1005n, 1n]]);
+    const shifted = decoder.decode(
+      { ...whole, regions: [region(image, 0x1004n, 3)] },
+      operation({ budget: { work: 32 } }),
+    );
+    assert.deepEqual(
+      shifted.instructions.map((instruction) => instruction.address.value),
+      [0x1004n, 0x1006n],
+    );
+    assert.deepEqual(
+      shifted.gaps.map((gap) => [gap.reason, gap.range.start.value, gap.range.size]),
+      [['data', 0x1005n, 1n]],
+    );
     const other = { ...image, hints: [] };
     assert.equal(other.id, image.id);
-    const unhinted = decoder.decode({ ...whole, image: other }, operation({ budget: { work: 64 } }));
+    const unhinted = decoder.decode(
+      { ...whole, image: other },
+      operation({ budget: { work: 64 } }),
+    );
     assert.equal(unhinted.coverage.state, 'complete');
     assert.equal(unhinted.instructions.length, 8);
     assert.deepEqual(decoder.decode(whole, operation({ budget: { work: 64 } })), cached);
     const limited = decoder.decode(whole, operation({ budget: { instructions: 1 } }));
     assert.equal(limited.instructions.length, 1);
-    assert.deepEqual(limited.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]), [
-      ['data', 0x1001n, 1n], ['budget', 0x1002n, 3n], ['data', 0x1005n, 1n], ['budget', 0x1006n, 2n],
-    ]);
-    assert.throws(() => decoder.decode(whole, operation({ budget: { work: 3 } })),
-      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit');
-    const aborted = new AbortController(); aborted.abort();
-    assert.throws(() => decoder.decode(whole, operation({ signal: aborted.signal })),
-      (error: unknown) => error instanceof OperationError && error.code === 'cancelled');
+    assert.deepEqual(
+      limited.gaps.map((gap) => [gap.reason, gap.range.start.value, gap.range.size]),
+      [
+        ['data', 0x1001n, 1n],
+        ['budget', 0x1002n, 3n],
+        ['data', 0x1005n, 1n],
+        ['budget', 0x1006n, 2n],
+      ],
+    );
+    assert.throws(
+      () => decoder.decode(whole, operation({ budget: { work: 3 } })),
+      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit',
+    );
+    const aborted = new AbortController();
+    aborted.abort();
+    assert.throws(
+      () => decoder.decode(whole, operation({ signal: aborted.signal })),
+      (error: unknown) => error instanceof OperationError && error.code === 'cancelled',
+    );
     const duringPartition = new AbortController();
     const active = operation({ signal: duringPartition.signal });
     let charged = 0;
-    assert.throws(() => decoder.decode(whole, { ...active, checkpoint(work) {
-      charged += work;
-      if (charged >= 4) duringPartition.abort();
-      active.checkpoint(work);
-    } }), (error: unknown) => error instanceof OperationError && error.code === 'cancelled');
-  } finally { decoder.dispose(); }
+    assert.throws(
+      () =>
+        decoder.decode(whole, {
+          ...active,
+          checkpoint(work) {
+            charged += work;
+            if (charged >= 4) duringPartition.abort();
+            active.checkpoint(work);
+          },
+        }),
+      (error: unknown) => error instanceof OperationError && error.code === 'cancelled',
+    );
+  } finally {
+    decoder.dispose();
+  }
 });
 
 test('prepared partitions retain overlapping data boundaries, holes and split-backing instructions', () => {
-  const initial = imageFromBytes(Uint8Array.from([0xe8, 0, 0, 0xcc, 0xcc, 0, 0, 0xc3, 0x90, 0x90]), { mappings: [
-    { id: 'one', va: 0x1000n, memory_size: 3n, file_offset: 0n, file_size: 3n, permissions: ['execute'] },
-    { id: 'two', va: 0x1003n, memory_size: 6n, file_offset: 5n, file_size: 5n, permissions: ['execute'] },
-  ] });
-  const image: LoadedImage = { ...initial, hints: [
-    { kind: 'data', range: region(initial, 0x1006n, 4), encoding: 'bytes', evidence_ids: [] },
-    { kind: 'data', range: region(initial, 0x1007n, 1), encoding: 'bytes', evidence_ids: [] },
-  ] };
+  const initial = imageFromBytes(
+    Uint8Array.from([0xe8, 0, 0, 0xcc, 0xcc, 0, 0, 0xc3, 0x90, 0x90]),
+    {
+      mappings: [
+        {
+          id: 'one',
+          va: 0x1000n,
+          memory_size: 3n,
+          file_offset: 0n,
+          file_size: 3n,
+          permissions: ['execute'],
+        },
+        {
+          id: 'two',
+          va: 0x1003n,
+          memory_size: 6n,
+          file_offset: 5n,
+          file_size: 5n,
+          permissions: ['execute'],
+        },
+      ],
+    },
+  );
+  const image: LoadedImage = {
+    ...initial,
+    hints: [
+      { kind: 'data', range: region(initial, 0x1006n, 4), encoding: 'bytes', evidence_ids: [] },
+      { kind: 'data', range: region(initial, 0x1007n, 1), encoding: 'bytes', evidence_ids: [] },
+    ],
+  };
   const decoder = new X86Decoder({ formatting: false });
   try {
-    const whole = { image, regions: [region(image, 0x1000n, 11)], features: [], mode: 'long64' as const };
+    const whole = {
+      image,
+      regions: [region(image, 0x1000n, 11)],
+      features: [],
+      mode: 'long64' as const,
+    };
     const result = decoder.decode(whole, operation());
-    assert.deepEqual(result.instructions.map(instruction => [instruction.address.value, instruction.size, instruction.bytes.start.space]), [
-      [0x1000n, 5, 'va'], [0x1005n, 1, 'file'],
-    ]);
-    assert.deepEqual(result.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]), [
-      ['data', 0x1006n, 1n], ['data', 0x1007n, 1n], ['data', 0x1008n, 1n], ['data', 0x1009n, 1n], ['unmapped', 0x100an, 1n],
-    ]);
+    assert.deepEqual(
+      result.instructions.map((instruction) => [
+        instruction.address.value,
+        instruction.size,
+        instruction.bytes.start.space,
+      ]),
+      [
+        [0x1000n, 5, 'va'],
+        [0x1005n, 1, 'file'],
+      ],
+    );
+    assert.deepEqual(
+      result.gaps.map((gap) => [gap.reason, gap.range.start.value, gap.range.size]),
+      [
+        ['data', 0x1006n, 1n],
+        ['data', 0x1007n, 1n],
+        ['data', 0x1008n, 1n],
+        ['data', 0x1009n, 1n],
+        ['unmapped', 0x100an, 1n],
+      ],
+    );
     const short = decoder.decode({ ...whole, regions: [region(image, 0x1000n, 4)] }, operation());
     assert.equal(short.instructions.length, 0);
-    assert.deepEqual(short.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]), [['truncated', 0x1000n, 4n]]);
+    assert.deepEqual(
+      short.gaps.map((gap) => [gap.reason, gap.range.start.value, gap.range.size]),
+      [['truncated', 0x1000n, 4n]],
+    );
     assert.deepEqual(decoder.decode(whole, operation()), result);
-    const boundary = { ...image, hints: [{ kind: 'data' as const, range: region(image, 0x1004n, 1), encoding: 'bytes' as const, evidence_ids: [] }] };
-    const stopped = decoder.decode({ ...whole, image: boundary, regions: [region(image, 0x1000n, 6)] }, operation());
-    assert.deepEqual(stopped.instructions.map(instruction => instruction.address.value), [0x1005n]);
-    assert.deepEqual(stopped.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]), [
-      ['truncated', 0x1000n, 4n], ['data', 0x1004n, 1n],
-    ]);
-  } finally { decoder.dispose(); }
+    const boundary = {
+      ...image,
+      hints: [
+        {
+          kind: 'data' as const,
+          range: region(image, 0x1004n, 1),
+          encoding: 'bytes' as const,
+          evidence_ids: [],
+        },
+      ],
+    };
+    const stopped = decoder.decode(
+      { ...whole, image: boundary, regions: [region(image, 0x1000n, 6)] },
+      operation(),
+    );
+    assert.deepEqual(
+      stopped.instructions.map((instruction) => instruction.address.value),
+      [0x1005n],
+    );
+    assert.deepEqual(
+      stopped.gaps.map((gap) => [gap.reason, gap.range.start.value, gap.range.size]),
+      [
+        ['truncated', 0x1000n, 4n],
+        ['data', 0x1004n, 1n],
+      ],
+    );
+  } finally {
+    decoder.dispose();
+  }
 });
 
 test('cached narrow windows skip unrelated data while dense partitions still consume work', () => {
   const initial = imageFromBytes(new Uint8Array(513).fill(0x90));
-  const image: LoadedImage = { ...initial, hints: Array.from({ length: 256 }, (_, index) => ({
-    kind: 'data', range: region(initial, 0x1001n + BigInt(index * 2), 1), encoding: 'bytes', evidence_ids: [],
-  })) };
-  const request = { image, regions: [region(image, 0x1200n, 1)], features: [], mode: 'long64' as const };
+  const image: LoadedImage = {
+    ...initial,
+    hints: Array.from({ length: 256 }, (_, index) => ({
+      kind: 'data',
+      range: region(initial, 0x1001n + BigInt(index * 2), 1),
+      encoding: 'bytes',
+      evidence_ids: [],
+    })),
+  };
+  const request = {
+    image,
+    regions: [region(image, 0x1200n, 1)],
+    features: [],
+    mode: 'long64' as const,
+  };
   const decoder = new X86Decoder({ formatting: false });
   try {
     const first = decoder.decode(request, operation());
     assert.equal(first.instructions.length, 1);
     assert.deepEqual(decoder.decode(request, operation({ budget: { work: 32 } })), first);
-    const beginning = decoder.decode({ ...request, regions: [region(image, 0x1000n, 2)] }, operation({ budget: { work: 32 } }));
-    assert.deepEqual(beginning.instructions.map(instruction => instruction.address.value), [0x1000n]);
-    assert.deepEqual(beginning.gaps.map(gap => [gap.reason, gap.range.start.value, gap.range.size]), [['data', 0x1001n, 1n]]);
-    assert.throws(() => decoder.decode({ ...request, regions: [region(image)] }, operation({ budget: { work: 32 } })),
-      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit');
-  } finally { decoder.dispose(); }
+    const beginning = decoder.decode(
+      { ...request, regions: [region(image, 0x1000n, 2)] },
+      operation({ budget: { work: 32 } }),
+    );
+    assert.deepEqual(
+      beginning.instructions.map((instruction) => instruction.address.value),
+      [0x1000n],
+    );
+    assert.deepEqual(
+      beginning.gaps.map((gap) => [gap.reason, gap.range.start.value, gap.range.size]),
+      [['data', 0x1001n, 1n]],
+    );
+    assert.throws(
+      () =>
+        decoder.decode(
+          { ...request, regions: [region(image)] },
+          operation({ budget: { work: 32 } }),
+        ),
+      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit',
+    );
+  } finally {
+    decoder.dispose();
+  }
 });
 
 test('adjacent virtual mappings decode across disjoint backing using a VA byte reference', () => {
-  const image = imageFromBytes(Uint8Array.from([0xe8, 0, 0, 0xcc, 0xcc, 0, 0, 0xc3]), { mappings: [
-    { id: 'one', va: 0x1000n, memory_size: 3n, file_offset: 0n, file_size: 3n, permissions: ['execute'] },
-    { id: 'two', va: 0x1003n, memory_size: 3n, file_offset: 5n, file_size: 3n, permissions: ['execute'] },
-  ] });
+  const image = imageFromBytes(Uint8Array.from([0xe8, 0, 0, 0xcc, 0xcc, 0, 0, 0xc3]), {
+    mappings: [
+      {
+        id: 'one',
+        va: 0x1000n,
+        memory_size: 3n,
+        file_offset: 0n,
+        file_size: 3n,
+        permissions: ['execute'],
+      },
+      {
+        id: 'two',
+        va: 0x1003n,
+        memory_size: 3n,
+        file_offset: 5n,
+        file_size: 3n,
+        permissions: ['execute'],
+      },
+    ],
+  });
   const decoder = new X86Decoder({ formatting: false });
   try {
-    const result = decoder.decode({ image, regions: [region(image, 0x1000n, 6)], features: [], mode: 'long64' }, operation());
+    const result = decoder.decode(
+      { image, regions: [region(image, 0x1000n, 6)], features: [], mode: 'long64' },
+      operation(),
+    );
     assert.equal(result.gaps.length, 0);
     assert.equal(result.instructions[0]?.bytes.start.space, 'va');
     assert.equal(result.instructions[0]?.size, 5);
     assert.equal(result.instructions[1]?.bytes.start.value, 7n);
     assert.equal(result.instructions[1]?.flow.kind, 'return');
-  } finally { decoder.dispose(); }
+  } finally {
+    decoder.dispose();
+  }
 });
 
 test('RVA/file requests normalize to VA and overlapping regions decode once', () => {
   const image = imageFromBytes(Uint8Array.from([0x90, 0xc3]));
   const decoder = new X86Decoder();
   try {
-    const result = decoder.decode({ image, regions: [{ start: { image_id: image.id, space: 'rva', value: 0n }, size: 2n }, { start: { image_id: image.id, space: 'file', value: 0n }, size: 2n }], features: [], mode: 'long64' }, operation());
+    const result = decoder.decode(
+      {
+        image,
+        regions: [
+          { start: { image_id: image.id, space: 'rva', value: 0n }, size: 2n },
+          { start: { image_id: image.id, space: 'file', value: 0n }, size: 2n },
+        ],
+        features: [],
+        mode: 'long64',
+      },
+      operation(),
+    );
     assert.equal(result.instructions.length, 2);
     assert.equal(result.instructions[0]?.address.space, 'va');
     assert.equal(decoder.format(result.instructions[1]!).mnemonic, 'ret');
-    decoder.dispose(); decoder.dispose();
-    assert.throws(() => decoder.decode({ image, regions: [], features: [], mode: 'long64' }, operation()), /disposed/);
+    decoder.dispose();
+    decoder.dispose();
+    assert.throws(
+      () => decoder.decode({ image, regions: [], features: [], mode: 'long64' }, operation()),
+      /disposed/,
+    );
     assert.throws(() => decoder.format(result.instructions[0]!), /disposed/);
-  } finally { decoder.dispose(); }
+  } finally {
+    decoder.dispose();
+  }
 });
 
 test('long regions retain instruction boundaries across bounded decode windows', () => {
@@ -326,36 +632,101 @@ test('long regions retain instruction boundaries across bounded decode windows',
   const image = imageFromBytes(bytes);
   const decoder = new X86Decoder({ formatting: false });
   try {
-    const result = decoder.decode({ image, regions: [region(image)], features: [], mode: 'long64' }, operation({ budget: { instructions: 100000 } }));
+    const result = decoder.decode(
+      { image, regions: [region(image)], features: [], mode: 'long64' },
+      operation({ budget: { instructions: 100000 } }),
+    );
     assert.equal(result.gaps.length, 0);
     assert.equal(result.instructions.length, 65536);
     assert.equal(result.instructions.at(-2)?.size, 5);
     assert.equal(result.instructions.at(-1)?.flow.kind, 'return');
-  } finally { decoder.dispose(); }
+  } finally {
+    decoder.dispose();
+  }
 });
 
 test('PE corpus function bytes have actual returns, signed division, direct and indirect calls', async () => {
-  const manifest = JSON.parse(await readFile(new URL('../../../fixtures/manifest.json', import.meta.url), 'utf8')) as { codeRanges: { architecture: string; symbol: string; image: string; address: string; fileOffset: number; size: number; path: string }[] };
+  const manifest = JSON.parse(
+    await readFile(new URL('../../../fixtures/manifest.json', import.meta.url), 'utf8'),
+  ) as {
+    codeRanges: {
+      architecture: string;
+      symbol: string;
+      image: string;
+      address: string;
+      fileOffset: number;
+      size: number;
+      path: string;
+    }[];
+  };
   const decoder = new X86Decoder();
   try {
-    for (const name of ['fixture_arithmetic', 'fixture_maximum', 'fixture_divide', 'fixture_direct', 'fixture_indirect', 'fixture_float', 'fixture_vector', 'fixture_vector_integer']) {
-      const fn = manifest.codeRanges.find((entry) => entry.architecture === 'x86_64' && entry.symbol === name)!;
+    for (const name of [
+      'fixture_arithmetic',
+      'fixture_maximum',
+      'fixture_divide',
+      'fixture_direct',
+      'fixture_indirect',
+      'fixture_float',
+      'fixture_vector',
+      'fixture_vector_integer',
+    ]) {
+      const fn = manifest.codeRanges.find(
+        (entry) => entry.architecture === 'x86_64' && entry.symbol === name,
+      )!;
       assert.ok(fn);
       const container = await readFile(new URL(`../../../${fn.image}`, import.meta.url));
       const extracted = await readFile(new URL(`../../../${fn.path}`, import.meta.url));
       assert.deepEqual(container.subarray(fn.fileOffset, fn.fileOffset + fn.size), extracted);
-      const image = imageFromBytes(container, { base: BigInt(fn.address), fileOffset: BigInt(fn.fileOffset) });
-      const result = decoder.decode({ image, regions: [region(image, BigInt(fn.address), fn.size)], features: [], mode: 'long64' }, operation());
+      const image = imageFromBytes(container, {
+        base: BigInt(fn.address),
+        fileOffset: BigInt(fn.fileOffset),
+      });
+      const result = decoder.decode(
+        {
+          image,
+          regions: [region(image, BigInt(fn.address), fn.size)],
+          features: [],
+          mode: 'long64',
+        },
+        operation(),
+      );
       assert.equal(result.coverage.state, 'complete', name);
-      assert.ok(result.instructions.some((i) => i.flow.kind === 'return'), name);
-      assert.equal(result.instructions.reduce((sum, i) => sum + i.size, 0), fn.size);
-      for (const instruction of result.instructions) assert.equal(instruction.bytes.start.value - BigInt(fn.fileOffset), instruction.address.value - BigInt(fn.address));
-      if (name === 'fixture_divide') assert.ok(result.instructions.some((i) => x86(i).mnemonic === 'idiv' && x86(i).registers.some((r) => r.implicit && r.register.root === 'x86_64:rdx')));
-      if (name === 'fixture_direct') assert.ok(result.instructions.some((i) => i.flow.kind === 'call' && !i.flow.indirect && i.flow.target !== null));
-      if (name === 'fixture_indirect') assert.ok(result.instructions.some((i) => i.flow.kind === 'call' && i.flow.indirect));
-      if (name === 'fixture_maximum') assert.ok(result.instructions.some((i) => x86(i).flags.read !== 0n));
+      assert.ok(
+        result.instructions.some((i) => i.flow.kind === 'return'),
+        name,
+      );
+      assert.equal(
+        result.instructions.reduce((sum, i) => sum + i.size, 0),
+        fn.size,
+      );
+      for (const instruction of result.instructions)
+        assert.equal(
+          instruction.bytes.start.value - BigInt(fn.fileOffset),
+          instruction.address.value - BigInt(fn.address),
+        );
+      if (name === 'fixture_divide')
+        assert.ok(
+          result.instructions.some(
+            (i) =>
+              x86(i).mnemonic === 'idiv' &&
+              x86(i).registers.some((r) => r.implicit && r.register.root === 'x86_64:rdx'),
+          ),
+        );
+      if (name === 'fixture_direct')
+        assert.ok(
+          result.instructions.some(
+            (i) => i.flow.kind === 'call' && !i.flow.indirect && i.flow.target !== null,
+          ),
+        );
+      if (name === 'fixture_indirect')
+        assert.ok(result.instructions.some((i) => i.flow.kind === 'call' && i.flow.indirect));
+      if (name === 'fixture_maximum')
+        assert.ok(result.instructions.some((i) => x86(i).flags.read !== 0n));
     }
-  } finally { decoder.dispose(); }
+  } finally {
+    decoder.dispose();
+  }
 });
 
 test('implied shift-by-one is not confused with an encoded immediate byte', () => {
@@ -377,7 +748,10 @@ test('EIP-relative accesses wrap at 32 bits while 64-bit branch targets retain h
   const image = imageFromBytes(bytes, { base: 0x180001000n });
   const decoder = new X86Decoder({ formatting: false });
   try {
-    const result = decoder.decode({ image, regions: [region(image)], features: [], mode: 'long64' }, operation());
+    const result = decoder.decode(
+      { image, regions: [region(image)], features: [], mode: 'long64' },
+      operation(),
+    );
     const memory = x86(result.instructions[0]).operands[1];
     assert.ok(memory?.kind === 'memory');
     assert.equal(memory.memory.base?.id, 'x86_64:eip');
@@ -386,19 +760,26 @@ test('EIP-relative accesses wrap at 32 bits while 64-bit branch targets retain h
     const branch = result.instructions[1]!.flow;
     assert.ok(branch.kind === 'branch');
     assert.equal(branch.target.value, 0x180001000n);
-  } finally { decoder.dispose(); }
+  } finally {
+    decoder.dispose();
+  }
 });
 
 test('feature-disabled encodings preserve their structured payload and diagnostics', () => {
   const image = imageFromBytes(Uint8Array.from([0xc5, 0xf8, 0x57, 0xc0]));
   const decoder = new X86Decoder({ formatting: false });
   try {
-    const result = decoder.decode({ image, regions: [region(image)], features: ['INTEL8086'], mode: 'long64' }, operation());
+    const result = decoder.decode(
+      { image, regions: [region(image)], features: ['INTEL8086'], mode: 'long64' },
+      operation(),
+    );
     assert.equal(result.instructions[0]?.validity, 'feature_disabled');
     assert.equal(result.instructions[0]?.payload?.architecture, 'x86_64');
     assert.equal(result.instructions[0]?.diagnostics[0]?.code, 'unsupported_target');
     assert.equal(result.coverage.state, 'partial');
-  } finally { decoder.dispose(); }
+  } finally {
+    decoder.dispose();
+  }
 });
 
 test('implicit accumulator and stack effects remain implicit when explicit operands overlap', () => {
@@ -407,6 +788,14 @@ test('implicit accumulator and stack effects remain implicit when explicit opera
   assert.ok(source?.kind === 'register');
   assert.equal(source.register.id, 'x86_64:eax');
   assert.equal(source.access, 'read');
-  assert.ok(x86(mul).registers.some((r) => r.implicit && r.register.root === 'x86_64:rax' && r.access.includes('write')));
-  assert.ok(x86(push).registers.some((r) => r.implicit && r.register.root === 'x86_64:rsp' && r.access.includes('write')));
+  assert.ok(
+    x86(mul).registers.some(
+      (r) => r.implicit && r.register.root === 'x86_64:rax' && r.access.includes('write'),
+    ),
+  );
+  assert.ok(
+    x86(push).registers.some(
+      (r) => r.implicit && r.register.root === 'x86_64:rsp' && r.access.includes('write'),
+    ),
+  );
 });

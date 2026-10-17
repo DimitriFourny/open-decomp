@@ -8,17 +8,17 @@ Corpus-relative paths in this document are under `fixtures/`; explicitly prefixe
 
 `manifest.json` is the machine-readable index. It records source/recipe SHA-256, complete compiler/linker/inspection commands, tool versions (and hashes where a version flag is unavailable), image hashes, independent LLVM report hashes, entry addresses, mappings, symbols, imports/exports, slice identities, raw function ranges, and every malformed mutation with expected disposition. Addresses are unslid hexadecimal VAs, not host addresses. PE RVAs and slice file offsets must not be substituted for VAs.
 
-| Input under `bin/` | Target/type | Entry VA | Useful symbol expectation |
-| --- | --- | --- | --- |
-| `macho-arm64-symbols` | Darwin ARM64 executable | `0x100000a8c` (`_main`) | `_fixture_arithmetic` at `0x100000574`, file offset 1396, 20 bytes; imports `_puts` |
-| `macho-arm64-stripped` | Same, executable symbols removed | `0x100000a8c` | `_fixture_arithmetic` absent from nlist; code and entry retained |
-| `libcorpus-arm64-symbols.dylib` | Darwin ARM64 dylib | None | Exports `_fixture_arithmetic` at `0x43c` |
-| `libcorpus-arm64-stripped.dylib` | Dylib, debug/local symbols stripped | None | Dynamic exports intentionally retained |
-| `macho-universal` | Real lipo x86-64 + ARM64 executable | Selected ARM64 entry as above | ARM64 slice at file offset 32768, size 52368, byte-identical to thin symbol-bearing input |
-| `pe-x86_64-symbols.exe` | Windows x86-64 PE32+ executable | `0x140001000` (`fixture_entry`, RVA `0x1000`) | Image base `0x140000000`; imports `KERNEL32.dll!ExitProcess` and `corpus-symbols.dll!fixture_check` |
-| `pe-x86_64-stripped.exe` | Same, debug sections stripped | `0x140001000` | Imports unchanged |
-| `corpus-symbols.dll` | Windows x86-64 PE32+ DLL | None (`/noentry`) | Exports `fixture_arithmetic` at `0x180001030`, file offset 1072; image base `0x180000000` |
-| `corpus-stripped.dll` | DLL, debug sections stripped | None | Export names intentionally retained |
+| Input under `bin/`               | Target/type                         | Entry VA                                      | Useful symbol expectation                                                                           |
+| -------------------------------- | ----------------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `macho-arm64-symbols`            | Darwin ARM64 executable             | `0x100000a8c` (`_main`)                       | `_fixture_arithmetic` at `0x100000574`, file offset 1396, 20 bytes; imports `_puts`                 |
+| `macho-arm64-stripped`           | Same, executable symbols removed    | `0x100000a8c`                                 | `_fixture_arithmetic` absent from nlist; code and entry retained                                    |
+| `libcorpus-arm64-symbols.dylib`  | Darwin ARM64 dylib                  | None                                          | Exports `_fixture_arithmetic` at `0x43c`                                                            |
+| `libcorpus-arm64-stripped.dylib` | Dylib, debug/local symbols stripped | None                                          | Dynamic exports intentionally retained                                                              |
+| `macho-universal`                | Real lipo x86-64 + ARM64 executable | Selected ARM64 entry as above                 | ARM64 slice at file offset 32768, size 52368, byte-identical to thin symbol-bearing input           |
+| `pe-x86_64-symbols.exe`          | Windows x86-64 PE32+ executable     | `0x140001000` (`fixture_entry`, RVA `0x1000`) | Image base `0x140000000`; imports `KERNEL32.dll!ExitProcess` and `corpus-symbols.dll!fixture_check` |
+| `pe-x86_64-stripped.exe`         | Same, debug sections stripped       | `0x140001000`                                 | Imports unchanged                                                                                   |
+| `corpus-symbols.dll`             | Windows x86-64 PE32+ DLL            | None (`/noentry`)                             | Exports `fixture_arithmetic` at `0x180001030`, file offset 1072; image base `0x180000000`           |
+| `corpus-stripped.dll`            | DLL, debug sections stripped        | None                                          | Export names intentionally retained                                                                 |
 
 The DLL is not an empty shell: it contains all semantic functions, exported data, a real relocatable function-pointer initializer, a zero-filled global, Windows unwind metadata, and the complete source self-check. The EXE invokes its imported self-check and passes the result to `ExitProcess`, with no CRT dependency. Both EXEs deliberately import the same DLL name; the trusted execution driver isolates the stripped pair and renames its checked-in DLL copy to that import name.
 
@@ -30,11 +30,11 @@ The DLL is not an empty shell: it contains all semantic functions, exported data
 
 The independent `elf-manifest.json` indexes LLVM cross-compiled Linux x86-64 inputs without rewriting the historical Mach-O/PE manifest or its pinned recipes. Generate it with the commands below before running ELF tests or the full investigation workflows. Generated artifacts are compiler outputs, not synthesized headers; generation never executes them.
 
-| Output under `bin/` | Format/type | Native interface |
-| --- | --- | --- |
-| `elf-x86_64-symbols` / `elf-x86_64-stripped` | ELF64 ET_EXEC, linked base `0x400000` | Explicit analysis entry `fixture_entry`; dynamic corpus exports and `fixture_external` import |
-| `libcorpus-elf-x86_64-symbols.so` / `libcorpus-elf-x86_64-stripped.so` | ELF64 ET_DYN | All existing `fixture_*` scalar/control/stack/memory/call/FP/vector functions and data; `fixture_external` import |
-| `libfixture-native.so` | ELF64 ET_DYN, self-authored dependency | Exports `fixture_external(value) = value ^ 0x1234` |
+| Output under `bin/`                                                    | Format/type                            | Native interface                                                                                                  |
+| ---------------------------------------------------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `elf-x86_64-symbols` / `elf-x86_64-stripped`                           | ELF64 ET_EXEC, linked base `0x400000`  | Explicit analysis entry `fixture_entry`; dynamic corpus exports and `fixture_external` import                     |
+| `libcorpus-elf-x86_64-symbols.so` / `libcorpus-elf-x86_64-stripped.so` | ELF64 ET_DYN                           | All existing `fixture_*` scalar/control/stack/memory/call/FP/vector functions and data; `fixture_external` import |
+| `libfixture-native.so`                                                 | ELF64 ET_DYN, self-authored dependency | Exports `fixture_external(value) = value ^ 0x1234`                                                                |
 
 Both main images record `DT_NEEDED libfixture-native.so`; that does not by itself attribute an individual undefined symbol to a library. Their stripped variants remove static/debug tables while retaining the dynamic interfaces. `fixture_entry` is intentionally **not** runnable Linux process startup: no CRT, syscalls, exit routine, kernel behavior or dynamic-linker execution is claimed. Shared-library internal corpus calls bind locally (`-Bsymbolic`) so source-call oracles have stable linked targets; the external native import remains dynamic.
 
@@ -67,18 +67,17 @@ node --import tsx --test test/fixtures/elf-*.test.ts test/abi/sysv-amd64/compile
 
 Compiled acceptance remains `node dist/scripts/release-acceptance.js`; it now investigates each supported format/ABI rather than treating all x86-64 inputs as PE. No ELF native-execution mode was added to `execute-trusted.ts`.
 
-
 ### Loader-independent function inputs
 
 `code/arm64/fixture_*.bin` and `code/x86_64/fixture_*.bin` contain 16 compiler function ranges per architecture. `manifest.codeRanges` binds each raw file to its parent image, source symbol, VA, file offset, byte length and hash. They can be consumed immediately by decoder/lifter tests with no image loader or sibling checkout. Symbol-to-next-symbol extents can contain compiler alignment padding, especially x86 NOP/INT3 bytes; these bytes are not proof of reachable instructions. Use CFG reachability, do not call recognition counts whole-function semantic conformance.
 
 ## Source semantics and isolated oracle
 
-* `source/corpus.c` / `corpus.h`: wrapping integer arithmetic, signed comparison/division, loops, volatile stack storage, aliased load/add/store, direct/indirect calls, 32-to-64-bit extension and masked variable shifts, ten integer arguments, binary64 arithmetic, 128-bit four-lane float/integer vectors, promoted floating varargs, and a referenced string.
-* `source/check.c`: all 24 deterministic cases, with stable failure IDs 1–14 and exit 0 on success. The Mach-O executable additionally prints exactly `open-decomp trusted fixture v1\n`. Finite FP test values are exact; contraction is disabled. No signed C division by zero or `INT_MIN/-1` is claimed defined.
-* `expected.json`: explicit arguments, results and memory-after expectations, independent of pseudocode wording.
-* `inventory.json`: exact compiler-corpus signatures, semantic families, observed instruction families and corpus exclusions. It does **not** describe total product coverage: targeted tests separately cover ADC/SBB, partial-register writes, logical authentication boundaries, TLS, ordinal/delay imports, forwarded exports and Objective-C/Swift metadata. Advanced-vector and runtime limitations remain explicit.
-* `test/fixtures/oracle.ts`: isolated source-level BigInt width/wrapping and IEEE-number/`Math.fround` reference semantics. It never executes a user image or imports the service. Current typed-IR evaluator suites compare these vectors and memory/call/branch effects rather than generated source spelling.
+- `source/corpus.c` / `corpus.h`: wrapping integer arithmetic, signed comparison/division, loops, volatile stack storage, aliased load/add/store, direct/indirect calls, 32-to-64-bit extension and masked variable shifts, ten integer arguments, binary64 arithmetic, 128-bit four-lane float/integer vectors, promoted floating varargs, and a referenced string.
+- `source/check.c`: all 24 deterministic cases, with stable failure IDs 1–14 and exit 0 on success. The Mach-O executable additionally prints exactly `open-decomp trusted fixture v1\n`. Finite FP test values are exact; contraction is disabled. No signed C division by zero or `INT_MIN/-1` is claimed defined.
+- `expected.json`: explicit arguments, results and memory-after expectations, independent of pseudocode wording.
+- `inventory.json`: exact compiler-corpus signatures, semantic families, observed instruction families and corpus exclusions. It does **not** describe total product coverage: targeted tests separately cover ADC/SBB, partial-register writes, logical authentication boundaries, TLS, ordinal/delay imports, forwarded exports and Objective-C/Swift metadata. Advanced-vector and runtime limitations remain explicit.
+- `test/fixtures/oracle.ts`: isolated source-level BigInt width/wrapping and IEEE-number/`Math.fround` reference semantics. It never executes a user image or imports the service. Current typed-IR evaluator suites compare these vectors and memory/call/branch effects rather than generated source spelling.
 
 The trusted native harness establishes compiler-output behavior on compatible hosts; the mathematical oracle is an additional check, not a claim that a source evaluator decodes machine code. No tests or application modules load the sibling implementation. All normal fixture tests use checked-in bytes/results and require no network, private binaries, cross-compiler or target execution.
 

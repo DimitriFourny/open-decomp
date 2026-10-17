@@ -14,9 +14,14 @@ export interface MemorySample {
 export function sampleMemory(): MemorySample {
   const memory = process.memoryUsage();
   const maximum = process.resourceUsage().maxRSS;
-  return { rss_bytes: memory.rss, heap_total_bytes: memory.heapTotal, heap_used_bytes: memory.heapUsed,
-    external_bytes: memory.external, array_buffers_bytes: memory.arrayBuffers,
-    process_lifetime_max_rss_bytes: maximum > 0 ? maximum * 1024 : null };
+  return {
+    rss_bytes: memory.rss,
+    heap_total_bytes: memory.heapTotal,
+    heap_used_bytes: memory.heapUsed,
+    external_bytes: memory.external,
+    array_buffers_bytes: memory.arrayBuffers,
+    process_lifetime_max_rss_bytes: maximum > 0 ? maximum * 1024 : null,
+  };
 }
 export interface WorkerMark {
   readonly phase: string;

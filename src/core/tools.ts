@@ -1,237 +1,800 @@
 import { z } from 'zod';
-import { SCHEMA_VERSION, projectIdSchema, imageIdSchema, sliceIdSchema, entityIdSchema, jobIdSchema, revisionSchema, addressSchema, rangeSchema, hexU64Schema, diagnosticSchema, evidenceSchema, evidenceRefsSchema, capabilitySchema, coverageSchema, versionsSchema, budgetSchema, DEFAULT_BUDGET, analysisOptionsSchema, DEFAULT_ANALYSIS_OPTIONS, pageRequestSchema, artifactSchema } from './primitives.js';
-import { imageSummarySchema, headerSchema, sectionSchema, mappingSchema, relocationSchema, hintSchema, symbolSchema, importSchema, exportSchema, functionSchema, stringRecordSchema, referenceSchema, signatureSchema, annotationEditSchema, annotationSchema, lineageSchema } from './model.js';
+import {
+  SCHEMA_VERSION,
+  projectIdSchema,
+  imageIdSchema,
+  sliceIdSchema,
+  entityIdSchema,
+  jobIdSchema,
+  revisionSchema,
+  addressSchema,
+  rangeSchema,
+  hexU64Schema,
+  diagnosticSchema,
+  evidenceSchema,
+  evidenceRefsSchema,
+  capabilitySchema,
+  coverageSchema,
+  versionsSchema,
+  budgetSchema,
+  DEFAULT_BUDGET,
+  analysisOptionsSchema,
+  DEFAULT_ANALYSIS_OPTIONS,
+  pageRequestSchema,
+  artifactSchema,
+} from './primitives.js';
+import {
+  imageSummarySchema,
+  headerSchema,
+  sectionSchema,
+  mappingSchema,
+  relocationSchema,
+  hintSchema,
+  symbolSchema,
+  importSchema,
+  exportSchema,
+  functionSchema,
+  stringRecordSchema,
+  referenceSchema,
+  signatureSchema,
+  annotationEditSchema,
+  annotationSchema,
+  lineageSchema,
+} from './model.js';
 import { instructionSchema, cfgBlockSchema } from './decoder.js';
 import type { Internal } from './primitives.js';
 
-export const toolNameSchema = z.enum(['project_open', 'project_close', 'binary_info', 'symbols_find', 'strings_find', 'functions_find', 'function_get', 'function_decompile', 'xrefs_get', 'memory_read', 'annotations_apply', 'analysis_status', 'analysis_cancel']);
-export const jobSchema = z.strictObject({
-  id: jobIdSchema, project_id: projectIdSchema, input_revision: revisionSchema, operation: toolNameSchema,
-  state: z.enum(['queued', 'running', 'completed', 'cancelled', 'failed', 'stale']),
-  progress: z.strictObject({ phase: z.string().min(1).max(128), completed: revisionSchema, total: revisionSchema.nullable() }),
-  artifacts: z.array(artifactSchema).max(1000), diagnostics: z.array(diagnosticSchema).max(1000),
-  published_revision: revisionSchema.nullable(),
-}).superRefine((job, context) => {
-  if (job.progress.total !== null && job.progress.completed > job.progress.total) context.addIssue({ code: 'custom', message: 'Job progress exceeds total' });
-  if (job.published_revision !== null && (job.state !== 'completed' || job.published_revision !== job.input_revision)) context.addIssue({ code: 'custom', message: 'Only completed jobs may publish at their input revision' });
-  if (job.artifacts.some((artifact) => artifact.project_id !== job.project_id || artifact.revision !== job.input_revision)) context.addIssue({ code: 'custom', message: 'Job artifacts must belong to its input snapshot' });
-  if (job.artifacts.length > 0 && job.published_revision === null) context.addIssue({ code: 'custom', message: 'Unpublished jobs cannot expose published artifact handles' });
-});
+export const toolNameSchema = z.enum([
+  'project_open',
+  'project_close',
+  'binary_info',
+  'symbols_find',
+  'strings_find',
+  'functions_find',
+  'function_get',
+  'function_decompile',
+  'xrefs_get',
+  'memory_read',
+  'annotations_apply',
+  'analysis_status',
+  'analysis_cancel',
+]);
+export const jobSchema = z
+  .strictObject({
+    id: jobIdSchema,
+    project_id: projectIdSchema,
+    input_revision: revisionSchema,
+    operation: toolNameSchema,
+    state: z.enum(['queued', 'running', 'completed', 'cancelled', 'failed', 'stale']),
+    progress: z.strictObject({
+      phase: z.string().min(1).max(128),
+      completed: revisionSchema,
+      total: revisionSchema.nullable(),
+    }),
+    artifacts: z.array(artifactSchema).max(1000),
+    diagnostics: z.array(diagnosticSchema).max(1000),
+    published_revision: revisionSchema.nullable(),
+  })
+  .superRefine((job, context) => {
+    if (job.progress.total !== null && job.progress.completed > job.progress.total)
+      context.addIssue({ code: 'custom', message: 'Job progress exceeds total' });
+    if (
+      job.published_revision !== null &&
+      (job.state !== 'completed' || job.published_revision !== job.input_revision)
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Only completed jobs may publish at their input revision',
+      });
+    if (
+      job.artifacts.some(
+        (artifact) =>
+          artifact.project_id !== job.project_id || artifact.revision !== job.input_revision,
+      )
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Job artifacts must belong to its input snapshot',
+      });
+    if (job.artifacts.length > 0 && job.published_revision === null)
+      context.addIssue({
+        code: 'custom',
+        message: 'Unpublished jobs cannot expose published artifact handles',
+      });
+  });
 export type WireJob = z.infer<typeof jobSchema>;
 export type Job = Internal<WireJob>;
-export const sourceMappingSchema = z.strictObject({
-  statement_id: entityIdSchema, start: revisionSchema, end: revisionSchema,
-  semantic_ids: z.array(entityIdSchema).max(10000), instruction_ids: z.array(entityIdSchema).max(10000),
-  ranges: z.array(rangeSchema).max(10000), evidence_ids: evidenceRefsSchema,
-}).superRefine((mapping, context) => {
-  if (mapping.end < mapping.start) context.addIssue({ code: 'custom', message: 'Invalid output span' });
-});
-export const emissionSchema = z.strictObject({
-  language: z.enum(['c-like', 'python-like']), emitter_version: z.string().min(1), text: z.string().max(16_777_216),
-  span_unit: z.literal('utf16'), reconstruction: z.literal('pseudocode'),
-  mappings: z.array(sourceMappingSchema).max(100000), helpers: z.array(z.strictObject({ name: z.string().min(1), explanation: z.string().min(1).max(8192) })).max(1000),
-}).superRefine((emission, context) => {
-  if (emission.mappings.some((mapping) => mapping.end > emission.text.length)) context.addIssue({ code: 'custom', message: 'Source mapping exceeds emitted text' });
-});
+export const sourceMappingSchema = z
+  .strictObject({
+    statement_id: entityIdSchema,
+    start: revisionSchema,
+    end: revisionSchema,
+    semantic_ids: z.array(entityIdSchema).max(10000),
+    instruction_ids: z.array(entityIdSchema).max(10000),
+    ranges: z.array(rangeSchema).max(10000),
+    evidence_ids: evidenceRefsSchema,
+  })
+  .superRefine((mapping, context) => {
+    if (mapping.end < mapping.start)
+      context.addIssue({ code: 'custom', message: 'Invalid output span' });
+  });
+export const emissionSchema = z
+  .strictObject({
+    language: z.enum(['c-like', 'python-like']),
+    emitter_version: z.string().min(1),
+    text: z.string().max(16_777_216),
+    span_unit: z.literal('utf16'),
+    reconstruction: z.literal('pseudocode'),
+    mappings: z.array(sourceMappingSchema).max(100000),
+    helpers: z
+      .array(z.strictObject({ name: z.string().min(1), explanation: z.string().min(1).max(8192) }))
+      .max(1000),
+  })
+  .superRefine((emission, context) => {
+    if (emission.mappings.some((mapping) => mapping.end > emission.text.length))
+      context.addIssue({ code: 'custom', message: 'Source mapping exceeds emitted text' });
+  });
 export type WireEmission = z.infer<typeof emissionSchema>;
 export type Emission = Internal<WireEmission>;
 
-const requestContext = { project_id: projectIdSchema, revision: revisionSchema, budget: budgetSchema.default(DEFAULT_BUDGET) };
+const requestContext = {
+  project_id: projectIdSchema,
+  revision: revisionSchema,
+  budget: budgetSchema.default(DEFAULT_BUDGET),
+};
 const paging = { page: pageRequestSchema.default({ limit: 100 }) };
-const querySchema = z.strictObject({ text: z.string().max(4096).default(''), match: z.enum(['exact', 'prefix', 'contains']).default('contains'), case_sensitive: z.boolean().default(false) });
+const querySchema = z.strictObject({
+  text: z.string().max(4096).default(''),
+  match: z.enum(['exact', 'prefix', 'contains']).default('contains'),
+  case_sensitive: z.boolean().default(false),
+});
 const defaultQuery = { text: '', match: 'contains' as const, case_sensitive: false };
-const pageInfoSchema = z.strictObject({ next_cursor: z.string().min(1).max(16384).nullable(), index_state: z.enum(['complete', 'partial', 'not_started']), order: z.enum(['address_id', 'name_id', 'id']) });
+const pageInfoSchema = z.strictObject({
+  next_cursor: z.string().min(1).max(16384).nullable(),
+  index_state: z.enum(['complete', 'partial', 'not_started']),
+  order: z.enum(['address_id', 'name_id', 'id']),
+});
 
 export const projectOpenArgsSchema = z.strictObject({
   source: z.discriminatedUnion('kind', [
-    z.strictObject({ kind: z.literal('import'), input_path: z.string().min(1).max(32768), project_path: z.string().min(1).max(32768), slice_id: sliceIdSchema.optional(), mode: z.enum(['create', 'resume']).default('create') }),
+    z.strictObject({
+      kind: z.literal('import'),
+      input_path: z.string().min(1).max(32768),
+      project_path: z.string().min(1).max(32768),
+      slice_id: sliceIdSchema.optional(),
+      mode: z.enum(['create', 'resume']).default('create'),
+    }),
     z.strictObject({ kind: z.literal('resume'), project_path: z.string().min(1).max(32768) }),
-  ]), wait: z.boolean().default(false), budget: budgetSchema.default(DEFAULT_BUDGET),
+  ]),
+  wait: z.boolean().default(false),
+  budget: budgetSchema.default(DEFAULT_BUDGET),
 });
-export const projectCloseArgsSchema = z.strictObject({ ...requestContext, running_jobs: z.enum(['wait', 'cancel', 'reject']).default('reject') });
-export const binaryInfoArgsSchema = z.strictObject({ ...requestContext, image_id: imageIdSchema.optional(), view: z.enum(['summary', 'headers', 'sections', 'mappings', 'entry_points', 'relocations', 'hints', 'capabilities']).default('summary'), ...paging });
-export const symbolsFindArgsSchema = z.strictObject({ ...requestContext, image_id: imageIdSchema, kinds: z.array(z.enum(['symbol', 'import', 'export'])).min(1).max(3).default(['symbol', 'import', 'export']), query: querySchema.default(defaultQuery), address: addressSchema.optional(), ...paging });
-export const stringsFindArgsSchema = z.strictObject({ ...requestContext, image_id: imageIdSchema, query: querySchema.default(defaultQuery), encodings: z.array(z.enum(['ascii', 'utf8', 'utf16le'])).min(1).max(3).default(['ascii', 'utf8', 'utf16le']), status: z.enum(['all', 'candidate', 'referenced']).default('all'), range: rangeSchema.optional(), ...paging });
-export const functionsFindArgsSchema = z.strictObject({ ...requestContext, image_id: imageIdSchema, id: entityIdSchema.optional(), query: querySchema.default(defaultQuery), address: addressSchema.optional(), boundary: z.enum(['candidate', 'established', 'conflicting']).optional(), analysis: z.enum(['not_analyzed', 'partial', 'complete', 'unsupported']).optional(), ...paging });
-export const functionGetArgsSchema = z.strictObject({ ...requestContext, function_id: entityIdSchema, view: z.enum(['metadata', 'disassembly', 'cfg']).default('metadata'), ...paging });
-export const functionDecompileArgsSchema = z.strictObject({ ...requestContext, function_id: entityIdSchema, wait: z.boolean().default(false), options: analysisOptionsSchema.default(DEFAULT_ANALYSIS_OPTIONS) });
-export const xrefsGetArgsSchema = z.strictObject({ ...requestContext, target: z.discriminatedUnion('kind', [z.strictObject({ kind: z.literal('entity'), id: entityIdSchema }), z.strictObject({ kind: z.literal('address'), address: addressSchema })]), direction: z.enum(['incoming', 'outgoing', 'both']).default('both'), kinds: z.array(z.enum(['call', 'tail_call', 'branch', 'read', 'write', 'address', 'unknown'])).min(1).max(7).default(['call', 'tail_call', 'branch', 'read', 'write', 'address', 'unknown']), include_unresolved: z.boolean().default(true), ...paging });
-export const memoryReadArgsSchema = z.strictObject({
-  ...requestContext, address: addressSchema, length: z.number().int().min(1).max(1_048_576).default(4096),
-  interpretation: z.enum(['bytes', 'u8', 'u16', 'u32', 'u64', 'i8', 'i16', 'i32', 'i64', 'f32', 'f64', 'pointer']).default('bytes'),
-  endian: z.enum(['little', 'big']).default('little'),
-}).superRefine((args, context) => {
-  const widths = { bytes: 1, u8: 1, i8: 1, u16: 2, i16: 2, u32: 4, i32: 4, f32: 4, u64: 8, i64: 8, f64: 8, pointer: 8 } as const;
-  if (args.length % widths[args.interpretation] !== 0) context.addIssue({ code: 'custom', message: 'Read length must contain whole typed elements' });
-  if (hexU64Schema.safeParse(args.address.value).success && Number.isSafeInteger(args.length) &&
-      BigInt(args.address.value) + BigInt(args.length) > (1n << 64n)) context.addIssue({ code: 'custom', message: 'Read range overflows address space' });
+export const projectCloseArgsSchema = z.strictObject({
+  ...requestContext,
+  running_jobs: z.enum(['wait', 'cancel', 'reject']).default('reject'),
 });
-export const annotationsApplyArgsSchema = z.strictObject({
-  project_id: projectIdSchema, expected_revision: revisionSchema, author: z.string().min(1).max(1024), origin: z.enum(['user', 'llm']),
-  edits: z.array(annotationEditSchema).min(1).max(1000), budget: budgetSchema.default(DEFAULT_BUDGET),
-}).superRefine((args, context) => {
-  const seen = new Set<string>();
-  for (const edit of args.edits) {
-    if (seen.has(edit.id)) context.addIssue({ code: 'custom', message: 'A batch may edit each annotation only once' });
-    seen.add(edit.id);
-  }
+export const binaryInfoArgsSchema = z.strictObject({
+  ...requestContext,
+  image_id: imageIdSchema.optional(),
+  view: z
+    .enum([
+      'summary',
+      'headers',
+      'sections',
+      'mappings',
+      'entry_points',
+      'relocations',
+      'hints',
+      'capabilities',
+    ])
+    .default('summary'),
+  ...paging,
 });
+export const symbolsFindArgsSchema = z.strictObject({
+  ...requestContext,
+  image_id: imageIdSchema,
+  kinds: z
+    .array(z.enum(['symbol', 'import', 'export']))
+    .min(1)
+    .max(3)
+    .default(['symbol', 'import', 'export']),
+  query: querySchema.default(defaultQuery),
+  address: addressSchema.optional(),
+  ...paging,
+});
+export const stringsFindArgsSchema = z.strictObject({
+  ...requestContext,
+  image_id: imageIdSchema,
+  query: querySchema.default(defaultQuery),
+  encodings: z
+    .array(z.enum(['ascii', 'utf8', 'utf16le']))
+    .min(1)
+    .max(3)
+    .default(['ascii', 'utf8', 'utf16le']),
+  status: z.enum(['all', 'candidate', 'referenced']).default('all'),
+  range: rangeSchema.optional(),
+  ...paging,
+});
+export const functionsFindArgsSchema = z.strictObject({
+  ...requestContext,
+  image_id: imageIdSchema,
+  id: entityIdSchema.optional(),
+  query: querySchema.default(defaultQuery),
+  address: addressSchema.optional(),
+  boundary: z.enum(['candidate', 'established', 'conflicting']).optional(),
+  analysis: z.enum(['not_analyzed', 'partial', 'complete', 'unsupported']).optional(),
+  ...paging,
+});
+export const functionGetArgsSchema = z.strictObject({
+  ...requestContext,
+  function_id: entityIdSchema,
+  view: z.enum(['metadata', 'disassembly', 'cfg']).default('metadata'),
+  ...paging,
+});
+export const functionDecompileArgsSchema = z.strictObject({
+  ...requestContext,
+  function_id: entityIdSchema,
+  wait: z.boolean().default(false),
+  options: analysisOptionsSchema.default(DEFAULT_ANALYSIS_OPTIONS),
+});
+export const xrefsGetArgsSchema = z.strictObject({
+  ...requestContext,
+  target: z.discriminatedUnion('kind', [
+    z.strictObject({ kind: z.literal('entity'), id: entityIdSchema }),
+    z.strictObject({ kind: z.literal('address'), address: addressSchema }),
+  ]),
+  direction: z.enum(['incoming', 'outgoing', 'both']).default('both'),
+  kinds: z
+    .array(z.enum(['call', 'tail_call', 'branch', 'read', 'write', 'address', 'unknown']))
+    .min(1)
+    .max(7)
+    .default(['call', 'tail_call', 'branch', 'read', 'write', 'address', 'unknown']),
+  include_unresolved: z.boolean().default(true),
+  ...paging,
+});
+export const memoryReadArgsSchema = z
+  .strictObject({
+    ...requestContext,
+    address: addressSchema,
+    length: z.number().int().min(1).max(1_048_576).default(4096),
+    interpretation: z
+      .enum([
+        'bytes',
+        'u8',
+        'u16',
+        'u32',
+        'u64',
+        'i8',
+        'i16',
+        'i32',
+        'i64',
+        'f32',
+        'f64',
+        'pointer',
+      ])
+      .default('bytes'),
+    endian: z.enum(['little', 'big']).default('little'),
+  })
+  .superRefine((args, context) => {
+    const widths = {
+      bytes: 1,
+      u8: 1,
+      i8: 1,
+      u16: 2,
+      i16: 2,
+      u32: 4,
+      i32: 4,
+      f32: 4,
+      u64: 8,
+      i64: 8,
+      f64: 8,
+      pointer: 8,
+    } as const;
+    if (args.length % widths[args.interpretation] !== 0)
+      context.addIssue({
+        code: 'custom',
+        message: 'Read length must contain whole typed elements',
+      });
+    if (
+      hexU64Schema.safeParse(args.address.value).success &&
+      Number.isSafeInteger(args.length) &&
+      BigInt(args.address.value) + BigInt(args.length) > 1n << 64n
+    )
+      context.addIssue({ code: 'custom', message: 'Read range overflows address space' });
+  });
+export const annotationsApplyArgsSchema = z
+  .strictObject({
+    project_id: projectIdSchema,
+    expected_revision: revisionSchema,
+    author: z.string().min(1).max(1024),
+    origin: z.enum(['user', 'llm']),
+    edits: z.array(annotationEditSchema).min(1).max(1000),
+    budget: budgetSchema.default(DEFAULT_BUDGET),
+  })
+  .superRefine((args, context) => {
+    const seen = new Set<string>();
+    for (const edit of args.edits) {
+      if (seen.has(edit.id))
+        context.addIssue({ code: 'custom', message: 'A batch may edit each annotation only once' });
+      seen.add(edit.id);
+    }
+  });
 export const analysisStatusArgsSchema = z.strictObject({ ...requestContext, job_id: jobIdSchema });
 export const analysisCancelArgsSchema = z.strictObject({ ...requestContext, job_id: jobIdSchema });
 
 const resultContext = {
-  schema_version: z.literal(SCHEMA_VERSION), project_id: projectIdSchema.nullable(), revision: revisionSchema.nullable(),
-  versions: versionsSchema, options: analysisOptionsSchema, budget: budgetSchema,
-  coverage: z.array(coverageSchema).max(1000), diagnostics: z.array(diagnosticSchema).max(1000),
-  evidence: z.array(evidenceSchema).max(10000), artifacts: z.array(artifactSchema).max(1000),
+  schema_version: z.literal(SCHEMA_VERSION),
+  project_id: projectIdSchema.nullable(),
+  revision: revisionSchema.nullable(),
+  versions: versionsSchema,
+  options: analysisOptionsSchema,
+  budget: budgetSchema,
+  coverage: z.array(coverageSchema).max(1000),
+  diagnostics: z.array(diagnosticSchema).max(1000),
+  evidence: z.array(evidenceSchema).max(10000),
+  artifacts: z.array(artifactSchema).max(1000),
 };
 export type ResultMetadata = z.output<z.ZodObject<typeof resultContext>>;
-export type ResultEnvelope<Data> = ResultMetadata & (
-  | { state: 'complete' | 'empty'; data: Data }
-  | { state: 'partial'; data: Data; reason: 'budget' | 'incomplete_index' | 'unsupported_subset' | 'output_limit'; continuation: string | null }
-  | { state: 'queued' | 'running'; job: WireJob }
-  | { state: 'unsupported'; error: z.output<typeof diagnosticSchema> }
-  | { state: 'failed'; error: z.output<typeof diagnosticSchema>; current_revision: number | null }
-  | { state: 'cancelled'; job_id: string | null }
-);
+export type ResultEnvelope<Data> = ResultMetadata &
+  (
+    | { state: 'complete' | 'empty'; data: Data }
+    | {
+        state: 'partial';
+        data: Data;
+        reason: 'budget' | 'incomplete_index' | 'unsupported_subset' | 'output_limit';
+        continuation: string | null;
+      }
+    | { state: 'queued' | 'running'; job: WireJob }
+    | { state: 'unsupported'; error: z.output<typeof diagnosticSchema> }
+    | { state: 'failed'; error: z.output<typeof diagnosticSchema>; current_revision: number | null }
+    | { state: 'cancelled'; job_id: string | null }
+  );
 /** All tools share explicit lifecycle states, but retain a concrete operation-specific data schema. */
 export function resultSchema<S extends z.ZodType>(data: S): z.ZodType<ResultEnvelope<z.output<S>>> {
-  return z.discriminatedUnion('state', [
-    z.strictObject({ ...resultContext, state: z.literal('complete'), data }),
-    z.strictObject({ ...resultContext, state: z.literal('empty'), data }),
-    z.strictObject({ ...resultContext, state: z.literal('partial'), data, reason: z.enum(['budget', 'incomplete_index', 'unsupported_subset', 'output_limit']), continuation: z.string().min(1).max(16384).nullable() }),
-    z.strictObject({ ...resultContext, state: z.literal('queued'), job: jobSchema }),
-    z.strictObject({ ...resultContext, state: z.literal('running'), job: jobSchema }),
-    z.strictObject({ ...resultContext, state: z.literal('unsupported'), error: diagnosticSchema }),
-    z.strictObject({ ...resultContext, state: z.literal('failed'), error: diagnosticSchema, current_revision: revisionSchema.nullable() }),
-    z.strictObject({ ...resultContext, state: z.literal('cancelled'), job_id: jobIdSchema.nullable() }),
-  ]).superRefine((result, context) => {
-    if ((result.project_id === null) !== (result.revision === null)) context.addIssue({ code: 'custom', message: 'Project and revision must appear together' });
-    if (['complete', 'empty', 'partial', 'queued', 'running'].includes(result.state) && result.project_id === null) context.addIssue({ code: 'custom', message: 'Successful results require project identity and revision' });
-    if ('data' in result && result.data !== null && typeof result.data === 'object') {
-      const record = result.data as Record<string, unknown>;
-      const items = record['items'];
-      const page = record['page'] as { index_state?: string; next_cursor?: string | null } | undefined;
-      if (typeof record['revision'] === 'number' && record['revision'] !== result.revision) context.addIssue({ code: 'custom', message: 'Data revision does not match envelope' });
-      if (typeof record['persisted_revision'] === 'number' && record['persisted_revision'] !== result.revision) context.addIssue({ code: 'custom', message: 'Persisted revision does not match envelope' });
-      if (record['next_address'] !== undefined && record['next_address'] !== null && result.state !== 'partial') context.addIssue({ code: 'custom', message: 'A shortened memory read is partial, not complete' });
-      if (result.state === 'partial' && 'reason' in result && result.reason === 'output_limit' && 'continuation' in result && result.continuation === null &&
-          result.artifacts.length === 0 && page?.next_cursor == null && record['next_address'] == null) {
-        context.addIssue({ code: 'custom', message: 'Output-limited results need a continuation or artifact' });
+  return z
+    .discriminatedUnion('state', [
+      z.strictObject({ ...resultContext, state: z.literal('complete'), data }),
+      z.strictObject({ ...resultContext, state: z.literal('empty'), data }),
+      z.strictObject({
+        ...resultContext,
+        state: z.literal('partial'),
+        data,
+        reason: z.enum(['budget', 'incomplete_index', 'unsupported_subset', 'output_limit']),
+        continuation: z.string().min(1).max(16384).nullable(),
+      }),
+      z.strictObject({ ...resultContext, state: z.literal('queued'), job: jobSchema }),
+      z.strictObject({ ...resultContext, state: z.literal('running'), job: jobSchema }),
+      z.strictObject({
+        ...resultContext,
+        state: z.literal('unsupported'),
+        error: diagnosticSchema,
+      }),
+      z.strictObject({
+        ...resultContext,
+        state: z.literal('failed'),
+        error: diagnosticSchema,
+        current_revision: revisionSchema.nullable(),
+      }),
+      z.strictObject({
+        ...resultContext,
+        state: z.literal('cancelled'),
+        job_id: jobIdSchema.nullable(),
+      }),
+    ])
+    .superRefine((result, context) => {
+      if ((result.project_id === null) !== (result.revision === null))
+        context.addIssue({ code: 'custom', message: 'Project and revision must appear together' });
+      if (
+        ['complete', 'empty', 'partial', 'queued', 'running'].includes(result.state) &&
+        result.project_id === null
+      )
+        context.addIssue({
+          code: 'custom',
+          message: 'Successful results require project identity and revision',
+        });
+      if ('data' in result && result.data !== null && typeof result.data === 'object') {
+        const record = result.data as Record<string, unknown>;
+        const items = record['items'];
+        const page = record['page'] as
+          { index_state?: string; next_cursor?: string | null } | undefined;
+        if (typeof record['revision'] === 'number' && record['revision'] !== result.revision)
+          context.addIssue({ code: 'custom', message: 'Data revision does not match envelope' });
+        if (
+          typeof record['persisted_revision'] === 'number' &&
+          record['persisted_revision'] !== result.revision
+        )
+          context.addIssue({
+            code: 'custom',
+            message: 'Persisted revision does not match envelope',
+          });
+        if (
+          record['next_address'] !== undefined &&
+          record['next_address'] !== null &&
+          result.state !== 'partial'
+        )
+          context.addIssue({
+            code: 'custom',
+            message: 'A shortened memory read is partial, not complete',
+          });
+        if (
+          result.state === 'partial' &&
+          'reason' in result &&
+          result.reason === 'output_limit' &&
+          'continuation' in result &&
+          result.continuation === null &&
+          result.artifacts.length === 0 &&
+          page?.next_cursor == null &&
+          record['next_address'] == null
+        ) {
+          context.addIssue({
+            code: 'custom',
+            message: 'Output-limited results need a continuation or artifact',
+          });
+        }
+        if (
+          result.state === 'empty' &&
+          (!Array.isArray(items) ||
+            items.length !== 0 ||
+            page?.index_state !== 'complete' ||
+            page.next_cursor !== null)
+        ) {
+          context.addIssue({
+            code: 'custom',
+            message: 'Empty means an exhausted, completely indexed query with zero items',
+          });
+        }
+        if (result.state === 'complete' && Array.isArray(items) && items.length === 0)
+          context.addIssue({
+            code: 'custom',
+            message: 'Use empty or partial for a query with no items',
+          });
+        if (
+          (result.state === 'complete' || result.state === 'empty') &&
+          page &&
+          page.index_state !== 'complete'
+        )
+          context.addIssue({
+            code: 'custom',
+            message: 'Incomplete indexes require partial results',
+          });
       }
-      if (result.state === 'empty' && (!Array.isArray(items) || items.length !== 0 || page?.index_state !== 'complete' || page.next_cursor !== null)) {
-        context.addIssue({ code: 'custom', message: 'Empty means an exhausted, completely indexed query with zero items' });
+      for (const artifact of result.artifacts) {
+        if (artifact.project_id !== result.project_id || artifact.revision !== result.revision)
+          context.addIssue({
+            code: 'custom',
+            message: 'Result artifact belongs to another snapshot',
+          });
       }
-      if (result.state === 'complete' && Array.isArray(items) && items.length === 0) context.addIssue({ code: 'custom', message: 'Use empty or partial for a query with no items' });
-      if ((result.state === 'complete' || result.state === 'empty') && page && page.index_state !== 'complete') context.addIssue({ code: 'custom', message: 'Incomplete indexes require partial results' });
-    }
-    for (const artifact of result.artifacts) {
-      if (artifact.project_id !== result.project_id || artifact.revision !== result.revision) context.addIssue({ code: 'custom', message: 'Result artifact belongs to another snapshot' });
-    }
-    if ('job' in result && (result.job.project_id !== result.project_id || result.job.input_revision !== result.revision || result.job.state !== result.state)) context.addIssue({ code: 'custom', message: 'Job does not match result snapshot/state' });
-  }) as z.ZodType<ResultEnvelope<z.output<S>>>;
+      if (
+        'job' in result &&
+        (result.job.project_id !== result.project_id ||
+          result.job.input_revision !== result.revision ||
+          result.job.state !== result.state)
+      )
+        context.addIssue({ code: 'custom', message: 'Job does not match result snapshot/state' });
+    }) as z.ZodType<ResultEnvelope<z.output<S>>>;
 }
 const binaryInfoDataSchema = z.discriminatedUnion('view', [
   z.strictObject({ view: z.literal('summary'), image: imageSummarySchema }),
-  z.strictObject({ view: z.literal('headers'), items: z.array(headerSchema).max(1000), page: pageInfoSchema }),
-  z.strictObject({ view: z.literal('sections'), items: z.array(sectionSchema).max(1000), page: pageInfoSchema }),
-  z.strictObject({ view: z.literal('mappings'), items: z.array(mappingSchema).max(1000), page: pageInfoSchema }),
-  z.strictObject({ view: z.literal('entry_points'), items: z.array(addressSchema).max(1000), page: pageInfoSchema }),
-  z.strictObject({ view: z.literal('relocations'), items: z.array(relocationSchema).max(1000), page: pageInfoSchema }),
-  z.strictObject({ view: z.literal('hints'), items: z.array(hintSchema).max(1000), page: pageInfoSchema }),
-  z.strictObject({ view: z.literal('capabilities'), items: z.array(capabilitySchema).max(1000), page: pageInfoSchema }),
+  z.strictObject({
+    view: z.literal('headers'),
+    items: z.array(headerSchema).max(1000),
+    page: pageInfoSchema,
+  }),
+  z.strictObject({
+    view: z.literal('sections'),
+    items: z.array(sectionSchema).max(1000),
+    page: pageInfoSchema,
+  }),
+  z.strictObject({
+    view: z.literal('mappings'),
+    items: z.array(mappingSchema).max(1000),
+    page: pageInfoSchema,
+  }),
+  z.strictObject({
+    view: z.literal('entry_points'),
+    items: z.array(addressSchema).max(1000),
+    page: pageInfoSchema,
+  }),
+  z.strictObject({
+    view: z.literal('relocations'),
+    items: z.array(relocationSchema).max(1000),
+    page: pageInfoSchema,
+  }),
+  z.strictObject({
+    view: z.literal('hints'),
+    items: z.array(hintSchema).max(1000),
+    page: pageInfoSchema,
+  }),
+  z.strictObject({
+    view: z.literal('capabilities'),
+    items: z.array(capabilitySchema).max(1000),
+    page: pageInfoSchema,
+  }),
 ]);
-const symbolItemSchema = z.discriminatedUnion('kind', [z.strictObject({ kind: z.literal('symbol'), symbol: symbolSchema }), z.strictObject({ kind: z.literal('import'), import: importSchema }), z.strictObject({ kind: z.literal('export'), export: exportSchema })]);
+const symbolItemSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('symbol'), symbol: symbolSchema }),
+  z.strictObject({ kind: z.literal('import'), import: importSchema }),
+  z.strictObject({ kind: z.literal('export'), export: exportSchema }),
+]);
 const functionGetDataSchema = z.discriminatedUnion('view', [
-  z.strictObject({ view: z.literal('metadata'), function: functionSchema, annotations: z.array(annotationSchema).max(1000), lineage: z.array(lineageSchema).max(1000) }),
-  z.strictObject({ view: z.literal('disassembly'), function_id: entityIdSchema, items: z.array(instructionSchema).max(1000), gaps: z.array(z.strictObject({ range: rangeSchema, reason: z.enum(['truncated', 'unmapped', 'data', 'budget']) })).max(1000), page: pageInfoSchema }),
-  z.strictObject({ view: z.literal('cfg'), function_id: entityIdSchema, items: z.array(cfgBlockSchema).max(1000), page: pageInfoSchema }),
+  z.strictObject({
+    view: z.literal('metadata'),
+    function: functionSchema,
+    annotations: z.array(annotationSchema).max(1000),
+    lineage: z.array(lineageSchema).max(1000),
+  }),
+  z.strictObject({
+    view: z.literal('disassembly'),
+    function_id: entityIdSchema,
+    items: z.array(instructionSchema).max(1000),
+    gaps: z
+      .array(
+        z.strictObject({
+          range: rangeSchema,
+          reason: z.enum(['truncated', 'unmapped', 'data', 'budget']),
+        }),
+      )
+      .max(1000),
+    page: pageInfoSchema,
+  }),
+  z.strictObject({
+    view: z.literal('cfg'),
+    function_id: entityIdSchema,
+    items: z.array(cfgBlockSchema).max(1000),
+    page: pageInfoSchema,
+  }),
 ]);
 export const memorySegmentSchema = z.discriminatedUnion('kind', [
-  z.strictObject({ kind: z.literal('mapped'), range: rangeSchema, bytes_hex: z.string().regex(/^(?:[0-9a-f]{2})*$/).max(2_097_152) }),
+  z.strictObject({
+    kind: z.literal('mapped'),
+    range: rangeSchema,
+    bytes_hex: z
+      .string()
+      .regex(/^(?:[0-9a-f]{2})*$/)
+      .max(2_097_152),
+  }),
   z.strictObject({ kind: z.literal('zero_fill'), range: rangeSchema }),
   z.strictObject({ kind: z.literal('unmapped'), range: rangeSchema }),
 ]);
-const memoryDataSchema = z.strictObject({
-  requested: rangeSchema, segments: z.array(memorySegmentSchema).min(1).max(10000),
-  values: z.array(z.strictObject({ address: addressSchema, type: z.enum(['u8', 'u16', 'u32', 'u64', 'i8', 'i16', 'i32', 'i64', 'f32', 'f64', 'pointer']), bits: hexU64Schema })).max(1_048_576),
-  next_address: addressSchema.nullable(),
-}).superRefine((data, context) => {
-  for (const segment of data.segments) {
-    if (segment.kind === 'mapped' && hexU64Schema.safeParse(segment.range.size).success &&
-        (segment.bytes_hex.length % 2 !== 0 || BigInt(segment.bytes_hex.length / 2) !== BigInt(segment.range.size))) context.addIssue({ code: 'custom', message: 'Mapped byte count does not match range' });
-  }
-  if (!rangeSchema.safeParse(data.requested).success || data.segments.some((segment) => !rangeSchema.safeParse(segment.range).success)) return;
-  let cursor = BigInt(data.requested.start.value);
-  const end = cursor + BigInt(data.requested.size);
-  for (const segment of data.segments) {
-    const start = segment.range.start;
-    if (start.image_id !== data.requested.start.image_id || start.space !== data.requested.start.space ||
-        BigInt(start.value) !== cursor || BigInt(segment.range.size) === 0n) {
-      context.addIssue({ code: 'custom', message: 'Memory segments must partition the request in order without gaps' });
+const memoryDataSchema = z
+  .strictObject({
+    requested: rangeSchema,
+    segments: z.array(memorySegmentSchema).min(1).max(10000),
+    values: z
+      .array(
+        z.strictObject({
+          address: addressSchema,
+          type: z.enum([
+            'u8',
+            'u16',
+            'u32',
+            'u64',
+            'i8',
+            'i16',
+            'i32',
+            'i64',
+            'f32',
+            'f64',
+            'pointer',
+          ]),
+          bits: hexU64Schema,
+        }),
+      )
+      .max(1_048_576),
+    next_address: addressSchema.nullable(),
+  })
+  .superRefine((data, context) => {
+    for (const segment of data.segments) {
+      if (
+        segment.kind === 'mapped' &&
+        hexU64Schema.safeParse(segment.range.size).success &&
+        (segment.bytes_hex.length % 2 !== 0 ||
+          BigInt(segment.bytes_hex.length / 2) !== BigInt(segment.range.size))
+      )
+        context.addIssue({ code: 'custom', message: 'Mapped byte count does not match range' });
     }
-    cursor += BigInt(segment.range.size);
-  }
-  if (cursor > end || (cursor < end && data.next_address === null) || (cursor === end && data.next_address !== null)) {
-    context.addIssue({ code: 'custom', message: 'Partial reads require an explicit continuation; complete reads cannot have one' });
-  }
-  if (data.next_address !== null && addressSchema.safeParse(data.next_address).success &&
-      (data.next_address.image_id !== data.requested.start.image_id || data.next_address.space !== data.requested.start.space || BigInt(data.next_address.value) !== cursor)) {
-    context.addIssue({ code: 'custom', message: 'Memory continuation must begin immediately after the returned segments' });
+    if (
+      !rangeSchema.safeParse(data.requested).success ||
+      data.segments.some((segment) => !rangeSchema.safeParse(segment.range).success)
+    )
+      return;
+    let cursor = BigInt(data.requested.start.value);
+    const end = cursor + BigInt(data.requested.size);
+    for (const segment of data.segments) {
+      const start = segment.range.start;
+      if (
+        start.image_id !== data.requested.start.image_id ||
+        start.space !== data.requested.start.space ||
+        BigInt(start.value) !== cursor ||
+        BigInt(segment.range.size) === 0n
+      ) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Memory segments must partition the request in order without gaps',
+        });
+      }
+      cursor += BigInt(segment.range.size);
+    }
+    if (
+      cursor > end ||
+      (cursor < end && data.next_address === null) ||
+      (cursor === end && data.next_address !== null)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Partial reads require an explicit continuation; complete reads cannot have one',
+      });
+    }
+    if (
+      data.next_address !== null &&
+      addressSchema.safeParse(data.next_address).success &&
+      (data.next_address.image_id !== data.requested.start.image_id ||
+        data.next_address.space !== data.requested.start.space ||
+        BigInt(data.next_address.value) !== cursor)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Memory continuation must begin immediately after the returned segments',
+      });
+    }
+  });
+export const projectOpenResultSchema = resultSchema(
+  z.strictObject({ image: imageSummarySchema.nullable(), resumed: z.boolean() }),
+).superRefine((result, context) => {
+  if (
+    'data' in result &&
+    result.data.image === null &&
+    (result.state !== 'partial' || result.reason !== 'incomplete_index' || !result.data.resumed)
+  ) {
+    context.addIssue({
+      code: 'custom',
+      message: 'An unfinished project is an explicitly resumed, incomplete snapshot',
+    });
   }
 });
-export const projectOpenResultSchema = resultSchema(z.strictObject({ image: imageSummarySchema.nullable(), resumed: z.boolean() })).superRefine((result, context) => {
-  if ('data' in result && result.data.image === null &&
-      (result.state !== 'partial' || result.reason !== 'incomplete_index' || !result.data.resumed)) {
-    context.addIssue({ code: 'custom', message: 'An unfinished project is an explicitly resumed, incomplete snapshot' });
-  }
-});
-export const projectCloseResultSchema = resultSchema(z.strictObject({ closed: z.literal(true), persisted_revision: revisionSchema }));
+export const projectCloseResultSchema = resultSchema(
+  z.strictObject({ closed: z.literal(true), persisted_revision: revisionSchema }),
+);
 export const binaryInfoResultSchema = resultSchema(binaryInfoDataSchema);
-export const symbolsFindResultSchema = resultSchema(z.strictObject({ items: z.array(symbolItemSchema).max(1000), page: pageInfoSchema }));
-export const stringsFindResultSchema = resultSchema(z.strictObject({ items: z.array(stringRecordSchema).max(1000), page: pageInfoSchema }));
-export const functionsFindResultSchema = resultSchema(z.strictObject({ items: z.array(functionSchema).max(1000), page: pageInfoSchema }));
+export const symbolsFindResultSchema = resultSchema(
+  z.strictObject({ items: z.array(symbolItemSchema).max(1000), page: pageInfoSchema }),
+);
+export const stringsFindResultSchema = resultSchema(
+  z.strictObject({ items: z.array(stringRecordSchema).max(1000), page: pageInfoSchema }),
+);
+export const functionsFindResultSchema = resultSchema(
+  z.strictObject({ items: z.array(functionSchema).max(1000), page: pageInfoSchema }),
+);
 export const functionGetResultSchema = resultSchema(functionGetDataSchema);
-export const functionDecompileResultSchema = resultSchema(z.discriminatedUnion('delivery', [
-  z.strictObject({ delivery: z.literal('inline'), function_id: entityIdSchema, signature: signatureSchema.nullable(), emission: emissionSchema, capabilities: z.array(capabilitySchema).max(1000), cache: z.enum(['hit', 'computed']) }),
-  z.strictObject({ delivery: z.literal('artifact'), function_id: entityIdSchema, artifact_id: artifactSchema.shape.id, cache: z.enum(['hit', 'computed']) }),
-])).superRefine((result, context) => {
+export const functionDecompileResultSchema = resultSchema(
+  z.discriminatedUnion('delivery', [
+    z.strictObject({
+      delivery: z.literal('inline'),
+      function_id: entityIdSchema,
+      signature: signatureSchema.nullable(),
+      emission: emissionSchema,
+      capabilities: z.array(capabilitySchema).max(1000),
+      cache: z.enum(['hit', 'computed']),
+    }),
+    z.strictObject({
+      delivery: z.literal('artifact'),
+      function_id: entityIdSchema,
+      artifact_id: artifactSchema.shape.id,
+      cache: z.enum(['hit', 'computed']),
+    }),
+  ]),
+).superRefine((result, context) => {
   if (!('data' in result)) return;
   const data = result.data;
-  if (data.delivery === 'artifact' && (result.state !== 'partial' || result.reason !== 'output_limit' || !result.artifacts.some(artifact => artifact.id === data.artifact_id))) {
-    context.addIssue({ code: 'custom', message: 'Artifact-only decompilation requires an output-limited partial result and its published artifact' });
+  if (
+    data.delivery === 'artifact' &&
+    (result.state !== 'partial' ||
+      result.reason !== 'output_limit' ||
+      !result.artifacts.some((artifact) => artifact.id === data.artifact_id))
+  ) {
+    context.addIssue({
+      code: 'custom',
+      message:
+        'Artifact-only decompilation requires an output-limited partial result and its published artifact',
+    });
   }
 });
 
 /** A transport may deliver the published analysis rather than repeat its large
  * body. Original analysis budgets, options and semantic partialness live unchanged
  * in that artifact; this envelope reports only the separate delivery limitation. */
-export function projectDecompilationArtifactResult(result: ToolResult<'function_decompile'>): ToolResult<'function_decompile'> {
+export function projectDecompilationArtifactResult(
+  result: ToolResult<'function_decompile'>,
+): ToolResult<'function_decompile'> {
   if (!('data' in result) || result.data.delivery === 'artifact') return result;
-  const artifact = result.artifacts.find(item => item.media_type === 'application/vnd.open-decomp.function+json' &&
-    item.project_id === result.project_id && item.revision === result.revision);
-  if (!artifact) throw new RangeError('Artifact delivery requires a published analysis for the same snapshot');
+  const artifact = result.artifacts.find(
+    (item) =>
+      item.media_type === 'application/vnd.open-decomp.function+json' &&
+      item.project_id === result.project_id &&
+      item.revision === result.revision,
+  );
+  if (!artifact)
+    throw new RangeError('Artifact delivery requires a published analysis for the same snapshot');
   return functionDecompileResultSchema.parse({
-    schema_version: result.schema_version, project_id: result.project_id, revision: result.revision,
-    versions: result.versions, options: result.options, budget: result.budget,
-    coverage: [], evidence: [], artifacts: [artifact], state: 'partial', reason: 'output_limit', continuation: null,
-    diagnostics: [{ code: 'resource_limit', severity: 'info', message: 'Full decompilation, coverage and diagnostics are available in the analysis artifact.', evidence_ids: [] }],
-    data: { delivery: 'artifact', function_id: result.data.function_id, artifact_id: artifact.id, cache: result.data.cache },
+    schema_version: result.schema_version,
+    project_id: result.project_id,
+    revision: result.revision,
+    versions: result.versions,
+    options: result.options,
+    budget: result.budget,
+    coverage: [],
+    evidence: [],
+    artifacts: [artifact],
+    state: 'partial',
+    reason: 'output_limit',
+    continuation: null,
+    diagnostics: [
+      {
+        code: 'resource_limit',
+        severity: 'info',
+        message:
+          'Full decompilation, coverage and diagnostics are available in the analysis artifact.',
+        evidence_ids: [],
+      },
+    ],
+    data: {
+      delivery: 'artifact',
+      function_id: result.data.function_id,
+      artifact_id: artifact.id,
+      cache: result.data.cache,
+    },
   });
 }
-export const xrefsGetResultSchema = resultSchema(z.strictObject({ items: z.array(referenceSchema).max(1000), page: pageInfoSchema }));
+export const xrefsGetResultSchema = resultSchema(
+  z.strictObject({ items: z.array(referenceSchema).max(1000), page: pageInfoSchema }),
+);
 export const memoryReadResultSchema = resultSchema(memoryDataSchema);
-export const annotationsApplyResultSchema = resultSchema(z.strictObject({ previous_revision: revisionSchema, revision: revisionSchema, applied: z.array(annotationSchema).max(1000), removed: z.array(z.string().regex(/^annotation_[0-9a-f]{64}$/)).max(1000), invalidation: z.strictObject({ scope: z.literal('project'), derived_before_revision: revisionSchema }) }).superRefine((data, context) => {
-  if (data.revision !== data.previous_revision + 1 || data.invalidation.derived_before_revision !== data.revision) context.addIssue({ code: 'custom', message: 'An atomic annotation batch advances revision exactly once' });
-}));
-export const analysisStatusResultSchema = resultSchema(z.strictObject({ job: jobSchema, known_revision: revisionSchema }));
-export const analysisCancelResultSchema = resultSchema(z.strictObject({ job: jobSchema, known_revision: revisionSchema, outcome: z.enum(['cancelled', 'already_finished', 'cancellation_requested']) }).superRefine((data, context) => {
-  if ((data.outcome === 'cancelled' && data.job.state !== 'cancelled') ||
-      (data.outcome === 'already_finished' && !['completed', 'failed', 'stale'].includes(data.job.state)) ||
-      (data.outcome === 'cancellation_requested' && !['queued', 'running'].includes(data.job.state))) {
-    context.addIssue({ code: 'custom', message: 'Cancellation outcome contradicts job state' });
-  }
-}));
+export const annotationsApplyResultSchema = resultSchema(
+  z
+    .strictObject({
+      previous_revision: revisionSchema,
+      revision: revisionSchema,
+      applied: z.array(annotationSchema).max(1000),
+      removed: z.array(z.string().regex(/^annotation_[0-9a-f]{64}$/)).max(1000),
+      invalidation: z.strictObject({
+        scope: z.literal('project'),
+        derived_before_revision: revisionSchema,
+      }),
+    })
+    .superRefine((data, context) => {
+      if (
+        data.revision !== data.previous_revision + 1 ||
+        data.invalidation.derived_before_revision !== data.revision
+      )
+        context.addIssue({
+          code: 'custom',
+          message: 'An atomic annotation batch advances revision exactly once',
+        });
+    }),
+);
+export const analysisStatusResultSchema = resultSchema(
+  z.strictObject({ job: jobSchema, known_revision: revisionSchema }),
+);
+export const analysisCancelResultSchema = resultSchema(
+  z
+    .strictObject({
+      job: jobSchema,
+      known_revision: revisionSchema,
+      outcome: z.enum(['cancelled', 'already_finished', 'cancellation_requested']),
+    })
+    .superRefine((data, context) => {
+      if (
+        (data.outcome === 'cancelled' && data.job.state !== 'cancelled') ||
+        (data.outcome === 'already_finished' &&
+          !['completed', 'failed', 'stale'].includes(data.job.state)) ||
+        (data.outcome === 'cancellation_requested' &&
+          !['queued', 'running'].includes(data.job.state))
+      ) {
+        context.addIssue({ code: 'custom', message: 'Cancellation outcome contradicts job state' });
+      }
+    }),
+);
 
 export interface ToolSchemaRegistry {
   project_open: { input: typeof projectOpenArgsSchema; output: typeof projectOpenResultSchema };
@@ -239,14 +802,29 @@ export interface ToolSchemaRegistry {
   binary_info: { input: typeof binaryInfoArgsSchema; output: typeof binaryInfoResultSchema };
   symbols_find: { input: typeof symbolsFindArgsSchema; output: typeof symbolsFindResultSchema };
   strings_find: { input: typeof stringsFindArgsSchema; output: typeof stringsFindResultSchema };
-  functions_find: { input: typeof functionsFindArgsSchema; output: typeof functionsFindResultSchema };
+  functions_find: {
+    input: typeof functionsFindArgsSchema;
+    output: typeof functionsFindResultSchema;
+  };
   function_get: { input: typeof functionGetArgsSchema; output: typeof functionGetResultSchema };
-  function_decompile: { input: typeof functionDecompileArgsSchema; output: typeof functionDecompileResultSchema };
+  function_decompile: {
+    input: typeof functionDecompileArgsSchema;
+    output: typeof functionDecompileResultSchema;
+  };
   xrefs_get: { input: typeof xrefsGetArgsSchema; output: typeof xrefsGetResultSchema };
   memory_read: { input: typeof memoryReadArgsSchema; output: typeof memoryReadResultSchema };
-  annotations_apply: { input: typeof annotationsApplyArgsSchema; output: typeof annotationsApplyResultSchema };
-  analysis_status: { input: typeof analysisStatusArgsSchema; output: typeof analysisStatusResultSchema };
-  analysis_cancel: { input: typeof analysisCancelArgsSchema; output: typeof analysisCancelResultSchema };
+  annotations_apply: {
+    input: typeof annotationsApplyArgsSchema;
+    output: typeof annotationsApplyResultSchema;
+  };
+  analysis_status: {
+    input: typeof analysisStatusArgsSchema;
+    output: typeof analysisStatusResultSchema;
+  };
+  analysis_cancel: {
+    input: typeof analysisCancelArgsSchema;
+    output: typeof analysisCancelResultSchema;
+  };
 }
 export const toolSchemas: ToolSchemaRegistry = {
   project_open: { input: projectOpenArgsSchema, output: projectOpenResultSchema },
@@ -270,9 +848,17 @@ export type ToolResult<K extends ToolName> = z.output<(typeof toolSchemas)[K]['o
 
 /** JSON Schema describes structural constraints. Zod remains authoritative for cross-field invariants. */
 export function exportToolJsonSchemas() {
-  return Object.fromEntries(Object.entries(toolSchemas).map(([name, schemas]) => [name, {
-    schema_version: SCHEMA_VERSION,
-    inputSchema: z.toJSONSchema(schemas.input, { target: 'draft-2020-12', io: 'input' }),
-    outputSchema: { ...z.toJSONSchema(schemas.output, { target: 'draft-2020-12', io: 'output' }), type: 'object' as const },
-  }]));
+  return Object.fromEntries(
+    Object.entries(toolSchemas).map(([name, schemas]) => [
+      name,
+      {
+        schema_version: SCHEMA_VERSION,
+        inputSchema: z.toJSONSchema(schemas.input, { target: 'draft-2020-12', io: 'input' }),
+        outputSchema: {
+          ...z.toJSONSchema(schemas.output, { target: 'draft-2020-12', io: 'output' }),
+          type: 'object' as const,
+        },
+      },
+    ]),
+  );
 }

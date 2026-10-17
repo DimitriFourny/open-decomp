@@ -1,17 +1,33 @@
-import { entityIdentity, type Address, type CFGBlock, type CFGEdge, type DecodedInstruction, type OperationContext } from '../../core/index.js';
+import {
+  entityIdentity,
+  type Address,
+  type CFGBlock,
+  type CFGEdge,
+  type DecodedInstruction,
+  type OperationContext,
+} from '../../core/index.js';
 
 /** Calls deliberately contribute only their continuation to intraprocedural reachability. */
 export function instructionSuccessors(instruction: DecodedInstruction): readonly Address[] {
   if (instruction.validity !== 'valid') return [];
   const flow = instruction.flow;
   switch (flow.kind) {
-    case 'fallthrough': return [flow.next];
-    case 'call': return [flow.fallthrough];
-    case 'branch': return flow.fallthrough ? [flow.target, flow.fallthrough] : [flow.target];
-    case 'indirect_branch': case 'trap': return flow.fallthrough ? [flow.fallthrough] : [];
-    case 'unknown': return flow.may_fallthrough && instruction.address.value + BigInt(instruction.size) < (1n << 64n)
-      ? [{ ...instruction.address, value: instruction.address.value + BigInt(instruction.size) }] : [];
-    case 'return': return [];
+    case 'fallthrough':
+      return [flow.next];
+    case 'call':
+      return [flow.fallthrough];
+    case 'branch':
+      return flow.fallthrough ? [flow.target, flow.fallthrough] : [flow.target];
+    case 'indirect_branch':
+    case 'trap':
+      return flow.fallthrough ? [flow.fallthrough] : [];
+    case 'unknown':
+      return flow.may_fallthrough &&
+        instruction.address.value + BigInt(instruction.size) < 1n << 64n
+        ? [{ ...instruction.address, value: instruction.address.value + BigInt(instruction.size) }]
+        : [];
+    case 'return':
+      return [];
   }
 }
 
@@ -30,8 +46,12 @@ export interface CFGInput {
  * Throws OperationError through the supplied context on work/deadline/cancellation limits.
  */
 export function buildCFG(input: CFGInput, context: OperationContext): readonly CFGBlock[] {
-  const sorted = [...input.instructions].sort((a, b) => a.address.value < b.address.value ? -1 : a.address.value > b.address.value ? 1 : 0);
-  const instructions = new Map(sorted.map(instruction => [instruction.address.value, instruction]));
+  const sorted = [...input.instructions].sort((a, b) =>
+    a.address.value < b.address.value ? -1 : a.address.value > b.address.value ? 1 : 0,
+  );
+  const instructions = new Map(
+    sorted.map((instruction) => [instruction.address.value, instruction]),
+  );
   const leaders = new Set<bigint>([input.entry.value]);
   const incoming = new Map<bigint, number>();
   for (const instruction of sorted) {
@@ -47,18 +67,28 @@ export function buildCFG(input: CFGInput, context: OperationContext): readonly C
   for (const instruction of sorted) {
     context.checkpoint(1);
     const previous = group.at(-1);
-    if (previous && (leaders.has(instruction.address.value) || previous.validity !== 'valid' || previous.flow.kind !== 'fallthrough' || previous.flow.next.value !== instruction.address.value)) {
-      groups.push(group); group = [];
+    if (
+      previous &&
+      (leaders.has(instruction.address.value) ||
+        previous.validity !== 'valid' ||
+        previous.flow.kind !== 'fallthrough' ||
+        previous.flow.next.value !== instruction.address.value)
+    ) {
+      groups.push(group);
+      group = [];
     }
     group.push(instruction);
   }
   if (group.length) groups.push(group);
   const blockAt = new Map<bigint, string>();
   for (const members of groups) {
-    const id = entityIdentity(input.slice_id, 'block', { function: input.function_id, entry: members[0]!.address.value });
+    const id = entityIdentity(input.slice_id, 'block', {
+      function: input.function_id,
+      entry: members[0]!.address.value,
+    });
     for (const instruction of members) blockAt.set(instruction.address.value, id);
   }
-  return groups.map(members => {
+  return groups.map((members) => {
     context.checkpoint(1);
     const first = members[0]!;
     const last = members.at(-1)!;
@@ -66,16 +96,35 @@ export function buildCFG(input: CFGInput, context: OperationContext): readonly C
     const evidence_ids = input.evidence.get(last.id) ?? last.evidence_ids;
     const edges: CFGEdge[] = [];
     const edge = (kind: CFGEdge['kind'], target: Address | null, conditional: boolean): void => {
-      edges.push({ from: id, to: target && kind !== 'tail_call' ? blockAt.get(target.value) ?? null : null, target, kind, conditional, evidence_ids });
+      edges.push({
+        from: id,
+        to: target && kind !== 'tail_call' ? (blockAt.get(target.value) ?? null) : null,
+        target,
+        kind,
+        conditional,
+        evidence_ids,
+      });
     };
     if (last.validity !== 'valid') edge('unknown', null, false);
     else {
       const flow = last.flow;
       switch (flow.kind) {
-        case 'fallthrough': edge('fallthrough', flow.next, false); break;
-        case 'call': edge('fallthrough', flow.fallthrough, false); break;
+        case 'fallthrough':
+          edge('fallthrough', flow.next, false);
+          break;
+        case 'call':
+          edge('fallthrough', flow.fallthrough, false);
+          break;
         case 'branch':
-          edge(!flow.conditional && flow.target.value !== input.entry.value && input.function_entries.has(flow.target.value) ? 'tail_call' : 'branch', flow.target, flow.conditional);
+          edge(
+            !flow.conditional &&
+              flow.target.value !== input.entry.value &&
+              input.function_entries.has(flow.target.value)
+              ? 'tail_call'
+              : 'branch',
+            flow.target,
+            flow.conditional,
+          );
           if (flow.fallthrough) edge('fallthrough', flow.fallthrough, true);
           break;
         case 'indirect_branch':
@@ -86,13 +135,25 @@ export function buildCFG(input: CFGInput, context: OperationContext): readonly C
           edge('trap', null, flow.conditional);
           if (flow.fallthrough) edge('fallthrough', flow.fallthrough, true);
           break;
-        case 'return': edge('return', null, false); break;
+        case 'return':
+          edge('return', null, false);
+          break;
         case 'unknown':
           edge('unknown', null, false);
           for (const successor of instructionSuccessors(last)) edge('fallthrough', successor, true);
           break;
       }
     }
-    return { id, ranges: [{ start: first.address, size: last.address.value + BigInt(last.size) - first.address.value }], instructions: members.map(instruction => instruction.id), edges };
+    return {
+      id,
+      ranges: [
+        {
+          start: first.address,
+          size: last.address.value + BigInt(last.size) - first.address.value,
+        },
+      ],
+      instructions: members.map((instruction) => instruction.id),
+      edges,
+    };
   });
 }

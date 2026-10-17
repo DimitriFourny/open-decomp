@@ -88,10 +88,11 @@ This is private, operator-provisioned, out-of-band bearer authentication. It is 
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 
 const client = new Client({ name: 'investigator', version: '1.0.0' });
-await client.connect(new StreamableHTTPClientTransport(
-  new URL('https://analysis.example.org:8443/mcp'),
-  { requestInit: { headers: { authorization: `Bearer ${secretFromCredentialStore}` } } },
-));
+await client.connect(
+  new StreamableHTTPClientTransport(new URL('https://analysis.example.org:8443/mcp'), {
+    requestInit: { headers: { authorization: `Bearer ${secretFromCredentialStore}` } },
+  }),
+);
 // Existing tools/call and resources/read workflows are unchanged.
 ```
 
@@ -115,23 +116,23 @@ The optional embedding-only `workerRuntime` is restricted to existing trusted `e
 
 All limits are per process. Deploy behind OS/container memory, CPU, process, disk and connection quotas with a least-privilege account. Workers provide fault containment, not an OS sandbox; no claim is made that malformed native data cannot exploit Node or a decoder dependency. Static analysis consumes target data only. Back up project directories, monitor disk use externally and retire/archive projects administratively. There is no HTTP delete/upload or automatic retention policy.
 
-| Setting | Default | Accepted range / meaning |
-| --- | --- | --- |
-| `port` | 3000 | 0–65535; zero selects a free local port |
-| `limits.max_connections` | 64 | 1–1024, all TCP sockets including idle/TLS handshakes |
-| `limits.max_requests` | 32 | 1–256 concurrent admitted HTTP requests globally |
-| `limits.requests_per_minute` | 600 | 1–100000 global token-bucket capacity/refill per minute, includes unauthenticated requests |
-| `limits.header_bytes` | 8192 | 1024–32768, native parser cap |
-| `limits.header_count` | 32 | 8–128, duplicate headers also rejected |
-| `limits.request_timeout_ms` | 60000 | 100–600000, absolute request/output deadline and maximum TCP connection lifetime |
-| `limits.body_timeout_ms` | 10000 | 100–60000, absolute body deadline; also native header/handshake timeout |
-| `limits.idle_timeout_ms` | 10000 | 100–60000, socket inactivity and keep-alive bound; even a silent waiting computation can lose its exchange |
-| principal `max_workers` | 2 | 1–8 persistent project workers; idle open projects count |
-| principal `max_queued` | 8 | 0–64 queued jobs per worker, in addition to its running job |
-| principal `max_requests` | 8 | 1–8 concurrent HTTP exchanges; separately bounds active service work/artifact reads and active control calls |
-| principal `requests_per_minute` | 120 | 1–10000 token-bucket capacity/refill per minute |
-| principal `work_admissions_per_minute` | 60 | 1–1000 token-bucket capacity/refill per minute for dispatched tools other than status/cancel/close |
-| principal `max_work_admissions` | 10000 | 1–1000000 total work dispatch attempts per server lifetime; failures after dispatch consume admission too |
+| Setting                                | Default | Accepted range / meaning                                                                                     |
+| -------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------ |
+| `port`                                 | 3000    | 0–65535; zero selects a free local port                                                                      |
+| `limits.max_connections`               | 64      | 1–1024, all TCP sockets including idle/TLS handshakes                                                        |
+| `limits.max_requests`                  | 32      | 1–256 concurrent admitted HTTP requests globally                                                             |
+| `limits.requests_per_minute`           | 600     | 1–100000 global token-bucket capacity/refill per minute, includes unauthenticated requests                   |
+| `limits.header_bytes`                  | 8192    | 1024–32768, native parser cap                                                                                |
+| `limits.header_count`                  | 32      | 8–128, duplicate headers also rejected                                                                       |
+| `limits.request_timeout_ms`            | 60000   | 100–600000, absolute request/output deadline and maximum TCP connection lifetime                             |
+| `limits.body_timeout_ms`               | 10000   | 100–60000, absolute body deadline; also native header/handshake timeout                                      |
+| `limits.idle_timeout_ms`               | 10000   | 100–60000, socket inactivity and keep-alive bound; even a silent waiting computation can lose its exchange   |
+| principal `max_workers`                | 2       | 1–8 persistent project workers; idle open projects count                                                     |
+| principal `max_queued`                 | 8       | 0–64 queued jobs per worker, in addition to its running job                                                  |
+| principal `max_requests`               | 8       | 1–8 concurrent HTTP exchanges; separately bounds active service work/artifact reads and active control calls |
+| principal `requests_per_minute`        | 120     | 1–10000 token-bucket capacity/refill per minute                                                              |
+| principal `work_admissions_per_minute` | 60      | 1–1000 token-bucket capacity/refill per minute for dispatched tools other than status/cancel/close           |
+| principal `max_work_admissions`        | 10000   | 1–1000000 total work dispatch attempts per server lifetime; failures after dispatch consume admission too    |
 
 Buckets start full and refill continuously; they are not fixed calendar-minute counters. Only configured principals allocate rate state: unknown tokens/IPs cannot create an unbounded limiter map. Global limits prevent multiplying all capacity by the principal count. Per-principal work count, queue capacity and request budgets bound detached work, not merely live HTTP exchanges. Artifact reads are separately bounded by active work and HTTP rates and do not create durable jobs. `max_work_admissions` bounds lifetime growth attempts but is not a byte quota or persisted billing ledger; restarting resets it. Disk quotas are still required.
 

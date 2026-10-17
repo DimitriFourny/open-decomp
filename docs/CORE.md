@@ -6,19 +6,19 @@ Module names in the interface map below are relative to `src/core/`.
 
 ## Interface map
 
-| Module | Main exports / consumers |
-| --- | --- |
-| `primitives.ts` | Strict Zod schemas for IDs, branded `HexU64`, explicit wire addresses, target combinations, diagnostics, evidence origins, layer-specific coverage/capabilities, revisions, budgets, options and artifacts. `Internal<T>` converts only branded machine integers to `bigint`; ordinary names/notes remain strings. |
-| `integers.ts`, `codecs.ts` | Existing `parseHexU64` / `formatHexU64`; Zod 4 `hexU64Codec`, `addressCodec`, `rangeCodec` and internal bigint schemas. JSON Schema is exported from wire schemas, never bigint schemas/codecs. |
-| `addresses.ts` | `Address`, `AddressRange`, `ImageMapping`, `MappingContext`, `ImmutableBytes`, `AddressMap.translate` / `.spans`, checked arithmetic/index conversion, signed-magnitude and address/range codecs. |
-| `identity.ts` | Content-derived image identity; slice identity includes image, container offset, size and architecture; entity identity includes immutable birth information. Random durable project/job/annotation/evidence/artifact IDs; type-tagged canonical fingerprints; revision/query-bound cursor encoding and validation. |
-| `model.ts` | `LoadedImage`, slices, mappings, sections, structured header fields, symbols/imports/exports, relocations, function/unwind/data hints, navigation records, source types/signatures, annotations and split/merge lineage. Corresponding finite wire schemas are exported. |
-| `decoder.ts` | `RegisterDescriptor`, `DecodedFlow`, `DecodedInstruction`, `DecodeGap`, `Arm64Payload`, `X86Payload`, and structured wire schemas. ARM canonical fields, aliases, SP/ZR and feature validity are distinct from x86 operands, prefixes, register/memory accesses and flags. |
-| `contracts.ts` | `Loader`, `Decoder`, `Lifter<RegisterIR>`, `AbiProfile`, `AbiType`, `AbiCallLayout`, `Emitter<Presentation>`, `ProjectStore`, `StoreTransaction`, `StoredRecordKinds`, `RecordQuery`, `StoreFactory`, `AnalysisService`, `WorkerCommand`, `WorkerEvent`, `WorkerPool`, `ComponentRegistry`. Semantic IR lives in `src/ir/`; presentation lives in `src/presentation/`. Generic parameters are those integration boundaries, not unknown tool payloads. |
-| `tools.ts` | `toolSchemas` (all 13 tools), each named argument/result schema, `ToolName`, `ToolInput<K>` (before defaults), `ToolArgs<K>` (validated/defaulted), `ToolResult<K>`, jobs, pseudocode source mappings, and `exportToolJsonSchemas()`. |
-| `validation.ts` | `validateToolRequest`, `validateToolResponse`, `assertRevision`, `nextRevision`, `RevisionConflict`, evidence/diagnostic codecs, `cacheIdentitySchema` / `cacheIdentityKey`. |
-| `serialization.ts` | Explicit recovered-type/annotation, artifact, job and emission codecs. Internal domain records use bigint; wire schemas and `Wire*` aliases use validated hexadecimal strings. |
-| `operation.ts` | `createOperationContext` owns one monotonic deadline and cumulative work counter per operation; `OperationError` carries typed cancellation/resource diagnostics across component boundaries. |
+| Module                     | Main exports / consumers                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `primitives.ts`            | Strict Zod schemas for IDs, branded `HexU64`, explicit wire addresses, target combinations, diagnostics, evidence origins, layer-specific coverage/capabilities, revisions, budgets, options and artifacts. `Internal<T>` converts only branded machine integers to `bigint`; ordinary names/notes remain strings.                                                                                                                                     |
+| `integers.ts`, `codecs.ts` | Existing `parseHexU64` / `formatHexU64`; Zod 4 `hexU64Codec`, `addressCodec`, `rangeCodec` and internal bigint schemas. JSON Schema is exported from wire schemas, never bigint schemas/codecs.                                                                                                                                                                                                                                                        |
+| `addresses.ts`             | `Address`, `AddressRange`, `ImageMapping`, `MappingContext`, `ImmutableBytes`, `AddressMap.translate` / `.spans`, checked arithmetic/index conversion, signed-magnitude and address/range codecs.                                                                                                                                                                                                                                                      |
+| `identity.ts`              | Content-derived image identity; slice identity includes image, container offset, size and architecture; entity identity includes immutable birth information. Random durable project/job/annotation/evidence/artifact IDs; type-tagged canonical fingerprints; revision/query-bound cursor encoding and validation.                                                                                                                                    |
+| `model.ts`                 | `LoadedImage`, slices, mappings, sections, structured header fields, symbols/imports/exports, relocations, function/unwind/data hints, navigation records, source types/signatures, annotations and split/merge lineage. Corresponding finite wire schemas are exported.                                                                                                                                                                               |
+| `decoder.ts`               | `RegisterDescriptor`, `DecodedFlow`, `DecodedInstruction`, `DecodeGap`, `Arm64Payload`, `X86Payload`, and structured wire schemas. ARM canonical fields, aliases, SP/ZR and feature validity are distinct from x86 operands, prefixes, register/memory accesses and flags.                                                                                                                                                                             |
+| `contracts.ts`             | `Loader`, `Decoder`, `Lifter<RegisterIR>`, `AbiProfile`, `AbiType`, `AbiCallLayout`, `Emitter<Presentation>`, `ProjectStore`, `StoreTransaction`, `StoredRecordKinds`, `RecordQuery`, `StoreFactory`, `AnalysisService`, `WorkerCommand`, `WorkerEvent`, `WorkerPool`, `ComponentRegistry`. Semantic IR lives in `src/ir/`; presentation lives in `src/presentation/`. Generic parameters are those integration boundaries, not unknown tool payloads. |
+| `tools.ts`                 | `toolSchemas` (all 13 tools), each named argument/result schema, `ToolName`, `ToolInput<K>` (before defaults), `ToolArgs<K>` (validated/defaulted), `ToolResult<K>`, jobs, pseudocode source mappings, and `exportToolJsonSchemas()`.                                                                                                                                                                                                                  |
+| `validation.ts`            | `validateToolRequest`, `validateToolResponse`, `assertRevision`, `nextRevision`, `RevisionConflict`, evidence/diagnostic codecs, `cacheIdentitySchema` / `cacheIdentityKey`.                                                                                                                                                                                                                                                                           |
+| `serialization.ts`         | Explicit recovered-type/annotation, artifact, job and emission codecs. Internal domain records use bigint; wire schemas and `Wire*` aliases use validated hexadecimal strings.                                                                                                                                                                                                                                                                         |
+| `operation.ts`             | `createOperationContext` owns one monotonic deadline and cumulative work counter per operation; `OperationError` carries typed cancellation/resource diagnostics across component boundaries.                                                                                                                                                                                                                                                          |
 
 ## ABI boundary facts
 
@@ -108,16 +108,16 @@ Each result includes schema version, project/revision, backend/component version
 
 ## Defaults and bounds
 
-| Setting | Default | Maximum |
-| --- | ---: | ---: |
-| Page items | 100 | 1,000 |
-| Read bytes | 4,096 | 1,048,576 |
-| Instructions | 10,000 | 1,000,000 |
-| Blocks | 10,000 | 100,000 |
-| IR nodes | 100,000 | 10,000,000 |
-| Work units | 1,000,000 | 100,000,000 |
-| Deadline milliseconds | 30,000 | 300,000 |
-| Output bytes | 1,048,576 | 16,777,216 |
+| Setting               |   Default |     Maximum |
+| --------------------- | --------: | ----------: |
+| Page items            |       100 |       1,000 |
+| Read bytes            |     4,096 |   1,048,576 |
+| Instructions          |    10,000 |   1,000,000 |
+| Blocks                |    10,000 |     100,000 |
+| IR nodes              |   100,000 |  10,000,000 |
+| Work units            | 1,000,000 | 100,000,000 |
+| Deadline milliseconds |    30,000 |     300,000 |
+| Output bytes          | 1,048,576 |  16,777,216 |
 
 Analysis defaults: conservative unknown calls, bounded indirect-target recovery, C-like emitter, evidence included, two-space indentation. String search defaults to all supported encodings and both candidates/referenced records. Search defaults to case-insensitive contains with empty query. Closing defaults to rejecting active jobs. Page ordering is explicit (`address_id`, `name_id`, or `id`) with stable identity as the final tie breaker.
 

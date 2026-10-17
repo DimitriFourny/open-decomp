@@ -34,7 +34,11 @@ export interface SourcePresentation {
   readonly parameter_names: ReadonlyMap<string, string>;
   readonly return_type: DataType | null;
   readonly locals: ReadonlyMap<string, SourceLocal>;
-  readonly stack: { readonly minimum_offset: bigint; readonly size: bigint; readonly alignment: number } | null;
+  readonly stack: {
+    readonly minimum_offset: bigint;
+    readonly size: bigint;
+    readonly alignment: number;
+  } | null;
   readonly stack_addresses: ReadonlyMap<string, bigint>;
   readonly addresses: readonly SourceAddress[];
   /** Whole source-call results may be assembled from multiple SSA register cells. */

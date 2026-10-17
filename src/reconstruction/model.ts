@@ -32,7 +32,10 @@ export interface Reconstruction {
   readonly live: ReadonlySet<string>;
   readonly retained: ReadonlySet<string>;
   /** Keyed by original transfer object, preserving simultaneous assignment. */
-  readonly transfers: ReadonlyMap<ParallelTransfer, readonly { readonly destination: Value; readonly source: Value }[]>;
+  readonly transfers: ReadonlyMap<
+    ParallelTransfer,
+    readonly { readonly destination: Value; readonly source: Value }[]
+  >;
   /** Keyed by consuming statement/control ID; includes hidden contributors. */
   readonly origins: ReadonlyMap<string, readonly Origin[]>;
   readonly parameters: readonly Value[];
@@ -43,8 +46,14 @@ export interface Reconstruction {
   /** Complete physical snapshots encoded as overlays on immutable function-entry
    * state, not patches on the preceding boundary. Missing slices retain entry
    * bits, including at faults. Only proven unchanged slices are omitted. */
-  readonly physical_inputs: ReadonlyMap<string, readonly { readonly register: RegisterDescriptor; readonly value: Value }[]>;
-  readonly physical_exits: ReadonlyMap<string, readonly { readonly register: RegisterDescriptor; readonly value: Value }[]>;
+  readonly physical_inputs: ReadonlyMap<
+    string,
+    readonly { readonly register: RegisterDescriptor; readonly value: Value }[]
+  >;
+  readonly physical_exits: ReadonlyMap<
+    string,
+    readonly { readonly register: RegisterDescriptor; readonly value: Value }[]
+  >;
   readonly memory: ReadonlyMap<string, MemoryView>;
   readonly diagnostics: readonly Diagnostic[];
 }

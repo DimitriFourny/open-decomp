@@ -24,14 +24,20 @@ export interface DebugSignature {
   definition?: boolean | undefined;
 }
 
-export interface DebugRange { start: bigint; end: bigint }
+export interface DebugRange {
+  start: bigint;
+  end: bigint;
+}
 /** Symbolic storage only: these expressions are never executed against the host. */
 export type DebugLocation =
   | { kind: 'address'; address: bigint }
   | { kind: 'register'; register: number }
   | { kind: 'register-offset'; register: number; offset: bigint }
   | { kind: 'frame-offset'; offset: bigint };
-export interface DebugLocationEntry { ranges: DebugRange[]; location: DebugLocation }
+export interface DebugLocationEntry {
+  ranges: DebugRange[];
+  location: DebugLocation;
+}
 export interface DebugVariable {
   id: string;
   name: string;
@@ -73,7 +79,15 @@ export interface DebugType {
   encoding?: number | undefined;
   alignment?: number | undefined;
   targetTypeId?: string | undefined;
-  members?: { name: string; typeId?: string | undefined; byteOffset?: number | undefined; bitSize?: number | undefined; bitOffset?: number | undefined }[] | undefined;
+  members?:
+    | {
+        name: string;
+        typeId?: string | undefined;
+        byteOffset?: number | undefined;
+        bitSize?: number | undefined;
+        bitOffset?: number | undefined;
+      }[]
+    | undefined;
   elementCount?: number | undefined;
   /** Outer-to-inner array bounds; null means not established by DWARF. */
   dimensions?: readonly (bigint | null)[] | undefined;
