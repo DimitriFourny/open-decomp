@@ -19,6 +19,7 @@ import type { Assignment, BoundaryProjection, MemoryView, Reconstruction } from 
 import { planSource } from './source-planner.js';
 import { planSourceStack } from './source-stack.js';
 import { normalizeSourceExpressions } from './source-expressions.js';
+import { projectSourceTypes } from './source-types.js';
 import { normalizeSourceRanges } from './source-ranges.js';
 export type * from './model.js';
 
@@ -557,8 +558,8 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     for (const shape of input.types.shapes)
       for (const field of shape.fields) {
         context.checkpoint(1);
-        if (conflicting.has(shape.id) || conflicting.has(field.id) || field.stride !== null)
-          continue;
+        if (conflicting.has(shape.id) || conflicting.has(shape.type_id) || conflicting.has(field.id) ||
+          (shape.base.kind === 'value' && conflicting.has(shape.base.value_id))) continue;
         for (const id of field.node_ids) {
           context.checkpoint(1);
           if (ambiguous.has(id) || conflicting.has(id)) continue;
@@ -648,6 +649,9 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     physical_exits,
     memory,
     diagnostics,
-    ...(source ? { source } : {}),
+    ...(source ? { source: { ...source,
+      ...projectSourceTypes(input.types, source, values, expressions, returns, memory,
+        input.source!.abi.layout, context),
+    } } : {}),
   };
 }

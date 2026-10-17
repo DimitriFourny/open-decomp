@@ -55,6 +55,13 @@ export type SourceStackStorage = {
   | { readonly kind: 'private' }
   | { readonly kind: 'entry'; readonly base: Value; readonly dynamic: boolean }
 );
+/** Complete source interpretation of an unchanged machine-width value. */
+export interface SourceTypeView {
+  readonly type_id: string;
+  readonly association_ids: readonly string[];
+  readonly subject_ids: readonly string[];
+  readonly evidence_ids: readonly string[];
+}
 /** Syntax-neutral source storage and interface information. All original SSA
  * identities and effects remain in the analyzed graph and source mappings. */
 export interface SourcePresentation {
@@ -63,6 +70,9 @@ export interface SourcePresentation {
   readonly return_type: DataType | null;
   /** Source pointer interpretation, separate from the machine result bit width. */
   readonly return_pointer?: 'char' | 'byte';
+  readonly value_types?: ReadonlyMap<string, SourceTypeView>;
+  readonly return_source_type?: string;
+  readonly field_subjects?: ReadonlyMap<string, readonly string[]>;
   /** Explicit preconditions of supported FP projection, not modeled control state. */
   readonly assumptions?: readonly string[];
   readonly locals: ReadonlyMap<string, SourceLocal>;

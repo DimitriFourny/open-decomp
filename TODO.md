@@ -77,7 +77,7 @@ Surfaces: `src/analysis/calls/`, `src/analysis/types/`, `src/service/analysis/ca
 
 ### Types, memory, and symbolic data
 
-- [ ] Carry pointer, scalar, signedness, result-width, and field/array evidence into source expressions rather than defaulting useful inputs/results to `uint64_t`. Keep machine bit width separate from inferred source type.
+- [x] Carry pointer, scalar, signedness, result-width, and field/array evidence into source expressions rather than defaulting useful inputs/results to `uint64_t`. Keep machine bit width separate from inferred source type.
 - [ ] Improve cross-function memory-shape constraints into compatible partial structures, array/stride accesses, and function-pointer fields. Preserve conflicting layouts and unknown sizes; an observed access extent is not proof of an entire object layout.
 - [x] Fix symbolic/literal recovery for `fixture_string`, then globals, string tables, constant pools, and switch tables. Render `char *` and the exact fixture string instead of only `0x100000ad0` when the bytes and address establish it.
   - Acceptance: exact bounds, terminators, encodings, relocations, interior pointers, and mutable-versus-immutable data are respected. Do not reproduce Ghidra's SQLite lookup-table presentation as out-of-bounds indexing into the unrelated `"expand 32-byte k"` literal.

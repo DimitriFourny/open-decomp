@@ -254,7 +254,8 @@ export class Renderer {
   }
 
   private valueType(value: Value): string {
-    const source = this.sourceValueTypes.get(value.id);
+    const source = this.sourceValueTypes.get(value.id) ??
+      this.program.source?.value_types?.get(value.id)?.type_id;
     if (source) return this.sourceType(source);
     return this.dataType(value.type);
   }
@@ -265,6 +266,21 @@ export class Renderer {
         ? 'bool'
         : `uint${type.bits}_t`
       : machineType(type);
+  }
+
+  private sourceInterpretation(value: Value, text: string, id?: string): string {
+    if (!this.program.source) return text;
+    id ??= this.sourceValueTypes.get(value.id) ?? this.program.source.value_types?.get(value.id)?.type_id;
+    const type = id && this.typeRecords.get(id)?.definition;
+    if (!type || (type.kind !== 'integer' && type.kind !== 'pointer') ||
+      type.bits !== bitWidth(value.type) || value.type.kind !== 'integer') return text;
+    if (type.kind === 'pointer')
+      return this.language === 'c-like'
+        ? `((${this.sourceType(id!)})(uintptr_t)(${text}))`
+        : this.call('uint64', 'Interpret exact target pointer bits without a host pointer or inferred object bounds.', [text]);
+    if (!type.signed) return text;
+    return this.language === 'c-like' ? `((int${type.bits}_t)(${text}))`
+      : this.call(`int${type.bits}`, 'Interpret the proven source signed scalar from its unchanged machine bits.', [text]);
   }
 
   private expression(expression: Expression, type: DataType): string {
@@ -298,7 +314,8 @@ export class Renderer {
       : undefined;
     if (!expression) {
       const name = this.local(value),
-        id = this.sourceValueTypes.get(value.id);
+        id = this.sourceValueTypes.get(value.id) ??
+          this.program.source?.value_types?.get(value.id)?.type_id;
       const type = id && this.typeRecords.get(id)?.definition;
       if (this.program.source && type && type.kind === 'integer' && type.signed)
         return this.language === 'c-like'
@@ -308,6 +325,9 @@ export class Renderer {
               'Convert a signed source result back to its exact ABI bit pattern.',
               [name],
             );
+      if (this.program.source && type && type.kind === 'pointer')
+        return this.language === 'c-like' ? `((uintptr_t)(${name}))`
+          : this.call('uint64', 'Read a source pointer as exact target address bits before machine byte arithmetic.', [name]);
       return name;
     }
     if (this.expanding.has(value.id)) this.invalid('Cyclic reconstructed expression');
@@ -386,14 +406,20 @@ export class Renderer {
     const resolve = (id: string): readonly string[] => contributors?.get(id) ?? [id];
     const subjects = [...resolve(origin.id), ...ids.flatMap(resolve)];
     this.context.checkpoint(subjects.length);
-    const dataEvidence = new Set(evidence);
+    const dataEvidence = new Set(evidence), semanticSubjects = new Set(subjects);
     for (const id of [origin.id, ...ids, ...subjects]) {
+      const type = this.program.source?.value_types?.get(id);
+      if (type) {
+        semanticSubjects.add(type.type_id);
+        for (const subject of [...type.association_ids, ...type.subject_ids]) semanticSubjects.add(subject);
+        for (const evidenceId of type.evidence_ids) dataEvidence.add(evidenceId);
+      }
       const value = this.program.values.get(id);
       if (!value) continue;
       const data = this.sourceDataValue(value);
       for (const evidenceId of data?.object?.evidence_ids ?? []) dataEvidence.add(evidenceId);
     }
-    this.writer.map({ ...origin, id: subjects[0] ?? origin.id }, start, subjects, [...dataEvidence], end);
+    this.writer.map({ ...origin, id: subjects[0] ?? origin.id }, start, [...semanticSubjects], [...dataEvidence], end);
   }
 
   private map(
@@ -587,8 +613,15 @@ export class Renderer {
         this.identifiers.get(local.id)?.identifier ??
         this.sourceIdentifier(local.id, `local${this.sourceLocal++}`)
       );
-    const address = this.sourceAddressValue(node.address),
-      type = node.kind === 'load' ? node.result.type : node.value.type;
+    let address = this.sourceAddressValue(node.address);
+    const type = node.kind === 'load' ? node.result.type : node.value.type,
+      view = this.program.memory.get(node.id);
+    if (view)
+      address = this.call(
+        view.shape.base.kind === 'stack' ? 'stack_slot' : 'field_view',
+        'An exact observed memory view, not a scalar local or proof of object extent. Arguments: actual address, signed byte displacement from recovered base, access width in bits. Return the unchanged address; aliasing, faults and ordering remain those of memory. A scaled actual address retains its original index and stride without asserting an array bound.',
+        [address, String(view.field.offset), String(view.field.width_bits)],
+      );
     if (this.language === 'python-like') {
       const name = `${node.access.volatile ? 'volatile_' : ''}${node.access.endian === 'big' ? 'be_' : ''}${type.kind === 'integer' ? `u${type.bits}` : machineType(type)}`;
       this.writer.helper(
@@ -659,7 +692,8 @@ export class Renderer {
     let text: string;
     switch (node.kind) {
       case 'assign':
-        text = `${this.local(node.result)} = ${this.expression(this.program.expressions.get(node.result.id) ?? node.expression, node.result.type)}`;
+        text = `${this.local(node.result)} = ${this.sourceInterpretation(node.result,
+          this.expression(this.program.expressions.get(node.result.id) ?? node.expression, node.result.type))}`;
         break;
       case 'read_register': {
         const operation = this.call(
@@ -699,7 +733,7 @@ export class Renderer {
             node.kind === 'store'
               ? `${storage} = ${this.value(node.value)}`
               : this.program.live.has(node.result.id)
-                ? `${this.local(node.result)} = ${storage}`
+                ? `${this.local(node.result)} = ${this.sourceInterpretation(node.result, storage)}`
                 : storage;
           break;
         }
@@ -853,7 +887,8 @@ export class Renderer {
       this.mapped(
         node,
         start,
-        [view.shape.id, view.field.id, view.shape.type_id],
+        [view.shape.id, view.field.id, view.shape.type_id,
+          ...(this.program.source?.field_subjects?.get(node.id) ?? [])],
         [...view.shape.evidence_ids, ...view.field.evidence_ids],
       );
   }
@@ -957,7 +992,8 @@ export class Renderer {
     // A write is safe only after all other RHS readers of its destination ran.
     if (copies.length === 1) {
       const copy = copies[0]!;
-      this.writer.statement(depth, `${this.local(copy.destination)} = ${this.value(copy.source)}`);
+      this.writer.statement(depth, `${this.local(copy.destination)} = ${
+        this.sourceInterpretation(copy.destination, this.value(copy.source))}`);
     } else {
       type Move = {
         destination: Value;
@@ -1025,7 +1061,7 @@ export class Renderer {
           this.writer.statement(
             depth,
             this.writer.declaration(
-              this.valueType(candidate.destination),
+              this.dataType(candidate.source.type),
               candidate.temporary,
               ` = ${this.value(candidate.source)}`,
             ),
@@ -1035,7 +1071,8 @@ export class Renderer {
           const move = ready[next++]!;
           this.writer.statement(
             depth,
-            `${this.local(move.destination)} = ${move.temporary ?? this.value(move.source)}`,
+            `${this.local(move.destination)} = ${
+              this.sourceInterpretation(move.destination, move.temporary ?? this.value(move.source))}`,
           );
           pending.delete(move.destination.id);
           release(move);
@@ -1130,7 +1167,10 @@ export class Renderer {
         for (const binding of block.register_exit) ids.push(binding.value.id);
         if (projection && projection.kind !== 'physical' && projection.outputs.length === 0) {
           const values = this.writer.list(projection.results, (value) =>
-            this.program.source?.return_pointer ? this.sourceAddressValue(value, true) : this.value(value));
+            this.program.source?.return_pointer && !this.program.source.return_source_type
+              ? this.sourceAddressValue(value, true)
+              : this.sourceInterpretation(value, this.value(value),
+                this.program.signature?.signature.return_type ?? this.program.source?.return_source_type));
           this.writer.statement(
             depth,
             values.length
@@ -1276,7 +1316,7 @@ export class Renderer {
         : this.identifier(value.id, source ? 'arg' : register ? 'reg' : 'arg');
       parameters.push({
         value,
-        type: source ? this.sourceType(source.type_id) : this.dataType(value.type),
+        type: source ? this.sourceType(source.type_id) : this.valueType(value),
         name,
       });
     }
@@ -1288,7 +1328,9 @@ export class Renderer {
     const returnType = signature
       ? this.sourceType(signature.signature.return_type)
       : this.program.source
-        ? this.program.source.return_pointer
+        ? this.program.source.return_source_type
+          ? this.sourceType(this.program.source.return_source_type)
+          : this.program.source.return_pointer
           ? this.language === 'c-like'
             ? `${this.program.source.return_pointer === 'char' ? 'char' : 'uint8_t'} *`
             : `pointer[${this.program.source.return_pointer === 'char' ? 'char' : 'uint8_t'}]`

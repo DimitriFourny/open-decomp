@@ -150,6 +150,37 @@ class Parser {
     this.take('DEDENT');
   }
 
+  /** Source type syntax carries no host allocation or pointee bounds. Only
+   * machine-width casts below give values numeric interpretation. */
+  private bodyType(python: boolean, depth = 0): { scalar: string; pointer: boolean } | null {
+    assert.ok(depth < 64, 'Source type annotation nesting limit');
+    const start = this.position, token = this.take();
+    const scalar = /^(?:bits\d+_t|u?int\d+_t|uintptr_t|bool|char|void|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t|type_\d+)$/;
+    let pointer = false;
+    if (python && token === 'pointer' && this.peek() === '[') {
+      this.take('[');
+      assert.ok(this.bodyType(python, depth + 1));
+      this.take(']');
+      pointer = true;
+    } else if ((token === 'array' || token === 'vector') && this.peek() === '<') {
+      this.take('<');
+      assert.ok(this.bodyType(python, depth + 1));
+      this.take(',');
+      assert.match(this.take(), /^(?:\d+|\?)$/);
+      this.take('>');
+    } else if (!scalar.test(token) &&
+      !((depth > 0 || this.peek() === '*') && /^[A-Za-z_]\w*$/.test(token))) {
+      this.position = start;
+      return null;
+    }
+    if (!python)
+      while (this.peek() === '*') {
+        this.take('*');
+        pointer = true;
+      }
+    return { scalar: token, pointer };
+  }
+
   private pythonStatement(): void {
     const token = this.take();
     if (token === 'memory' && this.peek() === '.') {
@@ -294,10 +325,7 @@ class Parser {
     }
     if (this.peek() === ':') {
       this.take(':');
-      assert.match(
-        this.take(),
-        /^(?:bits\d+_t|u?int\d+_t|bool|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t)$/,
-      );
+      assert.ok(this.bodyType(true), 'Unsupported source local annotation');
     }
     const expression = this.peek() === '=' ? (this.take('='), this.expression()) : null;
     this.take('\n');
@@ -454,11 +482,15 @@ class Parser {
         names.push(this.take());
       }
       this.take(')');
-    } else if (
-      /^(?:bits\d+_t|u?int\d+_t|bool|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t)$/.test(token)
-    )
-      names = [this.take()];
-    else names = [token];
+    } else {
+      this.position--;
+      const type = this.bodyType(false);
+      if (type) names = [this.take()];
+      else {
+        this.take(token);
+        names = [token];
+      }
+    }
     const expression = this.peek() === '=' ? (this.take('='), this.expression()) : null;
     this.take(';');
     this.ops.push({ kind: 'assign', names, expression, tuple: token === '(' });
@@ -561,7 +593,8 @@ class Parser {
     if (token === '(') {
       if (
         this.peek() === 'volatile' ||
-        (/^(?:unaligned_)?u?int\d+_t$/.test(this.peek()) && this.tokens[this.position + 1] === '*')
+        (/^(?:unaligned_)?u?int\d+_t$/.test(this.peek()) &&
+          this.tokens[this.position + 1] === '*' && this.tokens[this.position + 2] === ')')
       ) {
         const volatile = this.peek() === 'volatile' ? (this.take(), true) : false;
         const type = this.take(),
@@ -581,18 +614,17 @@ class Parser {
           ],
         };
       }
-      if (
-        /^(?:u?int\d+_t|uintptr_t)$/.test(this.peek()) &&
-        this.tokens[this.position + 1] === ')'
-      ) {
-        const type = this.take();
+      const castStart = this.position, type = this.bodyType(false);
+      if (type && this.peek() === ')' &&
+        (type.pointer || /^(?:u?int\d+_t|uintptr_t)$/.test(type.scalar))) {
         this.take(')');
         return {
           kind: 'call',
-          name: type === 'uintptr_t' ? 'uint64' : type.slice(0, -2),
+          name: type.pointer || type.scalar === 'uintptr_t' ? 'uint64' : type.scalar.slice(0, -2),
           args: [this.atom()],
         };
       }
+      this.position = castStart;
       const expression = this.expression();
       if (this.peek() !== ',') {
         this.take(')');

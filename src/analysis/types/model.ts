@@ -62,12 +62,17 @@ export interface ObservedField {
   readonly offset: bigint;
   readonly width_bits: number;
   readonly node_ids: readonly string[];
+  /** Stable original field identities contributing to this caller-relative view. */
+  readonly origin_ids?: readonly string[];
   readonly value_ids: readonly string[];
   readonly evidence_ids: readonly string[];
   readonly access: readonly ('read' | 'write')[];
   readonly stack_region: string | null;
   /** Non-null only for a syntactically established scaled index. Count is unknown. */
   readonly stride: bigint | null;
+  /** Dynamic index evidence without a single representable stride. In this
+   * case a null stride does not establish a constant-displacement access. */
+  readonly dynamic?: boolean;
 }
 export interface MemoryShape {
   readonly id: string;
