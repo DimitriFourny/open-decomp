@@ -20,7 +20,7 @@ export function requirePass(
     });
 }
 
-export function boundIR(ir: FunctionIR, context: OperationContext): void {
+export function boundIR(ir: FunctionIR, context: OperationContext): number {
   let nodes = 0;
   for (const block of ir.blocks) {
     context.checkpoint(1 + block.instructions.length + block.parameters.length);
@@ -34,4 +34,5 @@ export function boundIR(ir: FunctionIR, context: OperationContext): void {
       });
   }
   assertValidIR(ir, (work) => context.checkpoint(work));
+  return nodes;
 }

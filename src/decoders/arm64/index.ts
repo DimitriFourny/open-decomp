@@ -26,7 +26,7 @@ interface Segment {
   readonly file: bigint | null;
   readonly reason: DecodeGap['reason'] | null;
 }
-const VERSION = 'aa0e547ca5313779c87e1e52d75687b12e985615+adapter.1';
+const VERSION = 'aa0e547ca5313779c87e1e52d75687b12e985615+adapter.2';
 function diagnostic(code: Diagnostic['code'], message: string, address: Address): Diagnostic {
   return { code, severity: 'warning', message, address, evidence_ids: [] };
 }

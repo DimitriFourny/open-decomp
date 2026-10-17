@@ -33,3 +33,13 @@ test('aborting an operation stops zero-cost checkpoints and progress publication
   assert.throws(() => context.progress('finished', 2, 2), { code: 'cancelled' });
   assert.deepEqual(phases, ['decode']);
 });
+
+test('remaining work observes the cumulative counter through context wrappers', () => {
+  const original = createOperationContext({ budget: { work: 9 } });
+  const wrapped = { ...original, budget: { ...original.budget, work: 99 } };
+  assert.equal(wrapped.remainingWork?.(), 9);
+  original.checkpoint(3);
+  assert.equal(wrapped.remainingWork?.(), 6);
+  wrapped.checkpoint(5);
+  assert.equal(original.remainingWork?.(), 1);
+});

@@ -1,6 +1,6 @@
-import type { Diagnostic, RegisterDescriptor } from '../core/index.js';
+import type { Address, Diagnostic, RegisterDescriptor } from '../core/index.js';
 import type { SignatureAssociation, MemoryShape, ObservedField } from '../analysis/types/model.js';
-import type { Expression, Instruction, Origin, Value } from '../ir/index.js';
+import type { DataType, Expression, Instruction, Origin, Value } from '../ir/index.js';
 import type { BlockRegion, ParallelTransfer, StructuredFunction } from '../presentation/index.js';
 import type { SourcePresentation } from './source-model.js';
 
@@ -15,6 +15,12 @@ export interface BoundaryProjection {
   readonly results: readonly Value[];
   readonly inputs: readonly { readonly register: RegisterDescriptor; readonly value: Value }[];
   readonly outputs: readonly { readonly register: RegisterDescriptor; readonly value: Value }[];
+}
+/** Terminal call: results belong to the callee, not invented caller SSA cells. */
+export interface TailProjection {
+  readonly target: Address;
+  readonly boundary: BoundaryProjection;
+  readonly result_types: readonly DataType[];
 }
 export interface MemoryView {
   readonly shape: MemoryShape;
@@ -45,6 +51,7 @@ export interface Reconstruction {
   readonly signature: SignatureAssociation | null;
   readonly calls: ReadonlyMap<string, BoundaryProjection>;
   readonly returns: ReadonlyMap<string, BoundaryProjection>;
+  readonly tails: ReadonlyMap<string, TailProjection>;
   /** Complete physical snapshots encoded as overlays on immutable function-entry
    * state, not patches on the preceding boundary. Missing slices retain entry
    * bits, including at faults. Only proven unchanged slices are omitted. */

@@ -39,7 +39,7 @@ import type {
  */
 export class DarwinArm64Abi implements AbiProfile {
   readonly name = 'Darwin ARM64 C ABI';
-  readonly version = '1.1.0';
+  readonly version = '1.2.0';
   readonly id = 'darwin-arm64' as const;
   readonly architecture = 'arm64' as const;
   readonly layout: DataLayout = Object.freeze({
@@ -277,7 +277,7 @@ function integerRegister(index: number, width: 32 | 64): RegisterDescriptor {
 function simdRegister(index: number, width: number, vector: boolean): RegisterDescriptor {
   const prefix = vector ? 'v' : width === 16 ? 'h' : width === 32 ? 's' : 'd';
   return Object.freeze({
-    id: `arm64:${prefix}${index}`,
+    id: `arm64:${prefix}${index}${vector && width < 128 ? `:0:${width}` : ''}`,
     bank: vector ? 'vector' : 'float',
     root: `arm64:v${index}`,
     offset_bits: 0,

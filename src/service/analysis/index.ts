@@ -115,7 +115,7 @@ export async function executeDecompilation(
         });
       context.progress('lift', 1, 7);
       const lifted = components.lifter.lift(graph, components.abi, context);
-      boundIR(lifted.ir, context);
+      let requiredNodes = boundIR(lifted.ir, context);
       const passOptions = {
         max_work: context.budget.work,
         max_ir_nodes: context.budget.ir_nodes,
@@ -132,11 +132,11 @@ export async function executeDecompilation(
           message: 'SSA conversion returned register form',
           evidence_ids: [],
         });
-      boundIR(constructed.value, context);
+      requiredNodes = Math.max(requiredNodes, boundIR(constructed.value, context));
       const simplified = simplifySSA(constructed.value, passOptions);
       requirePass(simplified.state, simplified.diagnostics, context);
       const ir = simplified.value;
-      boundIR(ir, context);
+      requiredNodes = Math.max(requiredNodes, boundIR(ir, context));
       context.progress('metadata', 3, 7);
       const debug = recoverDebugInfo(image, fullContext);
       const library = recoverLibraryContracts(
@@ -377,6 +377,8 @@ export async function executeDecompilation(
         image,
         ir,
         instruction_count: graph.instructions.length,
+        coverage_reasons: graph.coverage.reasons,
+        required_nodes: requiredNodes,
         functions,
         references,
         calls,

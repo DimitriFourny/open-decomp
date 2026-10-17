@@ -6,6 +6,7 @@ import type {
   FunctionGraph,
   Lifter,
   OperationContext,
+  RegisterDescriptor,
 } from '../../core/index.js';
 import { OperationError } from '../../core/index.js';
 import {
@@ -58,7 +59,7 @@ export interface Arm64LiftResult {
  */
 export class Arm64Lifter implements Lifter<RegisterIR> {
   readonly name = 'ARM64 typed semantic lifter';
-  readonly version = '1.0.3';
+  readonly version = '1.0.4';
   readonly architecture = 'arm64' as const;
   lift(graph: FunctionGraph, abi: AbiProfile, context: OperationContext): Arm64LiftResult {
     if (abi.architecture !== 'arm64') throw new TypeError('ARM64 lifter requires an ARM64 ABI');
@@ -103,6 +104,7 @@ export class Arm64Lifter implements Lifter<RegisterIR> {
         },
       });
     context.checkpoint(graph.instructions.length + graph.blocks.length);
+    let returnRegisters: readonly RegisterDescriptor[] | undefined;
     const instructions = new Map(
       graph.instructions.map((instruction) => [instruction.id, instruction]),
     );
@@ -216,7 +218,20 @@ export class Arm64Lifter implements Lifter<RegisterIR> {
                 target: semantic.read('Rn', 64),
                 reason: 'Return through non-link register',
               });
-            else block.return();
+            else {
+              if (!returnRegisters) {
+                const registers: RegisterDescriptor[] = [];
+                for (const returns of [{ kind: 'pointer' }, { kind: 'float', bits: 64 }] as const)
+                  for (const location of abi.classifyCall({ returns, parameters: [],
+                    variadic: false, fixed_parameter_count: 0 }).returns)
+                    if (location.kind === 'register') registers.push(location.register);
+                returnRegisters = registers;
+              }
+              // Capacity only: unchanged entry cells are not inferred results
+              // unless an actual caller consumes that preserved return slice.
+              for (const register of returnRegisters) block.readRegister(register);
+              block.return();
+            }
             terminated = true;
           } else if (flow.kind === 'indirect_branch' && (name === 'BR' || authenticated)) {
             block.terminate({
@@ -240,6 +255,14 @@ export class Arm64Lifter implements Lifter<RegisterIR> {
               const tail = discovered.edges.some(
                 (edge) => edge.kind === 'tail_call' && edge.target?.value === address.value,
               );
+              if (tail) {
+                // A tail may forward untouched argument cells that this body
+                // never reads. Keep their physical entry/exit identities for
+                // the bounded callee observer; do not invent source arguments.
+                for (const register of abi.unknown_call_clobbers.registers)
+                  exit.readRegister(register);
+                exit.readRegister(abi.stack_pointer);
+              }
               exit.terminate({
                 kind: 'indirect',
                 target: exit.address(address),

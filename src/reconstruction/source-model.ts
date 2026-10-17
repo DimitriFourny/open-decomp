@@ -1,13 +1,22 @@
-import type { AbiProfile, Address, RegisterDescriptor } from '../core/index.js';
+import type { AbiProfile, Address, Diagnostic, Evidence, RegisterDescriptor } from '../core/index.js';
 import type { DataType, Instruction, Value } from '../ir/index.js';
+import type { MemoryShapeTransfer } from '../analysis/types/memory-shapes.js';
 
 /** Observed native callee inputs, not a user-supplied or proven source prototype. */
 export interface InferredCallee {
   readonly call_id: string;
+  /** Exact native dependency identity; absent for unresolved callback targets. */
+  readonly target?: Address;
   readonly parameter_state?: 'observed' | 'ambiguous';
   readonly parameters: readonly RegisterDescriptor[];
   /** False records an observed prefix without closing the target's source arity. */
   readonly argument_list_complete?: boolean;
+  /** Observed incoming slots in callee-entry SP coordinates, not a full arity. */
+  readonly stack_parameters?: readonly {
+    readonly offset: bigint;
+    readonly width_bits: number;
+    readonly type: DataType;
+  }[];
   readonly returns: readonly RegisterDescriptor[];
   /** Lane types observed independently of architectural register capacity. */
   readonly parameter_types?: readonly DataType[];
@@ -38,6 +47,11 @@ export interface SourceEvidence {
   readonly abi: AbiProfile;
   readonly callees: readonly InferredCallee[];
   readonly addresses: readonly SourceAddress[];
+  /** Explicit optional-dependency limitations; never substitutes a zero interface. */
+  readonly diagnostics?: readonly Diagnostic[];
+  readonly evidence?: readonly Evidence[];
+  /** Bounded native parameter-associated shape constraints over original values. */
+  readonly memory_transfers?: readonly MemoryShapeTransfer[];
   /** Proven complete actual counts for contextual variadic calls. */
   readonly call_argument_counts?: ReadonlyMap<string, number>;
 }

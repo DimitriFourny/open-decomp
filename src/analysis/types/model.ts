@@ -73,6 +73,9 @@ export interface ObservedField {
   /** Dynamic index evidence without a single representable stride. In this
    * case a null stride does not establish a constant-displacement access. */
   readonly dynamic?: boolean;
+  /** Exact calls whose indirect target was read from this field. No prototype
+   * or complete argument count is implied by observing a callable address. */
+  readonly call_target_ids?: readonly string[];
 }
 export interface MemoryShape {
   readonly id: string;

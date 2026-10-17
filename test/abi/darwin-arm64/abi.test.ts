@@ -339,7 +339,7 @@ test('HFA/HVA classification flattens nested complete layouts and counts at most
         ]),
       ).returns,
     ),
-    ['arm64:v0', 'arm64:v1'],
+    ['arm64:v0:0:64', 'arm64:v1:0:64'],
   );
   const five = repeated(f32, 5, 4n, 4);
   assert.equal(call([], five).hidden_result?.kind, 'indirect');

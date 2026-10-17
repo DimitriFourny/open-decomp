@@ -34,6 +34,9 @@ import {
 import { inspectRegister, inspectStackMemory, type StackSnapshot } from '../stack/index.js';
 import { AnalysisBudget } from '../ssa/budget.js';
 import { SourceLayouts, typeKey } from './layout.js';
+import {
+  buildMemoryShape, createAffineResolver, memoryAddressSources, memoryPointerFragments,
+} from './memory-shapes.js';
 import type {
   MemoryShape,
   ObservedField,
@@ -49,6 +52,10 @@ import type {
   TypeStatus,
 } from './model.js';
 export type * from './model.js';
+export { refineMemoryShapes, parameterMemoryShapes } from './memory-shapes.js';
+export type {
+  NativeParameterShape, MemoryShapeTransfer, MemoryShapeRefinementOptions, MemoryShapeParameter,
+} from './memory-shapes.js';
 
 /** Stable annotation subject for storage relative to this function's entry SP.
  * An offset identifies storage, not a proven source local or an object boundary. */
@@ -62,11 +69,6 @@ interface Transfer {
   width: number;
   node: string;
   conditional: boolean;
-}
-interface Affine {
-  base: string;
-  offset: bigint;
-  stride: bigint | null;
 }
 
 /** Bounded, nonrewriting source constraints over typed SSA. Supplied inputs are
@@ -213,7 +215,7 @@ export function recoverTypes(
           id: key,
           origin: source
             ? { kind: 'assertion', ...source }
-            : { kind: 'analysis', analyzer: 'source-types', version: '2', rule },
+            : { kind: 'analysis', analyzer: 'source-types', version: '3', rule },
           claim: rule,
           derived_from,
           conflicts_with: [],
@@ -856,74 +858,25 @@ export function recoverTypes(
       }
     }
 
-    const affineCache = new Map<string, Affine>();
-    const affine = (value: Value, active = new Set<string>()): Affine => {
-      budget.charge();
-      const cached = affineCache.get(value.id);
-      if (cached) return cached;
-      const fallback: Affine = { base: value.id, offset: 0n, stride: null };
-      if (active.has(value.id) || active.size >= 64 || bitWidth(value.type) !== 64) return fallback;
-      active.add(value.id);
-      const expression = definitions.get(value.id);
-      let result = fallback;
-      if (expression?.kind === 'integer' && (expression.op === 'add' || expression.op === 'sub')) {
-        const left = stack.values.get(expression.left.id)?.value,
-          right = stack.values.get(expression.right.id)?.value;
-        if (right?.kind === 'constant') {
-          const base = affine(expression.left, active);
-          result = {
-            ...base,
-            offset: BigInt.asIntN(
-              64,
-              base.offset + (expression.op === 'add' ? 1n : -1n) * BigInt.asIntN(64, right.bits),
-            ),
-          };
-        } else if (left?.kind === 'constant' && expression.op === 'add') {
-          const base = affine(expression.right, active);
-          result = {
-            ...base,
-            offset: BigInt.asIntN(64, base.offset + BigInt.asIntN(64, left.bits)),
-          };
-        } else if (expression.op === 'add') {
-          for (const [baseValue, indexValue] of [
-            [expression.left, expression.right],
-            [expression.right, expression.left],
-          ] as const) {
-            const index = definitions.get(indexValue.id);
-            if (index?.kind !== 'integer' || (index.op !== 'mul' && index.op !== 'shl')) continue;
-            const scale = stack.values.get(index.right.id)?.value;
-            if (scale?.kind !== 'constant') continue;
-            const stride =
-              index.op === 'mul' ? scale.bits : scale.bits < 64n ? 1n << scale.bits : 0n;
-            if (stride > 0n && stride <= 65536n) {
-              const base = affine(baseValue, active);
-              result = { ...base, stride };
-              break;
-            }
-          }
-        }
-      } else if (
-        expression?.kind === 'extract' &&
-        expression.offset === 0 &&
-        bitWidth(expression.value.type) === 64
-      )
-        result = affine(expression.value, active);
-      else if (
-        expression?.kind === 'cast' &&
-        expression.op === 'bitcast' &&
-        bitWidth(expression.value.type) === 64
-      )
-        result = affine(expression.value, active);
-      active.delete(value.id);
-      affineCache.set(value.id, result);
-      return result;
-    };
+    const affine = createAffineResolver(definitions, (value) => {
+      const fact = stack.values.get(value)?.value;
+      return fact?.kind === 'constant' ? fact.bits : undefined;
+    }, budget, memoryAddressSources(input, budget));
     const stackAccess = new Map(stack.accesses.map((access) => [access.node_id, access]));
     const groups = new Map<
       string,
       { base: MemoryShape['base']; fields: Map<string, ObservedField>; dynamic: boolean }
     >();
     const escapes = new Set<string>();
+    const callTargets = new Map<string, string[]>();
+    for (const node of nodes.values()) {
+      budget.charge();
+      if (node.kind !== 'call' || node.target.kind !== 'indirect') continue;
+      const target = affine(node.target.value).base;
+      const calls = callTargets.get(target) ?? [];
+      calls.push(node.id);
+      callTargets.set(target, calls);
+    }
     for (const node of nodes.values()) {
       budget.charge();
       if (node.kind === 'store') escapes.add(affine(node.value).base);
@@ -952,13 +905,17 @@ export function recoverTypes(
         node.id,
         node.provenance.evidence_ids,
       );
+      const targetCalls = callTargets.get(affine(value).base) ?? [];
+      const fieldProof = [proof, ...targetCalls.map((call_id) =>
+        reason('loaded field used as indirect call target', call_id,
+          [proof, ...nodes.get(call_id)!.provenance.evidence_ids]))];
       group.fields.set(fieldId, {
         id: fieldId,
         offset,
         width_bits: width,
         node_ids: [...(previous?.node_ids ?? []), node.id],
         value_ids: [...new Set([...(previous?.value_ids ?? []), value.id])],
-        evidence_ids: [...(previous?.evidence_ids ?? []), proof],
+        evidence_ids: [...(previous?.evidence_ids ?? []), ...fieldProof],
         access: [
           ...new Set([
             ...(previous?.access ?? []),
@@ -967,25 +924,31 @@ export function recoverTypes(
         ],
         stack_region: access?.region ?? null,
         stride: isStack ? null : address.stride,
+        ...((targetCalls.length || previous?.call_target_ids?.length) ? {
+          call_target_ids: [...new Set([...(previous?.call_target_ids ?? []), ...targetCalls])].sort(),
+        } : {}),
       });
       group.dynamic ||= address.stride !== null;
       groups.set(key, group);
       subjects.add(fieldId);
       typeSubjects.add(fieldId);
-      const type_id = machineType(value.type, [proof]);
+      const type_id = targetCalls.length
+        ? generated({ kind: 'pointer', bits: 64,
+            to: generated({ kind: 'unknown', size: null }, fieldProof) }, fieldProof)
+        : machineType(value.type, fieldProof);
       associate({
         subject_id: fieldId,
         type_id,
         source: 'analysis',
         status: 'candidate',
-        evidence_ids: [proof],
+        evidence_ids: fieldProof,
       });
       associate({
         subject_id: value.id,
         type_id,
         source: 'analysis',
         status: 'candidate',
-        evidence_ids: [proof],
+        evidence_ids: fieldProof,
       });
       if (isStack) {
         const subject_id = stackTypeSubject(options.slice_id, input.id, offset);
@@ -997,7 +960,7 @@ export function recoverTypes(
           type_id,
           source: 'analysis',
           status: 'candidate',
-          evidence_ids: [proof],
+          evidence_ids: fieldProof,
         });
       }
     }
@@ -1006,95 +969,46 @@ export function recoverTypes(
         for (const value of block.terminator.values) escapes.add(affine(value).base);
     const shapes: MemoryShape[] = [];
     for (const [key, group] of groups) {
-      budget.charge(group.fields.size);
-      const fields = [...group.fields.values()].sort((a, b) =>
-        a.offset < b.offset
-          ? -1
-          : a.offset > b.offset
-            ? 1
-            : a.width_bits - b.width_bits || a.id.localeCompare(b.id),
-      );
-      const constantFields = fields.filter((field) => field.stride === null);
-      const start = fields[0]!.offset,
-        base_offset = start < 0n ? start : 0n;
-      const proof: string[] = [];
-      const coreFields: Extract<RecoveredType, { kind: 'structure' }>['fields'][number][] = [];
-      for (const field of fields) {
-        proof.push(...field.evidence_ids);
-        const value = values.get(field.value_ids[0]!)!;
-        let type_id = machineType(value.type, field.evidence_ids);
-        if (field.width_bits % 8 === 0 && field.stride === BigInt(field.width_bits / 8))
-          type_id = generated({ kind: 'array', element: type_id, count: null }, field.evidence_ids);
-        coreFields.push({
-          id: field.id,
-          name: `field_${(field.offset - base_offset).toString(16)}`,
-          offset: field.offset - base_offset,
-          type_id,
-        });
-      }
-      const shapeId = id('shape', key);
-      const type_id = id('shape-type', key);
+      const built = buildMemoryShape({
+        id: id('shape', key),
+        type_id: id('shape-type', key),
+        base: group.base,
+        fields: [...group.fields.values()],
+        alias: group.base.kind === 'stack' && stack.frame.aliased ? 'observed' : 'possible',
+        escape: group.base.kind === 'stack'
+          ? stack.frame.escaped ? 'observed' : 'unknown'
+          : escapes.has(group.base.value_id) ? 'observed' : 'unknown',
+        dynamic: group.dynamic || (group.base.kind === 'stack' && stack.frame.dynamic),
+        field_type: (field) => {
+          const proof = field.evidence_ids;
+          if (field.call_target_ids?.length)
+            return generated({ kind: 'pointer', bits: 64,
+              to: generated({ kind: 'unknown', size: null }, proof) }, proof);
+          return machineType(values.get(field.value_ids[0]!)!.type, proof);
+        },
+        array_type: (element, field) => generated({ kind: 'array', element, count: null }, field.evidence_ids),
+      }, budget);
       addType({
-        id: type_id,
-        definition: { kind: 'structure', size: null, alignment: null, fields: coreFields },
+        id: built.shape.type_id,
+        definition: built.definition,
         source: 'analysis',
         status: 'candidate',
-        evidence_ids: proof,
+        evidence_ids: built.shape.evidence_ids,
       });
-      shapes.push({
-        id: shapeId,
-        base: group.base,
-        type_id,
-        base_offset,
-        observed_extent: constantFields.length
-          ? {
-              start: constantFields[0]!.offset,
-              end: constantFields.reduce((maximum, field) => {
-                const stop = field.offset + BigInt(Math.ceil(field.width_bits / 8));
-                return stop > maximum ? stop : maximum;
-              }, constantFields[0]!.offset),
-            }
-          : null,
-        fields,
-        alias: group.base.kind === 'stack' && stack.frame.aliased ? 'observed' : 'possible',
-        escape:
-          group.base.kind === 'stack'
-            ? stack.frame.escaped
-              ? 'observed'
-              : 'unknown'
-            : escapes.has(group.base.value_id)
-              ? 'observed'
-              : 'unknown',
-        dynamic: group.dynamic || (group.base.kind === 'stack' && stack.frame.dynamic),
-        evidence_ids: proof,
-      });
-      if (group.base.kind === 'value' && base_offset === 0n)
-        associate({
-          subject_id: group.base.value_id,
-          type_id: generated({ kind: 'pointer', bits: 64, to: type_id }, proof),
-          source: 'analysis',
-          status: 'candidate',
-          evidence_ids: proof,
-        });
-      // Overlap is evidence of a view/union/alias, not automatically a structure.
-      for (let index = 0; index < fields.length; index++)
-        for (
-          let next = index + 1;
-          next < fields.length &&
-          fields[next]!.offset <
-            fields[index]!.offset + BigInt(Math.ceil(fields[index]!.width_bits / 8));
-          next++
-        ) {
-          budget.charge();
-          const a = fields[index]!,
-            b = fields[next]!;
-          conflicts.push({
-            subject_id: shapeId,
-            alternatives: [a.id, b.id],
-            evidence_ids: [...a.evidence_ids, ...b.evidence_ids],
-            reason: 'overlapping_accesses',
-          });
-        }
+      shapes.push(built.shape);
+      conflicts.push(...built.conflicts);
+      if (group.base.kind === 'value' && built.shape.base_offset === 0n) {
+        const type_id = generated({ kind: 'pointer', bits: 64, to: built.shape.type_id }, built.shape.evidence_ids);
+        const binding = {
+          type_id, source: 'analysis' as const, status: 'candidate' as const,
+          evidence_ids: built.shape.evidence_ids,
+        };
+        associate({ ...binding, subject_id: group.base.value_id });
+        const value = values.get(group.base.value_id);
+        if (value)
+          for (const fragment of memoryPointerFragments(value, definitions, budget))
+            associate({ ...binding, subject_id: fragment.value.id }, fragment.offset, fragment.width);
+      }
     }
     // Machine signedness is an operation-use constraint, not a rewritten value.
     for (const node of nodes.values())
@@ -1287,6 +1201,7 @@ export function recoverTypes(
             (objectSize !== null &&
               displacement >= 0n &&
               field.stride === null &&
+              !field.dynamic &&
               displacement + BigInt(Math.ceil(field.width_bits / 8)) > objectSize) ||
             (memberSize !== null &&
               memberSize * 8n !== BigInt(field.width_bits) &&
@@ -1302,6 +1217,7 @@ export function recoverTypes(
           // A dynamic index can select an array element, but cannot be assumed to
           // remain within a particular struct member merely from its displacement.
           if (
+            field.dynamic ||
             field.stride !== null &&
             (object?.kind !== 'array' || layouts.size(object.element) !== field.stride)
           )

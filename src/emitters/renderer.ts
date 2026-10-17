@@ -1199,6 +1199,25 @@ export class Renderer {
       case 'indirect':
       case 'trap':
       case 'unknown': {
+        const tail = control.kind === 'indirect' && control.tail_call ? this.program.tails.get(control.id) : undefined;
+        if (tail && this.program.source && control.kind === 'indirect') {
+          const key = this.addressKey(tail.target), known = this.sourceAddresses.get(key);
+          const name = this.sourceNames.get(key) ?? this.sourceIdentifier(control.id,
+            this.names.get(control.id) ?? known?.name ?? `sub_${tail.target.value.toString(16)}`);
+          this.sourceNames.set(key, name);
+          const arguments_ = tail.boundary.arguments.map((value) => {
+            ids.push(value.id);
+            return this.value(value);
+          });
+          if (tail.boundary.argument_list_complete === false)
+            arguments_.push(this.call(arguments_.length ? 'unknown_argument_remainder' : 'unknown_arguments',
+              'Unresolved trailing native tail-call arguments; observed prefix is retained, not a complete prototype.', []));
+          this.writer.helper(name,
+            `Native tail transfer to ${this.writer.quote(key)} using observed ${this.input.source!.abi.id} storage. Preserve unknown target effects and forward its actual results. An absent observed result layout is unknown, not void.`);
+          ids.push(control.target.id);
+          this.writer.statement(depth, `return ${name}(${this.writer.join(arguments_)})`);
+          break;
+        }
         const args: string[] = [];
         if (control.kind === 'indirect') {
           args.push(this.value(control.target));

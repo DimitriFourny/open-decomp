@@ -2,6 +2,7 @@ import {
   entityIdentity,
   fingerprint,
   type Annotation,
+  type Address,
   type DataLayout,
   type Evidence,
   type FunctionRecord,
@@ -33,6 +34,72 @@ export interface CallScope {
   >;
 }
 
+interface NativeCallIndex {
+  readonly functions: readonly FunctionRecord[];
+  readonly references: readonly ReferenceRecord[];
+  readonly functions_by_id: ReadonlyMap<string, FunctionRecord>;
+  readonly functions_by_address: ReadonlyMap<string, readonly FunctionRecord[]>;
+  readonly exports_by_address: ReadonlyMap<string, LoadedImage['exports']>;
+  readonly imports_by_address: ReadonlyMap<string, LoadedImage['imports']>;
+  readonly imports_by_id: ReadonlyMap<string, LoadedImage['imports'][number]>;
+  readonly references_by_function: ReadonlyMap<string, ReadonlyMap<string, readonly ReferenceRecord[]>>;
+}
+const nativeIndexes = new WeakMap<LoadedImage, NativeCallIndex>();
+const nativeAddressKey = (address: Address): string =>
+  `${address.image_id}:${address.space}:${address.value}`;
+
+/** Index immutable native facts once; callers/callee summaries only visit their
+ * own call nodes and reference lists. Array identities bind the exact snapshot. */
+export function nativeCallIndex(
+  image: LoadedImage, functions: readonly FunctionRecord[],
+  references: readonly ReferenceRecord[], context: OperationContext,
+): NativeCallIndex {
+  const cached = nativeIndexes.get(image);
+  if (cached?.functions === functions && cached.references === references) return cached;
+  const functionsById = new Map<string, FunctionRecord>();
+  const functionsByAddress = new Map<string, FunctionRecord[]>();
+  for (const fn of functions) {
+    context.checkpoint(1);
+    functionsById.set(fn.id, fn);
+    const key = nativeAddressKey(fn.entry), list = functionsByAddress.get(key) ?? [];
+    list.push(fn); functionsByAddress.set(key, list);
+  }
+  const exportsByAddress = new Map<string, LoadedImage['exports'][number][]>();
+  for (const item of image.exports) {
+    context.checkpoint(1);
+    if (!item.address) continue;
+    const key = nativeAddressKey(item.address), list = exportsByAddress.get(key) ?? [];
+    list.push(item); exportsByAddress.set(key, list);
+  }
+  const importsByAddress = new Map<string, LoadedImage['imports'][number][]>();
+  const importsById = new Map<string, LoadedImage['imports'][number]>();
+  for (const item of image.imports) {
+    context.checkpoint(1);
+    importsById.set(item.id, item);
+    if (!item.callable_entry) continue;
+    const key = nativeAddressKey(item.callable_entry), list = importsByAddress.get(key) ?? [];
+    list.push(item); importsByAddress.set(key, list);
+  }
+  const referencesByFunction = new Map<string, Map<string, ReferenceRecord[]>>();
+  for (const reference of references) {
+    context.checkpoint(1);
+    if (reference.from_function === null || reference.from_instruction === null ||
+      (reference.kind !== 'call' && reference.kind !== 'tail_call')) continue;
+    const byInstruction = referencesByFunction.get(reference.from_function) ?? new Map<string, ReferenceRecord[]>();
+    const list = byInstruction.get(reference.from_instruction) ?? [];
+    list.push(reference); byInstruction.set(reference.from_instruction, list);
+    referencesByFunction.set(reference.from_function, byInstruction);
+  }
+  const indexed: NativeCallIndex = {
+    functions, references, functions_by_id: functionsById,
+    functions_by_address: functionsByAddress, exports_by_address: exportsByAddress,
+    imports_by_address: importsByAddress, imports_by_id: importsById,
+    references_by_function: referencesByFunction,
+  };
+  nativeIndexes.set(image, indexed);
+  return indexed;
+}
+
 /** Bind persisted discovery/target proofs to actual lifted call nodes. An import
  * slot identifies an imported callee, never a direct code address. */
 export function resolveCalls(
@@ -43,26 +110,15 @@ export function resolveCalls(
   indirect: boolean,
   context: OperationContext,
 ): CallScope {
-  const imports = new Map(image.imports.map((item) => [item.id, item]));
+  const indexed = nativeCallIndex(image, functions, references, context);
+  const imports = indexed.imports_by_id;
   const resolutions: SuppliedCallResolution[] = [];
   const subjects = new Set<string>();
   const callsBySubject = new Map<
     string,
     { call_id: string; target: ContractTarget; evidence_ids: readonly string[] }[]
   >();
-  const byInstruction = new Map<string, ReferenceRecord[]>();
-  for (const reference of references) {
-    context.checkpoint(1);
-    if (
-      reference.from_function !== ir.id ||
-      reference.from_instruction === null ||
-      !['call', 'tail_call'].includes(reference.kind)
-    )
-      continue;
-    const list = byInstruction.get(reference.from_instruction) ?? [];
-    list.push(reference);
-    byInstruction.set(reference.from_instruction, list);
-  }
+  const byInstruction = indexed.references_by_function.get(ir.id);
   const addSubject = (
     subject: string,
     call_id: string,
@@ -87,30 +143,19 @@ export function resolveCalls(
       if (node.target.kind === 'direct') {
         const address = node.target.address,
           target: ContractTarget = { kind: 'address', address };
-        for (const fn of functions) {
+        const key = nativeAddressKey(address);
+        for (const fn of indexed.functions_by_address.get(key) ?? []) {
           context.checkpoint(1);
-          if (
-            fn.entry.image_id === address.image_id &&
-            fn.entry.space === address.space &&
-            fn.entry.value === address.value
-          )
-            addSubject(fn.id, node.id, target, node.provenance.evidence_ids);
+          addSubject(fn.id, node.id, target, node.provenance.evidence_ids);
         }
-        for (const exported of image.exports) {
+        for (const exported of indexed.exports_by_address.get(key) ?? []) {
           context.checkpoint(1);
-          if (exported.address?.space === address.space && exported.address.value === address.value)
-            addSubject(exported.id, node.id, target, [
-              ...node.provenance.evidence_ids,
-              ...exported.evidence_ids,
-            ]);
+          addSubject(exported.id, node.id, target, [
+            ...node.provenance.evidence_ids, ...exported.evidence_ids,
+          ]);
         }
-        for (const imported of image.imports) {
+        for (const imported of indexed.imports_by_address.get(key) ?? []) {
           context.checkpoint(1);
-          if (
-            imported.callable_entry?.space !== address.space ||
-            imported.callable_entry.value !== address.value
-          )
-            continue;
           const proof = [...new Set([...node.provenance.evidence_ids, ...imported.evidence_ids])];
           const target: ContractTarget = {
             kind: 'import',
@@ -128,7 +173,7 @@ export function resolveCalls(
       }
       if (node.target.kind === 'indirect' && !indirect) continue;
       for (const instruction of node.provenance.instruction_ids)
-        for (const reference of byInstruction.get(instruction) ?? []) {
+        for (const reference of byInstruction?.get(instruction) ?? []) {
           context.checkpoint(1);
           if (reference.status === 'unresolved') continue;
           let target: ContractTarget | undefined;

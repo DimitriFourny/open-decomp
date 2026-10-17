@@ -15,7 +15,7 @@ import {
 import type { BlockRegion, Control, ParallelTransfer, Region } from '../presentation/index.js';
 import { boundaryProjector } from './boundaries.js';
 import { foldExpressions, identityOperand } from './expressions.js';
-import type { Assignment, BoundaryProjection, MemoryView, Reconstruction } from './model.js';
+import type { Assignment, BoundaryProjection, MemoryView, Reconstruction, TailProjection } from './model.js';
 import { planSource } from './source-planner.js';
 import { planSourceStack } from './source-stack.js';
 import { normalizeSourceExpressions } from './source-expressions.js';
@@ -214,7 +214,8 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
         });
     }
   if (sourcePlan) normalizeSourceExpressions(values, expressions, owner, sourcePlan.make, context);
-  const initial = new Map(entryBindings.map((binding) => [binding.register.id, binding.value.id]));
+  const initial = new Map(entryBindings.map((binding) =>
+    [binding.register.id, identities.get(binding.value.id) ?? binding.value.id]));
   const snapshot = (bindings: readonly RegisterBinding[]): readonly RegisterBinding[] =>
     bindings.filter((binding) => {
       context.checkpoint(1);
@@ -226,6 +227,7 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
   const project = boundaryProjector(input.types, context);
   const calls = new Map<string, BoundaryProjection>(),
     returns = new Map<string, BoundaryProjection>();
+  const tails = sourcePlan?.tails ?? new Map<string, TailProjection>();
   const physical_inputs = new Map<string, readonly RegisterBinding[]>(),
     physical_exits = new Map<string, readonly RegisterBinding[]>();
   let functionProjection: BoundaryProjection | null = null;
@@ -262,7 +264,7 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     )
       physical_exits.set(
         control.id,
-        sourcePlan && !(control.kind === 'indirect' && control.tail_call)
+        sourcePlan && (!(control.kind === 'indirect' && control.tail_call) || tails.has(control.id))
           ? []
           : snapshot(block.register_exit),
       );
@@ -356,6 +358,8 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     if (control.kind === 'if') operands.push(control.condition);
     else if (control.kind === 'switch') operands.push(control.value);
     else if (control.kind === 'indirect') operands.push(control.target);
+    const tail = tails.get(control.id);
+    if (tail) operands.push(...tail.boundary.arguments);
     if (control.kind === 'return') {
       const projection = returns.get(control.id)!;
       operands.push(...projection.results, ...projection.outputs.map((binding) => binding.value));
@@ -616,7 +620,9 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
       unavailable(
         block.control,
         block.control.kind === 'indirect' && block.control.tail_call
-          ? 'The tail-call target is preserved, but its source arguments, calling convention and result interface are unresolved.'
+          ? tails.has(block.control.id)
+            ? 'The observed native tail-call prefix and result storage are retained; trailing source arity and unknown effects remain explicit.'
+            : 'The tail-call target is preserved, but its source arguments, calling convention and result interface are unresolved.'
           : 'A control boundary remains unresolved; no target or trap is invented.',
       );
   }
@@ -645,6 +651,7 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     signature,
     calls,
     returns,
+    tails,
     physical_inputs,
     physical_exits,
     memory,

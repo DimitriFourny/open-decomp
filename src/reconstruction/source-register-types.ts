@@ -24,6 +24,7 @@ export function registerTypeSlices(
   copies: readonly StorageCopy[],
   callResults: Iterable<readonly Value[]>,
   context: OperationContext,
+  additionalSlices?: Iterable<readonly [Value, RegisterTypeSlice]>,
 ): ReadonlyMap<string, readonly RegisterTypeSlice[]> {
   const links = new Map<string, { readonly value: Value; readonly delta: number }[]>();
   const connect = (whole: Value, part: Value, offset: number): void => {
@@ -76,6 +77,8 @@ export function registerTypeSlices(
   for (const returned of callResults)
     for (const value of returned)
       if (value.type.kind !== 'integer') note(value, value.type, 0, true);
+  for (const [value, slice] of additionalSlices ?? [])
+    note(value, slice.type, slice.offset, slice.written);
   for (let index = 0; index < queue.length; index++) {
     const { value, slice } = queue[index]!;
     for (const link of links.get(value.id) ?? []) {

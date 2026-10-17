@@ -43,6 +43,9 @@ export interface OperationContext {
   readonly budget: Budget;
   /** Implementations must charge actual work and throw a typed resource-limit/cancel error. */
   checkpoint(work: number): void;
+  /** Actual shared work remaining; methods survive context wrappers/spreads.
+   * Optional custom contexts cannot safely grant optional dependency work. */
+  remainingWork?(): number;
   progress(phase: string, completed: number, total: number | null): void;
 }
 export interface ComponentIdentity {
@@ -97,6 +100,9 @@ export interface FunctionGraph {
   readonly gaps: readonly DecodeGap[];
   readonly coverage: z.infer<typeof coverageSchema>;
   readonly diagnostics: readonly Diagnostic[];
+  /** Query-local decode proofs, published with the result rather than mutating
+   * the historical image-wide discovery index. Absent for legacy/native graphs. */
+  readonly evidence?: readonly Evidence[];
 }
 /** The semantic IR module supplies RegisterIR. Core does not define semantic operations or strings masquerading as IR. */
 export interface Lifter<RegisterIR> extends ComponentIdentity {

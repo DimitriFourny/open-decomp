@@ -67,6 +67,7 @@ export function createOperationContext(
     signal,
     budget,
     checkpoint,
+    remainingWork: () => Math.max(0, budget.work - consumed),
     progress(phase, completed, total) {
       checkpoint(0);
       if (

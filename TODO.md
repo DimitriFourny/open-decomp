@@ -68,7 +68,7 @@ Surfaces: `src/lifters/arm64/`, `src/lifters/x86_64/`, `src/abi/`, `src/reconstr
 ### Call interfaces and interprocedural inference
 
 - [x] Recover the second input and actual passed argument in `fixture_indirect`, then reconstruct callback parameters/results without substituting `unknown_arguments()` when the dataflow establishes them.
-- [ ] Improve bounded native-callee summaries and caller/callee constraint propagation, including recursion, tail calls, preserved arguments, result widths, and mixed register/stack locations. Keep direct calls out of intraprocedural traversal and use an explicit bounded dependency worklist for interprocedural analysis.
+- [x] Improve bounded native-callee summaries and caller/callee constraint propagation, including recursion, tail calls, preserved arguments, result widths, and mixed register/stack locations. Keep direct calls out of intraprocedural traversal and use an explicit bounded dependency worklist for interprocedural analysis.
 - [ ] Recover the concrete interfaces around `sqlite3_changes64`, `sqlite3_total_changes64`, `sqlite3_errcode`, `sqlite3_limit`, and `sqlite3_complete`: safety checks, logging, mutex callbacks, and full-width `sqlite3_incomplete` results.
   - Acceptance: no observed argument is dropped; a narrow call result does not create invented unknown upper bits when the actual return contract establishes the full value. Preserve `fixture_direct`, where Open Decomp currently passes the argument that Ghidra omits.
   - Infer only what evidence supports. An unknown count is not zero arguments; a known prefix is not a complete variadic argument list; unresolved callback targets still retain conservative effects.

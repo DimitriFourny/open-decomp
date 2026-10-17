@@ -36,7 +36,7 @@ export function gpRegister(
 }
 function simdRegister(index: number, width: number, scalar: boolean): RegisterDescriptor {
   return {
-    id: `arm64:${scalar ? (elementByBits[width] ?? 'v') : 'v'}${index}`,
+    id: `arm64:${scalar ? (elementByBits[width] ?? 'v') : 'v'}${index}${!scalar && width < 128 ? `:0:${width}` : ''}`,
     bank: scalar && width < 128 ? 'float' : 'vector',
     root: `arm64:v${index}`,
     offset_bits: 0,

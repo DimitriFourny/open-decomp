@@ -19,11 +19,12 @@ import {
   type Value,
 } from '../ir/index.js';
 import type { BlockRegion } from '../presentation/index.js';
-import type { Assignment, BoundaryProjection } from './model.js';
-import type { SourcePresentation } from './source-model.js';
+import type { Assignment, BoundaryProjection, TailProjection } from './model.js';
+import type { InferredCallee, SourcePresentation } from './source-model.js';
 import { sourceDataValues } from './source-data.js';
 import type { SignatureAssociation } from '../analysis/types/model.js';
 import { FP_ENVIRONMENT_ASSUMPTION, registerTypeSlices, registerTypes, unchangedStorage, type StorageCopy } from './source-register-types.js';
+import { sourceStackArgumentParts } from './source-stack-arguments.js';
 
 /** Source ABI abstraction: architectural snapshots are retained in the input,
  * not treated as extra source arguments or memory-fault observables. */
@@ -41,6 +42,7 @@ export function planSource(
   const forcedInline = new Set<string>(),
     calls = new Map<string, BoundaryProjection>(),
     returns = new Map<string, BoundaryProjection>();
+  const tails = new Map<string, TailProjection>();
   const callResults = new Map<string, readonly Value[]>(),
     parameterNames = new Map<string, string>();
   const parameters: Value[] = [],
@@ -239,6 +241,40 @@ export function planSource(
   const locations = (register: RegisterDescriptor): readonly AbiLocation[] => [
     { kind: 'register', register, value_offset_bits: 0, width_bits: register.width_bits },
   ];
+  const stores = new Map<string, Value>();
+  for (const block of blocks.values())
+    for (const node of block.statements)
+      if (node.kind === 'store') stores.set(node.id, node.value);
+  const bindStack = (key: string, boundary: string, offset: bigint, type: DataType, block: string): Value | null => {
+    const stack = input.types?.calls?.stack;
+    if (!stack) return null;
+    const parts = sourceStackArgumentParts(stack, stores, boundary, offset, bitWidth(type), context);
+    if (!parts) return null;
+    const values = parts.map((part, index) =>
+      part.value_offset_bits === 0 && part.width_bits === bitWidth(part.value.type) ? part.value :
+        make(`${key}:part:${index}`, integer(part.width_bits), block, {
+          kind: 'extract', value: part.value, offset: part.value_offset_bits,
+        }));
+    if (values.length === 1 && sameType(values[0]!.type, type)) return values[0]!;
+    return make(key, type, block, values.length === 1 ?
+      { kind: 'cast', op: 'bitcast', value: values[0]! } : { kind: 'concat', values });
+  };
+  const observedArguments = (callee: InferredCallee, bindings: readonly RegisterBinding[],
+    boundary: string, block: string): { readonly arguments: readonly Value[]; readonly missing: boolean } => {
+    const arguments_: Value[] = [];
+    for (const [index, register] of callee.parameters.entries()) {
+      const value = bind(`${boundary}:arg:${index}`, bindings, locations(register),
+        callee.parameter_types?.[index] ?? integer(register.width_bits), block);
+      if (!value) return { arguments: arguments_, missing: true };
+      arguments_.push(value);
+    }
+    for (const [index, parameter] of (callee.stack_parameters ?? []).entries()) {
+      const value = bindStack(`${boundary}:stack-arg:${index}`, boundary, parameter.offset, parameter.type, block);
+      if (!value) return { arguments: arguments_, missing: true };
+      arguments_.push(value);
+    }
+    return { arguments: arguments_, missing: false };
+  };
   const inferred = new Map(evidence.callees.map((callee) => [callee.call_id, callee]));
   const facts = new Map(input.types?.calls?.calls.map((fact) => [fact.node_id, fact]) ?? []);
   const conflicts = new Set(input.types?.conflicts.map((conflict) => conflict.subject_id) ?? []);
@@ -362,37 +398,21 @@ export function planSource(
       }
       const callee = inferred.get(node.id);
       if (!projection && callee && node.arguments.length === 0 && node.results.length === 0) {
-        const args = callee.parameters.map((register, index) =>
-          bind(
-            `${node.id}:arg:${index}`,
-            node.register_inputs,
-            locations(register),
-            callee.parameter_types?.[index] ?? integer(register.width_bits),
-            block.id,
-          ),
-        );
-        if (args.every((value): value is Value => value !== null)) {
-          const returned = callee.returns
-            .map((register, index) =>
-              result(
-                `${node.id}:result:${index}`,
-                node.register_outputs,
-                locations(register),
-                callee.return_types?.[index] ?? integer(register.width_bits),
-                block.id,
-              ),
-            )
-            .filter((value): value is Value => value !== null);
-          projection = {
-            kind: callee.parameter_state === 'ambiguous' ? 'physical' : 'inferred',
-            signature: null,
-            arguments: args,
-            ...(callee.argument_list_complete === false ? { argument_list_complete: false } : {}),
-            results: returned,
-            inputs: [],
-            outputs: node.register_outputs,
-          };
-        }
+        const { arguments: args, missing } = observedArguments(callee, node.register_inputs, node.id, block.id);
+        const returned = callee.returns
+          .map((register, index) =>
+            result(`${node.id}:result:${index}`, node.register_outputs, locations(register),
+              callee.return_types?.[index] ?? integer(register.width_bits), block.id))
+          .filter((value): value is Value => value !== null);
+        projection = {
+          kind: callee.parameter_state === 'ambiguous' || missing ? 'physical' : 'inferred',
+          signature: null,
+          arguments: args,
+          ...(callee.argument_list_complete === false || missing ? { argument_list_complete: false } : {}),
+          results: returned,
+          inputs: [],
+          outputs: node.register_outputs,
+        };
       }
       projection ??= {
         kind: 'physical',
@@ -405,6 +425,17 @@ export function planSource(
       calls.set(node.id, projection);
       callResults.set(node.id, projection.results);
     }
+  for (const block of blocks.values()) {
+    const control = block.control, callee = inferred.get(control.id);
+    if (control.kind !== 'indirect' || !control.tail_call || !callee?.target) continue;
+    const args = observedArguments(callee, block.register_exit, control.id, block.id);
+    tails.set(control.id, { target: callee.target,
+      result_types: callee.return_types ?? callee.returns.map((register) => integer(register.width_bits)),
+      boundary: { kind: callee.parameter_state === 'ambiguous' || args.missing ? 'physical' : 'inferred',
+        signature: null, arguments: args.arguments, argument_list_complete: false,
+        results: [], inputs: [], outputs: [] },
+    });
+  }
   const storageCopies: StorageCopy[] = [];
   const storageSources = new Map<string, Value[]>();
   for (const block of blocks.values()) {
@@ -661,6 +692,13 @@ export function planSource(
         });
     }
   }
+  if (!functionSignature && tails.size) {
+    const types = [...tails.values()].map((tail) => tail.result_types.length === 1 ? tail.result_types[0]! : null);
+    const first = types[0];
+    if (first && types.every((type) => type !== null && sameType(type, first)) &&
+      (!returnType || sameType(returnType, first))) returnType = first;
+    else returnType = null;
+  }
   const addressValue = sourceDataValues(expressions, evidence.addresses, context);
   const returnedData = [...returns.values()].map((boundary) =>
     boundary.results.length === 1 && boundary.results[0]!.type.kind === 'integer' &&
@@ -696,6 +734,7 @@ export function planSource(
   return {
     calls,
     returns,
+    tails,
     parameters,
     parameterRegisters,
     signature: functionSignature?.signature ?? null,
