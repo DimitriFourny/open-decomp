@@ -149,6 +149,7 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
         sourcePlan.returns,
         sourcePlan.alias,
         context,
+        sourcePlan.incomingStack,
       )
     : null;
   if (sourcePlan) normalizeSourceExpressions(values, expressions, owner, sourcePlan.make, context);

@@ -621,6 +621,7 @@ export function planSource(
     value_origins: valueOrigins,
     definitions,
   };
+  const incomingParameters = new Map<bigint, Value>();
   return {
     calls,
     returns,
@@ -631,6 +632,26 @@ export function planSource(
     forcedInline,
     alias,
     make,
+    incomingStack(offset: bigint, type: DataType, contributors: readonly Value[]): Value | null {
+      // Without a declaration, infer only a whole scalar word in an actual ABI
+      // parameter slot. Entry return addresses, home space and alignment padding
+      // are not source inputs merely because their offsets are nonnegative.
+      if (functionSignature || type.kind !== 'integer' || type.bits !== abi.layout.pointer_bits)
+        return null;
+      const slot = layout.parameters.find((parameter) =>
+        parameter.locations.length === 1 &&
+        parameter.locations[0]!.kind === 'stack' &&
+        parameter.locations[0]!.offset === offset &&
+        parameter.locations[0]!.size * 8n === BigInt(type.bits),
+      );
+      if (!slot) return null;
+      let value = incomingParameters.get(offset);
+      if (!value) {
+        value = make(`parameter:entry-stack:${offset}`, type, entry.id, undefined, contributors);
+        incomingParameters.set(offset, value);
+      }
+      return value;
+    },
     materialize(live: ReadonlySet<string>, inline: Set<string>): void {
       for (const [id, anchor] of anchors) {
         context.checkpoint(1);
@@ -651,9 +672,12 @@ export function planSource(
       }
     },
     finalize(live: ReadonlySet<string>): readonly Value[] {
+      const incoming = [...incomingParameters]
+        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+        .map(([, value]) => value);
       const demanded = functionSignature
         ? parameters
-        : parameters.filter((value) => live.has(value.id));
+        : [...parameters, ...incoming].filter((value) => live.has(value.id));
       demanded.forEach((value, index) => {
         if (!parameterNames.has(value.id)) parameterNames.set(value.id, `arg${index}`);
       });

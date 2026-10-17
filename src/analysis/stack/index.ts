@@ -80,6 +80,24 @@ export interface StackRecoveryResult {
     readonly aliased: boolean;
   };
 }
+
+/** Regions use callee-entry SP coordinates, never the current allocated frame. */
+export function classifyStackRegion(
+  abi: AbiProfile,
+  offset: bigint | null,
+  size: bigint,
+): StackAccess['region'] {
+  if (offset === null) return 'dynamic';
+  const classify = (at: bigint): StackAccess['region'] =>
+    at < 0n
+      ? 'local_candidate'
+      : at < abi.stack_return_address_bytes
+        ? 'return_address'
+        : abi.id === 'windows-x64' && at < 40n
+          ? 'shadow_space'
+          : 'incoming_candidate';
+  return classify(offset) === classify(offset + size - 1n) ? classify(offset) : 'mixed';
+}
 const unknown: StackFact = Object.freeze({
   value: { kind: 'unknown' as const },
   initialization: 'unknown',
@@ -442,18 +460,8 @@ export function recoverStack(
         });
       }
     };
-    const region = (offset: bigint | null, size: bigint): StackAccess['region'] => {
-      if (offset === null) return 'dynamic';
-      const classify = (at: bigint): StackAccess['region'] =>
-        at < 0n
-          ? 'local_candidate'
-          : at < abi.stack_return_address_bytes
-            ? 'return_address'
-            : abi.id === 'windows-x64' && at < 40n
-              ? 'shadow_space'
-              : 'incoming_candidate';
-      return classify(offset) === classify(offset + size - 1n) ? classify(offset) : 'mixed';
-    };
+    const region = (offset: bigint | null, size: bigint): StackAccess['region'] =>
+      classifyStackRegion(abi, offset, size);
     const evaluate = (expression: Expression, result: Value): StackFact => {
       const operands = expressionOperands(expression).map(get);
       let value: StackValue = { kind: 'unknown' };

@@ -1,9 +1,11 @@
 import { fingerprint, type OperationContext } from '../core/index.js';
 import type { EmissionInput } from '../emitters/model.js';
+import { classifyStackRegion } from '../analysis/stack/index.js';
 import {
   bitWidth,
   expressionOperands,
   sameType,
+  type DataType,
   type Expression,
   type Instruction,
   type Value,
@@ -24,6 +26,11 @@ export function planSourceStack(
   returns: ReadonlyMap<string, BoundaryProjection>,
   alias: (value: Value, expression: Expression) => void,
   context: OperationContext,
+  incomingStack: (
+    offset: bigint,
+    type: DataType,
+    contributors: readonly Value[],
+  ) => Value | null,
 ) {
   const addresses = new Map<string, bigint>(),
     facts = input.types?.calls?.stack;
@@ -278,6 +285,38 @@ export function planSourceStack(
   const hidden = new Set<string>(),
     privateLoads = new Set<string>(),
     locals = new Map<string, SourceLocal>();
+  // An unchanged incoming slot is entry storage supplied by the caller, not a
+  // byte array allocated by this function. Bind only exact, nonescaping accesses
+  // to proven ABI scalar slots; partial/overlapping or modified storage retains
+  // its ordered memory representation until a richer storage model is available.
+  if (!escaped && facts?.state === 'complete')
+    for (const group of groups.values()) {
+      const first = group[0]!;
+      if (
+        classifyStackRegion(input.source!.abi, first.offset, first.end - first.offset) !==
+          'incoming_candidate' ||
+        group.some((access) => access.node.kind !== 'load' || access.node.access.volatile) ||
+        accesses.some((access) =>
+          access.key !== first.key && access.offset < first.end && access.end > first.offset,
+        ) ||
+        memory.some((node) => node.kind === 'store' && !addresses.has(node.address.id))
+      )
+        continue;
+      const loads = group.map((access) => access.node as Extract<Instruction, { kind: 'load' }>);
+      if (loads.some((node) =>
+        !sameType(node.result.type, loads[0]!.result.type) ||
+        node.access.endian !== input.source!.abi.layout.endian ||
+        facts?.snapshots.get(node.id)?.aliased ||
+        facts?.snapshots.get(node.id)?.escaped,
+      ))
+        continue;
+      const value = incomingStack(first.offset, loads[0]!.result.type, loads.map((node) => node.result));
+      if (!value) continue;
+      for (const node of loads) {
+        hidden.add(node.id);
+        alias(node.result, { kind: 'cast', op: 'bitcast', value });
+      }
+    }
   for (const key of eligible) {
     const group = groups.get(key)!,
       loads = group.filter((access) => access.node.kind === 'load');
