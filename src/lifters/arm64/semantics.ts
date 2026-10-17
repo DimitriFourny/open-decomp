@@ -586,6 +586,24 @@ export class ArmSemantics {
       this.fpStatus();
       return true;
     }
+    if (p.canonical_encoding === 'SCVTF_asisdmisc_R' ||
+        p.canonical_encoding === 'UCVTF_asisdmisc_R') {
+      const size = this.field('sz');
+      if (size > 1) throw new Unsupported('Invalid SIMD scalar integer conversion width');
+      const width = size === 1 ? 64 : 32;
+      b.writeRegister(
+        fpRegister(this.field('Rd'), width),
+        b.cast(
+          name === 'SCVTF' ? 'signed_to_float' : 'unsigned_to_float',
+          floating(width),
+          b.readRegister(fpRegister(this.field('Rn'), width), integer(width)),
+        ),
+      );
+      // Scalar SIMD writes clear the rest of Vd, preserve NZCV, and retain
+      // the existing guarded FPCR / explicitly unknown FPSR contract.
+      this.fpStatus();
+      return true;
+    }
     if ((name === 'SCVTF' || name === 'UCVTF') && p.canonical_encoding.endsWith('_float2int')) {
       const ftype = this.field('ftype');
       if (ftype > 1) throw new Unsupported('FP16 integer conversion is not modeled');

@@ -74,6 +74,38 @@ export function acknowledgeRequirements(
       .map((site) => ({ requirement_id: requirement.id, site_id: site.id, state_epoch: site.state_epoch })));
 }
 
+/** Direct integer-to-IEEE oracle: round the exact discarded remainder once.
+ * No intermediate Number, production evaluator, or target implementation is used. */
+function integerFloatBits(value: bigint, width: number): bigint {
+  assert.ok(width === 32 || width === 64);
+  if (value === 0n) return 0n;
+  const negative = value < 0n;
+  const magnitude = negative ? -value : value;
+  const precision = width === 32 ? 24 : 53;
+  const bias = width === 32 ? 127 : 1023;
+  let exponent = magnitude.toString(2).length - 1;
+  const discard = Math.max(0, exponent + 1 - precision);
+  const scale = 1n << BigInt(discard);
+  let significand = magnitude / scale;
+  const remainder = magnitude % scale;
+  if (remainder * 2n > scale ||
+      (remainder * 2n === scale && (significand & 1n) !== 0n))
+    significand++;
+  if (significand === 1n << BigInt(precision)) {
+    significand >>= 1n;
+    exponent++;
+  }
+  if (exponent < precision - 1)
+    significand <<= BigInt(precision - 1 - exponent);
+  const fractionBits = BigInt(precision - 1);
+  const fraction = significand & ((1n << fractionBits) - 1n);
+  const sign = negative ? 1n << BigInt(width - 1) : 0n;
+  const maximumExponent = bias * 2 + 1;
+  if (exponent + bias >= maximumExponent)
+    return sign | (BigInt(maximumExponent) << fractionBits);
+  return sign | (BigInt(exponent + bias) << fractionBits) | fraction;
+}
+
 /** Small test-only parser for the emitted machine-expression/control grammar.
  * It consumes the OUTPUT, not IR or mappings, and never evals target text. Helper
  * semantics below are independent arithmetic/byte-array observations, not imports
@@ -1023,8 +1055,8 @@ export function execute(
       if (name === 'cast_bitcast' || name === 'cast_truncate' || name === 'cast_zero_extend')
         return BigInt.asUintN(n, value);
       if (name === 'cast_unsigned_to_float' || name === 'cast_signed_to_float')
-        return encodeFloat(
-          Number(name === 'cast_signed_to_float' ? BigInt.asIntN(source, value) : value),
+        return integerFloatBits(
+          name === 'cast_signed_to_float' ? BigInt.asIntN(source, value) : BigInt.asUintN(source, value),
           n,
         );
       if (name === 'cast_float_convert') return encodeFloat(decodeFloat(value, source), n);

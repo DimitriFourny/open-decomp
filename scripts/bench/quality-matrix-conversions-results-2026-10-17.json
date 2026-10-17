@@ -1,0 +1,113 @@
+{
+  "commands": [
+    "python3 scripts/bench/quality-matrix-rank.py /Users/df0/Documents/open-decomp-quality-matrix-results-2026-10-17/comparison.json --output scripts/bench/quality-matrix-rank-2026-10-17.json",
+    "node --import tsx scripts/bench/quality-matrix-conversions.ts <new-output-directory>",
+    "node --import tsx scripts/bench/quality-matrix-conversion-replay.ts /Users/df0/Documents/open-decomp-quality-matrix-results-2026-10-17/comparison.json scripts/bench/quality-matrix-rank-2026-10-17.json <new-output-directory>"
+  ],
+  "comparison_sha256": "13575f704bf67fec44a05353e0af84a0dbca47e07c880f34dc60d19f5172c3e9",
+  "evidence_archive": {
+    "path": "scripts/bench/quality-matrix-conversions-2026-10-17.tar.gz",
+    "sha256": "44675090f0848c8894017efb9b2300439869dccd7b39cb54f36a7420c78aacf8",
+    "contents": "Trusted native oracle outputs, actual public both-dialect emissions, all 12 raw selected static replays and their aggregate; no target execution."
+  },
+  "denominator": {
+    "input_cells": 24,
+    "selected_function_cells": 288
+  },
+  "item": "P3.5 broader reviewed matrix integer-to-scalar-FP conversion coverage",
+  "limitations": [
+    "All 12 replayed functions remain partial from explicit FP environment/status assumptions; no whole-function completeness claim.",
+    "Static selected replay is not a rerun of the entire broader matrix.",
+    "No held-out input/source/results inspected and no retained target binary executed.",
+    "No repository build, test suite, lint, or formatter run; coordinator owns integration checks.",
+    "Native oracle requires Darwin ARM64, Apple clang, and ld.lld for nonexecuted x86 ELF fixture.",
+    "No general SIMD, atomics, C++/ObjC/Swift, parity, or superiority claim."
+  ],
+  "operation_reasons": {
+    "incomplete_index": 20,
+    "none_reported": 118,
+    "output_limit": 116,
+    "unsupported_subset": 34
+  },
+  "pre_fix_runtime": {
+    "arm_diagnostic": "Unsupported ARM64 encoding UCVTF_asisdmisc_R",
+    "arm_evaluation_status": "unknown",
+    "arm_words": [
+      "7e61d820",
+      "d65f03c0"
+    ],
+    "diagnostic": "Instruction family cvtsi2sd (Cvtsi2sd_xmm_rm32)",
+    "evaluation_status": "unknown",
+    "input_rcx": "17",
+    "x86_bytes": "f2 0f 2a c1 c3"
+  },
+  "ranked_unsupported_instructions": [
+    {
+      "emitted_instruction_occurrences": 8,
+      "function_cells": 8,
+      "reason": "Instruction family cvtsi2sd (Cvtsi2sd_xmm_rm32)"
+    },
+    {
+      "emitted_instruction_occurrences": 4,
+      "function_cells": 4,
+      "reason": "Unsupported ARM64 encoding UCVTF_asisdmisc_R"
+    }
+  ],
+  "result_states": {
+    "function_not_discovered": 92,
+    "text_returned": 186,
+    "tool_error": 10
+  },
+  "retained_replay_directory": "/tmp/open-decomp-conversions-replay-p35",
+  "retained_smoke_directory": "/tmp/open-decomp-conversions-p35-recorded",
+  "schema": 1,
+  "selected_static_replay": {
+    "after_instruction_occurrences": 0,
+    "before_instruction_occurrences": 12,
+    "comparison_sha256": "13575f704bf67fec44a05353e0af84a0dbca47e07c880f34dc60d19f5172c3e9",
+    "schema": 1,
+    "scope": "Static public API replay of every ranked integer-conversion occurrence, not a full matrix rerun or whole-function equivalence proof",
+    "selected_function_cells": 12,
+    "target_executed": false
+  },
+  "selected_static_replay_remaining_states": {
+    "partial": 12
+  },
+  "semantic_states": {
+    "complete": 48,
+    "not_reported": 102,
+    "partial": 138
+  },
+  "separate_noninstruction_function_cells": {
+    "environment_or_other_opaque_effect: Unsupported FPCR rounding, flush or trapping environment": 24,
+    "function_not_discovered": 92,
+    "resource_diagnostic": 12,
+    "resource_failure": 10,
+    "source_metadata_or_types": 46,
+    "tool_error": 10,
+    "unresolved_control": 84,
+    "unresolved_source_call": 56
+  },
+  "separate_opaque_effect_occurrences": {
+    "Unsupported FPCR rounding, flush or trapping environment": 72
+  },
+  "trusted_source_smoke": {
+    "arm_machine_cases": 52,
+    "both_dialect_output_cases": 234,
+    "compiler_version": "Apple clang version 21.0.0 (clang-2100.3.34.2)\nTarget: arm64-apple-darwin27.0.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+    "node_version": "v26.11.1",
+    "oracle_cases": 13,
+    "oracle_sha256": "c2308758b2e87c29c570cbc0c28952b95e3fb1d886e136d69361bdbd8e41d61b",
+    "public_emissions": 18,
+    "remaining": [
+      "Non-nearest-even/trapping/FTZ/DAZ environments stay unknown; FP status remains abstracted.",
+      "VEX/EVEX conversion, packed conversion, FP16/fixed-point variants remain unsupported.",
+      "Historical matrix discovery, resources, source interfaces, FP assumptions are not resolved by this family."
+    ],
+    "schema": 1,
+    "scope": "Trusted native C oracle; independent emitted-output interpreter; no retained matrix target execution",
+    "source": "/Users/df0/Documents/projects/open_decomp/scripts/bench/quality-matrix-conversions.c",
+    "source_sha256": "ad6915376b23bc5356477c6df612df239dcf38f7cdbd9b8267078cd21887781d",
+    "x86_machine_cases": 104
+  }
+}

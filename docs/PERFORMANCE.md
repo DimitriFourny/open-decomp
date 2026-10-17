@@ -297,3 +297,18 @@ Use the pinned bridge setup and a new durable output directory outside `/tmp`; t
 - `quality-heldout-results-2026-10-17.json`: scope, checkpoint, invocation, observations and member hashes.
 
 Intermediate objects, project databases and duplicate streams are omitted; complete run objects remain in `comparison.json`. Uncompressed originals are in `~/Documents/open-decomp-quality-heldout-{inputs,results}-2026-10-17/`. Independent source gold, actual executable-output subset checks and blind readability reviews are separate lanes. This recording does not establish the parity gate.
+
+## Measured optimized conversion coverage
+
+`scripts/bench/quality-matrix-rank.py` verifies the retained broader comparison output hashes and counts emitted unsupported-instruction sites across every reviewed input cell. These are static occurrences, not dynamic frequency or independent-program counts. Discovery, budget, unresolved-interface/control and FP-environment gaps remain separate in `quality-matrix-rank-2026-10-17.json`; they were not relabeled as ISA demand.
+
+| Ranked encoding family | Historical unsupported sites | Unsupported sites after focused replay | Whole-function results |
+| --- | ---: | ---: | --- |
+| Legacy SSE `Cvtsi2sd_xmm_rm32` | 8 | 0 | All partial: FP environment/status |
+| ARM64 `UCVTF_asisdmisc_R` | 4 | 0 | All partial: FP environment/status |
+
+The rank motivated legacy SSE signed 32/64-bit register/memory-to-FP32/FP64 and ARM signed/unsigned scalar-SIMD same-width 32/64-bit conversion support. Upper lanes, flags, load faults, environmental guards and unknown status effects retain their architectural contracts. This focused replay is not a new whole-matrix result or an equivalence claim.
+
+The trusted `quality-matrix-conversions.ts` smoke passed 13 native source inputs, 104 x86 machine cases, 52 ARM machine cases and 234 independently interpreted public C/Python outcomes across 18 emissions. It covers exact rounding ties, signed/unsigned boundaries, 64-to-32 double-rounding witnesses, lane/flag preservation and memory/environment failures. The independent BigInt-to-IEEE oracle rounds the exact remainder directly to destination precision; it does not reuse production evaluation or an intermediate JavaScript float. Only newly supplied trusted source wrappers execute; analyzed matrix/x86 images do not. A fresh coordinator run after requirement integration reproduced these observations, and 36 focused lifter/source tests passed.
+
+Reproduction: `node --import tsx scripts/bench/quality-matrix-conversions.ts <new-output-directory>`. Retained source, reports and archive are `scripts/bench/quality-matrix-conversions*`; `quality-matrix-conversion-replay.ts` records the historical-site replay. VEX/EVEX conversion, packed ARM conversion, FP16/fixed-point variants and exceptional FP environments remain unsupported. No general SIMD, atomics, language-runtime, parity or superiority claim follows.

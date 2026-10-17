@@ -59,7 +59,7 @@ export function pipelineComponents(target: Target): (typeof components)[keyof ty
 // Components without independent releases are explicitly versioned by this
 // composition contract. Bump the corresponding entry when its semantics change.
 const analysis =
-  'pipeline/8;discovery/1;targets/1;ssa/3;values-effects/3;stack-calls/4;debug/1;library/2;types/5;annotations/1;structure/1;reconstruction/20';
+  'pipeline/8;discovery/1;targets/1;ssa/3;values-effects/3;stack-calls/4;debug/1;library/2;types/5;annotations/1;structure/1;reconstruction/21';
 const versionRecords = (() => {
   const arm = new Arm64Decoder(),
     x86 = new X86Decoder({ formatting: false });

@@ -59,7 +59,7 @@ export interface Arm64LiftResult {
  */
 export class Arm64Lifter implements Lifter<RegisterIR> {
   readonly name = 'ARM64 typed semantic lifter';
-  readonly version = '1.0.4';
+  readonly version = '1.0.5';
   readonly architecture = 'arm64' as const;
   lift(graph: FunctionGraph, abi: AbiProfile, context: OperationContext): Arm64LiftResult {
     if (abi.architecture !== 'arm64') throw new TypeError('ARM64 lifter requires an ARM64 ABI');

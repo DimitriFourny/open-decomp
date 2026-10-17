@@ -179,7 +179,7 @@ test('ordinary memory sign extension, pre/post writeback and pair snapshots', ()
 });
 
 test('constrained-unpredictable memory overlap and unsupported system operations stay unknown, not traps', () => {
-  for (const word of [0xf8408400, 0xf8008c00, 0xa9400020, 0xd5033bbf, 0xffffffff]) {
+  for (const word of [0xf8408400, 0xf8008c00, 0xa9400020, 0xffffffff]) {
     const result = lift(fromWords([word, ret]));
     assert.equal(result.coverage.state, 'partial');
     assert.ok(

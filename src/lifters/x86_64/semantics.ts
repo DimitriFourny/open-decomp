@@ -801,6 +801,34 @@ export class X86Semantics {
       );
       return;
     }
+    if (m === 'cvtsi2ss' || m === 'cvtsi2sd') {
+      if (
+        dst?.kind !== 'register' ||
+        dst.register.bank !== 'vector' ||
+        dst.register.width_bits !== 128 ||
+        !src ||
+        (src.kind !== 'register' && src.kind !== 'memory') ||
+        (this.width(src) !== 32 && this.width(src) !== 64)
+      )
+        throw new Unsupported('Only legacy SSE signed GPR/memory scalar conversion is modeled');
+      this.fpEnvironment();
+      b = this.block;
+      const width = m === 'cvtsi2sd' ? 64 : 32;
+      const converted = b.cast('signed_to_float', floating(width), this.read(src));
+      // Legacy SSE replaces only the low scalar; all upper vector bits and
+      // integer flags survive. VEX/EVEX zeroing/merge rules are not implied.
+      b.writeRegister(
+        {
+          ...dst.register,
+          id: `${dst.register.id}:low${width}`,
+          width_bits: width,
+          write_rule: 'preserve_other_bits',
+        },
+        b.cast('bitcast', integer(width), converted),
+      );
+      this.fpStatus();
+      return;
+    }
     const fp = /^(add|sub|mul|div)(ss|sd|ps|pd)$/.exec(m);
     const compare = /^(ucomi|comi)(ss|sd)$/.exec(m);
     if (fp || compare) {

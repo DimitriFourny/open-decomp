@@ -59,7 +59,7 @@ export interface X86LiftResult {
  */
 export class X86Lifter implements Lifter<RegisterIR> {
   readonly name = 'x86-64 typed semantic lifter';
-  readonly version = '2';
+  readonly version = '3';
   readonly architecture = 'x86_64';
   lift(graph: FunctionGraph, abi: AbiProfile, context: OperationContext): X86LiftResult {
     if (abi.architecture !== this.architecture)
