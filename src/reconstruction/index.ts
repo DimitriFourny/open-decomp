@@ -19,6 +19,7 @@ import type { Assignment, BoundaryProjection, MemoryView, Reconstruction } from 
 import { planSource } from './source-planner.js';
 import { planSourceStack } from './source-stack.js';
 import { normalizeSourceExpressions } from './source-expressions.js';
+import { normalizeSourceRanges } from './source-ranges.js';
 export type * from './model.js';
 
 function controlTransfers(control: Control): readonly ParallelTransfer[] {
@@ -133,6 +134,8 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
       if (sources) sources.push(copy.source);
     }
   const expressions = foldExpressions(assignments, context);
+  if (input.source)
+    normalizeSourceRanges(input.function.entry, blocks, expressions, parameterSources, context);
   const entry = blocks.get(input.function.entry);
   const entryBindings = entry?.register_entry ?? [];
   const entryParameters = new Set(entry?.parameters.map((value) => value.id));
