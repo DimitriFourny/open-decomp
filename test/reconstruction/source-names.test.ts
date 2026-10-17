@@ -237,8 +237,7 @@ test(
 
 test('supplied prototype names outrank inferred operation roles and user display overrides remain authoritative', () => {
   const b = builder('source-prototype-role-names'),
-    entry = b.block('entry'),
-    u64 = integer(64);
+    entry = b.block('entry');
   const rdi = register('rdi', 64, 0, 'replace_root', 'x86_64:rdi');
   const rsi = register('rsi', 64, 0, 'replace_root', 'x86_64:rsi');
   const rax = register('rax', 64, 0, 'replace_root', 'x86_64:rax');

@@ -76,6 +76,16 @@ export type LoopForm =
       readonly kind: 'do_while';
       readonly test: EntityId;
       readonly repeat: boolean;
+    }
+  /** A `while` (`bottom: false`) or a guarded `do_while` (`bottom: true`) whose
+   * single entry edge and single repeat edge only initialize and step induction
+   * variables: those copies print in the `for` header. `enter` is the arm value
+   * staying inside. A bottom test's first evaluation is proven true on entry. */
+  | {
+      readonly kind: 'for';
+      readonly test: EntityId;
+      readonly enter: boolean;
+      readonly bottom: boolean;
     };
 export interface LoopRegion {
   readonly kind: 'loop';

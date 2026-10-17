@@ -73,6 +73,7 @@ import {
   planLayout,
   planLoopForms,
   transferAction,
+  type LoopFacts,
   type TransferAction,
 } from './source-control.js';
 
@@ -138,6 +139,13 @@ export class Renderer {
   /** Do-while tests restated over the values written by their repeat copies. */
   private readonly rebased = new Map<string, Extract<Expression, { kind: 'compare' }>>();
   private readonly synthetic = new Map<string, Expression>();
+  /** Edge copies printed in a `for` header (by destination variable), not at their edge. */
+  private readonly hoisted = new Map<ParallelTransfer, ReadonlySet<string>>();
+  /** `for` header edges keyed by the loop test control. */
+  private readonly forLoops = new Map<
+    string,
+    { readonly init: ParallelTransfer; readonly step: ParallelTransfer }
+  >();
   private readonly typeRecords = new Map<string, SuppliedTypeRecord | null>();
   private readonly sourceEvidence = new Map<string, { ids: Set<string>; evidence: Set<string> }>();
   private readonly expanding = new Set<string>();
@@ -1835,9 +1843,14 @@ export class Renderer {
 
   private transfer(transfer: ParallelTransfer, depth: number, origin: Control): void {
     if (!this.program.transfers.has(transfer)) this.invalid('Reconstructed transfer is missing');
-    const copies = this.printedCopies(transfer);
     // Coalesced phi classes share storage: order moves by printed variable.
-    const key = (value: Value): string => (this.variables.get(value.id) ?? value).id;
+    const key = (value: Value): string => this.variableKey(value);
+    // Copies hoisted into a `for` header are independent of every other copy of
+    // this edge and execute right after the ones printed here.
+    const hoisted = this.hoisted.get(transfer);
+    const copies = this.printedCopies(transfer).filter(
+      (copy) => !hoisted?.has(key(copy.destination)),
+    );
     const moves: PlannedMove[] = [];
     // A write is safe only after all other RHS readers of its destination ran.
     if (copies.length === 1) {
@@ -1950,6 +1963,10 @@ export class Renderer {
         }
       }
     }
+    if (hoisted)
+      for (const copy of this.printedCopies(transfer))
+        if (hoisted.has(key(copy.destination)) && moves.length <= 128)
+          moves.push({ destination: key(copy.destination), source: copy.source });
     if (this.program.transfers.get(transfer)!.length) {
       const checked = this.localValidation.check(
         'parallel-copy',
@@ -2008,6 +2025,149 @@ export class Renderer {
       this.writer.statement(depth, `goto ${this.identifier(transfer.target, 'label')}`);
     else if (action !== 'fallthrough' && !this.consumed.has(transfer))
       this.writer.statement(depth, action);
+  }
+
+  /** Printed variable identity: a coalesced phi class shares its representative. */
+  private variableKey(value: Value): string {
+    return (this.variables.get(value.id) ?? value).id;
+  }
+
+  /** `a = x, b = y` text of the copies a `for` header prints for one edge. */
+  private hoistedText(transfer: ParallelTransfer): string {
+    const hoisted = this.hoisted.get(transfer);
+    return this.writer.join(
+      this.printedCopies(transfer)
+        .filter((copy) => hoisted?.has(this.variableKey(copy.destination)))
+        .map(
+          (copy) =>
+            `${this.local(copy.destination)} = ${this.copied(copy.destination, copy.source)}`,
+        ),
+    );
+  }
+
+  /** Inline casts only change width; strip them to the operand they view. */
+  private uncast(value: Value, ops: readonly string[]): Value {
+    for (let depth = 0; depth < 16 && this.program.inline.has(value.id); depth++) {
+      const expression = this.program.expressions.get(value.id);
+      if (expression?.kind !== 'cast' || !ops.includes(expression.op)) break;
+      value = expression.value;
+    }
+    return value;
+  }
+
+  /** The copy source prints as `variable ± c` (c != 0), possibly through casts. */
+  private inductionStep(source: Value, variable: string): boolean {
+    const casts = ['bitcast', 'zero_extend', 'sign_extend', 'truncate'];
+    const top = this.uncast(source, casts);
+    const expression = this.program.inline.has(top.id)
+      ? this.program.expressions.get(top.id)
+      : undefined;
+    if (expression?.kind !== 'integer' || (expression.op !== 'add' && expression.op !== 'sub'))
+      return false;
+    const right = this.constantOf(expression.right),
+      left = expression.op === 'add' ? this.constantOf(expression.left) : undefined;
+    const [base, step] = right !== undefined ? [expression.left, right] : [expression.right, left];
+    if (step === undefined || step === 0n) return false;
+    const leaf = this.uncast(base, casts);
+    return !this.program.inline.has(leaf.id) && this.variableKey(leaf) === variable;
+  }
+
+  /** Side conditions of a `for` header (see LoopFacts.induction). Records the
+   * hoisted copies when they hold. */
+  private acceptFor(loop: Parameters<LoopFacts['induction']>[0]): boolean {
+    const liveness = this.liveness;
+    if (!liveness) return false;
+    const key = (value: Value): string => this.variableKey(value);
+    const steps = this.printedCopies(loop.step),
+      inits = this.printedCopies(loop.init);
+    // Every copy of both edges reads no other destination of its edge, so
+    // printing some of them elsewhere (and in any order) is unobservable.
+    const independent = (copies: typeof steps): boolean =>
+      copies.every((copy) => {
+        const others = new Set(
+          copies.filter((other) => other !== copy).map((other) => key(other.destination)),
+        );
+        return liveness
+          .leaves(copy.source)
+          .every((index) => !others.has(key(liveness.values[index]!)));
+      });
+    if (!steps.length || !independent(steps) || !independent(inits)) return false;
+    const induction = new Set<string>();
+    for (const copy of steps) {
+      const variable = key(copy.destination);
+      if (!this.inductionStep(copy.source, variable)) return false;
+      induction.add(variable);
+    }
+    const initialized = inits.filter((copy) => induction.has(key(copy.destination)));
+    if (initialized.length !== induction.size) return false;
+    const restated = this.rebased.get(loop.test.id);
+    const reads = loop.bottom
+      ? restated
+        ? [key(restated.left)]
+        : []
+      : liveness.leaves(loop.test.condition).map((index) => key(liveness.values[index]!));
+    if (!reads.some((variable) => induction.has(variable))) return false;
+    // Nothing inside the loop writes an induction variable except the step.
+    for (const id of loop.inside) {
+      const block = this.program.blocks.get(id);
+      if (!block) return false;
+      for (const event of liveness.events(block))
+        if (event.def && event.ids.some((index) => induction.has(key(liveness.values[index]!))))
+          return false;
+      for (const arm of [
+        ...(block.control.kind === 'jump' ? [{ transfer: block.control.transfer }] : []),
+        ...controlArms(block.control),
+      ])
+        if (
+          arm.transfer !== loop.step &&
+          this.printedCopies(arm.transfer).some((copy) => induction.has(key(copy.destination)))
+        )
+          return false;
+    }
+    if (loop.bottom && !this.entryHolds(loop, inits)) return false;
+    this.hoisted.set(loop.init, new Set(initialized.map((copy) => key(copy.destination))));
+    this.hoisted.set(loop.step, induction);
+    this.forLoops.set(loop.test.id, { init: loop.init, step: loop.step });
+    return true;
+  }
+
+  /** A bottom test also runs before the first iteration of a `for`: an
+   * enclosing arm must establish exactly the restated test `v op K` over the
+   * entry value of `v` (same SSA operand modulo bitcasts, constant and width). */
+  private entryHolds(
+    loop: Parameters<LoopFacts['induction']>[0],
+    inits: readonly { readonly destination: Value; readonly source: Value }[],
+  ): boolean {
+    const restated = this.rebased.get(loop.test.id);
+    if (!restated) return false;
+    const bound = this.constantOf(restated.right),
+      entry = inits.find(
+        (copy) => this.variableKey(copy.destination) === this.variableKey(restated.left),
+      );
+    if (bound === undefined || !entry) return false;
+    const op = loop.enter ? restated.op : NEGATED_PREDICATE[restated.op];
+    const operand = this.uncast(entry.source, ['bitcast']);
+    for (let i = loop.guards.length - 1; i >= 0; i--) {
+      const guard = loop.guards[i]!;
+      if (this.requirementPredicates.has(guard.control.id)) continue;
+      const condition = this.uncast(guard.control.condition, ['bitcast']);
+      const compare = this.program.expressions.get(condition.id);
+      if (compare?.kind !== 'compare') continue;
+      const constant = this.constantOf(compare.right);
+      if (
+        constant === bound &&
+        (guard.value ? compare.op : NEGATED_PREDICATE[compare.op]) === op &&
+        this.uncast(compare.left, ['bitcast']).id === operand.id &&
+        bitWidth(compare.left.type) === bitWidth(restated.left.type)
+      )
+        return this.localValidation.presentation(
+          'loop_entry_test',
+          loop.test.id,
+          'the first for-loop test holds on entry: an enclosing if arm establishes the same predicate over the same entry value',
+          [guard.control.id, loop.test.id],
+        );
+    }
+    return false;
   }
 
   /** Edge copies actually printed: a coalesced class's self-copy is no move. */
@@ -2091,15 +2251,28 @@ export class Renderer {
     const test = (positive: boolean): string =>
       positive ? condition.text : negate(condition, compare);
     const form = this.loopTests.get(control.id);
-    if (form?.kind === 'while') {
+    if (form?.kind === 'while' || (form?.kind === 'for' && !form.bottom)) {
       const enter = form.enter ? control.when_true : control.when_false,
-        exit = form.enter ? control.when_false : control.when_true;
+        exit = form.enter ? control.when_false : control.when_true,
+        header = this.forLoops.get(control.id);
       this.writer.line(
         depth - 1,
-        c ? `while (${test(form.enter)}) {` : `while ${test(form.enter)}:`,
+        form.kind === 'for' && header
+          ? `for (${this.hoistedText(header.init)}; ${test(form.enter)}; ${this.hoistedText(header.step)}) {`
+          : c
+            ? `while (${test(form.enter)}) {`
+            : `while ${test(form.enter)}:`,
       );
       this.transfer(exit.transfer, depth, control);
       this.arm(enter, depth, control);
+      return;
+    }
+    if (form?.kind === 'for') {
+      // The header printed this test and the step; both arms are the loop's own.
+      const again = form.enter ? control.when_true : control.when_false,
+        leave = form.enter ? control.when_false : control.when_true;
+      this.transfer(again.transfer, depth, control);
+      this.transfer(leave.transfer, depth, control);
       return;
     }
     if (form?.kind === 'do_while') {
@@ -2125,7 +2298,7 @@ export class Renderer {
     const empty = (arm: ControlArm): boolean =>
       !arm.body &&
       this.actions.get(arm.transfer) === 'fallthrough' &&
-      this.printedCopies(arm.transfer).length === 0;
+      this.printedCopies(arm.transfer).length === (this.hoisted.get(arm.transfer)?.size ?? 0);
     const yes = control.when_true,
       no = control.when_false;
     const shaped =
@@ -2256,29 +2429,43 @@ export class Renderer {
           );
         },
         rebase: (control, repeat) => this.restateTest(control, repeat),
+        induction: (loop) => this.acceptFor(loop),
       },
       this.context,
     );
-    const tests: string[] = [];
+    const tests: string[] = [],
+      fors: string[] = [];
     const forms = (region: Region): void => {
       if (region.kind === 'sequence') region.regions.forEach(forms);
       else if (region.kind === 'loop') {
         if (region.form) tests.push(region.form.test);
+        if (region.form?.kind === 'for') fors.push(region.form.test);
         forms(region.body);
       } else for (const arm of controlArms(region.control)) if (arm.body) forms(arm.body);
     };
     forms(shaped);
     this.body =
-      !tests.length ||
-      this.localValidation.presentation(
-        'loop_form',
-        subject,
-        'a loop prints as while/do-while only when its test block, copy-free exit, sole repeat edge and dead-on-exit repeat copies are established',
-        tests,
-      )
+      (!tests.length ||
+        this.localValidation.presentation(
+          'loop_form',
+          subject,
+          'a loop prints as while/do-while only when its test block, copy-free exit, sole repeat edge and dead-on-exit repeat copies are established',
+          tests,
+        )) &&
+      (!fors.length ||
+        this.localValidation.presentation(
+          'for_loop',
+          subject,
+          'a while/do-while prints as for (init; test; step) when its single entry and single repeat edges only initialize and step (x = x ± c) induction variables nothing else in the loop writes, and its test reads one; a bottom test must hold on entry',
+          fors,
+        ))
         ? shaped
         : body;
-    if (this.body === body) this.rebased.clear();
+    if (this.body === body) {
+      this.rebased.clear();
+      this.hoisted.clear();
+      this.forLoops.clear();
+    }
   }
 
   /** Restate a do-while test over the variable its repeat copy just wrote: for
@@ -2649,10 +2836,28 @@ export class Renderer {
     } else if (region.kind === 'loop') {
       const form = region.form,
         c = this.language === 'c-like';
-      // A while test prints its own header line from inside the body (its block's
-      // control); a do-while test prints the closing `} while (...)` line.
+      // A while/for test prints its own header line from inside the body (its
+      // block's control); a do-while test prints the closing `} while (...)` line.
+      // A bottom-tested for prints its header here; its test was proven on entry.
       if (!form) this.writer.line(depth, c ? 'while (true) {' : 'while True:');
       else if (form.kind === 'do_while') this.writer.line(depth, 'do {');
+      else if (form.kind === 'for' && form.bottom) {
+        const control = this.controls.get(form.test),
+          restated = this.rebased.get(form.test),
+          header = this.forLoops.get(form.test);
+        if (control?.kind !== 'if' || !restated || !header)
+          this.invalid('A bottom-tested for loop lost its proven test');
+        const start = this.writer.offset,
+          test = this.expression(
+            form.enter ? restated : { ...restated, op: NEGATED_PREDICATE[restated.op] },
+            control.condition.type,
+          ).text;
+        this.writer.line(
+          depth,
+          `for (${this.hoistedText(header.init)}; ${test}; ${this.hoistedText(header.step)}) {`,
+        );
+        this.mapped(control, start, [control.condition.id]);
+      }
       const lines = this.writer.codeLines;
       this.region(region.body, depth + 1);
       if (

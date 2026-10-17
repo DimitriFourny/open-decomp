@@ -674,6 +674,45 @@ class Parser {
       }
       return;
     }
+    if (token === 'for') {
+      // for (a = x, b = y; cond; a = a + 1, b = b - 1) { body }
+      const assignments = (end: string): Op[] => {
+        const list: Op[] = [];
+        while (this.peek() !== end) {
+          const name = this.take();
+          this.take('=');
+          list.push({ kind: 'assign', names: [name], expression: this.expression(), tuple: false });
+          if (this.peek() === ',') this.take(',');
+        }
+        this.take(end);
+        return list;
+      };
+      this.take('(');
+      this.ops.push(...assignments(';'));
+      const start = this.ops.length,
+        condition = this.expression();
+      this.take(';');
+      const step = assignments(')');
+      const test: Op & { kind: 'test' } = { kind: 'test', condition, target: -1 };
+      this.ops.push(test);
+      const exits: number[] = [],
+        continues: number[] = [];
+      this.loops.push({ start, breaks: exits, continues });
+      this.block(exits);
+      this.loops.pop();
+      const next = this.ops.length;
+      this.ops.push(...step, { kind: 'jump', target: start });
+      test.target = this.ops.length;
+      for (const index of continues) {
+        const op = this.ops[index]!;
+        if (op.kind === 'jump') op.target = next;
+      }
+      for (const index of exits) {
+        const op = this.ops[index]!;
+        if (op.kind === 'jump') op.target = this.ops.length;
+      }
+      return;
+    }
     if (token === 'do') {
       const start = this.ops.length,
         exits: number[] = [],

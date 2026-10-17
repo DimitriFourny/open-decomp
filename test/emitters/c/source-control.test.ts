@@ -45,20 +45,29 @@ const name = (output: EmissionResult, value: Value): string | undefined =>
   output.identifiers.find((row) => row.entity_id === value.id)?.identifier;
 
 /** `do { acc += *p; p += 4; } while (--n != 0)`, the compiled form of a counted
- * loop whose test reads the counter before its decrement. */
-function countedLoop(): { input: SSAForm; count: Value; base: Value; acc: Value; next: Value } {
-  const b = program('source-control-counted'),
+ * loop whose test reads the counter before its decrement. `guarded` adds the
+ * rotated loop's `n == 0` early return, which proves the first test. */
+function countedLoop(guarded = true): {
+  input: SSAForm;
+  count: Value;
+  base: Value;
+  acc: Value;
+  next: Value;
+} {
+  const b = program(`source-control-counted-${guarded}`),
     entry = b.block('entry', [i32, i64]),
-    zero = b.block('zero'),
     loop = b.block('loop', [i32, i64, i32]),
     exit = b.block('exit', [i32]);
   const [count, base] = entry.parameters as [Value, Value];
-  entry.branch(
-    entry.compare('eq', count, entry.constant(i32, 0n)),
-    entry.edge(zero),
-    entry.edge(loop, [entry.constant(i32, 0n), base, count]),
-  );
-  zero.return([zero.constant(i32, 0n)]);
+  if (guarded) {
+    const zero = b.block('zero');
+    entry.branch(
+      entry.compare('eq', count, entry.constant(i32, 0n)),
+      entry.edge(zero),
+      entry.edge(loop, [entry.constant(i32, 0n), base, count]),
+    );
+    zero.return([zero.constant(i32, 0n)]);
+  } else entry.jump(loop, [entry.constant(i32, 0n), base, count]);
   const [acc, pointer, remaining] = loop.parameters as [Value, Value, Value];
   const next = loop.int('add', loop.load(i32, pointer), acc);
   loop.branch(
@@ -77,16 +86,19 @@ function countedLoop(): { input: SSAForm; count: Value; base: Value; acc: Value;
 for (const language of ['c-like', 'python-like'] as const)
   describe(language, () => {
     const c = language === 'c-like';
-    test('counted loop prints as do/while with one coalesced accumulator; checked keeps while(true)', () => {
+    test('a guarded counted loop prints as for with one coalesced accumulator; checked keeps while(true)', () => {
       const { input, count, base, acc, next } = countedLoop();
       const source = emit(input, language),
         checked = emit(input, language, 'checked');
       const text = source.emission.text;
       assert.doesNotMatch(text, /\bcontinue\b|\bgoto\b|\belse\b/);
       if (c) {
-        assert.match(text, /\n {2}do \{\n/);
-        assert.match(text, /\n {2}\} while \(+.+ != 0(x0)?\)+;\n/);
-        assert.doesNotMatch(text, /\bbreak\b|while \(true\)/);
+        // init and step print only the induction variables; the accumulator stays in the body.
+        assert.match(
+          text,
+          /\n {2}for \(\w+ = [^,;]+, \w+ = [^,;]+; \(?\w+ != 0(x0)?\)?; \w+ = .+, \w+ = .+\) \{\n/,
+        );
+        assert.doesNotMatch(text, /\bbreak\b|while \(true\)|\bdo \{/);
       } else assert.match(text, /if .+:\n\s+break\n/);
       assert.match(checked.emission.text, c ? /while \(true\) \{/ : /while True:/);
       assert.match(checked.emission.text, /\bcontinue\b/);
@@ -94,8 +106,9 @@ for (const language of ['c-like', 'python-like'] as const)
       assert.equal(name(source, acc), name(source, next));
       assert.notEqual(name(checked, acc), name(checked, next));
       assert.ok(rules(source).includes('phi_copy_coalescing'));
-      if (c) assert.ok(rules(source).includes('loop_form'));
-      if (c) assert.ok(rules(source).includes('loop_test_restatement'));
+      if (c)
+        for (const rule of ['loop_form', 'loop_test_restatement', 'for_loop', 'loop_entry_test'])
+          assert.ok(rules(source).includes(rule), rule);
       assert.deepEqual(rules(checked), []);
       const words = [5, 7, 11, 13, 17];
       for (const n of [0, 1, 2, 5]) {
@@ -111,6 +124,66 @@ for (const language of ['c-like', 'python-like'] as const)
           );
           assert.deepEqual(observed.values, [expected], `${n}`);
           assert.equal(observed.events.length, n);
+        }
+      }
+    });
+
+    test('an unguarded bottom test stays do/while: its first test is not established', () => {
+      const { input, count, base } = countedLoop(false);
+      const source = emit(input, language);
+      if (c) {
+        assert.match(source.emission.text, /\n {2}do \{\n/);
+        assert.doesNotMatch(source.emission.text, /\bfor \(/);
+      }
+      assert.ok(!rules(source).includes('for_loop'));
+      const words = [5, 7, 11];
+      for (const n of [1, 3]) {
+        const observed = execute(
+          source.emission,
+          new Map([
+            [count.id, BigInt(n)],
+            [base.id, 0x1000n],
+          ]),
+          memory(words),
+        );
+        assert.deepEqual(observed.values, [BigInt(words.slice(0, n).reduce((a, b) => a + b, 0))]);
+      }
+    });
+
+    test('a top-tested counter loop prints as for; a step that is not x = x ± c keeps while', () => {
+      for (const written of [false, true]) {
+        const b = program(`source-control-for-${written}`),
+          entry = b.block('entry', [i32]),
+          head = b.block('head', [i32]),
+          body = b.block('body'),
+          exit = b.block('exit');
+        const limit = entry.parameters[0]!;
+        entry.jump(head, [entry.constant(i32, 0n)]);
+        const index = head.parameters[0]!;
+        head.branch(head.compare('ult', index, limit), head.edge(body), head.edge(exit));
+        const address = body.int(
+          'add',
+          body.constant(i64, 0x1000n),
+          body.cast('zero_extend', i64, index),
+        );
+        body.store(address, body.int('add', body.load(i32, address), index));
+        // `written`: the step is (x + 2) + 1 through an intermediate value, not x + c.
+        const bumped = written ? body.int('add', index, body.constant(i32, 2n)) : index;
+        body.jump(head, [body.int('add', bumped, body.constant(i32, 1n))]);
+        exit.return([]);
+        const output = emit(b.finish(entry, []), language);
+        const text = output.emission.text;
+        if (c && !written) {
+          assert.match(text, /\n {2}for \(\w+ = 0(x0)?; \(?\w+ < \w+\)?; \w+ = .+\) \{\n/);
+          assert.ok(rules(output).includes('for_loop'));
+        } else assert.doesNotMatch(text, /\bfor \(/);
+        for (const n of [0n, 1n, 3n]) {
+          const observed = execute(output.emission, new Map([[limit.id, n]]), memory());
+          const touched = written
+            ? [0n, 3n].filter((value) => value < n)
+            : [0n, 1n, 2n].filter((value) => value < n);
+          for (const value of touched)
+            assert.equal(observed.memory.get(0x1000n + value), Number(value), `${written}/${n}`);
         }
       }
     });

@@ -1,5 +1,5 @@
 import type { OperationContext } from '../core/index.js';
-import { expressionOperands, type Expression, type Value } from '../ir/index.js';
+import { expressionOperands, type Value } from '../ir/index.js';
 import type {
   BlockRegion,
   Control,
@@ -77,11 +77,14 @@ export function formArm(
   control: Control,
 ): { readonly arm: ControlArm; readonly action: 'break' | 'continue' }[] {
   if (control.kind !== 'if' || control.id !== form.test) return [];
-  if (form.kind !== 'do_while')
-    return [{ arm: form.enter ? control.when_false : control.when_true, action: 'break' }];
+  const repeat = form.kind === 'do_while' ? form.repeat : form.enter;
+  const again = repeat ? control.when_true : control.when_false,
+    leave = repeat ? control.when_false : control.when_true;
+  if (form.kind === 'while' || (form.kind === 'for' && !form.bottom))
+    return [{ arm: leave, action: 'break' }];
   return [
-    { arm: form.repeat ? control.when_true : control.when_false, action: 'continue' },
-    { arm: form.repeat ? control.when_false : control.when_true, action: 'break' },
+    { arm: again, action: 'continue' },
+    { arm: leave, action: 'break' },
   ];
 }
 
@@ -862,10 +865,30 @@ export interface LoopFacts {
   /** Restate a condition so it holds after the repeat copies ran; false when
    * no verified restatement exists. */
   readonly rebase: (control: Extract<Control, { kind: 'if' }>, repeat: ParallelTransfer) => boolean;
+  /** Accept a `for` header: the single entry edge `init` and repeat edge `step`
+   * write only induction variables (`x = x ± c`) that nothing else inside the
+   * loop writes, and the test reads one. A bottom test must also be implied on
+   * entry by an enclosing `if` arm (`guards`, outermost first). */
+  readonly induction: (loop: {
+    readonly test: Extract<Control, { kind: 'if' }>;
+    readonly enter: boolean;
+    readonly bottom: boolean;
+    readonly init: ParallelTransfer;
+    readonly step: ParallelTransfer;
+    readonly inside: ReadonlySet<string>;
+    readonly guards: readonly Guard[];
+  }) => boolean;
 }
 
-/** Choose `while (cond)` / `do { } while (cond)` syntax where its side
- * conditions hold on the final layout; other loops keep `while (true)`. */
+/** An enclosing `if` arm: code inside it runs only when `condition == value`. */
+export interface Guard {
+  readonly control: Extract<Control, { kind: 'if' }>;
+  readonly value: boolean;
+}
+
+/** Choose `for (init; cond; step)`, `while (cond)` or `do { } while (cond)`
+ * syntax where its side conditions hold on the final layout; other loops keep
+ * `while (true)`. */
 export function planLoopForms(
   body: Region,
   language: 'c-like' | 'python-like',
@@ -891,6 +914,7 @@ export function planLoopForms(
   const choose = (
     loop: Extract<Region, { kind: 'loop' }>,
     follow: string | null,
+    guards: readonly Guard[],
   ): LoopForm | undefined => {
     const entries = incoming.get(loop.header) ?? [];
     if (
@@ -898,6 +922,16 @@ export function planLoopForms(
       entries.some((occurrence) => occurrenceAction(occurrence, language) === 'goto')
     )
       return undefined;
+    const inside = owned(loop.body);
+    // A `for` header replaces exactly one entry edge falling into the loop.
+    const enters = entries.filter((occurrence) => !inside.has(occurrence.block));
+    const init =
+      enters.length === 1 &&
+      occurrenceAction(enters[0]!, language) === 'fallthrough' &&
+      enters[0]!.destination?.kind === 'loop' &&
+      enters[0]!.destination.header === loop.header
+        ? enters[0]!.transfer
+        : undefined;
     // The loop syntax performs exactly this edge: a copy-free lexical break.
     const exit = (arm: ControlArm): boolean =>
       !arm.body &&
@@ -920,7 +954,27 @@ export function planLoopForms(
       const control = head.control,
         stayTrue = !exit(control.when_true),
         stayFalse = !exit(control.when_false);
-      if (stayTrue !== stayFalse) return { kind: 'while', test: control.id, enter: stayTrue };
+      if (stayTrue !== stayFalse) {
+        // The body's lexical end is the only repeat edge: it becomes the step.
+        const repeats = entries.filter((occurrence) => inside.has(occurrence.block));
+        if (
+          language === 'c-like' &&
+          init &&
+          repeats.length === 1 &&
+          occurrenceAction(repeats[0]!, language) === 'fallthrough' &&
+          facts.induction({
+            test: control,
+            enter: stayTrue,
+            bottom: false,
+            init,
+            step: repeats[0]!.transfer,
+            inside,
+            guards,
+          })
+        )
+          return { kind: 'for', test: control.id, enter: stayTrue, bottom: false };
+        return { kind: 'while', test: control.id, enter: stayTrue };
+      }
     }
     const last = regions.at(-1);
     if (
@@ -930,8 +984,7 @@ export function planLoopForms(
       !facts.plain(last.control)
     )
       return undefined;
-    const control = last.control,
-      inside = owned(loop.body);
+    const control = last.control;
     for (const repeat of [true, false]) {
       const again = repeat ? control.when_true : control.when_false,
         leave = repeat ? control.when_false : control.when_true;
@@ -960,30 +1013,56 @@ export function planLoopForms(
       const reads = new Set(facts.reads(control));
       if (written.some((id) => reads.has(id)) && !facts.rebase(control, again.transfer))
         return undefined;
+      if (
+        init &&
+        facts.induction({
+          test: control,
+          enter: repeat,
+          bottom: true,
+          init,
+          step: again.transfer,
+          inside,
+          guards,
+        })
+      )
+        return { kind: 'for', test: control.id, enter: repeat, bottom: true };
       return { kind: 'do_while', test: control.id, repeat };
     }
     return undefined;
   };
-  const rebuild = (region: Region, follow: string | null): Region => {
+  const rebuild = (region: Region, follow: string | null, guards: readonly Guard[]): Region => {
     context.checkpoint(1);
     if (region.kind === 'sequence')
       return {
         kind: 'sequence',
         regions: region.regions.map((child, index) =>
-          rebuild(child, nextEntry(region.regions, index, follow)),
+          rebuild(child, nextEntry(region.regions, index, follow), guards),
         ),
       };
     if (region.kind === 'loop') {
-      const inner = rebuild(region.body, region.header);
-      const form = choose(region, follow);
+      const inner = rebuild(region.body, region.header, guards);
+      const form = choose(region, follow, guards);
       return form ? { ...region, body: inner, form } : { ...region, body: inner };
     }
+    const control = region.control;
+    // An owned arm body is entered only through its arm, after its test.
     return {
       ...region,
-      control: mapArms(region.control, (item) =>
-        item.body ? { ...item, body: rebuild(item.body, follow) } : item,
+      control: mapArms(control, (item) =>
+        item.body
+          ? {
+              ...item,
+              body: rebuild(
+                item.body,
+                follow,
+                control.kind === 'if'
+                  ? [...guards, { control, value: item === control.when_true }]
+                  : guards,
+              ),
+            }
+          : item,
       ),
     };
   };
-  return rebuild(body, null);
+  return rebuild(body, null, []);
 }

@@ -54,24 +54,4 @@ export default defineConfig([
       ],
     },
   },
-  {
-    // TODO(post-presentation): remove after item-1 integration
-    // Paths being rewritten concurrently by the presentation work; relax only the rules they currently violate.
-    files: [
-      'src/reconstruction/**',
-      'src/emitters/**',
-      'src/presentation/**',
-      'src/core/inference.ts',
-      'src/core/tools.ts',
-      'src/service/analysis/versions.ts',
-      'test/emitters/**',
-      'test/reconstruction/**',
-      'test/presentation/**',
-    ],
-    rules: {
-      '@typescript-eslint/no-unused-vars': 'off',
-      'prefer-const': 'off',
-      '@typescript-eslint/no-unused-expressions': 'off',
-    },
-  },
 ]);

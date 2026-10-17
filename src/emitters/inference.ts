@@ -1,10 +1,4 @@
-import type {
-  Address,
-  AddressRange,
-  Emission,
-  OperationContext,
-  RecoveredType,
-} from '../core/index.js';
+import type { Address, Emission, OperationContext, RecoveredType } from '../core/index.js';
 import type { Inference, InferenceStatus } from '../core/inference.js';
 import type { MemoryShape, ObservedField, TypeStatus } from '../analysis/types/model.js';
 import { bitWidth, expressionOperands, type Origin, type Value } from '../ir/index.js';
