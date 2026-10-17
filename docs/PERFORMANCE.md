@@ -197,3 +197,32 @@ node --import tsx scripts/bench/selected-work.ts --mode diagnose --contract /tmp
 ```
 
 `public` uses ordinary defaults in a fresh isolated project. `diagnose` raises only non-instruction observation ceilings to 100,000 blocks, 10,000,000 IR nodes, 100,000,000 work and 300,000 ms; these are measurement settings, not a proposed repair. No analyzed input executes. The retained count record is historical evidence of the pre-repair implementation, not a promise that later instrumentation produces identical counts.
+
+## Reviewed paired-decompiler harness
+
+`scripts/bench/quality.py` retains the original 16 native-corpus and ten SQLite 3.54.0 Mach-O ARM64 selections. `quality-inputs.json` pins hashes, selected addresses, compiler/source/license provenance, tool versions, budgets, semantic states and matched raw-response/output artifacts. Source and independently inspected instructions remain the oracle; Ghidra is a comparator, not truth.
+
+The durable baseline archive `scripts/bench/quality-evidence/baseline-2026-10-17.tar.gz` contains 968 individually hashed files: reviewed binaries, fixture source/license/build records, matching SQLite source, Homebrew recipe/receipt/SBOM, disassembly/manual findings, original raw responses and matched C. It excludes dependency checkouts, virtualenvs, installed tools and project databases. Archive SHA256: `9716b960dcbc94b02a49552ef195d9b2b51d54ef08bf1347a7dd1009f5cd0269`. Preparation was exercised independently and validated all 968 files:
+
+```sh
+python3 scripts/bench/quality.py prepare --destination .local/performance/quality-reviewed
+```
+
+Use Python 3.12+, a built production CLI, Ghidra 12.1.4 with a working host-native decompiler, and the separately provisioned `xjoker/ghidra-mcp` bridge pinned to `73ea1c8eaa4bb364f7338f8180e623583bb1d340` (`uv sync --locked --python 3.13`). `quality-ghidra.py` bootstraps that unchanged upstream runtime on Python's main thread with headless AWT settings; target operations still use MCP. The baseline manifest records dependency/build hashes. The Homebrew bottle's fully expanded compiler invocation and precise clang version are unavailable; retained recipe flags are not a byte-reproducible source-build claim.
+
+```sh
+python3 scripts/bench/quality.py run \
+  --inputs .local/performance/quality-reviewed \
+  --output "$HOME/Documents/open-decomp-quality/smoke" \
+  --ghidra-bridge "$HOME/Documents/open-decomp-quality-bridge" \
+  --ghidra /Users/df0/Downloads/ghidra_12.1.4_PUBLIC \
+  --java-home /opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home \
+  --input corpus-arm64 --function fixture_arithmetic --function fixture_direct \
+  --cold-runs 1 --warm-runs 1
+```
+
+Outputs must use a new durable non-hidden directory outside `/tmp`: the exercised Ghidra stack rejects dot-prefixed project paths. Omitting selection/repetition flags records all 26 functions, three fresh projects per input/tool and ten repeated calls per function. `--profile default` and `--profile raised` remain separate populations. Requests are serialized under `.local/performance/quality.measurement.lock`; coordinate host use before making performance claims.
+
+Both tools use the same Python stdlib newline-JSON-RPC client, identical binary/symbol/address access and no injected source/types/annotations. The harness records raw requests/responses, schemas, tool/component identities, first/repeated samples, cache and semantic states, emitted artifacts and hashes. Large analysis artifacts are read across bounded resource pages and size/SHA256 checked. No analyzed binary executes. Client latency includes transport and raw logging; the selected bridge still creates a new `DecompInterface` per call, so these records are not persistent-interface engine-speed evidence.
+
+The exercised two-function smoke exited zero with eight matched C outputs, successful closes and both servers exiting zero. Arithmetic was complete, computed then cached; direct-call output remained explicitly partial, and its 630,962-byte artifact was retrieved across two pages. This smoke used the existing compiled application, not concurrent reconstruction changes, and supports harness functionality only. Durable smoke archive SHA256: `06e31569fd853ae44104c6d616d2ee263807f9dd406c7f7cbf2240bf3ce90587`; exact invocation and 80 member hashes are in `quality-evidence/smoke-2026-10-17.json`. Full-matrix, held-out, semantic/readability and normalized performance results remain separate gates.
