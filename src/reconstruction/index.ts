@@ -411,6 +411,7 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     }
   };
   const roots = new Map<string, Value[]>();
+  const semanticRoots: Value[] = [], overlayOutputs: Value[] = [];
   for (const block of blocks.values()) {
     for (const node of block.statements) {
       context.checkpoint(1);
@@ -438,6 +439,7 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
         operands.push(...(physical_inputs.get(node.id) ?? []).map((binding) => binding.value));
       roots.set(node.id, operands);
       for (const value of operands) use(value, block.id);
+      semanticRoots.push(...operands);
     }
     const control = block.control,
       operands: Value[] = [];
@@ -446,12 +448,18 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     else if (control.kind === 'indirect') operands.push(control.target);
     const tail = tails.get(control.id);
     if (tail) operands.push(...tail.boundary.arguments);
+    let overlay: Value[] = [];
     if (control.kind === 'return') {
       const projection = returns.get(control.id)!;
-      operands.push(...projection.results, ...projection.outputs.map((binding) => binding.value));
+      operands.push(...projection.results);
+      overlay = projection.outputs.map((binding) => binding.value);
+      if (!sourcePlan || projection.kind !== 'inferred') semanticRoots.push(...overlay);
+      else overlayOutputs.push(...overlay);
+      operands.push(...overlay);
     } else operands.push(...(physical_exits.get(control.id) ?? []).map((binding) => binding.value));
     roots.set(control.id, operands);
     for (const value of operands) use(value, block.id);
+    semanticRoots.push(...operands.slice(0, operands.length - overlay.length));
   }
   // Incoming phi sources are demanded only when their destination is live.
   const incomingUses = new Map<string, { source: Value; block: string }[]>();
@@ -481,6 +489,32 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
       for (const operand of expressionOperands(expression)) use(operand, owner.get(value.id)!);
     if (!sourcePlan || !expression || !identityOperand(value.type, expression))
       for (const incoming of incomingUses.get(value.id) ?? []) use(incoming.source, incoming.block);
+  }
+  // An uncertain return overlay preserves machine state; reaching an ABI input
+  // register only through it is not evidence that the register is a source input.
+  if (sourcePlan && overlayOutputs.length) {
+    const demanded = new Set<string>(), pending: Value[] = [];
+    const reach = (value: Value): void => {
+      context.checkpoint(1);
+      if (demanded.has(value.id)) return;
+      demanded.add(value.id);
+      pending.push(value);
+    };
+    semanticRoots.forEach(reach);
+    for (let cursor = 0; cursor < pending.length; cursor++) {
+      context.checkpoint(1);
+      const value = pending[cursor]!, expression = expressions.get(value.id);
+      const returnAddress = sourceStack?.returnAddressLoads.get(value.id);
+      if (returnAddress) reach(returnAddress.node.address);
+      if (sourceStack?.addresses.has(value.id)) {
+        if (sourceStack.entryStorage && sourceStack.requiresEntry(value.id)) reach(sourceStack.entryStorage);
+        continue;
+      }
+      if (expression) for (const operand of expressionOperands(expression)) reach(operand);
+      if (!expression || !identityOperand(value.type, expression))
+        for (const incoming of incomingUses.get(value.id) ?? []) reach(incoming.source);
+    }
+    sourcePlan.demoteOverlayInputs(live, demanded);
   }
   if (sourcePlan)
     for (const [id, projection] of calls)

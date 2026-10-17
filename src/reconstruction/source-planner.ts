@@ -47,6 +47,7 @@ export function planSource(
   const tails = new Map<string, TailProjection>();
   const callResults = new Map<string, readonly Value[]>(),
     parameterNames = new Map<string, string>();
+  const demotedParameters = new Set<string>();
   const parameters: Value[] = [],
     parameterRegisters = new Map<string, RegisterDescriptor>();
   const valueOrigins = new Map<string, readonly string[]>();
@@ -846,13 +847,22 @@ export function planSource(
         definitions.set(anchor.id, list);
       }
     },
+    demoteOverlayInputs(live: ReadonlySet<string>, demanded: ReadonlySet<string>): void {
+      for (const value of parameters) {
+        context.checkpoint(1);
+        if (!live.has(value.id) || demanded.has(value.id) || !parameterRegisters.has(value.id)) continue;
+        alias(value, { kind: 'indeterminate', state: 'unknown', reason: 'non-argument entry register' });
+        parameterRegisters.delete(value.id);
+        demotedParameters.add(value.id);
+      }
+    },
     finalize(live: ReadonlySet<string>): readonly Value[] {
       const incoming = [...incomingParameters]
         .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
         .map(([, value]) => value);
       const demanded = functionSignature
         ? parameters
-        : [...parameters, ...incoming].filter((value) => live.has(value.id));
+        : [...parameters, ...incoming].filter((value) => live.has(value.id) && !demotedParameters.has(value.id));
       demanded.forEach((value, index) => {
         if (!parameterNames.has(value.id)) parameterNames.set(value.id, `arg${index}`);
       });
