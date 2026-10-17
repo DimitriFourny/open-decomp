@@ -58,7 +58,7 @@ Surfaces: `src/lifters/arm64/`, `src/lifters/x86_64/`, `src/abi/`, `src/reconstr
 
 - [x] Reject or explicitly mark reconstruction failures when internal reachability, def-use, incoming-storage, or result-projection invariants fail. Preserve diagnostic evidence instead of publishing plausible incorrect code without qualification.
   - Acceptance: the current `sqlite3_strnicmp` and incoming-stack defects cannot pass the relevant invariant checks unnoticed. Keep bounded-operation completion distinct from semantic coverage and from any future validation status; `complete` is not an equivalence proof.
-- [ ] Turn the observed failures into source-backed, end-to-end regression cases before changing the affected passes. Check both output dialects from the same reconstructed representation.
+- [x] Turn the observed failures into source-backed, end-to-end regression cases before changing the affected passes. Check both output dialects from the same reconstructed representation.
   - Compare observable return values, memory writes, call arguments/order, and branch outcomes using an independent source oracle and a reconstruction evaluator or supported executable-output subset. IR-only checks cannot establish that rendering preserved behavior.
   - Execute only trusted source-built fixtures in an isolated developer harness, never arbitrary analyzed inputs or production targets. Exclude undefined source inputs and state the supported FP environment.
   - Use semantic assertions, not snapshots of Ghidra wording, temporary counts, or formatting. A helper identity or self-comparison is not an independent oracle.
