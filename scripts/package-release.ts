@@ -191,7 +191,7 @@ async function packageRelease(): Promise<void> {
     const inventory = await releaseArchiveInventory(stagedArchive, join(staging, 'inventory'));
     assert.deepEqual(inventory.files.filter(file => file.path !== 'package.json'), initialInventory.files.filter(file => file.path !== 'package.json'), 'Repacking changed the bundled runtime inventory');
     await assertProductionClosure(join(staging, 'inventory', 'package'), metadata.dependencies);
-    for (const path of ['dist/src/index.js', 'dist/src/mcp/stdio.js', 'dist/vendor/a64js/src/decode.js']) assert.ok(inventory.files.some(file => file.path === path), `Missing compiled runtime: ${path}`);
+    for (const path of ['dist/src/index.js', 'dist/src/cli/entry.js', 'dist/src/api/index.js', 'API.md', 'dist/vendor/a64js/src/decode.js']) assert.ok(inventory.files.some(file => file.path === path), `Missing packaged runtime or documentation: ${path}`);
     assert.ok(inventory.files.every(file => !file.path.startsWith('vendor/a64js/src/')), 'Do not distribute duplicate uncompiled a64js runtime');
     assert.deepEqual(await readFile(join(root, 'package.json')), packageBytes, 'Package metadata changed during release');
     assert.equal(createHash('sha256').update(await readFile(join(root, 'bun.lock'))).digest('hex'), lockSha256, 'Lockfile changed during release');

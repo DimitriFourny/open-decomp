@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { once } from 'node:events';
 import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { arch, platform, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -21,10 +22,13 @@ const fixtureManifestSchema = z.object({
 // and copied immutable binary inputs are visible to this separate process.
 const installedProbe = String.raw`
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import * as app from 'open-decomp';
-const [fixtures, expectedEntry] = process.argv.slice(2);
+import { promisify } from 'node:util';
+import { openBinary } from 'open-decomp/api';
+const [fixtures, expectedEntry, cliEntry] = process.argv.slice(2);
 assert.equal(import.meta.resolve('open-decomp'), expectedEntry);
 console.log(JSON.stringify({ scenario: 'installed-root-import', outcome: 'passed', entry: import.meta.resolve('open-decomp'), node: process.version, platform: process.platform, architecture: process.arch }));
 const elfManifest = JSON.parse(await readFile(join(dirname(fixtures), 'elf-manifest.json'), 'utf8'));
@@ -64,6 +68,37 @@ for (const [name, format, language, fragment] of [
   assert.ok(result.display_name?.includes(fragment), JSON.stringify(result));
   assert.deepEqual(result.diagnostics, []);
   console.log(JSON.stringify({ scenario: 'installed-real-wasm-demangler', outcome: 'passed', ...result }));
+}
+let analysisIdentity;
+for (let run = 0; run < 2; run++) {
+  const binary = await openBinary(join(fixtures, 'macho-arm64-symbols'), { cachePath: join(dirname(fixtures), 'api-cache') });
+  try {
+    const result = await binary.decompile({ name: '_fixture_arithmetic' }, { budget: { output_bytes: 4096 } });
+    assert.equal(result.state, 'complete');
+    assert.ok('data' in result && result.data.delivery === 'inline');
+    assert.equal(result.data.cache, run === 0 ? 'computed' : 'hit');
+    assert.equal(binary.reused, run !== 0);
+    const identity = { project_id: binary.projectId, revision: binary.revision, artifact: result.artifacts[0].id, text: result.data.emission.text };
+    if (analysisIdentity) assert.deepEqual(identity, analysisIdentity);
+    analysisIdentity = identity;
+    console.log(JSON.stringify({ scenario: 'installed-task-api', outcome: 'passed', run: run + 1, reused: binary.reused, cache: result.data.cache, project_id: binary.projectId }));
+  } finally { await binary.close(); }
+}
+const execute = promisify(execFile);
+let cliIdentity;
+for (let run = 0; run < 2; run++) {
+  const { stdout } = await execute(process.execPath, [cliEntry, 'decompile', join(fixtures, 'macho-arm64-symbols'),
+    '--address', 'va:0x100000574', '--cache', join(dirname(fixtures), 'cli-cache'), '--json'], { maxBuffer: 32 * 1024 * 1024 });
+  const output = JSON.parse(stdout);
+  const result = app.toolSchemas.function_decompile.output.parse(output.result);
+  assert.equal(result.state, 'complete');
+  assert.ok('data' in result && result.data.delivery === 'inline');
+  assert.equal(output.reused, run !== 0);
+  assert.equal(result.data.cache, run === 0 ? 'computed' : 'hit');
+  const identity = { project_path: output.project_path, project_id: result.project_id, revision: result.revision, artifact: result.artifacts[0].id, text: result.data.emission.text };
+  if (cliIdentity) assert.deepEqual(identity, cliIdentity);
+  cliIdentity = identity;
+  console.log(JSON.stringify({ scenario: 'installed-human-cli', outcome: 'passed', run: run + 1, reused: output.reused, cache: result.data.cache }));
 }
 `;
 
@@ -155,7 +190,6 @@ async function installedAcceptance(): Promise<void> {
     assert.equal(installedMetadata.name, manifest.package.name);
     assert.equal(installedMetadata.version, manifest.package.version);
     assert.deepEqual([...installedMetadata.bundleDependencies].sort(), Object.keys(manifest.source_package.production_dependencies).sort(), 'Installed bundle declarations differ from source production dependencies');
-    assert.equal(installedMetadata.bin['open-decomp'].replace(/^\.\//, ''), 'dist/src/mcp/stdio.js');
     for (const file of manifest.bun_pack.files) {
       assert.ok(file.path !== '' && !file.path.includes('\\') && !isAbsolute(file.path) && !file.path.split('/').some(part => part === '..' || part === '.'), `Unsafe archive inventory path: ${file.path}`);
       const installedFile = join(installedPackage, file.path);
@@ -166,12 +200,12 @@ async function installedAcceptance(): Promise<void> {
       assert.equal(stat.size, file.size, `Installed size differs from archive inventory: ${file.path}`);
       assert.equal(createHash('sha256').update(await readFile(actual)).digest('hex'), file.sha256, `Installed checksum differs from archive inventory: ${file.path}`);
     }
-    const serverEntry = join(installedPackage, 'dist', 'src', 'mcp', 'stdio.js');
+    const serverEntry = join(installedPackage, installedMetadata.bin['open-decomp']);
     const publicEntry = pathToFileURL(join(installedPackage, 'dist', 'src', 'index.js')).href;
     process.stdout.write(`${JSON.stringify({ scenario: 'empty-cache-offline-install', outcome: 'passed', host: { ...host, bun: bunVersion }, package: installedMetadata.name, version: installedMetadata.version, inventory_files: manifest.bun_pack.files.length, artifact_sha256: identity.sha256 })}\n`);
     const probe = join(install, 'installed-probe.mjs');
     await writeFile(probe, installedProbe, { flag: 'wx' });
-    const probeProcess = spawn(process.execPath, [probe, fixtures, publicEntry], { cwd: install, env: environment, shell: false, stdio: 'inherit' });
+    const probeProcess = spawn(process.execPath, [probe, fixtures, publicEntry, serverEntry], { cwd: install, env: environment, shell: false, stdio: 'inherit' });
     await new Promise<void>((resolveProbe, reject) => {
       probeProcess.once('error', reject);
       probeProcess.once('exit', (code, signal) => {

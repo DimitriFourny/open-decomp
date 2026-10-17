@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runMcpWorkflows } from './mcp-workflow.js';
 
-let serverEntry = fileURLToPath(new URL('../src/mcp/stdio.js', import.meta.url));
+let serverEntry = fileURLToPath(new URL('../src/cli/entry.js', import.meta.url));
 let fixtures = resolve('fixtures/bin');
 const seen = new Set<string>();
 for (let index = 2; index < process.argv.length; index++) {

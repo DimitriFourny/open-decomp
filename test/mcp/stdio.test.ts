@@ -11,16 +11,15 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { z } from 'zod';
 import { newIdentity, toolSchemas } from '../../src/core/index.js';
-import { parseCliArguments } from '../../src/mcp/cli.js';
 import { MAX_MCP_INPUT_BYTES, MAX_MCP_PENDING_REQUESTS, MAX_MCP_REQUEST_ID_BYTES } from '../../src/mcp/limits.js';
 import { callMcpTool, resultData, runMcpWorkflows } from '../../scripts/mcp-workflow.js';
 
-const entry = fileURLToPath(new URL('../../src/mcp/stdio.ts', import.meta.url));
+const entry = fileURLToPath(new URL('../../src/cli/entry.ts', import.meta.url));
 const fixtures = resolve('fixtures/bin');
 const nodeArgs = ['--import', 'tsx'];
 
 function launch(t: TestContext, args: readonly string[]) {
-  const child = spawn(process.execPath, [...nodeArgs, entry, ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [...nodeArgs, entry, 'mcp', 'start', ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
   const output = { stdout: '', stderr: '' };
   child.stdout.on('data', (chunk: Buffer) => { output.stdout += chunk.toString('utf8'); });
   child.stderr.on('data', (chunk: Buffer) => { output.stderr += chunk.toString('utf8'); });
@@ -65,9 +64,13 @@ function rpcReader(child: ChildProcessWithoutNullStreams) {
   };
 }
 
-test('CLI requires explicit roots and reuses worker resource limits without hidden flags', () => {
+test('MCP command rejects malformed roots and resource limits through the unified executable', { timeout: 60000 }, async t => {
   for (const args of [[], ['--wat'], ['--root'], ['--root', '--version'], ['--root', 'x', '--max-workers', '0'], ['--root', 'x', '--max-workers', '33'], ['--root', 'x', '--max-queued', '-1'], ['--root', 'x', '--max-queued', '1025'], ['--root', 'x', '--max-workers', '1.5'], ['--root', 'x', '--max-workers', '01'], ['--root', 'x', '--max-workers', '1', '--max-workers', '2'], ['--root', 'x', '--worker-entry', 'foreign.js']]) {
-    assert.throws(() => parseCliArguments(args), Error, JSON.stringify(args));
+    const process = launch(t, args);
+    await process.closed;
+    assert.equal(process.child.exitCode, 1);
+    assert.equal(process.output.stdout, '');
+    assert.ok(process.output.stderr.length > 0 && process.output.stderr.length < 4096);
   }
 });
 
@@ -147,7 +150,7 @@ for (const shutdown of ['eof', 'SIGINT', 'SIGTERM', 'backpressure', 'stalled-out
     z.object({ jsonrpc: z.literal('2.0') }).parse(JSON.parse(line));
   }
   const client = new Client({ name: 'stdio-reopen-test', version: '0.1.0' });
-  const transport = new StdioClientTransport({ command: globalThis.process.execPath, args: [...nodeArgs, entry, '--root', root], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: globalThis.process.execPath, args: [...nodeArgs, entry, 'mcp', 'start', '--root', root], stderr: 'pipe' });
   transport.stderr?.on('data', () => {});
   try {
     await client.connect(transport);

@@ -10,7 +10,7 @@ import { MAX_MCP_INPUT_BYTES, MAX_MCP_PENDING_OUTPUTS, MAX_MCP_REQUEST_ID_BYTES,
 export const MCP_VERSION = '0.1.0';
 const OUTPUT_STALL_MS = 30_000;
 
-const HELP = `Usage: open-decomp-mcp --root PATH [--root PATH ...] [--max-workers N] [--max-queued N]
+const HELP = `Usage: open-decomp mcp start [--transport stdio] --root PATH [--root PATH ...] [--max-workers N] [--max-queued N]
 
 Serve the local analysis engine over MCP stdio. At least one explicit authorized
 filesystem root is required; no working-directory or home-directory root is added.
@@ -186,7 +186,7 @@ export async function runStdio(args: readonly string[]): Promise<void> {
     if (!reportedError) {
       reportedError = true;
       const message = error instanceof Error ? error.message : 'MCP transport failure';
-      process.stderr.write(`open-decomp-mcp: ${message.replace(/[\r\n\x00-\x1f\x7f]/g, ' ').slice(0, 512)}\n`);
+      process.stderr.write(`open-decomp mcp start: ${message.replace(/[\r\n\x00-\x1f\x7f]/g, ' ').slice(0, 512)}\n`);
     }
   };
   const onSignal = (): void => { void stop().catch(report); };

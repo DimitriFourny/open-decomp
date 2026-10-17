@@ -152,7 +152,7 @@ export async function withMcpClient<T>(options: McpWorkflowOptions, root: string
     const connected = new Client({ name: 'open-decomp-deterministic-client', version: '0.1.0' }, { capabilities: {} });
     const transport = new StdioClientTransport({
       command: process.execPath,
-      args: [...options.nodeArgs ?? [], options.serverEntry, '--root', root, '--root', options.fixtures, '--max-workers', '2', '--max-queued', '4'],
+      args: [...options.nodeArgs ?? [], options.serverEntry, 'mcp', 'start', '--root', root, '--root', options.fixtures, '--max-workers', '2', '--max-queued', '4'],
       ...(options.serverCwd === undefined ? {} : { cwd: options.serverCwd }),
       ...(options.serverEnv === undefined ? {} : { env: options.serverEnv }),
       stderr: 'pipe',

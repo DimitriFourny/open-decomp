@@ -14,11 +14,14 @@
     ".": {
       "types": "./dist/src/index.d.ts",
       "import": "./dist/src/index.js"
+    },
+    "./api": {
+      "types": "./dist/src/api/index.d.ts",
+      "import": "./dist/src/api/index.js"
     }
   },
   "bin": {
-    "open-decomp": "./dist/src/mcp/stdio.js",
-    "open-decomp-mcp-http": "./dist/src/mcp/http/entry.js"
+    "open-decomp": "./dist/src/cli/entry.js"
   },
   "files": [
     "dist/src",
@@ -27,6 +30,7 @@
     "vendor/a64js/README.md",
     "vendor/a64js/snapshot.json",
     "README.md",
+    "API.md",
     "REMOTE.md",
     "THIRD-PARTY-NOTICES.md",
     "licenses",
@@ -43,8 +47,8 @@
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "check": "bun run typecheck && bun run test && bun run build",
     "smoke": "node dist/scripts/smoke.js",
-    "mcp": "node dist/src/mcp/stdio.js",
-    "mcp:http": "node dist/src/mcp/http/entry.js",
+    "mcp": "node dist/src/cli/entry.js mcp start",
+    "mcp:http": "node dist/src/cli/entry.js mcp start --transport http",
     "smoke:mcp": "node dist/scripts/mcp-smoke.js",
     "pack:release": "node --import tsx scripts/package-release.ts",
     "verify:installed": "node --import tsx scripts/installed-acceptance.ts"

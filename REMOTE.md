@@ -1,16 +1,16 @@
 # Authenticated MCP over HTTP
 
-Open Decomp serves its existing tools and artifact resources over the pinned official MCP SDK 2.3.1 `createMcpHandler` HTTP implementation, with native HTTP/TLS CLI entry points. It shares the homemade analysis/presentation pipeline and C-like/Python-like emitter selection; it does not introduce a separate public analysis protocol. **macOS arm64 / Node 24.22.0** is the verified execution host. Linux, including WSL with Linux Node/filesystem/process APIs, is intended but not host-qualified; native Windows execution is out of product scope. PE, Mach-O and ELF are analysis targets, not required server hosts.
+Open Decomp serves its existing tools and artifact resources over the pinned official MCP SDK 2.3.1 `createMcpHandler` HTTP implementation, with native HTTP/TLS selected by its unified CLI. It shares the homemade analysis/presentation pipeline and C-like/Python-like emitter selection; it does not introduce a separate public analysis protocol. **macOS arm64 / Node 24.22.0** is the verified execution host. Linux, including WSL with Linux Node/filesystem/process APIs, is intended but not host-qualified; native Windows execution is out of product scope. PE, Mach-O and ELF are analysis targets, not required server hosts.
 
 ## Start and provision
 
-Use Node 24.22.0 as the runtime and Bun 1.4.3 as the package manager. For checkout commands, first install the pinned `bun.lock` dependencies with `bun install --frozen-lockfile`. The development package declares a separate HTTP command; a newly produced artifact must receive its own installed acceptance before it is qualified:
+Use Node 24.22.0 as the runtime and Bun 1.4.3 as the package manager. For checkout commands, first install the pinned `bun.lock` dependencies with `bun install --frozen-lockfile` and build with `bun run build`. Select HTTP on the single installed executable; a newly produced artifact must receive its own installed acceptance before it is qualified:
 
 ```sh
-open-decomp-mcp-http --config /absolute/private/open-decomp-http.json
+open-decomp mcp start --transport http --config /absolute/private/open-decomp-http.json
 ```
 
-The development/compiled entry is `src/mcp/http/entry.ts` / `dist/src/mcp/http/entry.js`; from the checkout use `bun run mcp:http --config /absolute/private/open-decomp-http.json`. `--help` prints usage. No roots, tokens or worker modules are accepted as network arguments. The actual installed local stdio binary is **`open-decomp`**, not `open-decomp-mcp`; no alias is provided. Its compiled entry remains `dist/src/mcp/stdio.js`.
+Both transports run in the foreground through `src/cli/entry.ts` / `dist/src/cli/entry.js`; from a built checkout use `bun run mcp:http --config /absolute/private/open-decomp-http.json`. `open-decomp mcp start --transport http --help` prints HTTP usage to stderr. No roots, tokens or worker modules are accepted as network arguments. `open-decomp mcp start --root PATH` selects local stdio by default; there are no separate transport executables or bare-command server fallback.
 
 Provision an existing, private project **parent directory** for each principal, and separate existing directories containing operator-approved input binaries. Clients choose absolute project paths strictly beneath their principal's project root. Creating a project requires its immediate parent to exist; the server does not recursively create arbitrary directories. Clients may import only existing files beneath that principal's input roots. There is no upload, URL import, symbol-server download, target execution, target-library loading, plugin endpoint or arbitrary file resource endpoint.
 

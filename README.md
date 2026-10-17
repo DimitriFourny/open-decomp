@@ -30,15 +30,44 @@ Production dependencies, their WASM assets, compiled `dist/src` and compiled `di
 
 Do not fetch a registry copy with `bunx` or patch `node_modules` to compensate for a broken artifact. A successful `--help` alone does not establish runtime closure: package import, worker startup, both decoders and all three demangler WASM paths must also work.
 
-## Launch and configure local MCP
+## Task-oriented CLI and persistent cache
 
-Create separate existing directories for input binaries and persistent projects. Authorize only those directories. The installed entry can be launched directly:
+The development checkout adds human commands without requiring an AI or a manual MCP session:
 
 ```sh
-node /absolute/app/node_modules/open-decomp/dist/src/mcp/stdio.js --root /absolute/inputs --root /absolute/projects
+open-decomp functions ./app --name main
+open-decomp decompile ./app --function main
+open-decomp decompile ./app --address va:0x100000574 --language python-like
+open-decomp decompile ./app --function main --json --cache ./analysis-cache
 ```
 
-The package binary is `open-decomp` (Bun installs its local executable under `node_modules/.bin`). Direct Node invocation avoids shell/PATH and Windows shim differences. The CLI help's usage label is `open-decomp-mcp`; this is not a second installed binary.
+`functions --name` is a case-insensitive substring search; `decompile --function` is exact and case-sensitive. Use discovered original/display names (including format-specific prefixes), a stable `--id`, or an explicit `--address va:0x...`, `rva:0x...` or `file:0x...`. Multiple indexed matches are an error, not a first-match selection. Both commands support `--help`, `--cache PATH`, and explicit `--slice ID`.
+
+The default sidecar is **`<canonical binary path>.open-decomp/`**, containing content-addressed SQLite project directories, immutable input snapshots, navigation indexes and analysis artifacts. Unchanged bytes resume the existing project; matching decompilations return cache hits. Each invocation still reads/hashes the binary to validate identity. Changed bytes select a new entry without overwriting earlier investigations. `--cache` overrides the cache root for read-only input locations or centralized storage. There is no silent fallback, automatic eviction or automatic replay of failed imports.
+
+Each project has one exclusive owner: close a CLI/API/MCP session before opening the same project elsewhere. The CLI prints the exact project path, which MCP can subsequently resume. Sidecars can contain sensitive target bytes and pseudocode; do not treat them as disposable while another process owns them.
+
+Text decompilation goes to stdout; progress, cache/project information and diagnostics go to stderr. `--json` emits `{project_path,reused,result}`. For function listing, `result` is `{pages:[...]}`, preserving each original schema envelope while consuming all cursors. Decompilation returns the full result envelope, automatically assembling and checking artifact-backed output. Results remain pseudocode, with partial/unknown semantics intact.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Complete or empty requested result. |
+| `2` | Semantic partial result, including an exhausted incomplete index. |
+| `1` | Usage, filesystem, integrity or operation error; unsupported/cancelled operation. |
+| `130`, `143` | Interrupted by SIGINT or SIGTERM; owned workers are closed. |
+
+For Node.js/TypeScript applications, use the small **`open-decomp/api`** entry: `openBinary()`, `findFunctions()`, `decompile()` and `close()`. It shares the CLI's persistent cache and the MCP service's contracts. See [API.md](API.md) for runnable usage patterns, lifecycle, paging, errors and cache policy.
+
+
+## Launch and configure local MCP
+
+Create separate existing directories for input binaries and persistent projects. Authorize only those directories. Run `open-decomp mcp start` for foreground stdio (the default transport), or invoke the installed entry directly:
+
+```sh
+node /absolute/app/node_modules/open-decomp/dist/src/cli/entry.js mcp start --root /absolute/inputs --root /absolute/projects
+```
+
+The only package binary is `open-decomp` (Bun installs its local executable under `node_modules/.bin`). Direct Node invocation avoids shell/PATH and Windows shim differences. Bare `open-decomp` prints command help; MCP requires the explicit `mcp start` subcommand.
 
 A typical MCP host configuration is below; the outer configuration location/shape is host-specific. Use the absolute Node 24.22.0 executable and installed entry, not a source-checkout package script:
 
@@ -48,7 +77,8 @@ A typical MCP host configuration is below; the outer configuration location/shap
     "open-decomp": {
       "command": "/absolute/path/to/node",
       "args": [
-        "/absolute/app/node_modules/open-decomp/dist/src/mcp/stdio.js",
+        "/absolute/app/node_modules/open-decomp/dist/src/cli/entry.js",
+        "mcp", "start",
         "--root", "/absolute/inputs",
         "--root", "/absolute/projects",
         "--max-workers", "2",
@@ -63,14 +93,15 @@ For intended WSL use, the MCP process must execute Linux Node and the installed 
 
 | CLI option | Contract |
 | --- | --- |
+| `--transport stdio` | Optional explicit stdio selection; stdio is the default for `mcp start`. |
 | `--root PATH` | Repeatable, at most 64 existing authorized directories; at least one required. No cwd/home root is implicit. |
 | `--max-workers N` | Persistent project workers, 1–32, default 2. Open projects consume owners; close unused ones. |
 | `--max-queued N` | Queued jobs per worker, 0–1,024, default 16. |
 | `--help`, `--version` | Print to stderr, not protocol stdout. |
 
-The first local release uses **stdio**. Stdout must remain protocol traffic; consume stderr separately. The SDK owns framing and version negotiation. EOF and catchable termination signals cancel/reap project owners; use `project_close` for an orderly durable close before disconnecting.
+For stdio, stdout must remain protocol traffic; help, version and diagnostics use stderr. The SDK owns framing and version negotiation. EOF and catchable termination signals cancel/reap project owners; use `project_close` for an orderly durable close before disconnecting.
 
-The current development checkout also provides `open-decomp-mcp-http --config /absolute/private/config.json` (`dist/src/mcp/http/entry.js`, or `bun run mcp:http --config ...`) for the same tools/resources over official-SDK Streamable HTTP. [REMOTE.md](REMOTE.md) documents provisioning, exact limits and lifecycle. Authentication is private, operator-provisioned high-entropy bearer authentication with stored SHA256 hashes, **not OAuth/SSO**. Every request is authenticated; each principal has disjoint private project ownership, its own service/worker pool, and authorized input roots. Non-loopback listeners require native TLS; Host/Origin allowlists do not create CORS/browser support or an OS sandbox.
+Use `open-decomp mcp start --transport http --config /absolute/private/config.json` (or `bun run mcp:http --config ...` from a built checkout) for the same tools/resources over official-SDK Streamable HTTP. Both transports use `dist/src/cli/entry.js`; `mcp start --help` and `mcp start --transport http --help` show transport-specific options. [REMOTE.md](REMOTE.md) documents provisioning, exact limits and lifecycle. Authentication is private, operator-provisioned high-entropy bearer authentication with stored SHA256 hashes, **not OAuth/SSO**. Every request is authenticated; each principal has disjoint private project ownership, its own service/worker pool, and authorized input roots. Non-loopback listeners require native TLS; Host/Origin allowlists do not create CORS/browser support or an OS sandbox.
 
 HTTP work transfers to the principal at validated, authorized service dispatch, not at a guaranteed durable commit. After dispatch, disconnects, HTTP deadlines and SDK cancellation do not automatically cancel work; use `analysis_cancel`, and inspect durable state after a lost acknowledgement rather than replaying mutations. This ownership differs from a local stdio process's EOF shutdown.
 
@@ -119,6 +150,8 @@ All 13 MCP tools expose concrete input/output JSON Schemas, structured content a
 | `analysis_status`, `analysis_cancel` | Durable job inspection and cancellation. |
 
 Read the [core contract reference](src/core/README.md) for detailed tool semantics, result states, codecs, cache rules and schema/storage distinctions. The installed root ESM export includes `toolSchemas`, `exportToolJsonSchemas()`, request/response validators, `QueryService`, loaders, decoders, lifters and other engine APIs; TypeScript declarations ship with the compiled entry. For programmatic schema export:
+
+The task-oriented local application entry is [`open-decomp/api`](API.md); use it to avoid manual project/revision/job handling for function listing and decompilation. The root exports below remain available for lower-level integration.
 
 ```js
 import { exportToolJsonSchemas } from 'open-decomp';
