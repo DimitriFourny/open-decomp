@@ -7,9 +7,11 @@ export interface InferredCallee {
   readonly parameter_state?: 'observed' | 'ambiguous';
   readonly parameters: readonly RegisterDescriptor[];
   readonly returns: readonly RegisterDescriptor[];
-  /** Scalar lane types observed independently of architectural register capacity. */
+  /** Lane types observed independently of architectural register capacity. */
   readonly parameter_types?: readonly DataType[];
   readonly return_types?: readonly DataType[];
+  /** Preconditions of these observations; absent means no inferred FP condition. */
+  readonly assumptions?: readonly string[];
   readonly evidence_ids: readonly string[];
 }
 export interface SourceAddress {

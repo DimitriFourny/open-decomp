@@ -12,6 +12,7 @@ import {
   bitWidth,
   expressionOperands,
   integer,
+  sameType,
   type DataType,
   type Expression,
   type RegisterBinding,
@@ -22,6 +23,7 @@ import type { Assignment, BoundaryProjection } from './model.js';
 import type { SourcePresentation } from './source-model.js';
 import { sourceDataValues } from './source-data.js';
 import type { SignatureAssociation } from '../analysis/types/model.js';
+import { FP_ENVIRONMENT_ASSUMPTION, registerTypeSlices, registerTypes, unchangedStorage, type StorageCopy } from './source-register-types.js';
 
 /** Source ABI abstraction: architectural snapshots are retained in the input,
  * not treated as extra source arguments or memory-fault observables. */
@@ -94,14 +96,21 @@ export function planSource(
     expressions.set(value.id, expression);
     forcedInline.add(value.id);
   };
-  const machineType = (type: AbiType): DataType | null =>
-    type.kind === 'pointer'
-      ? integer(abi.layout.pointer_bits)
-      : type.kind === 'integer'
-        ? integer(type.bits)
-        : type.kind === 'float' && (type.bits === 32 || type.bits === 64)
-          ? { kind: 'float', bits: type.bits }
+  const machineType = (type: AbiType): DataType | null => {
+    if (type.kind === 'pointer') return integer(abi.layout.pointer_bits);
+    if (type.kind === 'integer') return integer(type.bits);
+    if (type.kind === 'float' && (type.bits === 32 || type.bits === 64))
+      return { kind: 'float', bits: type.bits };
+    if (type.kind === 'vector') {
+      const element: Exclude<DataType, { kind: 'vector' }> | null = type.element === 'integer'
+        ? integer(type.element_bits)
+        : type.element_bits === 32 || type.element_bits === 64
+          ? { kind: 'float' as const, bits: type.element_bits }
           : null;
+      if (element) return { kind: 'vector', element, lanes: type.lanes };
+    }
+    return null;
+  };
   const bind = (
     key: string,
     bindings: readonly RegisterBinding[],
@@ -248,11 +257,14 @@ export function planSource(
     const resolve = (id: string): AbiType | null => {
       if (conflicts.has(id)) return null;
       const type = input.types!.types.find((type) => type.id === id)?.definition;
-      return type?.kind === 'void' || type?.kind === 'integer' || type?.kind === 'float'
-        ? type
-        : type?.kind === 'pointer'
-          ? { kind: 'pointer' }
-          : null;
+      if (type?.kind === 'void' || type?.kind === 'integer' || type?.kind === 'float') return type;
+      if (type?.kind === 'pointer') return { kind: 'pointer' };
+      if (type?.kind === 'vector') {
+        const element = resolve(type.element);
+        if (element?.kind === 'integer' || element?.kind === 'float')
+          return { kind: 'vector', element: element.kind, element_bits: element.bits, lanes: type.lanes };
+      }
+      return null;
     };
     const returned = resolve(signature.signature.return_type),
       types = signature.signature.parameters.map((parameter) => resolve(parameter.type_id));
@@ -392,26 +404,8 @@ export function planSource(
       calls.set(node.id, projection);
       callResults.set(node.id, projection.results);
     }
-  // Scalar lane typing follows only lossless storage transport. Register bank,
-  // root capacity and SSA cell integer types do not determine scalar FP width.
-  const scalarWidths = new Map<string, 32 | 64>();
-  const scalarLinks = new Map<string, Value[]>();
-  const linkScalar = (left: Value, right: Value): void => {
-    if (bitWidth(left.type) !== bitWidth(right.type)) return;
-    const leftLinks = scalarLinks.get(left.id) ?? [];
-    leftLinks.push(right);
-    scalarLinks.set(left.id, leftLinks);
-    const rightLinks = scalarLinks.get(right.id) ?? [];
-    rightLinks.push(left);
-    scalarLinks.set(right.id, rightLinks);
-  };
-  for (const [id, expression] of expressions) {
-    const value = values.get(id)!;
-    if (expression.kind === 'cast' && expression.op === 'bitcast')
-      linkScalar(value, expression.value);
-    else if (expression.kind === 'extract' && expression.offset === 0)
-      linkScalar(value, expression.value);
-  }
+  const storageCopies: StorageCopy[] = [];
+  const storageSources = new Map<string, Value[]>();
   for (const block of blocks.values()) {
     const control = block.control;
     const transfers = control.kind === 'jump'
@@ -422,49 +416,14 @@ export function planSource(
           ? [...control.cases.map((item) => item.arm.transfer), control.otherwise.transfer]
           : [];
     for (const transfer of transfers)
-      for (const copy of transfer.copies) linkScalar(copy.destination, copy.source);
-  }
-  const scalarQueue: Value[] = [];
-  for (const value of values.values())
-    if (value.type.kind === 'float') {
-      scalarWidths.set(value.id, value.type.bits);
-      scalarQueue.push(value);
-    }
-  for (let index = 0; index < scalarQueue.length; index++) {
-    const value = scalarQueue[index]!, width = scalarWidths.get(value.id)!;
-    for (const linked of scalarLinks.get(value.id) ?? []) {
-      context.checkpoint(1);
-      if (scalarWidths.has(linked.id)) continue;
-      scalarWidths.set(linked.id, width);
-      scalarQueue.push(linked);
-    }
-  }
-  // Typed reads alone are not evidence that the FP result bank was written.
-  // Seed actual FP producers/call results, then follow their storage transport.
-  const writtenScalars = new Set<string>();
-  const writtenQueue: Value[] = [];
-  for (const value of values.values()) {
-    if (value.type.kind !== 'float') continue;
-    const expression = expressions.get(value.id);
-    if (expression && expression.kind !== 'extract' &&
-        (expression.kind !== 'cast' || expression.op !== 'bitcast')) {
-      writtenScalars.add(value.id);
-      writtenQueue.push(value);
-    }
-  }
-  for (const returned of callResults.values())
-    for (const value of returned)
-      if (value.type.kind === 'float' && !writtenScalars.has(value.id)) {
-        writtenScalars.add(value.id);
-        writtenQueue.push(value);
+      for (const copy of transfer.copies) {
+        storageCopies.push(copy);
+        const sources = storageSources.get(copy.destination.id) ?? [];
+        sources.push(copy.source);
+        storageSources.set(copy.destination.id, sources);
       }
-  for (let index = 0; index < writtenQueue.length; index++)
-    for (const linked of scalarLinks.get(writtenQueue[index]!.id) ?? []) {
-      context.checkpoint(1);
-      if (writtenScalars.has(linked.id)) continue;
-      writtenScalars.add(linked.id);
-      writtenQueue.push(linked);
-    }
+  }
+  const typedSlices = registerTypeSlices(values, expressions, storageCopies, callResults.values(), context);
   // Candidate registers come from the target ABI classifier, never spelling or
   // the host platform. Only candidates demanded after source DCE become formals.
   const word: AbiType = { kind: 'integer', bits: abi.layout.pointer_bits, signed: false };
@@ -503,21 +462,19 @@ export function planSource(
         binding.register.offset_bits < register.offset_bits + register.width_bits,
     );
     if (!cells.length) continue;
-    const scalar = (register.bank === 'float' || register.bank === 'vector')
-      ? cells.find((cell) => cell.register.offset_bits === register.offset_bits &&
-          scalarWidths.has(cell.value.id))
+    const typed = (register.bank === 'float' || register.bank === 'vector')
+      ? registerTypes(entry.register_entry, register.root, register.offset_bits, typedSlices, context)[0]
       : undefined;
-    const width = scalar
-      ? scalarWidths.get(scalar.value.id)!
+    const width = typed ? bitWidth(typed)
       : Math.max(...cells.map((cell) => cell.register.offset_bits + cell.register.width_bits)) -
         register.offset_bits;
-    const descriptor = { ...register, width_bits: width };
+    const descriptor = { ...register, width_bits: width,
+      ...(typed?.kind === 'vector' ? { bank: 'vector' as const } : {}) };
     const value = result(
       `parameter:${register.root}`,
       entry.register_entry,
       locations(descriptor),
-      scalar ? { kind: 'float', bits: scalarWidths.get(scalar.value.id)! }
-        : cells.length === 1 ? cells[0]!.value.type : integer(width),
+      typed ?? (cells.length === 1 ? cells[0]!.value.type : integer(width)),
       entry.id,
     );
     if (value) {
@@ -612,19 +569,16 @@ export function planSource(
           : [];
       }
       if (!functionSignature && !returned.length) {
-        // A typed, written low FP lane is a scalar result, not the unrelated
-        // integer result bank or the full SIMD root (including cleared high bits).
         const floating = floatLayout.returns.flatMap((location) => {
           if (location.kind !== 'register') return [];
-          const low = block.register_exit.find((binding) =>
-            binding.register.root === location.register.root &&
-            binding.register.offset_bits === location.register.offset_bits);
-          const width = low && scalarWidths.get(low.value.id);
-          if (!width || !low || !writtenScalars.has(low.value.id) ||
-              entry.register_entry.some((binding) => binding.value.id === low.value.id))
-            return [];
-          const value = bind(`${control.id}:scalar-fp-result`, block.register_exit,
-            [{ ...location, width_bits: width }], { kind: 'float', bits: width }, block.id);
+          const type = registerTypes(block.register_exit, location.register.root,
+            location.register.offset_bits, typedSlices, context, true).find((candidate) =>
+              [...blocks.values()].filter((exit) => exit.control.kind === 'return').every((exit) =>
+                registerTypes(exit.register_exit, location.register.root, location.register.offset_bits,
+                  typedSlices, context, true).some((other) => sameType(candidate, other))));
+          if (!type) return [];
+          const value = bind(`${control.id}:fp-result`, block.register_exit,
+            [{ ...location, width_bits: bitWidth(type) }], type, block.id);
           return value ? [value] : [];
         });
         if (floating.length === 1) returned = floating;
@@ -635,10 +589,9 @@ export function planSource(
           const cells = block.register_exit.filter(
             (binding) => binding.register.root === location.register.root,
           );
-          const changed = cells.some(
-            (binding) =>
-              !entry.register_entry.some((initial) => initial.value.id === binding.value.id),
-          );
+          const changed = cells.some((binding) => !unchangedStorage(binding.value,
+            entry.register_entry.find((initial) => initial.register.id === binding.register.id)?.value.id,
+            expressions, storageSources, context));
           if (changed) {
             // An observed narrow ABI result is not padded with unrelated high bits.
             const low = cells.find(
@@ -722,10 +675,13 @@ export function planSource(
     parameter_names: parameterNames,
     return_type: returnType,
     ...(returnPointer === undefined ? {} : { return_pointer: returnPointer }),
-    ...([...returns.values()].some((boundary) =>
-      boundary.results.some((value) => value.type.kind === 'float'))
-      ? { assumptions: ['FP arithmetic assumes nearest-even rounding, gradual underflow and disabled exception traps; FPCR/FPSR status and exceptional environments are not modeled.'] }
-      : {}),
+    assumptions: [...new Set([
+      ...evidence.callees.flatMap((callee) => callee.assumptions ?? []),
+      ...([...expressions.values()].some((expression) =>
+        expression.kind === 'float' || expression.kind === 'float_unary' ||
+        expression.kind === 'float_compare' || expression.kind === 'vector_float')
+        ? [FP_ENVIRONMENT_ASSUMPTION] : []),
+    ])],
     locals: new Map(),
     stack: null,
     stack_addresses: new Map(),

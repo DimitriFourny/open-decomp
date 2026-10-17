@@ -40,6 +40,10 @@ A discovered code target alone is not a recovered prototype, and an empty
 changed-state overlay is not a zero-argument call.
 
 
+## SIMD register-move aliases
+
+The lifter models `ORR_asimdsame_only` from its canonical `Rd`, `Rn`, `Rm` and `Q` fields, including the compiler's `MOV` alias (`Rn == Rm`) when the decoder exposes only opaque display operands. It preserves the entire selected bit pattern without interpreting FP payloads or lane text. The 64-bit form clears the high half of the 128-bit root; the 128-bit form replaces the whole root. This is the specific register-move family exercised by mixed integer/FP call preservation, not general support for opaque SIMD operands or lane-indexed moves.
+
 ## Conformance evidence and integration commands
 
 The behavioral tests consume the actual extracted ARM64 fixture ranges. Selected arithmetic, loop, call, stack, scalar FP, vector and ADRP expectations were adjudicated against the existing LLVM 23.1.3 evidence in `fixtures/metadata/macho-arm64-symbols.disassembly.txt`; LLVM output is not parsed into instructions or semantics. LLVM renders `add/fadd/eor` vector arrangements as mnemonic suffixes and immediate MOV aliases differently from a64js; comparisons assert encoding fields, widths, arrangements and targets instead of incidental spelling. PAuth/PAuth_LR regression words additionally come from the previous adapter's `test/decompiler-core/pauth.test.js`; these are decoder/discovery-flow regressions, not adoption of the old lifter's authentication abstraction.

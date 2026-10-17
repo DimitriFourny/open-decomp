@@ -76,7 +76,12 @@ export const unknownClobbers: CallClobbers = {
 const mask = (bits: number): bigint => (1n << BigInt(bits)) - 1n;
 const rotate = (v: bigint, r: number, bits: number): bigint =>
   ((v >> BigInt(r)) | (v << BigInt(bits - r))) & mask(bits);
-export const fpControlMask = (3n << 22n) | (1n << 24n) | (1n << 26n) | (1n << 19n) | 0x9f00n | 3n;
+export const fpEnvironmentGuard = Object.freeze({
+  control_root: 'arm64:fpcr',
+  mask: (3n << 22n) | (1n << 24n) | (1n << 26n) | (1n << 19n) | 0x9f00n | 3n,
+  unsupported_effect: 'Unsupported FPCR rounding, flush or trapping environment',
+  unsupported_exit: 'Unsupported FPCR environment',
+});
 export function needsFpGuard(payload: Arm64Payload): boolean {
   return /^(FADD|FSUB|FMUL|FDIV|FSQRT|FCMP|FCMPE|FCCMP|FCCMPE|FCVT|SCVTF|UCVTF)(_|$)/.test(
     payload.canonical_encoding,
@@ -594,6 +599,31 @@ export class ArmSemantics {
         ),
       );
       this.fpStatus();
+      return true;
+    }
+    if (p.canonical_encoding === 'ORR_asimdsame_only') {
+      // MOV is an ORR alias with Rn == Rm. Its displayed operands may be
+      // opaque, but canonical fields still define the complete bitwise operation.
+      const q = this.field('Q');
+      if (q > 1) throw new Unsupported('Invalid SIMD ORR register width');
+      const width = q === 1 ? 128 : 64;
+      const registers = ['Rd', 'Rn', 'Rm'].map((field): RegisterDescriptor => {
+        const index = this.field(field);
+        return {
+          id: width === 128 ? `arm64:v${index}` : `arm64:v${index}[0:64]`,
+          root: `arm64:v${index}`,
+          bank: 'vector',
+          offset_bits: 0,
+          width_bits: width,
+          root_width_bits: 128,
+          role: 'general',
+          write_rule: width === 128 ? 'replace_root' : 'zero_extend_root',
+        };
+      });
+      const left = b.readRegister(registers[1]!, integer(width));
+      const value = registers[1]!.root === registers[2]!.root ? left
+        : b.int('or', left, b.readRegister(registers[2]!, integer(width)));
+      b.writeRegister(registers[0]!, value);
       return true;
     }
     const regs = p.operands.filter((o): o is RegisterOperand => o.kind === 'register');

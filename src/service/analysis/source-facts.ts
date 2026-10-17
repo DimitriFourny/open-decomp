@@ -21,7 +21,7 @@ import { recoverDataAddress } from '../../analysis/strings/source-data.js';
 import { sourceConstantValues } from '../../reconstruction/source-data.js';
 import { inspectRegister, type StackFact } from '../../analysis/stack/index.js';
 import type { SuppliedTypeRecord, TypeRecoveryResult } from '../../analysis/types/index.js';
-import type { DataType, Expression, RegisterIR, SSAForm, Value } from '../../ir/index.js';
+import { bitWidth, sameType, type DataType, type Expression, type RegisterIR, type SSAForm, type Value } from '../../ir/index.js';
 import type { DebugRecovery } from '../../metadata/debug/index.js';
 import type { LibraryContracts } from '../../metadata/library-contracts/index.js';
 import type {
@@ -33,6 +33,8 @@ import { loadFunctionGraph, records } from '../queries/scope.js';
 import type { AnalysisScope } from './index.js';
 import { callDeclarations, resolveCalls, type CallScope } from './calls.js';
 import { boundIR, requirePass } from './passes.js';
+import { fpEnvironmentGuard } from '../../lifters/arm64/semantics.js';
+import { FP_ENVIRONMENT_ASSUMPTION, registerTypeSlices, registerTypes, unchangedStorage, type StorageCopy } from '../../reconstruction/source-register-types.js';
 
 interface SourceFactsInput {
   readonly scope: AnalysisScope;
@@ -73,7 +75,7 @@ function parameterRegisters(abi: AbiProfile): readonly RegisterDescriptor[] {
 }
 type ObservedInterface = Pick<
   InferredCallee,
-  'parameters' | 'returns' | 'parameter_state' | 'parameter_types' | 'return_types'
+  'parameters' | 'returns' | 'parameter_state' | 'parameter_types' | 'return_types' | 'assumptions'
 >;
 
 /** Roots count only when they reach semantic observations. Physical snapshots,
@@ -87,29 +89,68 @@ function observeParameters(
   const candidates = parameterRegisters(abi),
     byRoot = new Map(candidates.map((register) => [register.root, register]));
   const observed = new Map<string, RegisterDescriptor>();
-  const scalarInputs = new Map<string, 32 | 64>();
   const definitions = new Map<string, Expression>();
-  for (const block of ir.blocks)
+  const values = new Map<string, Value>();
+  const storageCopies: StorageCopy[] = [];
+  const storageSources = new Map<string, Value[]>();
+  const byBlock = new Map(ir.blocks.map((block) => [block.id, block]));
+  const predecessors = new Map<string, SSAForm['blocks'][number][]>();
+  for (const block of ir.blocks) {
+    for (const value of block.parameters) values.set(value.id, value);
     for (const node of block.instructions) {
-      if (node.kind !== 'assign') continue;
-      definitions.set(node.result.id, node.expression);
-      if (node.result.type.kind !== 'float') continue;
-      for (const register of analysis.stack.values.get(node.result.id)?.incoming_registers ?? [])
-        if (register.bank === 'float' || register.bank === 'vector')
-          scalarInputs.set(register.root, node.result.type.bits);
+      if ('result' in node) values.set(node.result.id, node.result);
+      if (node.kind === 'assign') definitions.set(node.result.id, node.expression);
     }
-  const scalarOutput = (value: Value): Extract<DataType, { kind: 'float' }> | null => {
-    const seen = new Set<string>();
-    while (!seen.has(value.id)) {
-      context.checkpoint(1);
-      seen.add(value.id);
-      if (value.type.kind === 'float') return value.type;
-      const expression = definitions.get(value.id);
-      if (expression?.kind !== 'cast' || expression.op !== 'bitcast') return null;
-      value = expression.value;
+    const control = block.terminator;
+    const edges = control.kind === 'jump' ? [control.edge]
+      : control.kind === 'branch' ? [control.when_true, control.when_false]
+        : control.kind === 'switch' ? [...control.cases.map((item) => item.edge), control.otherwise] : [];
+    for (const edge of edges) {
+      const parents = predecessors.get(edge.target) ?? [];
+      parents.push(block);
+      predecessors.set(edge.target, parents);
+      for (const [index, source] of edge.arguments.entries()) {
+        const destination = byBlock.get(edge.target)!.parameters[index]!;
+        storageCopies.push({ source, destination });
+        const sources = storageSources.get(destination.id) ?? [];
+        sources.push(source);
+        storageSources.set(destination.id, sources);
+      }
     }
-    return null;
-  };
+  }
+  for (const state of ir.register_states)
+    for (const binding of [...state.entry, ...state.exit]) values.set(binding.value.id, binding.value);
+  const typedSlices = registerTypeSlices(values, definitions, storageCopies, [], context);
+  const entryBindings = ir.register_states.find((row) => row.block === ir.entry)?.entry ?? [];
+  // This is the lifter's precise FPCR failure boundary, not a blanket exemption
+  // for unknown instructions. Its supported-path observations remain conditional.
+  const conditionalFpFailures = new Set<string>();
+  if (abi.architecture === 'arm64')
+    for (const block of ir.blocks) {
+      if (block.terminator.kind !== 'unknown' ||
+          block.terminator.reason !== fpEnvironmentGuard.unsupported_exit ||
+          !block.instructions.some((node) => node.kind === 'unknown_effect' &&
+            node.reason === fpEnvironmentGuard.unsupported_effect) ||
+          block.instructions.some((node) => node.kind !== 'assign' &&
+            (node.kind !== 'unknown_effect' || node.reason !== fpEnvironmentGuard.unsupported_effect))) continue;
+      const parents = predecessors.get(block.id);
+      if (!parents?.length || !parents.every((parent) => {
+        const branch = parent.terminator;
+        if (branch.kind !== 'branch' || branch.when_false.target !== block.id ||
+            branch.when_true.target === block.id) return false;
+        const comparison = definitions.get(branch.condition.id);
+        if (comparison?.kind !== 'compare' || comparison.op !== 'eq') return false;
+        const zero = definitions.get(comparison.right.id), masked = definitions.get(comparison.left.id);
+        if (zero?.kind !== 'constant' || zero.bits !== 0n ||
+            masked?.kind !== 'integer' || masked.op !== 'and') return false;
+        const mask = definitions.get(masked.right.id);
+        const controls = analysis.stack.values.get(masked.left.id)?.incoming_registers;
+        return mask?.kind === 'constant' && mask.bits === fpEnvironmentGuard.mask &&
+          controls !== undefined && controls.length > 0 &&
+          controls.every((register) => register.root === fpEnvironmentGuard.control_root);
+      })) continue;
+      conditionalFpFailures.add(block.id);
+    }
   let ambiguous =
     analysis.state !== 'complete' ||
     analysis.stack.accesses.some(
@@ -123,7 +164,9 @@ function observeParameters(
       const candidate = byRoot.get(register.root);
       if (abi.preserved.some((preserved) => preserved.root === register.root)) continue;
       if (!candidate) {
-        if (register.role === 'general') ambiguous = true;
+        if (register.role === 'general' &&
+            (register.bank === 'integer' || register.bank === 'float' || register.bank === 'vector'))
+          ambiguous = true;
         continue;
       }
       const prior = observed.get(register.root);
@@ -138,6 +181,7 @@ function observeParameters(
   const calls = new Map(analysis.calls.map((call) => [call.node_id, call]));
   for (const block of ir.blocks) {
     if (!analysis.stack.snapshots.has(block.terminator.id)) continue;
+    if (conditionalFpFailures.has(block.id)) continue;
     for (const node of block.instructions) {
       context.checkpoint(1);
       if (node.kind === 'load') use(node.address);
@@ -181,7 +225,6 @@ function observeParameters(
     })
     .returns.find((location) => location.kind === 'register');
   const exits = ir.blocks.filter((block) => block.terminator.kind === 'return');
-  const entryBindings = ir.register_states.find((row) => row.block === ir.entry)?.entry ?? [];
   let returns: RegisterDescriptor[] = [];
   if (primary?.kind === 'register' && exits.length) {
     const slices = ir.register_states.find((row) => row.block === exits[0]!.id)?.exit ?? [];
@@ -201,7 +244,7 @@ function observeParameters(
               ?.exit.find((item) => item.register.id === binding.register.id);
             return (
               output !== undefined &&
-              output.value.id !== incoming?.value.id &&
+              !unchangedStorage(output.value, incoming?.value.id, definitions, storageSources, context) &&
               fact.initialization !== 'uninitialized'
             );
           }),
@@ -211,19 +254,18 @@ function observeParameters(
   const floatingPrimary = abi.classifyCall({
     returns: { kind: 'float', bits: 64 }, parameters: [], variadic: false, fixed_parameter_count: 0,
   }).returns.find((location) => location.kind === 'register');
-  let floatingType: Extract<DataType, { kind: 'float' }> | null = null;
+  let floatingType: DataType | null = null;
   if (floatingPrimary?.kind === 'register' && exits.length) {
-    const first = ir.register_states.find((row) => row.block === exits[0]!.id)?.exit.find(
-      (binding) => binding.register.root === floatingPrimary.register.root &&
-        binding.register.offset_bits === floatingPrimary.register.offset_bits);
-    floatingType = first ? scalarOutput(first.value) : null;
-    if (first && floatingType?.kind === 'float' && exits.every((exit) => {
-      const output = ir.register_states.find((row) => row.block === exit.id)?.exit.find(
-        (binding) => binding.register.id === first.register.id);
-      const type = output && scalarOutput(output.value);
-      return type?.kind === 'float' && type.bits === floatingType!.bits;
-    })) returns = [{ ...first.register, width_bits: floatingType.bits }];
-    else floatingType = null;
+    const bindings = ir.register_states.find((row) => row.block === exits[0]!.id)?.exit ?? [];
+    floatingType = registerTypes(bindings, floatingPrimary.register.root,
+      floatingPrimary.register.offset_bits, typedSlices, context, true).find((candidate) =>
+        exits.every((exit) => registerTypes(
+          ir.register_states.find((row) => row.block === exit.id)?.exit ?? [],
+          floatingPrimary.register.root, floatingPrimary.register.offset_bits, typedSlices, context, true,
+        ).some((type) => sameType(type, candidate)))) ?? null;
+    const first = bindings.find((binding) => binding.register.root === floatingPrimary.register.root &&
+      binding.register.offset_bits === floatingPrimary.register.offset_bits);
+    if (first && floatingType) returns = [{ ...first.register, width_bits: bitWidth(floatingType) }];
   }
   for (const exit of exits) {
     const snapshot = analysis.stack.snapshots.get(exit.terminator.id);
@@ -234,22 +276,25 @@ function observeParameters(
     if (!observed.has(candidate.root)) missingBanks.add(candidate.bank);
     else if (missingBanks.has(candidate.bank)) ambiguous = true;
   }
+  const inputTypes = new Map<string, DataType>();
   const parameters = candidates.flatMap((candidate) => {
     const observedRegister = observed.get(candidate.root);
     if (!observedRegister) return [];
-    const scalar = scalarInputs.get(candidate.root);
-    return [{ ...observedRegister, width_bits: scalar ?? observedRegister.width_bits }];
+    const type = (candidate.bank === 'float' || candidate.bank === 'vector')
+      ? registerTypes(entryBindings, candidate.root, candidate.offset_bits, typedSlices, context)[0]
+      : undefined;
+    if (type) inputTypes.set(candidate.root, type);
+    return [{ ...observedRegister, width_bits: type ? bitWidth(type) : observedRegister.width_bits }];
   });
   return {
     parameters,
-    parameter_types: parameters.map((register): DataType => {
-      const width = scalarInputs.get(register.root);
-      return width ? { kind: 'float', bits: width } : { kind: 'integer', bits: register.width_bits };
-    }),
+    parameter_types: parameters.map((register): DataType =>
+      inputTypes.get(register.root) ?? { kind: 'integer', bits: register.width_bits }),
     returns,
     return_types: returns.map((register): DataType =>
       floatingType ?? { kind: 'integer', bits: register.width_bits }),
     parameter_state: ambiguous ? 'ambiguous' : 'observed',
+    ...(conditionalFpFailures.size ? { assumptions: [FP_ENVIRONMENT_ASSUMPTION] } : {}),
   };
 }
 
