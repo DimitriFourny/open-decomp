@@ -21,6 +21,7 @@ import { constructSSA } from '../../analysis/ssa/index.js';
 import { simplifySSA } from '../../analysis/values/index.js';
 import {
   recoverTypes,
+  refineMemoryShapes,
   type SuppliedSignature,
   type SuppliedTypeRecord,
 } from '../../analysis/types/index.js';
@@ -282,7 +283,7 @@ export async function executeDecompilation(
         : nativeCalls;
       const externalSubjects = new Set(calls.subjects.filter((id) => id !== ir.id));
       const localSubjects = new Set([...selected].filter((id) => !externalSubjects.has(id)));
-      const types = asserted
+      let types = asserted
         ? recoverTypes(ir, components.abi, fullContext, {
             ...options,
             types: [...nativeTypes, ...active.types],
@@ -388,6 +389,16 @@ export async function executeDecompilation(
         native_types: nativeTypes,
         components,
       });
+      types = refineMemoryShapes(ir, types, fullContext, {
+        slice_id: image.selected_slice_id,
+        revision: args.revision,
+        max_work: context.budget.work,
+        transfers: source.memory_transfers ?? [],
+      });
+      const refinementFailure = types.diagnostics.find(
+        (item) => item.code === 'cancelled' || item.code === 'resource_limit',
+      );
+      if (refinementFailure) throw new OperationError(refinementFailure);
       context.progress('emit', 6, 7);
       const emit = args.options.emitter === 'python-like' ? emitPythonLike : emitC;
       const emitted = emit(

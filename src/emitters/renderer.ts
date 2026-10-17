@@ -493,7 +493,18 @@ export class Renderer {
   }
 
   private sourceCallee(node: Extract<Instruction, { kind: 'call' }>): string {
-    if (node.target.kind === 'indirect') return this.value(node.target.value);
+    if (node.target.kind === 'indirect') {
+      const value = node.target.value;
+      if (this.program.source && !this.program.inline.has(value.id)) {
+        const id = this.sourceValueTypes.get(value.id) ??
+          this.program.source.value_types?.get(value.id)?.type_id;
+        const type = id && this.typeRecords.get(id)?.definition;
+        // Callable context retains the declared pointer local; value() converts
+        // pointers to integer bits for machine arithmetic, not invocation.
+        if (type && type.kind === 'pointer') return this.local(value);
+      }
+      return this.value(value);
+    }
     const key = this.addressKey(node.target.address),
       previous = this.sourceNames.get(key);
     if (previous) return previous;
