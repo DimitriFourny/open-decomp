@@ -255,7 +255,12 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
       control.kind === 'unknown' ||
       control.kind === 'indirect'
     )
-      physical_exits.set(control.id, sourcePlan ? [] : snapshot(block.register_exit));
+      physical_exits.set(
+        control.id,
+        sourcePlan && !(control.kind === 'indirect' && control.tail_call)
+          ? []
+          : snapshot(block.register_exit),
+      );
     if (control.kind === 'return') {
       if (sourcePlan) {
         returns.set(control.id, sourcePlan.returns.get(control.id)!);
@@ -397,15 +402,9 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
       return (
         live.has(copy.destination.id) &&
         copy.destination.id !== copy.source.id &&
-        (!sourcePlan ||
-          !identityOperand(
-            copy.destination.type,
-            expressions.get(copy.destination.id) ?? {
-              kind: 'indeterminate',
-              state: 'unknown',
-              reason: 'phi',
-            },
-          ))
+        // Source aliases are immutable expressions, including aliases normalized
+        // to constants. They are not phi storage assigned by an edge transfer.
+        !sourcePlan?.forcedInline.has(copy.destination.id)
       );
     });
     transfers.set(transfer, copies);
@@ -603,13 +602,16 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     if (block.control.kind === 'unknown' || block.control.kind === 'indirect')
       unavailable(
         block.control,
-        'A control boundary remains unresolved; no target or trap is invented.',
+        block.control.kind === 'indirect' && block.control.tail_call
+          ? 'The tail-call target is preserved, but its source arguments, calling convention and result interface are unresolved.'
+          : 'A control boundary remains unresolved; no target or trap is invented.',
       );
   }
   const source =
     sourcePlan && sourceStack
       ? {
           ...sourcePlan.presentation,
+          inferred: sourcePlan.presentation.inferred || entryStorageLive,
           locals: sourceStack.locals,
           stack: sourceStack.frame(retained, live),
           stack_addresses: sourceStack.addresses,

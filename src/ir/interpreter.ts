@@ -315,6 +315,10 @@ export function evaluateIR(ir: FunctionIR, options: EvaluationOptions = {}): Eva
               instruction.access,
             );
             break;
+          case 'memory_fence':
+            // The ordered effect trace records this event. This single-thread
+            // fixture oracle does not simulate a concurrent memory system.
+            break;
           case 'unknown_effect':
             throw new EvaluationBoundary('unknown', instruction.reason);
           case 'call': {

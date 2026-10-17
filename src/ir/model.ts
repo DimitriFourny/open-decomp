@@ -202,6 +202,16 @@ export type Instruction =
         readonly access: MemoryAccess;
       })
   | (Origin &
+      EffectOrder & {
+        /** Orders all prior explicit reads/writes before subsequent reads/writes
+         * in this shareability domain. Does not access memory or clobber state;
+         * acquire_release does not assert a sequentially-consistent total order. */
+        readonly kind: 'memory_fence';
+        readonly scope: 'inner_shareable';
+        readonly ordering: 'acquire_release';
+        readonly accesses: 'reads_writes';
+      })
+  | (Origin &
       EffectOrder &
       RegisterBoundary & {
         readonly kind: 'call';
@@ -239,7 +249,13 @@ export type Terminator = Origin & { readonly effect: Effect } & (
         readonly otherwise: Edge;
       }
     | { readonly kind: 'return'; readonly values: readonly Value[] }
-    | { readonly kind: 'indirect'; readonly target: Value; readonly reason: string }
+    | {
+        readonly kind: 'indirect';
+        readonly target: Value;
+        readonly reason: string;
+        /** Discovery establishes a tail-call exit, not the target's source interface. */
+        readonly tail_call?: true;
+      }
     | { readonly kind: 'trap'; readonly reason: string }
     | { readonly kind: 'unknown'; readonly reason: string }
   );

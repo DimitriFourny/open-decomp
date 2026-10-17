@@ -19,7 +19,7 @@ import {
 import {
   ArmSemantics,
   Unsupported,
-  fpControlMask,
+  fpEnvironmentGuard,
   gp,
   needsFpGuard,
   stateRegister,
@@ -49,7 +49,8 @@ export interface Arm64LiftResult {
  * are explicitly canonicalized and FPSR is unknown, never claimed exact.
  *
  * Pointer authentication retains logical addresses with explicit diagnostics,
- * not hardware authentication/security semantics. SVE/SME, atomics, barriers,
+ * not hardware authentication/security semantics. The observed DMB ISH orders
+ * reads/writes in the inner-shareable domain. Other barriers, SVE/SME, atomics,
  * privileged/system state, fused FP, FP16, saturating/rounding conversions and
  * unimplemented SIMD remain unknown effect boundaries. Unsupported operations
  * clobber the entire modeled state and memory, never disappear or become
@@ -57,7 +58,7 @@ export interface Arm64LiftResult {
  */
 export class Arm64Lifter implements Lifter<RegisterIR> {
   readonly name = 'ARM64 typed semantic lifter';
-  readonly version = '1.0.1';
+  readonly version = '1.0.2';
   readonly architecture = 'arm64' as const;
   lift(graph: FunctionGraph, abi: AbiProfile, context: OperationContext): Arm64LiftResult {
     if (abi.architecture !== 'arm64') throw new TypeError('ARM64 lifter requires an ARM64 ABI');
@@ -179,17 +180,17 @@ export class Arm64Lifter implements Lifter<RegisterIR> {
             const supported = build.block(['fp-supported', instruction.id], [], source);
             const unsupported = build.block(['fp-unsupported', instruction.id], [], source);
             const control = block.readRegister(stateRegister('fpcr'));
-            const masked = block.int('and', control, block.constant(integer(32), fpControlMask));
+            const masked = block.int('and', control, block.constant(integer(32), fpEnvironmentGuard.mask));
             block.branch(
               block.compare('eq', masked, block.constant(integer(32), 0n)),
               block.edge(supported),
               block.edge(unsupported),
             );
             unsupported.unknown(
-              'Unsupported FPCR rounding, flush or trapping environment',
+              fpEnvironmentGuard.unsupported_effect,
               unknownClobbers,
             );
-            unsupported.terminate({ kind: 'unknown', reason: 'Unsupported FPCR environment' });
+            unsupported.terminate({ kind: 'unknown', reason: fpEnvironmentGuard.unsupported_exit });
             block = supported;
           }
           const semantic = new ArmSemantics(block, instruction, payload, (message) =>
@@ -236,14 +237,14 @@ export class Arm64Lifter implements Lifter<RegisterIR> {
                 source,
               );
               byAddress.set(address.value, exit);
+              const tail = discovered.edges.some(
+                (edge) => edge.kind === 'tail_call' && edge.target?.value === address.value,
+              );
               exit.terminate({
                 kind: 'indirect',
                 target: exit.address(address),
-                reason: discovered.edges.some(
-                  (edge) => edge.kind === 'tail_call' && edge.target?.value === address.value,
-                )
-                  ? 'Discovered tail-call exit'
-                  : 'Branch leaves discovered function',
+                ...(tail ? { tail_call: true as const } : {}),
+                reason: tail ? 'Discovered tail-call exit' : 'Branch leaves discovered function',
               });
               return exit;
             };

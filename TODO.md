@@ -98,7 +98,7 @@ Surfaces: `src/reconstruction/expressions.ts`, `src/reconstruction/source-expres
 
 - [x] Diagnose why small selected SQLite bodies exhaust default instruction budgets. Separate image discovery, function ownership/ranges, selected-function graph work, and bounded callee-summary work. Measure the actual visited instructions/edges before deciding the repair; do not assume a single cause or just raise every limit.
 - [ ] Make selected-function work proportional to its body and required dependencies. Reuse immutable per-image indexes and summaries; do not reconstruct or serialize unrelated image-wide analysis for every request.
-- [ ] Add evidence-backed support for the observed ARM64 memory barrier in `sqlite3_initialize`, preserving ordering rather than treating it as a no-op. Improve tail-call source presentation without hiding unknown targets/conventions.
+- [x] Add evidence-backed support for the observed ARM64 memory barrier in `sqlite3_initialize`, preserving ordering rather than treating it as a no-op. Improve tail-call source presentation without hiding unknown targets/conventions.
 - [ ] Make the ordinary small-page MCP navigation and cached-result paths usable on SQLite. Diagnose the wrapper-limit census failure and large-image cache latency; keep explicit delivery bounds and page/artifact semantics intact.
   - Acceptance: all originally selected corpus and SQLite functions return useful results through normal CLI/API/MCP defaults without supplied prototypes. Metadata-only gaps are distinguishable from missing instructions/graphs or unresolved semantics. Any remaining partial result names the actual limitation rather than implying full recovery.
 

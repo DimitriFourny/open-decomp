@@ -226,6 +226,12 @@ export class ArmSemantics {
   execute(): boolean {
     const { b, p, name, bits } = this;
     const encoding = p.canonical_encoding;
+    // SQLite's observed initialization barrier is DMB ISH (d5033bbf).
+    // Inspect canonical fields/word, never assembly text; other barriers remain unsupported.
+    if (encoding === 'DMB_BO_barriers' && p.word === 0xd5033bbfn) {
+      b.memoryFence();
+      return true;
+    }
     if (name === 'NOP' || p.behavior === 'nop') return true;
     if (/^(PAC|AUT|XPAC)/.test(name) && !name.startsWith('PACGA')) {
       let destination = p.fields.Rd === undefined ? 30 : this.field('Rd');

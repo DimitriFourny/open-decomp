@@ -249,6 +249,10 @@ function build(input: RegisterIR, budget: AnalysisBudget): SSAForm {
         capacity.nodes();
         nodes.push({ ...node, effect_in: effect, register_inputs: snapshot() });
         effect = node.effect_out;
+      } else if (node.kind === 'memory_fence') {
+        capacity.nodes();
+        nodes.push({ ...node, effect_in: effect });
+        effect = node.effect_out;
       } else {
         capacity.nodes();
         nodes.push(node);

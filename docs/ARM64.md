@@ -14,6 +14,32 @@ Formatting is optional, does not run during decode and can reconstruct presentat
 
 Data-hint normalization is cached per decoder and immutable `LoadedImage` object, not per content ID: two metadata snapshots of identical bytes can have different data boundaries. Only fully checked preparation enters the weak cache; failed preparation can be retried, and disposal releases it. Every request still applies its own regions, cancellation and work/instruction limits. This removes the measured full-hint scan on every single-instruction discovery request without treating data as code.
 
+## Observed initialization ordering
+
+The SQLite 3.54.0 `sqlite3_initialize` fast path contains `DMB ISH`
+(`0xd5033bbf`, at `0x100039288` in the retained ARM64 comparison input).
+The source calls `sqlite3MemoryBarrier()` before returning `SQLITE_OK`
+(`sqlite3.c:188657-188660`); that helper uses `__sync_synchronize()`
+(`sqlite3.c:31056-31060`). This encoding is lifted to an ordered
+`memory_fence` IR node, not an unknown instruction, register clobber, memory
+write, or no-op.
+
+The node orders prior explicit reads and writes before subsequent explicit
+reads and writes within the inner-shareable domain. Its `acquire_release`
+label does **not** claim the global total order of a C sequentially-consistent
+atomic fence or the completion guarantees of `DSB`. The effect token, source
+statement, helper contract and provenance retain this event in both output
+dialects. The fixture interpreter records it in its ordered effect trace;
+the interpreter is single-threaded and does not simulate concurrent weak-memory
+executions. Other barrier encodings/domains remain unsupported.
+
+Discovery-established ARM64 tail-call exits retain a typed tail-call marker.
+Presentation keeps the actual target and changed physical input bits while
+explicitly marking unknown source arguments, calling convention and results.
+A discovered code target alone is not a recovered prototype, and an empty
+changed-state overlay is not a zero-argument call.
+
+
 ## Conformance evidence and integration commands
 
 The behavioral tests consume the actual extracted ARM64 fixture ranges. Selected arithmetic, loop, call, stack, scalar FP, vector and ADRP expectations were adjudicated against the existing LLVM 23.1.3 evidence in `fixtures/metadata/macho-arm64-symbols.disassembly.txt`; LLVM output is not parsed into instructions or semantics. LLVM renders `add/fadd/eor` vector arrangements as mnemonic suffixes and immediate MOV aliases differently from a64js; comparisons assert encoding fields, widths, arrangements and targets instead of incidental spelling. PAuth/PAuth_LR regression words additionally come from the previous adapter's `test/decompiler-core/pauth.test.js`; these are decoder/discovery-flow regressions, not adoption of the old lifter's authentication abstraction.

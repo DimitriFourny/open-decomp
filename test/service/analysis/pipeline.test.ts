@@ -387,7 +387,6 @@ for (const fixture of [
   );
 
 for (const fixture of [
-  { name: 'macho-arm64-symbols', address: 0x100000574n, bytes: [0xbf, 0x3b, 0x03, 0xd5] },
   { name: 'corpus-symbols.dll', address: 0x180001030n, bytes: [0x0f, 0xa2] },
 ])
   test(

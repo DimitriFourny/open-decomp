@@ -657,6 +657,13 @@ export class Renderer {
           ],
         );
         break;
+      case 'memory_fence':
+        text = this.call(
+          'memory_fence',
+          'DMB ISH ordering event: all explicit memory reads/writes before this statement are ordered before subsequent reads/writes within the inner-shareable domain. No memory bytes or registers are modified. acquire_release does not claim sequentially-consistent total order or DSB completion; never elide, duplicate, or move memory accesses across this event.',
+          [this.writer.quote(node.scope), this.writer.quote(node.ordering), this.writer.quote(node.accesses)],
+        );
+        break;
       case 'load':
       case 'store': {
         if (this.program.source) {
@@ -1130,6 +1137,13 @@ export class Renderer {
         if (control.kind === 'indirect') {
           args.push(this.value(control.target));
           ids.push(control.target.id);
+          if (control.tail_call) {
+            args.push(
+              this.call('unknown_arguments', 'The source argument list is unresolved, not empty. Known changed physical input bits remain in the tail-call boundary snapshot.', []),
+              this.call('unknown_calling_convention', 'The target calling convention is not established; do not infer it from a discovered code address.', []),
+              this.call('unknown_results', 'The target result interface is unresolved, not void. Propagate the actual tail-call result without guessing its width or type.', []),
+            );
+          }
         }
         args.push(
           this.writer.quote(control.reason),
@@ -1138,7 +1152,7 @@ export class Renderer {
         for (const binding of block.register_exit) ids.push(binding.value.id);
         this.writer.statement(
           depth,
-          `return ${this.call(`${control.kind}_exit`, control.kind === 'trap' ? 'Established machine trap; reason and physical state are explicit. The surrounding return exits the pseudocode model.' : 'Unresolved control boundary, not a guessed trap or fallthrough. Target (indirect only), reason and physical state remain explicit. The surrounding return exits the pseudocode model.', args)}`,
+          `return ${this.call(control.kind === 'indirect' && control.tail_call ? 'tail_call' : `${control.kind}_exit`, control.kind === 'indirect' && control.tail_call ? 'Discovery-established tail-call transfer. Arguments: actual target, unresolved source arguments, unresolved calling convention, unresolved results, reason, changed physical input snapshot as an immutable-entry overlay. Preserve all target effects and forward its actual results; do not invent a prototype or interpret unknown arity as zero.' : control.kind === 'trap' ? 'Established machine trap; reason and physical state are explicit. The surrounding return exits the pseudocode model.' : 'Unresolved control boundary, not a guessed trap or fallthrough. Target (indirect only), reason and physical state remain explicit. The surrounding return exits the pseudocode model.', args)}`,
         );
         break;
       }
@@ -1238,12 +1252,17 @@ export class Renderer {
         name,
       });
     }
+    let hasTailCall = false;
+    for (const block of this.program.blocks.values()) {
+      this.context.checkpoint(1);
+      if (block.control.kind === 'indirect' && block.control.tail_call) hasTailCall = true;
+    }
     const returnType = signature
       ? this.sourceType(signature.signature.return_type)
       : this.program.source
         ? this.program.source.return_type
           ? this.dataType(this.program.source.return_type)
-          : 'void'
+          : hasTailCall ? 'unknown_result' : 'void'
         : 'physical_result';
     this.headerStart = w.offset;
     if (this.program.source && parameters.length <= 4) {

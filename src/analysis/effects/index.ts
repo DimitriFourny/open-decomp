@@ -8,6 +8,7 @@ export function instructionOperands(node: Instruction): readonly Value[] {
     case 'assign':
       return expressionOperands(node.expression);
     case 'read_register':
+    case 'memory_fence':
       return [];
     case 'write_register':
       return [node.value];
@@ -113,7 +114,9 @@ export function summarizeEffect(node: Instruction): EffectSummary | null {
     node: node.id,
     reads_memory: node.kind === 'load' || (call && node.clobbers.memory !== 'none'),
     writes_memory: node.kind === 'store' || (call && node.clobbers.memory === 'unknown_read_write'),
-    barrier: call || node.kind === 'store' || (node.kind === 'load' && node.access.volatile),
+    barrier:
+      call || node.kind === 'memory_fence' || node.kind === 'store' ||
+      (node.kind === 'load' && node.access.volatile),
     may_stop: call || node.kind === 'load' || node.kind === 'store',
   };
 }

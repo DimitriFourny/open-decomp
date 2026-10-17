@@ -425,6 +425,14 @@ export function verifyIR(
           else reference(instruction.value, instruction.id);
           break;
         }
+        case 'memory_fence':
+          if (
+            instruction.scope !== 'inner_shareable' ||
+            instruction.ordering !== 'acquire_release' ||
+            instruction.accesses !== 'reads_writes'
+          )
+            report('semantic', instruction.id, 'Unsupported memory fence semantics');
+          break;
         case 'call':
           if (instruction.target.kind === 'indirect')
             pointer(instruction.target.value, instruction.id);

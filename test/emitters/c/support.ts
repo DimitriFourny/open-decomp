@@ -599,6 +599,7 @@ class Parser {
 export interface Observation {
   readonly exit: string;
   readonly values: readonly bigint[];
+  readonly tail_target?: bigint;
   readonly source_calls?: readonly { readonly name: string; readonly arguments: readonly bigint[] }[];
   readonly registers: ReadonlyMap<string, { readonly bits: bigint; readonly known: bigint }>;
   readonly memory: ReadonlyMap<bigint, number>;
@@ -972,6 +973,10 @@ export function execute(
       }
       return store ? null : value;
     }
+    if (name === 'memory_fence') {
+      events.push(`fence:${args.map(string).join(':')}`);
+      return null;
+    }
     if (name === 'physical_call' || name === 'source_call') {
       events.push('call');
       calls.push({ target: number(args[0]), arguments: array(args[1]).map(number) });
@@ -1137,6 +1142,7 @@ export function execute(
           const result = object(value);
           return {
             exit: string(result['exit']),
+            ...(result['target'] === undefined ? {} : { tail_target: number(result['target']) }),
             values: array(result['values']).map(number),
             registers: physical(result['state']),
             memory,

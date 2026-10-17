@@ -307,6 +307,20 @@ export class BlockBuilder {
     });
   }
 
+  /** The observed A64 DMB ISH: full read/write ordering within the inner-shareable domain. */
+  memoryFence(): void {
+    this.budget?.nodes();
+    this.#instructions.push({
+      kind: 'memory_fence',
+      id: this.#identity('instruction'),
+      provenance: this.#source,
+      scope: 'inner_shareable',
+      ordering: 'acquire_release',
+      accesses: 'reads_writes',
+      ...this.#order(),
+    });
+  }
+
   call(
     target: CallTarget,
     args: readonly Value[],
