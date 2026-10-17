@@ -342,6 +342,34 @@ Same five frozen questions, binary, gold and rubric as runs 1–9; workflow adds
 
 All 12 fact atoms and 9/10 uncertainty atoms present on every side (the tenth qualified everywhere, as in run9); no unsupported claims. **Gate FAIL**: B now needs less manual repair for both reviewers, but carries more irrelevant bytes (both reviewers marked the `stack_slot`/`unaligned_uint64_t` helper contracts, call-clobber placeholder locals and native prologue/epilogue in the caller/callback cases). Packets A 5,445 / B 33,500 bytes; full wire A 47,822 / B 510,506 bytes.
 
+## Normalized four-lane performance (2026-10-17, commit `901602b`)
+
+Exclusive serialized slot (`.local/performance/quality.measurement.lock`), `dist/` aggregate `dd0ea263…` unchanged before/after, Node **v26.11.1** (not the historical 24.22.0 host), Ghidra 12.1.4, bridge `73ea1c8e…`. Protocol `scripts/bench/quality-persistent.py` unchanged: same MCP client for all four lanes (Open Decomp unobserved/observed, pinned Ghidra MCP bridge, persistent Ghidra `DecompInterface`), 11 equal requests in 156/156 matched cells, 3 fresh runs, 10 warm, 30 pings, balanced order. 1,716/1,716 observer/control pairs and 6/6 import controls equivalent. Raw evidence: `~/Documents/open-decomp-perf-2026-10-17-final/p25-normalized/comparison.json`.
+
+| Input  | Lane              | Import (ms) | Up-front analysis (ms) |         First decompile, fresh (ms, median) |                    Repeated decompile (ms, median) | Peak RSS fresh (MiB) |
+| ------ | ----------------- | ----------: | ---------------------: | ------------------------------------------: | -------------------------------------------------: | -------------------: |
+| corpus | Open Decomp       |         279 |                   lazy |  18.6 complete (n=27) / 26.9 partial (n=21) |             4.3 complete / 7.9 partial (cache hit) |                  724 |
+| corpus | Ghidra bridge     |         905 |                    500 |                                       233.5 |                                            231–232 |                  543 |
+| corpus | Ghidra persistent |         811 |                    488 |                                         2.2 |                                                1.9 |                  547 |
+| SQLite | Open Decomp       |       2,134 |                   lazy | 154.8 complete (n=6) / 207.9 partial (n=24) | 15.5–16.0 complete / 33.8–38.7 partial (cache hit) |                  648 |
+| SQLite | Ghidra bridge     |       1,349 |                 30,321 |                                       230.5 |                                        230.2–230.7 |                2,870 |
+| SQLite | Ghidra persistent |       1,238 |                 33,572 |                                         3.5 |                                            2.9–3.6 |                2,646 |
+
+Delivered coverage was **not** equal: Open Decomp returned `complete` output for 11/26 functions; both Ghidra lanes returned text for 26/26 (no semantic state exposed). Against the persistent Ghidra interface Open Decomp is slower on first and cached decompiles on both inputs; its lead over the bridge is the bridge's per-call interface start (~230 ms), and avoiding Ghidra's 30–34 s up-front SQLite analysis reflects lazy per-function analysis, not engine speed. Transport is isolated only as MCP ping overhead (0.1–0.6 ms). Open Decomp cached SQLite hits spend ~8.8 ms of 12.6 ms in `validate_computation`.
+
+## Controlled incremental reuse (2026-10-17, commit `901602b`)
+
+`scripts/bench/incremental-controlled.py`, four frozen functions × first/reopen × 6 balanced pairs = 48 pairs, no failures; every output passed its source oracle; 48/48 pairs semantically equivalent (declared proof-ID/revision renaming only); control lifted once, reuse zero times. Raw evidence: `~/Documents/open-decomp-perf-2026-10-17-final/p36-incremental-controlled/experiment.json`.
+
+| Case              | Control first (ms) | Reuse first (ms) | Reuse faster | Endpoint RSS Δ reuse−control (MiB, pairs lower) |
+| ----------------- | -----------------: | ---------------: | -----------: | ----------------------------------------------: |
+| fixture maximum   |               22.3 |             16.2 |          6/6 |                                      +9.8 (2/6) |
+| fixture sum-loop  |               27.6 |             17.4 |          6/6 |                                     −13.8 (6/6) |
+| SQLite threadsafe |               54.7 |             31.8 |          6/6 |                                      +0.8 (3/6) |
+| SQLite strnicmp   |               94.6 |             52.6 |          6/6 |                                     −16.0 (4/6) |
+
+Latency improves in 48/48 pairs (reuse/control median 0.54–0.72 across cells, reopen similar). Memory does **not** consistently improve (counterexamples above; sum-loop reopen heap +8.8 MiB; the 2 ms requested sampler achieved a 12.39 ms median interval, so most short fixture peaks are null, not 0). Cached SQLite leaf hits (~15.5 ms) remain slower than fixture hits (~4.3 ms), so repeated requests still depend on image size. P3.6 therefore stays open.
+
 ## Measured optimized conversion coverage
 
 `scripts/bench/quality-matrix-rank.py` verifies the retained broader comparison output hashes and counts emitted unsupported-instruction sites across every reviewed input cell. These are static occurrences, not dynamic frequency or independent-program counts. Discovery, budget, unresolved-interface/control and FP-environment gaps remain separate in `quality-matrix-rank-2026-10-17.json`; they were not relabeled as ISA demand.
