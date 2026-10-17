@@ -3,21 +3,45 @@ import type { BlockRegion, ParallelTransfer } from '../presentation/index.js';
 import { type LocalValidationRecord, ValidationAllowance } from './local-validation.js';
 
 export type StorageEvent =
-  | { readonly kind: 'store'; readonly offset: bigint | null; readonly bytes: number; readonly value: string; readonly promoted: boolean; readonly endian?: 'little' | 'big' }
-  | { readonly kind: 'load'; readonly offset: bigint; readonly bytes: number; readonly candidate: string | 'local'; readonly endian?: 'little' | 'big' }
+  | {
+      readonly kind: 'store';
+      readonly offset: bigint | null;
+      readonly bytes: number;
+      readonly value: string;
+      readonly promoted: boolean;
+      readonly endian?: 'little' | 'big';
+    }
+  | {
+      readonly kind: 'load';
+      readonly offset: bigint;
+      readonly bytes: number;
+      readonly candidate: string | 'local';
+      readonly endian?: 'little' | 'big';
+    }
   | { readonly kind: 'barrier'; readonly subject: string };
 
 /** Byte-addressed original memory and a distinct promoted scalar state. A read
  * from an uninitialized byte is not silently modeled as zero or a fresh scalar. */
-export function validateStorageTrace(subject: string, events: readonly StorageEvent[], allowance: ValidationAllowance): LocalValidationRecord {
-  const record = { kind: 'stack-promotion' as const, subject, scope: 'bounded ordered private-stack byte accesses and scalar replacement' };
-  const bytes = new Map<bigint, string>(), written = new Map<bigint, number>();
-  let local: string | undefined, epoch = 0;
+export function validateStorageTrace(
+  subject: string,
+  events: readonly StorageEvent[],
+  allowance: ValidationAllowance,
+): LocalValidationRecord {
+  const record = {
+    kind: 'stack-promotion' as const,
+    subject,
+    scope: 'bounded ordered private-stack byte accesses and scalar replacement',
+  };
+  const bytes = new Map<bigint, string>(),
+    written = new Map<bigint, number>();
+  let local: string | undefined,
+    epoch = 0;
   let alias: { epoch: number; value: string } | undefined;
   for (const event of events) {
     allowance.charge();
     epoch++;
-    if (event.kind === 'barrier') return { ...record, status: 'unverified', reason: `alias/effect barrier ${event.subject}` };
+    if (event.kind === 'barrier')
+      return { ...record, status: 'unverified', reason: `alias/effect barrier ${event.subject}` };
     if (event.kind === 'store') {
       if (event.offset === null) {
         alias = { epoch, value: event.value };
@@ -25,7 +49,10 @@ export function validateStorageTrace(subject: string, events: readonly StorageEv
       }
       for (let i = 0; i < event.bytes; i++) {
         allowance.charge();
-        bytes.set(event.offset + BigInt(i), `${event.value}:${event.endian === 'big' ? event.bytes - 1 - i : i}`);
+        bytes.set(
+          event.offset + BigInt(i),
+          `${event.value}:${event.endian === 'big' ? event.bytes - 1 - i : i}`,
+        );
         written.set(event.offset + BigInt(i), epoch);
       }
       if (event.promoted) local = event.value;
@@ -34,16 +61,41 @@ export function validateStorageTrace(subject: string, events: readonly StorageEv
     const candidate = event.candidate === 'local' ? local : event.candidate;
     for (let i = 0; i < event.bytes; i++) {
       allowance.charge();
-      const address = event.offset + BigInt(i), expected = bytes.get(address);
+      const address = event.offset + BigInt(i),
+        expected = bytes.get(address);
       if (alias && alias.epoch > (written.get(address) ?? -1)) {
         if (candidate === undefined || alias.value === candidate)
-          return { ...record, status: 'unverified', reason: 'unresolved alias relation to promoted scalar' };
-        return { ...record, status: 'rejected', counterexample: { alias_address: String(address),
-          [candidate]: '0xffffffffffffffff', [alias.value]: '0x0',
-          original_byte_after_alias: '0x00', promoted_byte: '0xff' } };
+          return {
+            ...record,
+            status: 'unverified',
+            reason: 'unresolved alias relation to promoted scalar',
+          };
+        return {
+          ...record,
+          status: 'rejected',
+          counterexample: {
+            alias_address: String(address),
+            [candidate]: '0xffffffffffffffff',
+            [alias.value]: '0x0',
+            original_byte_after_alias: '0x00',
+            promoted_byte: '0xff',
+          },
+        };
       }
-      if (expected === undefined || candidate === undefined || expected !== `${candidate}:${event.endian === 'big' ? event.bytes - 1 - i : i}`)
-        return { ...record, status: 'rejected', counterexample: { byte: String(address), original: expected ?? 'uninitialized', promoted: candidate ?? 'uninitialized scalar' } };
+      if (
+        expected === undefined ||
+        candidate === undefined ||
+        expected !== `${candidate}:${event.endian === 'big' ? event.bytes - 1 - i : i}`
+      )
+        return {
+          ...record,
+          status: 'rejected',
+          counterexample: {
+            byte: String(address),
+            original: expected ?? 'uninitialized',
+            promoted: candidate ?? 'uninitialized scalar',
+          },
+        };
     }
   }
   return { ...record, status: 'verified' };
@@ -51,12 +103,25 @@ export function validateStorageTrace(subject: string, events: readonly StorageEv
 
 /** Enumerate small acyclic paths independently of the planner's reaching-value
  * fixed point. Loops/large CFGs are explicitly outside this proof scope. */
-export function validateStackPromotion(subject: string, entry: string, blocks: ReadonlyMap<string, BlockRegion>,
-  transfers: readonly { transfer: ParallelTransfer; block: BlockRegion }[], addresses: ReadonlyMap<string, bigint>,
-  group: ReadonlySet<string>, forwarded: ReadonlyMap<string, Value> | null,
-  expressions: ReadonlyMap<string, Expression>, allowance: ValidationAllowance): LocalValidationRecord {
-  const base = { kind: 'stack-promotion' as const, subject, scope: 'all bounded acyclic CFG paths; ordered original bytes versus proposed scalar/forwarding' };
-  if (blocks.size > 32) return { ...base, status: 'unverified', reason: 'stack CFG block bound exceeded' };
+export function validateStackPromotion(
+  subject: string,
+  entry: string,
+  blocks: ReadonlyMap<string, BlockRegion>,
+  transfers: readonly { transfer: ParallelTransfer; block: BlockRegion }[],
+  addresses: ReadonlyMap<string, bigint>,
+  group: ReadonlySet<string>,
+  forwarded: ReadonlyMap<string, Value> | null,
+  expressions: ReadonlyMap<string, Expression>,
+  allowance: ValidationAllowance,
+): LocalValidationRecord {
+  const base = {
+    kind: 'stack-promotion' as const,
+    subject,
+    scope:
+      'all bounded acyclic CFG paths; ordered original bytes versus proposed scalar/forwarding',
+  };
+  if (blocks.size > 32)
+    return { ...base, status: 'unverified', reason: 'stack CFG block bound exceeded' };
   const successors = new Map<string, string[]>();
   for (const { transfer, block } of transfers) {
     allowance.charge();
@@ -65,7 +130,8 @@ export function validateStackPromotion(subject: string, entry: string, blocks: R
     successors.set(block.id, row);
   }
   const pending = [{ id: entry, path: [] as string[], events: [] as StorageEvent[] }];
-  let paths = 0, nodes = 0;
+  let paths = 0,
+    nodes = 0;
   const identity = (value: Value): string => {
     const seen = new Set<string>();
     while (!seen.has(value.id)) {
@@ -80,27 +146,53 @@ export function validateStackPromotion(subject: string, entry: string, blocks: R
   while (pending.length) {
     allowance.charge();
     const current = pending.pop()!;
-    if (current.path.includes(current.id)) return { ...base, status: 'unverified', reason: 'cyclic stack path is outside bounded proof' };
-    if (++nodes > 256 || pending.length > 64) return { ...base, status: 'unverified', reason: 'stack path enumeration bound exceeded' };
-    const events = [...current.events], path = [...current.path, current.id];
+    if (current.path.includes(current.id))
+      return {
+        ...base,
+        status: 'unverified',
+        reason: 'cyclic stack path is outside bounded proof',
+      };
+    if (++nodes > 256 || pending.length > 64)
+      return { ...base, status: 'unverified', reason: 'stack path enumeration bound exceeded' };
+    const events = [...current.events],
+      path = [...current.path, current.id];
     for (const node of blocks.get(current.id)!.statements) {
       allowance.charge();
-      if (node.kind === 'call' || node.kind === 'unknown_effect') events.push({ kind: 'barrier', subject: node.id });
+      if (node.kind === 'call' || node.kind === 'unknown_effect')
+        events.push({ kind: 'barrier', subject: node.id });
       if (node.kind === 'load' && !addresses.has(node.address.id))
         events.push({ kind: 'barrier', subject: `unknown-address load ${node.id}` });
-      if (node.kind === 'store') events.push({ kind: 'store', offset: addresses.get(node.address.id) ?? null,
-        bytes: Math.ceil(bitWidth(node.value.type) / 8), endian: node.access.endian,
-        value: identity(node.value), promoted: group.has(node.id) });
-      if (node.kind === 'load' && group.has(node.id)) events.push({ kind: 'load', offset: addresses.get(node.address.id)!,
-        bytes: Math.ceil(bitWidth(node.result.type) / 8), endian: node.access.endian,
-        candidate: forwarded ? identity(forwarded.get(node.id)!) : 'local' });
+      if (node.kind === 'store')
+        events.push({
+          kind: 'store',
+          offset: addresses.get(node.address.id) ?? null,
+          bytes: Math.ceil(bitWidth(node.value.type) / 8),
+          endian: node.access.endian,
+          value: identity(node.value),
+          promoted: group.has(node.id),
+        });
+      if (node.kind === 'load' && group.has(node.id))
+        events.push({
+          kind: 'load',
+          offset: addresses.get(node.address.id)!,
+          bytes: Math.ceil(bitWidth(node.result.type) / 8),
+          endian: node.access.endian,
+          candidate: forwarded ? identity(forwarded.get(node.id)!) : 'local',
+        });
     }
     const next = successors.get(current.id) ?? [];
     if (!next.length) {
-      if (++paths > 64) return { ...base, status: 'unverified', reason: 'stack completed-path bound exceeded' };
+      if (++paths > 64)
+        return { ...base, status: 'unverified', reason: 'stack completed-path bound exceeded' };
       const result = validateStorageTrace(subject, events, allowance);
-      if (result.status !== 'verified') return { ...result, scope: base.scope,
-        ...(result.counterexample ? { counterexample: { ...result.counterexample, path: path.join(' -> ') } } : {}) };
+      if (result.status !== 'verified')
+        return {
+          ...result,
+          scope: base.scope,
+          ...(result.counterexample
+            ? { counterexample: { ...result.counterexample, path: path.join(' -> ') } }
+            : {}),
+        };
     } else for (const id of next) pending.push({ id, path, events });
   }
   return { ...base, status: 'verified' };

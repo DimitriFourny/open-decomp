@@ -114,11 +114,15 @@ function evidenceDeriver(image: LoadedImage, revision: number, evidence: Map<str
   return (rule: string, address: Address, parents: readonly string[]): string => {
     const derived_from = [...new Set(parents)].sort();
     const id = `evidence_${fingerprint([image.selected_slice_id, 'discovery/1', rule, address.value, derived_from])}`;
-    if (!evidence.has(id)) evidence.set(id, {
-      id, origin: { kind: 'analysis', analyzer: 'open-decomp/discovery', version: '1', rule },
-      claim: `${rule} at 0x${address.value.toString(16)}`,
-      derived_from, conflicts_with: [], revision,
-    });
+    if (!evidence.has(id))
+      evidence.set(id, {
+        id,
+        origin: { kind: 'analysis', analyzer: 'open-decomp/discovery', version: '1', rule },
+        claim: `${rule} at 0x${address.value.toString(16)}`,
+        derived_from,
+        conflicts_with: [],
+        revision,
+      });
     return id;
   };
 }
@@ -159,32 +163,41 @@ export function discoverFunctions(
       });
   const index = input.index ?? prepareDiscoveryIndex(input, context);
   if (
-    index.image_id !== image.id || index.slice_id !== image.selected_slice_id ||
+    index.image_id !== image.id ||
+    index.slice_id !== image.selected_slice_id ||
     index.revision !== revision
-  ) throw new OperationError({
-    code: 'invalid_input', severity: 'error',
-    message: 'Discovery index belongs to another immutable image revision',
-    evidence_ids: [],
-  });
+  )
+    throw new OperationError({
+      code: 'invalid_input',
+      severity: 'error',
+      message: 'Discovery index belongs to another immutable image revision',
+      evidence_ids: [],
+    });
   const selected = input.selected_entry;
-  if (selected && (
-    selected.image_id !== image.id || selected.space !== 'va' ||
-    !index.seeds.has(selected.value)
-  )) throw new OperationError({
-    code: 'invalid_address', severity: 'error',
-    message: 'Selected discovery requires an indexed virtual function root',
-    evidence_ids: [],
-  });
+  if (
+    selected &&
+    (selected.image_id !== image.id || selected.space !== 'va' || !index.seeds.has(selected.value))
+  )
+    throw new OperationError({
+      code: 'invalid_address',
+      severity: 'error',
+      message: 'Selected discovery requires an indexed virtual function root',
+      evidence_ids: [],
+    });
   const diagnostics: Diagnostic[] = [];
   const evidence = selected ? new Map<string, Evidence>() : new Map(index.evidence);
   const instructionEvidence = new Map<string, readonly string[]>();
   const seeds = new Map<bigint, Seed>();
   if (!selected)
-    for (const [entry, item] of index.seeds) seeds.set(entry, {
-      ...item, evidence: new Set(item.evidence), names: new Set(item.names),
-      claims: [...item.claims],
-    });
-  const seedAt = (value: bigint): IndexedSeed | undefined => seeds.get(value) ?? index.seeds.get(value);
+    for (const [entry, item] of index.seeds)
+      seeds.set(entry, {
+        ...item,
+        evidence: new Set(item.evidence),
+        names: new Set(item.names),
+        claims: [...item.claims],
+      });
+  const seedAt = (value: bigint): IndexedSeed | undefined =>
+    seeds.get(value) ?? index.seeds.get(value);
   const decoded = new Map<bigint, DecodedInstruction>();
   const gaps = new Map<bigint, DecodeGap>();
   const queue: Address[] = selected ? [selected] : [...seeds.values()].map((item) => item.entry);
@@ -195,16 +208,26 @@ export function discoverFunctions(
   const jumpTables: JumpTableCandidate[] = selected ? [] : [...index.jump_tables];
   const boundaryClaims = selected
     ? seedAt(selected.value)!.claims.map((range) => ({
-        entry: selected, range, evidence_ids: [...seedAt(selected.value)!.evidence],
+        entry: selected,
+        range,
+        evidence_ids: [...seedAt(selected.value)!.evidence],
       }))
     : [...index.boundary_claims];
   const va = (value: bigint): Address => ({ image_id: image.id, space: 'va', value });
   const derive = evidenceDeriver(image, revision, evidence);
   const enqueue = (address: Address): void => {
     if (selected && address.value !== selected.value && seedAt(address.value)) return;
-    if (!queued.has(address.value)) { queued.add(address.value); queue.push(address); }
+    if (!queued.has(address.value)) {
+      queued.add(address.value);
+      queue.push(address);
+    }
   };
-  const seed = (address: Address, rule: string, parents: readonly string[], established: boolean): void => {
+  const seed = (
+    address: Address,
+    rule: string,
+    parents: readonly string[],
+    established: boolean,
+  ): void => {
     context.checkpoint(1);
     if (executableEnd(address.value) <= address.value) return;
     const id = derive(rule, address, parents);
@@ -212,8 +235,11 @@ export function discoverFunctions(
     if (!item) {
       const original = index.seeds.get(address.value);
       item = {
-        entry: address, evidence: new Set(original?.evidence), names: new Set(original?.names),
-        claims: [...(original?.claims ?? [])], established: original?.established ?? false,
+        entry: address,
+        evidence: new Set(original?.evidence),
+        names: new Set(original?.names),
+        claims: [...(original?.claims ?? [])],
+        established: original?.established ?? false,
       };
       seeds.set(address.value, item);
       if (!selected) enqueue(address);
@@ -392,10 +418,12 @@ export function discoverFunctions(
   const functionEntries = { has: (value: bigint): boolean => seedAt(value) !== undefined };
   const graphs: FunctionGraph[] = [];
   let blockCount = 0;
-  const orderedSeeds = selected ? [seedAt(selected.value)!] : [...seeds.values()].sort((a, b) => {
-    context.checkpoint(1);
-    return a.entry.value < b.entry.value ? -1 : a.entry.value > b.entry.value ? 1 : 0;
-  });
+  const orderedSeeds = selected
+    ? [seedAt(selected.value)!]
+    : [...seeds.values()].sort((a, b) => {
+        context.checkpoint(1);
+        return a.entry.value < b.entry.value ? -1 : a.entry.value > b.entry.value ? 1 : 0;
+      });
   const claimBoundaries = selected ? index.ordered_seeds : orderedSeeds;
   for (const item of orderedSeeds) {
     context.checkpoint(1);
@@ -420,9 +448,12 @@ export function discoverFunctions(
       if (selected)
         for (const candidate of seeds.values()) {
           context.checkpoint(1);
-          if (candidate.entry.value !== item.entry.value &&
+          if (
+            candidate.entry.value !== item.entry.value &&
             candidate.entry.value >= claim.start.value &&
-            candidate.entry.value < claim.start.value + claim.size) conflict = true;
+            candidate.entry.value < claim.start.value + claim.size
+          )
+            conflict = true;
         }
     }
     for (let cursor = 0; cursor < pending.length; cursor++) {
@@ -648,9 +679,12 @@ export function discoverFunctions(
           from_instruction: instruction.id,
           target_role: target ? 'code' : 'unknown',
           to: target,
-          to_entity: target ? (byEntry.get(target.value) ??
-            (functionEntries.has(target.value)
-              ? entityIdentity(image.selected_slice_id, 'function', { entry: target.value }) : null)) : null,
+          to_entity: target
+            ? (byEntry.get(target.value) ??
+              (functionEntries.has(target.value)
+                ? entityIdentity(image.selected_slice_id, 'function', { entry: target.value })
+                : null))
+            : null,
           kind,
           status: target ? 'established' : 'unresolved',
           evidence_ids: instructionEvidence.get(instruction.id) ?? [],
@@ -1011,15 +1045,28 @@ export function prepareDiscoveryIndex(
       );
   }
   for (const fn of input.functions ?? [])
-    seed(fn.entry, 'published function root', fn.evidence_ids,
-      fn.boundary === 'established', fn.original_name);
+    seed(
+      fn.entry,
+      'published function root',
+      fn.evidence_ids,
+      fn.boundary === 'established',
+      fn.original_name,
+    );
   const ordered_seeds = [...seeds.values()].sort((a, b) => {
     context.checkpoint(1);
     return a.entry.value < b.entry.value ? -1 : a.entry.value > b.entry.value ? 1 : 0;
   });
   return {
-    image_id: image.id, slice_id: image.selected_slice_id, revision,
-    seeds, ordered_seeds, evidence, data, jump_tables: jumpTables,
-    boundary_claims: boundaryClaims, data_after: dataAfter, executable_end: executableEnd,
+    image_id: image.id,
+    slice_id: image.selected_slice_id,
+    revision,
+    seeds,
+    ordered_seeds,
+    evidence,
+    data,
+    jump_tables: jumpTables,
+    boundary_claims: boundaryClaims,
+    data_after: dataAfter,
+    executable_end: executableEnd,
   };
 }

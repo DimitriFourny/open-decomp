@@ -294,35 +294,54 @@ test('constant switch selection retains only the executable arm and its state', 
 
 test('sparse executable-edge propagation revisits a join when a later predecessor changes a constant', () => {
   const ir = builder('sparse-late-predecessor');
-  const entry = ir.block('entry', [i1]), left = ir.block('left'),
-    delayed = ir.block('delayed'), later = ir.block('later'), join = ir.block('join', [i32]),
-    yes = ir.block('yes'), no = ir.block('no');
+  const entry = ir.block('entry', [i1]),
+    left = ir.block('left'),
+    delayed = ir.block('delayed'),
+    later = ir.block('later'),
+    join = ir.block('join', [i32]),
+    yes = ir.block('yes'),
+    no = ir.block('no');
   entry.branch(entry.parameters[0]!, entry.edge(left), entry.edge(delayed));
   left.jump(join, [left.constant(i32, 7n)]);
   delayed.jump(later);
   later.jump(join, [later.constant(i32, 9n)]);
-  join.branch(join.compare('eq', join.parameters[0]!, join.constant(i32, 7n)), join.edge(yes), join.edge(no));
+  join.branch(
+    join.compare('eq', join.parameters[0]!, join.constant(i32, 7n)),
+    join.edge(yes),
+    join.edge(no),
+  );
   yes.return([yes.constant(i32, 1n)]);
   no.return([no.constant(i32, 0n)]);
   const program = ir.finish(entry, [i32]);
-  const { ssa } = forms(program), analysis = analyzeValues(ssa);
+  const { ssa } = forms(program),
+    analysis = analyzeValues(ssa);
   assert.equal(analysis.state, 'complete');
   assert.deepEqual(analysis.value.facts.get(join.parameters[0]!.id), { kind: 'varying' });
-  assert.ok(analysis.value.reachable_blocks.has(yes.id) && analysis.value.reachable_blocks.has(no.id));
+  assert.ok(
+    analysis.value.reachable_blocks.has(yes.id) && analysis.value.reachable_blocks.has(no.id),
+  );
   for (const condition of [0n, 1n])
-    assert.deepEqual(returned(equivalent(program, { arguments: [condition] }).original), [condition]);
+    assert.deepEqual(returned(equivalent(program, { arguments: [condition] }).original), [
+      condition,
+    ]);
 });
 
 test('sparse phi dependencies revisit loop backedges and activate the eventual exit', () => {
   const ir = builder('sparse-backedge');
-  const entry = ir.block('entry'), loop = ir.block('loop', [i32]),
-    body = ir.block('body', [i32]), exit = ir.block('exit', [i32]);
+  const entry = ir.block('entry'),
+    loop = ir.block('loop', [i32]),
+    body = ir.block('body', [i32]),
+    exit = ir.block('exit', [i32]);
   entry.jump(loop, [entry.constant(i32, 0n)]);
-  loop.branch(loop.compare('ult', loop.parameters[0]!, loop.constant(i32, 2n)),
-    loop.edge(body, [loop.parameters[0]!]), loop.edge(exit, [loop.parameters[0]!]));
+  loop.branch(
+    loop.compare('ult', loop.parameters[0]!, loop.constant(i32, 2n)),
+    loop.edge(body, [loop.parameters[0]!]),
+    loop.edge(exit, [loop.parameters[0]!]),
+  );
   body.jump(loop, [body.int('add', body.parameters[0]!, body.constant(i32, 1n))]);
   exit.return([exit.parameters[0]!]);
-  const program = ir.finish(entry, [i32]), { ssa } = forms(program);
+  const program = ir.finish(entry, [i32]),
+    { ssa } = forms(program);
   const analysis = analyzeValues(ssa);
   assert.equal(analysis.state, 'complete');
   assert.deepEqual(analysis.value.facts.get(loop.parameters[0]!.id), { kind: 'varying' });
@@ -333,8 +352,16 @@ test('sparse phi dependencies revisit loop backedges and activate the eventual e
 test('sparse propagation is independent of reverse block layout and unrelated phi rounds', () => {
   const ir = builder('sparse-reverse-layout');
   const entry = ir.block('entry');
-  const blocks = Array.from({ length: 64 }, (_, index) => ir.block(`step-${index}`, Array.from({ length: 8 }, () => i32)));
-  entry.jump(blocks[0]!, Array.from({ length: 8 }, (_, index) => entry.constant(i32, BigInt(42 + index))));
+  const blocks = Array.from({ length: 64 }, (_, index) =>
+    ir.block(
+      `step-${index}`,
+      Array.from({ length: 8 }, () => i32),
+    ),
+  );
+  entry.jump(
+    blocks[0]!,
+    Array.from({ length: 8 }, (_, index) => entry.constant(i32, BigInt(42 + index))),
+  );
   for (let index = 0; index < blocks.length - 1; index++)
     blocks[index]!.jump(blocks[index + 1]!, blocks[index]!.parameters);
   blocks.at(-1)!.return([blocks.at(-1)!.parameters[0]!]);
@@ -344,7 +371,10 @@ test('sparse propagation is independent of reverse block layout and unrelated ph
   const analysis = analyzeValues(reversed, { max_work: 8000 });
   assert.equal(analysis.state, 'complete', JSON.stringify(analysis.diagnostics));
   assert.equal(analysis.value.reachable_blocks.size, reversed.blocks.length);
-  assert.deepEqual(analysis.value.facts.get(blocks.at(-1)!.parameters[0]!.id), { kind: 'constant', bits: 42n });
+  assert.deepEqual(analysis.value.facts.get(blocks.at(-1)!.parameters[0]!.id), {
+    kind: 'constant',
+    bits: 42n,
+  });
   const optimized = simplifySSA(reversed, { max_work: 20_000 });
   assert.equal(optimized.state, 'complete', JSON.stringify(optimized.diagnostics));
   assert.deepEqual(returned(evaluateIR(optimized.value)), [42n]);

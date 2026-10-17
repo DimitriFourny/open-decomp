@@ -182,16 +182,17 @@ export class Arm64Lifter implements Lifter<RegisterIR> {
             const supported = build.block(['fp-supported', instruction.id], [], source);
             const unsupported = build.block(['fp-unsupported', instruction.id], [], source);
             const control = block.readRegister(stateRegister('fpcr'));
-            const masked = block.int('and', control, block.constant(integer(32), fpEnvironmentGuard.mask));
+            const masked = block.int(
+              'and',
+              control,
+              block.constant(integer(32), fpEnvironmentGuard.mask),
+            );
             block.branch(
               block.compare('eq', masked, block.constant(integer(32), 0n)),
               block.edge(supported),
               block.edge(unsupported),
             );
-            unsupported.unknown(
-              fpEnvironmentGuard.unsupported_effect,
-              unknownClobbers,
-            );
+            unsupported.unknown(fpEnvironmentGuard.unsupported_effect, unknownClobbers);
             unsupported.terminate({ kind: 'unknown', reason: fpEnvironmentGuard.unsupported_exit });
             block = supported;
           }
@@ -222,8 +223,12 @@ export class Arm64Lifter implements Lifter<RegisterIR> {
               if (!returnRegisters) {
                 const registers: RegisterDescriptor[] = [];
                 for (const returns of [{ kind: 'pointer' }, { kind: 'float', bits: 64 }] as const)
-                  for (const location of abi.classifyCall({ returns, parameters: [],
-                    variadic: false, fixed_parameter_count: 0 }).returns)
+                  for (const location of abi.classifyCall({
+                    returns,
+                    parameters: [],
+                    variadic: false,
+                    fixed_parameter_count: 0,
+                  }).returns)
                     if (location.kind === 'register') registers.push(location.register);
                 returnRegisters = registers;
               }

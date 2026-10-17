@@ -916,7 +916,9 @@ test('native symbol-table completeness is reported independently of unrelated op
     unrelated.capabilities.find((capability) => capability.feature.startsWith('Mach-O'))?.status,
     'partial',
   );
-  assert.ok(unrelated.diagnostics.some((diagnostic) => diagnostic.message.startsWith('Function starts:')));
+  assert.ok(
+    unrelated.diagnostics.some((diagnostic) => diagnostic.message.startsWith('Function starts:')),
+  );
   assert.equal(tables(unrelated)?.status, 'supported');
   assert.deepEqual(tables(unrelated)?.limitations, []);
   // A symbol whose name lies outside the string table makes name authority partial, with the reason.

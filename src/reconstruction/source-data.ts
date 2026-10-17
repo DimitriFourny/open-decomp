@@ -32,13 +32,22 @@ export function sourceConstantValues(
       case 'compare':
         break;
       case 'cast':
-        if (expression.op !== 'bitcast' && expression.op !== 'truncate' &&
-          expression.op !== 'zero_extend' && expression.op !== 'sign_extend') return unknown;
+        if (
+          expression.op !== 'bitcast' &&
+          expression.op !== 'truncate' &&
+          expression.op !== 'zero_extend' &&
+          expression.op !== 'sign_extend'
+        )
+          return unknown;
         break;
       default:
         return unknown;
     }
-    if (expression.kind === 'address' && imageId !== undefined && expression.address.image_id !== imageId)
+    if (
+      expression.kind === 'address' &&
+      imageId !== undefined &&
+      expression.address.image_id !== imageId
+    )
       return unknown;
     active.add(value.id);
     const result = evaluateExpression(value.type, expression, resolve);
@@ -71,10 +80,19 @@ export function sourceDataValues(
     if (item.address.space !== 'va') continue;
     const previous = byValue.get(item.address.value);
     if (previous === undefined) byValue.set(item.address.value, item);
-    else if (previous && (previous.address.image_id !== item.address.image_id ||
-      previous.string !== item.string || previous.name !== item.name)) byValue.set(item.address.value, null);
+    else if (
+      previous &&
+      (previous.address.image_id !== item.address.image_id ||
+        previous.string !== item.string ||
+        previous.name !== item.name)
+    )
+      byValue.set(item.address.value, null);
   }
-  const bits = sourceConstantValues(expressions, context, images.size === 1 ? [...images][0] : undefined);
+  const bits = sourceConstantValues(
+    expressions,
+    context,
+    images.size === 1 ? [...images][0] : undefined,
+  );
   // A value's exact/negative lookup is stable for this immutable expression and
   // address index. Mapping the same contributor to several spans must not
   // re-evaluate its transport graph each time.

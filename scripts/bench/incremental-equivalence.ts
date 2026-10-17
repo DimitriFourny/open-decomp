@@ -1,16 +1,25 @@
 import assert from 'node:assert/strict';
 import { z } from 'zod';
 import {
-  cacheIdentitySchema, evidenceSchema, fingerprint, functionDecompileResultSchema,
-  type CanonicalValue, type WireEvidence,
+  cacheIdentitySchema,
+  evidenceSchema,
+  fingerprint,
+  functionDecompileResultSchema,
+  type CanonicalValue,
+  type WireEvidence,
 } from '../../src/core/index.js';
 import { analysisReadsetSchema } from '../../src/project/cache/dependencies.js';
 import { ANALYSIS_ARTIFACT_VERSION } from '../../src/project/cache/model.js';
 
 const payloadSchema = z.strictObject({
-  format_version: z.literal(ANALYSIS_ARTIFACT_VERSION), identity: cacheIdentitySchema,
+  format_version: z.literal(ANALYSIS_ARTIFACT_VERSION),
+  identity: cacheIdentitySchema,
   result: functionDecompileResultSchema,
-  catalog: z.strictObject({ subjects: z.array(z.json()), types: z.array(z.json()), evidence: z.array(evidenceSchema) }),
+  catalog: z.strictObject({
+    subjects: z.array(z.json()),
+    types: z.array(z.json()),
+    evidence: z.array(evidenceSchema),
+  }),
   dependencies: analysisReadsetSchema.optional(),
 });
 export type IncrementalWirePayload = z.infer<typeof payloadSchema>;
@@ -22,15 +31,27 @@ export function parseIncrementalWirePayload(value: unknown): IncrementalWirePayl
   assert.equal(payload.result.revision, payload.identity.annotation_revision);
   assert.equal(payload.identity.annotation_revision, payload.identity.evidence_revision);
   assert.equal(payload.result.data.function_id, payload.identity.function_id);
-  assert.ok(payload.dependencies?.complete, 'Every measured publication must contain a complete dependency ledger');
+  assert.ok(
+    payload.dependencies?.complete,
+    'Every measured publication must contain a complete dependency ledger',
+  );
   return payload;
 }
 function plain(value: unknown): CanonicalValue {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') return value;
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    typeof value === 'number'
+  )
+    return value;
   if (Array.isArray(value)) return value.map(plain);
-  assert.ok(value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype);
+  assert.ok(
+    value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype,
+  );
   const result: { [key: string]: CanonicalValue } = {};
-  for (const [key, item] of Object.entries(value)) if (item !== undefined) result[key] = plain(item);
+  for (const [key, item] of Object.entries(value))
+    if (item !== undefined) result[key] = plain(item);
   return result;
 }
 
@@ -48,24 +69,38 @@ export function canonicalIncrementalComputation(payload: IncrementalWirePayload)
     if (previous) assert.deepEqual(previous, proof, 'Published proof identity is unambiguous');
     proofs.set(proof.id, proof);
   }
-  const completed = new Map<string, CanonicalValue>(), pending = new Set<string>();
+  const completed = new Map<string, CanonicalValue>(),
+    pending = new Set<string>();
   function proofValue(id: string): CanonicalValue {
     const cached = completed.get(id);
     if (cached !== undefined) return cached;
     const proof = proofs.get(id);
     assert.ok(proof, `Full output references unavailable evidence ${id}`);
-    assert.equal(pending.has(id), false, 'This declared oracle cannot establish alpha-equivalence for cyclic proof graphs; do not silently drop that case');
+    assert.equal(
+      pending.has(id),
+      false,
+      'This declared oracle cannot establish alpha-equivalence for cyclic proof graphs; do not silently drop that case',
+    );
     pending.add(id);
-    const value = { origin: plain(proof.origin), claim: proof.claim,
+    const value = {
+      origin: plain(proof.origin),
+      claim: proof.claim,
       derived_from: proof.derived_from.map((parent) => fingerprint(proofValue(parent))).sort(),
-      conflicts_with: proof.conflicts_with.map((other) => fingerprint(proofValue(other))).sort() };
-    pending.delete(id); completed.set(id, value);
+      conflicts_with: proof.conflicts_with.map((other) => fingerprint(proofValue(other))).sort(),
+    };
+    pending.delete(id);
+    completed.set(id, value);
     return value;
   }
   function normalize(value: unknown, field = ''): CanonicalValue {
     if (field === 'evidence_ids') {
       assert.ok(Array.isArray(value));
-      return value.map((id) => { assert.equal(typeof id, 'string'); return fingerprint(proofValue(id)); }).sort();
+      return value
+        .map((id) => {
+          assert.equal(typeof id, 'string');
+          return fingerprint(proofValue(id));
+        })
+        .sort();
     }
     // The emission proof table is cited by index, so its order is preserved.
     if (field === 'evidence' && Array.isArray(value) && value.every((id) => typeof id === 'string'))
@@ -73,21 +108,28 @@ export function canonicalIncrementalComputation(payload: IncrementalWirePayload)
     if (Array.isArray(value)) return value.map((item) => normalize(item));
     if (value !== null && typeof value === 'object') {
       const result: { [key: string]: CanonicalValue } = {};
-      for (const [key, item] of Object.entries(value)) if (item !== undefined) result[key] = normalize(item, key);
+      for (const [key, item] of Object.entries(value))
+        if (item !== undefined) result[key] = normalize(item, key);
       return result;
     }
     return plain(value);
   }
-  const orderedProofs = (records: readonly WireEvidence[]) => records.map((proof) => proofValue(proof.id))
-    .sort((left, right) => fingerprint(left).localeCompare(fingerprint(right)));
+  const orderedProofs = (records: readonly WireEvidence[]) =>
+    records
+      .map((proof) => proofValue(proof.id))
+      .sort((left, right) => fingerprint(left).localeCompare(fingerprint(right)));
   return normalize({
     identity: payload.identity,
     result: { ...payload.result, evidence: orderedProofs(payload.result.evidence) },
     catalog: { ...payload.catalog, evidence: orderedProofs(payload.catalog.evidence) },
-    dependencies: payload.dependencies === undefined ? null : {
-      ...payload.dependencies,
-      reads: [...payload.dependencies.reads].sort((left, right) =>
-        fingerprint(plain(left.selector)).localeCompare(fingerprint(plain(right.selector)))),
-    },
+    dependencies:
+      payload.dependencies === undefined
+        ? null
+        : {
+            ...payload.dependencies,
+            reads: [...payload.dependencies.reads].sort((left, right) =>
+              fingerprint(plain(left.selector)).localeCompare(fingerprint(plain(right.selector))),
+            ),
+          },
   });
 }

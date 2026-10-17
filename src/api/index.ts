@@ -21,7 +21,12 @@ import type { QueryCallOptions } from '../service/queries/index.js';
 
 export type { ToolInput, ToolResult, WireJob } from '../core/index.js';
 export { expandEmission } from '../core/index.js';
-export type { ExpandedEmission, ExpandedInference, ExpandedRequirement, ExpandedSourceMapping } from '../core/index.js';
+export type {
+  ExpandedEmission,
+  ExpandedInference,
+  ExpandedRequirement,
+  ExpandedSourceMapping,
+} from '../core/index.js';
 export type { QueryCallOptions } from '../service/queries/index.js';
 export type BinaryImage = NonNullable<
   Extract<ToolResult<'project_open'>, { data: unknown }>['data']['image']

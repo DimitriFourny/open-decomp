@@ -20,12 +20,14 @@ export function validateEmittedUses(
     const block = program.blocks.get(id)!;
     for (const parameter of block.parameters) define(parameter, id, -1);
     for (let index = 0; index < block.statements.length; index++) {
-      const node = block.statements[index]!, order = index * 2;
+      const node = block.statements[index]!,
+        order = index * 2;
       context.checkpoint(1);
       if (program.retained.has(node.id)) {
         if ('result' in node) define(node.result, id, order);
         if (node.kind === 'call')
-          for (const result of program.calls.get(node.id)?.results ?? node.results) define(result, id, order);
+          for (const result of program.calls.get(node.id)?.results ?? node.results)
+            define(result, id, order);
         if ('register_outputs' in node)
           for (const binding of node.register_outputs) define(binding.value, id, order);
       }
@@ -42,7 +44,8 @@ export function validateEmittedUses(
     if (definition === program.function.entry) return true;
     let reachableWithout = withoutDefinition.get(definition);
     if (!reachableWithout) {
-      const seen = new Set<string>(), pending = [program.function.entry];
+      const seen = new Set<string>(),
+        pending = [program.function.entry];
       while (pending.length) {
         context.checkpoint(1);
         const id = pending.pop()!;
@@ -57,14 +60,18 @@ export function validateEmittedUses(
   };
   const fail = (origin: Origin): never => {
     throw new OperationError({
-      code: 'unavailable_semantics', severity: 'error',
-      message: 'Reconstruction invariant failed: an emitted value is used before its definition on a reachable path',
-      entity_id: origin.id, evidence_ids: origin.provenance.evidence_ids,
+      code: 'unavailable_semantics',
+      severity: 'error',
+      message:
+        'Reconstruction invariant failed: an emitted value is used before its definition on a reachable path',
+      entity_id: origin.id,
+      evidence_ids: origin.provenance.evidence_ids,
       ...(origin.provenance.ranges[0] ? { address: origin.provenance.ranges[0].start } : {}),
     });
   };
   const use = (value: Value, block: string, order: number, origin: Origin): void => {
-    const pending = [value], seen = new Set<string>();
+    const pending = [value],
+      seen = new Set<string>();
     while (pending.length) {
       context.checkpoint(1);
       const current = pending.pop()!;
@@ -79,14 +86,20 @@ export function validateEmittedUses(
       }
       if (formal.has(current.id)) continue;
       const definition = definitions.get(current.id);
-      if (!definition || (definition.block === block ? definition.order >= order : !dominates(definition.block, block)))
+      if (
+        !definition ||
+        (definition.block === block
+          ? definition.order >= order
+          : !dominates(definition.block, block))
+      )
         fail(origin);
     }
   };
   for (const id of reachable) {
     const block = program.blocks.get(id)!;
     for (let index = 0; index < block.statements.length; index++) {
-      const node = block.statements[index]!, order = index * 2;
+      const node = block.statements[index]!,
+        order = index * 2;
       if (program.retained.has(node.id)) {
         if (node.kind === 'assign') {
           const expression = program.expressions.get(node.result.id) ?? node.expression;
@@ -102,14 +115,18 @@ export function validateEmittedUses(
           for (const binding of projection.inputs) use(binding.value, id, order, node);
           if (node.target.kind === 'indirect') use(node.target.value, id, order, node);
         } else if ('register_inputs' in node)
-          for (const binding of program.physical_inputs.get(node.id) ?? []) use(binding.value, id, order, node);
+          for (const binding of program.physical_inputs.get(node.id) ?? [])
+            use(binding.value, id, order, node);
       }
       for (const definition of program.source?.definitions?.get(node.id) ?? [])
-        for (const operand of expressionOperands(definition.expression)) use(operand, id, order + 1, definition);
+        for (const operand of expressionOperands(definition.expression))
+          use(operand, id, order + 1, definition);
     }
-    const control = block.control, order = block.statements.length * 2 + 1;
+    const control = block.control,
+      order = block.statements.length * 2 + 1;
     for (const definition of program.source?.definitions?.get(control.id) ?? [])
-      for (const operand of expressionOperands(definition.expression)) use(operand, id, order - 1, definition);
+      for (const operand of expressionOperands(definition.expression))
+        use(operand, id, order - 1, definition);
     if (control.kind === 'if') use(control.condition, id, order, control);
     else if (control.kind === 'switch') use(control.value, id, order, control);
     else if (control.kind === 'indirect') use(control.target, id, order, control);
@@ -118,8 +135,10 @@ export function validateEmittedUses(
       for (const result of projection.results) use(result, id, order, control);
       for (const binding of projection.outputs) use(binding.value, id, order, control);
     } else
-      for (const binding of program.physical_exits.get(control.id) ?? []) use(binding.value, id, order, control);
+      for (const binding of program.physical_exits.get(control.id) ?? [])
+        use(binding.value, id, order, control);
     for (const transfer of edges(id))
-      for (const copy of program.transfers.get(transfer) ?? []) use(copy.source, id, order, control);
+      for (const copy of program.transfers.get(transfer) ?? [])
+        use(copy.source, id, order, control);
   }
 }

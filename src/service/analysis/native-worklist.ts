@@ -1,4 +1,10 @@
-import { OperationError, type Evidence, type FunctionRecord, type OperationContext, type RegisterDescriptor } from '../../core/index.js';
+import {
+  OperationError,
+  type Evidence,
+  type FunctionRecord,
+  type OperationContext,
+  type RegisterDescriptor,
+} from '../../core/index.js';
 import type { InferredCallee } from '../../reconstruction/source-model.js';
 import type { NativeParameterShape } from '../../analysis/types/memory-shapes.js';
 import type { DataType } from '../../ir/index.js';
@@ -52,7 +58,10 @@ export interface NativeWorklistResult<U extends NativeSummaryUnit> {
 }
 
 const unresolved = (): NativeInterface => ({
-  parameters: [], returns: [], parameter_state: 'ambiguous', argument_list_complete: false,
+  parameters: [],
+  returns: [],
+  parameter_state: 'ambiguous',
+  argument_list_complete: false,
 });
 
 /** Analyze only the direct dependency closure of the requested roots. Loading and
@@ -75,35 +84,58 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
   readonly max_functions: number;
   readonly max_refinements: number;
   /** Borrowed live maps for conservative recovery if optional work stops. */
-  readonly on_partial?: (units: ReadonlyMap<string, U>, summaries: ReadonlyMap<string, NativeSummary>) => void;
+  readonly on_partial?: (
+    units: ReadonlyMap<string, U>,
+    summaries: ReadonlyMap<string, NativeSummary>,
+  ) => void;
   readonly return_demands?: ReadonlyMap<string, readonly RegisterDescriptor[]>;
   /** Already analyzed selected bodies are reused if recursion reaches them. */
   readonly preloaded?: ReadonlyMap<string, U>;
   readonly load: (fn: FunctionRecord, context: OperationContext) => U;
-  readonly observe: (unit: U, dependencies: ReadonlyMap<string, NativeInterface>, context: OperationContext,
-    demandedReturns: readonly RegisterDescriptor[]) => NativeInterface;
+  readonly observe: (
+    unit: U,
+    dependencies: ReadonlyMap<string, NativeInterface>,
+    context: OperationContext,
+    demandedReturns: readonly RegisterDescriptor[],
+  ) => NativeInterface;
   readonly equal: (left: NativeInterface, right: NativeInterface) => boolean;
   /** Locally authored return witnesses seed recursive SCCs; no dependency output
    * may be treated as an authored witness. Normal observations validate all exits. */
-  readonly initialize: (unit: U, context: OperationContext, demandedReturns: readonly RegisterDescriptor[]) => NativeInterface;
+  readonly initialize: (
+    unit: U,
+    context: OperationContext,
+    demandedReturns: readonly RegisterDescriptor[],
+  ) => NativeInterface;
 }): NativeWorklistResult<U> {
   const { context } = options;
-  const units = new Map<string, U>(), summaries = new Map<string, NativeSummary>();
+  const units = new Map<string, U>(),
+    summaries = new Map<string, NativeSummary>();
   const scheduled = new Set<string>();
-  const pending: { readonly fn: FunctionRecord; readonly key: string; readonly assumptions?: NativeContext }[] = [];
-  const baselines = new Map<string, U>(), contextKeys = new Map<string, string>();
-  const contextCounts = new Map<string, number>(), fallbackReasons = new Map<string, string>();
+  const pending: {
+    readonly fn: FunctionRecord;
+    readonly key: string;
+    readonly assumptions?: NativeContext;
+  }[] = [];
+  const baselines = new Map<string, U>(),
+    contextKeys = new Map<string, string>();
+  const contextCounts = new Map<string, number>(),
+    fallbackReasons = new Map<string, string>();
   let contextCount = 0;
-  const failures = new Map<string, string[]>(), parents = new Map<string, Set<string>>();
-  const refinements = new Map<string, number>(), refinementLimits = new Map<string, string>();
+  const failures = new Map<string, string[]>(),
+    parents = new Map<string, Set<string>>();
+  const refinements = new Map<string, number>(),
+    refinementLimits = new Map<string, string>();
   const demands = new Map<string, Map<string, RegisterDescriptor>>();
   const demand = (id: string, registers: readonly RegisterDescriptor[]): void => {
     const known = demands.get(id) ?? new Map<string, RegisterDescriptor>();
     for (const register of registers) {
       context.checkpoint(1);
       const prior = known.get(register.root);
-      known.set(register.root, { ...register, offset_bits: 0,
-        width_bits: Math.max(prior?.width_bits ?? 0, register.offset_bits + register.width_bits) });
+      known.set(register.root, {
+        ...register,
+        offset_bits: 0,
+        width_bits: Math.max(prior?.width_bits ?? 0, register.offset_bits + register.width_bits),
+      });
     }
     demands.set(id, known);
   };
@@ -115,15 +147,22 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
     const prior = contextKeys.get(requested);
     if (prior) return prior;
     const count = contextCounts.get(fn.id) ?? 0;
-    if (assumptions && (!options.specialize || count >= (options.max_contexts_per_function ?? 4) ||
-        contextCount >= (options.max_contexts ?? 64))) {
+    if (
+      assumptions &&
+      (!options.specialize ||
+        count >= (options.max_contexts_per_function ?? 4) ||
+        contextCount >= (options.max_contexts ?? 64))
+    ) {
       fallbackReasons.set(fn.id, 'native context limit: conservative generic interface');
       assumptions = undefined;
     }
     const key = nativeContextKey(fn.id, assumptions);
     contextKeys.set(requested, key);
     if (scheduled.has(key)) return key;
-    if (assumptions) { contextCounts.set(fn.id, count + 1); contextCount++; }
+    if (assumptions) {
+      contextCounts.set(fn.id, count + 1);
+      contextCount++;
+    }
     scheduled.add(key);
     pending.push({ fn, key, ...(assumptions ? { assumptions } : {}) });
     return key;
@@ -139,14 +178,25 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
       failures.set(key, [`native dependency function limit (${options.max_functions})`]);
       continue;
     }
-    if (!prepared && (remaining.instructions <= 0 || remaining.blocks <= 0 || remaining.nodes <= 0)) {
-      const exhausted = (['instructions', 'blocks', 'nodes'] as const)
-        .filter((resource) => remaining[resource] <= 0);
+    if (
+      !prepared &&
+      (remaining.instructions <= 0 || remaining.blocks <= 0 || remaining.nodes <= 0)
+    ) {
+      const exhausted = (['instructions', 'blocks', 'nodes'] as const).filter(
+        (resource) => remaining[resource] <= 0,
+      );
       failures.set(key, [`native dependency ${exhausted.join('/')} capacity exhausted`]);
       continue;
     }
-    const bounded: OperationContext = { ...context, budget: { ...context.budget,
-      instructions: remaining.instructions, blocks: remaining.blocks, ir_nodes: remaining.nodes } };
+    const bounded: OperationContext = {
+      ...context,
+      budget: {
+        ...context.budget,
+        instructions: remaining.instructions,
+        blocks: remaining.blocks,
+        ir_nodes: remaining.nodes,
+      },
+    };
     let unit: U;
     try {
       unit = prepared ?? options.load(fn, bounded);
@@ -154,36 +204,64 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
       const details = error instanceof OperationError ? error.diagnostic.details : undefined;
       // Only this optional dependency's capacities are recoverable. Cancellation,
       // deadlines, selected-body failures and the outer work limit still escape.
-      const local = details?.kind === 'limit' && (
-        (details.resource === 'ir_nodes' && details.limit === remaining.nodes) ||
-        (details.resource === 'blocks' && details.limit === remaining.blocks) ||
-        (details.resource === 'instructions' && details.limit === remaining.instructions));
-      if (!(error instanceof OperationError) || error.code !== 'resource_limit' || !local) throw error;
+      const local =
+        details?.kind === 'limit' &&
+        ((details.resource === 'ir_nodes' && details.limit === remaining.nodes) ||
+          (details.resource === 'blocks' && details.limit === remaining.blocks) ||
+          (details.resource === 'instructions' && details.limit === remaining.instructions));
+      if (!(error instanceof OperationError) || error.code !== 'resource_limit' || !local)
+        throw error;
       context.checkpoint(0);
       failures.set(key, [`native dependency ${details.resource} limit (${details.limit})`]);
       continue;
     }
-    if (!prepared && (unit.instructions > remaining.instructions || unit.blocks > remaining.blocks ||
-        unit.required_nodes > remaining.nodes)) {
-      failures.set(key, ['native dependency loader exceeded its reserved instruction/block/IR capacity']);
+    if (
+      !prepared &&
+      (unit.instructions > remaining.instructions ||
+        unit.blocks > remaining.blocks ||
+        unit.required_nodes > remaining.nodes)
+    ) {
+      failures.set(key, [
+        'native dependency loader exceeded its reserved instruction/block/IR capacity',
+      ]);
       continue;
     }
-    if (!prepared) remaining = { instructions: remaining.instructions - unit.instructions,
-      blocks: remaining.blocks - unit.blocks, nodes: remaining.nodes - unit.nodes };
+    if (!prepared)
+      remaining = {
+        instructions: remaining.instructions - unit.instructions,
+        blocks: remaining.blocks - unit.blocks,
+        nodes: remaining.nodes - unit.nodes,
+      };
     baselines.set(fn.id, unit);
     if (assumptions && options.specialize) {
       try {
-        unit = options.specialize(unit, assumptions, { ...context, budget: { ...context.budget,
-          ir_nodes: remaining.nodes, blocks: remaining.blocks } });
-        remaining = { ...remaining, nodes: remaining.nodes - unit.nodes, blocks: remaining.blocks - unit.blocks };
+        unit = options.specialize(unit, assumptions, {
+          ...context,
+          budget: { ...context.budget, ir_nodes: remaining.nodes, blocks: remaining.blocks },
+        });
+        remaining = {
+          ...remaining,
+          nodes: remaining.nodes - unit.nodes,
+          blocks: remaining.blocks - unit.blocks,
+        };
       } catch (error) {
         const details = error instanceof OperationError ? error.diagnostic.details : undefined;
-        if (!(error instanceof OperationError) || error.code !== 'resource_limit' || details?.kind !== 'limit' ||
-          !((details.resource === 'ir_nodes' && details.limit === remaining.nodes) ||
-            (details.resource === 'blocks' && details.limit === remaining.blocks))) throw error;
+        if (
+          !(error instanceof OperationError) ||
+          error.code !== 'resource_limit' ||
+          details?.kind !== 'limit' ||
+          !(
+            (details.resource === 'ir_nodes' && details.limit === remaining.nodes) ||
+            (details.resource === 'blocks' && details.limit === remaining.blocks)
+          )
+        )
+          throw error;
         context.checkpoint(0);
         unit = baselines.get(fn.id)!;
-        fallbackReasons.set(key, `native context ${details.resource} capacity: conservative generic interface`);
+        fallbackReasons.set(
+          key,
+          `native context ${details.resource} capacity: conservative generic interface`,
+        );
       }
     }
     units.set(key, unit);
@@ -198,15 +276,19 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
       demand(dependencyKey, dependency.return_demand ?? []);
     }
   }
-  for (const [id, unit] of units) summaries.set(id, {
-    observed: options.initialize(unit, context, [...(demands.get(id)?.values() ?? [])]),
-    evidence_ids: unit.evidence_ids, reasons: unit.reasons, complete: false,
-  });
+  for (const [id, unit] of units)
+    summaries.set(id, {
+      observed: options.initialize(unit, context, [...(demands.get(id)?.values() ?? [])]),
+      evidence_ids: unit.evidence_ids,
+      reasons: unit.reasons,
+      complete: false,
+    });
   options.on_partial?.(units, summaries);
 
   // A changed callee schedules only its direct callers. Self/mutual recursion use
   // the same finite queue and the same shared operation/work clock as all roots.
-  const queue = [...units.keys()], queued = new Set(queue);
+  const queue = [...units.keys()],
+    queued = new Set(queue);
   for (let cursor = 0; cursor < queue.length; cursor++) {
     context.checkpoint(1);
     const id = queue[cursor]!;
@@ -221,10 +303,14 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
     const dependencies = new Map<string, NativeInterface>();
     for (const dependency of unit.dependencies) {
       context.checkpoint(1);
-      const key = contextKeys.get(nativeContextKey(dependency.target.id, dependency.assumptions)) ?? dependency.target.id;
+      const key =
+        contextKeys.get(nativeContextKey(dependency.target.id, dependency.assumptions)) ??
+        dependency.target.id;
       dependencies.set(dependency.call_id, summaries.get(key)?.observed ?? unresolved());
     }
-    const observed = options.observe(unit, dependencies, context, [...(demands.get(id)?.values() ?? [])]),
+    const observed = options.observe(unit, dependencies, context, [
+        ...(demands.get(id)?.values() ?? []),
+      ]),
       previous = summaries.get(id)!;
     if (options.equal(previous.observed, observed)) continue;
     summaries.set(id, { ...previous, observed });
@@ -241,22 +327,32 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
   // dependencies are closed; recursion alone is not an unavailable-semantics gap.
   const reasons = new Map<string, Set<string>>();
   for (const [id, unit] of units) {
-    reasons.set(id, new Set([
-      ...unit.reasons,
-      ...(fallbackReasons.has(id) ? [fallbackReasons.get(id)!] : []),
-      ...(refinementLimits.has(id) ? [refinementLimits.get(id)!] : []),
-      ...(unit.budget_truncated ? ['native dependency graph instruction budget truncated'] : []),
-    ]));
+    reasons.set(
+      id,
+      new Set([
+        ...unit.reasons,
+        ...(fallbackReasons.has(id) ? [fallbackReasons.get(id)!] : []),
+        ...(refinementLimits.has(id) ? [refinementLimits.get(id)!] : []),
+        ...(unit.budget_truncated ? ['native dependency graph instruction budget truncated'] : []),
+      ]),
+    );
   }
-  const reasonQueue = [...units.keys()], reasonQueued = new Set(reasonQueue);
+  const reasonQueue = [...units.keys()],
+    reasonQueued = new Set(reasonQueue);
   for (let cursor = 0; cursor < reasonQueue.length; cursor++) {
     context.checkpoint(1);
-    const id = reasonQueue[cursor]!, unit = units.get(id)!, own = reasons.get(id)!;
+    const id = reasonQueue[cursor]!,
+      unit = units.get(id)!,
+      own = reasons.get(id)!;
     reasonQueued.delete(id);
     let changed = false;
     for (const dependency of unit.dependencies) {
-      const key = contextKeys.get(nativeContextKey(dependency.target.id, dependency.assumptions)) ?? dependency.target.id;
-      const inherited = reasons.get(key) ?? new Set(failures.get(key) ?? ['native dependency interface unavailable']);
+      const key =
+        contextKeys.get(nativeContextKey(dependency.target.id, dependency.assumptions)) ??
+        dependency.target.id;
+      const inherited =
+        reasons.get(key) ??
+        new Set(failures.get(key) ?? ['native dependency interface unavailable']);
       for (const reason of inherited) {
         context.checkpoint(1);
         const qualified = `${dependency.target.original_name ?? dependency.target.id}: ${reason}`;
@@ -277,13 +373,24 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
   }
   for (const [id, summary] of summaries) {
     const limits = [...reasons.get(id)!].sort();
-    summaries.set(id, { ...summary, reasons: limits, complete: limits.length === 0 &&
-      summary.observed.parameter_state !== 'ambiguous' });
+    summaries.set(id, {
+      ...summary,
+      reasons: limits,
+      complete: limits.length === 0 && summary.observed.parameter_state !== 'ambiguous',
+    });
   }
-  for (const [id, limits] of failures) summaries.set(id, {
-    observed: unresolved(), evidence_ids: pending.find((entry) => entry.key === id)?.fn.evidence_ids ?? [],
-    reasons: limits, complete: false,
-  });
-  return { units, summaries, context_keys: contextKeys, remaining,
-    complete: [...summaries.values()].every((summary) => summary.complete) };
+  for (const [id, limits] of failures)
+    summaries.set(id, {
+      observed: unresolved(),
+      evidence_ids: pending.find((entry) => entry.key === id)?.fn.evidence_ids ?? [],
+      reasons: limits,
+      complete: false,
+    });
+  return {
+    units,
+    summaries,
+    context_keys: contextKeys,
+    remaining,
+    complete: [...summaries.values()].every((summary) => summary.complete),
+  };
 }

@@ -28,11 +28,7 @@ export function planSourceStack(
   returns: ReadonlyMap<string, BoundaryProjection>,
   alias: (value: Value, expression: Expression) => void,
   context: OperationContext,
-  incomingStack: (
-    offset: bigint,
-    type: DataType,
-    contributors: readonly Value[],
-  ) => Value | null,
+  incomingStack: (offset: bigint, type: DataType, contributors: readonly Value[]) => Value | null,
   entryStack: () => Value,
   validation = new LocalValidationSession(context),
 ) {
@@ -163,8 +159,7 @@ export function planSourceStack(
         if (projection.kind === 'inferred' && writtenStack)
           calls.set(node.id, { ...projection, argument_list_complete: false });
       }
-      if (node.kind === 'call' && calls.get(node.id)!.kind !== 'source')
-        unknownCallStorage = true;
+      if (node.kind === 'call' && calls.get(node.id)!.kind !== 'source') unknownCallStorage = true;
       if (
         node.kind === 'call' &&
         (calls.get(node.id)!.kind === 'physical' ||
@@ -197,13 +192,20 @@ export function planSourceStack(
   const outgoingRanges = (input.types?.calls?.calls ?? []).flatMap((call) =>
     call.contracts
       .filter((contract) => contract.status === 'established')
-      .flatMap((contract) => contract.parameters.flatMap((parameter) =>
-        parameter.locations.flatMap((observation) =>
-          observation.location.kind === 'stack' && observation.stack_offset !== null
-            ? [{ start: observation.stack_offset, end: observation.stack_offset + observation.location.size }]
-            : [],
+      .flatMap((contract) =>
+        contract.parameters.flatMap((parameter) =>
+          parameter.locations.flatMap((observation) =>
+            observation.location.kind === 'stack' && observation.stack_offset !== null
+              ? [
+                  {
+                    start: observation.stack_offset,
+                    end: observation.stack_offset + observation.location.size,
+                  },
+                ]
+              : [],
+          ),
         ),
-      )),
+      ),
   );
   const groups = new Map<string, typeof accesses>();
   for (const access of accesses) {
@@ -211,7 +213,8 @@ export function planSourceStack(
     group.push(access);
     groups.set(access.key, group);
   }
-  const aliased = facts?.frame.aliased === true ||
+  const aliased =
+    facts?.frame.aliased === true ||
     memory.some((node) => node.kind === 'store' && !addresses.has(node.address.id));
   const eligible = new Set<string>();
   if (!escaped && !unknownCallStorage && !aliased)
@@ -331,21 +334,29 @@ export function planSourceStack(
         classifyStackRegion(input.source!.abi, first.offset, first.end - first.offset) !==
           'incoming_candidate' ||
         group.some((access) => access.node.kind !== 'load' || access.node.access.volatile) ||
-        accesses.some((access) =>
-          access.key !== first.key && access.offset < first.end && access.end > first.offset,
+        accesses.some(
+          (access) =>
+            access.key !== first.key && access.offset < first.end && access.end > first.offset,
         ) ||
         memory.some((node) => node.kind === 'store' && !addresses.has(node.address.id))
       )
         continue;
       const loads = group.map((access) => access.node as Extract<Instruction, { kind: 'load' }>);
-      if (loads.some((node) =>
-        !sameType(node.result.type, loads[0]!.result.type) ||
-        node.access.endian !== input.source!.abi.layout.endian ||
-        facts?.snapshots.get(node.id)?.aliased ||
-        facts?.snapshots.get(node.id)?.escaped,
-      ))
+      if (
+        loads.some(
+          (node) =>
+            !sameType(node.result.type, loads[0]!.result.type) ||
+            node.access.endian !== input.source!.abi.layout.endian ||
+            facts?.snapshots.get(node.id)?.aliased ||
+            facts?.snapshots.get(node.id)?.escaped,
+        )
+      )
         continue;
-      const value = incomingStack(first.offset, loads[0]!.result.type, loads.map((node) => node.result));
+      const value = incomingStack(
+        first.offset,
+        loads[0]!.result.type,
+        loads.map((node) => node.result),
+      );
       if (!value) continue;
       for (const node of loads) {
         hidden.add(node.id);
@@ -360,17 +371,34 @@ export function planSourceStack(
       loads.every((access) => before.get(access.node.id) !== null) &&
       (acyclic || group.every((access) => access.block === group[0]!.block));
     const subjects = [group[0]!.node.id];
-    const checked = validation.check('stack-promotion', `stack:${key}`, 'private stack promotion', () => {
-      const members = new Set<string>(), proposed = new Map<string, Value>();
-      for (const access of group) {
-        validation.allowance.charge();
-        members.add(access.node.id);
-        if (subjects.length < 64 && access.node.id !== subjects[0]) subjects.push(access.node.id);
-        if (forwarded && access.node.kind === 'load') proposed.set(access.node.id, before.get(access.node.id)!);
-      }
-      return validateStackPromotion(`stack:${key}`, input.function.entry, blocks, transfers, addresses,
-        members, forwarded ? proposed : null, expressions, validation.allowance);
-    }, subjects);
+    const checked = validation.check(
+      'stack-promotion',
+      `stack:${key}`,
+      'private stack promotion',
+      () => {
+        const members = new Set<string>(),
+          proposed = new Map<string, Value>();
+        for (const access of group) {
+          validation.allowance.charge();
+          members.add(access.node.id);
+          if (subjects.length < 64 && access.node.id !== subjects[0]) subjects.push(access.node.id);
+          if (forwarded && access.node.kind === 'load')
+            proposed.set(access.node.id, before.get(access.node.id)!);
+        }
+        return validateStackPromotion(
+          `stack:${key}`,
+          input.function.entry,
+          blocks,
+          transfers,
+          addresses,
+          members,
+          forwarded ? proposed : null,
+          expressions,
+          validation.allowance,
+        );
+      },
+      subjects,
+    );
     if (checked.status === 'rejected') continue;
     if (forwarded) {
       for (const access of group) {
@@ -394,14 +422,20 @@ export function planSourceStack(
       }
     }
   }
-  const dynamicStorage = memory.some((node) =>
-    tainted.has(node.address.id) && !addresses.has(node.address.id),
+  const dynamicStorage = memory.some(
+    (node) => tainted.has(node.address.id) && !addresses.has(node.address.id),
   );
   const sharedEntry = escaped || aliased || dynamicStorage;
-  const entryAddresses = new Set(accesses.filter((access) =>
-    !hidden.has(access.node.id) &&
-    classifyStackRegion(input.source!.abi, access.offset, access.end - access.offset) !== 'local_candidate',
-  ).map((access) => access.node.address.id));
+  const entryAddresses = new Set(
+    accesses
+      .filter(
+        (access) =>
+          !hidden.has(access.node.id) &&
+          classifyStackRegion(input.source!.abi, access.offset, access.end - access.offset) !==
+            'local_candidate',
+      )
+      .map((access) => access.node.address.id),
+  );
   const entryStorage = sharedEntry || entryAddresses.size ? entryStack() : null;
   const requiresEntry = (id: string): boolean => sharedEntry || entryAddresses.has(id);
   if (entryStorage)
@@ -423,7 +457,10 @@ export function planSourceStack(
       access.end <= input.source!.abi.stack_return_address_bytes
     )
       returnAddressLoads.set(access.node.result.id, { node: access.node, block: access.block });
-  const frame = (retained: ReadonlySet<string>, live: ReadonlySet<string>): SourceStackStorage | null => {
+  const frame = (
+    retained: ReadonlySet<string>,
+    live: ReadonlySet<string>,
+  ): SourceStackStorage | null => {
     const remaining = accesses.filter(
       (access) =>
         retained.has(access.node.id) && !hidden.has(access.node.id) && !locals.has(access.node.id),
@@ -453,5 +490,14 @@ export function planSourceStack(
         }
       : null;
   };
-  return { hidden, privateLoads, locals, addresses, returnAddressLoads, frame, entryStorage, requiresEntry };
+  return {
+    hidden,
+    privateLoads,
+    locals,
+    addresses,
+    returnAddressLoads,
+    frame,
+    entryStorage,
+    requiresEntry,
+  };
 }

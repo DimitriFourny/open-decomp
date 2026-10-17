@@ -223,11 +223,14 @@ export function verifyIR(
   };
   // Generated nodes deliberately share immutable provenance. Validate that
   // payload once per invocation, but retain every node-specific diagnostic.
-  const provenanceFacts = new WeakMap<Origin['provenance'], {
-    readonly missing: boolean;
-    readonly invalid: boolean;
-    readonly missing_range: boolean;
-  }>();
+  const provenanceFacts = new WeakMap<
+    Origin['provenance'],
+    {
+      readonly missing: boolean;
+      readonly invalid: boolean;
+      readonly missing_range: boolean;
+    }
+  >();
   const origin = (node: Origin): void => {
     identify(node.id);
     const p = node.provenance;
@@ -242,14 +245,18 @@ export function verifyIR(
           p.instruction_ids.some((id) => !entityIdSchema.safeParse(id).success) ||
           p.evidence_ids.some((id) => !evidenceIdSchema.safeParse(id).success) ||
           p.synthetic.some((reason) => reason.trim().length === 0) ||
-          p.ranges.some((range) => !machineRangeSchema.safeParse(range).success || range.size === 0n),
+          p.ranges.some(
+            (range) => !machineRangeSchema.safeParse(range).success || range.size === 0n,
+          ),
         missing_range: p.instruction_ids.length > 0 && p.ranges.length === 0,
       };
       provenanceFacts.set(p, facts);
     } else checkpoint?.(0);
     if (facts.missing) report('provenance', node.id, 'Missing instruction or synthetic origin');
-    if (facts.invalid) report('provenance', node.id, 'Invalid source identity, range, evidence or justification');
-    if (facts.missing_range) report('provenance', node.id, 'Instruction origin needs a source range');
+    if (facts.invalid)
+      report('provenance', node.id, 'Invalid source identity, range, evidence or justification');
+    if (facts.missing_range)
+      report('provenance', node.id, 'Instruction origin needs a source range');
   };
   const registerRoots = new Map<string, number>();
   const registers = new Map<string, RegisterDescriptor>();
@@ -269,8 +276,10 @@ export function verifyIR(
         return false;
       }
       const errors: string[] = [];
-      if (r.write_rule === 'replace_root' &&
-        (r.offset_bits !== 0 || r.width_bits !== r.root_width_bits))
+      if (
+        r.write_rule === 'replace_root' &&
+        (r.offset_bits !== 0 || r.width_bits !== r.root_width_bits)
+      )
         errors.push('replace_root must cover the root');
       if (r.write_rule === 'zero_extend_root' && r.offset_bits !== 0)
         errors.push('zero_extend_root must start at bit zero');
@@ -278,14 +287,18 @@ export function verifyIR(
       if (Object.isFrozen(r)) {
         const fields = Object.getOwnPropertyDescriptors(r);
         // Frozen accessors/inherited fields are not immutable descriptor data.
-        const flat = Reflect.ownKeys(fields).every((key) => {
-          const field = fields[key as keyof typeof fields]!;
-          return 'value' in field &&
-            (typeof field.value === 'string' || typeof field.value === 'number');
-        }) && Object.keys(parsed.data).every((key) => {
-          const field = fields[key];
-          return field !== undefined && 'value' in field;
-        });
+        const flat =
+          Reflect.ownKeys(fields).every((key) => {
+            const field = fields[key as keyof typeof fields]!;
+            return (
+              'value' in field &&
+              (typeof field.value === 'string' || typeof field.value === 'number')
+            );
+          }) &&
+          Object.keys(parsed.data).every((key) => {
+            const field = fields[key];
+            return field !== undefined && 'value' in field;
+          });
         if (flat) registerFacts.set(r, facts);
       }
     }
@@ -327,7 +340,8 @@ export function verifyIR(
     let canonical = tracked !== undefined && bindings.length === layoutDescriptors.length;
     let invalid: Set<number> | undefined;
     for (let index = 0; index < bindings.length; index++) {
-      const binding = bindings[index]!, r = binding.register;
+      const binding = bindings[index]!,
+        r = binding.register;
       if (initial) layoutDescriptors.push(r);
       if (!register(r, node)) {
         canonical = false;
@@ -375,7 +389,10 @@ export function verifyIR(
     expected: ReadonlyMap<string, bigint>,
     node: string,
   ): void => {
-    if (actual === expected) { checkpoint?.(0); return; }
+    if (actual === expected) {
+      checkpoint?.(0);
+      return;
+    }
     checkpoint?.(expected.size);
     if (
       actual.size !== expected.size ||
@@ -420,8 +437,10 @@ export function verifyIR(
     const reference = (v: Value | Effect, node: string): void => {
       checkpoint?.(1);
       const type = local.get(v.id);
-      if (!type && v.type.kind !== 'effect') remote.push({ value: v as Value, block: block.id, node });
-      else if (!type) report('reference', node, `Undefined, forward or nondominating value ${v.id}`);
+      if (!type && v.type.kind !== 'effect')
+        remote.push({ value: v as Value, block: block.id, node });
+      else if (!type)
+        report('reference', node, `Undefined, forward or nondominating value ${v.id}`);
       else if (!sameType(type, v.type))
         report('type', node, 'Reference type differs from its definition');
     };

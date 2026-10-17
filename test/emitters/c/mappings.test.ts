@@ -60,7 +60,9 @@ for (const language of ['c-like', 'python-like'] as const)
       const final = optimized.value.blocks[0]!.instructions.find(
         (node) => node.kind === 'assign' && node.result.id === sum.id,
       )!;
-      const mapping = expandEmission(output.emission).mappings.find((item) => item.statement_id === final.id)!;
+      const mapping = expandEmission(output.emission).mappings.find(
+        (item) => item.statement_id === final.id,
+      )!;
       assert.ok(mapping);
       assert.deepEqual(
         new Set(mapping.instruction_ids),

@@ -102,14 +102,19 @@ export function checkExecutableSource(
   directory: string,
 ): void {
   const python = emission.language === 'python-like';
-  const functionName = python ? /^def\s+([A-Za-z_]\w*)\(/m.exec(emission.text)?.[1]
+  const functionName = python
+    ? /^def\s+([A-Za-z_]\w*)\(/m.exec(emission.text)?.[1]
     : /^uint(?:32|64)_t\s+([A-Za-z_]\w*)\(/m.exec(emission.text)?.[1];
   assert.ok(functionName, 'declared executable subset has one scalar function');
   const formals = emittedFormals(emission);
-  assert.ok(formals.every((formal) => formal.name !== 'entry_sp'), 'this subset has no unknown entry storage');
+  assert.ok(
+    formals.every((formal) => formal.name !== 'entry_sp'),
+    'this subset has no unknown entry storage',
+  );
   const stem = `${functionName}-${emission.language}`;
   const path = join(directory, `${stem}.${python ? 'py' : 'c'}`);
-  const integer = (value: bigint): string => `0x${BigInt.asUintN(64, value).toString(16)}${python ? '' : 'ULL'}`;
+  const integer = (value: bigint): string =>
+    `0x${BigInt.asUintN(64, value).toString(16)}${python ? '' : 'ULL'}`;
   const runners: string[] = [];
   for (const [index, scenario] of cases.entries()) {
     assert.equal(scenario.arguments.length, formals.length);
@@ -117,23 +122,35 @@ export function checkExecutableSource(
     const memory = scenario.memory;
     if (python) {
       if (memory) {
-        runners.push(`memory = _Memory(${memory.bits}, [${memory.values.map(integer).join(', ')}])`);
+        runners.push(
+          `memory = _Memory(${memory.bits}, [${memory.values.map(integer).join(', ')}])`,
+        );
         arguments_[0] = 'memory.base';
       }
       runners.push(`result = ${functionName}(${arguments_.join(', ')})`);
-      runners.push(memory
-        ? `print(' '.join(format(value, 'x') for value in [uint64(result)] + memory.values(${memory.bits})))`
-        : "print(format(uint64(result), 'x'))");
+      runners.push(
+        memory
+          ? `print(' '.join(format(value, 'x') for value in [uint64(result)] + memory.values(${memory.bits})))`
+          : "print(format(uint64(result), 'x'))",
+      );
     } else {
       if (memory) {
-        runners.push(`uint${memory.bits}_t values_${index}[] = {${memory.values.length ? memory.values.map(integer).join(', ') : '0'}};`);
+        runners.push(
+          `uint${memory.bits}_t values_${index}[] = {${memory.values.length ? memory.values.map(integer).join(', ') : '0'}};`,
+        );
         const first = formals[0]!;
-        const mapping = emission.mappings.find((mapping) => emission.ids[mapping.semantic_refs[0]!] === first.statement_id);
+        const mapping = emission.mappings.find(
+          (mapping) => emission.ids[mapping.semantic_refs[0]!] === first.statement_id,
+        );
         assert.ok(mapping);
         const declaration = emission.text.slice(mapping.start, mapping.end);
-        arguments_[0] = declaration.includes('*') ? `(void *)values_${index}` : `(uintptr_t)values_${index}`;
+        arguments_[0] = declaration.includes('*')
+          ? `(void *)values_${index}`
+          : `(uintptr_t)values_${index}`;
       }
-      runners.push(`printf("%llx", (unsigned long long)${functionName}(${arguments_.join(', ')}));`);
+      runners.push(
+        `printf("%llx", (unsigned long long)${functionName}(${arguments_.join(', ')}));`,
+      );
       if (memory)
         for (let offset = 0; offset < memory.values.length; offset++)
           runners.push(`printf(" %llx", (unsigned long long)values_${index}[${offset}]);`);
@@ -148,15 +165,35 @@ export function checkExecutableSource(
     : `${cHelpers}\n${opaqueTags.map((name) => `typedef struct ${name} ${name};`).join('\n')}\n${emission.text}\nint main(void) {\n${runners.join('\n')}\nreturn 0;\n}\n`;
   writeFileSync(path, source);
   const executable = join(directory, stem);
-  const compile = spawnSync(python ? 'python3' : '/usr/bin/clang', python
-    ? ['-m', 'py_compile', path]
-    : ['-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', path, '-o', executable],
-  { encoding: 'utf8', timeout: 30000 });
+  const compile = spawnSync(
+    python ? 'python3' : '/usr/bin/clang',
+    python
+      ? ['-m', 'py_compile', path]
+      : ['-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', path, '-o', executable],
+    { encoding: 'utf8', timeout: 30000 },
+  );
   assert.equal(compile.status, 0, `${compile.error ?? ''}\n${compile.stderr}`);
-  const run = spawnSync(python ? 'python3' : executable, python ? [path] : [], { encoding: 'utf8', timeout: 10000 });
+  const run = spawnSync(python ? 'python3' : executable, python ? [path] : [], {
+    encoding: 'utf8',
+    timeout: 10000,
+  });
   assert.equal(run.status, 0, `${run.error ?? ''}\n${run.stderr}`);
-  const observed = run.stdout.trim().split('\n').map((line) => line.trim().split(/\s+/).map((value) => BigInt(`0x${value}`)));
-  const expected = cases.map((scenario) => [scenario.expected,
-    ...(scenario.memory?.expected ?? scenario.memory?.values ?? [])]);
-  assert.deepEqual(observed, expected, 'real compiled output agrees with the independent source oracle');
+  const observed = run.stdout
+    .trim()
+    .split('\n')
+    .map((line) =>
+      line
+        .trim()
+        .split(/\s+/)
+        .map((value) => BigInt(`0x${value}`)),
+    );
+  const expected = cases.map((scenario) => [
+    scenario.expected,
+    ...(scenario.memory?.expected ?? scenario.memory?.values ?? []),
+  ]);
+  assert.deepEqual(
+    observed,
+    expected,
+    'real compiled output agrees with the independent source oracle',
+  );
 }

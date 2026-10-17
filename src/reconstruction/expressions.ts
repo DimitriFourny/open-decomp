@@ -272,8 +272,11 @@ export function foldExpressions(
     if (e.kind === 'cast' && ['truncate', 'zero_extend', 'sign_extend'].includes(e.op)) {
       const source = observe(resolve(e.value).id);
       if (source?.kind === 'cast') {
-        if (sameType(node.result.type, source.value.type) && e.op === 'truncate' &&
-          (source.op === 'zero_extend' || source.op === 'sign_extend'))
+        if (
+          sameType(node.result.type, source.value.type) &&
+          e.op === 'truncate' &&
+          (source.op === 'zero_extend' || source.op === 'sign_extend')
+        )
           return alias(source.value);
         if (e.op === source.op && (e.op === 'zero_extend' || e.op === 'sign_extend'))
           return { ...e, value: source.value };
@@ -285,9 +288,11 @@ export function foldExpressions(
       const source = observe(resolve(e.value).id);
       if (source?.kind === 'extract')
         return { kind: 'extract', value: source.value, offset: source.offset + e.offset };
-      if (source?.kind === 'cast' &&
+      if (
+        source?.kind === 'cast' &&
         ['truncate', 'zero_extend', 'sign_extend'].includes(source.op) &&
-        e.offset + bitWidth(node.result.type) <= bitWidth(source.value.type))
+        e.offset + bitWidth(node.result.type) <= bitWidth(source.value.type)
+      )
         return e.offset === 0 && sameType(node.result.type, source.value.type)
           ? alias(source.value)
           : { kind: 'extract', value: source.value, offset: e.offset };
@@ -298,10 +303,12 @@ export function foldExpressions(
       // Recompose before source-width distribution rewrites the low slice of an
       // arithmetic result. Keeping its original full-width value preserves carry
       // bits and avoids exposing independently recomputed register-cell halves.
-      let offset = 0, base: Value | undefined;
+      let offset = 0,
+        base: Value | undefined;
       for (const part of e.values) {
         context.checkpoint(1);
-        const value = resolve(part), source = observe(value.id);
+        const value = resolve(part),
+          source = observe(value.id);
         if (source?.kind !== 'extract' || source.offset !== offset) return e;
         const original = resolve(source.value);
         if (base && base.id !== original.id) return e;

@@ -27,9 +27,15 @@ test('SSA parameters scale with merges, not blocks times registers', () => {
   assert.deepEqual(verifyIR(result.value), []);
   const [entry, ...rest] = result.value.blocks;
   assert.equal(entry!.parameters.length, 64, 'The entry binds every physical input');
-  assert.ok(rest.every((block) => block.parameters.length === 0), 'A chain has no merges');
-  assert.ok(result.value.register_states.slice(1).every((row) =>
-    row.entry.length === 0 && (row.exit.length === 0 || row.exit.length === 64)));
+  assert.ok(
+    rest.every((block) => block.parameters.length === 0),
+    'A chain has no merges',
+  );
+  assert.ok(
+    result.value.register_states
+      .slice(1)
+      .every((row) => row.entry.length === 0 && (row.exit.length === 0 || row.exit.length === 64)),
+  );
 });
 
 test('SSA construction fails transactionally under a node budget', () => {

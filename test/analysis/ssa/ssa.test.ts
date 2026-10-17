@@ -226,7 +226,8 @@ test('indexed register slices preserve partial writes without scanning unrelated
   const ir = builder('ssa-root-index-budget');
   const entry = ir.block('entry');
   const roots = Array.from({ length: 64 }, (_, index) =>
-    register(`root-${index}`, 64, 0, 'replace_root', `independent-root-${index}`));
+    register(`root-${index}`, 64, 0, 'replace_root', `independent-root-${index}`),
+  );
   for (const [index, root] of roots.entries())
     entry.writeRegister(root, entry.constant(i64, index ? BigInt(index) : 0x1122334455667788n));
   const middle = register('middle-slice', 16, 16, 'preserve_other_bits', roots[0]!.root);

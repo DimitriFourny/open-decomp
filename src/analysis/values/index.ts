@@ -93,7 +93,8 @@ function propagate(
     if (block.terminator.kind === 'branch') connect(users, block.terminator.condition, block.id);
     else if (block.terminator.kind === 'switch') connect(users, block.terminator.value, block.id);
   }
-  const queue: BasicBlock[] = [], queued = new Set<EntityId>();
+  const queue: BasicBlock[] = [],
+    queued = new Set<EntityId>();
   const enqueue = (id: EntityId): void => {
     if (queued.has(id)) return;
     queued.add(id);
@@ -104,8 +105,11 @@ function propagate(
   const change = (value: Value, fact: ValueFact | undefined): boolean => {
     if (!fact) return false;
     const previous = facts.get(value.id);
-    if (previous?.kind === 'varying' ||
-      (previous?.kind === 'constant' && fact.kind === 'constant' && previous.bits === fact.bits)) return false;
+    if (
+      previous?.kind === 'varying' ||
+      (previous?.kind === 'constant' && fact.kind === 'constant' && previous.bits === fact.bits)
+    )
+      return false;
     facts.set(value.id, previous ? varying : fact);
     notifications.push(value.id);
     return true;
@@ -154,7 +158,10 @@ function propagate(
       if (expression.kind === 'select') {
         const condition = facts.get(expression.condition.id);
         if (condition?.kind === 'constant') {
-          update(node.result, facts.get((condition.bits === 0n ? expression.when_false : expression.when_true).id));
+          update(
+            node.result,
+            facts.get((condition.bits === 0n ? expression.when_false : expression.when_true).id),
+          );
           continue;
         }
       }
@@ -166,23 +173,36 @@ function propagate(
       if (inputs.some((fact) => !fact)) continue;
       const result = evaluateExpression(node.result.type, expression, (value) => {
         const fact = facts.get(value.id)!;
-        return fact.kind === 'constant' ? { kind: 'bits', bits: fact.bits } :
-          { kind: 'unknown', reason: 'Nonconstant analysis operand' };
+        return fact.kind === 'constant'
+          ? { kind: 'bits', bits: fact.bits }
+          : { kind: 'unknown', reason: 'Nonconstant analysis operand' };
       });
-      update(node.result, result.kind === 'bits' ? { kind: 'constant', bits: result.bits } : varying);
+      update(
+        node.result,
+        result.kind === 'bits' ? { kind: 'constant', bits: result.bits } : varying,
+      );
     }
     const terminator = block.terminator;
     let selected: readonly Edge[];
     if (terminator.kind === 'branch') {
       const condition = facts.get(terminator.condition.id);
-      selected = condition?.kind === 'constant'
-        ? [condition.bits === 0n ? terminator.when_false : terminator.when_true]
-        : condition ? successors(terminator) : [];
+      selected =
+        condition?.kind === 'constant'
+          ? [condition.bits === 0n ? terminator.when_false : terminator.when_true]
+          : condition
+            ? successors(terminator)
+            : [];
     } else if (terminator.kind === 'switch') {
       const selector = facts.get(terminator.value.id);
-      selected = selector?.kind === 'constant'
-        ? [terminator.cases.find((item) => item.bits === selector.bits)?.edge ?? terminator.otherwise]
-        : selector ? successors(terminator) : [];
+      selected =
+        selector?.kind === 'constant'
+          ? [
+              terminator.cases.find((item) => item.bits === selector.bits)?.edge ??
+                terminator.otherwise,
+            ]
+          : selector
+            ? successors(terminator)
+            : [];
     } else selected = successors(terminator);
     for (const edge of selected) {
       budget.charge();
@@ -199,7 +219,8 @@ function propagate(
         const row = phiUsers.get(argument.id) ?? [];
         row.push({ edge, index });
         phiUsers.set(argument.id, row);
-        changed = change(blocks.get(edge.target)!.parameters[index]!, facts.get(argument.id)) || changed;
+        changed =
+          change(blocks.get(edge.target)!.parameters[index]!, facts.get(argument.id)) || changed;
       });
       flush();
       if (changed || newlyReachable) enqueue(edge.target);
@@ -366,7 +387,8 @@ export function simplifySSA(
   const budget = new AnalysisBudget(options);
   let current = input;
   try {
-    let changed = true, first = true;
+    let changed = true,
+      first = true;
     while (changed) {
       budget.charge();
       const analysis = {
@@ -378,9 +400,10 @@ export function simplifySSA(
       const rewritten = rewrite(current, analysis, budget);
       const copies = propagateCopies(rewritten.value, budget);
       // Parameters become trivial only when edges or values change.
-      const trivial = first || rewritten.changed || copies.changed
-        ? eliminateTrivialParameters(copies.value, budget)
-        : { value: copies.value, changed: false };
+      const trivial =
+        first || rewritten.changed || copies.changed
+          ? eliminateTrivialParameters(copies.value, budget)
+          : { value: copies.value, changed: false };
       first = false;
       changed = rewritten.changed || copies.changed || trivial.changed;
       current = trivial.value;
@@ -558,8 +581,10 @@ function rewrite(
     const state = states.get(block.id);
     for (const binding of [...(state?.entry ?? []), ...(state?.exit ?? [])]) pin(binding.value);
     // One ordered union per block (same order as successive pairwise merges).
-    const provenance = removed.length === 0 ? block.provenance
-      : mergeProvenanceSources([block.provenance, ...removed], (work) => budget.charge(work));
+    const provenance =
+      removed.length === 0
+        ? block.provenance
+        : mergeProvenanceSources([block.provenance, ...removed], (work) => budget.charge(work));
     blocks.push({ ...block, provenance, instructions: kept, terminator });
   }
   const byId = new Map(blocks.map((block) => [block.id, block]));
@@ -576,8 +601,15 @@ function rewrite(
         // Only an empty pass-through block whose parameters feed nothing but
         // its own terminator, and which records no architectural state, is
         // bypassed; dominated users and derived state stay unchanged.
-        if (!target || target.instructions.length !== 0 || target.id === input.entry ||
-          pinned.has(target.id) || row?.entry.length || row?.exit.length) break;
+        if (
+          !target ||
+          target.instructions.length !== 0 ||
+          target.id === input.entry ||
+          pinned.has(target.id) ||
+          row?.entry.length ||
+          row?.exit.length
+        )
+          break;
         const substitution = new Map(
           target.parameters.map((parameter, index) => [parameter.id, edge.arguments[index]!]),
         );
@@ -653,16 +685,27 @@ function mapInstruction(node: Instruction, map: (value: Value) => Value): Instru
     case 'assign':
       return { ...node, expression: mapExpression(node.expression, map) };
     case 'load':
-      return { ...node, address: map(node.address), register_inputs: bindings(node.register_inputs) };
+      return {
+        ...node,
+        address: map(node.address),
+        register_inputs: bindings(node.register_inputs),
+      };
     case 'store':
-      return { ...node, address: map(node.address), value: map(node.value),
-        register_inputs: bindings(node.register_inputs) };
+      return {
+        ...node,
+        address: map(node.address),
+        value: map(node.value),
+        register_inputs: bindings(node.register_inputs),
+      };
     case 'write_register':
       return { ...node, value: map(node.value) };
     case 'call':
       return {
         ...node,
-        target: node.target.kind === 'indirect' ? { ...node.target, value: map(node.target.value) } : node.target,
+        target:
+          node.target.kind === 'indirect'
+            ? { ...node.target, value: map(node.target.value) }
+            : node.target,
         arguments: node.arguments.map(map),
         register_inputs: bindings(node.register_inputs),
       };
@@ -686,12 +729,19 @@ function mapTerminator(
     case 'jump':
       return { ...terminator, edge: edge(terminator.edge) };
     case 'branch':
-      return { ...terminator, condition: map(terminator.condition),
-        when_true: edge(terminator.when_true), when_false: edge(terminator.when_false) };
+      return {
+        ...terminator,
+        condition: map(terminator.condition),
+        when_true: edge(terminator.when_true),
+        when_false: edge(terminator.when_false),
+      };
     case 'switch':
-      return { ...terminator, value: map(terminator.value),
+      return {
+        ...terminator,
+        value: map(terminator.value),
         cases: terminator.cases.map((item) => ({ ...item, edge: edge(item.edge) })),
-        otherwise: edge(terminator.otherwise) };
+        otherwise: edge(terminator.otherwise),
+      };
     default:
       return terminator;
   }
@@ -744,14 +794,16 @@ function propagateCopies(
       chain.push(copy);
       id = copy.source.id;
     }
-    let tail = resolved.get(id), tailBlock = copies.get(id)?.block;
+    let tail = resolved.get(id),
+      tailBlock = copies.get(id)?.block;
     for (let i = chain.length - 1; i >= 0; i--) {
       const { node, source, block } = chain[i]!;
       tail = {
         value: tail?.value ?? source,
-        origin: tail && tailBlock === block
-          ? mergeProvenanceSources([node.provenance, tail.origin], (work) => budget.charge(work))
-          : node.provenance,
+        origin:
+          tail && tailBlock === block
+            ? mergeProvenanceSources([node.provenance, tail.origin], (work) => budget.charge(work))
+            : node.provenance,
       };
       tailBlock = block;
       resolved.set(node.result.id, tail);
@@ -759,7 +811,10 @@ function propagateCopies(
     return tail;
   };
   const map = (value: Value): Value => resolve(value)?.value ?? value;
-  const rewrite = (values: readonly Value[], block: EntityId): { aliased: boolean; sources: Provenance[] } => {
+  const rewrite = (
+    values: readonly Value[],
+    block: EntityId,
+  ): { aliased: boolean; sources: Provenance[] } => {
     let aliased = false;
     const sources: Provenance[] = [];
     for (const value of values) {
@@ -781,24 +836,43 @@ function propagateCopies(
         continue;
       }
       const { aliased, sources } = rewrite(instructionOperands(node), block.id);
-      nodes.push(!aliased ? node : {
-        ...mapInstruction(node, map),
-        provenance: sources.length === 0 ? node.provenance
-          : mergeProvenanceSources([node.provenance, ...sources], (work) => budget.charge(work)),
-      });
+      nodes.push(
+        !aliased
+          ? node
+          : {
+              ...mapInstruction(node, map),
+              provenance:
+                sources.length === 0
+                  ? node.provenance
+                  : mergeProvenanceSources([node.provenance, ...sources], (work) =>
+                      budget.charge(work),
+                    ),
+            },
+      );
     }
     const terminator = block.terminator;
     const { aliased, sources } = rewrite(terminatorOperands(terminator), block.id);
     return {
       ...block,
-      provenance: removed.length === 0 ? block.provenance
-        : mergeProvenanceSources([block.provenance, ...removed], (work) => budget.charge(work)),
+      provenance:
+        removed.length === 0
+          ? block.provenance
+          : mergeProvenanceSources([block.provenance, ...removed], (work) => budget.charge(work)),
       instructions: nodes,
-      terminator: !aliased ? terminator : {
-        ...mapTerminator(terminator, map, (edge) => ({ ...edge, arguments: edge.arguments.map(map) })),
-        provenance: sources.length === 0 ? terminator.provenance
-          : mergeProvenanceSources([terminator.provenance, ...sources], (work) => budget.charge(work)),
-      },
+      terminator: !aliased
+        ? terminator
+        : {
+            ...mapTerminator(terminator, map, (edge) => ({
+              ...edge,
+              arguments: edge.arguments.map(map),
+            })),
+            provenance:
+              sources.length === 0
+                ? terminator.provenance
+                : mergeProvenanceSources([terminator.provenance, ...sources], (work) =>
+                    budget.charge(work),
+                  ),
+          },
     };
   });
   return {
@@ -855,7 +929,8 @@ function eliminateTrivialParameters(
     budget.charge();
     const id = pending.pop()!;
     if (replacement.has(id)) continue;
-    let unique: Value | undefined, trivial = true;
+    let unique: Value | undefined,
+      trivial = true;
     for (const argument of incoming.get(id)!) {
       budget.charge();
       const value = find(argument);
@@ -875,12 +950,19 @@ function eliminateTrivialParameters(
     users.set(unique.id, [...(users.get(unique.id) ?? []), ...dependents]);
   }
   if (replacement.size === 0) return { value: input, changed: false };
-  const kept = new Map(input.blocks.map((block) => [block.id,
-    block.parameters.map((parameter) => !replacement.has(parameter.id))]));
+  const kept = new Map(
+    input.blocks.map((block) => [
+      block.id,
+      block.parameters.map((parameter) => !replacement.has(parameter.id)),
+    ]),
+  );
   const edge = (value: Edge): Edge => {
     const slots = kept.get(value.target);
     budget.charge(value.arguments.length);
-    return { ...value, arguments: value.arguments.filter((_, index) => slots?.[index] ?? true).map(find) };
+    return {
+      ...value,
+      arguments: value.arguments.filter((_, index) => slots?.[index] ?? true).map(find),
+    };
   };
   const blocks = input.blocks.map((block) => {
     budget.charge(block.instructions.length + 1);

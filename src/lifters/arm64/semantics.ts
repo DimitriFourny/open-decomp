@@ -586,8 +586,10 @@ export class ArmSemantics {
       this.fpStatus();
       return true;
     }
-    if (p.canonical_encoding === 'SCVTF_asisdmisc_R' ||
-        p.canonical_encoding === 'UCVTF_asisdmisc_R') {
+    if (
+      p.canonical_encoding === 'SCVTF_asisdmisc_R' ||
+      p.canonical_encoding === 'UCVTF_asisdmisc_R'
+    ) {
       const size = this.field('sz');
       if (size > 1) throw new Unsupported('Invalid SIMD scalar integer conversion width');
       const width = size === 1 ? 64 : 32;
@@ -639,8 +641,10 @@ export class ArmSemantics {
         };
       });
       const left = b.readRegister(registers[1]!, integer(width));
-      const value = registers[1]!.root === registers[2]!.root ? left
-        : b.int('or', left, b.readRegister(registers[2]!, integer(width)));
+      const value =
+        registers[1]!.root === registers[2]!.root
+          ? left
+          : b.int('or', left, b.readRegister(registers[2]!, integer(width)));
       b.writeRegister(registers[0]!, value);
       return true;
     }

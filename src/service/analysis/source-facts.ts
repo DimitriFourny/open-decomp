@@ -18,8 +18,21 @@ import { createCallResultDemandIndex } from '../../analysis/calls/result-demands
 import { recoverDataAddress } from '../../analysis/strings/source-data.js';
 import { sourceConstantValues } from '../../reconstruction/source-data.js';
 import { inspectRegister, type StackFact } from '../../analysis/stack/index.js';
-import { parameterMemoryShapes, refineMemoryShapes, type MemoryShapeTransfer, type SuppliedTypeRecord, type TypeRecoveryResult } from '../../analysis/types/index.js';
-import { bitWidth, type DataType, type Expression, type RegisterIR, type SSAForm, type Value } from '../../ir/index.js';
+import {
+  parameterMemoryShapes,
+  refineMemoryShapes,
+  type MemoryShapeTransfer,
+  type SuppliedTypeRecord,
+  type TypeRecoveryResult,
+} from '../../analysis/types/index.js';
+import {
+  bitWidth,
+  type DataType,
+  type Expression,
+  type RegisterIR,
+  type SSAForm,
+  type Value,
+} from '../../ir/index.js';
 import type { DebugRecovery } from '../../metadata/debug/index.js';
 import type { LibraryContracts } from '../../metadata/library-contracts/index.js';
 import type {
@@ -30,15 +43,36 @@ import type {
 import { records } from '../queries/scope.js';
 import type { AnalysisScope } from './index.js';
 import type { CallScope } from './calls.js';
-import { nativeDependencies, prepareNativeUnit, type PreparedNativeUnit } from './native-prepare.js';
-import { nativeDependencyWorklist, type NativeInterface, type NativeSummary } from './native-worklist.js';
-import { nativeCallInputs, nativeReturnInterface, nativeStackParameters, nativeTypeSlices } from './native-transfer.js';
-import { createNativeInterfaceIndex, nativeEntryRegisters, type NativeInterfaceIndex } from './native-entry.js';
+import {
+  nativeDependencies,
+  prepareNativeUnit,
+  type PreparedNativeUnit,
+} from './native-prepare.js';
+import {
+  nativeDependencyWorklist,
+  type NativeInterface,
+  type NativeSummary,
+} from './native-worklist.js';
+import {
+  nativeCallInputs,
+  nativeReturnInterface,
+  nativeStackParameters,
+  nativeTypeSlices,
+} from './native-transfer.js';
+import {
+  createNativeInterfaceIndex,
+  nativeEntryRegisters,
+  type NativeInterfaceIndex,
+} from './native-entry.js';
 import { pipelineVersions } from './versions.js';
 import { nativeArgumentValues } from './native-arguments.js';
 import { parameterRegisters } from './native-abi.js';
 import { fpEnvironmentGuard } from '../../lifters/arm64/semantics.js';
-import { registerTypeSlices, registerTypes, type StorageCopy } from '../../reconstruction/source-register-types.js';
+import {
+  registerTypeSlices,
+  registerTypes,
+  type StorageCopy,
+} from '../../reconstruction/source-register-types.js';
 import { needsSourceFpEnvironment } from '../../reconstruction/source-requirements.js';
 import { nativeContextKey } from './native-context.js';
 import { prepareNativeContext } from './native-context-prepare.js';
@@ -75,31 +109,62 @@ function mergeNativeInterface(
   abi: AbiProfile,
   context: OperationContext,
 ): NativeInterface {
-  if (!proven) return prepared ?? { parameters: [], returns: [], parameter_state: 'ambiguous', argument_list_complete: false };
+  if (!proven)
+    return (
+      prepared ?? {
+        parameters: [],
+        returns: [],
+        parameter_state: 'ambiguous',
+        argument_list_complete: false,
+      }
+    );
   if (!prepared) return proven;
-  const registers = new Map<string, { readonly register: RegisterDescriptor; readonly type: DataType }>();
+  const registers = new Map<
+    string,
+    { readonly register: RegisterDescriptor; readonly type: DataType }
+  >();
   for (const observed of [prepared, proven])
     for (const [index, register] of observed.parameters.entries()) {
       context.checkpoint(1);
       const previous = registers.get(register.root);
-      if (previous && register.bank === 'integer' && previous.register.bank === 'integer' &&
-        previous.register.width_bits > register.width_bits) continue;
-      registers.set(register.root, { register, type: observed.parameter_types?.[index] ??
-        { kind: 'integer', bits: register.width_bits } });
+      if (
+        previous &&
+        register.bank === 'integer' &&
+        previous.register.bank === 'integer' &&
+        previous.register.width_bits > register.width_bits
+      )
+        continue;
+      registers.set(register.root, {
+        register,
+        type: observed.parameter_types?.[index] ?? { kind: 'integer', bits: register.width_bits },
+      });
     }
-  const ordered = parameterRegisters(abi).flatMap((candidate) => registers.get(candidate.root) ?? []);
+  const ordered = parameterRegisters(abi).flatMap(
+    (candidate) => registers.get(candidate.root) ?? [],
+  );
   const parameters = ordered.map((item) => item.register);
   const parameter_shapes = proven.parameter_shapes?.map((shape) => {
     const source = proven.parameters[shape.parameter_index];
-    return { ...shape, parameter_index: source
-      ? parameters.findIndex((register) => register.root === source.root)
-      : parameters.length + shape.parameter_index - proven.parameters.length };
+    return {
+      ...shape,
+      parameter_index: source
+        ? parameters.findIndex((register) => register.root === source.root)
+        : parameters.length + shape.parameter_index - proven.parameters.length,
+    };
   });
-  return { ...proven, parameters, parameter_types: ordered.map((item) => item.type),
+  return {
+    ...proven,
+    parameters,
+    parameter_types: ordered.map((item) => item.type),
     ...(parameter_shapes === undefined ? {} : { parameter_shapes }),
-    ...(proven.returns.length ? {} : { returns: prepared.returns,
-      ...(prepared.return_types === undefined ? {} : { return_types: prepared.return_types }) }),
-    argument_list_complete: false };
+    ...(proven.returns.length
+      ? {}
+      : {
+          returns: prepared.returns,
+          ...(prepared.return_types === undefined ? {} : { return_types: prepared.return_types }),
+        }),
+    argument_list_complete: false,
+  };
 }
 
 /** Roots count only when they reach semantic observations. Physical snapshots,
@@ -134,9 +199,14 @@ function observeParameters(
       }
     }
     const control = block.terminator;
-    const edges = control.kind === 'jump' ? [control.edge]
-      : control.kind === 'branch' ? [control.when_true, control.when_false]
-        : control.kind === 'switch' ? [...control.cases.map((item) => item.edge), control.otherwise] : [];
+    const edges =
+      control.kind === 'jump'
+        ? [control.edge]
+        : control.kind === 'branch'
+          ? [control.when_true, control.when_false]
+          : control.kind === 'switch'
+            ? [...control.cases.map((item) => item.edge), control.otherwise]
+            : [];
     for (const edge of edges) {
       const parents = predecessors.get(edge.target) ?? [];
       parents.push(block);
@@ -148,37 +218,71 @@ function observeParameters(
     }
   }
   for (const state of ir.register_states)
-    for (const binding of [...state.entry, ...state.exit]) values.set(binding.value.id, binding.value);
-  const typedSlices = registerTypeSlices(values, definitions, storageCopies, [], context,
-    nativeTypeSlices(ir, interfaces, context, interfaceIndex));
+    for (const binding of [...state.entry, ...state.exit])
+      values.set(binding.value.id, binding.value);
+  const typedSlices = registerTypeSlices(
+    values,
+    definitions,
+    storageCopies,
+    [],
+    context,
+    nativeTypeSlices(ir, interfaces, context, interfaceIndex),
+  );
   const entryBindings = ir.register_states.find((row) => row.block === ir.entry)?.entry ?? [];
   // This is the lifter's precise FPCR failure boundary, not a blanket exemption
   // for unknown instructions. Its supported-path observations remain conditional.
   const conditionalFpFailures = new Set<string>();
   if (abi.architecture === 'arm64')
     for (const block of ir.blocks) {
-      if (block.terminator.kind !== 'unknown' ||
-          block.terminator.reason !== fpEnvironmentGuard.unsupported_exit ||
-          !block.instructions.some((node) => node.kind === 'unknown_effect' &&
-            node.reason === fpEnvironmentGuard.unsupported_effect) ||
-          block.instructions.some((node) => node.kind !== 'assign' &&
-            (node.kind !== 'unknown_effect' || node.reason !== fpEnvironmentGuard.unsupported_effect))) continue;
+      if (
+        block.terminator.kind !== 'unknown' ||
+        block.terminator.reason !== fpEnvironmentGuard.unsupported_exit ||
+        !block.instructions.some(
+          (node) =>
+            node.kind === 'unknown_effect' && node.reason === fpEnvironmentGuard.unsupported_effect,
+        ) ||
+        block.instructions.some(
+          (node) =>
+            node.kind !== 'assign' &&
+            (node.kind !== 'unknown_effect' ||
+              node.reason !== fpEnvironmentGuard.unsupported_effect),
+        )
+      )
+        continue;
       const parents = predecessors.get(block.id);
-      if (!parents?.length || !parents.every((parent) => {
-        const branch = parent.terminator;
-        if (branch.kind !== 'branch' || branch.when_false.target !== block.id ||
-            branch.when_true.target === block.id) return false;
-        const comparison = definitions.get(branch.condition.id);
-        if (comparison?.kind !== 'compare' || comparison.op !== 'eq') return false;
-        const zero = definitions.get(comparison.right.id), masked = definitions.get(comparison.left.id);
-        if (zero?.kind !== 'constant' || zero.bits !== 0n ||
-            masked?.kind !== 'integer' || masked.op !== 'and') return false;
-        const mask = definitions.get(masked.right.id);
-        const controls = analysis.stack.values.get(masked.left.id)?.incoming_registers;
-        return mask?.kind === 'constant' && mask.bits === fpEnvironmentGuard.mask &&
-          controls !== undefined && controls.length > 0 &&
-          controls.every((register) => register.root === fpEnvironmentGuard.control_root);
-      })) continue;
+      if (
+        !parents?.length ||
+        !parents.every((parent) => {
+          const branch = parent.terminator;
+          if (
+            branch.kind !== 'branch' ||
+            branch.when_false.target !== block.id ||
+            branch.when_true.target === block.id
+          )
+            return false;
+          const comparison = definitions.get(branch.condition.id);
+          if (comparison?.kind !== 'compare' || comparison.op !== 'eq') return false;
+          const zero = definitions.get(comparison.right.id),
+            masked = definitions.get(comparison.left.id);
+          if (
+            zero?.kind !== 'constant' ||
+            zero.bits !== 0n ||
+            masked?.kind !== 'integer' ||
+            masked.op !== 'and'
+          )
+            return false;
+          const mask = definitions.get(masked.right.id);
+          const controls = analysis.stack.values.get(masked.left.id)?.incoming_registers;
+          return (
+            mask?.kind === 'constant' &&
+            mask.bits === fpEnvironmentGuard.mask &&
+            controls !== undefined &&
+            controls.length > 0 &&
+            controls.every((register) => register.root === fpEnvironmentGuard.control_root)
+          );
+        })
+      )
+        continue;
       conditionalFpFailures.add(block.id);
     }
   let ambiguous =
@@ -194,8 +298,10 @@ function observeParameters(
       const candidate = byRoot.get(register.root);
       if (abi.preserved.some((preserved) => preserved.root === register.root)) continue;
       if (!candidate) {
-        if (register.role === 'general' &&
-            (register.bank === 'integer' || register.bank === 'float' || register.bank === 'vector'))
+        if (
+          register.role === 'general' &&
+          (register.bank === 'integer' || register.bank === 'float' || register.bank === 'vector')
+        )
           ambiguous = true;
         continue;
       }
@@ -227,7 +333,8 @@ function observeParameters(
           call?.contracts.filter(
             (contract) => contract.status === 'established' && contract.layout.state === 'complete',
           ) ?? [];
-        if ((!contracts.length && !interfaces.has(node.id)) || call?.status === 'conflicting') ambiguous = true;
+        if ((!contracts.length && !interfaces.has(node.id)) || call?.status === 'conflicting')
+          ambiguous = true;
         for (const contract of contracts) {
           for (const parameter of contract.parameters)
             for (const location of parameter.locations) note(location.fact);
@@ -245,8 +352,17 @@ function observeParameters(
     else if (terminator.kind === 'return') for (const value of terminator.values) use(value);
   }
   for (const fact of nativeCallInputs(analysis, interfaces, context)) note(fact);
-  const { returns, return_types, written_result } = nativeReturnInterface(ir, abi, analysis, interfaces, context, seed,
-    demandedReturns, assumedEntry, interfaceIndex);
+  const { returns, return_types, written_result } = nativeReturnInterface(
+    ir,
+    abi,
+    analysis,
+    interfaces,
+    context,
+    seed,
+    demandedReturns,
+    assumedEntry,
+    interfaceIndex,
+  );
   const exits = ir.blocks.filter((block) => block.terminator.kind === 'return');
   for (const exit of exits) {
     const snapshot = analysis.stack.snapshots.get(exit.terminator.id);
@@ -261,26 +377,39 @@ function observeParameters(
   const parameters = candidates.flatMap((candidate) => {
     const observedRegister = observed.get(candidate.root);
     if (!observedRegister) return [];
-    const type = (candidate.bank === 'float' || candidate.bank === 'vector')
-      ? registerTypes(entryBindings, candidate.root, candidate.offset_bits, typedSlices, context)[0]
-      : undefined;
+    const type =
+      candidate.bank === 'float' || candidate.bank === 'vector'
+        ? registerTypes(
+            entryBindings,
+            candidate.root,
+            candidate.offset_bits,
+            typedSlices,
+            context,
+          )[0]
+        : undefined;
     if (type) inputTypes.set(candidate.root, type);
-    return [{ ...observedRegister, width_bits: type ? bitWidth(type) : observedRegister.width_bits }];
+    return [
+      { ...observedRegister, width_bits: type ? bitWidth(type) : observedRegister.width_bits },
+    ];
   });
   return {
     parameters,
-    parameter_types: parameters.map((register): DataType =>
-      inputTypes.get(register.root) ?? { kind: 'integer', bits: register.width_bits }),
+    parameter_types: parameters.map(
+      (register): DataType =>
+        inputTypes.get(register.root) ?? { kind: 'integer', bits: register.width_bits },
+    ),
     returns,
     ...(return_types === undefined ? {} : { return_types }),
     ...(written_result === undefined ? {} : { written_result }),
     parameter_state: ambiguous ? 'ambiguous' : 'observed',
     argument_list_complete: false,
     stack_parameters: nativeStackParameters(ir, analysis, context, interfaceIndex),
-    requirements: [...new Set([
-      ...(conditionalFpFailures.size || localFpEnvironment ? ['fp_environment' as const] : []),
-      ...[...interfaces.values()].flatMap((callee) => callee.requirements ?? []),
-    ])],
+    requirements: [
+      ...new Set([
+        ...(conditionalFpFailures.size || localFpEnvironment ? ['fp_environment' as const] : []),
+        ...[...interfaces.values()].flatMap((callee) => callee.requirements ?? []),
+      ]),
+    ],
   };
 }
 
@@ -333,21 +462,27 @@ function actualArgumentCounts(
   return counts;
 }
 
-
 function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
   const { image, scope, revision } = input,
     context = scope.context;
   const candidates = new Map<string, Address>();
   const expressions = new Map(
-    input.ir.blocks.flatMap((block) => block.instructions.flatMap((node) =>
-      node.kind === 'assign' ? [[node.result.id, node.expression] as const] : [])),
+    input.ir.blocks.flatMap((block) =>
+      block.instructions.flatMap((node) =>
+        node.kind === 'assign' ? [[node.result.id, node.expression] as const] : [],
+      ),
+    ),
   );
   const constant = sourceConstantValues(expressions, context, image.id);
   for (const block of input.ir.blocks)
     for (const node of block.instructions) {
       context.checkpoint(1);
-      if (node.kind !== 'assign' || node.result.type.kind !== 'integer' ||
-        node.result.type.bits !== image.target.address_bits) continue;
+      if (
+        node.kind !== 'assign' ||
+        node.result.type.kind !== 'integer' ||
+        node.result.type.bits !== image.target.address_bits
+      )
+        continue;
       const bits = constant(node.result);
       if (bits !== undefined && bits < U64_LIMIT) {
         const address: Address = { image_id: image.id, space: 'va', value: bits };
@@ -399,8 +534,12 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
     if (!relevant && symbol.kind === 'object' && symbol.size !== null)
       for (const candidate of candidates.values()) {
         context.checkpoint(1);
-        if (candidate.image_id === start.image_id && candidate.space === start.space &&
-          candidate.value >= start.value && candidate.value < start.value + symbol.size) {
+        if (
+          candidate.image_id === start.image_id &&
+          candidate.space === start.space &&
+          candidate.value >= start.value &&
+          candidate.value < start.value + symbol.size
+        ) {
           relevant = true;
           break;
         }
@@ -453,13 +592,16 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
  * consumed return slices of this request. Unknown/truncated preparations are not
  * cached. Immutable image + revision + full component/target identity bind all
  * graph, declaration, annotation and dependency-resolution inputs. */
-const nativeSummaries = new WeakMap<LoadedImage, {
-  readonly identity: string;
-  readonly functions: readonly FunctionRecord[];
-  readonly references: readonly ReferenceRecord[];
-  readonly summaries: Map<string, PreparedNativeUnit>;
-  units: number;
-}>();
+const nativeSummaries = new WeakMap<
+  LoadedImage,
+  {
+    readonly identity: string;
+    readonly functions: readonly FunctionRecord[];
+    readonly references: readonly ReferenceRecord[];
+    readonly summaries: Map<string, PreparedNativeUnit>;
+    units: number;
+  }
+>();
 
 function nativeShapeTransfers(
   unit: PreparedNativeUnit,
@@ -474,8 +616,13 @@ function nativeShapeTransfers(
     for (const shape of observed.parameter_shapes) {
       context.checkpoint(1);
       const argument = arguments_.get(shape.parameter_index);
-      if (argument) transfers.push({ ...shape, argument, call_id,
-        evidence_ids: [...new Set([...unit.evidence_ids, ...shape.parameter_shape.evidence_ids])] });
+      if (argument)
+        transfers.push({
+          ...shape,
+          argument,
+          call_id,
+          evidence_ids: [...new Set([...unit.evidence_ids, ...shape.parameter_shape.evidence_ids])],
+        });
     }
   }
   return transfers;
@@ -489,49 +636,127 @@ function observeNativeUnit(
   demandedReturns: readonly RegisterDescriptor[],
   seed: boolean,
 ): NativeInterface {
-  if (!unit.ir) return unit.entry_prefix ??
-    { parameters: [], returns: [], parameter_state: 'ambiguous', argument_list_complete: false };
+  if (!unit.ir)
+    return (
+      unit.entry_prefix ?? {
+        parameters: [],
+        returns: [],
+        parameter_state: 'ambiguous',
+        argument_list_complete: false,
+      }
+    );
   const interfaces = new Map(dependencies);
   for (const observed of unit.observed_calls)
-    interfaces.set(observed.call_id, mergeNativeInterface(interfaces.get(observed.call_id), observed, input.components.abi, context));
+    interfaces.set(
+      observed.call_id,
+      mergeNativeInterface(
+        interfaces.get(observed.call_id),
+        observed,
+        input.components.abi,
+        context,
+      ),
+    );
   let observed: NativeInterface;
-  if (unit.analysis) observed = observeParameters(unit.ir, input.components.abi, unit.analysis,
-    context, interfaces, seed, demandedReturns, unit.context_assumptions !== undefined, unit.interface_index);
+  if (unit.analysis)
+    observed = observeParameters(
+      unit.ir,
+      input.components.abi,
+      unit.analysis,
+      context,
+      interfaces,
+      seed,
+      demandedReturns,
+      unit.context_assumptions !== undefined,
+      unit.interface_index,
+    );
   else {
-    const result = nativeReturnInterface(unit.ir, input.components.abi, null, interfaces, context, seed, demandedReturns,
-      unit.context_assumptions !== undefined, unit.interface_index);
-    const parameters = nativeEntryRegisters(unit.ir, parameterRegisters(input.components.abi), interfaces,
-      result.returns, context, unit.interface_index);
-    const localFpEnvironment = unit.ir.blocks.some((block) => block.instructions.some((node) => {
-      context.checkpoint(1);
-      return node.kind === 'assign' && needsSourceFpEnvironment(node.expression);
-    }));
-    observed = { ...result, parameters, parameter_types: parameters.map((register) =>
-      ({ kind: 'integer' as const, bits: register.width_bits })), parameter_state: 'ambiguous', argument_list_complete: false,
-      requirements: [...new Set([
-        ...(localFpEnvironment ? ['fp_environment' as const] : []),
-        ...[...interfaces.values()].flatMap((callee) => callee.requirements ?? []),
-      ])] };
+    const result = nativeReturnInterface(
+      unit.ir,
+      input.components.abi,
+      null,
+      interfaces,
+      context,
+      seed,
+      demandedReturns,
+      unit.context_assumptions !== undefined,
+      unit.interface_index,
+    );
+    const parameters = nativeEntryRegisters(
+      unit.ir,
+      parameterRegisters(input.components.abi),
+      interfaces,
+      result.returns,
+      context,
+      unit.interface_index,
+    );
+    const localFpEnvironment = unit.ir.blocks.some((block) =>
+      block.instructions.some((node) => {
+        context.checkpoint(1);
+        return node.kind === 'assign' && needsSourceFpEnvironment(node.expression);
+      }),
+    );
+    observed = {
+      ...result,
+      parameters,
+      parameter_types: parameters.map((register) => ({
+        kind: 'integer' as const,
+        bits: register.width_bits,
+      })),
+      parameter_state: 'ambiguous',
+      argument_list_complete: false,
+      requirements: [
+        ...new Set([
+          ...(localFpEnvironment ? ['fp_environment' as const] : []),
+          ...[...interfaces.values()].flatMap((callee) => callee.requirements ?? []),
+        ]),
+      ],
+    };
   }
   if (unit.context_assumptions) {
-    const assumed = [...unit.context_assumptions.constants.map((item) => item.register),
-      ...unit.context_assumptions.aliases.flat()];
-    observed = mergeNativeInterface(observed, { parameters: assumed, returns: [],
-      parameter_state: 'observed', argument_list_complete: false }, input.components.abi, context);
+    const assumed = [
+      ...unit.context_assumptions.constants.map((item) => item.register),
+      ...unit.context_assumptions.aliases.flat(),
+    ];
+    observed = mergeNativeInterface(
+      observed,
+      {
+        parameters: assumed,
+        returns: [],
+        parameter_state: 'observed',
+        argument_list_complete: false,
+      },
+      input.components.abi,
+      context,
+    );
     observed = { ...observed, context_assumptions: unit.context_assumptions };
   }
-  if (unit.budget_truncated) observed = { ...observed, returns: [], return_types: [],
-    written_result: { registers: [], types: [] }, parameter_state: 'ambiguous' };
+  if (unit.budget_truncated)
+    observed = {
+      ...observed,
+      returns: [],
+      return_types: [],
+      written_result: { registers: [], types: [] },
+      parameter_state: 'ambiguous',
+    };
   if (!unit.types) return observed;
   const transfers = nativeShapeTransfers(unit, interfaces, context);
-  const types = transfers.length ? refineMemoryShapes(unit.ir, unit.types, context, {
-    slice_id: input.image.selected_slice_id, revision: input.revision,
-    max_work: context.remainingWork?.() ?? context.budget.work, transfers,
-  }) : unit.types;
-  const parameters = [...nativeArgumentValues(unit.ir, unit.analysis, unit.ir.id, observed, context)]
-    .map(([parameter_index, value]) => ({ parameter_index, value }));
-  return { ...observed, parameter_shapes: parameterMemoryShapes(types, parameters, context,
-    { max_work: context.remainingWork?.() ?? context.budget.work }) };
+  const types = transfers.length
+    ? refineMemoryShapes(unit.ir, unit.types, context, {
+        slice_id: input.image.selected_slice_id,
+        revision: input.revision,
+        max_work: context.remainingWork?.() ?? context.budget.work,
+        transfers,
+      })
+    : unit.types;
+  const parameters = [
+    ...nativeArgumentValues(unit.ir, unit.analysis, unit.ir.id, observed, context),
+  ].map(([parameter_index, value]) => ({ parameter_index, value }));
+  return {
+    ...observed,
+    parameter_shapes: parameterMemoryShapes(types, parameters, context, {
+      max_work: context.remainingWork?.() ?? context.budget.work,
+    }),
+  };
 }
 
 /** Optional native dependencies share at most half the actual work remaining
@@ -539,85 +764,161 @@ function observeNativeUnit(
  * outer cancellation/deadline/work and selected-path invariants still propagate. */
 export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   const { scope, components, image, revision } = input,
-    { context } = scope, abi = components.abi;
-  const diagnostics: Diagnostic[] = [], evidence: Evidence[] = [];
+    { context } = scope,
+    abi = components.abi;
+  const diagnostics: Diagnostic[] = [],
+    evidence: Evidence[] = [];
   const demand_index = createCallResultDemandIndex(input.ir, abi, context);
-  const observedCalls = observePreparedCallInterfaces(input.ir, abi, input.types.calls, context, demand_index);
+  const observedCalls = observePreparedCallInterfaces(
+    input.ir,
+    abi,
+    input.types.calls,
+    context,
+    demand_index,
+  );
   // Exactly one record per call: a native dependency record already merges the
   // local observation for its call and replaces it.
-  const callees = new Map<string, InferredCallee>(observedCalls.map((call) => [call.call_id, call]));
+  const callees = new Map<string, InferredCallee>(
+    observedCalls.map((call) => [call.call_id, call]),
+  );
   let dependencies = nativeDependencies(input, input.ir, context, undefined, false, demand_index);
   const targets = new Map<string, FunctionRecord>();
   for (const dependency of dependencies) targets.set(dependency.target.id, dependency.target);
   const selectedNodes = input.ir.blocks.reduce(
-    (count, block) => count + 3 + block.parameters.length + block.instructions.length, 0);
-  const capacity = { nodes: context.budget.ir_nodes - selectedNodes,
+    (count, block) => count + 3 + block.parameters.length + block.instructions.length,
+    0,
+  );
+  const capacity = {
+    nodes: context.budget.ir_nodes - selectedNodes,
     blocks: context.budget.blocks - input.ir.blocks.length,
-    instructions: context.budget.instructions - input.instruction_count };
+    instructions: context.budget.instructions - input.instruction_count,
+  };
   const summaryWorkLimit = Math.floor((context.remainingWork?.() ?? 0) / 2);
   let summaryWork = 0;
   const summaryContext: OperationContext = {
-    ...context, budget: { ...context.budget, work: summaryWorkLimit },
+    ...context,
+    budget: { ...context.budget, work: summaryWorkLimit },
     remainingWork: () => Math.max(0, summaryWorkLimit - summaryWork),
     checkpoint(work) {
       context.checkpoint(0);
-      if (summaryWork + work > summaryWorkLimit) throw new OperationError({
-        code: 'resource_limit', severity: 'warning',
-        message: 'Optional native summary work sub-budget exhausted', evidence_ids: [],
-        details: { kind: 'limit', resource: 'work', limit: summaryWorkLimit,
-          consumed: Math.min(summaryWork + work, Number.MAX_SAFE_INTEGER) },
-      });
+      if (summaryWork + work > summaryWorkLimit)
+        throw new OperationError({
+          code: 'resource_limit',
+          severity: 'warning',
+          message: 'Optional native summary work sub-budget exhausted',
+          evidence_ids: [],
+          details: {
+            kind: 'limit',
+            resource: 'work',
+            limit: summaryWorkLimit,
+            consumed: Math.min(summaryWork + work, Number.MAX_SAFE_INTEGER),
+          },
+        });
       context.checkpoint(work);
       summaryWork += work;
     },
   };
   // Recovery stays inside the same optional pool: unfinished dependencies cannot
   // consume the allowance needed to retain proven root inputs and local results.
-  const worklistWorkLimit = Math.floor(summaryWorkLimit * 3 / 4);
+  const worklistWorkLimit = Math.floor((summaryWorkLimit * 3) / 4);
   let worklistWork = 0;
-  const worklistContext: OperationContext = { ...summaryContext,
+  const worklistContext: OperationContext = {
+    ...summaryContext,
     budget: { ...summaryContext.budget, work: worklistWorkLimit },
     remainingWork: () => Math.max(0, worklistWorkLimit - worklistWork),
     checkpoint(work) {
       summaryContext.checkpoint(0);
-      if (worklistWork + work > worklistWorkLimit) throw new OperationError({
-        code: 'resource_limit', severity: 'warning', message: 'Native dependency refinement work limit exceeded',
-        evidence_ids: [], details: { kind: 'limit', resource: 'work', limit: worklistWorkLimit,
-          consumed: Math.min(worklistWork + work, Number.MAX_SAFE_INTEGER) },
-      });
-      summaryContext.checkpoint(work); worklistWork += work;
+      if (worklistWork + work > worklistWorkLimit)
+        throw new OperationError({
+          code: 'resource_limit',
+          severity: 'warning',
+          message: 'Native dependency refinement work limit exceeded',
+          evidence_ids: [],
+          details: {
+            kind: 'limit',
+            resource: 'work',
+            limit: worklistWorkLimit,
+            consumed: Math.min(worklistWork + work, Number.MAX_SAFE_INTEGER),
+          },
+        });
+      summaryContext.checkpoint(work);
+      worklistWork += work;
     },
   };
-  const libraryContracts: SuppliedCallContract[] = targets.size ? input.library.contracts
-    .filter((contract) => contract.abi_state === 'supported' && !contract.conflicts_with.length)
-    .map((contract) => ({
-      id: contract.id, target: { kind: 'import', image_id: image.id, import_id: contract.import_id },
-      signature: contract.abi_signature, noreturn: contract.noreturn, evidence_ids: contract.evidence_ids,
-    })) : [];
-  const identity = fingerprint({ revision, image: image.sha256, slice: image.selected_slice_id,
-    target: image.target, versions: pipelineVersions(image.target, 'c-like'),
-    lifter: `${components.lifter.name}/${components.lifter.version}`, abi: `${abi.id}/${abi.version}`,
-    identity: input.identity ?? null, budget: input.identity?.budget ?? context.budget, capacity, native_types: input.native_types,
+  const libraryContracts: SuppliedCallContract[] = targets.size
+    ? input.library.contracts
+        .filter((contract) => contract.abi_state === 'supported' && !contract.conflicts_with.length)
+        .map((contract) => ({
+          id: contract.id,
+          target: { kind: 'import', image_id: image.id, import_id: contract.import_id },
+          signature: contract.abi_signature,
+          noreturn: contract.noreturn,
+          evidence_ids: contract.evidence_ids,
+        }))
+    : [];
+  const identity = fingerprint({
+    revision,
+    image: image.sha256,
+    slice: image.selected_slice_id,
+    target: image.target,
+    versions: pipelineVersions(image.target, 'c-like'),
+    lifter: `${components.lifter.name}/${components.lifter.version}`,
+    abi: `${abi.id}/${abi.version}`,
+    identity: input.identity ?? null,
+    budget: input.identity?.budget ?? context.budget,
+    capacity,
+    native_types: input.native_types,
   } as unknown as CanonicalValue);
   let cached = nativeSummaries.get(image);
-  if (!cached || cached.identity !== identity || cached.functions !== input.functions || cached.references !== input.references) {
-    cached = { identity, functions: input.functions, references: input.references, summaries: new Map(), units: 0 };
+  if (
+    !cached ||
+    cached.identity !== identity ||
+    cached.functions !== input.functions ||
+    cached.references !== input.references
+  ) {
+    cached = {
+      identity,
+      functions: input.functions,
+      references: input.references,
+      summaries: new Map(),
+      units: 0,
+    };
     nativeSummaries.set(image, cached);
   }
   const selected = input.functions.find((fn) => fn.id === input.ir.id);
-  const selectedUnit: PreparedNativeUnit | undefined = selected ? {
-    function: selected, ir: input.ir, types: input.types, analysis: input.types.calls,
-    observed_calls: observedCalls, dependencies, instructions: input.instruction_count, blocks: input.ir.blocks.length,
-    nodes: selectedNodes, required_nodes: input.required_nodes ?? selectedNodes, evidence: input.types.evidence,
-    evidence_ids: selected.evidence_ids, reasons: input.coverage_reasons, budget_truncated: false,
-    demand_index, interface_index: createNativeInterfaceIndex(input.ir, abi, summaryContext),
-    ...(scope.dependencies ? { dependency_readset: scope.dependencies.finish() } : {}),
-  } : undefined;
-  if (selectedUnit && input.required_nodes !== undefined && input.types.state === 'complete' &&
-    selectedUnit.analysis?.state === 'complete' && !selectedUnit.reasons.length && !cached.summaries.has(input.ir.id)) {
+  const selectedUnit: PreparedNativeUnit | undefined = selected
+    ? {
+        function: selected,
+        ir: input.ir,
+        types: input.types,
+        analysis: input.types.calls,
+        observed_calls: observedCalls,
+        dependencies,
+        instructions: input.instruction_count,
+        blocks: input.ir.blocks.length,
+        nodes: selectedNodes,
+        required_nodes: input.required_nodes ?? selectedNodes,
+        evidence: input.types.evidence,
+        evidence_ids: selected.evidence_ids,
+        reasons: input.coverage_reasons,
+        budget_truncated: false,
+        demand_index,
+        interface_index: createNativeInterfaceIndex(input.ir, abi, summaryContext),
+        ...(scope.dependencies ? { dependency_readset: scope.dependencies.finish() } : {}),
+      }
+    : undefined;
+  if (
+    selectedUnit &&
+    input.required_nodes !== undefined &&
+    input.types.state === 'complete' &&
+    selectedUnit.analysis?.state === 'complete' &&
+    !selectedUnit.reasons.length &&
+    !cached.summaries.has(input.ir.id)
+  ) {
     const units = selectedUnit.instructions + selectedUnit.nodes + selectedUnit.evidence.length;
     if (cached.summaries.size < 64 && cached.units + units <= 8192) {
-      cached.summaries.set(input.ir.id, selectedUnit); cached.units += units;
+      cached.summaries.set(input.ir.id, selectedUnit);
+      cached.units += units;
     }
   }
   let memory_transfers: readonly MemoryShapeTransfer[] = [];
@@ -628,26 +929,49 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   const returnDemands = new Map<string, RegisterDescriptor[]>();
   for (const dependency of dependencies) {
     const known = returnDemands.get(dependency.target.id) ?? [];
-    known.push(...(dependency.return_demand ?? [])); returnDemands.set(dependency.target.id, known);
+    known.push(...(dependency.return_demand ?? []));
+    returnDemands.set(dependency.target.id, known);
   }
   try {
     // Constant/identity discovery is optional native work too, not an extra
     // unmetered pass before the existing shared half-remaining allowance.
-    dependencies = nativeDependencies(input, input.ir, worklistContext, undefined, true, demand_index);
+    dependencies = nativeDependencies(
+      input,
+      input.ir,
+      worklistContext,
+      undefined,
+      true,
+      demand_index,
+    );
     const result = nativeDependencyWorklist({
-      roots: [], root_dependencies: dependencies, context: worklistContext, capacity,
-      max_functions: 64, max_refinements: 64, max_contexts_per_function: 4, max_contexts: 64,
+      roots: [],
+      root_dependencies: dependencies,
+      context: worklistContext,
+      capacity,
+      max_functions: 64,
+      max_refinements: 64,
+      max_contexts_per_function: 4,
+      max_contexts: 64,
       specialize: (baseline, assumptions, boundedContext) =>
         prepareNativeContext(input, baseline, assumptions, boundedContext, libraryContracts),
-      on_partial(units, summaries) { partialUnits = units; partialSummaries = summaries; },
+      on_partial(units, summaries) {
+        partialUnits = units;
+        partialSummaries = summaries;
+      },
       ...(selectedUnit ? { preloaded: new Map([[input.ir.id, selectedUnit]]) } : {}),
       load(fn, boundedContext) {
         let unit = cached.summaries.get(fn.id);
-        if (unit && (unit.instructions > boundedContext.budget.instructions ||
-          unit.blocks > boundedContext.budget.blocks || unit.required_nodes > boundedContext.budget.ir_nodes)) unit = undefined;
+        if (
+          unit &&
+          (unit.instructions > boundedContext.budget.instructions ||
+            unit.blocks > boundedContext.budget.blocks ||
+            unit.required_nodes > boundedContext.budget.ir_nodes)
+        )
+          unit = undefined;
         if (unit) {
           boundedContext.checkpoint(1 + unit.dependencies.length + unit.evidence.length);
-          if (scope.dependencies && unit.dependency_readset) scope.dependencies.replay(unit.dependency_readset);
+          if (scope.dependencies && unit.dependency_readset)
+            scope.dependencies.replay(unit.dependency_readset);
           else if (scope.dependencies) {
             cached.summaries.delete(fn.id);
             cached.units -= unit.instructions + unit.nodes + unit.evidence.length;
@@ -660,26 +984,41 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         }
         unit = prepareNativeUnit(input, fn, boundedContext, libraryContracts);
         if (scope.dependencies) unit = { ...unit, dependency_readset: scope.dependencies.finish() };
-        if (!unit.budget_truncated && !unit.reasons.length && unit.analysis?.state === 'complete' &&
-          !cached.summaries.has(fn.id)) {
+        if (
+          !unit.budget_truncated &&
+          !unit.reasons.length &&
+          unit.analysis?.state === 'complete' &&
+          !cached.summaries.has(fn.id)
+        ) {
           const units = unit.instructions + unit.nodes + unit.evidence.length;
           if (cached.summaries.size < 64 && cached.units + units <= 8192) {
-            cached.summaries.set(fn.id, unit); cached.units += units;
+            cached.summaries.set(fn.id, unit);
+            cached.units += units;
           }
         }
         return unit;
       },
-      initialize: (unit, boundedContext, demand) => observeNativeUnit(input, unit, new Map(), boundedContext, demand, true),
-      observe: (unit, summaries, boundedContext, demand) => observeNativeUnit(input, unit, summaries, boundedContext, demand, false),
-      equal: (left, right) => fingerprint(left as unknown as CanonicalValue) === fingerprint(right as unknown as CanonicalValue),
+      initialize: (unit, boundedContext, demand) =>
+        observeNativeUnit(input, unit, new Map(), boundedContext, demand, true),
+      observe: (unit, summaries, boundedContext, demand) =>
+        observeNativeUnit(input, unit, summaries, boundedContext, demand, false),
+      equal: (left, right) =>
+        fingerprint(left as unknown as CanonicalValue) ===
+        fingerprint(right as unknown as CanonicalValue),
     });
     for (const unit of result.units.values()) evidence.push(...unit.evidence);
     const interfaces = new Map<string, NativeInterface>();
     for (const dependency of dependencies) {
-      const key = result.context_keys.get(nativeContextKey(dependency.target.id, dependency.assumptions)) ?? dependency.target.id;
+      const key =
+        result.context_keys.get(nativeContextKey(dependency.target.id, dependency.assumptions)) ??
+        dependency.target.id;
       const summary = result.summaries.get(key);
-      const observed = mergeNativeInterface(summary?.observed,
-        observedCalls.find((call) => call.call_id === dependency.call_id), abi, summaryContext);
+      const observed = mergeNativeInterface(
+        summary?.observed,
+        observedCalls.find((call) => call.call_id === dependency.call_id),
+        abi,
+        summaryContext,
+      );
       interfaces.set(dependency.call_id, observed);
       const { parameter_shapes, written_result: _written, ...interface_ } = observed;
       const proofIds = [...(summary?.evidence_ids ?? dependency.target.evidence_ids)];
@@ -687,82 +1026,177 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         const readset = scope.dependencies?.finish();
         const proof: Evidence = {
           id: `evidence_${fingerprint([image.id, revision, dependency.call_id, key, 'context-use'])}`,
-          origin: { kind: 'analysis', analyzer: 'native-context', version: '1', rule: 'proven whole ABI caller context use' },
-          claim: `Original semantic subjects ${(dependency.original_subject_ids ?? [input.ir.id, dependency.call_id]).join(', ')}; ` +
+          origin: {
+            kind: 'analysis',
+            analyzer: 'native-context',
+            version: '1',
+            rule: 'proven whole ABI caller context use',
+          },
+          claim:
+            `Original semantic subjects ${(dependency.original_subject_ids ?? [input.ir.id, dependency.call_id]).join(', ')}; ` +
             `callee ${dependency.target.id}; requested ${nativeContextKey(dependency.target.id, dependency.assumptions)}; ` +
-            `effective ${key}; constants ${dependency.assumptions.constants.map(({ register, bits }) =>
-              `${register.root}[${register.offset_bits}:${register.width_bits}]=${bits}`).join(', ')}; ` +
+            `effective ${key}; constants ${dependency.assumptions.constants
+              .map(
+                ({ register, bits }) =>
+                  `${register.root}[${register.offset_bits}:${register.width_bits}]=${bits}`,
+              )
+              .join(', ')}; ` +
             `identity aliases ${dependency.assumptions.aliases.map((group) => group.map((register) => register.root).join('=')).join(', ')}; ` +
             `type/evidence scope ${dependency.assumptions.type_evidence_scope}; ` +
             `complete positive/negative dependency scope ${readset ? fingerprint(readset as unknown as CanonicalValue) : 'unavailable (no reuse ledger)'}; ` +
             `result storage ${observed.returns.map((register) => `${register.root}:${register.width_bits}`).join(', ')}; ` +
             'input assumptions do not establish complete source arity, disjoint aliases, object bounds, or source field names',
           derived_from: [...new Set([...proofIds, ...(dependency.evidence_ids ?? [])])],
-          conflicts_with: [], revision,
+          conflicts_with: [],
+          revision,
         };
-        evidence.push(proof); proofIds.push(proof.id);
+        evidence.push(proof);
+        proofIds.push(proof.id);
       }
-      callees.set(dependency.call_id, { call_id: dependency.call_id, target: dependency.target.entry,
-        target_subject_id: dependency.target.id, ...interface_,
-        evidence_ids: proofIds });
+      callees.set(dependency.call_id, {
+        call_id: dependency.call_id,
+        target: dependency.target.entry,
+        target_subject_id: dependency.target.id,
+        ...interface_,
+        evidence_ids: proofIds,
+      });
       summarized.add(dependency.call_id);
       for (const shape of parameter_shapes ?? []) evidence.push(...shape.evidence);
-      if (summary?.reasons.length) diagnostics.push({ code: 'unavailable_semantics', severity: 'warning',
-        message: `Native callee ${dependency.target.original_name ?? dependency.target.id} remains partial: ${summary.reasons.join('; ')}`,
-        entity_id: dependency.target.id, evidence_ids: dependency.target.evidence_ids });
+      if (summary?.reasons.length)
+        diagnostics.push({
+          code: 'unavailable_semantics',
+          severity: 'warning',
+          message: `Native callee ${dependency.target.original_name ?? dependency.target.id} remains partial: ${summary.reasons.join('; ')}`,
+          entity_id: dependency.target.id,
+          evidence_ids: dependency.target.evidence_ids,
+        });
     }
-    if (selectedUnit) memory_transfers = nativeShapeTransfers(selectedUnit, interfaces, summaryContext);
-    function_returns = nativeReturnInterface(input.ir, abi, input.types.calls, interfaces, summaryContext, false,
-      [], false, selectedUnit?.interface_index).written_result;
+    if (selectedUnit)
+      memory_transfers = nativeShapeTransfers(selectedUnit, interfaces, summaryContext);
+    function_returns = nativeReturnInterface(
+      input.ir,
+      abi,
+      input.types.calls,
+      interfaces,
+      summaryContext,
+      false,
+      [],
+      false,
+      selectedUnit?.interface_index,
+    ).written_result;
   } catch (error) {
     const details = error instanceof OperationError ? error.diagnostic.details : undefined;
-    if (!(error instanceof OperationError) || error.code !== 'resource_limit' || details?.kind !== 'limit' ||
-      details.resource !== 'work' || details.limit > summaryWorkLimit) throw error;
+    if (
+      !(error instanceof OperationError) ||
+      error.code !== 'resource_limit' ||
+      details?.kind !== 'limit' ||
+      details.resource !== 'work' ||
+      details.limit > summaryWorkLimit
+    )
+      throw error;
     context.checkpoint(0);
-    diagnostics.push({ code: 'resource_limit', severity: 'warning',
+    diagnostics.push({
+      code: 'resource_limit',
+      severity: 'warning',
       message: `Native dependency worklist stopped at its work sub-budget (${details.limit}); selected-body analysis remains available and unfinished interfaces remain unresolved`,
-      evidence_ids: [], details });
+      evidence_ids: [],
+      details,
+    });
     for (const dependency of dependencies) {
       // A record finished before the cut keeps its established facts; the
       // conservative fallback only covers calls the summary loop never reached.
       if (summarized.has(dependency.call_id)) continue;
       const unit = partialUnits.get(dependency.target.id),
         prior = partialSummaries.get(dependency.target.id)?.observed ?? unit?.entry_prefix;
-      let observed: NativeInterface = { ...prior, parameters: prior?.parameters ?? [], returns: [],
-        parameter_state: 'ambiguous', argument_list_complete: false };
+      let observed: NativeInterface = {
+        ...prior,
+        parameters: prior?.parameters ?? [],
+        returns: [],
+        parameter_state: 'ambiguous',
+        argument_list_complete: false,
+      };
       if (unit?.ir) {
         try {
-          const returned = nativeReturnInterface(unit.ir, abi, unit.analysis, new Map(), summaryContext, false,
-            returnDemands.get(dependency.target.id) ?? [], false, unit.interface_index);
-          const inputs = nativeEntryRegisters(unit.ir, parameterRegisters(abi), new Map(), returned.returns, summaryContext,
-            unit.interface_index);
-          const parameters = new Map((prior?.parameters ?? []).map((register) => [register.root, register]));
+          const returned = nativeReturnInterface(
+            unit.ir,
+            abi,
+            unit.analysis,
+            new Map(),
+            summaryContext,
+            false,
+            returnDemands.get(dependency.target.id) ?? [],
+            false,
+            unit.interface_index,
+          );
+          const inputs = nativeEntryRegisters(
+            unit.ir,
+            parameterRegisters(abi),
+            new Map(),
+            returned.returns,
+            summaryContext,
+            unit.interface_index,
+          );
+          const parameters = new Map(
+            (prior?.parameters ?? []).map((register) => [register.root, register]),
+          );
           for (const register of inputs) {
             const previous = parameters.get(register.root);
-            if (!previous || previous.width_bits < register.width_bits) parameters.set(register.root, register);
+            if (!previous || previous.width_bits < register.width_bits)
+              parameters.set(register.root, register);
           }
-          const ordered = parameterRegisters(abi).flatMap((register) => parameters.get(register.root) ?? []);
-          observed = { ...observed, ...returned, parameters: ordered,
-            parameter_types: ordered.map((register) => ({ kind: 'integer', bits: register.width_bits })) };
+          const ordered = parameterRegisters(abi).flatMap(
+            (register) => parameters.get(register.root) ?? [],
+          );
+          observed = {
+            ...observed,
+            ...returned,
+            parameters: ordered,
+            parameter_types: ordered.map((register) => ({
+              kind: 'integer',
+              bits: register.width_bits,
+            })),
+          };
         } catch (recoveryError) {
-          const recoveryDetails = recoveryError instanceof OperationError ? recoveryError.diagnostic.details : undefined;
-          if (!(recoveryError instanceof OperationError) || recoveryError.code !== 'resource_limit' ||
-            recoveryDetails?.kind !== 'limit' || recoveryDetails.resource !== 'work' ||
-            recoveryDetails.limit > summaryWorkLimit) throw recoveryError;
+          const recoveryDetails =
+            recoveryError instanceof OperationError ? recoveryError.diagnostic.details : undefined;
+          if (
+            !(recoveryError instanceof OperationError) ||
+            recoveryError.code !== 'resource_limit' ||
+            recoveryDetails?.kind !== 'limit' ||
+            recoveryDetails.resource !== 'work' ||
+            recoveryDetails.limit > summaryWorkLimit
+          )
+            throw recoveryError;
           context.checkpoint(0);
         }
       }
       // The callee record cites this unit's graph-refined function proofs even when
       // SSA preparation stopped, so its graph evidence is published either way.
       if (unit) evidence.push(...unit.evidence);
-      observed = mergeNativeInterface(observed, observedCalls.find((call) => call.call_id === dependency.call_id), abi, context);
+      observed = mergeNativeInterface(
+        observed,
+        observedCalls.find((call) => call.call_id === dependency.call_id),
+        abi,
+        context,
+      );
       const { parameter_shapes: _shapes, written_result: _written, ...interface_ } = observed;
-      callees.set(dependency.call_id, { call_id: dependency.call_id, target: dependency.target.entry,
-        target_subject_id: dependency.target.id, ...interface_,
-        evidence_ids: unit?.evidence_ids ?? dependency.target.evidence_ids });
+      callees.set(dependency.call_id, {
+        call_id: dependency.call_id,
+        target: dependency.target.entry,
+        target_subject_id: dependency.target.id,
+        ...interface_,
+        evidence_ids: unit?.evidence_ids ?? dependency.target.evidence_ids,
+      });
     }
   }
-  return { abi, callees: [...callees.values()], diagnostics, evidence, addresses: sourceAddresses(input), memory_transfers,
+  return {
+    abi,
+    callees: [...callees.values()],
+    diagnostics,
+    evidence,
+    addresses: sourceAddresses(input),
+    memory_transfers,
     ...(function_returns === undefined ? {} : { function_returns }),
-    call_argument_counts: actualArgumentCounts(input.types.calls, input.library, context) };
+    call_argument_counts: actualArgumentCounts(input.types.calls, input.library, context),
+  };
 }

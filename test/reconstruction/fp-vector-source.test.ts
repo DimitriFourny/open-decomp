@@ -16,11 +16,24 @@ const variadicCases = [
   [2 ** 52, 1, -(2 ** 52)],
 ] as const;
 const vectorCases = [
-  [[1, -2, 0, 3.125], [3, 4, -0, 10]],
-  [[2 ** -126, 2 ** -149, 2 ** 24, -0], [-(2 ** -126), 2 ** -149, 1, -0]],
-  [[2 ** 120, -(2 ** 120), 1.25, -2.5], [-(2 ** 120), 2 ** 120, -2.5, 5]],
+  [
+    [1, -2, 0, 3.125],
+    [3, 4, -0, 10],
+  ],
+  [
+    [2 ** -126, 2 ** -149, 2 ** 24, -0],
+    [-(2 ** -126), 2 ** -149, 1, -0],
+  ],
+  [
+    [2 ** 120, -(2 ** 120), 1.25, -2.5],
+    [-(2 ** 120), 2 ** 120, -2.5, 5],
+  ],
 ] as const;
-const mixedCases = [[0, 4, 3], [7, -2, 0.5], [0xffffffff, 0.5, -1.5]] as const;
+const mixedCases = [
+  [0, 4, 3],
+  [7, -2, 0.5],
+  [0xffffffff, 0.5, -1.5],
+] as const;
 const storage = new DataView(new ArrayBuffer(8));
 function floatBits(value: number, width: 32 | 64): bigint {
   if (width === 32) {
@@ -43,7 +56,11 @@ function store(memory: Map<bigint, number>, address: bigint, bits: bigint, size:
   for (let byte = 0; byte < size; byte++)
     memory.set(address + BigInt(byte), Number((bits >> BigInt(byte * 8)) & 255n));
 }
-function formals(emission: Parameters<typeof execute>[0], args: readonly bigint[], entrySp: bigint): Map<string, bigint> {
+function formals(
+  emission: Parameters<typeof execute>[0],
+  args: readonly bigint[],
+  entrySp: bigint,
+): Map<string, bigint> {
   const result = new Map<string, bigint>();
   let index = 0;
   for (const formal of emittedFormals(emission)) {
@@ -73,10 +90,20 @@ test(
       await rm(root, { recursive: true, force: true });
     });
     const binary = join(root, 'fp-vector');
-    const compiled = spawnSync('/usr/bin/clang', [
-      '-target', 'arm64-apple-macos13.0', '-O1', '-ffp-contract=off', '-fno-builtin',
-      resolve('test/reconstruction/fp-vector-source.c'), '-o', binary,
-    ], { encoding: 'utf8' });
+    const compiled = spawnSync(
+      '/usr/bin/clang',
+      [
+        '-target',
+        'arm64-apple-macos13.0',
+        '-O1',
+        '-ffp-contract=off',
+        '-fno-builtin',
+        resolve('test/reconstruction/fp-vector-source.c'),
+        '-o',
+        binary,
+      ],
+      { encoding: 'utf8' },
+    );
     assert.equal(compiled.status, 0, compiled.stderr);
     const native = spawnSync(binary, [], { encoding: 'utf8' });
     assert.equal(native.status, 0, native.stderr);
@@ -84,7 +111,10 @@ test(
     for (const line of native.stdout.trim().split('\n')) {
       const [name, index, ...bits] = line.split(' ');
       assert.ok(name && index && bits.length);
-      oracle.set(`${name}:${index}`, bits.map((value) => BigInt(`0x${value}`)));
+      oracle.set(
+        `${name}:${index}`,
+        bits.map((value) => BigInt(`0x${value}`)),
+      );
     }
     assert.equal(oracle.size, variadicCases.length + vectorCases.length * 2 + mixedCases.length);
     session = await openBinary(binary, { cachePath: join(root, 'cache') });
@@ -103,27 +133,48 @@ test(
           // The reserved va_list cursor bytes are mapped stack backing, not
           // source-initialized zero. The native prologue overwrites all eight.
           for (let offset = -8; offset < 0; offset++) memory.set(entrySp + BigInt(offset), poison);
-          args.forEach((value, argument) => store(memory, entrySp + BigInt(argument * 8), floatBits(value, 64), 8));
-          const observed = execute(variadicEmission,
-            formals(variadicEmission, [BigInt(args.length)], entrySp), memory, 0n, new Map(), environment,
-            new Map(), acknowledgeRequirements(variadicEmission));
+          args.forEach((value, argument) =>
+            store(memory, entrySp + BigInt(argument * 8), floatBits(value, 64), 8),
+          );
+          const observed = execute(
+            variadicEmission,
+            formals(variadicEmission, [BigInt(args.length)], entrySp),
+            memory,
+            0n,
+            new Map(),
+            environment,
+            new Map(),
+            acknowledgeRequirements(variadicEmission),
+          );
           assert.equal(observed.exit, 'machine_return', `${emitter}: variadic ${index}`);
           assert.deepEqual(observed.values, oracle.get(`variadic:${index}`));
           assert.equal(observed.events[0], 'store');
           if (args.length === 0)
-            assert.ok(!observed.events.includes('load'), 'count zero never reads incoming arguments');
+            assert.ok(
+              !observed.events.includes('load'),
+              'count zero never reads incoming arguments',
+            );
         }
       const vector = await session.decompile({ name: '_fixture_vector_return' }, { emitter });
       assert.ok('data' in vector && vector.data.delivery === 'inline');
       const vectorEmission = vector.data.emission;
       assert.match(vectorEmission.text, /vector_f32x4_t/);
       for (const [index, [left, right]] of vectorCases.entries()) {
-        const observed = execute(vectorEmission,
+        const observed = execute(
+          vectorEmission,
           formals(vectorEmission, [vectorBits(left), vectorBits(right)], entrySp),
-          new Map(), 0n, new Map(), environment, new Map(), acknowledgeRequirements(vectorEmission));
+          new Map(),
+          0n,
+          new Map(),
+          environment,
+          new Map(),
+          acknowledgeRequirements(vectorEmission),
+        );
         assert.equal(observed.exit, 'machine_return', `${emitter}: vector ${index}`);
         const expected = oracle.get(`vector:${index}`)!;
-        assert.deepEqual(observed.values, [expected.reduce((packed, lane, i) => packed | (lane << BigInt(i * 32)), 0n)]);
+        assert.deepEqual(observed.values, [
+          expected.reduce((packed, lane, i) => packed | (lane << BigInt(i * 32)), 0n),
+        ]);
       }
       const stored = await session.decompile({ name: '_fixture_vector_store' }, { emitter });
       assert.ok('data' in stored && stored.data.delivery === 'inline');
@@ -133,9 +184,16 @@ test(
         store(memory, 0x2000n, vectorBits(left), 16);
         store(memory, 0x3000n, vectorBits(right), 16);
         store(memory, 0x1000n, (1n << 128n) - 1n, 16);
-        const observed = execute(storeEmission,
+        const observed = execute(
+          storeEmission,
           formals(storeEmission, [0x1000n, 0x2000n, 0x3000n], entrySp),
-          memory, 0n, new Map(), environment, new Map(), acknowledgeRequirements(storeEmission));
+          memory,
+          0n,
+          new Map(),
+          environment,
+          new Map(),
+          acknowledgeRequirements(storeEmission),
+        );
         assert.equal(observed.exit, 'machine_return', `${emitter}: store ${index}`);
         // The source returns void: caller-saved result-register contents are
         // not an observable return contract without native prototype evidence.
@@ -143,7 +201,8 @@ test(
         for (let lane = 0; lane < 4; lane++) {
           let bits = 0n;
           for (let byte = 0; byte < 4; byte++)
-            bits |= BigInt(observed.memory.get(0x1000n + BigInt(lane * 4 + byte))!) << BigInt(byte * 8);
+            bits |=
+              BigInt(observed.memory.get(0x1000n + BigInt(lane * 4 + byte))!) << BigInt(byte * 8);
           lanes.push(bits);
         }
         assert.deepEqual(lanes, oracle.get(`store:${index}`));
@@ -156,25 +215,52 @@ test(
       const calls = new Map<string, (args: readonly bigint[]) => bigint>();
       calls.set('_fixture_mixed', (args) => {
         assert.equal(args.length, 3);
-        return floatBits(Number(BigInt.asUintN(32, args[0]!)) +
-          floatNumber(args[1]!) * 1.5 + floatNumber(args[2]!) * 0.5, 64);
+        return floatBits(
+          Number(BigInt.asUintN(32, args[0]!)) +
+            floatNumber(args[1]!) * 1.5 +
+            floatNumber(args[2]!) * 0.5,
+          64,
+        );
       });
       for (const [index, [count, left, right]] of mixedCases.entries())
         for (const poison of [0xa5, 0x5a]) {
           const memory = new Map<bigint, number>();
           // Writable caller-frame backing has arbitrary incoming contents.
           // Saved registers must be stored before restoration loads consume it.
-          for (let offset = -256; offset < 0; offset++) memory.set(entrySp + BigInt(offset), poison);
-          const observed = execute(mixedEmission,
-            formals(mixedEmission, [BigInt(count), floatBits(left, 64), floatBits(right, 64)], entrySp),
-            memory, 0n, new Map(), environment, calls, acknowledgeRequirements(mixedEmission));
+          for (let offset = -256; offset < 0; offset++)
+            memory.set(entrySp + BigInt(offset), poison);
+          const observed = execute(
+            mixedEmission,
+            formals(
+              mixedEmission,
+              [BigInt(count), floatBits(left, 64), floatBits(right, 64)],
+              entrySp,
+            ),
+            memory,
+            0n,
+            new Map(),
+            environment,
+            calls,
+            acknowledgeRequirements(mixedEmission),
+          );
           assert.equal(observed.exit, 'machine_return', `${emitter}: mixed ${index}`);
           assert.deepEqual(observed.values, oracle.get(`mixed:${index}`));
           assert.deepEqual(observed.source_calls, [
-            { name: '_fixture_mixed', arguments: [BigInt(count), floatBits(left, 64), floatBits(right, 64)] },
-            { name: '_fixture_mixed', arguments: [BigInt.asUintN(32, BigInt(count) + 1n), floatBits(right, 64), floatBits(left, 64)] },
+            {
+              name: '_fixture_mixed',
+              arguments: [BigInt(count), floatBits(left, 64), floatBits(right, 64)],
+            },
+            {
+              name: '_fixture_mixed',
+              arguments: [
+                BigInt.asUintN(32, BigInt(count) + 1n),
+                floatBits(right, 64),
+                floatBits(left, 64),
+              ],
+            },
           ]);
-          const firstStore = observed.events.indexOf('store'), firstLoad = observed.events.indexOf('load');
+          const firstStore = observed.events.indexOf('store'),
+            firstLoad = observed.events.indexOf('load');
           assert.ok(firstStore >= 0 && (firstLoad < 0 || firstStore < firstLoad));
         }
     }

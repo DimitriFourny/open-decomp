@@ -175,7 +175,11 @@ test('SQLite cache hits and annotation catalogs reuse immutable image facts with
   assert.equal(hit.data.cache, 'hit');
   assert.deepEqual({ ...hit.data, cache: 'computed' }, computed.data);
   const catalog = await readAnnotationCatalog(
-    store, 2, [valueId], createOperationContext(), () => true,
+    store,
+    2,
+    [valueId],
+    createOperationContext(),
+    () => true,
   );
   assert.equal(catalog?.subject(valueId)?.kind, 'value');
   assert.ok(loaded.length >= 5, 'all cache/catalog validation paths are exercised');
@@ -192,15 +196,19 @@ test('SQLite cache hits and annotation catalogs reuse immutable image facts with
     (first.target.features as string[]).push('forged');
   }, TypeError);
   assert.equal(
-    store.transaction(2, (tx) => tx.putImage({
-      ...image,
-      diagnostics: [{
-        code: 'unavailable_semantics',
-        severity: 'warning',
-        message: 'new metadata revision',
-        evidence_ids: [],
-      }],
-    })).state,
+    store.transaction(2, (tx) =>
+      tx.putImage({
+        ...image,
+        diagnostics: [
+          {
+            code: 'unavailable_semantics',
+            severity: 'warning',
+            message: 'new metadata revision',
+            evidence_ids: [],
+          },
+        ],
+      }),
+    ).state,
     'committed',
   );
   assert.equal(store.readLoadedImage(image.id, image.selected_slice_id, 2), first);

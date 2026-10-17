@@ -47,7 +47,12 @@ import {
 import { loadFunctionGraph, loadFunctionIndex, loadFunctionScope } from '../queries/scope.js';
 import { MAX_FRAME_BYTES } from '../../workers/protocol.js';
 import { callDeclarations, resolveCalls } from './calls.js';
-import { closeEvidence, emissionEvidenceReferences, evidenceReferences, semanticCatalog } from './catalog.js';
+import {
+  closeEvidence,
+  emissionEvidenceReferences,
+  evidenceReferences,
+  semanticCatalog,
+} from './catalog.js';
 import { pipelineComponents, pipelineVersions } from './versions.js';
 import { boundIR, requirePass } from './passes.js';
 import { recoverSourceEvidence } from './source-facts.js';
@@ -255,11 +260,13 @@ export async function executeDecompilation(
         ...calls.subjects,
       ]);
       const annotationService = new AnnotationService(store);
-      let active = dependencies.annotationView(() => annotationService.active(args.revision, fullContext, {
-        catalog: trusted,
-        entity_ids: [...selected],
-        on_dependencies: dependencies.recordAnnotationScope,
-      }));
+      let active = dependencies.annotationView(() =>
+        annotationService.active(args.revision, fullContext, {
+          catalog: trusted,
+          entity_ids: [...selected],
+          on_dependencies: dependencies.recordAnnotationScope,
+        }),
+      );
       let expanded = false;
       for (const type of active.types) {
         if (!selected.has(type.id)) {
@@ -274,11 +281,13 @@ export async function executeDecompilation(
             }
       }
       if (expanded)
-        active = dependencies.annotationView(() => annotationService.active(args.revision, fullContext, {
-          catalog: trusted,
-          entity_ids: [...selected],
-          on_dependencies: dependencies.recordAnnotationScope,
-        }));
+        active = dependencies.annotationView(() =>
+          annotationService.active(args.revision, fullContext, {
+            catalog: trusted,
+            entity_ids: [...selected],
+            on_dependencies: dependencies.recordAnnotationScope,
+          }),
+        );
       const asserted = active.annotations.some(
         (annotation) => annotation.value.kind === 'type' || annotation.value.kind === 'signature',
       );
@@ -375,28 +384,40 @@ export async function executeDecompilation(
         const name = subject.display_name ?? subject.original_name;
         if (name) nativeNames.set(subject.id, name);
       }
-      const callNames = new Map<string, {
-        readonly asserted: Set<string>;
-        readonly hypotheses: Set<string>;
-        readonly native: Set<string>;
-        readonly evidence: Set<string>;
-        explicit: boolean;
-      }>();
+      const callNames = new Map<
+        string,
+        {
+          readonly asserted: Set<string>;
+          readonly hypotheses: Set<string>;
+          readonly native: Set<string>;
+          readonly evidence: Set<string>;
+          explicit: boolean;
+        }
+      >();
       for (const [subject, uses] of calls.calls_by_subject) {
         context.checkpoint(1 + uses.length);
-        const annotations = named.get(subject), native = nativeNames.get(subject);
+        const annotations = named.get(subject),
+          native = nativeNames.get(subject);
         for (const use of uses) {
           let candidates = callNames.get(use.call_id);
           if (!candidates) {
-            candidates = { asserted: new Set(), hypotheses: new Set(), native: new Set(), evidence: new Set(), explicit: false };
+            candidates = {
+              asserted: new Set(),
+              hypotheses: new Set(),
+              native: new Set(),
+              evidence: new Set(),
+              explicit: false,
+            };
             callNames.set(use.call_id, candidates);
           }
           if (annotations) {
             candidates.explicit = true;
             for (const annotation of annotations)
               if (annotation.value.kind === 'name') {
-                (annotation.status === 'asserted' ? candidates.asserted : candidates.hypotheses)
-                  .add(annotation.value.value);
+                (annotation.status === 'asserted'
+                  ? candidates.asserted
+                  : candidates.hypotheses
+                ).add(annotation.value.value);
                 for (const proof of annotation.evidence_ids) candidates.evidence.add(proof);
               }
           } else if (native) candidates.native.add(native);
@@ -412,14 +433,14 @@ export async function executeDecompilation(
         const name = chosen.size === 1 ? chosen.values().next().value : undefined;
         let competing = false;
         if (candidates.explicit)
-          for (const hypothesis of candidates.hypotheses)
-            if (hypothesis !== name) competing = true;
+          for (const hypothesis of candidates.hypotheses) if (hypothesis !== name) competing = true;
         if (name === undefined || competing) {
           if (candidates.explicit)
             nameDiagnostics.push({
               code: 'conflicting_evidence',
               severity: 'info',
-              message: 'Callee alias names lack a unique unopposed assertion; native aliases do not resolve explicit hypotheses or conflicts',
+              message:
+                'Callee alias names lack a unique unopposed assertion; native aliases do not resolve explicit hypotheses or conflicts',
               entity_id,
               evidence_ids: [...candidates.evidence],
             });
@@ -551,8 +572,9 @@ export async function executeDecompilation(
         {
           layer: 'analysis',
           state:
-            graph.coverage.state === 'complete' && types.state === 'complete' &&
-            !(source.diagnostics?.length)
+            graph.coverage.state === 'complete' &&
+            types.state === 'complete' &&
+            !source.diagnostics?.length
               ? 'complete'
               : 'partial',
           completed_units: analysisReasons.length ? 0 : 1,
@@ -588,7 +610,8 @@ export async function executeDecompilation(
         );
         if (keys.size === 1) signature = signatures[0]!.signature;
       }
-      const catalog = types === baseline ? baselineCatalog : semanticCatalog(image, ir, types, context);
+      const catalog =
+        types === baseline ? baselineCatalog : semanticCatalog(image, ir, types, context);
       const proofIds = evidenceReferences(
         [
           catalog.types,

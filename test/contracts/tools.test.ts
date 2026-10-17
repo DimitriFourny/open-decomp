@@ -157,7 +157,15 @@ const success: Record<ToolName, object> = {
   functions_find: { state: 'complete', data: { items: [functionRecord], page } },
   function_get: {
     state: 'complete',
-    data: { view: 'metadata', evidence_delivery: 'by_reference', function: functionRecord, reviewed_subject_id: entity, annotation_eligible: true, annotations: [], lineage: [] },
+    data: {
+      view: 'metadata',
+      evidence_delivery: 'by_reference',
+      function: functionRecord,
+      reviewed_subject_id: entity,
+      annotation_eligible: true,
+      annotations: [],
+      lineage: [],
+    },
   },
   function_decompile: {
     state: 'complete',
@@ -477,13 +485,28 @@ test('emitter spans refer to actual UTF-16 text bounds and emission tables', () 
       .success,
     false,
   );
-  for (const mapping of [{ semantic_refs: [1] }, { semantic_refs: [] }, { range_refs: [1] }, { evidence_refs: [0] }])
-    assert.equal(emissionSchema.safeParse({ ...emission, mappings: [{ ...emission.mappings[0], ...mapping }] }).success,
-      false, 'every reference cites an existing table entry');
-  assert.equal(emissionSchema.safeParse({ ...emission, ids: [entity, entity] }).success, false,
-    'each identity is stated once');
-  assert.equal(emissionSchema.safeParse({ ...emission, ranges: [range, range] }).success, false,
-    'each range is stated once');
+  for (const mapping of [
+    { semantic_refs: [1] },
+    { semantic_refs: [] },
+    { range_refs: [1] },
+    { evidence_refs: [0] },
+  ])
+    assert.equal(
+      emissionSchema.safeParse({ ...emission, mappings: [{ ...emission.mappings[0], ...mapping }] })
+        .success,
+      false,
+      'every reference cites an existing table entry',
+    );
+  assert.equal(
+    emissionSchema.safeParse({ ...emission, ids: [entity, entity] }).success,
+    false,
+    'each identity is stated once',
+  );
+  assert.equal(
+    emissionSchema.safeParse({ ...emission, ranges: [range, range] }).success,
+    false,
+    'each range is stated once',
+  );
   const declaration = {
     ...emission,
     text: '\u{1d538}',
@@ -491,8 +514,15 @@ test('emitter spans refer to actual UTF-16 text bounds and emission tables', () 
     declaration_span: { start: 0, end: 2 },
   };
   assert.equal(emissionSchema.safeParse(declaration).success, true);
-  for (const span of [{ start: -1, end: 2 }, { start: 0, end: 0 }, { start: 0, end: 3 }])
-    assert.equal(emissionSchema.safeParse({ ...declaration, declaration_span: span }).success, false);
+  for (const span of [
+    { start: -1, end: 2 },
+    { start: 0, end: 0 },
+    { start: 0, end: 3 },
+  ])
+    assert.equal(
+      emissionSchema.safeParse({ ...declaration, declaration_span: span }).success,
+      false,
+    );
 });
 
 test('serialized output budgets and job/project bindings are enforced at delivery', () => {

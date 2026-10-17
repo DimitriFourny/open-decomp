@@ -32,11 +32,8 @@ export function loadImage(input: Uint8Array): LoadedImage {
   const bytes = new ImmutableBytes(input),
     sha256 = contentHash(input),
     image_id = imageIdentity(sha256);
-  const loader = input[0] === 0x4d
-    ? new PELoader()
-    : input[0] === 0x7f
-      ? new ELFLoader()
-      : new MachOLoader();
+  const loader =
+    input[0] === 0x4d ? new PELoader() : input[0] === 0x7f ? new ELFLoader() : new MachOLoader();
   return loader.load({ bytes, sha256, image_id, slice_id: null }, createOperationContext());
 }
 

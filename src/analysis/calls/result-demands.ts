@@ -1,5 +1,13 @@
 import type { AbiProfile, OperationContext, RegisterDescriptor } from '../../core/index.js';
-import { bitWidth, expressionOperands, successors, type Expression, type RegisterBinding, type SSAForm, type Value } from '../../ir/index.js';
+import {
+  bitWidth,
+  expressionOperands,
+  successors,
+  type Expression,
+  type RegisterBinding,
+  type SSAForm,
+  type Value,
+} from '../../ir/index.js';
 
 /** Read-only access to private stage structure, never shared witness results. */
 export interface CallPreparationIndex {
@@ -14,17 +22,26 @@ export interface CallPreparationIndex {
 export interface CallResultDemandIndex {
   preparation(ir: SSAForm, abi: AbiProfile, context: OperationContext): CallPreparationIndex;
   query(
-    ir: SSAForm, abi: AbiProfile, context: OperationContext,
+    ir: SSAForm,
+    abi: AbiProfile,
+    context: OperationContext,
     additionalRoots?: readonly Value[],
   ): ReadonlyMap<string, readonly RegisterDescriptor[]>;
 }
 
 export function observeCallResultDemands(
-  ir: SSAForm, abi: AbiProfile, context: OperationContext,
+  ir: SSAForm,
+  abi: AbiProfile,
+  context: OperationContext,
   additionalRoots: readonly Value[] = [],
   index?: CallResultDemandIndex,
 ): ReadonlyMap<string, readonly RegisterDescriptor[]> {
-  return (index ?? createCallResultDemandIndex(ir, abi, context)).query(ir, abi, context, additionalRoots);
+  return (index ?? createCallResultDemandIndex(ir, abi, context)).query(
+    ir,
+    abi,
+    context,
+    additionalRoots,
+  );
 }
 
 /** Semantic result consumption, independent of a callee's return guarantee.
@@ -35,21 +52,32 @@ export function createCallResultDemandIndex(
   abi: AbiProfile,
   context: OperationContext,
 ): CallResultDemandIndex {
-  const primary = abi.classifyCall({ returns: { kind: 'pointer' }, parameters: [],
-    variadic: false, fixed_parameter_count: 0 }).returns.find((location) => location.kind === 'register');
-  const expressions = new Map<string, Expression>(), incoming = new Map<string, Value[]>();
+  const primary = abi
+    .classifyCall({
+      returns: { kind: 'pointer' },
+      parameters: [],
+      variadic: false,
+      fixed_parameter_count: 0,
+    })
+    .returns.find((location) => location.kind === 'register');
+  const expressions = new Map<string, Expression>(),
+    incoming = new Map<string, Value[]>();
   const outputs = new Map<string, { readonly call: string; readonly binding: RegisterBinding }>();
   const loads = new Set<string>();
   const blocks = new Map(ir.blocks.map((block) => [block.id, block]));
   const states = new Map(ir.register_states.map((state) => [state.block, state]));
-  const entry = new Map((states.get(ir.entry)?.entry ?? []).map((binding) => [binding.register.id, binding.value.id]));
+  const entry = new Map(
+    (states.get(ir.entry)?.entry ?? []).map((binding) => [binding.register.id, binding.value.id]),
+  );
   const roots: Value[] = [];
   for (const block of ir.blocks) {
     for (const node of block.instructions) {
       context.checkpoint(1);
       if (node.kind === 'assign') expressions.set(node.result.id, node.expression);
-      else if (node.kind === 'load') { loads.add(node.result.id); roots.push(node.address); }
-      else if (node.kind === 'store') roots.push(node.address, node.value);
+      else if (node.kind === 'load') {
+        loads.add(node.result.id);
+        roots.push(node.address);
+      } else if (node.kind === 'store') roots.push(node.address, node.value);
       else if (node.kind === 'call') {
         roots.push(...node.arguments);
         if (node.target.kind === 'indirect') roots.push(node.target.value);
@@ -68,7 +96,10 @@ export function createCallResultDemandIndex(
       if (!control.values.length && primary?.kind === 'register')
         for (const binding of states.get(block.id)?.exit ?? []) {
           context.checkpoint(1);
-          if (binding.register.root === primary.register.root && entry.get(binding.register.id) !== binding.value.id)
+          if (
+            binding.register.root === primary.register.root &&
+            entry.get(binding.register.id) !== binding.value.id
+          )
             roots.push(binding.value);
         }
     }
@@ -77,7 +108,8 @@ export function createCallResultDemandIndex(
       if (!target) continue;
       for (let index = 0; index < target.parameters.length; index++) {
         context.checkpoint(1);
-        const destination = target.parameters[index]!.id, sources = incoming.get(destination) ?? [];
+        const destination = target.parameters[index]!.id,
+          sources = incoming.get(destination) ?? [];
         sources.push(edge.arguments[index]!);
         incoming.set(destination, sources);
       }
@@ -85,7 +117,11 @@ export function createCallResultDemandIndex(
   }
   let preparation: CallPreparationIndex | undefined;
   return Object.freeze({
-    preparation(input: SSAForm, profile: AbiProfile, queryContext: OperationContext): CallPreparationIndex {
+    preparation(
+      input: SSAForm,
+      profile: AbiProfile,
+      queryContext: OperationContext,
+    ): CallPreparationIndex {
       queryContext.checkpoint(0);
       if (input !== ir || profile !== abi)
         throw new TypeError('Call preparation index belongs to a different SSA or ABI stage');
@@ -98,7 +134,8 @@ export function createCallResultDemandIndex(
         preparation = Object.freeze({
           assertStage(input: SSAForm, queryContext: OperationContext): void {
             queryContext.checkpoint(0);
-            if (input !== ir) throw new TypeError('Call preparation index belongs to a different SSA stage');
+            if (input !== ir)
+              throw new TypeError('Call preparation index belongs to a different SSA stage');
           },
           entry: (id: string) => entryByValue.get(id),
           expression: (id: string) => expressions.get(id),
@@ -114,44 +151,66 @@ export function createCallResultDemandIndex(
       return preparation;
     },
     query(
-      input: SSAForm, profile: AbiProfile, queryContext: OperationContext,
+      input: SSAForm,
+      profile: AbiProfile,
+      queryContext: OperationContext,
       additionalRoots: readonly Value[] = [],
     ): ReadonlyMap<string, readonly RegisterDescriptor[]> {
       queryContext.checkpoint(0);
       if (input !== ir || profile !== abi)
         throw new TypeError('Call result demand index belongs to a different SSA or ABI stage');
       const demanded = new Map<string, Map<string, RegisterDescriptor>>();
-      const pending = additionalRoots.map((value) =>
-        ({ value, offset: 0, width: bitWidth(value.type) }));
+      const pending = additionalRoots.map((value) => ({
+        value,
+        offset: 0,
+        width: bitWidth(value.type),
+      }));
       for (const value of roots) pending.push({ value, offset: 0, width: bitWidth(value.type) });
       const seen = new Set<string>();
       for (let index = 0; index < pending.length; index++) {
         queryContext.checkpoint(1);
-        const { value, offset, width } = pending[index]!, key = `${value.id}:${offset}:${width}`;
+        const { value, offset, width } = pending[index]!,
+          key = `${value.id}:${offset}:${width}`;
         if (seen.has(key)) continue;
         seen.add(key);
         const output = outputs.get(value.id);
         if (output) {
           const registers = demanded.get(output.call) ?? new Map<string, RegisterDescriptor>();
-          const register = output.binding.register, high = register.offset_bits + offset + width;
+          const register = output.binding.register,
+            high = register.offset_bits + offset + width;
           const previous = registers.get(register.root);
-          registers.set(register.root, { ...register, offset_bits: 0,
-            width_bits: Math.max(previous?.width_bits ?? 0, high) });
+          registers.set(register.root, {
+            ...register,
+            offset_bits: 0,
+            width_bits: Math.max(previous?.width_bits ?? 0, high),
+          });
           demanded.set(output.call, registers);
         }
         const expression = expressions.get(value.id);
-        if (expression?.kind === 'extract') pending.push({ value: expression.value,
-          offset: expression.offset + offset, width });
-        else if (expression?.kind === 'cast' && (expression.op === 'truncate' ||
-          expression.op === 'zero_extend' || expression.op === 'sign_extend' || expression.op === 'bitcast')) {
+        if (expression?.kind === 'extract')
+          pending.push({ value: expression.value, offset: expression.offset + offset, width });
+        else if (
+          expression?.kind === 'cast' &&
+          (expression.op === 'truncate' ||
+            expression.op === 'zero_extend' ||
+            expression.op === 'sign_extend' ||
+            expression.op === 'bitcast')
+        ) {
           const available = bitWidth(expression.value.type);
-          if (offset < available) pending.push({ value: expression.value, offset, width: Math.min(width, available - offset) });
+          if (offset < available)
+            pending.push({
+              value: expression.value,
+              offset,
+              width: Math.min(width, available - offset),
+            });
           if (expression.op === 'sign_extend' && offset + width > available)
             pending.push({ value: expression.value, offset: available - 1, width: 1 });
         } else if (expression?.kind === 'concat') {
           let cursor = 0;
           for (const part of expression.values) {
-            const end = cursor + bitWidth(part.type), low = Math.max(cursor, offset), high = Math.min(end, offset + width);
+            const end = cursor + bitWidth(part.type),
+              low = Math.max(cursor, offset),
+              high = Math.min(end, offset + width);
             if (low < high) pending.push({ value: part, offset: low - cursor, width: high - low });
             cursor = end;
           }

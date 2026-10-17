@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createOperationContext, DEFAULT_ANALYSIS_OPTIONS, expandEmission } from '../../../src/core/index.js';
+import {
+  createOperationContext,
+  DEFAULT_ANALYSIS_OPTIONS,
+  expandEmission,
+} from '../../../src/core/index.js';
 import { DarwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { simplifySSA } from '../../../src/analysis/values/index.js';
@@ -21,10 +25,16 @@ test('SQLite initialized fast path retains DMB ISH ordering through source proje
   const graph = fromWords([0xd5033bbf, 0x52800000, 0xd65f03c0]);
   const lifted = lift(graph);
   assert.equal(lifted.coverage.state, 'complete');
-  const fence = lifted.ir.blocks.flatMap((block) => block.instructions).find((node) => node.kind === 'memory_fence');
+  const fence = lifted.ir.blocks
+    .flatMap((block) => block.instructions)
+    .find((node) => node.kind === 'memory_fence');
   assert.ok(fence);
   assert.deepEqual(summarizeEffect(fence), {
-    node: fence.id, reads_memory: false, writes_memory: false, barrier: true, may_stop: false,
+    node: fence.id,
+    reads_memory: false,
+    writes_memory: false,
+    barrier: true,
+    may_stop: false,
   });
   const evaluated = evaluate(lifted.ir);
   assert.equal(registerBits(evaluated, 'arm64:x0', 32), 0n);
@@ -40,8 +50,13 @@ test('SQLite initialized fast path retains DMB ISH ordering through source proje
     assert.ok(projection.retained.has(fence.id));
     for (const emit of [emitC, emitPythonLike]) {
       const output = emit(input, DEFAULT_ANALYSIS_OPTIONS, createOperationContext());
-      assert.match(output.emission.text, /memory_fence\("inner_shareable", "acquire_release", "reads_writes"\)/);
-      const mapping = expandEmission(output.emission).mappings.find((item) => item.statement_id === fence.id);
+      assert.match(
+        output.emission.text,
+        /memory_fence\("inner_shareable", "acquire_release", "reads_writes"\)/,
+      );
+      const mapping = expandEmission(output.emission).mappings.find(
+        (item) => item.statement_id === fence.id,
+      );
       assert.ok(mapping);
       assert.ok(mapping.instruction_ids.includes(graph.instructions[0]!.id));
       assert.doesNotMatch(output.emission.text, /opaque_effect|Unsupported ARM64/);
@@ -58,14 +73,19 @@ test('unobserved barrier domains and barrier families remain unsupported', () =>
   for (const word of [0xd5033fbf, 0xd5033b9f, 0xd5033fdf]) {
     const result = lift(fromWords([word, 0xd65f03c0]));
     assert.equal(result.coverage.state, 'partial');
-    assert.ok(result.ir.blocks.some((block) => block.instructions.some((node) => node.kind === 'unknown_effect')));
+    assert.ok(
+      result.ir.blocks.some((block) =>
+        block.instructions.some((node) => node.kind === 'unknown_effect'),
+      ),
+    );
   }
 });
 
 // Independent source oracle: *p = 23; __sync_synchronize(); return *p.
 // This checks consumer-visible event order, not just the IR token chain.
 test('read/write ordering remains observable after simplification and both output renderers', () => {
-  const ir = builder('observed-dmb-memory-order'), block = ir.block('entry');
+  const ir = builder('observed-dmb-memory-order'),
+    block = ir.block('entry');
   const address = block.constant(integer(64), 0x8000n);
   block.store(address, block.constant(integer(32), 23n));
   block.memoryFence();
@@ -76,12 +96,27 @@ test('read/write ordering remains observable after simplification and both outpu
   const structured = structureControlFlow(simplified, createOperationContext()).value;
   assert.ok(structured);
   for (const emit of [emitC, emitPythonLike]) {
-    const output = emit({ function: structured }, DEFAULT_ANALYSIS_OPTIONS, createOperationContext());
-    const observed = execute(output.emission, new Map(), new Map([
-      [0x8000n, 0], [0x8001n, 0], [0x8002n, 0], [0x8003n, 0],
-    ]));
+    const output = emit(
+      { function: structured },
+      DEFAULT_ANALYSIS_OPTIONS,
+      createOperationContext(),
+    );
+    const observed = execute(
+      output.emission,
+      new Map(),
+      new Map([
+        [0x8000n, 0],
+        [0x8001n, 0],
+        [0x8002n, 0],
+        [0x8003n, 0],
+      ]),
+    );
     assert.deepEqual(observed.values, [23n]);
-    assert.deepEqual(observed.events, ['store', 'fence:inner_shareable:acquire_release:reads_writes', 'load']);
+    assert.deepEqual(observed.events, [
+      'store',
+      'fence:inner_shareable:acquire_release:reads_writes',
+      'load',
+    ]);
     assert.equal(observed.memory.get(0x8000n), 23);
   }
 });

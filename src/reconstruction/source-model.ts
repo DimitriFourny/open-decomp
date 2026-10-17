@@ -1,4 +1,10 @@
-import type { AbiProfile, Address, Diagnostic, Evidence, RegisterDescriptor } from '../core/index.js';
+import type {
+  AbiProfile,
+  Address,
+  Diagnostic,
+  Evidence,
+  RegisterDescriptor,
+} from '../core/index.js';
 import type { DataType, Instruction, Value } from '../ir/index.js';
 import type { MemoryShapeTransfer } from '../analysis/types/memory-shapes.js';
 import type { Requirement } from '../core/inference.js';

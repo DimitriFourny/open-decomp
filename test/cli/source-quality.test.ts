@@ -11,7 +11,9 @@ test(
   'CLI, BinarySession API and SDK stdio MCP preserve source return/memory/call/branch behavior in both dialects',
   { skip: process.platform !== 'darwin' || process.arch !== 'arm64', timeout: 360000 },
   async (t) => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-public-source-quality-')));
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), 'open-decomp-public-source-quality-')),
+    );
     t.after(() => rm(root, { recursive: true, force: true }));
     const fixture = await prepareSourceQuality(root);
     for (const consumer of ['cli', 'api', 'mcp'] as const) {

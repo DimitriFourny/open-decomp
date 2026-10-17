@@ -321,13 +321,22 @@ for (const fixture of [
         },
       });
       const image = openedImage(opened);
-      const scope = { project_id: opened.project_id!, revision: opened.revision!, image_id: image.id };
+      const scope = {
+        project_id: opened.project_id!,
+        revision: opened.revision!,
+        image_id: image.id,
+      };
       const exact = (text: string) => ({ text, match: 'exact' as const, case_sensitive: true });
       const find = async (text: string) =>
         data(await service.execute('functions_find', { ...scope, query: exact(text) })).items;
       const symbols = async (text: string) =>
-        data(await service.execute('symbols_find', { ...scope, kinds: ['symbol'], query: exact(text) }))
-          .items;
+        data(
+          await service.execute('symbols_find', {
+            ...scope,
+            kinds: ['symbol'],
+            query: exact(text),
+          }),
+        ).items;
       assert.equal((await find(fixture.native)).length, 1);
       assert.equal((await symbols(fixture.native)).length, 1);
       // The C spelling is the native spelling minus the Mach-O underscore; no other format has one.
@@ -915,7 +924,10 @@ test(
     assert.deepEqual(await find('reviewed_hypothesis'), []);
     const all = data(await service.execute('functions_find', current)).items;
     assert.equal(all.length, listed.length);
-    assert.equal(all.find((fn) => fn.id === conflicting.id)?.display_name, conflicting.display_name);
+    assert.equal(
+      all.find((fn) => fn.id === conflicting.id)?.display_name,
+      conflicting.display_name,
+    );
     assert.equal(
       all.find((fn) => fn.id === hypothesized.id)?.display_name,
       hypothesized.display_name,

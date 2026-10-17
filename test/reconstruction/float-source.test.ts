@@ -40,9 +40,12 @@ test(
       await session?.close();
       await rm(root, { recursive: true, force: true });
     });
-    const source = join(root, 'float.c'), binary = join(root, 'float');
+    const source = join(root, 'float.c'),
+      binary = join(root, 'float');
     // Hex storage literals preserve signed zero and subnormal inputs exactly.
-    await writeFile(source, `
+    await writeFile(
+      source,
+      `
 #include <stdint.h>
 #include <stdio.h>
 __attribute__((noinline)) double fixture_float(double a, double b) {
@@ -64,19 +67,27 @@ int main(void) {
   }
   return 0;
 }
-`);
-    const compiled = spawnSync('/usr/bin/clang', [
-      '-target', 'arm64-apple-macos13.0', '-O1', '-ffp-contract=off', source, '-o', binary,
-    ], { encoding: 'utf8' });
+`,
+    );
+    const compiled = spawnSync(
+      '/usr/bin/clang',
+      ['-target', 'arm64-apple-macos13.0', '-O1', '-ffp-contract=off', source, '-o', binary],
+      { encoding: 'utf8' },
+    );
     assert.equal(compiled.status, 0, compiled.stderr);
     const oracle = spawnSync(binary, [], { encoding: 'utf8' });
     assert.equal(oracle.status, 0, oracle.stderr);
-    const expected = oracle.stdout.trim().split('\n').map((line) =>
-      line.split(' ').map((value) => BigInt(`0x${value}`)));
+    const expected = oracle.stdout
+      .trim()
+      .split('\n')
+      .map((line) => line.split(' ').map((value) => BigInt(`0x${value}`)));
     assert.equal(expected.length, cases.length);
     session = await openBinary(binary, { cachePath: join(root, 'cache') });
     for (const emitter of ['c-like', 'python-like'] as const) {
-      const result: ToolResult<'function_decompile'> = await session.decompile({ name: '_fixture_float' }, { emitter });
+      const result: ToolResult<'function_decompile'> = await session.decompile(
+        { name: '_fixture_float' },
+        { emitter },
+      );
       assert.ok('data' in result && result.data.delivery === 'inline');
       const emission: WireEmission = result.data.emission;
       assert.match(emission.text, /nearest-even/);
@@ -85,7 +96,10 @@ int main(void) {
       for (const [index, [a, b]] of cases.entries()) {
         const observed = execute(
           emission,
-          new Map([[formals[0]!.statement_id, bits(a)], [formals[1]!.statement_id, bits(b)]]),
+          new Map([
+            [formals[0]!.statement_id, bits(a)],
+            [formals[1]!.statement_id, bits(b)],
+          ]),
           new Map(),
           0n,
           new Map(),
@@ -96,11 +110,22 @@ int main(void) {
         assert.equal(observed.exit, 'machine_return');
         assert.deepEqual(observed.values, [expected[index]![0]!], `${emitter}: ${a}, ${b}`);
         if (index === 0)
-          assert.equal(execute(emission, new Map([
-            [formals[0]!.statement_id, bits(a)], [formals[1]!.statement_id, bits(b)],
-          ])).exit, 'unknown', 'FPCR is not silently assumed by default');
+          assert.equal(
+            execute(
+              emission,
+              new Map([
+                [formals[0]!.statement_id, bits(a)],
+                [formals[1]!.statement_id, bits(b)],
+              ]),
+            ).exit,
+            'unknown',
+            'FPCR is not silently assumed by default',
+          );
       }
-      const consumer: ToolResult<'function_decompile'> = await session.decompile({ name: '_fixture_float_consumer' }, { emitter });
+      const consumer: ToolResult<'function_decompile'> = await session.decompile(
+        { name: '_fixture_float_consumer' },
+        { emitter },
+      );
       assert.ok('data' in consumer && consumer.data.delivery === 'inline');
       const consumerEmission: WireEmission = consumer.data.emission;
       const consumerFormals = emittedFormals(consumerEmission);
@@ -128,8 +153,16 @@ int main(void) {
         assert.equal(sourceIndex, 2);
         const memory = new Map<bigint, number>();
         for (let offset = -256; offset < 0; offset++) memory.set(0x9000n + BigInt(offset), 0xa5);
-        const observed = execute(consumerEmission, inputs, memory, 0n, new Map(), environment, calls,
-          acknowledgeRequirements(consumerEmission));
+        const observed = execute(
+          consumerEmission,
+          inputs,
+          memory,
+          0n,
+          new Map(),
+          environment,
+          calls,
+          acknowledgeRequirements(consumerEmission),
+        );
         assert.equal(observed.exit, 'machine_return');
         assert.deepEqual(observed.values, [expected[index]![1]!]);
         assert.deepEqual(observed.source_calls, [

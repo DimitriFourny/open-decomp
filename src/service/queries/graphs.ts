@@ -11,15 +11,24 @@ import { discoverFunctions, prepareDiscoveryIndex } from '../../analysis/discove
 import type { DiscoveryIndex } from '../../analysis/discovery/index.js';
 import { queryFailure } from './shared.js';
 
-const indexes = new WeakMap<LoadedImage, {
-  readonly revision: number;
-  readonly functions: readonly FunctionRecord[];
-  readonly index: DiscoveryIndex;
-}>();
+const indexes = new WeakMap<
+  LoadedImage,
+  {
+    readonly revision: number;
+    readonly functions: readonly FunctionRecord[];
+    readonly index: DiscoveryIndex;
+  }
+>();
 export interface QueryFunctionGraph extends FunctionGraph {
-  readonly presentations?: ReadonlyMap<string, { readonly mnemonic: string; readonly operands: string }>;
+  readonly presentations?: ReadonlyMap<
+    string,
+    { readonly mnemonic: string; readonly operands: string }
+  >;
 }
-const cache = new Map<string, { readonly graph: QueryFunctionGraph; readonly units: number; readonly characters: number }>();
+const cache = new Map<
+  string,
+  { readonly graph: QueryFunctionGraph; readonly units: number; readonly characters: number }
+>();
 let cachedUnits = 0;
 let cachedCharacters = 0;
 
@@ -58,14 +67,20 @@ export function reconstructFunctionGraph(
     prepared = { revision, functions: input.functions, index };
     indexes.set(image, prepared);
   }
-  const decoder = image.target.architecture === 'arm64'
-    ? new Arm64Decoder() : new X86Decoder({ formatting: input.formatting === true });
+  const decoder =
+    image.target.architecture === 'arm64'
+      ? new Arm64Decoder()
+      : new X86Decoder({ formatting: input.formatting === true });
   let discovery;
-  const presentations = input.formatting ? new Map<string, { mnemonic: string; operands: string }>() : undefined;
+  const presentations = input.formatting
+    ? new Map<string, { mnemonic: string; operands: string }>()
+    : undefined;
   let presentationCharacters = 0;
   try {
-    discovery = discoverFunctions({ image, decoder, revision, index: prepared.index,
-      selected_entry: fn.entry }, context);
+    discovery = discoverFunctions(
+      { image, decoder, revision, index: prepared.index, selected_entry: fn.entry },
+      context,
+    );
     if (presentations) {
       for (const instruction of discovery.graphs[0]?.instructions ?? []) {
         context.checkpoint(1);
@@ -76,48 +91,91 @@ export function reconstructFunctionGraph(
         presentations.set(instruction.id, presentation);
       }
     }
-  } finally { decoder.dispose(); }
+  } finally {
+    decoder.dispose();
+  }
   const source = discovery.graphs[0];
   if (!source) queryFailure('not_found', 'Selected root produced no function graph');
-  const refined = fn.analysis !== 'complete' ||
+  const refined =
+    fn.analysis !== 'complete' ||
     fn.ranges.length !== source.function.ranges.length ||
     fn.ranges.some((range, index) => {
       const observed = source.function.ranges[index];
-      return !observed || range.start.value !== observed.start.value || range.size !== observed.size;
+      return (
+        !observed || range.start.value !== observed.start.value || range.size !== observed.size
+      );
     });
   const proof = {
-    id: `evidence_${fingerprint([image.selected_slice_id, 'selected-local-graph/1', revision,
-      fn.id, source.instructions.map((instruction) => instruction.id),
-      source.gaps.map((gap) => [gap.range.start.value, gap.range.size, gap.reason])])}`,
-    origin: { kind: 'analysis' as const, analyzer: 'open-decomp/discovery', version: '2',
-      rule: 'selected-local graph reconstruction' },
+    id: `evidence_${fingerprint([
+      image.selected_slice_id,
+      'selected-local-graph/1',
+      revision,
+      fn.id,
+      source.instructions.map((instruction) => instruction.id),
+      source.gaps.map((gap) => [gap.range.start.value, gap.range.size, gap.reason]),
+    ])}`,
+    origin: {
+      kind: 'analysis' as const,
+      analyzer: 'open-decomp/discovery',
+      version: '2',
+      rule: 'selected-local graph reconstruction',
+    },
     claim: `Selected-local traversal observed ${source.instructions.length} instructions at 0x${fn.entry.value.toString(16)}; historical image-wide function metadata is unchanged`,
     derived_from: [...new Set([...fn.evidence_ids, ...source.function.evidence_ids])].sort(),
-    conflicts_with: [], revision,
+    conflicts_with: [],
+    revision,
   };
   const graph: QueryFunctionGraph = {
     ...source,
     ...(presentations ? { presentations } : {}),
-    function: { ...source.function, id: fn.id, original_name: fn.original_name,
-      display_name: fn.display_name, signature: fn.signature,
-      evidence_ids: [...new Set([...fn.evidence_ids, ...source.function.evidence_ids, proof.id])].sort() },
+    function: {
+      ...source.function,
+      id: fn.id,
+      original_name: fn.original_name,
+      display_name: fn.display_name,
+      signature: fn.signature,
+      evidence_ids: [
+        ...new Set([...fn.evidence_ids, ...source.function.evidence_ids, proof.id]),
+      ].sort(),
+    },
     evidence: [...discovery.evidence, proof],
     diagnostics: [
       ...source.diagnostics,
-      ...(refined ? [{ code: 'unavailable_semantics' as const, severity: 'info' as const,
-        message: `Selected-local graph refinement observed ${source.instructions.length} instructions; historical image-wide discovery remains ${fn.analysis} and its published ranges are unchanged`,
-        entity_id: fn.id, evidence_ids: [proof.id] }] : []),
+      ...(refined
+        ? [
+            {
+              code: 'unavailable_semantics' as const,
+              severity: 'info' as const,
+              message: `Selected-local graph refinement observed ${source.instructions.length} instructions; historical image-wide discovery remains ${fn.analysis} and its published ranges are unchanged`,
+              entity_id: fn.id,
+              evidence_ids: [proof.id],
+            },
+          ]
+        : []),
     ],
   };
-  const units = graph.instructions.length + graph.gaps.length + graph.blocks.length + graph.evidence!.length +
+  const units =
+    graph.instructions.length +
+    graph.gaps.length +
+    graph.blocks.length +
+    graph.evidence!.length +
     (presentations?.size ?? 0);
-  const characters = (fn.original_name?.length ?? 0) + (fn.display_name?.length ?? 0) +
+  const characters =
+    (fn.original_name?.length ?? 0) +
+    (fn.display_name?.length ?? 0) +
     graph.diagnostics.reduce((n, item) => n + item.message.length, 0) +
-    graph.evidence!.reduce((n, item) => n + item.claim.length + item.derived_from.reduce((m, id) => m + id.length, 0), 0) +
+    graph.evidence!.reduce(
+      (n, item) => n + item.claim.length + item.derived_from.reduce((m, id) => m + id.length, 0),
+      0,
+    ) +
     presentationCharacters;
   // One operation can still analyze a larger graph without retaining it globally.
   if (units <= 8192 && characters <= 1_048_576) {
-    while (cache.size >= 32 || cachedUnits + units > 8192 || cachedCharacters + characters > 1_048_576) {
+    while (
+      cache.size >= 32 ||
+      cachedUnits + units > 8192 ||
+      cachedCharacters + characters > 1_048_576
+    ) {
       const oldest = cache.keys().next().value!;
       const removed = cache.get(oldest)!;
       cache.delete(oldest);

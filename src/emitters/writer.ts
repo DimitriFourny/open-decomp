@@ -1,5 +1,11 @@
-import { OperationError, type AddressRange, type Emission, type EmissionRequirement, type OperationContext,
-  type Requirement } from '../core/index.js';
+import {
+  OperationError,
+  type AddressRange,
+  type Emission,
+  type EmissionRequirement,
+  type OperationContext,
+  type Requirement,
+} from '../core/index.js';
 import type { Origin } from '../ir/index.js';
 
 const NO_REFS: readonly number[] = Object.freeze([]);
@@ -14,7 +20,11 @@ class MappingReferences {
   private readonly indexes: number[] = [];
   private sealed = false;
   constructor(readonly owner: Writer) {}
-  get ids(): readonly string[] { return this.items; }
+
+  get ids(): readonly string[] {
+    return this.items;
+  }
+
   add(id: string): void {
     this.owner.context.checkpoint(1);
     if (this.sealed) throw new TypeError('Published mapping references are immutable');
@@ -24,6 +34,7 @@ class MappingReferences {
     this.items.push(id);
     this.indexes.push(ref);
   }
+
   seal(): readonly number[] {
     this.sealed = true;
     Object.freeze(this.items);
@@ -35,12 +46,21 @@ class MappingReferences {
 class InternTable<T> {
   readonly items: T[] = [];
   private readonly indexes = new Map<string, number>();
-  constructor(private readonly writer: Writer, private readonly limit: number, private readonly bytes: (item: T) => number) {}
-  find(key: string): number | undefined { return this.indexes.get(key); }
+  constructor(
+    private readonly writer: Writer,
+    private readonly limit: number,
+    private readonly bytes: (item: T) => number,
+  ) {}
+
+  find(key: string): number | undefined {
+    return this.indexes.get(key);
+  }
+
   add(key: string, item: T): number {
     const known = this.indexes.get(key);
     if (known !== undefined) return known;
-    if (this.items.length >= this.limit) this.writer.fail('Pseudocode reference table limit exceeded');
+    if (this.items.length >= this.limit)
+      this.writer.fail('Pseudocode reference table limit exceeded');
     this.writer.metadata(this.bytes(item));
     this.indexes.set(key, this.items.length);
     this.items.push(item);
@@ -233,7 +253,10 @@ export class Writer {
       this.metadata(2 + value.length);
       for (const item of value) this.charge(item);
     } else if (value && typeof value === 'object') {
-      for (const [key, item] of Object.entries(value)) { this.metadata(key.length + 4); this.charge(item); }
+      for (const [key, item] of Object.entries(value)) {
+        this.metadata(key.length + 4);
+        this.charge(item);
+      }
     } else this.metadata(5);
   }
 
@@ -265,21 +288,49 @@ export class Writer {
     const { subject_ids, evidence_ids, instruction_ids, ranges, sites, ...facts } = record;
     this.charge(facts);
     const compact: EmissionRequirement = {
-      id: facts.id, status: facts.status, explanation: facts.explanation,
-      subject_refs: this.idRefs(subject_ids), evidence_refs: this.proofRefs(evidence_ids),
-      instruction_refs: this.idRefs(instruction_ids), range_refs: this.rangeRefs(ranges),
-      output_spans: facts.output_spans, kind: facts.kind,
-      sites: sites.map(({ subject_ids: subjects, evidence_ids: proofs, instruction_ids: instructions, ...site }) => {
-        this.charge(site);
-        const refs = { subject_refs: this.idRefs(subjects), evidence_refs: this.proofRefs(proofs),
-          instruction_refs: this.idRefs(instructions) };
-        this.chargeRefs(refs.subject_refs, refs.evidence_refs, refs.instruction_refs);
-        return { id: site.id, ...refs, state_epoch: site.state_epoch,
-          ...(site.predicate_value_id === undefined ? {} : { predicate_value_id: site.predicate_value_id }),
-          ...(site.supported_predicate_value === undefined ? {} : { supported_predicate_value: site.supported_predicate_value }) };
-      }),
+      id: facts.id,
+      status: facts.status,
+      explanation: facts.explanation,
+      subject_refs: this.idRefs(subject_ids),
+      evidence_refs: this.proofRefs(evidence_ids),
+      instruction_refs: this.idRefs(instruction_ids),
+      range_refs: this.rangeRefs(ranges),
+      output_spans: facts.output_spans,
+      kind: facts.kind,
+      sites: sites.map(
+        ({
+          subject_ids: subjects,
+          evidence_ids: proofs,
+          instruction_ids: instructions,
+          ...site
+        }) => {
+          this.charge(site);
+          const refs = {
+            subject_refs: this.idRefs(subjects),
+            evidence_refs: this.proofRefs(proofs),
+            instruction_refs: this.idRefs(instructions),
+          };
+          this.chargeRefs(refs.subject_refs, refs.evidence_refs, refs.instruction_refs);
+          return {
+            id: site.id,
+            ...refs,
+            state_epoch: site.state_epoch,
+            ...(site.predicate_value_id === undefined
+              ? {}
+              : { predicate_value_id: site.predicate_value_id }),
+            ...(site.supported_predicate_value === undefined
+              ? {}
+              : { supported_predicate_value: site.supported_predicate_value }),
+          };
+        },
+      ),
     };
-    this.chargeRefs(compact.subject_refs, compact.evidence_refs, compact.instruction_refs, compact.range_refs);
+    this.chargeRefs(
+      compact.subject_refs,
+      compact.evidence_refs,
+      compact.instruction_refs,
+      compact.range_refs,
+    );
     return compact;
   }
 
@@ -295,7 +346,9 @@ export class Writer {
     const prepared = semanticIds instanceof MappingReferences ? semanticIds : undefined;
     const semanticInput = semanticIds instanceof MappingReferences ? semanticIds.ids : semanticIds;
     if (prepared && (prepared.owner !== this || prepared.ids[0] !== origin.id))
-      throw new TypeError('Prepared mapping references must belong to this writer and begin with the mapped origin');
+      throw new TypeError(
+        'Prepared mapping references must belong to this writer and begin with the mapped origin',
+      );
     if (
       this.mappings.length >= 100000 ||
       semanticInput.length >= 10000 ||
@@ -307,10 +360,14 @@ export class Writer {
       ? this.union(this.proofs, this.proofUnions, origin.provenance.evidence_ids, extraEvidence)
       : NO_REFS;
     if (evidence.length > 1000) this.fail('Pseudocode mapping evidence limit exceeded');
-    const semantic = prepared ? prepared.seal() : this.union(this.ids, this.idUnions, [origin.id], semanticInput);
+    const semantic = prepared
+      ? prepared.seal()
+      : this.union(this.ids, this.idUnions, [origin.id], semanticInput);
     const instructions = this.idRefs(origin.provenance.instruction_ids);
     const ranges = this.rangeRefs(origin.provenance.ranges);
-    this.metadata(32 + REF_BYTES * (semantic.length + instructions.length + ranges.length + evidence.length));
+    this.metadata(
+      32 + REF_BYTES * (semantic.length + instructions.length + ranges.length + evidence.length),
+    );
     this.mappings.push({
       start,
       end,
@@ -332,7 +389,10 @@ export class Writer {
     if (a.length + b.length > 10000) this.fail('Pseudocode mapping reference limit exceeded');
     if (b.length === 0) {
       const cached = cache.get(a);
-      if (cached) { this.context.checkpoint(0); return cached; }
+      if (cached) {
+        this.context.checkpoint(0);
+        return cached;
+      }
     }
     const refs = new Set<number>();
     for (let index = 0; index < a.length + b.length; index++) {
@@ -352,7 +412,10 @@ export class Writer {
     key: (item: T) => string,
   ): readonly number[] {
     const cached = cache?.get(items);
-    if (cached) { this.context.checkpoint(0); return cached; }
+    if (cached) {
+      this.context.checkpoint(0);
+      return cached;
+    }
     const result: number[] = [];
     for (const item of items) {
       this.context.checkpoint(1);

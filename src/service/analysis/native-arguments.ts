@@ -1,6 +1,12 @@
 import type { OperationContext } from '../../core/index.js';
 import type { CallAnalysisResult } from '../../analysis/calls/index.js';
-import { bitWidth, type Expression, type RegisterBinding, type SSAForm, type Value } from '../../ir/index.js';
+import {
+  bitWidth,
+  type Expression,
+  type RegisterBinding,
+  type SSAForm,
+  type Value,
+} from '../../ir/index.js';
 import { sourceStackArgumentParts } from '../../reconstruction/source-stack-arguments.js';
 import type { NativeInterface } from './native-worklist.js';
 
@@ -16,44 +22,77 @@ export function nativeArgumentValues(
 ): ReadonlyMap<number, Value> {
   const expressions = new Map<string, { readonly value: Value; readonly expression: Expression }>();
   const stores = new Map<string, Value>();
-  let bindings: readonly RegisterBinding[] = boundary === ir.id
-    ? ir.register_states.find((state) => state.block === ir.entry)?.entry ?? [] : [];
+  let bindings: readonly RegisterBinding[] =
+    boundary === ir.id
+      ? (ir.register_states.find((state) => state.block === ir.entry)?.entry ?? [])
+      : [];
   for (const block of ir.blocks) {
     for (const node of block.instructions) {
       context.checkpoint(1);
-      if (node.kind === 'assign') expressions.set(node.result.id, { value: node.result, expression: node.expression });
+      if (node.kind === 'assign')
+        expressions.set(node.result.id, { value: node.result, expression: node.expression });
       else if (node.kind === 'store') stores.set(node.id, node.value);
       else if (node.kind === 'call' && node.id === boundary) bindings = node.register_inputs;
     }
-    if (block.terminator.id === boundary) bindings = ir.register_states.find((state) => state.block === block.id)?.exit ?? [];
+    if (block.terminator.id === boundary)
+      bindings = ir.register_states.find((state) => state.block === block.id)?.exit ?? [];
   }
   const result = new Map<number, Value>();
   for (const [index, register] of observed.parameters.entries()) {
-    const cells = bindings.filter((binding) => binding.register.root === register.root &&
-      binding.register.offset_bits >= register.offset_bits &&
-      binding.register.offset_bits < register.offset_bits + register.width_bits)
+    const cells = bindings
+      .filter(
+        (binding) =>
+          binding.register.root === register.root &&
+          binding.register.offset_bits >= register.offset_bits &&
+          binding.register.offset_bits < register.offset_bits + register.width_bits,
+      )
       .sort((left, right) => left.register.offset_bits - right.register.offset_bits);
-    if (cells.length === 1 && cells[0]!.register.offset_bits === register.offset_bits &&
-      bitWidth(cells[0]!.value.type) === register.width_bits) { result.set(index, cells[0]!.value); continue; }
-    let cursor = register.offset_bits, whole: Value | null = null, exact = true;
+    if (
+      cells.length === 1 &&
+      cells[0]!.register.offset_bits === register.offset_bits &&
+      bitWidth(cells[0]!.value.type) === register.width_bits
+    ) {
+      result.set(index, cells[0]!.value);
+      continue;
+    }
+    let cursor = register.offset_bits,
+      whole: Value | null = null,
+      exact = true;
     for (const cell of cells) {
       context.checkpoint(1);
       const expression = expressions.get(cell.value.id)?.expression;
-      if (cell.register.offset_bits !== cursor || expression?.kind !== 'extract' ||
-        expression.offset !== cursor - register.offset_bits || (whole && whole.id !== expression.value.id)) {
-        exact = false; break;
+      if (
+        cell.register.offset_bits !== cursor ||
+        expression?.kind !== 'extract' ||
+        expression.offset !== cursor - register.offset_bits ||
+        (whole && whole.id !== expression.value.id)
+      ) {
+        exact = false;
+        break;
       }
       whole = expression.value;
       cursor += cell.register.width_bits;
     }
-    if (exact && whole && cursor === register.offset_bits + register.width_bits &&
-      bitWidth(whole.type) === register.width_bits) { result.set(index, whole); continue; }
+    if (
+      exact &&
+      whole &&
+      cursor === register.offset_bits + register.width_bits &&
+      bitWidth(whole.type) === register.width_bits
+    ) {
+      result.set(index, whole);
+      continue;
+    }
     for (const candidate of expressions.values()) {
       context.checkpoint(1);
-      if (candidate.expression.kind !== 'concat' || bitWidth(candidate.value.type) !== register.width_bits ||
-        candidate.expression.values.length !== cells.length) continue;
+      if (
+        candidate.expression.kind !== 'concat' ||
+        bitWidth(candidate.value.type) !== register.width_bits ||
+        candidate.expression.values.length !== cells.length
+      )
+        continue;
       if (candidate.expression.values.every((value, i) => value.id === cells[i]!.value.id)) {
-        result.set(index, candidate.value); break;
+        result.set(index, candidate.value);
+        break;
       }
     }
   }
@@ -62,8 +101,13 @@ export function nativeArgumentValues(
       if (boundary === ir.id) {
         for (const access of analysis.stack.accesses) {
           context.checkpoint(1);
-          if (access.kind !== 'read' || access.region !== 'incoming_candidate' || access.offset !== parameter.offset ||
-            access.size * 8n !== BigInt(parameter.width_bits)) continue;
+          if (
+            access.kind !== 'read' ||
+            access.region !== 'incoming_candidate' ||
+            access.offset !== parameter.offset ||
+            access.size * 8n !== BigInt(parameter.width_bits)
+          )
+            continue;
           for (const block of ir.blocks)
             for (const node of block.instructions)
               if (node.kind === 'load' && node.id === access.node_id)
@@ -71,10 +115,19 @@ export function nativeArgumentValues(
         }
         continue;
       }
-      const parts = sourceStackArgumentParts(analysis.stack, stores, boundary, parameter.offset,
-        parameter.width_bits, context);
-      if (parts?.length === 1 && parts[0]!.value_offset_bits === 0 &&
-        parts[0]!.width_bits === bitWidth(parts[0]!.value.type))
+      const parts = sourceStackArgumentParts(
+        analysis.stack,
+        stores,
+        boundary,
+        parameter.offset,
+        parameter.width_bits,
+        context,
+      );
+      if (
+        parts?.length === 1 &&
+        parts[0]!.value_offset_bits === 0 &&
+        parts[0]!.width_bits === bitWidth(parts[0]!.value.type)
+      )
         result.set(observed.parameters.length + index, parts[0]!.value);
     }
   return result;

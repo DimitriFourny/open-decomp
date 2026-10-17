@@ -26,7 +26,9 @@ test('canonical SIMD ORR and MOV aliases preserve bits and Q=0 clears the high h
     if (!alias) inputs.set('arm64:v2', right);
     const observed = evaluate(lifted.ir, inputs);
     assert.equal(observed.status, 'returned');
-    assert.equal(registerBits(observed, 'arm64:v0', 128),
-      BigInt.asUintN(width, alias ? left : left | right));
+    assert.equal(
+      registerBits(observed, 'arm64:v0', 128),
+      BigInt.asUintN(width, alias ? left : left | right),
+    );
   }
 });

@@ -1,7 +1,12 @@
 import { z } from 'zod';
 import {
-  inferenceSchema, requirementSchema, inferenceDetailsByKind, requirementSiteSchema, outputSpanSchema,
-  emissionRefsSchema, evidenceRefIndexesSchema,
+  inferenceSchema,
+  requirementSchema,
+  inferenceDetailsByKind,
+  requirementSiteSchema,
+  outputSpanSchema,
+  emissionRefsSchema,
+  evidenceRefIndexesSchema,
 } from './inference.js';
 import {
   SCHEMA_VERSION,
@@ -157,29 +162,50 @@ export const emissionSchema = z
       .array(z.strictObject({ name: z.string().min(1), explanation: z.string().min(1).max(8192) }))
       .max(1000),
     review: z.strictObject({
-      operation: z.literal('function_get'), view: z.literal('metadata'), function_id: entityIdSchema,
+      operation: z.literal('function_get'),
+      view: z.literal('metadata'),
+      function_id: entityIdSchema,
     }),
   })
   .superRefine((emission, context) => {
     const unique = (path: 'ids' | 'evidence' | 'ranges', keys: readonly string[]): void => {
       if (new Set(keys).size !== keys.length)
-        context.addIssue({ code: 'custom', path: [path], message: 'Emission reference tables are duplicate-free' });
+        context.addIssue({
+          code: 'custom',
+          path: [path],
+          message: 'Emission reference tables are duplicate-free',
+        });
     };
     unique('ids', emission.ids);
     unique('evidence', emission.evidence);
-    unique('ranges', emission.ranges.map((range) =>
-      `${range.start.image_id}:${range.start.space}:${BigInt(range.start.value)}:${BigInt(range.size)}`));
-    const bounded = (refs: readonly number[], table: readonly unknown[]) => refs.every((ref) => ref < table.length);
-    const references = (record: { subject_refs?: readonly number[]; semantic_refs?: readonly number[];
-      instruction_refs: readonly number[]; evidence_refs: readonly number[]; range_refs?: readonly number[] }) =>
+    unique(
+      'ranges',
+      emission.ranges.map(
+        (range) =>
+          `${range.start.image_id}:${range.start.space}:${BigInt(range.start.value)}:${BigInt(range.size)}`,
+      ),
+    );
+    const bounded = (refs: readonly number[], table: readonly unknown[]) =>
+      refs.every((ref) => ref < table.length);
+    const references = (record: {
+      subject_refs?: readonly number[];
+      semantic_refs?: readonly number[];
+      instruction_refs: readonly number[];
+      evidence_refs: readonly number[];
+      range_refs?: readonly number[];
+    }) =>
       bounded(record.subject_refs ?? record.semantic_refs ?? [], emission.ids) &&
-      bounded(record.instruction_refs, emission.ids) && bounded(record.evidence_refs, emission.evidence) &&
+      bounded(record.instruction_refs, emission.ids) &&
+      bounded(record.evidence_refs, emission.evidence) &&
       bounded(record.range_refs ?? [], emission.ranges);
     for (const mapping of emission.mappings) {
       if (mapping.end > emission.text.length)
         context.addIssue({ code: 'custom', message: 'Source mapping exceeds emitted text' });
       if (!references(mapping))
-        context.addIssue({ code: 'custom', message: 'Source mapping reference is outside its emission table' });
+        context.addIssue({
+          code: 'custom',
+          message: 'Source mapping reference is outside its emission table',
+        });
     }
     if (emission.declaration_span && emission.declaration_span.end > emission.text.length)
       context.addIssue({ code: 'custom', message: 'Declaration span exceeds emitted text' });
@@ -188,7 +214,10 @@ export const emissionSchema = z
         if (record.output_spans.some((span) => span.end > emission.text.length))
           context.addIssue({ code: 'custom', message: 'Inference span exceeds emitted text' });
         if (!references(record) || ('sites' in record && !record.sites.every(references)))
-          context.addIssue({ code: 'custom', message: 'Inference reference is outside its emission table' });
+          context.addIssue({
+            code: 'custom',
+            message: 'Inference reference is outside its emission table',
+          });
       }
   });
 export type WireEmission = z.infer<typeof emissionSchema>;
@@ -285,30 +314,74 @@ export const functionsFindArgsSchema = z.strictObject({
   analysis: z.enum(['not_analyzed', 'partial', 'complete', 'unsupported']).optional(),
   ...paging,
 });
-export const functionGetArgsSchema = z.strictObject({
-  ...requestContext,
-  function_id: entityIdSchema,
-  view: z.enum(['metadata', 'disassembly', 'cfg', 'investigation']).default('metadata'),
-  artifact_id: artifactSchema.shape.id.optional(),
-  subject_id: entityIdSchema.optional(),
-  kinds: z.array(z.enum(['signature', 'parameter', 'type', 'interpretation', 'field', 'identity',
-    'call', 'rewrite', 'conflict', 'annotation', 'fp_environment', 'unresolved', 'source', 'helper'])).min(1).max(14).optional(),
-  include_quotes: z.boolean().optional(),
-  detail: z.enum(['full', 'compact']).optional().describe('Disassembly only; omitted means full'),
-  ...paging,
-}).superRefine((args, context) => {
-  if (args.view === 'investigation' && args.artifact_id === undefined)
-    context.addIssue({ code: 'custom', path: ['artifact_id'], message: 'Investigation requires an explicit published artifact' });
-  if (args.view !== 'investigation' && args.kinds !== undefined)
-    context.addIssue({ code: 'custom', path: ['kinds'], message: 'Kind filters require investigation view' });
-  if (args.view !== 'investigation' && args.include_quotes)
-    context.addIssue({ code: 'custom', path: ['include_quotes'], message: 'Output quotations require investigation view' });
-  if (args.detail !== undefined && args.view !== 'disassembly')
-    context.addIssue({ code: 'custom', path: ['detail'], message: 'Instruction detail requires disassembly view' });
-  if (args.view !== 'metadata' && args.view !== 'investigation' &&
-    (args.subject_id !== undefined || args.artifact_id !== undefined))
-    context.addIssue({ code: 'custom', message: 'Subject and artifact scope require metadata or investigation view' });
-});
+export const functionGetArgsSchema = z
+  .strictObject({
+    ...requestContext,
+    function_id: entityIdSchema,
+    view: z.enum(['metadata', 'disassembly', 'cfg', 'investigation']).default('metadata'),
+    artifact_id: artifactSchema.shape.id.optional(),
+    subject_id: entityIdSchema.optional(),
+    kinds: z
+      .array(
+        z.enum([
+          'signature',
+          'parameter',
+          'type',
+          'interpretation',
+          'field',
+          'identity',
+          'call',
+          'rewrite',
+          'conflict',
+          'annotation',
+          'fp_environment',
+          'unresolved',
+          'source',
+          'helper',
+        ]),
+      )
+      .min(1)
+      .max(14)
+      .optional(),
+    include_quotes: z.boolean().optional(),
+    detail: z.enum(['full', 'compact']).optional().describe('Disassembly only; omitted means full'),
+    ...paging,
+  })
+  .superRefine((args, context) => {
+    if (args.view === 'investigation' && args.artifact_id === undefined)
+      context.addIssue({
+        code: 'custom',
+        path: ['artifact_id'],
+        message: 'Investigation requires an explicit published artifact',
+      });
+    if (args.view !== 'investigation' && args.kinds !== undefined)
+      context.addIssue({
+        code: 'custom',
+        path: ['kinds'],
+        message: 'Kind filters require investigation view',
+      });
+    if (args.view !== 'investigation' && args.include_quotes)
+      context.addIssue({
+        code: 'custom',
+        path: ['include_quotes'],
+        message: 'Output quotations require investigation view',
+      });
+    if (args.detail !== undefined && args.view !== 'disassembly')
+      context.addIssue({
+        code: 'custom',
+        path: ['detail'],
+        message: 'Instruction detail requires disassembly view',
+      });
+    if (
+      args.view !== 'metadata' &&
+      args.view !== 'investigation' &&
+      (args.subject_id !== undefined || args.artifact_id !== undefined)
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Subject and artifact scope require metadata or investigation view',
+      });
+  });
 export const functionDecompileArgsSchema = z.strictObject({
   ...requestContext,
   function_id: entityIdSchema,
@@ -605,153 +678,226 @@ const symbolItemSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('export'), export: exportSchema }),
 ]);
 const instructionRefsSchema = z.array(z.int().min(0)).max(10000);
-const compactParameterSchema = inferenceDetailsByKind.parameter.omit({ value_ids: true, source_type_id: true })
+const compactParameterSchema = inferenceDetailsByKind.parameter
+  .omit({ value_ids: true, source_type_id: true })
   .extend({ source_type_known: z.boolean() });
-const compactCallSchema = inferenceDetailsByKind.call.omit({ call_id: true, signature_id: true }).extend({
-  signature_known: z.boolean(),
-  target: z.discriminatedUnion('kind', [
-    inferenceDetailsByKind.call.shape.target.options[0],
-    inferenceDetailsByKind.call.shape.target.options[1].omit({ value_ids: true }),
-  ]),
-  ordered_arguments: z.array(inferenceDetailsByKind.call.shape.ordered_arguments.element.omit({ value_ids: true })).max(10000),
-});
+const compactCallSchema = inferenceDetailsByKind.call
+  .omit({ call_id: true, signature_id: true })
+  .extend({
+    signature_known: z.boolean(),
+    target: z.discriminatedUnion('kind', [
+      inferenceDetailsByKind.call.shape.target.options[0],
+      inferenceDetailsByKind.call.shape.target.options[1].omit({ value_ids: true }),
+    ]),
+    ordered_arguments: z
+      .array(inferenceDetailsByKind.call.shape.ordered_arguments.element.omit({ value_ids: true }))
+      .max(10000),
+  });
 const investigationDetailsSchema = z.discriminatedUnion('kind', [
   compactParameterSchema,
-  inferenceDetailsByKind.type.omit({ association_ids: true, type_id: true, pointee_id: true }).extend({ pointee_known: z.boolean() }),
+  inferenceDetailsByKind.type
+    .omit({ association_ids: true, type_id: true, pointee_id: true })
+    .extend({ pointee_known: z.boolean() }),
   inferenceDetailsByKind.interpretation.omit({ operand_value_ids: true }),
   inferenceDetailsByKind.field.omit({ shape_id: true, field_ids: true, type_id: true }),
   inferenceDetailsByKind.identity.omit({ value_ids: true }),
   compactCallSchema,
   inferenceDetailsByKind.rewrite,
-  inferenceDetailsByKind.conflict.omit({ alternatives: true }).extend({ alternative_count: z.int().min(0) }),
+  inferenceDetailsByKind.conflict
+    .omit({ alternatives: true })
+    .extend({ alternative_count: z.int().min(0) }),
   inferenceDetailsByKind.annotation,
 ]);
 /** Field validators come from the emission itself (emissionSchema is refined, so only its shape is shared). */
 const emissionHelperSchema = emissionSchema.shape.helpers.element;
 const investigationItemSchema = z.discriminatedUnion('kind', [
   z.strictObject({
-    kind: z.literal('source'), span: z.strictObject({ start: z.int().min(0), end: z.int().min(1) }),
-    text: z.string().max(512), mapping_indexes: z.array(z.int().min(0)).max(100000),
+    kind: z.literal('source'),
+    span: z.strictObject({ start: z.int().min(0), end: z.int().min(1) }),
+    text: z.string().max(512),
+    mapping_indexes: z.array(z.int().min(0)).max(100000),
     instruction_refs: instructionRefsSchema,
   }),
   z.strictObject({
-    kind: z.literal('signature'), status: z.literal('inferred'),
-    signature: signatureSchema.omit({ return_type: true, parameters: true, evidence_ids: true })
-      .extend({ parameter_count: z.int().min(0).max(10000) }).nullable(),
+    kind: z.literal('signature'),
+    status: z.literal('inferred'),
+    signature: signatureSchema
+      .omit({ return_type: true, parameters: true, evidence_ids: true })
+      .extend({ parameter_count: z.int().min(0).max(10000) })
+      .nullable(),
     parameters: z.array(compactParameterSchema).max(10000),
     locator: z.literal('result.data.signature'),
   }),
   z.strictObject({
-    kind: z.literal('helper'), artifact_helper_index: z.int().min(0).max(999),
-    name: emissionHelperSchema.shape.name, explanation: emissionHelperSchema.shape.explanation,
-    semantic_domain: z.literal('renderer pseudocode semantic contract; not original source or an executable helper definition'),
-    locator: z.literal('result.data.emission.helpers[artifact_helper_index] in the selected artifact'),
+    kind: z.literal('helper'),
+    artifact_helper_index: z.int().min(0).max(999),
+    name: emissionHelperSchema.shape.name,
+    explanation: emissionHelperSchema.shape.explanation,
+    semantic_domain: z.literal(
+      'renderer pseudocode semantic contract; not original source or an executable helper definition',
+    ),
+    locator: z.literal(
+      'result.data.emission.helpers[artifact_helper_index] in the selected artifact',
+    ),
   }),
   z.strictObject({
-    kind: z.literal('inference'), record: inferenceSchema.pick({ id: true, status: true }).extend({
-      details: investigationDetailsSchema, instruction_refs: instructionRefsSchema,
-    }),
-  }),
-  z.strictObject({
-    kind: z.literal('requirement'), record: requirementSchema.pick({ id: true, status: true, kind: true, explanation: true }).extend({
-      sites: z.array(requirementSiteSchema.omit({ subject_refs: true, evidence_refs: true, instruction_refs: true, predicate_value_id: true })).max(1000),
+    kind: z.literal('inference'),
+    record: inferenceSchema.pick({ id: true, status: true }).extend({
+      details: investigationDetailsSchema,
       instruction_refs: instructionRefsSchema,
     }),
   }),
+  z.strictObject({
+    kind: z.literal('requirement'),
+    record: requirementSchema
+      .pick({ id: true, status: true, kind: true, explanation: true })
+      .extend({
+        sites: z
+          .array(
+            requirementSiteSchema.omit({
+              subject_refs: true,
+              evidence_refs: true,
+              instruction_refs: true,
+              predicate_value_id: true,
+            }),
+          )
+          .max(1000),
+        instruction_refs: instructionRefsSchema,
+      }),
+  }),
 ]);
-const compactInstructionSchema = z.strictObject({
-  id: instructionSchema.shape.id,
-  address: instructionSchema.shape.address,
-  size: instructionSchema.shape.size,
-  validity: instructionSchema.shape.validity,
-  flow: instructionSchema.shape.flow,
-  diagnostics: instructionSchema.shape.diagnostics,
-  evidence_ids: instructionSchema.shape.evidence_ids,
-  architecture: targetSchema.shape.architecture,
-  presentation: z.strictObject({ mnemonic: z.string().min(1), operands: z.string() }).nullable(),
-}).superRefine((instruction, context) => {
-  if (instruction.validity === 'valid' && instruction.presentation === null)
-    context.addIssue({ code: 'custom', message: 'Valid compact instructions require decoder presentation' });
-  if (instruction.architecture === 'arm64' && instruction.size !== 4)
-    context.addIssue({ code: 'custom', message: 'ARM64 instructions have four bytes' });
-});
+const compactInstructionSchema = z
+  .strictObject({
+    id: instructionSchema.shape.id,
+    address: instructionSchema.shape.address,
+    size: instructionSchema.shape.size,
+    validity: instructionSchema.shape.validity,
+    flow: instructionSchema.shape.flow,
+    diagnostics: instructionSchema.shape.diagnostics,
+    evidence_ids: instructionSchema.shape.evidence_ids,
+    architecture: targetSchema.shape.architecture,
+    presentation: z.strictObject({ mnemonic: z.string().min(1), operands: z.string() }).nullable(),
+  })
+  .superRefine((instruction, context) => {
+    if (instruction.validity === 'valid' && instruction.presentation === null)
+      context.addIssue({
+        code: 'custom',
+        message: 'Valid compact instructions require decoder presentation',
+      });
+    if (instruction.architecture === 'arm64' && instruction.size !== 4)
+      context.addIssue({ code: 'custom', message: 'ARM64 instructions have four bytes' });
+  });
 const disassemblyDataFields = {
   view: z.literal('disassembly'),
   function_id: entityIdSchema,
-  gaps: z.array(z.strictObject({
-    range: rangeSchema, reason: z.enum(['truncated', 'unmapped', 'data', 'budget']),
-  })).max(1000),
+  gaps: z
+    .array(
+      z.strictObject({
+        range: rangeSchema,
+        reason: z.enum(['truncated', 'unmapped', 'data', 'budget']),
+      }),
+    )
+    .max(1000),
   page: pageInfoSchema,
 };
 const disassemblyDataSchema = z.discriminatedUnion('detail', [
   z.strictObject({
-    ...disassemblyDataFields, detail: z.literal('full').optional(),
+    ...disassemblyDataFields,
+    detail: z.literal('full').optional(),
     items: z.array(instructionSchema).max(1000),
   }),
   z.strictObject({
-    ...disassemblyDataFields, detail: z.literal('compact'),
+    ...disassemblyDataFields,
+    detail: z.literal('compact'),
     items: z.array(compactInstructionSchema).max(1000),
   }),
 ]);
-const investigationDiagnosticSchema = diagnosticSchema.omit({
-  message: true, entity_id: true, evidence_ids: true,
-}).extend({
-  artifact_index: z.int().min(0).max(999),
-  entity_known: z.boolean(),
-  evidence_count: z.int().min(0).max(1000),
-});
-const functionGetDataSchema = z.discriminatedUnion('view', [
-  z.strictObject({
-    view: z.literal('metadata'),
-    evidence_delivery: z.literal('by_reference'),
-    function: functionSchema,
-    reviewed_subject_id: entityIdSchema,
-    annotation_eligible: z.boolean(),
-    annotations: z.array(annotationSchema).max(1000),
-    lineage: z.array(lineageSchema).max(1000),
-  }),
-  disassemblyDataSchema,
-  z.strictObject({
-    view: z.literal('cfg'),
-    function_id: entityIdSchema,
-    items: z.array(cfgBlockSchema).max(1000),
-    page: pageInfoSchema,
-  }),
-  z.strictObject({
-    view: z.literal('investigation'),
-    function_id: entityIdSchema,
-    artifact_id: artifactSchema.shape.id,
-    record_lookup: z.literal('original emission inference/requirement IDs and mapping indexes in the selected artifact'),
-    items: z.array(investigationItemSchema).max(1000),
-    analysis_state: z.enum(['complete', 'partial']),
-    proof_delivery: z.literal('artifact_references'),
-    diagnostic_lookup: z.literal('result.diagnostics[artifact_index] in the selected artifact'),
-    analysis_diagnostics: z.array(investigationDiagnosticSchema).max(1000),
-    references: z.array(z.union([entityIdSchema,
-      z.string().regex(/^(va|rva|file):0x[0-9a-f]{1,16}\+0x[0-9a-f]{1,16}$/)])).max(10000),
-    selection: z.strictObject({
-      kinds: z.array(z.string()).max(14).nullable(), subject_id: entityIdSchema.nullable(),
-      quotes: z.boolean(),
-      counts: z.record(z.enum(['inferences', 'requirements', 'unresolved_sites', 'source_mappings', 'helpers']),
-        z.strictObject({ total: z.int().min(0), selected: z.int().min(0) })),
-      omitted_inference_statuses: z.partialRecord(inferenceSchema.shape.status, z.int().min(0)),
-      omitted_requirement_kinds: z.partialRecord(requirementSchema.shape.kind, z.int().min(0)),
+const investigationDiagnosticSchema = diagnosticSchema
+  .omit({
+    message: true,
+    entity_id: true,
+    evidence_ids: true,
+  })
+  .extend({
+    artifact_index: z.int().min(0).max(999),
+    entity_known: z.boolean(),
+    evidence_count: z.int().min(0).max(1000),
+  });
+const functionGetDataSchema = z
+  .discriminatedUnion('view', [
+    z.strictObject({
+      view: z.literal('metadata'),
+      evidence_delivery: z.literal('by_reference'),
+      function: functionSchema,
+      reviewed_subject_id: entityIdSchema,
+      annotation_eligible: z.boolean(),
+      annotations: z.array(annotationSchema).max(1000),
+      lineage: z.array(lineageSchema).max(1000),
     }),
-    helpers: z.array(z.strictObject({ name: z.string().min(1), artifact_helper_index: z.int().min(0) })).max(1000),
-    page: pageInfoSchema,
-  }),
-]).superRefine((data, context) => {
-  if (data.view !== 'investigation') return;
-  if (new Set(data.references).size !== data.references.length)
-    context.addIssue({ code: 'custom', path: ['references'], message: 'Page provenance references must be unique' });
-  for (const [index, item] of data.items.entries()) {
-    if (item.kind === 'signature' || item.kind === 'helper') continue;
-    const record = item.kind === 'source' ? item : item.record;
-    for (const ref of record.instruction_refs)
-      if (data.references[ref] === undefined)
-        context.addIssue({ code: 'custom', path: ['items', index, 'instruction_refs'], message: 'Invalid instruction proof reference' });
-  }
-});
+    disassemblyDataSchema,
+    z.strictObject({
+      view: z.literal('cfg'),
+      function_id: entityIdSchema,
+      items: z.array(cfgBlockSchema).max(1000),
+      page: pageInfoSchema,
+    }),
+    z.strictObject({
+      view: z.literal('investigation'),
+      function_id: entityIdSchema,
+      artifact_id: artifactSchema.shape.id,
+      record_lookup: z.literal(
+        'original emission inference/requirement IDs and mapping indexes in the selected artifact',
+      ),
+      items: z.array(investigationItemSchema).max(1000),
+      analysis_state: z.enum(['complete', 'partial']),
+      proof_delivery: z.literal('artifact_references'),
+      diagnostic_lookup: z.literal('result.diagnostics[artifact_index] in the selected artifact'),
+      analysis_diagnostics: z.array(investigationDiagnosticSchema).max(1000),
+      references: z
+        .array(
+          z.union([
+            entityIdSchema,
+            z.string().regex(/^(va|rva|file):0x[0-9a-f]{1,16}\+0x[0-9a-f]{1,16}$/),
+          ]),
+        )
+        .max(10000),
+      selection: z.strictObject({
+        kinds: z.array(z.string()).max(14).nullable(),
+        subject_id: entityIdSchema.nullable(),
+        quotes: z.boolean(),
+        counts: z.record(
+          z.enum(['inferences', 'requirements', 'unresolved_sites', 'source_mappings', 'helpers']),
+          z.strictObject({ total: z.int().min(0), selected: z.int().min(0) }),
+        ),
+        omitted_inference_statuses: z.partialRecord(inferenceSchema.shape.status, z.int().min(0)),
+        omitted_requirement_kinds: z.partialRecord(requirementSchema.shape.kind, z.int().min(0)),
+      }),
+      helpers: z
+        .array(z.strictObject({ name: z.string().min(1), artifact_helper_index: z.int().min(0) }))
+        .max(1000),
+      page: pageInfoSchema,
+    }),
+  ])
+  .superRefine((data, context) => {
+    if (data.view !== 'investigation') return;
+    if (new Set(data.references).size !== data.references.length)
+      context.addIssue({
+        code: 'custom',
+        path: ['references'],
+        message: 'Page provenance references must be unique',
+      });
+    for (const [index, item] of data.items.entries()) {
+      if (item.kind === 'signature' || item.kind === 'helper') continue;
+      const record = item.kind === 'source' ? item : item.record;
+      for (const ref of record.instruction_refs)
+        if (data.references[ref] === undefined)
+          context.addIssue({
+            code: 'custom',
+            path: ['items', index, 'instruction_refs'],
+            message: 'Invalid instruction proof reference',
+          });
+    }
+  });
 export const memorySegmentSchema = z.discriminatedUnion('kind', [
   z.strictObject({
     kind: z.literal('mapped'),
@@ -896,11 +1042,19 @@ export const functionDecompileResultSchema = resultSchema(
   if (!('data' in result)) return;
   const data = result.data;
   if (data.delivery !== 'artifact') return;
-  if (!result.artifacts.some((artifact) => artifact.id === data.artifact_id) ||
-    (data.delivery_reason === 'output_limit' && (result.state !== 'partial' || result.reason !== 'output_limit')) ||
-    (data.delivery_reason === 'requested' && (result.state !== 'complete' &&
-      (result.state !== 'partial' || result.reason === 'output_limit'))))
-    context.addIssue({ code: 'custom', message: 'Artifact delivery requires its published handle and truthful requested/overflow state' });
+  if (
+    !result.artifacts.some((artifact) => artifact.id === data.artifact_id) ||
+    (data.delivery_reason === 'output_limit' &&
+      (result.state !== 'partial' || result.reason !== 'output_limit')) ||
+    (data.delivery_reason === 'requested' &&
+      result.state !== 'complete' &&
+      (result.state !== 'partial' || result.reason === 'output_limit'))
+  )
+    context.addIssue({
+      code: 'custom',
+      message:
+        'Artifact delivery requires its published handle and truthful requested/overflow state',
+    });
 });
 
 /** A transport may deliver the published analysis rather than repeat its large
@@ -921,9 +1075,16 @@ export function projectDecompilationArtifactResult(
     throw new RangeError('Artifact delivery requires a published analysis for the same snapshot');
   if (reason === 'requested')
     return functionDecompileResultSchema.parse({
-      ...result, evidence: [], artifacts: [artifact],
-      data: { delivery: 'artifact', delivery_reason: 'requested',
-        function_id: result.data.function_id, artifact_id: artifact.id, cache: result.data.cache },
+      ...result,
+      evidence: [],
+      artifacts: [artifact],
+      data: {
+        delivery: 'artifact',
+        delivery_reason: 'requested',
+        function_id: result.data.function_id,
+        artifact_id: artifact.id,
+        cache: result.data.cache,
+      },
     });
   return functionDecompileResultSchema.parse({
     schema_version: result.schema_version,
@@ -1071,9 +1232,17 @@ export function exportToolJsonSchemas() {
       name,
       {
         schema_version: SCHEMA_VERSION,
-        inputSchema: z.toJSONSchema(schemas.input, { target: 'draft-2020-12', io: 'input', reused: 'ref' }),
+        inputSchema: z.toJSONSchema(schemas.input, {
+          target: 'draft-2020-12',
+          io: 'input',
+          reused: 'ref',
+        }),
         outputSchema: {
-          ...z.toJSONSchema(schemas.output, { target: 'draft-2020-12', io: 'output', reused: 'ref' }),
+          ...z.toJSONSchema(schemas.output, {
+            target: 'draft-2020-12',
+            io: 'output',
+            reused: 'ref',
+          }),
           type: 'object' as const,
         },
       },

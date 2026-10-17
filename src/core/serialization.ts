@@ -123,7 +123,10 @@ export interface ExpandedSourceMapping<Range = WireRange> {
   readonly evidence_ids: readonly string[];
 }
 /** Consumer view with every table reference replaced by its identity/range. */
-export type ExpandedEmission<Range = WireRange> = Omit<Emission, 'ids' | 'evidence' | 'ranges' | 'mappings' | 'inferences' | 'requirements'> & {
+export type ExpandedEmission<Range = WireRange> = Omit<
+  Emission,
+  'ids' | 'evidence' | 'ranges' | 'mappings' | 'inferences' | 'requirements'
+> & {
   readonly mappings: readonly ExpandedSourceMapping<Range>[];
   readonly inferences?: readonly ExpandedInference<Range>[];
   readonly requirements?: readonly ExpandedRequirement<Range>[];
@@ -135,29 +138,58 @@ export function expandEmission(value: WireEmission): ExpandedEmission;
 export function expandEmission(value: Emission): ExpandedEmission<AddressRange>;
 export function expandEmission<Range>(value: CompactEmission<Range>): ExpandedEmission<Range> {
   const { ids, evidence, ranges, mappings, inferences, requirements, ...rest } = value;
-  const lookup = <T>(table: readonly T[], refs: readonly number[]): T[] => refs.map((ref) => {
-    if (!Number.isInteger(ref) || ref < 0 || ref >= table.length) throw new RangeError('Emission reference is outside its table');
-    return table[ref]!;
-  });
-  const references = (record: { readonly subject_refs: readonly number[]; readonly evidence_refs: readonly number[];
-    readonly instruction_refs: readonly number[] }) => ({
-    subject_ids: lookup(ids, record.subject_refs), evidence_ids: lookup(evidence, record.evidence_refs),
+  const lookup = <T>(table: readonly T[], refs: readonly number[]): T[] =>
+    refs.map((ref) => {
+      if (!Number.isInteger(ref) || ref < 0 || ref >= table.length)
+        throw new RangeError('Emission reference is outside its table');
+      return table[ref]!;
+    });
+  const references = (record: {
+    readonly subject_refs: readonly number[];
+    readonly evidence_refs: readonly number[];
+    readonly instruction_refs: readonly number[];
+  }) => ({
+    subject_ids: lookup(ids, record.subject_refs),
+    evidence_ids: lookup(evidence, record.evidence_refs),
     instruction_ids: lookup(ids, record.instruction_refs),
   });
   return {
     ...rest,
-    mappings: mappings.map(({ semantic_refs, instruction_refs, range_refs, evidence_refs, ...span }) => {
-      const semantic_ids = lookup(ids, semantic_refs);
-      return { statement_id: semantic_ids[0]!, ...span, semantic_ids, instruction_ids: lookup(ids, instruction_refs),
-        ranges: lookup(ranges, range_refs), evidence_ids: lookup(evidence, evidence_refs) };
+    mappings: mappings.map(
+      ({ semantic_refs, instruction_refs, range_refs, evidence_refs, ...span }) => {
+        const semantic_ids = lookup(ids, semantic_refs);
+        return {
+          statement_id: semantic_ids[0]!,
+          ...span,
+          semantic_ids,
+          instruction_ids: lookup(ids, instruction_refs),
+          ranges: lookup(ranges, range_refs),
+          evidence_ids: lookup(evidence, evidence_refs),
+        };
+      },
+    ),
+    ...(inferences && {
+      inferences: inferences.map(
+        ({ subject_refs, evidence_refs, instruction_refs, range_refs, ...record }) => ({
+          ...record,
+          ...references({ subject_refs, evidence_refs, instruction_refs }),
+          ranges: lookup(ranges, range_refs),
+        }),
+      ),
     }),
-    ...(inferences && { inferences: inferences.map(({ subject_refs, evidence_refs, instruction_refs, range_refs, ...record }) =>
-      ({ ...record, ...references({ subject_refs, evidence_refs, instruction_refs }), ranges: lookup(ranges, range_refs) })) }),
-    ...(requirements && { requirements: requirements.map(({ subject_refs, evidence_refs, instruction_refs, range_refs, sites, ...record }) => ({
-      ...record, ...references({ subject_refs, evidence_refs, instruction_refs }), ranges: lookup(ranges, range_refs),
-      sites: sites.map(({ subject_refs, evidence_refs, instruction_refs, ...site }) =>
-        ({ ...site, ...references({ subject_refs, evidence_refs, instruction_refs }) })),
-    })) }),
+    ...(requirements && {
+      requirements: requirements.map(
+        ({ subject_refs, evidence_refs, instruction_refs, range_refs, sites, ...record }) => ({
+          ...record,
+          ...references({ subject_refs, evidence_refs, instruction_refs }),
+          ranges: lookup(ranges, range_refs),
+          sites: sites.map(({ subject_refs, evidence_refs, instruction_refs, ...site }) => ({
+            ...site,
+            ...references({ subject_refs, evidence_refs, instruction_refs }),
+          })),
+        }),
+      ),
+    }),
   };
 }
 export function encodeJob(value: Job): WireJob {

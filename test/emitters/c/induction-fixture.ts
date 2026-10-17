@@ -18,7 +18,9 @@ import { emit, execute } from './support.js';
  * reconstructing its register concat on every iteration.
  */
 export function checkLoopInduction(): { observations: number } {
-  const graph = discover(loadCorpus()).find((candidate) => candidate.function.original_name === '_fixture_loop');
+  const graph = discover(loadCorpus()).find(
+    (candidate) => candidate.function.original_name === '_fixture_loop',
+  );
   assert.ok(graph);
   const converted = constructSSA(lift(graph).ir);
   assert.equal(converted.state, 'complete');
@@ -36,20 +38,41 @@ export function checkLoopInduction(): { observations: number } {
     const output = emit(ir, { source }, language);
     for (const count of [0, 1, 2, 5, 6]) {
       const pointer = count === 0 ? 0xdead0000n : 0x2000n;
-      const roots = new Map([['arm64:x0', pointer], ['arm64:x1', BigInt(count)]]);
+      const roots = new Map([
+        ['arm64:x0', pointer],
+        ['arm64:x1', BigInt(count)],
+      ]);
       const inputs = new Map(entry.parameters.map((value) => [value.id, 0n]));
       for (const binding of bindings)
-        inputs.set(binding.value.id, BigInt.asUintN(binding.register.width_bits,
-          (roots.get(binding.register.root) ?? 0n) >> BigInt(binding.register.offset_bits)));
+        inputs.set(
+          binding.value.id,
+          BigInt.asUintN(
+            binding.register.width_bits,
+            (roots.get(binding.register.root) ?? 0n) >> BigInt(binding.register.offset_bits),
+          ),
+        );
       // Only the source-valid extent is mapped. An extra iteration or zero-trip
       // load is an observable fault, not hidden by spare fixture allocation.
       const memory = new Map<bigint, number>();
-      for (let index = 0; index < count; index++) for (let byte = 0; byte < 4; byte++)
-        memory.set(0x2000n + BigInt(index * 4 + byte), Number((words[index]! >> BigInt(byte * 8)) & 255n));
-      const before = new Map(memory), observed = execute(output.emission, inputs, memory);
+      for (let index = 0; index < count; index++)
+        for (let byte = 0; byte < 4; byte++)
+          memory.set(
+            0x2000n + BigInt(index * 4 + byte),
+            Number((words[index]! >> BigInt(byte * 8)) & 255n),
+          );
+      const before = new Map(memory),
+        observed = execute(output.emission, inputs, memory);
       assert.equal(observed.exit, 'machine_return', `${language}/${count}`);
-      assert.deepEqual(observed.values, [BigInt.asUintN(32, words.slice(0, count).reduce((sum, value) => sum + value, 0n))]);
-      assert.deepEqual(observed.events, Array.from({ length: count }, () => 'load'));
+      assert.deepEqual(observed.values, [
+        BigInt.asUintN(
+          32,
+          words.slice(0, count).reduce((sum, value) => sum + value, 0n),
+        ),
+      ]);
+      assert.deepEqual(
+        observed.events,
+        Array.from({ length: count }, () => 'load'),
+      );
       assert.deepEqual(observed.memory, before);
       observations++;
     }
@@ -57,8 +80,13 @@ export function checkLoopInduction(): { observations: number } {
   const structured = structureControlFlow(ir, createOperationContext());
   assert.ok(structured.value);
   const program = reconstruct({ function: structured.value, source }, createOperationContext());
-  const livePacking = [...program.live].filter((id) => program.expressions.get(id)?.kind === 'concat');
-  assert.deepEqual(livePacking, [],
-    'A proven zero high-half countdown must not remain a live loop-carried cell or per-iteration register concat');
+  const livePacking = [...program.live].filter(
+    (id) => program.expressions.get(id)?.kind === 'concat',
+  );
+  assert.deepEqual(
+    livePacking,
+    [],
+    'A proven zero high-half countdown must not remain a live loop-carried cell or per-iteration register concat',
+  );
   return { observations };
 }

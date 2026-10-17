@@ -22,7 +22,8 @@ export function sourceStackArgumentParts(
   context: OperationContext,
 ): readonly StackArgumentPart[] | null {
   if (width <= 0 || width % 8 !== 0 || width > 2048) return null;
-  const snapshot = stack.snapshots.get(boundary), sp = snapshot?.stack_pointer.value;
+  const snapshot = stack.snapshots.get(boundary),
+    sp = snapshot?.stack_pointer.value;
   if (!snapshot || sp?.kind !== 'stack') return null;
   const owners = new Map<StackFact, Value>();
   for (const access of stack.accesses) {
@@ -39,10 +40,19 @@ export function sourceStackArgumentParts(
     const value = owners.get(cell.fact);
     if (!value || cell.fact.initialization === 'uninitialized') return null;
     const previous = parts.at(-1);
-    if (previous && previous.value.id === value.id &&
-      previous.value_offset_bits + previous.width_bits === cell.value_offset_bits) {
+    if (
+      previous &&
+      previous.value.id === value.id &&
+      previous.value_offset_bits + previous.width_bits === cell.value_offset_bits
+    ) {
       parts[parts.length - 1] = { ...previous, width_bits: previous.width_bits + 8 };
-    } else parts.push({ value, value_offset_bits: cell.value_offset_bits, offset_bits: byte * 8, width_bits: 8 });
+    } else
+      parts.push({
+        value,
+        value_offset_bits: cell.value_offset_bits,
+        offset_bits: byte * 8,
+        width_bits: 8,
+      });
   }
   return parts;
 }

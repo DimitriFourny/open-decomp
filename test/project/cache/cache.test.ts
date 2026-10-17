@@ -444,50 +444,99 @@ test('publication validates every catalog subject against its exact function and
   type Subjects = AnalysisComputation['catalog']['subjects'];
   const other = (id: string): string => `${id.slice(0, -1)}${id.endsWith('0') ? '1' : '0'}`;
   const corruptions: readonly [string, (subjects: Subjects) => Subjects][] = [
-    ['foreign image', (subjects) => subjects.map((subject, index) =>
-      index === 1 ? { ...subject, image_id: other(subject.image_id) } : subject)],
-    ['foreign slice', (subjects) => subjects.map((subject, index) =>
-      index === 1 ? { ...subject, slice_id: other(subject.slice_id) } : subject)],
-    ['mixed ABI', (subjects) => subjects.map((subject, index) =>
-      index === 1 ? { ...subject, abi: subject.abi === 'sysv-amd64'
-        ? 'windows-x64' as const : 'sysv-amd64' as const } : subject)],
+    [
+      'foreign image',
+      (subjects) =>
+        subjects.map((subject, index) =>
+          index === 1 ? { ...subject, image_id: other(subject.image_id) } : subject,
+        ),
+    ],
+    [
+      'foreign slice',
+      (subjects) =>
+        subjects.map((subject, index) =>
+          index === 1 ? { ...subject, slice_id: other(subject.slice_id) } : subject,
+        ),
+    ],
+    [
+      'mixed ABI',
+      (subjects) =>
+        subjects.map((subject, index) =>
+          index === 1
+            ? {
+                ...subject,
+                abi:
+                  subject.abi === 'sysv-amd64' ? ('windows-x64' as const) : ('sysv-amd64' as const),
+              }
+            : subject,
+        ),
+    ],
     ['missing function', (subjects) => subjects.filter((subject) => subject.kind !== 'function')],
-    ['function impostor', (subjects) => subjects.map((subject, index) =>
-      index === 0 ? { ...subject, kind: 'value' as const } : subject)],
+    [
+      'function impostor',
+      (subjects) =>
+        subjects.map((subject, index) =>
+          index === 0 ? { ...subject, kind: 'value' as const } : subject,
+        ),
+    ],
     ['empty subjects', () => []],
-    ['ambiguous duplicate', (subjects) => [...subjects, { ...subjects[0]!, kind: 'call' as const }]],
+    [
+      'ambiguous duplicate',
+      (subjects) => [...subjects, { ...subjects[0]!, kind: 'call' as const }],
+    ],
   ];
-  for (const [name, corrupt] of corruptions) await t.test(name, async (t) => {
-    const p = await project(t), computation = p.computation(), job = p.job();
-    await assert.rejects(runCachedDecompilation({
-      store: p.state.store, job_id: job.id, identity: p.identity,
-      context: createOperationContext({ budget: p.identity.budget }),
-      inline_limit: 65536,
-    }, () => ({ ...computation,
-      catalog: { ...computation.catalog, subjects: corrupt(computation.catalog.subjects) },
-    })), { code: 'invalid_input' });
-    assert.equal(p.state.store.findArtifact(p.identity), null);
-    assert.equal(p.state.store.readJob(job.id)?.state, 'running');
-    assert.equal(readdirSync(join(p.state.path, 'artifacts')).length, 0);
-  });
+  for (const [name, corrupt] of corruptions)
+    await t.test(name, async (t) => {
+      const p = await project(t),
+        computation = p.computation(),
+        job = p.job();
+      await assert.rejects(
+        runCachedDecompilation(
+          {
+            store: p.state.store,
+            job_id: job.id,
+            identity: p.identity,
+            context: createOperationContext({ budget: p.identity.budget }),
+            inline_limit: 65536,
+          },
+          () => ({
+            ...computation,
+            catalog: { ...computation.catalog, subjects: corrupt(computation.catalog.subjects) },
+          }),
+        ),
+        { code: 'invalid_input' },
+      );
+      assert.equal(p.state.store.findArtifact(p.identity), null);
+      assert.equal(p.state.store.readJob(job.id)?.state, 'running');
+      assert.equal(readdirSync(join(p.state.path, 'artifacts')).length, 0);
+    });
 });
 
 test('bounded publication visits catalog subjects once while retaining every published identity', async (t) => {
   const p = await project(t);
   const identity = { ...p.identity, budget: { ...p.identity.budget, work: 600 } };
-  const computation = p.computation(identity), template = computation.catalog.subjects[1]!;
-  const subjects = [...computation.catalog.subjects,
-    ...Array.from({ length: 500 }, (_, index) => ({ ...template,
+  const computation = p.computation(identity),
+    template = computation.catalog.subjects[1]!;
+  const subjects = [
+    ...computation.catalog.subjects,
+    ...Array.from({ length: 500 }, (_, index) => ({
+      ...template,
       id: entityIdentity(p.image.selected_slice_id, 'field', ['catalog-work', index]),
-    }))];
-  const published = await p.run(identity, 65536, () => ({ ...computation,
+    })),
+  ];
+  const published = await p.run(identity, 65536, () => ({
+    ...computation,
     catalog: { ...computation.catalog, subjects },
   }));
   assert.equal(p.state.store.readJob(published.job.id)?.state, 'completed');
-  const restored = await readAnnotationCatalog(p.state.store, 2,
-    subjects.map((subject) => subject.id), createOperationContext(), p.isCurrent);
-  for (const subject of subjects)
-    assert.equal(restored?.subject(subject.id)?.kind, subject.kind);
+  const restored = await readAnnotationCatalog(
+    p.state.store,
+    2,
+    subjects.map((subject) => subject.id),
+    createOperationContext(),
+    p.isCurrent,
+  );
+  for (const subject of subjects) assert.equal(restored?.subject(subject.id)?.kind, subject.kind);
 });
 
 test('cancellation, stale computation and forged full-result metadata never publish success', async (t) => {
@@ -747,7 +796,9 @@ test('schema-2 migration preserves artifacts, jobs, revisions and removal actors
   const db = new DatabaseSync(join(p.state.path, 'project.sqlite'));
   const { bytes: _bytes, address_map: _map, ...legacyMetadata } = p.image;
   db.prepare('UPDATE loaded_images SET payload=?').run(encodeStored(legacyMetadata));
-  db.exec('DROP TABLE analysis_artifacts; DROP TABLE loaded_image_records; DROP TABLE analysis_reuse; DROP INDEX records_scope_revision; DROP INDEX loaded_images_revision; PRAGMA user_version=2;');
+  db.exec(
+    'DROP TABLE analysis_artifacts; DROP TABLE loaded_image_records; DROP TABLE analysis_reuse; DROP INDEX records_scope_revision; DROP INDEX loaded_images_revision; PRAGMA user_version=2;',
+  );
   db.close();
   p.state.store = SqliteProjectStore.open(p.state.path, 'resume');
   assert.equal(p.state.store.snapshot().revision, snapshot.revision);

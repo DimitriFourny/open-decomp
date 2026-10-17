@@ -170,15 +170,18 @@ function join(a: StackFact, b: StackFact): StackFact {
   );
 }
 function sameFact(a: StackFact, b: StackFact): boolean {
-  return a === b || (
-    sameValue(a.value, b.value) &&
-    a.initialization === b.initialization &&
-    a.value_ids.length === b.value_ids.length &&
-    a.value_ids.every((id, index) => id === b.value_ids[index]) &&
-    a.evidence_ids.length === b.evidence_ids.length &&
-    a.evidence_ids.every((id, index) => id === b.evidence_ids[index]) &&
-    a.incoming_registers.length === b.incoming_registers.length &&
-    a.incoming_registers.every((register, index) => register.id === b.incoming_registers[index]?.id)
+  return (
+    a === b ||
+    (sameValue(a.value, b.value) &&
+      a.initialization === b.initialization &&
+      a.value_ids.length === b.value_ids.length &&
+      a.value_ids.every((id, index) => id === b.value_ids[index]) &&
+      a.evidence_ids.length === b.evidence_ids.length &&
+      a.evidence_ids.every((id, index) => id === b.evidence_ids[index]) &&
+      a.incoming_registers.length === b.incoming_registers.length &&
+      a.incoming_registers.every(
+        (register, index) => register.id === b.incoming_registers[index]?.id,
+      ))
   );
 }
 function absent(offset: bigint, aliased: boolean): StackFact {
@@ -330,7 +333,8 @@ interface State {
 /** Bounded reverse-postorder priority scheduling; every pending block has one
  * fixed slot, including backedges and disconnected components. */
 function stackWorklist(input: SSAForm, budget: AnalysisBudget) {
-  const count = input.blocks.length, slots = new Map<EntityId, number>();
+  const count = input.blocks.length,
+    slots = new Map<EntityId, number>();
   const outgoing = new Array<readonly Edge[]>(count);
   for (let slot = 0; slot < count; slot++) {
     budget.charge();
@@ -342,8 +346,10 @@ function stackWorklist(input: SSAForm, budget: AnalysisBudget) {
     if (slot === undefined) throw new TypeError('Stack worklist references a missing SSA block');
     return slot;
   };
-  const marked = new Uint8Array(count), cursor = new Uint32Array(count);
-  const frames = new Uint32Array(count), postorder = new Uint32Array(count);
+  const marked = new Uint8Array(count),
+    cursor = new Uint32Array(count);
+  const frames = new Uint32Array(count),
+    postorder = new Uint32Array(count);
   let ordered = 0;
   // The entry component comes first; remaining components use original order.
   for (let start = -1; start < count; start++) {
@@ -355,7 +361,8 @@ function stackWorklist(input: SSAForm, budget: AnalysisBudget) {
     marked[root] = 1;
     budget.charge();
     while (depth > 0) {
-      const slot = frames[depth - 1]!, edges = outgoing[slot]!;
+      const slot = frames[depth - 1]!,
+        edges = outgoing[slot]!;
       if (cursor[slot]! < edges.length) {
         budget.charge();
         const target = slotFor(edges[cursor[slot]!]!.target);
@@ -371,7 +378,8 @@ function stackWorklist(input: SSAForm, budget: AnalysisBudget) {
     }
   }
   // Reuse DFS storage for ranks, the heap and membership; no enqueue allocates.
-  const rank = cursor, heap = frames;
+  const rank = cursor,
+    heap = frames;
   for (let index = 0; index < ordered; index++) {
     budget.charge();
     rank[postorder[index]!] = ordered - index - 1;
@@ -387,7 +395,8 @@ function stackWorklist(input: SSAForm, budget: AnalysisBudget) {
       let child = size++;
       while (child > 0) {
         budget.charge();
-        const parent = (child - 1) >>> 1, previous = heap[parent]!;
+        const parent = (child - 1) >>> 1,
+          previous = heap[parent]!;
         if (rank[previous]! <= rank[slot]!) break;
         heap[child] = previous;
         child = parent;
@@ -396,7 +405,8 @@ function stackWorklist(input: SSAForm, budget: AnalysisBudget) {
     },
     take(): EntityId | undefined {
       if (size === 0) return undefined;
-      const first = heap[0]!, last = heap[--size]!;
+      const first = heap[0]!,
+        last = heap[--size]!;
       marked[first] = 0;
       if (size > 0) {
         let parent = 0;
@@ -415,7 +425,9 @@ function stackWorklist(input: SSAForm, budget: AnalysisBudget) {
       }
       return input.blocks[first]!.id;
     },
-    edges(id: EntityId): readonly Edge[] { return outgoing[slotFor(id)]!; },
+    edges(id: EntityId): readonly Edge[] {
+      return outgoing[slotFor(id)]!;
+    },
   };
 }
 
@@ -538,7 +550,13 @@ export function recoverStack(
           }
         : { ...unknown, value_ids: [parameter.id] };
     });
-    const initial: State = { parameters, memory: new Map(), memory_shared: false, escaped: false, aliased: false };
+    const initial: State = {
+      parameters,
+      memory: new Map(),
+      memory_shared: false,
+      escaped: false,
+      aliased: false,
+    };
     const incoming = new Map<EntityId, State>([[input.entry, initial]]);
     pendingBlocks.add(input.entry);
     const snapshots = new Map<EntityId, StackSnapshot>();
@@ -598,8 +616,11 @@ export function recoverStack(
       if (barrierInvariant.has(state.memory)) return;
       for (const [offset, byte] of state.memory) {
         budget.charge();
-        if (byte.fact.initialization === 'unknown' &&
-          (byte.fact.value.kind === 'unknown' || byte.fact.value.kind === 'dynamic_stack')) continue;
+        if (
+          byte.fact.initialization === 'unknown' &&
+          (byte.fact.value.kind === 'unknown' || byte.fact.value.kind === 'dynamic_stack')
+        )
+          continue;
         mutableMemory(state).set(offset, {
           fact: {
             ...byte.fact,
@@ -719,7 +740,8 @@ export function recoverStack(
       if (!transferred.has(id)) {
         budget.charge(block.parameters.length);
         block.parameters.forEach((parameter, index) =>
-          publish(parameter.id, incomingState.parameters[index]!));
+          publish(parameter.id, incomingState.parameters[index]!),
+        );
         transferred.add(id);
       } else {
         const changed = dirtyParameters.get(id);
@@ -779,9 +801,9 @@ export function recoverStack(
           else if (offset !== null) {
             for (let index = 0n; index < size; index++) {
               budget.charge();
-              const at = offset + index, previous = state.memory.get(at);
-              if (!previous && state.memory.size >= maxBytes)
-                budget.charge(budget.limit + 1);
+              const at = offset + index,
+                previous = state.memory.get(at);
+              if (!previous && state.memory.size >= maxBytes) budget.charge(budget.limit + 1);
               const byte: StackByte = {
                 fact:
                   width % 8 === 0
@@ -796,8 +818,11 @@ export function recoverStack(
                 value_offset_bits:
                   Number(node.access.endian === 'little' ? index : size - index - 1n) * 8,
               };
-              if (!previous || previous.value_offset_bits !== byte.value_offset_bits ||
-                !sameFact(previous.fact, byte.fact))
+              if (
+                !previous ||
+                previous.value_offset_bits !== byte.value_offset_bits ||
+                !sameFact(previous.fact, byte.fact)
+              )
                 mutableMemory(state).set(at, byte);
             }
           } else {
@@ -868,7 +893,9 @@ export function recoverStack(
         snapshots.set(block.terminator.id, exit);
         for (const boundary of [exit, merged])
           if (
-            boundary.registers.some((binding) => binding.register.root === abi.stack_pointer.root) &&
+            boundary.registers.some(
+              (binding) => binding.register.root === abi.stack_pointer.root,
+            ) &&
             boundary.stack_pointer.value.kind !== 'stack'
           )
             frame.dynamic = true;
@@ -896,12 +923,16 @@ export function recoverStack(
       const state = transfer(id, false);
       for (const edge of pendingBlocks.edges(id)) {
         budget.charge();
-        const last = posted.get(edge), pending = dirtyEdges.get(edge);
-        const memoryChanged = !last || last.memory !== state.memory ||
-          last.escaped !== state.escaped || last.aliased !== state.aliased;
+        const last = posted.get(edge),
+          pending = dirtyEdges.get(edge);
+        const memoryChanged =
+          !last ||
+          last.memory !== state.memory ||
+          last.escaped !== state.escaped ||
+          last.aliased !== state.aliased;
         if (last && !pending?.size && !memoryChanged) continue;
         dirtyEdges.delete(edge);
-        budget.charge(last ? pending?.size ?? 0 : edge.arguments.length);
+        budget.charge(last ? (pending?.size ?? 0) : edge.arguments.length);
         state.memory_shared = true;
         const previous = incoming.get(edge.target);
         const next: State = {
@@ -912,8 +943,12 @@ export function recoverStack(
         let changed = !previous;
         const contribute = (index: number): void => {
           const fact = get(edge.arguments[index]!);
-          if (!previous) { next.parameters[index] = fact; return; }
-          const prior = previous.parameters[index]!, merged = join(prior, fact);
+          if (!previous) {
+            next.parameters[index] = fact;
+            return;
+          }
+          const prior = previous.parameters[index]!,
+            merged = join(prior, fact);
           if (sameFact(prior, merged)) return;
           // Entry snapshots retain the original ABI inputs even if an unusual
           // backedge targets the entry. Other parameter arrays are solver-owned.
@@ -949,21 +984,29 @@ export function recoverStack(
           if (memoryChanged && previous.memory !== state.memory)
             for (const offset of new Set([...previous.memory.keys(), ...state.memory.keys()])) {
               budget.charge();
-              const a = previous.memory.get(offset), b = state.memory.get(offset);
+              const a = previous.memory.get(offset),
+                b = state.memory.get(offset);
               const merged = join(
                 a?.fact ?? absent(offset, previous.aliased),
                 b?.fact ?? absent(offset, state.aliased),
               );
               const sameOffset = a && b && a.value_offset_bits === b.value_offset_bits;
               const byte = {
-                fact: sameOffset ? merged : {
-                  ...merged,
-                  value: isStack(merged.value)
-                    ? { kind: 'dynamic_stack' as const } : { kind: 'unknown' as const },
-                },
+                fact: sameOffset
+                  ? merged
+                  : {
+                      ...merged,
+                      value: isStack(merged.value)
+                        ? { kind: 'dynamic_stack' as const }
+                        : { kind: 'unknown' as const },
+                    },
                 value_offset_bits: sameOffset ? a.value_offset_bits : 0,
               };
-              if (!a || a.value_offset_bits !== byte.value_offset_bits || !sameFact(a.fact, byte.fact)) {
+              if (
+                !a ||
+                a.value_offset_bits !== byte.value_offset_bits ||
+                !sameFact(a.fact, byte.fact)
+              ) {
                 mutableMemory(next).set(offset, byte);
                 changed = true;
               }

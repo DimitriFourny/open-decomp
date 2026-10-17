@@ -368,7 +368,10 @@ export class AnnotationService {
       readonly catalog?: TrustedSemanticCatalog;
       readonly entity_ids?: readonly string[];
       /** Reports effective query keys, including empty subjects and absent shared declarations. */
-      readonly on_dependencies?: (subjects: readonly string[] | null, type_ids: readonly string[]) => void;
+      readonly on_dependencies?: (
+        subjects: readonly string[] | null,
+        type_ids: readonly string[],
+      ) => void;
     } = {},
   ): ActiveAnnotationView {
     const snapshot = this.store.snapshot(revision);

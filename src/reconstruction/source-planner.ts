@@ -23,7 +23,12 @@ import type { Assignment, BoundaryProjection, TailProjection } from './model.js'
 import type { InferredCallee, SourcePresentation } from './source-model.js';
 import { sourceDataValues } from './source-data.js';
 import type { SignatureAssociation } from '../analysis/types/model.js';
-import { registerTypeSlices, registerTypes, unchangedStorage, type StorageCopy } from './source-register-types.js';
+import {
+  registerTypeSlices,
+  registerTypes,
+  unchangedStorage,
+  type StorageCopy,
+} from './source-register-types.js';
 import { sourceStackArgumentParts } from './source-stack-arguments.js';
 import { planSourceRequirements } from './source-requirements.js';
 import { possibleAbiReturnStorage } from '../analysis/calls/return-storage.js';
@@ -107,11 +112,12 @@ export function planSource(
     if (type.kind === 'float' && (type.bits === 32 || type.bits === 64))
       return { kind: 'float', bits: type.bits };
     if (type.kind === 'vector') {
-      const element: Exclude<DataType, { kind: 'vector' }> | null = type.element === 'integer'
-        ? integer(type.element_bits)
-        : type.element_bits === 32 || type.element_bits === 64
-          ? { kind: 'float' as const, bits: type.element_bits }
-          : null;
+      const element: Exclude<DataType, { kind: 'vector' }> | null =
+        type.element === 'integer'
+          ? integer(type.element_bits)
+          : type.element_bits === 32 || type.element_bits === 64
+            ? { kind: 'float' as const, bits: type.element_bits }
+            : null;
       if (element) return { kind: 'vector', element, lanes: type.lanes };
     }
     return null;
@@ -246,33 +252,70 @@ export function planSource(
   ];
   const stores = new Map<string, Value>();
   for (const block of blocks.values())
-    for (const node of block.statements)
-      if (node.kind === 'store') stores.set(node.id, node.value);
-  const bindStack = (key: string, boundary: string, offset: bigint, type: DataType, block: string): Value | null => {
+    for (const node of block.statements) if (node.kind === 'store') stores.set(node.id, node.value);
+  const bindStack = (
+    key: string,
+    boundary: string,
+    offset: bigint,
+    type: DataType,
+    block: string,
+  ): Value | null => {
     const stack = input.types?.calls?.stack;
     if (!stack) return null;
-    const parts = sourceStackArgumentParts(stack, stores, boundary, offset, bitWidth(type), context);
+    const parts = sourceStackArgumentParts(
+      stack,
+      stores,
+      boundary,
+      offset,
+      bitWidth(type),
+      context,
+    );
     if (!parts) return null;
     const values = parts.map((part, index) =>
-      part.value_offset_bits === 0 && part.width_bits === bitWidth(part.value.type) ? part.value :
-        make(`${key}:part:${index}`, integer(part.width_bits), block, {
-          kind: 'extract', value: part.value, offset: part.value_offset_bits,
-        }));
+      part.value_offset_bits === 0 && part.width_bits === bitWidth(part.value.type)
+        ? part.value
+        : make(`${key}:part:${index}`, integer(part.width_bits), block, {
+            kind: 'extract',
+            value: part.value,
+            offset: part.value_offset_bits,
+          }),
+    );
     if (values.length === 1 && sameType(values[0]!.type, type)) return values[0]!;
-    return make(key, type, block, values.length === 1 ?
-      { kind: 'cast', op: 'bitcast', value: values[0]! } : { kind: 'concat', values });
+    return make(
+      key,
+      type,
+      block,
+      values.length === 1
+        ? { kind: 'cast', op: 'bitcast', value: values[0]! }
+        : { kind: 'concat', values },
+    );
   };
-  const observedArguments = (callee: InferredCallee, bindings: readonly RegisterBinding[],
-    boundary: string, block: string): { readonly arguments: readonly Value[]; readonly missing: boolean } => {
+  const observedArguments = (
+    callee: InferredCallee,
+    bindings: readonly RegisterBinding[],
+    boundary: string,
+    block: string,
+  ): { readonly arguments: readonly Value[]; readonly missing: boolean } => {
     const arguments_: Value[] = [];
     for (const [index, register] of callee.parameters.entries()) {
-      const value = bind(`${boundary}:arg:${index}`, bindings, locations(register),
-        callee.parameter_types?.[index] ?? integer(register.width_bits), block);
+      const value = bind(
+        `${boundary}:arg:${index}`,
+        bindings,
+        locations(register),
+        callee.parameter_types?.[index] ?? integer(register.width_bits),
+        block,
+      );
       if (!value) return { arguments: arguments_, missing: true };
       arguments_.push(value);
     }
     for (const [index, parameter] of (callee.stack_parameters ?? []).entries()) {
-      const value = bindStack(`${boundary}:stack-arg:${index}`, boundary, parameter.offset, parameter.type, block);
+      const value = bindStack(
+        `${boundary}:stack-arg:${index}`,
+        boundary,
+        parameter.offset,
+        parameter.type,
+        block,
+      );
       if (!value) return { arguments: arguments_, missing: true };
       arguments_.push(value);
     }
@@ -301,7 +344,12 @@ export function planSource(
       if (type?.kind === 'vector') {
         const element = resolve(type.element);
         if (element?.kind === 'integer' || element?.kind === 'float')
-          return { kind: 'vector', element: element.kind, element_bits: element.bits, lanes: type.lanes };
+          return {
+            kind: 'vector',
+            element: element.kind,
+            element_bits: element.bits,
+            lanes: type.lanes,
+          };
       }
       return null;
     };
@@ -401,17 +449,30 @@ export function planSource(
       }
       const callee = inferred.get(node.id);
       if (!projection && callee && node.arguments.length === 0 && node.results.length === 0) {
-        const { arguments: args, missing } = observedArguments(callee, node.register_inputs, node.id, block.id);
+        const { arguments: args, missing } = observedArguments(
+          callee,
+          node.register_inputs,
+          node.id,
+          block.id,
+        );
         const returned = callee.returns
           .map((register, index) =>
-            result(`${node.id}:result:${index}`, node.register_outputs, locations(register),
-              callee.return_types?.[index] ?? integer(register.width_bits), block.id))
+            result(
+              `${node.id}:result:${index}`,
+              node.register_outputs,
+              locations(register),
+              callee.return_types?.[index] ?? integer(register.width_bits),
+              block.id,
+            ),
+          )
           .filter((value): value is Value => value !== null);
         projection = {
           kind: callee.parameter_state === 'ambiguous' || missing ? 'physical' : 'inferred',
           signature: null,
           arguments: args,
-          ...(callee.argument_list_complete === false || missing ? { argument_list_complete: false } : {}),
+          ...(callee.argument_list_complete === false || missing
+            ? { argument_list_complete: false }
+            : {}),
           results: returned,
           inputs: [],
           outputs: node.register_outputs,
@@ -429,27 +490,37 @@ export function planSource(
       callResults.set(node.id, projection.results);
     }
   for (const block of blocks.values()) {
-    const control = block.control, callee = inferred.get(control.id);
+    const control = block.control,
+      callee = inferred.get(control.id);
     if (control.kind !== 'indirect' || !control.tail_call || !callee?.target) continue;
     const args = observedArguments(callee, block.register_exit, control.id, block.id);
-    tails.set(control.id, { target: callee.target,
-      result_types: callee.return_types ?? callee.returns.map((register) => integer(register.width_bits)),
-      boundary: { kind: callee.parameter_state === 'ambiguous' || args.missing ? 'physical' : 'inferred',
-        signature: null, arguments: args.arguments, argument_list_complete: false,
-        results: [], inputs: [], outputs: [] },
+    tails.set(control.id, {
+      target: callee.target,
+      result_types:
+        callee.return_types ?? callee.returns.map((register) => integer(register.width_bits)),
+      boundary: {
+        kind: callee.parameter_state === 'ambiguous' || args.missing ? 'physical' : 'inferred',
+        signature: null,
+        arguments: args.arguments,
+        argument_list_complete: false,
+        results: [],
+        inputs: [],
+        outputs: [],
+      },
     });
   }
   const storageCopies: StorageCopy[] = [];
   const storageSources = new Map<string, Value[]>();
   for (const block of blocks.values()) {
     const control = block.control;
-    const transfers = control.kind === 'jump'
-      ? [control.transfer]
-      : control.kind === 'if'
-        ? [control.when_true.transfer, control.when_false.transfer]
-        : control.kind === 'switch'
-          ? [...control.cases.map((item) => item.arm.transfer), control.otherwise.transfer]
-          : [];
+    const transfers =
+      control.kind === 'jump'
+        ? [control.transfer]
+        : control.kind === 'if'
+          ? [control.when_true.transfer, control.when_false.transfer]
+          : control.kind === 'switch'
+            ? [...control.cases.map((item) => item.arm.transfer), control.otherwise.transfer]
+            : [];
     for (const transfer of transfers)
       for (const copy of transfer.copies) {
         storageCopies.push(copy);
@@ -458,7 +529,13 @@ export function planSource(
         storageSources.set(copy.destination.id, sources);
       }
   }
-  const typedSlices = registerTypeSlices(values, expressions, storageCopies, callResults.values(), context);
+  const typedSlices = registerTypeSlices(
+    values,
+    expressions,
+    storageCopies,
+    callResults.values(),
+    context,
+  );
   // Candidate registers come from the target ABI classifier, never spelling or
   // the host platform. Only candidates demanded after source DCE become formals.
   const word: AbiType = { kind: 'integer', bits: abi.layout.pointer_bits, signed: false };
@@ -497,14 +574,25 @@ export function planSource(
         binding.register.offset_bits < register.offset_bits + register.width_bits,
     );
     if (!cells.length) continue;
-    const typed = (register.bank === 'float' || register.bank === 'vector')
-      ? registerTypes(entry.register_entry, register.root, register.offset_bits, typedSlices, context)[0]
-      : undefined;
-    const width = typed ? bitWidth(typed)
+    const typed =
+      register.bank === 'float' || register.bank === 'vector'
+        ? registerTypes(
+            entry.register_entry,
+            register.root,
+            register.offset_bits,
+            typedSlices,
+            context,
+          )[0]
+        : undefined;
+    const width = typed
+      ? bitWidth(typed)
       : Math.max(...cells.map((cell) => cell.register.offset_bits + cell.register.width_bits)) -
         register.offset_bits;
-    const descriptor = { ...register, width_bits: width,
-      ...(typed?.kind === 'vector' ? { bank: 'vector' as const } : {}) };
+    const descriptor = {
+      ...register,
+      width_bits: width,
+      ...(typed?.kind === 'vector' ? { bank: 'vector' as const } : {}),
+    };
     const value = result(
       `parameter:${register.root}`,
       entry.register_entry,
@@ -581,8 +669,12 @@ export function planSource(
       alias(binding.value, {
         kind: 'indeterminate',
         state: 'unknown',
-        reason: binding.register.root === 'arm64:fpcr' ? 'FPCR environment'
-          : binding.register.root === 'x86_64:mxcsr' ? 'MXCSR environment' : 'non-argument entry register',
+        reason:
+          binding.register.root === 'arm64:fpcr'
+            ? 'FPCR environment'
+            : binding.register.root === 'x86_64:mxcsr'
+              ? 'MXCSR environment'
+              : 'non-argument entry register',
       });
   }
   let returnType: DataType | null = null;
@@ -607,22 +699,49 @@ export function planSource(
       }
       if (!functionSignature && !returned.length && evidence.function_returns?.registers.length) {
         const observed = evidence.function_returns;
-        const results = observed.registers.map((register, index) => bind(
-          `${control.id}:observed-result:${index}`, block.register_exit, locations(register),
-          observed.types[index] ?? integer(register.width_bits), block.id));
+        const results = observed.registers.map((register, index) =>
+          bind(
+            `${control.id}:observed-result:${index}`,
+            block.register_exit,
+            locations(register),
+            observed.types[index] ?? integer(register.width_bits),
+            block.id,
+          ),
+        );
         if (results.every((value) => value !== null)) returned = results as Value[];
       }
       if (!functionSignature && !returned.length) {
         const floating = floatLayout.returns.flatMap((location) => {
           if (location.kind !== 'register') return [];
-          const type = registerTypes(block.register_exit, location.register.root,
-            location.register.offset_bits, typedSlices, context, true).find((candidate) =>
-              [...blocks.values()].filter((exit) => exit.control.kind === 'return').every((exit) =>
-                registerTypes(exit.register_exit, location.register.root, location.register.offset_bits,
-                  typedSlices, context, true).some((other) => sameType(candidate, other))));
+          const type = registerTypes(
+            block.register_exit,
+            location.register.root,
+            location.register.offset_bits,
+            typedSlices,
+            context,
+            true,
+          ).find((candidate) =>
+            [...blocks.values()]
+              .filter((exit) => exit.control.kind === 'return')
+              .every((exit) =>
+                registerTypes(
+                  exit.register_exit,
+                  location.register.root,
+                  location.register.offset_bits,
+                  typedSlices,
+                  context,
+                  true,
+                ).some((other) => sameType(candidate, other)),
+              ),
+          );
           if (!type) return [];
-          const value = bind(`${control.id}:fp-result`, block.register_exit,
-            [{ ...location, width_bits: bitWidth(type) }], type, block.id);
+          const value = bind(
+            `${control.id}:fp-result`,
+            block.register_exit,
+            [{ ...location, width_bits: bitWidth(type) }],
+            type,
+            block.id,
+          );
           return value ? [value] : [];
         });
         if (floating.length === 1) returned = floating;
@@ -633,9 +752,17 @@ export function planSource(
           const cells = block.register_exit.filter(
             (binding) => binding.register.root === location.register.root,
           );
-          const changed = cells.some((binding) => !unchangedStorage(binding.value,
-            entry.register_entry.find((initial) => initial.register.id === binding.register.id)?.value.id,
-            expressions, storageSources, context));
+          const changed = cells.some(
+            (binding) =>
+              !unchangedStorage(
+                binding.value,
+                entry.register_entry.find((initial) => initial.register.id === binding.register.id)
+                  ?.value.id,
+                expressions,
+                storageSources,
+                context,
+              ),
+          );
           if (changed) {
             // An observed narrow ABI result is not padded with unrelated high bits.
             const low = cells.find(
@@ -674,40 +801,74 @@ export function planSource(
       // overlay, not as another inferred source/aggregate result.
       const knownReturnStorage = [...(evidence.function_returns?.registers ?? [])];
       for (const value of returned) {
-        const primary = value.type.kind === 'float' || value.type.kind === 'vector' ? floatLayout : layout;
+        const primary =
+          value.type.kind === 'float' || value.type.kind === 'vector' ? floatLayout : layout;
         for (const location of primary.returns)
-          if (location.kind === 'register') knownReturnStorage.push({
-            ...location.register, width_bits: bitWidth(value.type),
-          });
+          if (location.kind === 'register')
+            knownReturnStorage.push({
+              ...location.register,
+              width_bits: bitWidth(value.type),
+            });
       }
       const uncertainOutputs: RegisterBinding[] = [];
-      if (!functionSignature) for (const binding of block.register_exit) {
-        context.checkpoint(1);
-        const capability = possibleReturnStorage.find((register) => register.root === binding.register.root);
-        if (!capability || unchangedStorage(binding.value,
-          entry.register_entry.find((initial) => initial.register.id === binding.register.id)?.value.id,
-          expressions, storageSources, context)) continue;
-        let uncovered = [{ low: Math.max(binding.register.offset_bits, capability.offset_bits),
-          high: Math.min(binding.register.offset_bits + binding.register.width_bits,
-            capability.offset_bits + capability.width_bits) }];
-        for (const known of knownReturnStorage) {
-          if (known.root !== binding.register.root) continue;
-          const low = known.offset_bits, high = low + known.width_bits;
-          uncovered = uncovered.flatMap((range) => [
-            ...(range.low < low ? [{ low: range.low, high: Math.min(range.high, low) }] : []),
-            ...(range.high > high ? [{ low: Math.max(range.low, high), high: range.high }] : []),
-          ]);
+      if (!functionSignature)
+        for (const binding of block.register_exit) {
+          context.checkpoint(1);
+          const capability = possibleReturnStorage.find(
+            (register) => register.root === binding.register.root,
+          );
+          if (
+            !capability ||
+            unchangedStorage(
+              binding.value,
+              entry.register_entry.find((initial) => initial.register.id === binding.register.id)
+                ?.value.id,
+              expressions,
+              storageSources,
+              context,
+            )
+          )
+            continue;
+          let uncovered = [
+            {
+              low: Math.max(binding.register.offset_bits, capability.offset_bits),
+              high: Math.min(
+                binding.register.offset_bits + binding.register.width_bits,
+                capability.offset_bits + capability.width_bits,
+              ),
+            },
+          ];
+          for (const known of knownReturnStorage) {
+            if (known.root !== binding.register.root) continue;
+            const low = known.offset_bits,
+              high = low + known.width_bits;
+            uncovered = uncovered.flatMap((range) => [
+              ...(range.low < low ? [{ low: range.low, high: Math.min(range.high, low) }] : []),
+              ...(range.high > high ? [{ low: Math.max(range.low, high), high: range.high }] : []),
+            ]);
+          }
+          for (const { low, high } of uncovered) {
+            if (low >= high) continue;
+            const width = high - low;
+            const value =
+              low === binding.register.offset_bits && width === binding.register.width_bits
+                ? binding.value
+                : make(
+                    `${control.id}:uncertain-return:${binding.value.id}:${low}:${width}`,
+                    integer(width),
+                    block.id,
+                    {
+                      kind: 'extract',
+                      value: binding.value,
+                      offset: low - binding.register.offset_bits,
+                    },
+                  );
+            uncertainOutputs.push({
+              value,
+              register: { ...binding.register, offset_bits: low, width_bits: width },
+            });
+          }
         }
-        for (const { low, high } of uncovered) {
-          if (low >= high) continue;
-          const width = high - low;
-          const value = low === binding.register.offset_bits && width === binding.register.width_bits
-            ? binding.value : make(`${control.id}:uncertain-return:${binding.value.id}:${low}:${width}`,
-              integer(width), block.id, { kind: 'extract', value: binding.value,
-                offset: low - binding.register.offset_bits });
-          uncertainOutputs.push({ value, register: { ...binding.register, offset_bits: low, width_bits: width } });
-        }
-      }
       returns.set(control.id, {
         kind: functionSignature ? 'source' : 'inferred',
         signature: functionSignature?.signature ?? null,
@@ -744,33 +905,63 @@ export function planSource(
     }
   }
   if (!functionSignature && tails.size) {
-    const types = [...tails.values()].map((tail) => tail.result_types.length === 1 ? tail.result_types[0]! : null);
+    const types = [...tails.values()].map((tail) =>
+      tail.result_types.length === 1 ? tail.result_types[0]! : null,
+    );
     const first = types[0];
-    if (first && types.every((type) => type !== null && sameType(type, first)) &&
-      (!returnType || sameType(returnType, first))) returnType = first;
+    if (
+      first &&
+      types.every((type) => type !== null && sameType(type, first)) &&
+      (!returnType || sameType(returnType, first))
+    )
+      returnType = first;
     else returnType = null;
   }
   const addressValue = sourceDataValues(expressions, evidence.addresses, context);
   const returnedData = [...returns.values()].map((boundary) =>
-    boundary.results.length === 1 && boundary.results[0]!.type.kind === 'integer' &&
-      bitWidth(boundary.results[0]!.type) === abi.layout.pointer_bits
-      ? addressValue(boundary.results[0]!) : undefined);
-  const returnPointer = (!functionSignature || functionSignature.declaration.returns.kind === 'pointer') &&
-    returnedData.length && returnedData.every((item) =>
-      item?.object !== undefined || item?.string !== undefined)
-    ? returnedData.every((item) => item!.string !== undefined) ? 'char' as const : 'byte' as const
-    : undefined;
-  const resultTypes = [...returns.values()].map((boundary) => boundary.results.map((value) => value.type));
+    boundary.results.length === 1 &&
+    boundary.results[0]!.type.kind === 'integer' &&
+    bitWidth(boundary.results[0]!.type) === abi.layout.pointer_bits
+      ? addressValue(boundary.results[0]!)
+      : undefined,
+  );
+  const returnPointer =
+    (!functionSignature || functionSignature.declaration.returns.kind === 'pointer') &&
+    returnedData.length &&
+    returnedData.every((item) => item?.object !== undefined || item?.string !== undefined)
+      ? returnedData.every((item) => item!.string !== undefined)
+        ? ('char' as const)
+        : ('byte' as const)
+      : undefined;
+  const resultTypes = [...returns.values()].map((boundary) =>
+    boundary.results.map((value) => value.type),
+  );
   const tuple = resultTypes[0];
-  const returnTypes = tuple && tuple.length > 1 && resultTypes.every((types) => types.length === tuple.length &&
-    types.every((type, index) => sameType(type, tuple[index]!))) ? tuple : undefined;
+  const returnTypes =
+    tuple &&
+    tuple.length > 1 &&
+    resultTypes.every(
+      (types) =>
+        types.length === tuple.length &&
+        types.every((type, index) => sameType(type, tuple[index]!)),
+    )
+      ? tuple
+      : undefined;
   const presentation: SourcePresentation = {
     inferred: !functionSignature,
     parameter_names: parameterNames,
     return_type: returnType,
     ...(returnTypes ? { return_types: returnTypes } : {}),
     ...(returnPointer === undefined ? {} : { return_pointer: returnPointer }),
-    requirements: planSourceRequirements(input, blocks, expressions, originalDefinitions, calls, returns, context),
+    requirements: planSourceRequirements(
+      input,
+      blocks,
+      expressions,
+      originalDefinitions,
+      calls,
+      returns,
+      context,
+    ),
     locals: new Map(),
     stack: null,
     stack_addresses: new Map(),
@@ -814,11 +1005,12 @@ export function planSource(
       // are not source inputs merely because their offsets are nonnegative.
       if (functionSignature || type.kind !== 'integer' || type.bits !== abi.layout.pointer_bits)
         return null;
-      const slot = layout.parameters.find((parameter) =>
-        parameter.locations.length === 1 &&
-        parameter.locations[0]!.kind === 'stack' &&
-        parameter.locations[0]!.offset === offset &&
-        parameter.locations[0]!.size * 8n === BigInt(type.bits),
+      const slot = layout.parameters.find(
+        (parameter) =>
+          parameter.locations.length === 1 &&
+          parameter.locations[0]!.kind === 'stack' &&
+          parameter.locations[0]!.offset === offset &&
+          parameter.locations[0]!.size * 8n === BigInt(type.bits),
       );
       if (!slot) return null;
       let value = incomingParameters.get(offset);
@@ -850,19 +1042,26 @@ export function planSource(
     demoteOverlayInputs(live: ReadonlySet<string>, demanded: ReadonlySet<string>): void {
       for (const value of parameters) {
         context.checkpoint(1);
-        if (!live.has(value.id) || demanded.has(value.id) || !parameterRegisters.has(value.id)) continue;
-        alias(value, { kind: 'indeterminate', state: 'unknown', reason: 'non-argument entry register' });
+        if (!live.has(value.id) || demanded.has(value.id) || !parameterRegisters.has(value.id))
+          continue;
+        alias(value, {
+          kind: 'indeterminate',
+          state: 'unknown',
+          reason: 'non-argument entry register',
+        });
         parameterRegisters.delete(value.id);
         demotedParameters.add(value.id);
       }
     },
     finalize(live: ReadonlySet<string>): readonly Value[] {
       const incoming = [...incomingParameters]
-        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
         .map(([, value]) => value);
       const demanded = functionSignature
         ? parameters
-        : [...parameters, ...incoming].filter((value) => live.has(value.id) && !demotedParameters.has(value.id));
+        : [...parameters, ...incoming].filter(
+            (value) => live.has(value.id) && !demotedParameters.has(value.id),
+          );
       demanded.forEach((value, index) => {
         if (!parameterNames.has(value.id)) parameterNames.set(value.id, `arg${index}`);
       });

@@ -61,17 +61,34 @@ export type RequirementAcknowledgments = readonly {
 /** A trusted source oracle may explicitly assert supported FP state at each
  * actual guard epoch. Merely executing emitted output never calls this helper. */
 export function acknowledgeRequirements(
-  emission: { readonly requirements?: readonly {
-    readonly id: string;
-    readonly kind: string;
-    readonly sites: readonly { readonly id: string; readonly state_epoch: string; readonly predicate_value_id?: string | undefined }[];
-  }[] | undefined },
+  emission: {
+    readonly requirements?:
+      | readonly {
+          readonly id: string;
+          readonly kind: string;
+          readonly sites: readonly {
+            readonly id: string;
+            readonly state_epoch: string;
+            readonly predicate_value_id?: string | undefined;
+          }[];
+        }[]
+      | undefined;
+  },
   siteIds?: ReadonlySet<string>,
 ): RequirementAcknowledgments {
-  return (emission.requirements ?? []).filter((requirement) => requirement.kind === 'fp_environment')
-    .flatMap((requirement) => requirement.sites
-      .filter((site) => site.predicate_value_id !== undefined && (!siteIds || siteIds.has(site.id)))
-      .map((site) => ({ requirement_id: requirement.id, site_id: site.id, state_epoch: site.state_epoch })));
+  return (emission.requirements ?? [])
+    .filter((requirement) => requirement.kind === 'fp_environment')
+    .flatMap((requirement) =>
+      requirement.sites
+        .filter(
+          (site) => site.predicate_value_id !== undefined && (!siteIds || siteIds.has(site.id)),
+        )
+        .map((site) => ({
+          requirement_id: requirement.id,
+          site_id: site.id,
+          state_epoch: site.state_epoch,
+        })),
+    );
 }
 
 /** Direct integer-to-IEEE oracle: round the exact discarded remainder once.
@@ -88,21 +105,18 @@ function integerFloatBits(value: bigint, width: number): bigint {
   const scale = 1n << BigInt(discard);
   let significand = magnitude / scale;
   const remainder = magnitude % scale;
-  if (remainder * 2n > scale ||
-      (remainder * 2n === scale && (significand & 1n) !== 0n))
+  if (remainder * 2n > scale || (remainder * 2n === scale && (significand & 1n) !== 0n))
     significand++;
   if (significand === 1n << BigInt(precision)) {
     significand >>= 1n;
     exponent++;
   }
-  if (exponent < precision - 1)
-    significand <<= BigInt(precision - 1 - exponent);
+  if (exponent < precision - 1) significand <<= BigInt(precision - 1 - exponent);
   const fractionBits = BigInt(precision - 1);
   const fraction = significand & ((1n << fractionBits) - 1n);
   const sign = negative ? 1n << BigInt(width - 1) : 0n;
   const maximumExponent = bias * 2 + 1;
-  if (exponent + bias >= maximumExponent)
-    return sign | (BigInt(maximumExponent) << fractionBits);
+  if (exponent + bias >= maximumExponent) return sign | (BigInt(maximumExponent) << fractionBits);
   return sign | (BigInt(exponent + bias) << fractionBits) | fraction;
 }
 
@@ -127,7 +141,9 @@ class Parser {
         (line, index) => index >= header && /\):$|\) -> .*:$/.test(line),
       );
       assert.ok(endHeader >= header);
-      this.headerEnd = lines.slice(0, endHeader + 1).reduce((length, line) => length + line.length + 1, 0);
+      this.headerEnd = lines
+        .slice(0, endHeader + 1)
+        .reduce((length, line) => length + line.length + 1, 0);
       const indents = [0];
       const token =
         /[ \t]+|#[^\n]*|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|<<|>>|[.()[\],:=?<>+*/%&|^~!-]/gy;
@@ -164,7 +180,8 @@ class Parser {
     }
     const token =
       /\s+|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|<<|>>|[{}()[\],;:=?<>@+*/%&|^~!-]/gy;
-    let offset = 0, headerEnd = -1;
+    let offset = 0,
+      headerEnd = -1;
     while (offset < text.length) {
       token.lastIndex = offset;
       const match = token.exec(text);
@@ -209,8 +226,10 @@ class Parser {
    * machine-width casts below give values numeric interpretation. */
   private bodyType(python: boolean, depth = 0): { scalar: string; pointer: boolean } | null {
     assert.ok(depth < 64, 'Source type annotation nesting limit');
-    const start = this.position, token = this.take();
-    const scalar = /^(?:bits\d+_t|u?int\d+_t|uintptr_t|bool|char|void|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t|type_\d+)$/;
+    const start = this.position,
+      token = this.take();
+    const scalar =
+      /^(?:bits\d+_t|u?int\d+_t|uintptr_t|bool|char|void|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t|type_\d+)$/;
     let pointer = false;
     if (python && token === 'pointer' && this.peek() === '[') {
       this.take('[');
@@ -223,8 +242,10 @@ class Parser {
       this.take(',');
       assert.match(this.take(), /^(?:\d+|\?)$/);
       this.take('>');
-    } else if (!scalar.test(token) &&
-      !((depth > 0 || this.peek() === '*') && /^[A-Za-z_]\w*$/.test(token))) {
+    } else if (
+      !scalar.test(token) &&
+      !((depth > 0 || this.peek() === '*') && /^[A-Za-z_]\w*$/.test(token))
+    ) {
       this.position = start;
       return null;
     }
@@ -400,7 +421,9 @@ class Parser {
       this.take(']');
       this.take(';');
       this.ops.push({
-        kind: 'assign', names: [name], tuple: false,
+        kind: 'assign',
+        names: [name],
+        tuple: false,
         expression: { kind: 'call', name: 'stack_storage', args: [size, alignment] },
       });
       return;
@@ -667,7 +690,8 @@ class Parser {
       if (
         this.peek() === 'volatile' ||
         (/^(?:unaligned_)?u?int\d+_t$/.test(this.peek()) &&
-          this.tokens[this.position + 1] === '*' && this.tokens[this.position + 2] === ')')
+          this.tokens[this.position + 1] === '*' &&
+          this.tokens[this.position + 2] === ')')
       ) {
         const volatile = this.peek() === 'volatile' ? (this.take(), true) : false;
         const type = this.take(),
@@ -687,9 +711,13 @@ class Parser {
           ],
         };
       }
-      const castStart = this.position, type = this.bodyType(false);
-      if (type && this.peek() === ')' &&
-        (type.pointer || /^(?:u?int\d+_t|uintptr_t)$/.test(type.scalar))) {
+      const castStart = this.position,
+        type = this.bodyType(false);
+      if (
+        type &&
+        this.peek() === ')' &&
+        (type.pointer || /^(?:u?int\d+_t|uintptr_t)$/.test(type.scalar))
+      ) {
         this.take(')');
         return {
           kind: 'call',
@@ -751,11 +779,18 @@ export interface Observation {
   /** Immutable literal bytes returned by the source-level pointer subset. */
   readonly string_result?: string;
   readonly tail_target?: bigint;
-  readonly source_calls?: readonly { readonly name: string; readonly arguments: readonly bigint[] }[];
+  readonly source_calls?: readonly {
+    readonly name: string;
+    readonly arguments: readonly bigint[];
+  }[];
   readonly registers: ReadonlyMap<string, { readonly bits: bigint; readonly known: bigint }>;
   readonly memory: ReadonlyMap<bigint, number>;
   readonly events: readonly string[];
-  readonly calls: readonly { readonly target: bigint; readonly arguments: readonly bigint[]; readonly arguments_complete?: boolean }[];
+  readonly calls: readonly {
+    readonly target: bigint;
+    readonly arguments: readonly bigint[];
+    readonly arguments_complete?: boolean;
+  }[];
 }
 export type SourceCallOracle = (
   arguments_: readonly bigint[],
@@ -777,25 +812,38 @@ export function emittedFormals(
       ? /^([A-Za-z_]\w*)\s*:/.exec(declaration)
       : /\b([A-Za-z_]\w*)\s*,?$/.exec(declaration);
     if (!match) continue;
-    if (!python && !declaration.endsWith(',') &&
-        !/^\s*[,)]/.test(emission.text.slice(mapping.end, headerEnd)))
+    if (
+      !python &&
+      !declaration.endsWith(',') &&
+      !/^\s*[,)]/.test(emission.text.slice(mapping.end, headerEnd))
+    )
       continue;
     // semantic_refs[0] is the mapped statement; all cite the emission's ids table.
     const semantic = mapping.semantic_refs.map((ref) => emission.ids[ref]!);
-    const name = match[1]!, previous = declarations.get(name);
+    const name = match[1]!,
+      previous = declarations.get(name);
     if (previous) {
-      assert.ok(mapping.start < previous.end && mapping.end > previous.start,
-        `Duplicate formal declaration ${name}`);
+      assert.ok(
+        mapping.start < previous.end && mapping.end > previous.start,
+        `Duplicate formal declaration ${name}`,
+      );
       declarations.set(name, {
-        formal: { ...previous.formal, semantic_ids: [...new Set([...previous.formal.semantic_ids, ...semantic])] },
-        start: Math.min(previous.start, mapping.start), end: Math.max(previous.end, mapping.end),
+        formal: {
+          ...previous.formal,
+          semantic_ids: [...new Set([...previous.formal.semantic_ids, ...semantic])],
+        },
+        start: Math.min(previous.start, mapping.start),
+        end: Math.max(previous.end, mapping.end),
       });
-    } else declarations.set(name, {
-      formal: { name, statement_id: semantic[0]!, semantic_ids: [...new Set(semantic)] },
-      start: mapping.start, end: mapping.end,
-    });
+    } else
+      declarations.set(name, {
+        formal: { name, statement_id: semantic[0]!, semantic_ids: [...new Set(semantic)] },
+        start: mapping.start,
+        end: mapping.end,
+      });
   }
-  return [...declarations.values()].sort((left, right) => left.start - right.start)
+  return [...declarations.values()]
+    .sort((left, right) => left.start - right.start)
     .map((declaration) => declaration.formal);
 }
 export function execute(
@@ -890,12 +938,17 @@ export function execute(
     return scratch.getBigUint64(0, true);
   };
   const invokeSourceCall = (name: string, target: bigint | undefined, args: Data[]): Data => {
-    const sourceCall = sourceCalls.get(name) ??
+    const sourceCall =
+      sourceCalls.get(name) ??
       (target === undefined ? undefined : sourceCalls.get(`0x${target.toString(16)}`));
     if (!sourceCall) throw new Error(`Oracle does not support helper ${name}`);
     const last = args.at(-1);
-    const remainder = last !== null && typeof last === 'object' && !Array.isArray(last) &&
-      (last['unresolved'] === 'unknown_arguments' || last['unresolved'] === 'unknown_argument_remainder');
+    const remainder =
+      last !== null &&
+      typeof last === 'object' &&
+      !Array.isArray(last) &&
+      (last['unresolved'] === 'unknown_arguments' ||
+        last['unresolved'] === 'unknown_argument_remainder');
     const prefix = remainder ? args.slice(0, -1) : args;
     if (prefix.includes(null)) throw new Boundary('unknown', []);
     const arguments_ = prefix.map(number);
@@ -928,13 +981,17 @@ export function execute(
     if (name === 'data_address') return number(args[1]) + number(args[2]);
     if (name === 'address_of') return number(args[0]) + number(args[1]);
     if (name === 'stack_storage') {
-      const size = number(args[0]), alignment = number(args[1]);
+      const size = number(args[0]),
+        alignment = number(args[1]);
       assert.ok(size >= 0n && size <= 1048576n && alignment > 0n);
       let base = ((nextStackAddress + alignment - 1n) / alignment) * alignment;
       for (;;) {
         let overlap = false;
         for (let offset = 0n; offset < size; offset++)
-          if (memory.has(base + offset)) { overlap = true; break; }
+          if (memory.has(base + offset)) {
+            overlap = true;
+            break;
+          }
         if (!overlap) break;
         base += size + alignment;
       }
@@ -1055,7 +1112,9 @@ export function execute(
         return BigInt.asUintN(n, value);
       if (name === 'cast_unsigned_to_float' || name === 'cast_signed_to_float')
         return integerFloatBits(
-          name === 'cast_signed_to_float' ? BigInt.asIntN(source, value) : BigInt.asUintN(source, value),
+          name === 'cast_signed_to_float'
+            ? BigInt.asIntN(source, value)
+            : BigInt.asUintN(source, value),
           n,
         );
       if (name === 'cast_float_convert') return encodeFloat(decodeFloat(value, source), n);
@@ -1219,7 +1278,12 @@ export function execute(
     }
     if (name === 'unknown_value') return unknownValues.get(string(args[1])) ?? null;
     if (name === 'undefined_value') return null;
-    if (name === 'unknown_arguments' || name === 'unknown_argument_remainder' || name === 'unknown_calling_convention' || name === 'unknown_results')
+    if (
+      name === 'unknown_arguments' ||
+      name === 'unknown_argument_remainder' ||
+      name === 'unknown_calling_convention' ||
+      name === 'unknown_results'
+    )
       return { unresolved: name };
     if (name === 'tail_call') {
       assert.equal(object(args[1])['unresolved'], 'unknown_arguments');
@@ -1263,8 +1327,14 @@ export function execute(
           if (predicate !== null) return predicate;
           const supported = number(evaluate(expression.args[4]!));
           assert.ok(supported === 0n || supported === 1n);
-          return requirementAcknowledgments.some((ack) => ack.requirement_id === requirement &&
-            ack.site_id === site && ack.state_epoch === epoch) ? supported : null;
+          return requirementAcknowledgments.some(
+            (ack) =>
+              ack.requirement_id === requirement &&
+              ack.site_id === site &&
+              ack.state_epoch === epoch,
+          )
+            ? supported
+            : null;
         }
         return helper(expression.name, expression.args.map(evaluate));
       case 'invoke': {

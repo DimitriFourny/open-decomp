@@ -268,7 +268,9 @@ function validateComputation(
   return {
     result: result as StoredDecompilation,
     catalog: { ...catalog, evidence: [...proofs.values()] },
-    ...(computation.dependencies === undefined ? {} : { dependencies: analysisReadsetSchema.parse(computation.dependencies) }),
+    ...(computation.dependencies === undefined
+      ? {}
+      : { dependencies: analysisReadsetSchema.parse(computation.dependencies) }),
   };
 }
 
@@ -297,7 +299,9 @@ function loadPayload(
     (expected && cacheIdentityKey(wire.identity) !== cacheIdentityKey(expected))
   )
     fail('invalid_input', 'Analysis artifact identity mismatch');
-  const indexed = historical ? store.findHistoricalArtifact(wire.identity) : store.findArtifact(wire.identity);
+  const indexed = historical
+    ? store.findHistoricalArtifact(wire.identity)
+    : store.findArtifact(wire.identity);
   if (!indexed || fingerprint(encodeArtifact(indexed)) !== fingerprint(encodeArtifact(artifact)))
     fail('invalid_input', 'Analysis payload does not match its published cache key');
   const computation = validateComputation(
@@ -322,7 +326,10 @@ function loadPayload(
 
 /** Exact published artifact reader shared by trusted investigation/catalog consumers. */
 export function readAnalysisArtifact(
-  store: ProjectStore, artifact: Artifact, context: OperationContext, expected?: CacheIdentity,
+  store: ProjectStore,
+  artifact: Artifact,
+  context: OperationContext,
+  expected?: CacheIdentity,
 ): AnalysisArtifactPayload {
   return loadPayload(store, artifact, context, expected);
 }
@@ -393,8 +400,15 @@ export async function runCachedDecompilation(
     const payload = loadPayload(dependencyStore, artifact, context, undefined, true);
     if (analysisReuseScope(payload.identity) !== analysisReuseScope(identity))
       fail('invalid_input', 'Analysis reuse candidate escapes its immutable scope');
-    if (payload.dependencies === undefined ||
-      !validateAnalysisReadset(dependencyStore, identity.annotation_revision, payload.dependencies, context))
+    if (
+      payload.dependencies === undefined ||
+      !validateAnalysisReadset(
+        dependencyStore,
+        identity.annotation_revision,
+        payload.dependencies,
+        context,
+      )
+    )
       continue;
     context.progress('dependency-reuse', 0, 1);
     candidate = {
@@ -405,7 +419,7 @@ export async function runCachedDecompilation(
     reused = true;
     break;
   }
-  let computation = validateComputation(store, identity, candidate ?? await compute(), context);
+  let computation = validateComputation(store, identity, candidate ?? (await compute()), context);
   if (!reused && input.dependencies !== undefined)
     computation = { ...computation, dependencies: input.dependencies.finish() };
   if (reused) context.progress('dependency-reuse', 1, 1);
@@ -439,7 +453,13 @@ export async function runCachedDecompilation(
     sha256: contentHash(bytes),
     schema_version: SCHEMA_VERSION,
   };
-  const response = delivery(computation.result, provisional, reused ? 'hit' : 'computed', limit, input.delivery ?? 'auto');
+  const response = delivery(
+    computation.result,
+    provisional,
+    reused ? 'hit' : 'computed',
+    limit,
+    input.delivery ?? 'auto',
+  );
   if (!('data' in response)) fail('invalid_input', 'Invalid prepared analysis delivery');
   activeJob(store, job_id, identity, context);
   const publication = await store.publishArtifact({
@@ -448,7 +468,9 @@ export async function runCachedDecompilation(
     media_type: ANALYSIS_ARTIFACT_MEDIA_TYPE,
     bytes,
     cache: identity,
-    ...(computation.dependencies === undefined ? {} : { reuse_scope: analysisReuseScope(identity) }),
+    ...(computation.dependencies === undefined
+      ? {}
+      : { reuse_scope: analysisReuseScope(identity) }),
     analysis_ids: [
       ...new Set([
         identity.function_id,

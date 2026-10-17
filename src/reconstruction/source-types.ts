@@ -1,5 +1,9 @@
 import type { DataLayout, OperationContext, RecoveredType } from '../core/index.js';
-import type { TypeAssociation, TypeRecoveryResult, SuppliedTypeRecord } from '../analysis/types/index.js';
+import type {
+  TypeAssociation,
+  TypeRecoveryResult,
+  SuppliedTypeRecord,
+} from '../analysis/types/index.js';
 import { SourceLayouts, typeKey } from '../analysis/types/layout.js';
 import { AnalysisBudget } from '../analysis/ssa/budget.js';
 import { bitWidth, type Expression, type Value } from '../ir/index.js';
@@ -27,8 +31,12 @@ export function projectSourceTypes(
   for (const record of types.types) {
     context.checkpoint(1);
     if (record.status === 'conflicting') conflicts.add(record.id);
-    if (record.status !== 'established' && record.status !== 'asserted' &&
-      !(record.source === 'analysis' && record.status === 'candidate')) continue;
+    if (
+      record.status !== 'established' &&
+      record.status !== 'asserted' &&
+      !(record.source === 'analysis' && record.status === 'candidate')
+    )
+      continue;
     const group = records.get(record.id) ?? [];
     group.push(record);
     records.set(record.id, group);
@@ -42,8 +50,14 @@ export function projectSourceTypes(
         dependents.set(subject, group);
       }
     for (const field of shape.fields) {
-      const sources = [shape.id, shape.type_id, field.id, ...(field.origin_ids ?? []), ...field.node_ids,
-        ...(shape.base.kind === 'value' ? [shape.base.value_id] : [])];
+      const sources = [
+        shape.id,
+        shape.type_id,
+        field.id,
+        ...(field.origin_ids ?? []),
+        ...field.node_ids,
+        ...(shape.base.kind === 'value' ? [shape.base.value_id] : []),
+      ];
       for (const subject of sources) {
         context.checkpoint(1);
         const group = dependents.get(subject) ?? new Set<string>();
@@ -61,10 +75,15 @@ export function projectSourceTypes(
       conflicts.add(subject);
       pendingConflicts.push(subject);
     }
-  const layouts = new SourceLayouts(records,
-    new AnalysisBudget({ max_work: context.budget.work, checkpoint: (work) => context.checkpoint(work) }),
+  const layouts = new SourceLayouts(
+    records,
+    new AnalysisBudget({
+      max_work: context.budget.work,
+      checkpoint: (work) => context.checkpoint(work),
+    }),
     // Source layout sizes are target facts; observed extents never enter here.
-    layout);
+    layout,
+  );
   const definitions = new Map<string, RecoveredType | null>();
   const keys = new Map<string, string>();
   const definition = (id: string): RecoveredType | null => {
@@ -78,10 +97,16 @@ export function projectSourceTypes(
   const associations = new Map<string, TypeAssociation[]>();
   for (const association of types.associations) {
     context.checkpoint(1);
-    if (conflicts.has(association.subject_id) || conflicts.has(association.type_id) ||
-      association.status === 'conflicting' || association.status === 'hypothesis' ||
+    if (
+      conflicts.has(association.subject_id) ||
+      conflicts.has(association.type_id) ||
+      association.status === 'conflicting' ||
+      association.status === 'hypothesis' ||
       (association.status === 'candidate' && association.source !== 'analysis') ||
-      association.machine_offset_bits !== 0 || association.width_bits === null) continue;
+      association.machine_offset_bits !== 0 ||
+      association.width_bits === null
+    )
+      continue;
     const group = associations.get(association.subject_id) ?? [];
     group.push(association);
     associations.set(association.subject_id, group);
@@ -90,39 +115,68 @@ export function projectSourceTypes(
     context.checkpoint(1);
     if (conflicts.has(value.id)) continue;
     const expression = expressions.get(value.id);
-    const transport = !expression || expression.kind === 'concat' ||
+    const transport =
+      !expression ||
+      expression.kind === 'concat' ||
       (expression.kind === 'extract' && expression.offset === 0) ||
       (expression.kind === 'cast' && (expression.op === 'bitcast' || expression.op === 'truncate'));
-    const subjects = transport ? [value.id, ...(source.value_origins?.get(value.id) ?? [])] : [value.id];
+    const subjects = transport
+      ? [value.id, ...(source.value_origins?.get(value.id) ?? [])]
+      : [value.id];
     if (subjects.some((id) => conflicts.has(id))) continue;
     let candidates = subjects.flatMap((id) => associations.get(id) ?? []);
     if (!candidates.length) continue;
-    if (candidates.some((item) => item.source !== 'analysis' &&
-      (item.status === 'established' || item.status === 'asserted')))
-      candidates = candidates.filter((item) => item.source !== 'analysis' &&
-        (item.status === 'established' || item.status === 'asserted'));
+    if (
+      candidates.some(
+        (item) =>
+          item.source !== 'analysis' &&
+          (item.status === 'established' || item.status === 'asserted'),
+      )
+    )
+      candidates = candidates.filter(
+        (item) =>
+          item.source !== 'analysis' &&
+          (item.status === 'established' || item.status === 'asserted'),
+      );
     const groups = new Map<string, TypeAssociation[]>();
     for (const candidate of candidates) {
       const type = definition(candidate.type_id);
       if (!type) continue;
       // A signed consumer constrains that operation, not the author's scalar
       // declaration. Its signed cast remains on the machine expression itself.
-      if (candidate.source === 'analysis' && candidate.status === 'candidate' &&
-        type.kind === 'integer' && type.signed) continue;
-      const width = type.kind === 'integer' || type.kind === 'pointer' || type.kind === 'float'
-        ? type.bits : type.kind === 'vector' ? layouts.size(candidate.type_id) : null;
+      if (
+        candidate.source === 'analysis' &&
+        candidate.status === 'candidate' &&
+        type.kind === 'integer' &&
+        type.signed
+      )
+        continue;
+      const width =
+        type.kind === 'integer' || type.kind === 'pointer' || type.kind === 'float'
+          ? type.bits
+          : type.kind === 'vector'
+            ? layouts.size(candidate.type_id)
+            : null;
       const bits = typeof width === 'bigint' ? Number(width * 8n) : width;
-      if (bits !== bitWidth(value.type) ||
+      if (
+        bits !== bitWidth(value.type) ||
         ((type.kind === 'integer' || type.kind === 'pointer') && value.type.kind !== 'integer') ||
         (type.kind === 'float' && value.type.kind !== 'float') ||
-        (type.kind === 'vector' && value.type.kind !== 'vector')) continue;
+        (type.kind === 'vector' && value.type.kind !== 'vector')
+      )
+        continue;
       if (type.kind === 'vector' && value.type.kind === 'vector') {
         const element = definition(type.element);
-        if ((element?.kind !== 'integer' && element?.kind !== 'float') ||
-          type.lanes !== value.type.lanes || element.kind !== value.type.element.kind ||
-          element.bits !== value.type.element.bits) continue;
+        if (
+          (element?.kind !== 'integer' && element?.kind !== 'float') ||
+          type.lanes !== value.type.lanes ||
+          element.kind !== value.type.element.kind ||
+          element.bits !== value.type.element.bits
+        )
+          continue;
       }
-      const key = keys.get(candidate.type_id)!, group = groups.get(key) ?? [];
+      const key = keys.get(candidate.type_id)!,
+        group = groups.get(key) ?? [];
       group.push(candidate);
       groups.set(key, group);
     }
@@ -131,17 +185,29 @@ export function projectSourceTypes(
       pointer ||= definition(group[0]!.type_id)?.kind === 'pointer';
     if (pointer)
       for (const [key, group] of groups)
-        if (group.every((item) => {
-          const type = definition(item.type_id);
-          return item.source === 'analysis' && item.status === 'candidate' &&
-            type?.kind === 'integer' && !type.signed;
-        })) groups.delete(key);
+        if (
+          group.every((item) => {
+            const type = definition(item.type_id);
+            return (
+              item.source === 'analysis' &&
+              item.status === 'candidate' &&
+              type?.kind === 'integer' &&
+              !type.signed
+            );
+          })
+        )
+          groups.delete(key);
     // Alternatives remain alternatives even when their machine widths coincide.
     if (groups.size !== 1) continue;
     const group = [...groups.values()][0]!;
-    const ranges = group.map((item) => ({ start: item.value_offset_bits,
-      end: item.value_offset_bits + item.width_bits! })).sort((a, b) => a.start - b.start);
-    let covered = 0, valid = true;
+    const ranges = group
+      .map((item) => ({
+        start: item.value_offset_bits,
+        end: item.value_offset_bits + item.width_bits!,
+      }))
+      .sort((a, b) => a.start - b.start);
+    let covered = 0,
+      valid = true;
     for (const range of ranges) {
       context.checkpoint(1);
       if (range.start > covered || range.start < 0 || range.end > bitWidth(value.type)) {
@@ -160,8 +226,12 @@ export function projectSourceTypes(
       evidence_ids: [...new Set(group.flatMap((item) => item.evidence_ids))],
     });
   }
-  const memberSubjects = (id: string, offset: bigint, width: number,
-    active = new Set<string>()): string[] => {
+  const memberSubjects = (
+    id: string,
+    offset: bigint,
+    width: number,
+    active = new Set<string>(),
+  ): string[] => {
     context.checkpoint(1);
     if (offset < 0n || active.has(id) || active.size >= 64 || conflicts.has(id)) return [];
     const type = definition(id);
@@ -198,16 +268,27 @@ export function projectSourceTypes(
       members.push(...memberSubjects(pointer.to, view.field.offset, view.field.width_bits));
     if (members.length) fieldSubjects.set(node, [...new Set(members)]);
   }
-  const returnedValues = [...returns.values()].map((boundary) => boundary.results.length === 1
-    ? boundary.results[0] : undefined);
+  const returnedValues = [...returns.values()].map((boundary) =>
+    boundary.results.length === 1 ? boundary.results[0] : undefined,
+  );
   const returned = returnedValues.map((value) => value && projected.get(value.id));
   const first = returned[0];
   // An unsigned storage-use constraint is weaker than exact literal/data pointer
   // evidence. Only an independent scalar declaration can override that role.
-  const weakScalarPointer = source.return_pointer && first && definition(first.type_id)?.kind === 'integer' &&
+  const weakScalarPointer =
+    source.return_pointer &&
+    first &&
+    definition(first.type_id)?.kind === 'integer' &&
     returnedValues.some((value) => !value || !established.has(value.id));
-  const returnType = !weakScalarPointer && first && returned.every((item) => item &&
-    keys.get(item.type_id) === keys.get(first.type_id)) ? first.type_id : undefined;
-  return { value_types: projected, field_subjects: fieldSubjects,
-    ...(returnType === undefined ? {} : { return_source_type: returnType }) };
+  const returnType =
+    !weakScalarPointer &&
+    first &&
+    returned.every((item) => item && keys.get(item.type_id) === keys.get(first.type_id))
+      ? first.type_id
+      : undefined;
+  return {
+    value_types: projected,
+    field_subjects: fieldSubjects,
+    ...(returnType === undefined ? {} : { return_source_type: returnType }),
+  };
 }

@@ -1,6 +1,12 @@
 import { fingerprint } from '../../core/index.js';
 import type { EntityId, RegisterDescriptor } from '../../core/index.js';
-import { bitWidth, computeDominance, integer, mergeProvenanceSources, successors } from '../../ir/index.js';
+import {
+  bitWidth,
+  computeDominance,
+  integer,
+  mergeProvenanceSources,
+  successors,
+} from '../../ir/index.js';
 import type {
   BasicBlock,
   DataType,
@@ -60,11 +66,17 @@ export class RegisterSSAConstruction implements SSAConstruction {
 }
 
 /** Add run boundaries without visiting every bit of a wide architectural root. */
-function observableCuts(mask: bigint, width: number, cuts: Set<number>, budget: AnalysisBudget): void {
+function observableCuts(
+  mask: bigint,
+  width: number,
+  cuts: Set<number>,
+  budget: AnalysisBudget,
+): void {
   const full = (1n << BigInt(width)) - 1n;
   mask &= full;
   if (mask === full) return;
-  let boundaries = mask ^ (mask << 1n), base = 0;
+  let boundaries = mask ^ (mask << 1n),
+    base = 0;
   while (boundaries !== 0n) {
     budget.charge();
     let word = Number(boundaries & 0xffffffffn);
@@ -79,8 +91,11 @@ function observableCuts(mask: bigint, width: number, cuts: Set<number>, budget: 
   }
 }
 
-function build(input: RegisterIR, budget: AnalysisBudget,
-  observableMasks?: ReadonlyMap<string, bigint>): SSAForm {
+function build(
+  input: RegisterIR,
+  budget: AnalysisBudget,
+  observableMasks?: ReadonlyMap<string, bigint>,
+): SSAForm {
   const capacity = new IRConstructionBudget({
     ...budget.options,
     checkpoint: (work) => budget.charge(work),
@@ -108,8 +123,12 @@ function build(input: RegisterIR, budget: AnalysisBudget,
       cuts: new Set([0, descriptor.root_width_bits]),
     };
     if (!known && observableMasks !== undefined && !actualRoots!.has(descriptor.root))
-      observableCuts(observableMasks.get(descriptor.root) ?? 0n,
-        descriptor.root_width_bits, root.cuts, budget);
+      observableCuts(
+        observableMasks.get(descriptor.root) ?? 0n,
+        descriptor.root_width_bits,
+        root.cuts,
+        budget,
+      );
     if (root.descriptor.root_width_bits !== descriptor.root_width_bits)
       throw new TypeError('Inconsistent architectural register root width');
     // Preserve explicit architectural roles even when the first view was a general slice.
@@ -128,8 +147,11 @@ function build(input: RegisterIR, budget: AnalysisBudget,
       if (node.kind === 'read_register' || node.kind === 'write_register') register(node.register);
       if (node.kind === 'call' || node.kind === 'unknown_effect')
         for (const descriptor of [...node.clobbers.registers, ...node.clobbers.flags]) {
-          if (observableMasks === undefined || (observableMasks.get(descriptor.root) ?? 0n) !== 0n ||
-            actualRoots!.has(descriptor.root))
+          if (
+            observableMasks === undefined ||
+            (observableMasks.get(descriptor.root) ?? 0n) !== 0n ||
+            actualRoots!.has(descriptor.root)
+          )
             register(descriptor);
           else budget.charge(); // The original clobber metadata is still visited and retained.
         }
@@ -145,8 +167,12 @@ function build(input: RegisterIR, budget: AnalysisBudget,
       const offset = ordered[i - 1]!,
         width = ordered[i]! - offset;
       budget.charge();
-      if (observableMasks !== undefined && !actualRoots!.has(root) &&
-        ((observableMasks.get(root) ?? 0n) & (((1n << BigInt(width)) - 1n) << BigInt(offset))) === 0n)
+      if (
+        observableMasks !== undefined &&
+        !actualRoots!.has(root) &&
+        ((observableMasks.get(root) ?? 0n) & (((1n << BigInt(width)) - 1n) << BigInt(offset))) ===
+          0n
+      )
         continue;
       const cell: Cell = Object.freeze({
         ...descriptor,
@@ -182,13 +208,16 @@ function build(input: RegisterIR, budget: AnalysisBudget,
         const { root, offset_bits: low, width_bits: width, write_rule: rule } = node.register;
         for (const cell of cellsByRoot.get(root) ?? []) {
           budget.charge();
-          if (rule === 'zero_extend_root' ||
-            (cell.offset_bits >= low && cell.offset_bits + cell.width_bits <= low + width))
+          if (
+            rule === 'zero_extend_root' ||
+            (cell.offset_bits >= low && cell.offset_bits + cell.width_bits <= low + width)
+          )
             definitions[cellIndex.get(key(cell))!]!.add(index);
         }
       } else if (node.kind === 'call' || node.kind === 'unknown_effect')
         for (const descriptor of [...node.clobbers.registers, ...node.clobbers.flags])
-          for (const cell of matching(descriptor)) definitions[cellIndex.get(key(cell))!]!.add(index);
+          for (const cell of matching(descriptor))
+            definitions[cellIndex.get(key(cell))!]!.add(index);
     }
   });
   // Minimal SSA: a block receives a cell parameter only on the iterated
@@ -212,7 +241,11 @@ function build(input: RegisterIR, budget: AnalysisBudget,
   predecessors.forEach((incoming, index) => {
     if (incoming.length < 2 || idoms[index] === -1) return;
     for (const predecessor of incoming)
-      for (let runner = predecessor; runner !== -1 && runner !== idoms[index]; runner = idoms[runner]!) {
+      for (
+        let runner = predecessor;
+        runner !== -1 && runner !== idoms[index];
+        runner = idoms[runner]!
+      ) {
         budget.charge();
         if (frontier[runner]!.at(-1) !== index) frontier[runner]!.push(index);
       }
@@ -220,7 +253,9 @@ function build(input: RegisterIR, budget: AnalysisBudget,
   const parameterCells = idoms.map((parent) => (parent === -1 ? cells.map((_, cell) => cell) : []));
   const unrooted = idoms.flatMap((parent, index) => (parent === -1 ? [index] : []));
   definitions.forEach((blocksDefining, cell) => {
-    const pending = [...blocksDefining, ...unrooted], seen = new Set(pending), placed = new Set<number>();
+    const pending = [...blocksDefining, ...unrooted],
+      seen = new Set(pending),
+      placed = new Set<number>();
     while (pending.length) {
       budget.charge();
       for (const join of frontier[pending.pop()!]!) {
@@ -388,16 +423,20 @@ function build(input: RegisterIR, budget: AnalysisBudget,
       }
     }
     // Function exits observe every cell; other blocks list only rebound cells.
-    const exit = successors(block.terminator).length === 0
-      ? snapshot()
-      : [...rebound]
-          .filter(([cell, initial]) => {
-            budget.charge();
-            return state.get(cell) !== initial;
-          })
-          .map(([cell]) => cellIndex.get(cell)!)
-          .sort((a, b) => a - b)
-          .map((slot): RegisterBinding => ({ register: cells[slot]!, value: state.get(key(cells[slot]!))! }));
+    const exit =
+      successors(block.terminator).length === 0
+        ? snapshot()
+        : [...rebound]
+            .filter(([cell, initial]) => {
+              budget.charge();
+              return state.get(cell) !== initial;
+            })
+            .map(([cell]) => cellIndex.get(cell)!)
+            .sort((a, b) => a - b)
+            .map((slot): RegisterBinding => ({
+              register: cells[slot]!,
+              value: state.get(key(cells[slot]!))!,
+            }));
     const edge = (old: Edge): Edge => {
       const target = parameterCells[slots.get(old.target) ?? -1] ?? [];
       budget.charge(1 + old.arguments.length + target.length);
@@ -410,8 +449,10 @@ function build(input: RegisterIR, budget: AnalysisBudget,
     let terminator: Terminator = {
       ...block.terminator,
       effect,
-      provenance: mergeProvenanceSources([block.terminator.provenance, block.provenance, ...writes],
-        (work) => budget.charge(work)),
+      provenance: mergeProvenanceSources(
+        [block.terminator.provenance, block.provenance, ...writes],
+        (work) => budget.charge(work),
+      ),
     };
     switch (terminator.kind) {
       case 'jump':

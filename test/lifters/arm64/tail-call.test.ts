@@ -23,7 +23,11 @@ test('discovery-established ARM64 tail calls retain target and changed physical 
     })),
   };
   const lifted = lift(graph);
-  assert.ok(lifted.ir.blocks.some((block) => block.terminator.kind === 'indirect' && block.terminator.tail_call));
+  assert.ok(
+    lifted.ir.blocks.some(
+      (block) => block.terminator.kind === 'indirect' && block.terminator.tail_call,
+    ),
+  );
   const ssa = constructSSA(lifted.ir).value;
   assert.ok(ssa.form === 'ssa');
   const simplified = simplifySSA(ssa).value;
@@ -33,12 +37,18 @@ test('discovery-established ARM64 tail calls retain target and changed physical 
     const input = { function: structured, ...(source ? { source } : {}) };
     if (source) {
       const projection = reconstruct(input, createOperationContext());
-      assert.ok(projection.diagnostics.some((diagnostic) =>
-        diagnostic.message.includes('tail-call target is preserved') &&
-        diagnostic.message.includes('calling convention')));
+      assert.ok(
+        projection.diagnostics.some(
+          (diagnostic) =>
+            diagnostic.message.includes('tail-call target is preserved') &&
+            diagnostic.message.includes('calling convention'),
+        ),
+      );
       for (const copies of projection.transfers.values())
-        assert.ok(copies.every((copy) => !projection.inline.has(copy.destination.id)),
-          'Proven expression aliases are not mutable transfer destinations requiring undeclared locals');
+        assert.ok(
+          copies.every((copy) => !projection.inline.has(copy.destination.id)),
+          'Proven expression aliases are not mutable transfer destinations requiring undeclared locals',
+        );
     }
     for (const emit of [emitC, emitPythonLike]) {
       const emission = emit(input, DEFAULT_ANALYSIS_OPTIONS, createOperationContext()).emission;

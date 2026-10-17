@@ -291,8 +291,10 @@ test('replacing SP with an unrelated unknown value retains a dynamic stack bound
 
 test('forked stack maps and published snapshots survive sibling stores and alias barriers', () => {
   const ir = builder('stack-copy-on-write-fork'),
-    entry = ir.block('entry', [i1]), left = ir.block('left'),
-    right = ir.block('right'), done = ir.block('done');
+    entry = ir.block('entry', [i1]),
+    left = ir.block('left'),
+    right = ir.block('right'),
+    done = ir.block('done');
   const slot = entry.int('sub', entry.readRegister(darwin.stack_pointer), entry.constant(i64, 16n));
   entry.writeRegister(darwin.stack_pointer, slot);
   entry.store(slot, entry.constant(i64, 0x55n));
@@ -308,51 +310,87 @@ test('forked stack maps and published snapshots survive sibling stores and alias
   const context = createOperationContext();
   const result = recoverStack(program, darwin, context);
   assert.equal(result.state, 'complete');
-  const nodeFor = (id: string) => program.blocks.flatMap((block) => block.instructions)
-    .find((node) => node.kind === 'load' && node.result.id === id)!;
-  assert.deepEqual(result.accesses.find((access) => access.node_id === nodeFor(intact.id).id)!.value.value,
-    { kind: 'constant', bits: 0x55n });
-  assert.equal(result.accesses.find((access) => access.node_id === nodeFor(damaged.id).id)!.value.value.kind, 'unknown');
+  const nodeFor = (id: string) =>
+    program.blocks
+      .flatMap((block) => block.instructions)
+      .find((node) => node.kind === 'load' && node.result.id === id)!;
+  assert.deepEqual(
+    result.accesses.find((access) => access.node_id === nodeFor(intact.id).id)!.value.value,
+    { kind: 'constant', bits: 0x55n },
+  );
+  assert.equal(
+    result.accesses.find((access) => access.node_id === nodeFor(damaged.id).id)!.value.value.kind,
+    'unknown',
+  );
   const entrySnapshot = result.snapshots.get(program.blocks[0]!.terminator.id)!;
-  assert.deepEqual(inspectStackMemory(entrySnapshot, -16n, 8n).value, { kind: 'constant', bits: 0x55n });
-  const call = program.blocks.flatMap((block) => block.instructions).find((node) => node.kind === 'call')!;
-  assert.deepEqual(inspectStackMemory(result.snapshots.get(call.id)!, -16n, 8n).value,
-    { kind: 'constant', bits: 0x66n });
+  assert.deepEqual(inspectStackMemory(entrySnapshot, -16n, 8n).value, {
+    kind: 'constant',
+    bits: 0x55n,
+  });
+  const call = program.blocks
+    .flatMap((block) => block.instructions)
+    .find((node) => node.kind === 'call')!;
+  assert.deepEqual(inspectStackMemory(result.snapshots.get(call.id)!, -16n, 8n).value, {
+    kind: 'constant',
+    bits: 0x66n,
+  });
   const consumed = context.budget.work - context.remainingWork!();
-  const partial = recoverStack(program, darwin, createOperationContext(),
-    { max_work: Math.max(1, Math.floor(consumed / 2)) });
+  const partial = recoverStack(program, darwin, createOperationContext(), {
+    max_work: Math.max(1, Math.floor(consumed / 2)),
+  });
   assert.equal(partial.state, 'partial');
   assert.deepEqual(partial.accesses, []);
   assert.equal(partial.snapshots.size, 0);
   assert.equal(partial.values.size, 0);
-  assert.deepEqual(inspectStackMemory(entrySnapshot, -16n, 8n).value, { kind: 'constant', bits: 0x55n });
+  assert.deepEqual(inspectStackMemory(entrySnapshot, -16n, 8n).value, {
+    kind: 'constant',
+    bits: 0x55n,
+  });
 });
 
 test('loop joins do not mutate the entry memory snapshot they borrow', () => {
   const ir = builder('stack-copy-on-write-loop'),
-    entry = ir.block('entry'), loop = ir.block('loop', [i1]), done = ir.block('done');
+    entry = ir.block('entry'),
+    loop = ir.block('loop', [i1]),
+    done = ir.block('done');
   const slot = entry.int('sub', entry.readRegister(darwin.stack_pointer), entry.constant(i64, 16n));
   entry.writeRegister(darwin.stack_pointer, slot);
   entry.store(slot, entry.constant(i64, 0n));
   entry.jump(loop, [entry.indeterminate(i1, 'unknown', 'Loop condition')]);
   const before = loop.load(i64, loop.readRegister(darwin.stack_pointer));
-  loop.store(loop.readRegister(darwin.stack_pointer), loop.int('add', before, loop.constant(i64, 1n)));
+  loop.store(
+    loop.readRegister(darwin.stack_pointer),
+    loop.int('add', before, loop.constant(i64, 1n)),
+  );
   loop.branch(loop.parameters[0]!, loop.edge(loop, [loop.parameters[0]!]), loop.edge(done));
   done.return([done.load(i64, done.readRegister(darwin.stack_pointer))]);
   const program = ssa(ir.finish(entry, [i64]));
   const result = recoverStack(program, darwin, createOperationContext());
   assert.equal(result.state, 'complete');
-  assert.equal(result.accesses.find((access) => access.kind === 'read')!.value.value.kind, 'unknown');
-  assert.deepEqual(inspectStackMemory(result.snapshots.get(program.blocks[0]!.terminator.id)!, -16n, 8n).value,
-    { kind: 'constant', bits: 0n });
+  assert.equal(
+    result.accesses.find((access) => access.kind === 'read')!.value.value.kind,
+    'unknown',
+  );
+  assert.deepEqual(
+    inspectStackMemory(result.snapshots.get(program.blocks[0]!.terminator.id)!, -16n, 8n).value,
+    { kind: 'constant', bits: 0n },
+  );
 });
 
 test('read-only stack propagation is proportional to bindings rather than copied byte maps', () => {
-  const ir = builder('stack-copy-on-write-read-chain'), entry = ir.block('entry');
-  const slot = entry.int('sub', entry.readRegister(darwin.stack_pointer), entry.constant(i64, 128n));
+  const ir = builder('stack-copy-on-write-read-chain'),
+    entry = ir.block('entry');
+  const slot = entry.int(
+    'sub',
+    entry.readRegister(darwin.stack_pointer),
+    entry.constant(i64, 128n),
+  );
   entry.writeRegister(darwin.stack_pointer, slot);
   for (let index = 0; index < 16; index++)
-    entry.store(entry.int('add', slot, entry.constant(i64, BigInt(index * 8))), entry.constant(i64, 42n));
+    entry.store(
+      entry.int('add', slot, entry.constant(i64, BigInt(index * 8))),
+      entry.constant(i64, 42n),
+    );
   let previous = entry;
   for (let index = 0; index < 64; index++) {
     const block = ir.block(`read-${index}`);
@@ -361,23 +399,37 @@ test('read-only stack propagation is proportional to bindings rather than copied
     previous = block;
   }
   previous.return();
-  const result = recoverStack(ssa(ir.finish(entry)), darwin, createOperationContext(), { max_work: 10_000 });
+  const result = recoverStack(ssa(ir.finish(entry)), darwin, createOperationContext(), {
+    max_work: 10_000,
+  });
   assert.equal(result.state, 'complete');
   const reads = result.accesses.filter((access) => access.kind === 'read');
   assert.equal(reads.length, 64);
-  assert.ok(reads.every((access) => access.value.value.kind === 'constant' && access.value.value.bits === 42n));
+  assert.ok(
+    reads.every(
+      (access) => access.value.value.kind === 'constant' && access.value.value.bits === 42n,
+    ),
+  );
 });
 
 test('late incoming parameter conflicts requeue an already interpreted block', () => {
   const ir = builder('stack-late-parameter-conflict'),
-    entry = ir.block('entry', [i1]), left = ir.block('left'),
-    right = ir.block('right'), joined = ir.block('joined', [i64]), delay = ir.block('delay');
+    entry = ir.block('entry', [i1]),
+    left = ir.block('left'),
+    right = ir.block('right'),
+    joined = ir.block('joined', [i64]),
+    delay = ir.block('delay');
   entry.branch(entry.parameters[0]!, entry.edge(left), entry.edge(right));
-  const first = left.constant(i64, 11n), second = delay.constant(i64, 22n);
+  const first = left.constant(i64, 11n),
+    second = delay.constant(i64, 22n);
   left.jump(joined, [first]);
   right.jump(delay);
   delay.jump(joined, [second]);
-  const slot = joined.int('sub', joined.readRegister(darwin.stack_pointer), joined.constant(i64, 16n));
+  const slot = joined.int(
+    'sub',
+    joined.readRegister(darwin.stack_pointer),
+    joined.constant(i64, 16n),
+  );
   joined.store(slot, joined.parameters[0]!);
   joined.return([joined.load(i64, slot)]);
   const program = ssa(ir.finish(entry, [i64]));
@@ -393,30 +445,40 @@ test('late incoming parameter conflicts requeue an already interpreted block', (
   const controller = new AbortController();
   const base = createOperationContext({ signal: controller.signal });
   let visits = 0;
-  const cancelled = recoverStack(program, darwin, { ...base, checkpoint(work) {
-    base.checkpoint(work);
-    visits += work;
-    if (visits >= Math.floor(consumed / 2)) controller.abort();
-  } });
+  const cancelled = recoverStack(program, darwin, {
+    ...base,
+    checkpoint(work) {
+      base.checkpoint(work);
+      visits += work;
+      if (visits >= Math.floor(consumed / 2)) controller.abort();
+    },
+  });
   assert.equal(cancelled.state, 'partial');
   assert.equal(cancelled.diagnostics[0]!.code, 'cancelled');
   assert.deepEqual(cancelled.accesses, []);
   assert.equal(cancelled.snapshots.size, 0);
   assert.equal(cancelled.values.size, 0);
-  assert.equal(result.accesses.find((access) => access.kind === 'read')!.value.value.kind, 'unknown');
+  assert.equal(
+    result.accesses.find((access) => access.kind === 'read')!.value.value.kind,
+    'unknown',
+  );
 });
 
 test('memory-only backedge changes retain exact partial stores and independent entry snapshots', () => {
   const ir = builder('stack-memory-only-backedge'),
-    entry = ir.block('entry'), loop = ir.block('loop', [i1]), done = ir.block('done');
+    entry = ir.block('entry'),
+    loop = ir.block('loop', [i1]),
+    done = ir.block('done');
   const initial = 0x1122334455667788n;
   const slot = entry.int('sub', entry.readRegister(darwin.stack_pointer), entry.constant(i64, 16n));
   entry.writeRegister(darwin.stack_pointer, slot);
   entry.store(slot, entry.constant(i64, initial));
   entry.jump(loop, [entry.indeterminate(i1, 'unknown', 'Loop condition')]);
   loop.load(i64, loop.readRegister(darwin.stack_pointer));
-  loop.store(loop.int('add', loop.readRegister(darwin.stack_pointer), loop.constant(i64, 1n)),
-    loop.constant(i8, 0xaan));
+  loop.store(
+    loop.int('add', loop.readRegister(darwin.stack_pointer), loop.constant(i64, 1n)),
+    loop.constant(i8, 0xaan),
+  );
   loop.branch(loop.parameters[0]!, loop.edge(loop, [loop.parameters[0]!]), loop.edge(done));
   done.return([done.load(i64, done.readRegister(darwin.stack_pointer))]);
   const program = ssa(ir.finish(entry, [i64]));
@@ -425,18 +487,28 @@ test('memory-only backedge changes retain exact partial stores and independent e
   const reads = result.accesses.filter((access) => access.kind === 'read');
   assert.equal(reads[0]!.value.value.kind, 'unknown');
   assert.deepEqual(reads[1]!.value.value, { kind: 'constant', bits: 0x112233445566aa88n });
-  assert.deepEqual(inspectStackMemory(result.snapshots.get(program.blocks[0]!.terminator.id)!, -16n, 8n).value,
-    { kind: 'constant', bits: initial });
+  assert.deepEqual(
+    inspectStackMemory(result.snapshots.get(program.blocks[0]!.terminator.id)!, -16n, 8n).value,
+    { kind: 'constant', bits: initial },
+  );
 });
 
 test('repeated opaque barriers reuse only unchanged byte maps and later stores invalidate that proof', () => {
-  const ir = builder('stack-barrier-invariant-budget'), entry = ir.block('entry');
-  const slot = entry.int('sub', entry.readRegister(darwin.stack_pointer), entry.constant(i64, 128n));
+  const ir = builder('stack-barrier-invariant-budget'),
+    entry = ir.block('entry');
+  const slot = entry.int(
+    'sub',
+    entry.readRegister(darwin.stack_pointer),
+    entry.constant(i64, 128n),
+  );
   entry.writeRegister(darwin.stack_pointer, slot);
   const frame = register('frame-alias', 64, 0, 'replace_root', 'stack-frame-alias');
   entry.writeRegister(frame, slot);
   for (let index = 0; index < 16; index++)
-    entry.store(entry.int('add', slot, entry.constant(i64, BigInt(index * 8))), entry.constant(i64, 42n));
+    entry.store(
+      entry.int('add', slot, entry.constant(i64, BigInt(index * 8))),
+      entry.constant(i64, 42n),
+    );
   for (let index = 0; index < 40; index++)
     entry.call(target, [], [], { registers: [], flags: [], memory: 'unknown_read_write' });
   entry.store(slot, entry.constant(i8, 0xbbn));
@@ -447,11 +519,18 @@ test('repeated opaque barriers reuse only unchanged byte maps and later stores i
   assert.equal(result.state, 'complete', JSON.stringify(result.diagnostics));
   const calls = program.blocks[0]!.instructions.filter((node) => node.kind === 'call');
   assert.equal(calls.length, 41);
-  assert.deepEqual(inspectStackMemory(result.snapshots.get(calls[0]!.id)!, -128n, 8n).value,
-    { kind: 'constant', bits: 42n });
-  assert.equal(inspectStackMemory(result.snapshots.get(calls[1]!.id)!, -128n, 8n).value.kind, 'unknown');
-  assert.deepEqual(inspectStackMemory(result.snapshots.get(calls.at(-1)!.id)!, -128n, 1n).value,
-    { kind: 'constant', bits: 0xbbn });
+  assert.deepEqual(inspectStackMemory(result.snapshots.get(calls[0]!.id)!, -128n, 8n).value, {
+    kind: 'constant',
+    bits: 42n,
+  });
+  assert.equal(
+    inspectStackMemory(result.snapshots.get(calls[1]!.id)!, -128n, 8n).value.kind,
+    'unknown',
+  );
+  assert.deepEqual(inspectStackMemory(result.snapshots.get(calls.at(-1)!.id)!, -128n, 1n).value, {
+    kind: 'constant',
+    bits: 0xbbn,
+  });
   const loaded = result.accesses.find((access) => access.kind === 'read')!;
   assert.equal(loaded.value.value.kind, 'unknown');
   assert.equal(loaded.value.initialization, 'unknown');
@@ -461,12 +540,16 @@ test('repeated opaque barriers reuse only unchanged byte maps and later stores i
   assert.equal(partial.state, 'partial');
   assert.equal(partial.snapshots.size, 0);
   assert.equal(partial.values.size, 0);
-  assert.deepEqual(inspectStackMemory(result.snapshots.get(calls[0]!.id)!, -128n, 8n).value,
-    { kind: 'constant', bits: 42n });
+  assert.deepEqual(inspectStackMemory(result.snapshots.get(calls[0]!.id)!, -128n, 8n).value, {
+    kind: 'constant',
+    bits: 42n,
+  });
 });
 
 test('many late predecessors reach one memory-reading exit within a bounded stack budget', () => {
-  const ir = builder('stack-late-predecessor-work'), entry = ir.block('entry'), exit = ir.block('exit');
+  const ir = builder('stack-late-predecessor-work'),
+    entry = ir.block('entry'),
+    exit = ir.block('exit');
   const output = register('result', 64, 0, 'replace_root', 'rpo-result-root');
   const slot = entry.int('sub', entry.readRegister(darwin.stack_pointer), entry.constant(i64, 8n));
   entry.writeRegister(darwin.stack_pointer, slot);
@@ -480,12 +563,16 @@ test('many late predecessors reach one memory-reading exit within a bounded stac
     if (index === 39) current.jump(exit);
     else {
       const next = ir.block(`next-${index}`);
-      current.branch(current.indeterminate(i1, 'unknown', 'Either path is executable'),
-        current.edge(exit), current.edge(next));
+      current.branch(
+        current.indeterminate(i1, 'unknown', 'Either path is executable'),
+        current.edge(exit),
+        current.edge(next),
+      );
       current = next;
     }
   }
-  const returned = exit.readRegister(output), address = exit.readRegister(darwin.stack_pointer);
+  const returned = exit.readRegister(output),
+    address = exit.readRegister(darwin.stack_pointer);
   let loaded = returned;
   for (let index = 0; index < 64; index++) loaded = exit.load(i64, address);
   exit.return([returned, loaded]);
@@ -494,8 +581,14 @@ test('many late predecessors reach one memory-reading exit within a bounded stac
   assert.equal(result.state, 'complete', JSON.stringify(result.diagnostics));
   const reads = result.accesses.filter((access) => access.kind === 'read');
   assert.equal(reads.length, 64);
-  assert.ok(reads.every((access) => access.value.initialization === 'initialized' &&
-    access.value.value.kind === 'constant' && access.value.value.bits === 42n));
+  assert.ok(
+    reads.every(
+      (access) =>
+        access.value.initialization === 'initialized' &&
+        access.value.value.kind === 'constant' &&
+        access.value.value.bits === 42n,
+    ),
+  );
   const fact = result.values.get(returned.id)!;
   assert.deepEqual(fact.value, { kind: 'constant', bits: 42n });
   for (const id of contributors)

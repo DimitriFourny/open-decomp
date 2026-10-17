@@ -42,7 +42,12 @@ import {
   type IndexState,
 } from './scope.js';
 import { executeDecompilation, executeAnnotations } from '../analysis/index.js';
-import { investigationArtifact, investigationItems, investigationPage, reviewedSubject } from './investigation.js';
+import {
+  investigationArtifact,
+  investigationItems,
+  investigationPage,
+  reviewedSubject,
+} from './investigation.js';
 
 type PageArgs = {
   project_id: string;
@@ -148,7 +153,12 @@ function presentNames<T extends { readonly id: string; readonly display_name: st
     return names?.size === 1 ? { ...record, display_name: [...names][0]! } : record;
   });
 }
-function resultEvidence(scope: Scope, revision: number, data: unknown, local: readonly Evidence[] = []): unknown {
+function resultEvidence(
+  scope: Scope,
+  revision: number,
+  data: unknown,
+  local: readonly Evidence[] = [],
+): unknown {
   const ids = new Set<string>();
   const collect = (value: unknown): void => {
     scope.context.checkpoint(1);
@@ -236,7 +246,8 @@ function paginate<T>(
   extra: Record<string, unknown> = {},
   order: 'address_id' | 'id' = 'address_id',
   partialReason: 'budget' | 'incomplete_index' = 'incomplete_index',
-  details?: Pick<ResultMetadata, 'coverage' | 'diagnostics'> & Partial<Pick<ResultMetadata, 'artifacts'>>,
+  details?: Pick<ResultMetadata, 'coverage' | 'diagnostics'> &
+    Partial<Pick<ResultMetadata, 'artifacts'>>,
   localEvidence: readonly Evidence[] = [],
   evidenceDelivery: 'inline' | 'by_reference' | 'artifact' = 'by_reference',
   projectPage?: (items: readonly T[]) => object,
@@ -265,7 +276,7 @@ function paginate<T>(
     const selected = candidates.slice(0, count).map((entry) => entry.item);
     const data = {
       ...extra,
-      ...wireValue(projectPage ? projectPage(selected) : { items: selected }) as object,
+      ...(wireValue(projectPage ? projectPage(selected) : { items: selected }) as object),
       page: { next_cursor, index_state: state, order, evidence_delivery: evidenceDelivery },
     };
     const metadata = {
@@ -471,7 +482,15 @@ async function dispatch(
         for (const [index, item] of candidates.entries()) {
           const location = 'slot' in item ? (item.callable_entry ?? item.slot) : item.address;
           const presented = presentedItems[index]!;
-          if (matches(args.query, image.target.format, item.original_name, item.display_name, presented.display_name))
+          if (
+            matches(
+              args.query,
+              image.target.format,
+              item.original_name,
+              item.display_name,
+              presented.display_name,
+            )
+          )
             output.push({ kind, [kind]: presented, id: item.id, location });
         }
       }
@@ -533,7 +552,15 @@ async function dispatch(
       const presentedItems = presentNames(scope, args.revision, candidates);
       for (const [index, item] of candidates.entries()) {
         const presented = presentedItems[index]!;
-        if (matches(args.query, image.target.format, item.original_name, item.display_name, presented.display_name))
+        if (
+          matches(
+            args.query,
+            image.target.format,
+            item.original_name,
+            item.display_name,
+            presented.display_name,
+          )
+        )
           selected.push(presented);
       }
       return paginate(scope, operation, args, selected, page.state, (item) =>
@@ -550,20 +577,44 @@ async function dispatch(
         if (args.subject_id) reviewedSubject(scope, args, loaded, selected);
         const result = selected.payload.result;
         const projection = investigationItems(scope, args, selected.payload);
-        return paginate(scope, operation, args, projection.items,
-          'complete', (_item, index) => index.toString().padStart(10, '0'), {
-            view: 'investigation', function_id: fn.id, artifact_id: selected.artifact.id,
-            record_lookup: 'original emission inference/requirement IDs and mapping indexes in the selected artifact',
-            analysis_state: result.state, proof_delivery: 'artifact_references',
-            selection: projection.selection, helpers: projection.helpers,
+        return paginate(
+          scope,
+          operation,
+          args,
+          projection.items,
+          'complete',
+          (_item, index) => index.toString().padStart(10, '0'),
+          {
+            view: 'investigation',
+            function_id: fn.id,
+            artifact_id: selected.artifact.id,
+            record_lookup:
+              'original emission inference/requirement IDs and mapping indexes in the selected artifact',
+            analysis_state: result.state,
+            proof_delivery: 'artifact_references',
+            selection: projection.selection,
+            helpers: projection.helpers,
             diagnostic_lookup: 'result.diagnostics[artifact_index] in the selected artifact',
-            analysis_diagnostics: result.diagnostics.map(({ message: _message, entity_id, evidence_ids, ...diagnostic }, artifact_index) => ({
-              ...diagnostic, artifact_index, entity_known: entity_id !== undefined, evidence_count: evidence_ids.length,
-            })),
-          }, 'id', 'incomplete_index',
-          { coverage: result.coverage, diagnostics: [],
-            artifacts: [encodeArtifact(selected.artifact)] }, [], 'artifact',
-          (items) => investigationPage(items, projection.instructionLocations));
+            analysis_diagnostics: result.diagnostics.map(
+              ({ message: _message, entity_id, evidence_ids, ...diagnostic }, artifact_index) => ({
+                ...diagnostic,
+                artifact_index,
+                entity_known: entity_id !== undefined,
+                evidence_count: evidence_ids.length,
+              }),
+            ),
+          },
+          'id',
+          'incomplete_index',
+          {
+            coverage: result.coverage,
+            diagnostics: [],
+            artifacts: [encodeArtifact(selected.artifact)],
+          },
+          [],
+          'artifact',
+          (items) => investigationPage(items, projection.instructionLocations),
+        );
       }
       if (args.view === 'metadata') {
         const subject = reviewedSubject(scope, args, loaded, selected);
@@ -605,7 +656,12 @@ async function dispatch(
           data,
         };
       }
-      const graph = loadFunctionGraph(scope, args.revision, loaded, args.view === 'disassembly' && args.detail === 'compact');
+      const graph = loadFunctionGraph(
+        scope,
+        args.revision,
+        loaded,
+        args.view === 'disassembly' && args.detail === 'compact',
+      );
       const state = graph.coverage.state === 'complete' ? 'complete' : 'partial';
       const partialReason = graph.gaps.some((gap) => gap.reason === 'budget')
         ? 'budget'
@@ -620,12 +676,22 @@ async function dispatch(
           operation,
           args,
           graph.instructions.map(
-            (item) => encodeInstruction(args.detail === 'compact' ? {
-              id: item.id, address: item.address, size: item.size, validity: item.validity,
-              architecture: item.payload?.architecture ?? loaded.image.target.architecture,
-              flow: item.flow, diagnostics: item.diagnostics, evidence_ids: item.evidence_ids,
-              presentation: graph.presentations?.get(item.id) ?? null,
-            } : item) as { id: string; address: { value: string } },
+            (item) =>
+              encodeInstruction(
+                args.detail === 'compact'
+                  ? {
+                      id: item.id,
+                      address: item.address,
+                      size: item.size,
+                      validity: item.validity,
+                      architecture: item.payload?.architecture ?? loaded.image.target.architecture,
+                      flow: item.flow,
+                      diagnostics: item.diagnostics,
+                      evidence_ids: item.evidence_ids,
+                      presentation: graph.presentations?.get(item.id) ?? null,
+                    }
+                  : item,
+              ) as { id: string; address: { value: string } },
           ),
           state,
           (item) => `${BigInt(item.address.value).toString(16).padStart(16, '0')}:${item.id}`,

@@ -1,6 +1,11 @@
 import { OperationError, type OperationContext } from '../core/index.js';
 import { bitWidth, expressionOperands, type Origin, type Value } from '../ir/index.js';
-import type { ControlArm, ParallelTransfer, Region, StructuredFunction } from '../presentation/index.js';
+import type {
+  ControlArm,
+  ParallelTransfer,
+  Region,
+  StructuredFunction,
+} from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
 import { validateEmittedUses } from './validate-uses.js';
 
@@ -18,10 +23,14 @@ function invalid(origin: Origin, message: string): never {
 function transfers(program: Reconstruction, id: string): readonly ParallelTransfer[] {
   const control = program.blocks.get(id)!.control;
   switch (control.kind) {
-    case 'jump': return [control.transfer];
-    case 'if': return [control.when_true.transfer, control.when_false.transfer];
-    case 'switch': return [...control.cases.map((item) => item.arm.transfer), control.otherwise.transfer];
-    default: return [];
+    case 'jump':
+      return [control.transfer];
+    case 'if':
+      return [control.when_true.transfer, control.when_false.transfer];
+    case 'switch':
+      return [...control.cases.map((item) => item.arm.transfer), control.otherwise.transfer];
+    default:
+      return [];
   }
 }
 
@@ -34,7 +43,8 @@ export function validateReconstruction(program: Reconstruction, context: Operati
     context.checkpoint(1);
     const id = pending.pop()!;
     if (reachable.has(id)) continue;
-    if (!program.blocks.has(id)) invalid(program.function, 'a reachable CFG target has no owned block');
+    if (!program.blocks.has(id))
+      invalid(program.function, 'a reachable CFG target has no owned block');
     reachable.add(id);
     for (const transfer of transfers(program, id)) pending.push(transfer.target);
   }
@@ -49,8 +59,11 @@ export function validateReconstruction(program: Reconstruction, context: Operati
   for (const id of reachable) {
     const block = program.blocks.get(id)!;
     const row = coverage.get(id);
-    if (!row || row.terminator_id !== block.control.id ||
-        row.statement_ids.length !== block.statements.length)
+    if (
+      !row ||
+      row.terminator_id !== block.control.id ||
+      row.statement_ids.length !== block.statements.length
+    )
       invalid(block, 'reachable structured ownership disagrees with source CFG coverage');
     const statements = new Set(block.statements.map((node) => node.id));
     for (const statement of row.statement_ids) {
@@ -79,10 +92,12 @@ export function validateReconstruction(program: Reconstruction, context: Operati
       const destinations = new Set<string>();
       for (const copy of program.transfers.get(transfer) ?? []) {
         context.checkpoint(1);
-        if (destinations.has(copy.destination.id) ||
-            program.inline.has(copy.destination.id) ||
-            !target.parameters.some((parameter) => parameter.id === copy.destination.id) ||
-            bitWidth(copy.destination.type) !== bitWidth(copy.source.type))
+        if (
+          destinations.has(copy.destination.id) ||
+          program.inline.has(copy.destination.id) ||
+          !target.parameters.some((parameter) => parameter.id === copy.destination.id) ||
+          bitWidth(copy.destination.type) !== bitWidth(copy.source.type)
+        )
           invalid(block.control, 'a parallel edge copy has an invalid destination or width');
         destinations.add(copy.destination.id);
         checkValue(copy.source);
@@ -100,10 +115,16 @@ export function validateReconstruction(program: Reconstruction, context: Operati
       if (!result) invalid(block.control, 'a reachable return has no result projection');
       for (const value of result.results) checkValue(value);
       const type = program.source?.return_type;
-      if (type && (result.results.length !== 1 ||
+      if (
+        type &&
+        (result.results.length !== 1 ||
           bitWidth(result.results[0]!.type) !== bitWidth(type) ||
-          result.results[0]!.type.kind !== type.kind))
-        invalid(block.control, 'a source return loses its declared storage width or register-bank interpretation');
+          result.results[0]!.type.kind !== type.kind)
+      )
+        invalid(
+          block.control,
+          'a source return loses its declared storage width or register-bank interpretation',
+        );
     }
   }
   for (const id of program.live) {
@@ -119,20 +140,28 @@ export function validateReconstruction(program: Reconstruction, context: Operati
     if (expression) for (const operand of expressionOperands(expression)) checkValue(operand);
   }
   const storage = program.source?.stack;
-  if (storage?.kind === 'entry' &&
-      (!program.parameters.some((value) => value.id === storage.base.id) ||
-       !program.live.has(storage.base.id)))
+  if (
+    storage?.kind === 'entry' &&
+    (!program.parameters.some((value) => value.id === storage.base.id) ||
+      !program.live.has(storage.base.id))
+  )
     invalid(program.function, 'entry-backed storage has no live explicit incoming base');
   if (storage?.kind === 'private')
     for (const id of reachable) {
       const block = program.blocks.get(id)!;
       for (const node of block.statements) {
         context.checkpoint(1);
-        if (!program.retained.has(node.id) || (node.kind !== 'load' && node.kind !== 'store')) continue;
+        if (!program.retained.has(node.id) || (node.kind !== 'load' && node.kind !== 'store'))
+          continue;
         const offset = program.source!.stack_addresses.get(node.address.id);
-        const bytes = BigInt(Math.ceil(bitWidth(node.kind === 'load' ? node.result.type : node.value.type) / 8));
+        const bytes = BigInt(
+          Math.ceil(bitWidth(node.kind === 'load' ? node.result.type : node.value.type) / 8),
+        );
         if (offset !== undefined && offset + bytes > 0n)
-          invalid(node, 'callee-entry incoming bytes were projected as newly allocated private storage');
+          invalid(
+            node,
+            'callee-entry incoming bytes were projected as newly allocated private storage',
+          );
       }
     }
   const locals = program.source?.locals;
@@ -145,7 +174,8 @@ export function validateReconstruction(program: Reconstruction, context: Operati
         predecessors.set(transfer.target, list);
       }
     const outgoing = new Map<string, ReadonlySet<string>>();
-    const queue = [program.function.entry], queued = new Set(queue);
+    const queue = [program.function.entry],
+      queued = new Set(queue);
     const incoming = (id: string): Set<string> | null => {
       if (id === program.function.entry) return new Set();
       let result: Set<string> | null = null;
@@ -153,10 +183,11 @@ export function validateReconstruction(program: Reconstruction, context: Operati
         const state = outgoing.get(parent);
         if (!state) continue;
         if (result === null) result = new Set(state);
-        else for (const local of result) {
-          context.checkpoint(1);
-          if (!state.has(local)) result.delete(local);
-        }
+        else
+          for (const local of result) {
+            context.checkpoint(1);
+            if (!state.has(local)) result.delete(local);
+          }
       }
       return result;
     };
@@ -173,7 +204,11 @@ export function validateReconstruction(program: Reconstruction, context: Operati
         if (local && node.kind === 'store' && program.retained.has(node.id)) state.add(local.id);
       }
       const previous = outgoing.get(id);
-      if (previous && previous.size === state.size && [...state].every((local) => previous.has(local)))
+      if (
+        previous &&
+        previous.size === state.size &&
+        [...state].every((local) => previous.has(local))
+      )
         continue;
       outgoing.set(id, state);
       for (const transfer of transfers(program, id))
@@ -199,11 +234,15 @@ export function validateReconstruction(program: Reconstruction, context: Operati
   const expanding = new Set<string>();
   const visit = (id: string, depth: number): void => {
     context.checkpoint(1);
-    if (!program.inline.has(id) || program.source?.stack_addresses.has(id) || checked.has(id)) return;
-    if (depth > 128) invalid(program.function, 'expanded expression depth exceeds the supported rendering bound');
-    if (expanding.has(id)) invalid(program.function, 'expanded expressions contain a def-use cycle');
+    if (!program.inline.has(id) || program.source?.stack_addresses.has(id) || checked.has(id))
+      return;
+    if (depth > 128)
+      invalid(program.function, 'expanded expression depth exceeds the supported rendering bound');
+    if (expanding.has(id))
+      invalid(program.function, 'expanded expressions contain a def-use cycle');
     expanding.add(id);
-    for (const operand of expressionOperands(program.expressions.get(id)!)) visit(operand.id, depth + 1);
+    for (const operand of expressionOperands(program.expressions.get(id)!))
+      visit(operand.id, depth + 1);
     expanding.delete(id);
     checked.add(id);
   };
@@ -234,7 +273,12 @@ export function validateRenderedTransfers(
       region = first;
     }
   };
-  const edge = (transfer: ParallelTransfer, follow: string | null, nesting: readonly Nest[], origin: Origin): void => {
+  const edge = (
+    transfer: ParallelTransfer,
+    follow: string | null,
+    nesting: readonly Nest[],
+    origin: Origin,
+  ): void => {
     context.checkpoint(1);
     let actual = follow;
     if (gotos.has(transfer)) actual = transfer.target;
@@ -242,13 +286,24 @@ export function validateRenderedTransfers(
       actual = null;
       for (let i = nesting.length - 1; i >= 0; i--) {
         const scope = nesting[i]!;
-        if (scope.kind === 'loop') { actual = scope.header; break; }
+        if (scope.kind === 'loop') {
+          actual = scope.header;
+          break;
+        }
       }
     } else if (transfer.mode === 'break') actual = nesting.at(-1)?.follow ?? null;
     if (actual !== transfer.target)
-      invalid(origin, `rendered ${transfer.mode} reaches ${actual ?? 'no block'} instead of CFG target ${transfer.target}`);
+      invalid(
+        origin,
+        `rendered ${transfer.mode} reaches ${actual ?? 'no block'} instead of CFG target ${transfer.target}`,
+      );
   };
-  const arm = (value: ControlArm, follow: string | null, nesting: readonly Nest[], origin: Origin): void => {
+  const arm = (
+    value: ControlArm,
+    follow: string | null,
+    nesting: readonly Nest[],
+    origin: Origin,
+  ): void => {
     edge(value.transfer, value.body ? entry(value.body, follow) : follow, nesting, origin);
     if (value.body) walk(value.body, follow, nesting);
   };
@@ -259,14 +314,20 @@ export function validateRenderedTransfers(
         let next = follow;
         for (let j = i + 1; j < region.regions.length; j++) {
           const candidate = entry(region.regions[j]!, null);
-          if (candidate !== null) { next = candidate; break; }
+          if (candidate !== null) {
+            next = candidate;
+            break;
+          }
         }
         walk(region.regions[i]!, next, nesting);
       }
       return;
     }
     if (region.kind === 'loop') {
-      walk(region.body, region.header, [...nesting, { kind: 'loop', header: region.header, follow }]);
+      walk(region.body, region.header, [
+        ...nesting,
+        { kind: 'loop', header: region.header, follow },
+      ]);
       return;
     }
     const control = region.control;
@@ -275,7 +336,8 @@ export function validateRenderedTransfers(
       arm(control.when_true, follow, nesting, control);
       arm(control.when_false, follow, nesting, control);
     } else if (control.kind === 'switch') {
-      const scopes: readonly Nest[] = language === 'c-like' ? [...nesting, { kind: 'switch', follow }] : nesting;
+      const scopes: readonly Nest[] =
+        language === 'c-like' ? [...nesting, { kind: 'switch', follow }] : nesting;
       for (const item of control.cases) arm(item.arm, follow, scopes, control);
       arm(control.otherwise, follow, scopes, control);
     }

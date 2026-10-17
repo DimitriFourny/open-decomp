@@ -1,5 +1,12 @@
 import type { AbiProfile, OperationContext, RegisterDescriptor } from '../../core/index.js';
-import { integer, type DataType, type Instruction, type RegisterBinding, type SSAForm, type Value } from '../../ir/index.js';
+import {
+  integer,
+  type DataType,
+  type Instruction,
+  type RegisterBinding,
+  type SSAForm,
+  type Value,
+} from '../../ir/index.js';
 import type { CallAnalysisResult } from './index.js';
 import { observeCallResultDemands, type CallResultDemandIndex } from './result-demands.js';
 import { preparedCallArguments } from './argument-preparation.js';
@@ -39,15 +46,20 @@ export function observePreparedCallInterfaces(
       context.checkpoint(1);
       if (node.kind !== 'call') continue;
       const fact = facts.get(node.id);
-      if (fact?.status === 'conflicting' || fact?.contracts.some((contract) => contract.status === 'established'))
+      if (
+        fact?.status === 'conflicting' ||
+        fact?.contracts.some((contract) => contract.status === 'established')
+      )
         continue;
       calls.push(node);
     }
   if (!calls.length) return [];
   const pointer = { kind: 'pointer' as const };
   const layout = abi.classifyCall({
-    returns: pointer, parameters: Array.from({ length: 16 }, () => pointer),
-    variadic: false, fixed_parameter_count: 16,
+    returns: pointer,
+    parameters: Array.from({ length: 16 }, () => pointer),
+    variadic: false,
+    fixed_parameter_count: 16,
   });
   const primary = layout.returns.find((location) => location.kind === 'register');
   const prepared = preparedCallArguments(ir, context, demandIndex?.preparation(ir, abi, context));
@@ -70,15 +82,21 @@ export function observePreparedCallInterfaces(
     for (const parameter of layout.parameters) {
       context.checkpoint(1);
       if (parameter.locations.length !== 1 || parameter.locations[0]!.kind !== 'register') break;
-      const location = parameter.locations[0]!, register = location.register;
-      let width = 0, witnessed = false;
+      const location = parameter.locations[0]!,
+        register = location.register;
+      let width = 0,
+        witnessed = false;
       const values: Value[] = [];
-      const bindings = (byRoot.get(register.root) ?? [])
-        .sort((left, right) => left.register.offset_bits - right.register.offset_bits);
+      const bindings = (byRoot.get(register.root) ?? []).sort(
+        (left, right) => left.register.offset_bits - right.register.offset_bits,
+      );
       for (const binding of bindings) {
         context.checkpoint(1);
-        if (binding.register.offset_bits < register.offset_bits ||
-            binding.register.offset_bits >= register.offset_bits + location.width_bits) continue;
+        if (
+          binding.register.offset_bits < register.offset_bits ||
+          binding.register.offset_bits >= register.offset_bits + location.width_bits
+        )
+          continue;
         if (binding.register.offset_bits !== register.offset_bits + width) break;
         width += Math.min(binding.register.width_bits, location.width_bits - width);
         witnessed ||= prepared(call, binding);
@@ -97,13 +115,18 @@ export function observePreparedCallInterfaces(
   return calls.map((call): ObservedCall => {
     context.checkpoint(1);
     const parameters = prefixes.get(call.id)!;
-    const returns = (demanded.get(call.id) ?? []).filter((register) =>
-      primary?.kind === 'register' && register.root === primary.register.root);
+    const returns = (demanded.get(call.id) ?? []).filter(
+      (register) => primary?.kind === 'register' && register.root === primary.register.root,
+    );
     return {
-      call_id: call.id, parameter_state: 'observed', parameters,
+      call_id: call.id,
+      parameter_state: 'observed',
+      parameters,
       parameter_types: parameters.map((register) => integer(register.width_bits)),
-      returns, return_types: returns.map((register) => integer(register.width_bits)),
-      argument_list_complete: false, evidence_ids: call.provenance.evidence_ids,
+      returns,
+      return_types: returns.map((register) => integer(register.width_bits)),
+      argument_list_complete: false,
+      evidence_ids: call.provenance.evidence_ids,
     };
   });
 }

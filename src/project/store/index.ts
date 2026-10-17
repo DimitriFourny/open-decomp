@@ -516,15 +516,21 @@ export class SqliteProjectStore implements ProjectStore {
     this.#revision(revision);
     imageIdSchema.parse(imageId);
     if (!Object.hasOwn(RECORD_SCHEMAS, kind)) fail('invalid_input', 'Unknown record kind');
-    const record = this.#db.prepare(
-      'SELECT revision FROM records WHERE image_id=? AND kind=? AND revision<=? ORDER BY revision DESC LIMIT 1',
-    ).get(imageId, kind, revision);
-    const index = this.#db.prepare(
-      'SELECT revision,state FROM indexes WHERE image_id=? AND kind=? AND revision<=? ORDER BY revision DESC LIMIT 1',
-    ).get(imageId, kind, revision);
-    const image = this.#db.prepare(
-      'SELECT revision FROM loaded_images WHERE image_id=? AND revision<=? ORDER BY revision DESC LIMIT 1',
-    ).get(imageId, revision);
+    const record = this.#db
+      .prepare(
+        'SELECT revision FROM records WHERE image_id=? AND kind=? AND revision<=? ORDER BY revision DESC LIMIT 1',
+      )
+      .get(imageId, kind, revision);
+    const index = this.#db
+      .prepare(
+        'SELECT revision,state FROM indexes WHERE image_id=? AND kind=? AND revision<=? ORDER BY revision DESC LIMIT 1',
+      )
+      .get(imageId, kind, revision);
+    const image = this.#db
+      .prepare(
+        'SELECT revision FROM loaded_images WHERE image_id=? AND revision<=? ORDER BY revision DESC LIMIT 1',
+      )
+      .get(imageId, revision);
     return fingerprint([
       record ? numberField(record, 'revision') : null,
       index ? [numberField(index, 'revision'), stringField(index, 'state')] : null,
@@ -1067,6 +1073,7 @@ export class SqliteProjectStore implements ProjectStore {
     encodeArtifact(artifact);
     return artifact;
   }
+
   findHistoricalArtifact(identity: CacheIdentity): Artifact | null {
     this.#revision(identity.annotation_revision);
     if (identity.annotation_revision !== identity.evidence_revision)
@@ -1076,7 +1083,10 @@ export class SqliteProjectStore implements ProjectStore {
     if (!row) return null;
     const artifact = decodeStored<Artifact>(row['payload']);
     encodeArtifact(artifact);
-    if (artifact.project_id !== this.project_id || artifact.revision !== identity.annotation_revision)
+    if (
+      artifact.project_id !== this.project_id ||
+      artifact.revision !== identity.annotation_revision
+    )
       fail('invalid_input', 'Historical analysis scope mismatch');
     return artifact;
   }
@@ -1087,18 +1097,22 @@ export class SqliteProjectStore implements ProjectStore {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 8)
       fail('invalid_input', 'Invalid analysis reuse candidate bound');
     const scope = cacheIdentityKey({ ...identity, annotation_revision: 0, evidence_revision: 0 });
-    const rows = this.#db.prepare(
-      'SELECT a.payload FROM analysis_reuse r JOIN artifacts a ON a.id=r.artifact_id WHERE r.scope=? AND r.revision<? ORDER BY r.revision DESC,r.artifact_id LIMIT ?',
-    ).all(scope, identity.annotation_revision, limit);
+    const rows = this.#db
+      .prepare(
+        'SELECT a.payload FROM analysis_reuse r JOIN artifacts a ON a.id=r.artifact_id WHERE r.scope=? AND r.revision<? ORDER BY r.revision DESC,r.artifact_id LIMIT ?',
+      )
+      .all(scope, identity.annotation_revision, limit);
     return rows.map((row) => {
       const artifact = decodeStored<Artifact>(row['payload']);
       encodeArtifact(artifact);
-      if (artifact.project_id !== this.project_id || artifact.revision >= identity.annotation_revision)
+      if (
+        artifact.project_id !== this.project_id ||
+        artifact.revision >= identity.annotation_revision
+      )
         fail('invalid_input', 'Analysis reuse index scope mismatch');
       return artifact;
     });
   }
-
 
   findAnalysisArtifacts(query: {
     readonly revision: number;
@@ -1211,8 +1225,11 @@ export class SqliteProjectStore implements ProjectStore {
       fail('resource_limit', 'Too many analysis artifact identities');
     const analysisIds = [...new Set(input.analysis_ids ?? [])];
     for (const id of analysisIds) z.union([entityIdSchema, evidenceIdSchema]).parse(id);
-    if (input.reuse_scope !== undefined &&
-      input.reuse_scope !== cacheIdentityKey({ ...input.cache, annotation_revision: 0, evidence_revision: 0 }))
+    if (
+      input.reuse_scope !== undefined &&
+      input.reuse_scope !==
+        cacheIdentityKey({ ...input.cache, annotation_revision: 0, evidence_revision: 0 })
+    )
       fail('invalid_input', 'Analysis reuse index does not match its immutable scope');
     const artifact: Artifact = {
       id: newIdentity('artifact'),
@@ -1234,7 +1251,8 @@ export class SqliteProjectStore implements ProjectStore {
       const index = this.#db.prepare('INSERT INTO analysis_artifacts VALUES (?,?,?)');
       for (const id of analysisIds) index.run(current, id, artifact.id);
       if (input.reuse_scope !== undefined)
-        this.#db.prepare('INSERT INTO analysis_reuse VALUES (?,?,?)')
+        this.#db
+          .prepare('INSERT INTO analysis_reuse VALUES (?,?,?)')
           .run(input.reuse_scope, current, artifact.id);
       this.saveJob({
         ...job,

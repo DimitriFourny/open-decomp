@@ -139,8 +139,8 @@ test(
       'a call-local signature is not the containing function signature',
     );
     const proofs = new Map(current.result.evidence.map((proof) => [proof.id, proof]));
-    const pending = expandEmission(current.result.data.emission).mappings
-      .filter((mapping) => mapping.semantic_ids.includes(call.id))
+    const pending = expandEmission(current.result.data.emission)
+      .mappings.filter((mapping) => mapping.semantic_ids.includes(call.id))
       .flatMap((mapping) => mapping.evidence_ids);
     const ancestry = new Set<string>();
     for (let cursor = 0; cursor < pending.length; cursor++) {

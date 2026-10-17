@@ -162,7 +162,9 @@ for (const fixture of [
       assert.equal(restyled.result.data.cache, 'computed');
       assert.notEqual(restyled.result.artifacts[0]!.id, python.result.artifacts[0]!.id);
       assert.ok(
-        expandEmission(restyledFull.data.emission).mappings.every((mapping) => mapping.evidence_ids.length === 0),
+        expandEmission(restyledFull.data.emission).mappings.every(
+          (mapping) => mapping.evidence_ids.length === 0,
+        ),
       );
       evaluate(restyledFull.data.emission);
       const repeated = await p.decompile(fn.id, {}, 29000);
@@ -387,9 +389,7 @@ for (const fixture of [
     },
   );
 
-for (const fixture of [
-  { name: 'corpus-symbols.dll', address: 0x180001030n, bytes: [0x0f, 0xa2] },
-])
+for (const fixture of [{ name: 'corpus-symbols.dll', address: 0x180001030n, bytes: [0x0f, 0xa2] }])
   test(
     `${fixture.name}: unimplemented real instruction keeps an explicit mapped boundary and never publishes complete semantics`,
     { timeout: 60000 },
@@ -522,7 +522,9 @@ test('suppressing wire evidence preserves the trusted catalog needed to annotate
   assert.deepEqual(hidden.result.evidence, []);
   const full = p.payload(hidden.result);
   assert.ok(
-    expandEmission(full.result.data.emission).mappings.every((mapping) => mapping.evidence_ids.length === 0),
+    expandEmission(full.result.data.emission).mappings.every(
+      (mapping) => mapping.evidence_ids.length === 0,
+    ),
   );
   const field = full.catalog.subjects.find((subject) => subject.kind === 'field')!;
   const catalog = await readAnnotationCatalog(

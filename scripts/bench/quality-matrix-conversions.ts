@@ -22,9 +22,14 @@ const native = join(root, 'oracle');
 command('/usr/bin/clang', ['-std=c11', '-O2', '-ffp-contract=off', source, '-o', native]);
 const oracleText = command(native, []);
 await writeFile(join(root, 'oracle.txt'), oracleText);
-const oracle = oracleText.trim().split('\n').map((line) => line.split(' ').map((bits) => BigInt(`0x${bits}`)));
+const oracle = oracleText
+  .trim()
+  .split('\n')
+  .map((line) => line.split(' ').map((bits) => BigInt(`0x${bits}`)));
 assert.equal(oracle.length, 13);
-let x86Cases = 0, armCases = 0, outputCases = 0;
+let x86Cases = 0,
+  armCases = 0,
+  outputCases = 0;
 const sentinel = (1n << 512n) - 1n;
 const x86Variants = [
   { prefix: 'f3', input: 32, output: 32, column: 1 },
@@ -42,18 +47,28 @@ for (const variant of x86Variants) {
       const storage = new DataView(bytes.buffer);
       if (variant.input === 32) storage.setUint32(0, Number(BigInt.asUintN(32, row[0]!)), true);
       else storage.setBigUint64(0, row[0]!, true);
-      const result = run(lifted.ir, { rcx: memory ? 0x10000n : row[0]!, zmm0: sentinel },
-        memory ? { memory: [{ base: 0x10000n, bytes, writable: false }] } : {});
+      const result = run(
+        lifted.ir,
+        { rcx: memory ? 0x10000n : row[0]!, zmm0: sentinel },
+        memory ? { memory: [{ base: 0x10000n, bytes, writable: false }] } : {},
+      );
       assert.equal(register(result, 'zmm0', variant.output), row[variant.column]);
-      assert.equal(register(result, 'zmm0', 512 - variant.output, variant.output),
-        sentinel >> BigInt(variant.output), 'legacy SSE preserves upper vector state');
-      const flags = run(flagWitness.ir, { rax: 0x80n, rcx: memory ? 0x10000n : row[0]!, zmm0: sentinel },
-        memory ? { memory: [{ base: 0x10000n, bytes, writable: false }] } : {});
+      assert.equal(
+        register(result, 'zmm0', 512 - variant.output, variant.output),
+        sentinel >> BigInt(variant.output),
+        'legacy SSE preserves upper vector state',
+      );
+      const flags = run(
+        flagWitness.ir,
+        { rax: 0x80n, rcx: memory ? 0x10000n : row[0]!, zmm0: sentinel },
+        memory ? { memory: [{ base: 0x10000n, bytes, writable: false }] } : {},
+      );
       // OR AL,0 establishes SF=1, CF=OF=ZF=0, PF=0; conversion must not alter them.
       assert.equal(register(flags, 'rflags', 1, 7), 1n);
       for (const offset of [0, 2, 6, 11]) assert.equal(register(flags, 'rflags', 1, offset), 0n);
       assert.equal(run(lifted.ir, { rcx: 0x10000n, zmm0: sentinel, mxcsr: 0n }).status, 'unknown');
-      if (memory) assert.equal(run(lifted.ir, { rcx: 0x10000n, zmm0: sentinel }).status, 'memory_fault');
+      if (memory)
+        assert.equal(run(lifted.ir, { rcx: 0x10000n, zmm0: sentinel }).status, 'memory_fault');
       x86Cases++;
     }
   }
@@ -68,10 +83,26 @@ for (const variant of [
   assert.ok(!lifted.diagnostics.some((d) => d.message.startsWith('Unsupported ARM64 encoding')));
   const flagWitness = lift(fromWords([0xf100041f, variant.word, 0xd65f03c0]));
   for (const row of oracle) {
-    const result = evaluate(lifted.ir, new Map([['arm64:v1', row[0]! | (sentinel << 64n)], ['arm64:v0', sentinel]]));
-    assert.equal(registerBits(result, 'arm64:v0', 128), row[variant.column], 'scalar SIMD clears upper Vd bits');
+    const result = evaluate(
+      lifted.ir,
+      new Map([
+        ['arm64:v1', row[0]! | (sentinel << 64n)],
+        ['arm64:v0', sentinel],
+      ]),
+    );
+    assert.equal(
+      registerBits(result, 'arm64:v0', 128),
+      row[variant.column],
+      'scalar SIMD clears upper Vd bits',
+    );
     assert.equal(evaluate(lifted.ir, new Map([['arm64:fpcr', 1n << 22n]])).status, 'unknown');
-    const flags = evaluate(flagWitness.ir, new Map([['arm64:x0', 0n], ['arm64:v1', row[0]!]]));
+    const flags = evaluate(
+      flagWitness.ir,
+      new Map([
+        ['arm64:x0', 0n],
+        ['arm64:v1', row[0]!],
+      ]),
+    );
     assert.equal(registerBits(flags, 'arm64:nzcv', 32), 0x80000000n);
     armCases++;
   }
@@ -83,50 +114,123 @@ const unsupportedArm = lift(fromWords([0x6e61d820, 0xd65f03c0]));
 assert.ok(unsupportedArm.diagnostics.some((d) => d.message.includes('Unsupported ARM64 encoding')));
 assert.equal(evaluate(unsupportedArm.ir).status, 'unknown');
 const binaries = [
-  { target: 'arm64-apple-macos13.0', file: join(root, 'conversions.dylib'), flags: ['-dynamiclib'], prefix: '_',
-    functions: [['qc_simd_s32', 1], ['qc_simd_s64', 4], ['qc_simd_u32', 5], ['qc_simd_u64', 8],
-      ['qc_u64_f32', 7]] as const },
-  { target: 'x86_64-unknown-linux-gnu', file: join(root, 'conversions.so'),
-    flags: ['-fuse-ld=lld', '-nostdlib', '-shared'], prefix: '',
-    functions: [['qc_s32_f32', 1], ['qc_s32_f64', 2], ['qc_s64_f32', 3], ['qc_s64_f64', 4]] as const },
+  {
+    target: 'arm64-apple-macos13.0',
+    file: join(root, 'conversions.dylib'),
+    flags: ['-dynamiclib'],
+    prefix: '_',
+    functions: [
+      ['qc_simd_s32', 1],
+      ['qc_simd_s64', 4],
+      ['qc_simd_u32', 5],
+      ['qc_simd_u64', 8],
+      ['qc_u64_f32', 7],
+    ] as const,
+  },
+  {
+    target: 'x86_64-unknown-linux-gnu',
+    file: join(root, 'conversions.so'),
+    flags: ['-fuse-ld=lld', '-nostdlib', '-shared'],
+    prefix: '',
+    functions: [
+      ['qc_s32_f32', 1],
+      ['qc_s32_f64', 2],
+      ['qc_s64_f32', 3],
+      ['qc_s64_f64', 4],
+    ] as const,
+  },
 ];
-const emissions: { target: string; function: string; emitter: string; text: string; state: string }[] = [];
+const emissions: {
+  target: string;
+  function: string;
+  emitter: string;
+  text: string;
+  state: string;
+}[] = [];
 for (const binary of binaries) {
-  command('/usr/bin/clang', ['-target', binary.target, '-O2', '-ffreestanding', '-DQC_INPUT_ONLY', ...binary.flags,
-    source, '-o', binary.file]);
-  const session = await openBinary(binary.file, { cachePath: join(root, binary.prefix ? 'arm-cache' : 'x86-cache') });
+  command('/usr/bin/clang', [
+    '-target',
+    binary.target,
+    '-O2',
+    '-ffreestanding',
+    '-DQC_INPUT_ONLY',
+    ...binary.flags,
+    source,
+    '-o',
+    binary.file,
+  ]);
+  const session = await openBinary(binary.file, {
+    cachePath: join(root, binary.prefix ? 'arm-cache' : 'x86-cache'),
+  });
   try {
     for (const [name, column] of binary.functions) {
       for (const emitter of ['c-like', 'python-like'] as const) {
         const result = await session.decompile({ name: binary.prefix + name }, { emitter });
         assert.ok('data' in result && result.data.delivery === 'inline', JSON.stringify(result));
         const emission = result.data.emission;
-        assert.doesNotMatch(emission.text, /Instruction family cvtsi2s|Unsupported ARM64 encoding [SU]CVTF/);
+        assert.doesNotMatch(
+          emission.text,
+          /Instruction family cvtsi2s|Unsupported ARM64 encoding [SU]CVTF/,
+        );
         const formals = emittedFormals(emission);
         assert.equal(formals.length, 1, emission.text);
         const environment = new Map([['non-argument entry register', binary.prefix ? 0n : 0x7en]]);
         for (const row of oracle) {
-          const observed = execute(emission, new Map([[formals[0]!.statement_id, row[0]!]]),
-            new Map(), 0n, new Map(), environment, new Map(), acknowledgeRequirements(emission));
+          const observed = execute(
+            emission,
+            new Map([[formals[0]!.statement_id, row[0]!]]),
+            new Map(),
+            0n,
+            new Map(),
+            environment,
+            new Map(),
+            acknowledgeRequirements(emission),
+          );
           assert.equal(observed.exit, 'machine_return', emission.text);
-          assert.deepEqual(observed.values, [row[column]!], `${binary.target}/${name}/${emitter}/${row[0]}`);
+          assert.deepEqual(
+            observed.values,
+            [row[column]!],
+            `${binary.target}/${name}/${emitter}/${row[0]}`,
+          );
           outputCases++;
         }
-        emissions.push({ target: binary.target, function: name, emitter, text: emission.text, state: result.state });
+        emissions.push({
+          target: binary.target,
+          function: name,
+          emitter,
+          text: emission.text,
+          state: result.state,
+        });
       }
     }
-  } finally { await session.close(); }
+  } finally {
+    await session.close();
+  }
 }
 await writeFile(join(root, 'public-emissions.json'), JSON.stringify(emissions, null, 2) + '\n');
-const evidence = { schema: 1, source, oracle_cases: oracle.length, x86_machine_cases: x86Cases,
-  source_sha256: createHash('sha256').update(await readFile(source)).digest('hex'),
-  oracle_sha256: createHash('sha256').update(await readFile(native)).digest('hex'),
+const evidence = {
+  schema: 1,
+  source,
+  oracle_cases: oracle.length,
+  x86_machine_cases: x86Cases,
+  source_sha256: createHash('sha256')
+    .update(await readFile(source))
+    .digest('hex'),
+  oracle_sha256: createHash('sha256')
+    .update(await readFile(native))
+    .digest('hex'),
   compiler_version: command('/usr/bin/clang', ['--version']).trim(),
   node_version: process.version,
-  arm_machine_cases: armCases, both_dialect_output_cases: outputCases, public_emissions: emissions.length,
-  scope: 'Trusted native C oracle; independent emitted-output interpreter; no retained matrix target execution',
-  remaining: ['Non-nearest-even/trapping/FTZ/DAZ environments stay unknown; FP status remains abstracted.',
+  arm_machine_cases: armCases,
+  both_dialect_output_cases: outputCases,
+  public_emissions: emissions.length,
+  scope:
+    'Trusted native C oracle; independent emitted-output interpreter; no retained matrix target execution',
+  remaining: [
+    'Non-nearest-even/trapping/FTZ/DAZ environments stay unknown; FP status remains abstracted.',
     'VEX/EVEX conversion, packed conversion, FP16/fixed-point variants remain unsupported.',
-    'Historical matrix discovery, resources, source interfaces, FP assumptions are not resolved by this family.'] };
+    'Historical matrix discovery, resources, source interfaces, FP assumptions are not resolved by this family.',
+  ],
+};
 await writeFile(join(root, 'evidence.json'), JSON.stringify(evidence, null, 2) + '\n');
 console.log(JSON.stringify(evidence, null, 2));

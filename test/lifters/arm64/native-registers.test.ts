@@ -20,11 +20,17 @@ test('short vector views and full caller-clobbered roots retain distinct canonic
   assert.equal(destination.register.width_bits, 64);
   assert.equal(destination.register.write_rule, 'zero_extend_root');
   const abi = new DarwinArm64Abi();
-  const root = abi.unknown_call_clobbers.registers.find((register) => register.root === 'arm64:v10');
+  const root = abi.unknown_call_clobbers.registers.find(
+    (register) => register.root === 'arm64:v10',
+  );
   assert.ok(root);
   assert.notEqual(root.id, destination.register.id);
-  const vector = abi.classifyCall({ returns: { kind: 'vector', element: 'integer', element_bits: 8, lanes: 8 },
-    parameters: [], variadic: false, fixed_parameter_count: 0 }).returns[0];
+  const vector = abi.classifyCall({
+    returns: { kind: 'vector', element: 'integer', element_bits: 8, lanes: 8 },
+    parameters: [],
+    variadic: false,
+    fixed_parameter_count: 0,
+  }).returns[0];
   assert.ok(vector?.kind === 'register');
   assert.equal(vector.register.id, 'arm64:v0:0:64');
   const lifted = lift(graph);

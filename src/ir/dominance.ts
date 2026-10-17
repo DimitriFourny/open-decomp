@@ -26,7 +26,8 @@ export function computeDominance(
   const slot = new Map<EntityId, number>();
   ir.blocks.forEach((block, index) => slot.set(block.id, index));
   checkpoint?.(count);
-  const succ: number[][] = [], pred: number[][] = ir.blocks.map(() => []);
+  const succ: number[][] = [],
+    pred: number[][] = ir.blocks.map(() => []);
   for (let index = 0; index < count; index++) {
     const targets: number[] = [];
     for (const edge of successors(ir.blocks[index]!.terminator)) {
@@ -68,7 +69,10 @@ export function computeDominance(
   const virtual = count;
   const idom = new Int32Array(count + 1).fill(-1);
   const rootFlag = new Uint8Array(count);
-  for (const root of roots) { idom[root] = virtual; rootFlag[root] = 1; }
+  for (const root of roots) {
+    idom[root] = virtual;
+    rootFlag[root] = 1;
+  }
   idom[virtual] = virtual;
   const number = (node: number): number => (node === virtual ? count : post[node]!);
   let changed = true;
@@ -81,8 +85,12 @@ export function computeDominance(
       for (const p of pred[node]!) {
         checkpoint?.(1);
         if (idom[p] === -1) continue;
-        if (candidate === -1) { candidate = p; continue; }
-        let a = p, b = candidate;
+        if (candidate === -1) {
+          candidate = p;
+          continue;
+        }
+        let a = p,
+          b = candidate;
         while (a !== b) {
           checkpoint?.(1);
           while (number(a) < number(b)) a = idom[a]!;
@@ -102,7 +110,8 @@ export function computeDominance(
     checkpoint?.(1);
     children[idom[index]!]!.push(index);
   }
-  const enter = new Int32Array(count + 1), leave = new Int32Array(count + 1);
+  const enter = new Int32Array(count + 1),
+    leave = new Int32Array(count + 1);
   let clock = 0;
   const walk: [number, number][] = [[virtual, 0]];
   enter[virtual] = clock++;
@@ -129,7 +138,8 @@ export function computeDominance(
       return parent === virtual ? null : ir.blocks[parent]!.id;
     },
     dominates(dominator: EntityId, block: EntityId): boolean {
-      const a = slot.get(dominator), b = slot.get(block);
+      const a = slot.get(dominator),
+        b = slot.get(block);
       return a !== undefined && b !== undefined && enter[a]! <= enter[b]! && leave[b]! <= leave[a]!;
     },
   });
@@ -156,10 +166,14 @@ export function registerStateAt(
   const find = (bindings: readonly RegisterBinding[]): RegisterBinding | undefined =>
     bindings.find((binding) => {
       checkpoint?.(1);
-      return binding.register.root === cell.root && binding.register.offset_bits === cell.offset_bits &&
-        binding.register.width_bits === cell.width_bits;
+      return (
+        binding.register.root === cell.root &&
+        binding.register.offset_bits === cell.offset_bits &&
+        binding.register.width_bits === cell.width_bits
+      );
     });
-  let current: EntityId | null = block, side = boundary;
+  let current: EntityId | null = block,
+    side = boundary;
   while (current !== null) {
     checkpoint?.(1);
     if (side === 'exit') {

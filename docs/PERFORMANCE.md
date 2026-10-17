@@ -175,10 +175,10 @@ Windows source acceptance, representative performance, and clean installed-artif
 
 This count-only diagnosis used SQLite 3.54.0 Mach-O ARM64, SHA256 `4e01e37ea6fc2cfb008521558f999ac06cdbb4504e3eeb422c1a84b5ead57e56`. Production traversal and budgets were unchanged. Durable evidence: `scripts/bench/selected-work-baseline.json`; runnable instrumentation: `scripts/bench/selected-work.ts` and `selected-work-hooks.ts`. Concurrent host activity excludes performance conclusions.
 
-| Image discovery profile | Decoded instructions | Successor-edge visits | Ownership queue visits | Functions | CFG blocks |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Ordinary 10,000-instruction ceiling | 10,000 | 10,190 | 13,499 | 3,389 | 4,181 |
-| Completed seeded traversal, raised observation ceilings | 287,720 | 317,051 | 319,301 | 3,521 | 79,496 |
+| Image discovery profile                                 | Decoded instructions | Successor-edge visits | Ownership queue visits | Functions | CFG blocks |
+| ------------------------------------------------------- | -------------------: | --------------------: | ---------------------: | --------: | ---------: |
+| Ordinary 10,000-instruction ceiling                     |               10,000 |                10,190 |                 13,499 |     3,389 |      4,181 |
+| Completed seeded traversal, raised observation ceilings |              287,720 |               317,051 |                319,301 |     3,521 |     79,496 |
 
 Both profiles recorded zero shared/overlapping instruction ownership records. The ten originally selected bodies total only 251 instructions after traversal finishes. Ordinary import retained just three instructions for most selected wrappers and six for each string-comparison loop. The unchanged public QueryService/worker path returned text for two selected SQLite functions; the other eight failed in decode/discovery before lifting or callee summaries.
 
@@ -268,11 +268,11 @@ The full default recording completed 24 input cells, 48 input/tool cells and 288
 **Text-return observations only—not correctness or usable-semantic-coverage scores:**
 
 | Target, 96 function cells/tool | Open Decomp text | OD complete / partial | OD missing entry / work failure | Ghidra MCP text | Ghidra missing-function failure |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Mach-O ARM64 | 92 | 32 / 60 | 0 / 4 | 96 | 0 |
-| PE x86-64 | 48 | 16 / 32 | 46 / 2 | 20 | 76 |
-| ELF x86-64 | 46 | 0 / 46 | 46 / 4 | 74 | 22 |
-| Total | 186 | 48 / 138 | 92 / 10 | 190 | 98 |
+| ------------------------------ | ---------------: | --------------------: | ------------------------------: | --------------: | ------------------------------: |
+| Mach-O ARM64                   |               92 |               32 / 60 |                           0 / 4 |              96 |                               0 |
+| PE x86-64                      |               48 |               16 / 32 |                          46 / 2 |              20 |                              76 |
+| ELF x86-64                     |               46 |                0 / 46 |                          46 / 4 |              74 |                              22 |
+| Total                          |              186 |              48 / 138 |                         92 / 10 |             190 |                              98 |
 
 All ten Open Decomp request errors were `adler32_z` work limits. Exact-address discovery gaps and all Ghidra selected-address-not-in-function errors remain present; these describe the pinned import/discovery/bridge configuration, not universal engine coverage. The harness verified 116 full Open Decomp artifacts by size/SHA256; no Ghidra text was truncated and no reconstruction-invariant rejection was reported. Ghidra semantic coverage is unavailable through the bridge.
 
@@ -287,11 +287,11 @@ All 24 source-built cells succeeded: three supported targets × independently bu
 The recording exited zero: 48 tool/input cells, 120 matched function pairs, 240 function/tool cells; every project close and server exit succeeded. All 6,222 compiled `dist/` files remained unchanged at index digest `db33db3bb8593018c7fb01ad60cee9e0393fc0a3ee635ae0dfd23ef3eb46b33c`, the broader-matrix checkpoint. Later source/build changes are outside this evaluation.
 
 | Target / selected cells per tool | Open Decomp text | OD complete / partial | OD undiscovered | Ghidra MCP text | Ghidra missing-function failures |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Mach-O ARM64 / 40 | 40 | 28 / 12 | 0 | 40 | 0 |
-| PE x86-64 / 40 | 20 | 14 / 6 | 20 | 0 | 40 |
-| ELF x86-64 / 40 | 20 | 0 / 20 | 20 | 30 | 10 |
-| Total / 120 | 80 | 42 / 38 | 40 | 70 | 50 |
+| -------------------------------- | ---------------: | --------------------: | --------------: | --------------: | -------------------------------: |
+| Mach-O ARM64 / 40                |               40 |               28 / 12 |               0 |              40 |                                0 |
+| PE x86-64 / 40                   |               20 |                14 / 6 |              20 |               0 |                               40 |
+| ELF x86-64 / 40                  |               20 |                0 / 20 |              20 |              30 |                               10 |
+| Total / 120                      |               80 |               42 / 38 |              40 |              70 |                               50 |
 
 These are text-availability observations, not correctness, usable-coverage or readability scores. Ghidra exposes no semantic-coverage state through this bridge. Its failures identify selected addresses outside discovered functions in this pinned import/discovery/MCP configuration, not universal engine limitations. Every missing/unsupported cell remains recorded; no budget retry or performance claim is made.
 
@@ -319,10 +319,10 @@ Intermediate objects, project databases and duplicate streams are omitted; compl
 
 `scripts/bench/quality-matrix-rank.py` verifies the retained broader comparison output hashes and counts emitted unsupported-instruction sites across every reviewed input cell. These are static occurrences, not dynamic frequency or independent-program counts. Discovery, budget, unresolved-interface/control and FP-environment gaps remain separate in `quality-matrix-rank-2026-10-17.json`; they were not relabeled as ISA demand.
 
-| Ranked encoding family | Historical unsupported sites | Unsupported sites after focused replay | Whole-function results |
-| --- | ---: | ---: | --- |
-| Legacy SSE `Cvtsi2sd_xmm_rm32` | 8 | 0 | All partial: FP environment/status |
-| ARM64 `UCVTF_asisdmisc_R` | 4 | 0 | All partial: FP environment/status |
+| Ranked encoding family         | Historical unsupported sites | Unsupported sites after focused replay | Whole-function results             |
+| ------------------------------ | ---------------------------: | -------------------------------------: | ---------------------------------- |
+| Legacy SSE `Cvtsi2sd_xmm_rm32` |                            8 |                                      0 | All partial: FP environment/status |
+| ARM64 `UCVTF_asisdmisc_R`      |                            4 |                                      0 | All partial: FP environment/status |
 
 The rank motivated legacy SSE signed 32/64-bit register/memory-to-FP32/FP64 and ARM signed/unsigned scalar-SIMD same-width 32/64-bit conversion support. Upper lanes, flags, load faults, environmental guards and unknown status effects retain their architectural contracts. This focused replay is not a new whole-matrix result or an equivalence claim.
 

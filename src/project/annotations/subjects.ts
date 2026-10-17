@@ -129,8 +129,11 @@ export class TrustedSemanticCatalog {
       context.checkpoint(1);
       entityIdSchema.parse(subject.id);
       if (expected) {
-        if (subject.image_id !== expected.image_id || subject.slice_id !== expected.slice_id ||
-          subject.abi !== expected.abi)
+        if (
+          subject.image_id !== expected.image_id ||
+          subject.slice_id !== expected.slice_id ||
+          subject.abi !== expected.abi
+        )
           missing('Analysis catalog subject escapes its image scope');
         if (subject.id === expected.function_id && functionKind === undefined)
           functionKind = subject.kind;

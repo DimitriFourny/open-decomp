@@ -495,10 +495,12 @@ async function unsupportedEffects(
           mapping.instruction_refs.includes(instructionRef) &&
           mapping.range_refs.some((ref) => {
             const range = data.emission.ranges[ref]!;
-            return range.start.image_id === image.id &&
+            return (
+              range.start.image_id === image.id &&
               range.start.space === instruction.bytes.start.space &&
               range.start.value === instruction.bytes.start.value &&
-              range.size === instruction.bytes.size;
+              range.size === instruction.bytes.size
+            );
           }),
       ),
       'The unsupported instruction must retain its exact original byte provenance',

@@ -194,7 +194,10 @@ export function createMcpServer(service: QueryService, policy: McpServerPolicy =
             'MCP text+structured delivery exceeds 2 MiB. Read-only callers can request a smaller page/read or a published analysis artifact. A mutation may already be committed: inspect durable job status and the acknowledged revision, never replay automatically. Original budgets/options were not changed.',
           );
         if (name === 'function_get')
-          text = investigationText(result as ToolResult<'function_get'>) ?? navigationText(result) ?? text;
+          text =
+            investigationText(result as ToolResult<'function_get'>) ??
+            navigationText(result) ??
+            text;
         else if (navigationTools.has(name)) text = navigationText(result) ?? text;
         const artifacts = new Map(result.artifacts.map((artifact) => [artifact.id, artifact]));
         if ('job' in result)

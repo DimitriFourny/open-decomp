@@ -55,8 +55,10 @@ export function emissionEvidenceReferences(
   for (const id of emission.evidence) ids.add(id);
   if (ids.size > 10000)
     throw new OperationError({
-      code: 'resource_limit', severity: 'error',
-      message: 'Analysis evidence exceeds the catalog bound', evidence_ids: [],
+      code: 'resource_limit',
+      severity: 'error',
+      message: 'Analysis evidence exceeds the catalog bound',
+      evidence_ids: [],
     });
   return ids;
 }

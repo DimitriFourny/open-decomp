@@ -9,3 +9,7 @@ licenses/
 /fixtures/
 /scripts/fixtures/
 /test/**/fixtures/
+
+# Frozen, hash-referenced benchmark evidence and inputs (byte identity matters).
+/scripts/bench/*.json
+/scripts/bench/quality-evidence/

@@ -42,7 +42,10 @@ interface NativeCallIndex {
   readonly exports_by_address: ReadonlyMap<string, LoadedImage['exports']>;
   readonly imports_by_address: ReadonlyMap<string, LoadedImage['imports']>;
   readonly imports_by_id: ReadonlyMap<string, LoadedImage['imports'][number]>;
-  readonly references_by_function: ReadonlyMap<string, ReadonlyMap<string, readonly ReferenceRecord[]>>;
+  readonly references_by_function: ReadonlyMap<
+    string,
+    ReadonlyMap<string, readonly ReferenceRecord[]>
+  >;
 }
 const nativeIndexes = new WeakMap<LoadedImage, NativeCallIndex>();
 const nativeAddressKey = (address: Address): string =>
@@ -51,8 +54,10 @@ const nativeAddressKey = (address: Address): string =>
 /** Index immutable native facts once; callers/callee summaries only visit their
  * own call nodes and reference lists. Array identities bind the exact snapshot. */
 export function nativeCallIndex(
-  image: LoadedImage, functions: readonly FunctionRecord[],
-  references: readonly ReferenceRecord[], context: OperationContext,
+  image: LoadedImage,
+  functions: readonly FunctionRecord[],
+  references: readonly ReferenceRecord[],
+  context: OperationContext,
 ): NativeCallIndex {
   const cached = nativeIndexes.get(image);
   if (cached?.functions === functions && cached.references === references) return cached;
@@ -61,15 +66,19 @@ export function nativeCallIndex(
   for (const fn of functions) {
     context.checkpoint(1);
     functionsById.set(fn.id, fn);
-    const key = nativeAddressKey(fn.entry), list = functionsByAddress.get(key) ?? [];
-    list.push(fn); functionsByAddress.set(key, list);
+    const key = nativeAddressKey(fn.entry),
+      list = functionsByAddress.get(key) ?? [];
+    list.push(fn);
+    functionsByAddress.set(key, list);
   }
   const exportsByAddress = new Map<string, LoadedImage['exports'][number][]>();
   for (const item of image.exports) {
     context.checkpoint(1);
     if (!item.address) continue;
-    const key = nativeAddressKey(item.address), list = exportsByAddress.get(key) ?? [];
-    list.push(item); exportsByAddress.set(key, list);
+    const key = nativeAddressKey(item.address),
+      list = exportsByAddress.get(key) ?? [];
+    list.push(item);
+    exportsByAddress.set(key, list);
   }
   const importsByAddress = new Map<string, LoadedImage['imports'][number][]>();
   const importsById = new Map<string, LoadedImage['imports'][number]>();
@@ -77,23 +86,35 @@ export function nativeCallIndex(
     context.checkpoint(1);
     importsById.set(item.id, item);
     if (!item.callable_entry) continue;
-    const key = nativeAddressKey(item.callable_entry), list = importsByAddress.get(key) ?? [];
-    list.push(item); importsByAddress.set(key, list);
+    const key = nativeAddressKey(item.callable_entry),
+      list = importsByAddress.get(key) ?? [];
+    list.push(item);
+    importsByAddress.set(key, list);
   }
   const referencesByFunction = new Map<string, Map<string, ReferenceRecord[]>>();
   for (const reference of references) {
     context.checkpoint(1);
-    if (reference.from_function === null || reference.from_instruction === null ||
-      (reference.kind !== 'call' && reference.kind !== 'tail_call')) continue;
-    const byInstruction = referencesByFunction.get(reference.from_function) ?? new Map<string, ReferenceRecord[]>();
+    if (
+      reference.from_function === null ||
+      reference.from_instruction === null ||
+      (reference.kind !== 'call' && reference.kind !== 'tail_call')
+    )
+      continue;
+    const byInstruction =
+      referencesByFunction.get(reference.from_function) ?? new Map<string, ReferenceRecord[]>();
     const list = byInstruction.get(reference.from_instruction) ?? [];
-    list.push(reference); byInstruction.set(reference.from_instruction, list);
+    list.push(reference);
+    byInstruction.set(reference.from_instruction, list);
     referencesByFunction.set(reference.from_function, byInstruction);
   }
   const indexed: NativeCallIndex = {
-    functions, references, functions_by_id: functionsById,
-    functions_by_address: functionsByAddress, exports_by_address: exportsByAddress,
-    imports_by_address: importsByAddress, imports_by_id: importsById,
+    functions,
+    references,
+    functions_by_id: functionsById,
+    functions_by_address: functionsByAddress,
+    exports_by_address: exportsByAddress,
+    imports_by_address: importsByAddress,
+    imports_by_id: importsById,
     references_by_function: referencesByFunction,
   };
   nativeIndexes.set(image, indexed);
@@ -151,7 +172,8 @@ export function resolveCalls(
         for (const exported of indexed.exports_by_address.get(key) ?? []) {
           context.checkpoint(1);
           addSubject(exported.id, node.id, target, [
-            ...node.provenance.evidence_ids, ...exported.evidence_ids,
+            ...node.provenance.evidence_ids,
+            ...exported.evidence_ids,
           ]);
         }
         for (const imported of indexed.imports_by_address.get(key) ?? []) {

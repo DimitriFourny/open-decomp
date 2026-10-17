@@ -4,9 +4,20 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openBinary } from '../../src/api/index.js';
-import { contentHash, toolSchemas, type WireEmission, type ToolResult } from '../../src/core/index.js';
+import {
+  contentHash,
+  toolSchemas,
+  type WireEmission,
+  type ToolResult,
+} from '../../src/core/index.js';
 import { callMcpTool, readAnalysis, withMcpClient } from '../../scripts/mcp-workflow.js';
-import { acknowledgeRequirements, emittedFormals, execute, type EmittedFormal, type SourceCallOracle } from '../emitters/c/support.js';
+import {
+  acknowledgeRequirements,
+  emittedFormals,
+  execute,
+  type EmittedFormal,
+  type SourceCallOracle,
+} from '../emitters/c/support.js';
 import { strnicmpCases, strnicmpOracle } from '../emitters/c/strnicmp-fixture.js';
 import { loadBytes } from '../metadata/fixture.js';
 
@@ -46,24 +57,50 @@ const stackCases = [
   Array<bigint>(10).fill(0n),
   Array<bigint>(10).fill(0xffffffffffffffffn),
   Array.from({ length: 10 }, (_, index) => 0x8000000000000000n + BigInt(index)),
-  [0n, 1n, 0x7fffffffffffffffn, 0x8000000000000000n, 0xffffffffffffffffn,
-    0x100000000n, 0xffffffffn, 0x123456789abcdef0n, 0xfedcba9876543210n, 0xffffffffffffffffn],
+  [
+    0n,
+    1n,
+    0x7fffffffffffffffn,
+    0x8000000000000000n,
+    0xffffffffffffffffn,
+    0x100000000n,
+    0xffffffffn,
+    0x123456789abcdef0n,
+    0xfedcba9876543210n,
+    0xffffffffffffffffn,
+  ],
   ...Array.from({ length: 10 }, (_, active) =>
-    Array.from({ length: 10 }, (_, index) => index === active ? 0xffffffffffffffffn : 0n)),
+    Array.from({ length: 10 }, (_, index) => (index === active ? 0xffffffffffffffffn : 0n)),
+  ),
   ...Array.from({ length: 10 }, (_, active) =>
-    Array.from({ length: 10 }, (_, index) => index === active ? 0x8000000000000000n : 0n)),
+    Array.from({ length: 10 }, (_, index) => (index === active ? 0x8000000000000000n : 0n)),
+  ),
 ];
 const floatCases = [
-  [4, 3], [-2, 0.5], [0, 0], [-0, -0], [1, -3],
-  [2 ** 52 + 1, -(2 ** 52)], [2 ** -1022, -(2 ** -1022)],
-  [Number.MIN_VALUE, Number.MIN_VALUE], [Number.MIN_VALUE * 3, -Number.MIN_VALUE],
+  [4, 3],
+  [-2, 0.5],
+  [0, 0],
+  [-0, -0],
+  [1, -3],
+  [2 ** 52 + 1, -(2 ** 52)],
+  [2 ** -1022, -(2 ** -1022)],
+  [Number.MIN_VALUE, Number.MIN_VALUE],
+  [Number.MIN_VALUE * 3, -Number.MIN_VALUE],
   [Number.MAX_VALUE / 4, -Number.MAX_VALUE / 4],
 ] as const;
-const memoryCases = [[0n, 0n], [7n, 11n], [0xffffffffffffffffn, 1n],
-  [0x8000000000000000n, 0xffffffffffffffffn]] as const;
+const memoryCases = [
+  [0n, 0n],
+  [7n, 11n],
+  [0xffffffffffffffffn, 1n],
+  [0x8000000000000000n, 0xffffffffffffffffn],
+] as const;
 const loopCases = [[], [0], [1], [1, 2, 3, 4], [0xffffffff, 1, 5], [0x80000000, 0x80000000]];
-const effectCases = [[5n, 0n], [5n, 2n], [0xffffffffffffffffn, 1n],
-  [0x8000000000000000n, 0xffffffffffffffffn]] as const;
+const effectCases = [
+  [5n, 0n],
+  [5n, 2n],
+  [0xffffffffffffffffn, 1n],
+  [0x8000000000000000n, 0xffffffffffffffffn],
+] as const;
 const functions: readonly { name: string; scenario: Scenario }[] = [
   { name: '_fixture_stack_args', scenario: 'stack' },
   { name: '_fixture_float', scenario: 'float' },
@@ -80,17 +117,36 @@ function bits(value: number): bigint {
 }
 
 function nativeRunner(): string {
-  const pair = (values: readonly bigint[]) => `{${values.map((value) => `0x${value.toString(16)}ULL`).join(',')}}`;
-  const strings = strnicmpCases.map(([left, right], index) => [left, right].map((value, side) =>
-    value === null ? '' : `static const unsigned char s${index}_${side}[] = {${[...value].map((char) => char.charCodeAt(0)).concat(0).join(',')}};`,
-  ).join('\n')).join('\n');
-  const comparisons = strnicmpCases.map(([left, right, count], index) =>
-    `printf("{\\"scenario\\":\\"strnicmp\\",\\"index\\":${index},\\"value\\":\\"%08x\\"}\\n", (unsigned)quality_strnicmp(${left === null ? '0' : `(const char*)s${index}_0`}, ${right === null ? '0' : `(const char*)s${index}_1`}, ${count}));`,
-  ).join('\n');
-  const loops = loopCases.map((values, index) => `{
+  const pair = (values: readonly bigint[]) =>
+    `{${values.map((value) => `0x${value.toString(16)}ULL`).join(',')}}`;
+  const strings = strnicmpCases
+    .map(([left, right], index) =>
+      [left, right]
+        .map((value, side) =>
+          value === null
+            ? ''
+            : `static const unsigned char s${index}_${side}[] = {${[...value]
+                .map((char) => char.charCodeAt(0))
+                .concat(0)
+                .join(',')}};`,
+        )
+        .join('\n'),
+    )
+    .join('\n');
+  const comparisons = strnicmpCases
+    .map(
+      ([left, right, count], index) =>
+        `printf("{\\"scenario\\":\\"strnicmp\\",\\"index\\":${index},\\"value\\":\\"%08x\\"}\\n", (unsigned)quality_strnicmp(${left === null ? '0' : `(const char*)s${index}_0`}, ${right === null ? '0' : `(const char*)s${index}_1`}, ${count}));`,
+    )
+    .join('\n');
+  const loops = loopCases
+    .map(
+      (values, index) => `{
     const u32 values[] = {${values.length ? values.join(',') : '0'}};
     printf("{\\"scenario\\":\\"loop\\",\\"index\\":${index},\\"value\\":\\"%08x\\"}\\n", fixture_loop(values, ${values.length}));
-  }`).join('\n');
+  }`,
+    )
+    .join('\n');
   return `#include "corpus.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -148,18 +204,49 @@ export async function prepareSourceQuality(root: string): Promise<SourceQualityF
   const binary = join(root, 'trusted-source-quality');
   const source = nativeRunner();
   await writeFile(oracle, source);
-  const args = ['-target', 'arm64-apple-macos13.0', '-std=c11', '-O1', '-g0',
-    '-ffp-contract=off', '-fno-builtin', '-fno-stack-protector',
-    '-I', resolve(repo, 'fixtures/source'), corpus, fixture, oracle, '-o', binary];
+  const args = [
+    '-target',
+    'arm64-apple-macos13.0',
+    '-std=c11',
+    '-O1',
+    '-g0',
+    '-ffp-contract=off',
+    '-fno-builtin',
+    '-fno-stack-protector',
+    '-I',
+    resolve(repo, 'fixtures/source'),
+    corpus,
+    fixture,
+    oracle,
+    '-o',
+    binary,
+  ];
   const compiled = spawnSync('/usr/bin/clang', args, { encoding: 'utf8', timeout: 60000 });
-  await writeFile(join(root, 'compile.json'), JSON.stringify({ command: ['/usr/bin/clang', ...args],
-    status: compiled.status, stdout: compiled.stdout, stderr: compiled.stderr }, null, 2));
+  await writeFile(
+    join(root, 'compile.json'),
+    JSON.stringify(
+      {
+        command: ['/usr/bin/clang', ...args],
+        status: compiled.status,
+        stdout: compiled.stdout,
+        stderr: compiled.stderr,
+      },
+      null,
+      2,
+    ),
+  );
   assert.equal(compiled.status, 0, compiled.stderr);
   const native = spawnSync(binary, [], { encoding: 'utf8', timeout: 10000 });
   await writeFile(join(root, 'oracle.stdout.jsonl'), native.stdout);
   assert.equal(native.status, 0, native.stderr);
-  const expected = native.stdout.trim().split('\n').map((line) => JSON.parse(line) as NativeCase);
-  assert.equal(expected.find((row) => row.scenario === 'stack' && row.index === 0)?.value, '0000000000000181');
+  const expected = native.stdout
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as NativeCase);
+  assert.equal(
+    expected.find((row) => row.scenario === 'stack' && row.index === 0)?.value,
+    '0000000000000181',
+  );
   for (const [index, args] of strnicmpCases.entries()) {
     const row = expected.find((row) => row.scenario === 'strnicmp' && row.index === index)!;
     assert.equal(BigInt(`0x${row.value}`), BigInt.asUintN(32, strnicmpOracle(...args)));
@@ -170,15 +257,31 @@ export async function prepareSourceQuality(root: string): Promise<SourceQualityF
   for (const mapping of image.mappings) {
     if (mapping.memory_size > 1_048_576n) continue; // No enormous unmapped PAGEZERO allocation.
     for (let i = 0n; i < mapping.memory_size; i++)
-      imageMemory.set(mapping.va + i, i < mapping.file_size ? image.bytes.at(Number(mapping.file_offset + i)) : 0);
+      imageMemory.set(
+        mapping.va + i,
+        i < mapping.file_size ? image.bytes.at(Number(mapping.file_offset + i)) : 0,
+      );
   }
-  await writeFile(join(root, 'provenance.json'), JSON.stringify({
-    target_executed: 'Only this newly built trusted source executable; no retained/baseline target',
-    binary, sha256: contentHash(bytes),
-    sources: { [corpus]: contentHash(await readFile(corpus)), [fixture]: contentHash(await readFile(fixture)),
-      [oracle]: contentHash(Buffer.from(source)) },
-    fp_environment: 'FPCR=0: nearest-even, gradual underflow, traps disabled; finite input cases only',
-  }, null, 2));
+  await writeFile(
+    join(root, 'provenance.json'),
+    JSON.stringify(
+      {
+        target_executed:
+          'Only this newly built trusted source executable; no retained/baseline target',
+        binary,
+        sha256: contentHash(bytes),
+        sources: {
+          [corpus]: contentHash(await readFile(corpus)),
+          [fixture]: contentHash(await readFile(fixture)),
+          [oracle]: contentHash(Buffer.from(source)),
+        },
+        fp_environment:
+          'FPCR=0: nearest-even, gradual underflow, traps disabled; finite input cases only',
+      },
+      null,
+      2,
+    ),
+  );
   return { root, binary, expected, imageMemory };
 }
 
@@ -189,13 +292,20 @@ function put(memory: Map<bigint, number>, address: bigint, value: bigint, width:
 
 function read64(memory: ReadonlyMap<bigint, number>, address: bigint): bigint {
   let value = 0n;
-  for (let index = 0; index < 8; index++) value |= BigInt(memory.get(address + BigInt(index))!) << BigInt(index * 8);
+  for (let index = 0; index < 8; index++)
+    value |= BigInt(memory.get(address + BigInt(index))!) << BigInt(index * 8);
   return value;
 }
 
-function checkBehavior(p: SourceQualityFixture, scenario: Scenario, emission: WireEmission): number {
+function checkBehavior(
+  p: SourceQualityFixture,
+  scenario: Scenario,
+  emission: WireEmission,
+): number {
   const parameters: readonly EmittedFormal[] = emittedFormals(emission);
-  const formals: readonly EmittedFormal[] = parameters.filter((formal) => formal.name !== 'entry_sp');
+  const formals: readonly EmittedFormal[] = parameters.filter(
+    (formal) => formal.name !== 'entry_sp',
+  );
   const entryStack = parameters.find((formal) => formal.name === 'entry_sp');
   const expectedArity = { stack: 10, float: 2, strnicmp: 3, memory: 2, loop: 2, effects: 2 };
   assert.equal(formals.length, expectedArity[scenario], emission.text);
@@ -208,10 +318,18 @@ function checkBehavior(p: SourceQualityFixture, scenario: Scenario, emission: Wi
     else if (scenario === 'float') values = floatCases[row.index]!.map(bits);
     else if (scenario === 'strnicmp') {
       const [left, right, count] = strnicmpCases[row.index]!;
-      for (const [address, text] of [[pointer, left], [0x3000n, right]] as const)
+      for (const [address, text] of [
+        [pointer, left],
+        [0x3000n, right],
+      ] as const)
         if (text !== null)
-          for (let i = 0; i <= text.length; i++) memory.set(address + BigInt(i), text.charCodeAt(i) || 0);
-      values = [left === null ? 0n : pointer, right === null ? 0n : 0x3000n, BigInt.asUintN(32, BigInt(count))];
+          for (let i = 0; i <= text.length; i++)
+            memory.set(address + BigInt(i), text.charCodeAt(i) || 0);
+      values = [
+        left === null ? 0n : pointer,
+        right === null ? 0n : 0x3000n,
+        BigInt.asUintN(32, BigInt(count)),
+      ];
     } else if (scenario === 'loop') {
       const array = loopCases[row.index]!;
       array.forEach((value, index) => put(memory, pointer + BigInt(index * 4), BigInt(value), 4));
@@ -231,37 +349,64 @@ function checkBehavior(p: SourceQualityFixture, scenario: Scenario, emission: Wi
     const before = new Map(memory);
     let calls = 0;
     const sourceCalls = new Map<string, SourceCallOracle>();
-    if (scenario === 'effects') sourceCalls.set('_quality_record', (args) => {
-      const expected = row.calls![calls++];
-      assert.ok(expected, 'No additional call is authorized by the trusted source oracle');
-      assert.deepEqual(args, [BigInt(`0x${expected.argument}`)]);
-      assert.equal(read64(memory, pointer), BigInt(`0x${expected.memory}`), 'Store/call ordering must match native source');
-      return BigInt(`0x${expected.result}`);
-    });
+    if (scenario === 'effects')
+      sourceCalls.set('_quality_record', (args) => {
+        const expected = row.calls![calls++];
+        assert.ok(expected, 'No additional call is authorized by the trusted source oracle');
+        assert.deepEqual(args, [BigInt(`0x${expected.argument}`)]);
+        assert.equal(
+          read64(memory, pointer),
+          BigInt(`0x${expected.memory}`),
+          'Store/call ordering must match native source',
+        );
+        return BigInt(`0x${expected.result}`);
+      });
     const unknownValues = new Map<string, bigint>();
     if (entryStack) unknownValues.set('non-argument entry register', 0x1122334455667788n);
-    const observed = execute(emission, inputs, memory, 0n, new Map(), unknownValues, sourceCalls,
-      scenario === 'float' ? acknowledgeRequirements(emission) : []);
+    const observed = execute(
+      emission,
+      inputs,
+      memory,
+      0n,
+      new Map(),
+      unknownValues,
+      sourceCalls,
+      scenario === 'float' ? acknowledgeRequirements(emission) : [],
+    );
     const description = `${scenario}[${row.index}] ${emission.language}`;
     assert.equal(observed.exit, 'machine_return', description);
     assert.deepEqual(observed.values, [BigInt(`0x${row.value}`)], description);
-    if (row.memory !== undefined) assert.equal(read64(observed.memory, pointer), BigInt(`0x${row.memory}`), description);
+    if (row.memory !== undefined)
+      assert.equal(read64(observed.memory, pointer), BigInt(`0x${row.memory}`), description);
     if (scenario === 'effects') {
       assert.equal(calls, row.calls!.length, description);
-      assert.deepEqual(observed.source_calls?.map((call) => call.arguments), row.calls!.map((call) => [BigInt(`0x${call.argument}`)]));
+      assert.deepEqual(
+        observed.source_calls?.map((call) => call.arguments),
+        row.calls!.map((call) => [BigInt(`0x${call.argument}`)]),
+      );
     } else {
       assert.deepEqual(observed.calls, [], description);
       assert.deepEqual(observed.source_calls, [], description);
       if (scenario !== 'memory') assert.deepEqual(observed.memory, before, description);
     }
     if (scenario === 'float' && row.index === 0)
-      assert.equal(execute(emission, inputs, new Map(before)).exit, 'unknown', 'Unsupported/unacknowledged FP environment must remain unknown');
+      assert.equal(
+        execute(emission, inputs, new Map(before)).exit,
+        'unknown',
+        'Unsupported/unacknowledged FP environment must remain unknown',
+      );
   }
   return cases.length;
 }
 
-async function checkResult(p: SourceQualityFixture, consumer: SourceQualityConsumer,
-                           name: string, scenario: Scenario, dialect: Dialect, result: Result): Promise<SourceQualityEvidence> {
+async function checkResult(
+  p: SourceQualityFixture,
+  consumer: SourceQualityConsumer,
+  name: string,
+  scenario: Scenario,
+  dialect: Dialect,
+  result: Result,
+): Promise<SourceQualityEvidence> {
   const response = join(p.root, `${consumer}-${name}-${dialect}.json`);
   await writeFile(response, JSON.stringify(result, null, 2));
   assert.ok('data' in result && result.data.delivery === 'inline', JSON.stringify(result));
@@ -271,9 +416,17 @@ async function checkResult(p: SourceQualityFixture, consumer: SourceQualityConsu
 }
 
 /** Public results, never request echoes, are evaluated against trusted native source. */
-export async function exerciseSourceQuality(p: SourceQualityFixture, consumer: SourceQualityConsumer): Promise<SourceQualityEvidence[]> {
+export async function exerciseSourceQuality(
+  p: SourceQualityFixture,
+  consumer: SourceQualityConsumer,
+): Promise<SourceQualityEvidence[]> {
   const evidence: SourceQualityEvidence[] = [];
-  const retain = async (name: string, scenario: Scenario, dialect: Dialect, result: Result): Promise<void> => {
+  const retain = async (
+    name: string,
+    scenario: Scenario,
+    dialect: Dialect,
+    result: Result,
+  ): Promise<void> => {
     evidence.push(await checkResult(p, consumer, name, scenario, dialect, result));
     await writeFile(join(p.root, `${consumer}-evidence.json`), JSON.stringify(evidence, null, 2));
   };
@@ -282,46 +435,98 @@ export async function exerciseSourceQuality(p: SourceQualityFixture, consumer: S
     try {
       for (const { name, scenario } of functions)
         for (const dialect of dialects)
-          await retain(name, scenario, dialect, await session.decompile({ name }, { emitter: dialect }));
-    } finally { await session.close(); }
+          await retain(
+            name,
+            scenario,
+            dialect,
+            await session.decompile({ name }, { emitter: dialect }),
+          );
+    } finally {
+      await session.close();
+    }
   } else if (consumer === 'cli') {
     for (const { name, scenario } of functions)
       for (const dialect of dialects) {
-        const args = ['--import', 'tsx', entry, 'decompile', p.binary, '--function', name,
-          '--language', dialect, '--cache', join(p.root, 'cli-cache'), '--json'];
-        const child = spawnSync(process.execPath, args, { cwd: repo, encoding: 'utf8', timeout: 90000, maxBuffer: 32 * 1024 * 1024 });
+        const args = [
+          '--import',
+          'tsx',
+          entry,
+          'decompile',
+          p.binary,
+          '--function',
+          name,
+          '--language',
+          dialect,
+          '--cache',
+          join(p.root, 'cli-cache'),
+          '--json',
+        ];
+        const child = spawnSync(process.execPath, args, {
+          cwd: repo,
+          encoding: 'utf8',
+          timeout: 90000,
+          maxBuffer: 32 * 1024 * 1024,
+        });
         await writeFile(join(p.root, `cli-${name}-${dialect}.stderr.txt`), child.stderr);
         await writeFile(join(p.root, `cli-${name}-${dialect}.stdout.json`), child.stdout);
         assert.ok(child.status === 0 || child.status === 2, child.stderr);
         const decoded = JSON.parse(child.stdout) as { result: unknown };
-        await retain(name, scenario, dialect, toolSchemas.function_decompile.output.parse(decoded.result));
+        await retain(
+          name,
+          scenario,
+          dialect,
+          toolSchemas.function_decompile.output.parse(decoded.result),
+        );
       }
   } else {
-    await withMcpClient({ serverEntry: entry, fixtures: p.root, nodeArgs: ['--import', 'tsx'] }, p.root, async (client) => {
-      const opened = await callMcpTool(client, 'project_open', { wait: true,
-        source: { kind: 'import', input_path: p.binary, project_path: join(p.root, 'mcp-project') } });
-      assert.ok('data' in opened && opened.data.image);
-      const scope = { project_id: opened.project_id!, revision: opened.revision! };
-      try {
-        for (const { name, scenario } of functions) {
-          const found: ToolResult<'functions_find'> = await callMcpTool(client, 'functions_find', { ...scope, image_id: opened.data.image.id,
-            query: { text: name, match: 'exact', case_sensitive: true } });
-          assert.ok('data' in found);
-          assert.equal(found.data.items.length, 1);
-          for (const dialect of dialects) {
-            let result = await callMcpTool(client, 'function_decompile', { ...scope,
-              function_id: found.data.items[0]!.id, options: { emitter: dialect }, wait: true });
-            if ('data' in result && result.data.delivery === 'artifact') {
-              const artifactId = result.data.artifact_id;
-              const artifact = result.artifacts.find((artifact) => artifact.id === artifactId);
-              assert.ok(artifact);
-              result = (await readAnalysis(client, artifact)).result;
+    await withMcpClient(
+      { serverEntry: entry, fixtures: p.root, nodeArgs: ['--import', 'tsx'] },
+      p.root,
+      async (client) => {
+        const opened = await callMcpTool(client, 'project_open', {
+          wait: true,
+          source: {
+            kind: 'import',
+            input_path: p.binary,
+            project_path: join(p.root, 'mcp-project'),
+          },
+        });
+        assert.ok('data' in opened && opened.data.image);
+        const scope = { project_id: opened.project_id!, revision: opened.revision! };
+        try {
+          for (const { name, scenario } of functions) {
+            const found: ToolResult<'functions_find'> = await callMcpTool(
+              client,
+              'functions_find',
+              {
+                ...scope,
+                image_id: opened.data.image.id,
+                query: { text: name, match: 'exact', case_sensitive: true },
+              },
+            );
+            assert.ok('data' in found);
+            assert.equal(found.data.items.length, 1);
+            for (const dialect of dialects) {
+              let result = await callMcpTool(client, 'function_decompile', {
+                ...scope,
+                function_id: found.data.items[0]!.id,
+                options: { emitter: dialect },
+                wait: true,
+              });
+              if ('data' in result && result.data.delivery === 'artifact') {
+                const artifactId = result.data.artifact_id;
+                const artifact = result.artifacts.find((artifact) => artifact.id === artifactId);
+                assert.ok(artifact);
+                result = (await readAnalysis(client, artifact)).result;
+              }
+              await retain(name, scenario, dialect, result);
             }
-            await retain(name, scenario, dialect, result);
           }
+        } finally {
+          await callMcpTool(client, 'project_close', scope);
         }
-      } finally { await callMcpTool(client, 'project_close', scope); }
-    });
+      },
+    );
   }
   return evidence;
 }

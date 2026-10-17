@@ -15,10 +15,20 @@ import {
 import type { BlockRegion, Control, ParallelTransfer, Region } from '../presentation/index.js';
 import { boundaryProjector } from './boundaries.js';
 import { foldExpressions, identityOperand } from './expressions.js';
-import type { Assignment, BoundaryProjection, MemoryView, Reconstruction, TailProjection } from './model.js';
+import type {
+  Assignment,
+  BoundaryProjection,
+  MemoryView,
+  Reconstruction,
+  TailProjection,
+} from './model.js';
 import { planSource } from './source-planner.js';
 import { planSourceStack } from './source-stack.js';
-import { normalizeSourceExpressions, sourceExpressionDemand, type SourceExpressionDemand } from './source-expressions.js';
+import {
+  normalizeSourceExpressions,
+  sourceExpressionDemand,
+  type SourceExpressionDemand,
+} from './source-expressions.js';
 import { normalizeSourceRanges } from './source-ranges.js';
 import { projectSourceTypes } from './source-types.js';
 import { LocalValidationSession } from './local-validation.js';
@@ -177,15 +187,22 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
       for (const node of block.statements) {
         context.checkpoint(1);
         switch (node.kind) {
-          case 'assign': break;
-          case 'read_register': roots.push(node.result); break;
-          case 'write_register': roots.push(node.value); break;
+          case 'assign':
+            break;
+          case 'read_register':
+            roots.push(node.result);
+            break;
+          case 'write_register':
+            roots.push(node.value);
+            break;
           case 'load':
             // Include even promoted/hidden loads: storage planning is fixed,
             // but normalization must not assume an unused read has no effect.
             roots.push(node.address, node.result);
             break;
-          case 'store': roots.push(node.address, node.value); break;
+          case 'store':
+            roots.push(node.address, node.value);
+            break;
           case 'call': {
             const boundary = sourcePlan.calls.get(node.id);
             if (boundary) boundaryRoots(boundary);
@@ -198,16 +215,23 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
             for (const binding of node.register_inputs) roots.push(binding.value);
             for (const binding of node.register_outputs) roots.push(binding.value);
             break;
-          case 'memory_fence': break;
-          default: complete = false;
+          case 'memory_fence':
+            break;
+          default:
+            complete = false;
         }
       }
       const control = block.control;
       context.checkpoint(1);
       switch (control.kind) {
-        case 'jump': break;
-        case 'if': roots.push(control.condition); break;
-        case 'switch': roots.push(control.value); break;
+        case 'jump':
+          break;
+        case 'if':
+          roots.push(control.condition);
+          break;
+        case 'switch':
+          roots.push(control.value);
+          break;
         case 'return': {
           const boundary = sourcePlan.returns.get(control.id);
           if (boundary) boundaryRoots(boundary);
@@ -224,7 +248,8 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
         case 'trap':
           for (const binding of block.register_exit) roots.push(binding.value);
           break;
-        default: complete = false;
+        default:
+          complete = false;
       }
       const tail = sourcePlan.tails.get(control.id);
       if (tail) boundaryRoots(tail.boundary);
@@ -234,7 +259,15 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
       normalizationDemand = sourceExpressionDemand(roots, expressions, parameterSources, context);
   }
   const sourceExpressions = sourcePlan
-    ? normalizeSourceExpressions(values, expressions, owner, sourcePlan.make, context, localValidation, normalizationDemand)
+    ? normalizeSourceExpressions(
+        values,
+        expressions,
+        owner,
+        sourcePlan.make,
+        context,
+        localValidation,
+        normalizationDemand,
+      )
     : null;
 
   // A three-level identity lattice (unreached / exact identity / conflicting).
@@ -300,8 +333,12 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
       }
     }
   sourceExpressions?.run();
-  const initial = new Map(entryBindings.map((binding) =>
-    [binding.register.id, identities.get(binding.value.id) ?? binding.value.id]));
+  const initial = new Map(
+    entryBindings.map((binding) => [
+      binding.register.id,
+      identities.get(binding.value.id) ?? binding.value.id,
+    ]),
+  );
   const snapshot = (bindings: readonly RegisterBinding[]): readonly RegisterBinding[] =>
     bindings.filter((binding) => {
       context.checkpoint(1);
@@ -411,7 +448,8 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     }
   };
   const roots = new Map<string, Value[]>();
-  const semanticRoots: Value[] = [], overlayOutputs: Value[] = [];
+  const semanticRoots: Value[] = [],
+    overlayOutputs: Value[] = [];
   for (const block of blocks.values()) {
     for (const node of block.statements) {
       context.checkpoint(1);
@@ -493,7 +531,8 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
   // An uncertain return overlay preserves machine state; reaching an ABI input
   // register only through it is not evidence that the register is a source input.
   if (sourcePlan && overlayOutputs.length) {
-    const demanded = new Set<string>(), pending: Value[] = [];
+    const demanded = new Set<string>(),
+      pending: Value[] = [];
     const reach = (value: Value): void => {
       context.checkpoint(1);
       if (demanded.has(value.id)) return;
@@ -503,11 +542,13 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     semanticRoots.forEach(reach);
     for (let cursor = 0; cursor < pending.length; cursor++) {
       context.checkpoint(1);
-      const value = pending[cursor]!, expression = expressions.get(value.id);
+      const value = pending[cursor]!,
+        expression = expressions.get(value.id);
       const returnAddress = sourceStack?.returnAddressLoads.get(value.id);
       if (returnAddress) reach(returnAddress.node.address);
       if (sourceStack?.addresses.has(value.id)) {
-        if (sourceStack.entryStorage && sourceStack.requiresEntry(value.id)) reach(sourceStack.entryStorage);
+        if (sourceStack.entryStorage && sourceStack.requiresEntry(value.id))
+          reach(sourceStack.entryStorage);
         continue;
       }
       if (expression) for (const operand of expressionOperands(expression)) reach(operand);
@@ -658,7 +699,8 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     signature = null;
   if (sourcePlan) signature = sourcePlan.signature;
   const entryStorage = sourceStack?.entryStorage;
-  const entryStorageLive = entryStorage !== null && entryStorage !== undefined && live.has(entryStorage.id);
+  const entryStorageLive =
+    entryStorage !== null && entryStorage !== undefined && live.has(entryStorage.id);
   if (entryStorageLive) signature = null;
   // A source return without a fully expressible function interface still retains
   // its proven result binding; physical outputs are never dropped by this choice.
@@ -682,8 +724,13 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     for (const shape of input.types.shapes)
       for (const field of shape.fields) {
         context.checkpoint(1);
-        if (conflicting.has(shape.id) || conflicting.has(shape.type_id) || conflicting.has(field.id) ||
-          (shape.base.kind === 'value' && conflicting.has(shape.base.value_id))) continue;
+        if (
+          conflicting.has(shape.id) ||
+          conflicting.has(shape.type_id) ||
+          conflicting.has(field.id) ||
+          (shape.base.kind === 'value' && conflicting.has(shape.base.value_id))
+        )
+          continue;
         for (const id of field.node_ids) {
           context.checkpoint(1);
           if (ambiguous.has(id) || conflicting.has(id)) continue;
@@ -727,8 +774,11 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
           unavailable(node, 'An unknown machine value remains explicit.');
       } else if (node.kind === 'unknown_effect')
         unavailable(node, 'Unknown instruction effects remain ordered and explicit.');
-      else if (node.kind === 'call' &&
-        (calls.get(node.id)?.kind === 'physical' || calls.get(node.id)?.argument_list_complete === false))
+      else if (
+        node.kind === 'call' &&
+        (calls.get(node.id)?.kind === 'physical' ||
+          calls.get(node.id)?.argument_list_complete === false)
+      )
         unavailable(
           node,
           sourcePlan
@@ -739,10 +789,16 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     if (sourcePlan && block.control.kind === 'return') {
       const projection = returns.get(block.control.id);
       if (projection?.kind === 'inferred' && projection.outputs.length)
-        unavailable(block.control,
+        unavailable(
+          block.control,
           'The source return list is unresolved; changed possible ABI return storage is preserved as an uncertain physical overlay, not inferred aggregate fields: ' +
-          projection.outputs.map(({ register }) =>
-            `${register.root}[${register.offset_bits}:${register.width_bits}]`).join(', '));
+            projection.outputs
+              .map(
+                ({ register }) =>
+                  `${register.root}[${register.offset_bits}:${register.width_bits}]`,
+              )
+              .join(', '),
+        );
     }
     if (block.control.kind === 'unknown' || block.control.kind === 'indirect')
       unavailable(
@@ -786,9 +842,22 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     local_validation: localValidation.records,
     local_validation_session: localValidation,
     diagnostics,
-    ...(source ? { source: { ...source,
-      ...projectSourceTypes(input.types, source, values, expressions, returns, memory,
-        input.source!.abi.layout, context),
-    } } : {}),
+    ...(source
+      ? {
+          source: {
+            ...source,
+            ...projectSourceTypes(
+              input.types,
+              source,
+              values,
+              expressions,
+              returns,
+              memory,
+              input.source!.abi.layout,
+              context,
+            ),
+          },
+        }
+      : {}),
   };
 }

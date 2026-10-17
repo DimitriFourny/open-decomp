@@ -650,7 +650,9 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
         for (const instruction of arithmetic.items) {
           const ref = baselineData.emission.ids.indexOf(instruction.id);
           assert.ok(
-            baselineData.emission.mappings.some((mapping) => mapping.instruction_refs.includes(ref)),
+            baselineData.emission.mappings.some((mapping) =>
+              mapping.instruction_refs.includes(ref),
+            ),
           );
         }
         // Every cited proof (mapping, inference or requirement) is stated once in the table.

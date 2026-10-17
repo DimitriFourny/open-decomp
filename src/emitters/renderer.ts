@@ -32,9 +32,21 @@ import { validateReconstruction, validateRenderedTransfers } from '../reconstruc
 import type { SourceAddress } from '../reconstruction/source-model.js';
 import { sourceDataValues } from '../reconstruction/source-data.js';
 import { planSourceNames, sourceIdentifierStem } from '../reconstruction/source-names.js';
-import { sourceRequirementPredicates, sourceRequirementProofs, type SourceRequirementPredicate } from '../reconstruction/source-requirements.js';
-import { LocalValidationSession, rejectTranslation, validateParallelMoves, type PlannedMove } from '../reconstruction/local-validation.js';
-import { validateEmittedControl, type EmittedEdge } from '../reconstruction/local-control-validation.js';
+import {
+  sourceRequirementPredicates,
+  sourceRequirementProofs,
+  type SourceRequirementPredicate,
+} from '../reconstruction/source-requirements.js';
+import {
+  LocalValidationSession,
+  rejectTranslation,
+  validateParallelMoves,
+  type PlannedMove,
+} from '../reconstruction/local-validation.js';
+import {
+  validateEmittedControl,
+  type EmittedEdge,
+} from '../reconstruction/local-control-validation.js';
 import { expressionText, machineType } from './expressions.js';
 import { Writer } from './writer.js';
 import type { EmissionInput, EmissionResult } from './model.js';
@@ -59,7 +71,10 @@ export class Renderer {
   private readonly emittedNotes = new Set<string>();
   private readonly mappedStatements = new Set<string>();
   private readonly mappedControls = new Set<string>();
-  private readonly inferenceSites = new Map<string, { readonly start: number; readonly end: number }>();
+  private readonly inferenceSites = new Map<
+    string,
+    { readonly start: number; readonly end: number }
+  >();
   private readonly labels = new Set<string>();
   private readonly gotos = new Set<ParallelTransfer>();
   private readonly localValidation: LocalValidationSession;
@@ -91,9 +106,13 @@ export class Renderer {
     this.writer = new Writer(context, options.indent, options.include_evidence, language);
     this.program = reconstruct(input, context);
     this.requirementPredicates = sourceRequirementPredicates(this.program.source?.requirements);
-    this.localValidation = this.program.local_validation_session ?? new LocalValidationSession(context);
+    this.localValidation =
+      this.program.local_validation_session ?? new LocalValidationSession(context);
     this.sourceDataValue = sourceDataValues(
-      this.program.expressions, this.program.source?.addresses ?? [], context);
+      this.program.expressions,
+      this.program.source?.addresses ?? [],
+      context,
+    );
     this.origins.set(input.function.id, input.function);
     for (const diagnostic of this.program.diagnostics) {
       context.checkpoint(1);
@@ -233,7 +252,8 @@ export class Renderer {
     const previous = this.identifiers.get(id);
     if (previous) return previous.identifier;
     const stack = this.program.source?.stack;
-    const entryStack = (stack?.kind === 'entry' && stack.base.id === id) ||
+    const entryStack =
+      (stack?.kind === 'entry' && stack.base.id === id) ||
       this.program.parameter_registers.get(id)?.role === 'stack_pointer';
     const stem = entryStack ? 'entry_sp' : sourceIdentifierStem(preferred);
     let name = stem,
@@ -257,13 +277,16 @@ export class Renderer {
       ? (this.identifiers.get(value.id)?.identifier ??
           this.sourceIdentifier(
             value.id,
-            this.names.get(value.id) ?? this.sourceRoleNames.get(value.id) ?? `value${this.sourceTemporary++}`,
+            this.names.get(value.id) ??
+              this.sourceRoleNames.get(value.id) ??
+              `value${this.sourceTemporary++}`,
           ))
       : this.identifier(value.id, 'v');
   }
 
   private valueType(value: Value): string {
-    const source = this.sourceValueTypes.get(value.id) ??
+    const source =
+      this.sourceValueTypes.get(value.id) ??
       this.program.source?.value_types?.get(value.id)?.type_id;
     if (source) return this.sourceType(source);
     return this.dataType(value.type);
@@ -279,17 +302,33 @@ export class Renderer {
 
   private sourceInterpretation(value: Value, text: string, id?: string): string {
     if (!this.program.source) return text;
-    id ??= this.sourceValueTypes.get(value.id) ?? this.program.source.value_types?.get(value.id)?.type_id;
+    id ??=
+      this.sourceValueTypes.get(value.id) ??
+      this.program.source.value_types?.get(value.id)?.type_id;
     const type = id && this.typeRecords.get(id)?.definition;
-    if (!type || (type.kind !== 'integer' && type.kind !== 'pointer') ||
-      type.bits !== bitWidth(value.type) || value.type.kind !== 'integer') return text;
+    if (
+      !type ||
+      (type.kind !== 'integer' && type.kind !== 'pointer') ||
+      type.bits !== bitWidth(value.type) ||
+      value.type.kind !== 'integer'
+    )
+      return text;
     if (type.kind === 'pointer')
       return this.language === 'c-like'
         ? `((${this.sourceType(id!)})(uintptr_t)(${text}))`
-        : this.call('uint64', 'Interpret exact target pointer bits without a host pointer or inferred object bounds.', [text]);
+        : this.call(
+            'uint64',
+            'Interpret exact target pointer bits without a host pointer or inferred object bounds.',
+            [text],
+          );
     if (!type.signed) return text;
-    return this.language === 'c-like' ? `((int${type.bits}_t)(${text}))`
-      : this.call(`int${type.bits}`, 'Interpret the proven source signed scalar from its unchanged machine bits.', [text]);
+    return this.language === 'c-like'
+      ? `((int${type.bits}_t)(${text}))`
+      : this.call(
+          `int${type.bits}`,
+          'Interpret the proven source signed scalar from its unchanged machine bits.',
+          [text],
+        );
   }
 
   private expression(expression: Expression, type: DataType): string {
@@ -312,7 +351,9 @@ export class Renderer {
         const address = `(${base} ${offset < 0n ? '-' : '+'} ${offset < 0n ? -offset : offset})`;
         return this.language === 'c-like'
           ? `((uintptr_t)${address})`
-          : this.call('uint64', 'Wrap an entry-stack byte address to the target pointer width.', [address]);
+          : this.call('uint64', 'Wrap an entry-stack byte address to the target pointer width.', [
+              address,
+            ]);
       }
       return this.language === 'c-like'
         ? `((uintptr_t)&stack_frame[${offset - stack.minimum_offset}])`
@@ -323,7 +364,8 @@ export class Renderer {
       : undefined;
     if (!expression) {
       const name = this.local(value),
-        id = this.sourceValueTypes.get(value.id) ??
+        id =
+          this.sourceValueTypes.get(value.id) ??
           this.program.source?.value_types?.get(value.id)?.type_id;
       const type = id && this.typeRecords.get(id)?.definition;
       if (this.program.source && type && type.kind === 'integer' && type.signed)
@@ -335,8 +377,13 @@ export class Renderer {
               [name],
             );
       if (this.program.source && type && type.kind === 'pointer')
-        return this.language === 'c-like' ? `((uintptr_t)(${name}))`
-          : this.call('uint64', 'Read a source pointer as exact target address bits before machine byte arithmetic.', [name]);
+        return this.language === 'c-like'
+          ? `((uintptr_t)(${name}))`
+          : this.call(
+              'uint64',
+              'Read a source pointer as exact target address bits before machine byte arithmetic.',
+              [name],
+            );
       return name;
     }
     if (this.expanding.has(value.id)) this.invalid('Cyclic reconstructed expression');
@@ -427,7 +474,8 @@ export class Renderer {
       const type = this.program.source?.value_types?.get(id);
       if (type) {
         references.add(type.type_id);
-        for (const subject of [...type.association_ids, ...type.subject_ids]) references.add(subject);
+        for (const subject of [...type.association_ids, ...type.subject_ids])
+          references.add(subject);
         for (const evidenceId of type.evidence_ids) dataEvidence.add(evidenceId);
       }
       const value = this.program.values.get(id);
@@ -435,7 +483,13 @@ export class Renderer {
       const data = this.sourceDataValue(value);
       for (const evidenceId of data?.object?.evidence_ids ?? []) dataEvidence.add(evidenceId);
     }
-    this.writer.map({ ...origin, id: subjects[0] ?? origin.id }, start, references, [...dataEvidence], end);
+    this.writer.map(
+      { ...origin, id: subjects[0] ?? origin.id },
+      start,
+      references,
+      [...dataEvidence],
+      end,
+    );
   }
 
   private map(
@@ -482,7 +536,9 @@ export class Renderer {
           this.writer.quote(item.name ?? `data_${object.address.value.toString(16)}`),
           `0x${object.address.value.toString(16)}`,
           `0x${object.offset.toString(16)}`,
-          object.byte_length === null ? this.writer.quote('unknown') : `0x${object.byte_length.toString(16)}`,
+          object.byte_length === null
+            ? this.writer.quote('unknown')
+            : `0x${object.byte_length.toString(16)}`,
           this.language === 'c-like' ? String(object.mutable) : object.mutable ? 'True' : 'False',
           this.writer.quote(object.kind),
         ],
@@ -515,7 +571,8 @@ export class Renderer {
     if (node.target.kind === 'indirect') {
       const value = node.target.value;
       if (this.program.source && !this.program.inline.has(value.id)) {
-        const id = this.sourceValueTypes.get(value.id) ??
+        const id =
+          this.sourceValueTypes.get(value.id) ??
           this.program.source.value_types?.get(value.id)?.type_id;
         const type = id && this.typeRecords.get(id)?.definition;
         // Callable context retains the declared pointer local; value() converts
@@ -638,8 +695,12 @@ export class Renderer {
     if (local)
       return (
         this.identifiers.get(local.id)?.identifier ??
-        this.sourceIdentifier(local.id,
-          this.names.get(local.id) ?? this.sourceRoleNames.get(local.id) ?? `local${this.sourceLocal++}`)
+        this.sourceIdentifier(
+          local.id,
+          this.names.get(local.id) ??
+            this.sourceRoleNames.get(local.id) ??
+            `local${this.sourceLocal++}`,
+        )
       );
     let address = this.sourceAddressValue(node.address);
     const type = node.kind === 'load' ? node.result.type : node.value.type,
@@ -720,8 +781,13 @@ export class Renderer {
     let text: string;
     switch (node.kind) {
       case 'assign':
-        text = `${this.local(node.result)} = ${this.sourceInterpretation(node.result,
-          this.expression(this.program.expressions.get(node.result.id) ?? node.expression, node.result.type))}`;
+        text = `${this.local(node.result)} = ${this.sourceInterpretation(
+          node.result,
+          this.expression(
+            this.program.expressions.get(node.result.id) ?? node.expression,
+            node.result.type,
+          ),
+        )}`;
         break;
       case 'read_register': {
         const operation = this.call(
@@ -750,7 +816,11 @@ export class Renderer {
         text = this.call(
           'memory_fence',
           'DMB ISH ordering event: all explicit memory reads/writes before this statement are ordered before subsequent reads/writes within the inner-shareable domain. No memory bytes or registers are modified. acquire_release does not claim sequentially-consistent total order or DSB completion; never elide, duplicate, or move memory accesses across this event.',
-          [this.writer.quote(node.scope), this.writer.quote(node.ordering), this.writer.quote(node.accesses)],
+          [
+            this.writer.quote(node.scope),
+            this.writer.quote(node.ordering),
+            this.writer.quote(node.accesses),
+          ],
         );
         break;
       case 'load':
@@ -916,8 +986,12 @@ export class Renderer {
       this.mapped(
         node,
         start,
-        [view.shape.id, view.field.id, view.shape.type_id,
-          ...(this.program.source?.field_subjects?.get(node.id) ?? [])],
+        [
+          view.shape.id,
+          view.field.id,
+          view.shape.type_id,
+          ...(this.program.source?.field_subjects?.get(node.id) ?? []),
+        ],
         [...view.shape.evidence_ids, ...view.field.evidence_ids],
       );
   }
@@ -928,8 +1002,7 @@ export class Renderer {
     destination: string | null,
   ): boolean {
     if (transfer.mode === 'next') return transfer.target === destination;
-    if (transfer.mode === 'goto')
-      return !!this.program.source && transfer.target === destination;
+    if (transfer.mode === 'goto') return !!this.program.source && transfer.target === destination;
     for (let i = nesting.length - 1; i >= 0; i--) {
       const item = nesting[i]!;
       if (item.kind !== 'loop') continue;
@@ -1023,8 +1096,13 @@ export class Renderer {
     if (copies.length === 1) {
       const copy = copies[0]!;
       moves.push({ destination: copy.destination.id, source: copy.source });
-      this.writer.statement(depth, `${this.local(copy.destination)} = ${
-        this.sourceInterpretation(copy.destination, this.value(copy.source))}`);
+      this.writer.statement(
+        depth,
+        `${this.local(copy.destination)} = ${this.sourceInterpretation(
+          copy.destination,
+          this.value(copy.source),
+        )}`,
+      );
     } else {
       type Move = {
         destination: Value;
@@ -1089,7 +1167,8 @@ export class Renderer {
           }
           if (!candidate) this.invalid('Parallel transfer dependency cycle cannot be resolved');
           candidate.temporary = `transfer_${this.temporary++}`;
-          if (moves.length <= 128) moves.push({ destination: candidate.temporary, source: candidate.source });
+          if (moves.length <= 128)
+            moves.push({ destination: candidate.temporary, source: candidate.source });
           this.writer.statement(
             depth,
             this.writer.declaration(
@@ -1101,11 +1180,14 @@ export class Renderer {
           release(candidate);
         } else {
           const move = ready[next++]!;
-          if (moves.length <= 128) moves.push({ destination: move.destination.id, source: move.temporary ?? move.source });
+          if (moves.length <= 128)
+            moves.push({ destination: move.destination.id, source: move.temporary ?? move.source });
           this.writer.statement(
             depth,
-            `${this.local(move.destination)} = ${
-              this.sourceInterpretation(move.destination, move.temporary ?? this.value(move.source))}`,
+            `${this.local(move.destination)} = ${this.sourceInterpretation(
+              move.destination,
+              move.temporary ?? this.value(move.source),
+            )}`,
           );
           pending.delete(move.destination.id);
           release(move);
@@ -1113,27 +1195,55 @@ export class Renderer {
       }
     }
     if (copies.length) {
-      const checked = this.localValidation.check('parallel-copy', transfer.effect.destination.id,
-        'actual phi-copy emission', () => {
+      const checked = this.localValidation.check(
+        'parallel-copy',
+        transfer.effect.destination.id,
+        'actual phi-copy emission',
+        () => {
           this.localValidation.allowance.charge();
-          if (transfer.copies.length > 64) return { kind: 'parallel-copy', subject: transfer.effect.destination.id,
-            scope: 'actual phi-copy emission', status: 'unverified', reason: 'original edge copy bound exceeded' };
-          return validateParallelMoves(transfer.effect.destination.id,
+          if (transfer.copies.length > 64)
+            return {
+              kind: 'parallel-copy',
+              subject: transfer.effect.destination.id,
+              scope: 'actual phi-copy emission',
+              status: 'unverified',
+              reason: 'original edge copy bound exceeded',
+            };
+          return validateParallelMoves(
+            transfer.effect.destination.id,
             transfer.copies.filter((copy) => {
               this.localValidation.allowance.charge();
-              return this.program.live.has(copy.destination.id) && !this.program.inline.has(copy.destination.id);
-            }), moves, (id) => {
+              return (
+                this.program.live.has(copy.destination.id) &&
+                !this.program.inline.has(copy.destination.id)
+              );
+            }),
+            moves,
+            (id) => {
               const expression = this.program.expressions.get(id);
-              return this.program.inline.has(id) || (expression?.kind === 'cast' && expression.op === 'bitcast')
-                ? expression : undefined;
-            }, this.localValidation.allowance);
-        }, [origin.id]);
-      if (checked.status === 'rejected')
-        rejectTranslation(checked, origin);
+              return this.program.inline.has(id) ||
+                (expression?.kind === 'cast' && expression.op === 'bitcast')
+                ? expression
+                : undefined;
+            },
+            this.localValidation.allowance,
+          );
+        },
+        [origin.id],
+      );
+      if (checked.status === 'rejected') rejectTranslation(checked, origin);
     }
-    this.emittedEdges.set(transfer, this.gotos.has(transfer)
-      ? { kind: 'goto', target: transfer.target }
-      : { kind: transfer.mode === 'break' || transfer.mode === 'continue' ? transfer.mode : 'fallthrough' });
+    this.emittedEdges.set(
+      transfer,
+      this.gotos.has(transfer)
+        ? { kind: 'goto', target: transfer.target }
+        : {
+            kind:
+              transfer.mode === 'break' || transfer.mode === 'continue'
+                ? transfer.mode
+                : 'fallthrough',
+          },
+    );
     if (this.gotos.has(transfer))
       this.writer.statement(depth, `goto ${this.identifier(transfer.target, 'label')}`);
     else if (transfer.mode === 'break' || transfer.mode === 'continue')
@@ -1163,11 +1273,17 @@ export class Renderer {
         const requirement = this.requirementPredicates.get(control.id);
         const originalCondition = this.value(control.condition);
         const condition = requirement
-          ? this.call('requirement_predicate',
+          ? this.call(
+              'requirement_predicate',
               'A pure predicate at its original control site. Arguments: requirement ID, site ID, exact SSA state epoch, original predicate, supported predicate result (0 or 1). Evaluate the original pure predicate and preserve any known result, including unsupported state. Only an unknown result may be resolved by explicit matching acknowledgment to the documented supported result; this never changes surrounding values, effects, other sites or epochs, or moves or erases the guard.',
-              [this.writer.quote(requirement.requirement.id), this.writer.quote(requirement.site.id),
-                this.writer.quote(requirement.site.state_epoch), originalCondition,
-                requirement.site.supported_predicate_value ? '1' : '0'])
+              [
+                this.writer.quote(requirement.requirement.id),
+                this.writer.quote(requirement.site.id),
+                this.writer.quote(requirement.site.state_epoch),
+                originalCondition,
+                requirement.site.supported_predicate_value ? '1' : '0',
+              ],
+            )
           : originalCondition;
         let conditionValue = control.condition,
           expression: Expression | undefined;
@@ -1232,8 +1348,13 @@ export class Renderer {
           const values = this.writer.list(projection.results, (value) =>
             this.program.source?.return_pointer && !this.program.source.return_source_type
               ? this.sourceAddressValue(value, true)
-              : this.sourceInterpretation(value, this.value(value),
-                this.program.signature?.signature.return_type ?? this.program.source?.return_source_type));
+              : this.sourceInterpretation(
+                  value,
+                  this.value(value),
+                  this.program.signature?.signature.return_type ??
+                    this.program.source?.return_source_type,
+                ),
+          );
           this.writer.statement(
             depth,
             values.length
@@ -1264,21 +1385,36 @@ export class Renderer {
       case 'indirect':
       case 'trap':
       case 'unknown': {
-        const tail = control.kind === 'indirect' && control.tail_call ? this.program.tails.get(control.id) : undefined;
+        const tail =
+          control.kind === 'indirect' && control.tail_call
+            ? this.program.tails.get(control.id)
+            : undefined;
         if (tail && this.program.source && control.kind === 'indirect') {
-          const key = this.addressKey(tail.target), known = this.sourceAddresses.get(key);
-          const name = this.sourceNames.get(key) ?? this.sourceIdentifier(control.id,
-            this.names.get(control.id) ?? known?.name ?? `sub_${tail.target.value.toString(16)}`);
+          const key = this.addressKey(tail.target),
+            known = this.sourceAddresses.get(key);
+          const name =
+            this.sourceNames.get(key) ??
+            this.sourceIdentifier(
+              control.id,
+              this.names.get(control.id) ?? known?.name ?? `sub_${tail.target.value.toString(16)}`,
+            );
           this.sourceNames.set(key, name);
           const arguments_ = tail.boundary.arguments.map((value) => {
             ids.push(value.id);
             return this.value(value);
           });
           if (tail.boundary.argument_list_complete === false)
-            arguments_.push(this.call(arguments_.length ? 'unknown_argument_remainder' : 'unknown_arguments',
-              'Unresolved trailing native tail-call arguments; observed prefix is retained, not a complete prototype.', []));
-          this.writer.helper(name,
-            `Native tail transfer to ${this.writer.quote(key)} using observed ${this.input.source!.abi.id} storage. Preserve unknown target effects and forward its actual results. An absent observed result layout is unknown, not void.`);
+            arguments_.push(
+              this.call(
+                arguments_.length ? 'unknown_argument_remainder' : 'unknown_arguments',
+                'Unresolved trailing native tail-call arguments; observed prefix is retained, not a complete prototype.',
+                [],
+              ),
+            );
+          this.writer.helper(
+            name,
+            `Native tail transfer to ${this.writer.quote(key)} using observed ${this.input.source!.abi.id} storage. Preserve unknown target effects and forward its actual results. An absent observed result layout is unknown, not void.`,
+          );
           ids.push(control.target.id);
           this.writer.statement(depth, `return ${name}(${this.writer.join(arguments_)})`);
           break;
@@ -1289,9 +1425,21 @@ export class Renderer {
           ids.push(control.target.id);
           if (control.tail_call) {
             args.push(
-              this.call('unknown_arguments', 'The source argument list is unresolved, not empty. Known changed physical input bits remain in the tail-call boundary snapshot.', []),
-              this.call('unknown_calling_convention', 'The target calling convention is not established; do not infer it from a discovered code address.', []),
-              this.call('unknown_results', 'The target result interface is unresolved, not void. Propagate the actual tail-call result without guessing its width or type.', []),
+              this.call(
+                'unknown_arguments',
+                'The source argument list is unresolved, not empty. Known changed physical input bits remain in the tail-call boundary snapshot.',
+                [],
+              ),
+              this.call(
+                'unknown_calling_convention',
+                'The target calling convention is not established; do not infer it from a discovered code address.',
+                [],
+              ),
+              this.call(
+                'unknown_results',
+                'The target result interface is unresolved, not void. Propagate the actual tail-call result without guessing its width or type.',
+                [],
+              ),
             );
           }
         }
@@ -1374,7 +1522,10 @@ export class Renderer {
     for (const requirement of this.program.source?.requirements ?? []) {
       this.context.checkpoint(1);
       if (requirement.kind === 'fp_environment')
-        w.comment(0, `Requirement ${requirement.id} (${requirement.status}): ${requirement.explanation}`);
+        w.comment(
+          0,
+          `Requirement ${requirement.id} (${requirement.status}): ${requirement.explanation}`,
+        );
     }
     const displayName = this.names.get(this.input.function.id);
     const functionName = this.program.source
@@ -1396,8 +1547,8 @@ export class Renderer {
         ? this.sourceIdentifier(
             value.id,
             this.sourceRoleNames.has(value.id)
-              ? this.sourceRoleNames.get(value.id) ?? `arg${i}`
-              : this.program.source.parameter_names.get(value.id) ?? source?.name ?? `arg${i}`,
+              ? (this.sourceRoleNames.get(value.id) ?? `arg${i}`)
+              : (this.program.source.parameter_names.get(value.id) ?? source?.name ?? `arg${i}`),
           )
         : this.identifier(value.id, source ? 'arg' : register ? 'reg' : 'arg');
       parameters.push({
@@ -1417,16 +1568,18 @@ export class Renderer {
         ? this.program.source.return_source_type
           ? this.sourceType(this.program.source.return_source_type)
           : this.program.source.return_pointer
-          ? this.language === 'c-like'
-            ? `${this.program.source.return_pointer === 'char' ? 'char' : 'uint8_t'} *`
-            : `pointer[${this.program.source.return_pointer === 'char' ? 'char' : 'uint8_t'}]`
-          : this.program.source.return_types?.length
             ? this.language === 'c-like'
-              ? `tuple<${w.join(this.program.source.return_types.map((type) => this.dataType(type)))}>`
-              : `tuple[${w.join(this.program.source.return_types.map((type) => this.dataType(type)))}]`
-            : this.program.source.return_type
-              ? this.dataType(this.program.source.return_type)
-              : hasTailCall ? 'unknown_result' : 'void'
+              ? `${this.program.source.return_pointer === 'char' ? 'char' : 'uint8_t'} *`
+              : `pointer[${this.program.source.return_pointer === 'char' ? 'char' : 'uint8_t'}]`
+            : this.program.source.return_types?.length
+              ? this.language === 'c-like'
+                ? `tuple<${w.join(this.program.source.return_types.map((type) => this.dataType(type)))}>`
+                : `tuple[${w.join(this.program.source.return_types.map((type) => this.dataType(type)))}]`
+              : this.program.source.return_type
+                ? this.dataType(this.program.source.return_type)
+                : hasTailCall
+                  ? 'unknown_result'
+                  : 'void'
         : 'physical_result';
     this.headerStart = w.offset;
     if (this.program.source && parameters.length <= 4) {
@@ -1502,8 +1655,12 @@ export class Renderer {
       this.context.checkpoint(1);
       if (declaredLocals.has(local.id) || !this.program.retained.has(node)) continue;
       declaredLocals.add(local.id);
-      const name = this.sourceIdentifier(local.id,
-        this.names.get(local.id) ?? this.sourceRoleNames.get(local.id) ?? `local${this.sourceLocal++}`),
+      const name = this.sourceIdentifier(
+          local.id,
+          this.names.get(local.id) ??
+            this.sourceRoleNames.get(local.id) ??
+            `local${this.sourceLocal++}`,
+        ),
         start = w.offset;
       w.statement(1, w.declaration(this.dataType(local.type), name));
       this.mapped(this.dataOrigin(node), start, [node]);
@@ -1534,19 +1691,36 @@ export class Renderer {
         if (!this.mappedStatements.has(id))
           this.invalid('Reconstructed coverage contains an unmapped statement');
     }
-    validateEmittedControl(this.input.function, this.emittedEdges, this.language, this.localValidation);
+    validateEmittedControl(
+      this.input.function,
+      this.emittedEdges,
+      this.language,
+      this.localValidation,
+    );
     for (const record of this.localValidation.records)
       if (record.kind === 'control' && record.status === 'rejected')
         rejectTranslation(record, this.controls.get(record.subject) ?? this.input.function);
     const requirements = sourceRequirementProofs(
-      this.program, w.mappings, { ids: w.ids.items, ranges: w.ranges.items }, this.context,
+      this.program,
+      w.mappings,
+      { ids: w.ids.items, ranges: w.ranges.items },
+      this.context,
     ).map((record) => w.requirement(record));
     const inferences = collectInferences(
-      this.input, this.program, this.localValidation.records, w, this.context,
-      this.inferenceSites, this.sourceDataValue,
+      this.input,
+      this.program,
+      this.localValidation.records,
+      w,
+      this.context,
+      this.inferenceSites,
+      this.sourceDataValue,
     );
     const declarationSpan = { start: this.headerStart, end: this.headerEnd };
-    const review = { operation: 'function_get', view: 'metadata', function_id: this.input.function.id } as const;
+    const review = {
+      operation: 'function_get',
+      view: 'metadata',
+      function_id: this.input.function.id,
+    } as const;
     w.charge({ declarationSpan, review });
     return {
       emission: {

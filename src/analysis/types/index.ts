@@ -35,7 +35,10 @@ import { inspectRegister, inspectStackMemory, type StackSnapshot } from '../stac
 import { AnalysisBudget } from '../ssa/budget.js';
 import { SourceLayouts, typeKey } from './layout.js';
 import {
-  buildMemoryShape, createAffineResolver, memoryAddressSources, memoryPointerFragments,
+  buildMemoryShape,
+  createAffineResolver,
+  memoryAddressSources,
+  memoryPointerFragments,
 } from './memory-shapes.js';
 import type {
   MemoryShape,
@@ -54,7 +57,10 @@ import type {
 export type * from './model.js';
 export { refineMemoryShapes, parameterMemoryShapes } from './memory-shapes.js';
 export type {
-  NativeParameterShape, MemoryShapeTransfer, MemoryShapeRefinementOptions, MemoryShapeParameter,
+  NativeParameterShape,
+  MemoryShapeTransfer,
+  MemoryShapeRefinementOptions,
+  MemoryShapeParameter,
 } from './memory-shapes.js';
 
 /** Stable annotation subject for storage relative to this function's entry SP.
@@ -858,10 +864,15 @@ export function recoverTypes(
       }
     }
 
-    const affine = createAffineResolver(definitions, (value) => {
-      const fact = stack.values.get(value)?.value;
-      return fact?.kind === 'constant' ? fact.bits : undefined;
-    }, budget, memoryAddressSources(input, budget));
+    const affine = createAffineResolver(
+      definitions,
+      (value) => {
+        const fact = stack.values.get(value)?.value;
+        return fact?.kind === 'constant' ? fact.bits : undefined;
+      },
+      budget,
+      memoryAddressSources(input, budget),
+    );
     const stackAccess = new Map(stack.accesses.map((access) => [access.node_id, access]));
     const groups = new Map<
       string,
@@ -906,9 +917,15 @@ export function recoverTypes(
         node.provenance.evidence_ids,
       );
       const targetCalls = callTargets.get(affine(value).base) ?? [];
-      const fieldProof = [proof, ...targetCalls.map((call_id) =>
-        reason('loaded field used as indirect call target', call_id,
-          [proof, ...nodes.get(call_id)!.provenance.evidence_ids]))];
+      const fieldProof = [
+        proof,
+        ...targetCalls.map((call_id) =>
+          reason('loaded field used as indirect call target', call_id, [
+            proof,
+            ...nodes.get(call_id)!.provenance.evidence_ids,
+          ]),
+        ),
+      ];
       group.fields.set(fieldId, {
         id: fieldId,
         offset,
@@ -924,17 +941,27 @@ export function recoverTypes(
         ],
         stack_region: access?.region ?? null,
         stride: isStack ? null : address.stride,
-        ...((targetCalls.length || previous?.call_target_ids?.length) ? {
-          call_target_ids: [...new Set([...(previous?.call_target_ids ?? []), ...targetCalls])].sort(),
-        } : {}),
+        ...(targetCalls.length || previous?.call_target_ids?.length
+          ? {
+              call_target_ids: [
+                ...new Set([...(previous?.call_target_ids ?? []), ...targetCalls]),
+              ].sort(),
+            }
+          : {}),
       });
       group.dynamic ||= address.stride !== null;
       groups.set(key, group);
       subjects.add(fieldId);
       typeSubjects.add(fieldId);
       const type_id = targetCalls.length
-        ? generated({ kind: 'pointer', bits: 64,
-            to: generated({ kind: 'unknown', size: null }, fieldProof) }, fieldProof)
+        ? generated(
+            {
+              kind: 'pointer',
+              bits: 64,
+              to: generated({ kind: 'unknown', size: null }, fieldProof),
+            },
+            fieldProof,
+          )
         : machineType(value.type, fieldProof);
       associate({
         subject_id: fieldId,
@@ -969,25 +996,40 @@ export function recoverTypes(
         for (const value of block.terminator.values) escapes.add(affine(value).base);
     const shapes: MemoryShape[] = [];
     for (const [key, group] of groups) {
-      const built = buildMemoryShape({
-        id: id('shape', key),
-        type_id: id('shape-type', key),
-        base: group.base,
-        fields: [...group.fields.values()],
-        alias: group.base.kind === 'stack' && stack.frame.aliased ? 'observed' : 'possible',
-        escape: group.base.kind === 'stack'
-          ? stack.frame.escaped ? 'observed' : 'unknown'
-          : escapes.has(group.base.value_id) ? 'observed' : 'unknown',
-        dynamic: group.dynamic || (group.base.kind === 'stack' && stack.frame.dynamic),
-        field_type: (field) => {
-          const proof = field.evidence_ids;
-          if (field.call_target_ids?.length)
-            return generated({ kind: 'pointer', bits: 64,
-              to: generated({ kind: 'unknown', size: null }, proof) }, proof);
-          return machineType(values.get(field.value_ids[0]!)!.type, proof);
+      const built = buildMemoryShape(
+        {
+          id: id('shape', key),
+          type_id: id('shape-type', key),
+          base: group.base,
+          fields: [...group.fields.values()],
+          alias: group.base.kind === 'stack' && stack.frame.aliased ? 'observed' : 'possible',
+          escape:
+            group.base.kind === 'stack'
+              ? stack.frame.escaped
+                ? 'observed'
+                : 'unknown'
+              : escapes.has(group.base.value_id)
+                ? 'observed'
+                : 'unknown',
+          dynamic: group.dynamic || (group.base.kind === 'stack' && stack.frame.dynamic),
+          field_type: (field) => {
+            const proof = field.evidence_ids;
+            if (field.call_target_ids?.length)
+              return generated(
+                {
+                  kind: 'pointer',
+                  bits: 64,
+                  to: generated({ kind: 'unknown', size: null }, proof),
+                },
+                proof,
+              );
+            return machineType(values.get(field.value_ids[0]!)!.type, proof);
+          },
+          array_type: (element, field) =>
+            generated({ kind: 'array', element, count: null }, field.evidence_ids),
         },
-        array_type: (element, field) => generated({ kind: 'array', element, count: null }, field.evidence_ids),
-      }, budget);
+        budget,
+      );
       addType({
         id: built.shape.type_id,
         definition: built.definition,
@@ -998,16 +1040,25 @@ export function recoverTypes(
       shapes.push(built.shape);
       conflicts.push(...built.conflicts);
       if (group.base.kind === 'value' && built.shape.base_offset === 0n) {
-        const type_id = generated({ kind: 'pointer', bits: 64, to: built.shape.type_id }, built.shape.evidence_ids);
+        const type_id = generated(
+          { kind: 'pointer', bits: 64, to: built.shape.type_id },
+          built.shape.evidence_ids,
+        );
         const binding = {
-          type_id, source: 'analysis' as const, status: 'candidate' as const,
+          type_id,
+          source: 'analysis' as const,
+          status: 'candidate' as const,
           evidence_ids: built.shape.evidence_ids,
         };
         associate({ ...binding, subject_id: group.base.value_id });
         const value = values.get(group.base.value_id);
         if (value)
           for (const fragment of memoryPointerFragments(value, definitions, budget))
-            associate({ ...binding, subject_id: fragment.value.id }, fragment.offset, fragment.width);
+            associate(
+              { ...binding, subject_id: fragment.value.id },
+              fragment.offset,
+              fragment.width,
+            );
       }
     }
     // Machine signedness is an operation-use constraint, not a rewritten value.
@@ -1218,8 +1269,8 @@ export function recoverTypes(
           // remain within a particular struct member merely from its displacement.
           if (
             field.dynamic ||
-            field.stride !== null &&
-            (object?.kind !== 'array' || layouts.size(object.element) !== field.stride)
+            (field.stride !== null &&
+              (object?.kind !== 'array' || layouts.size(object.element) !== field.stride))
           )
             continue;
           for (const fieldType of fieldTypes) {

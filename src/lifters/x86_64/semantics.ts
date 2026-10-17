@@ -351,7 +351,11 @@ export class X86Semantics {
         write_rule: 'preserve_other_bits',
       });
     this.guard(
-      b.compare('ne', state, this.c(x86FpEnvironmentGuard.width_bits, x86FpEnvironmentGuard.supported_bits)),
+      b.compare(
+        'ne',
+        state,
+        this.c(x86FpEnvironmentGuard.width_bits, x86FpEnvironmentGuard.supported_bits),
+      ),
       [],
       x86FpEnvironmentGuard.unsupported_exit,
       false,

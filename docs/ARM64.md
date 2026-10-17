@@ -39,7 +39,6 @@ explicitly marking unknown source arguments, calling convention and results.
 A discovered code target alone is not a recovered prototype, and an empty
 changed-state overlay is not a zero-argument call.
 
-
 ## SIMD register-move aliases
 
 The lifter models `ORR_asimdsame_only` from its canonical `Rd`, `Rn`, `Rm` and `Q` fields, including the compiler's `MOV` alias (`Rn == Rm`) when the decoder exposes only opaque display operands. It preserves the entire selected bit pattern without interpreting FP payloads or lane text. The 64-bit form clears the high half of the 128-bit root; the 128-bit form replaces the whole root. This is the specific register-move family exercised by mixed integer/FP call preservation, not general support for opaque SIMD operands or lane-indexed moves.

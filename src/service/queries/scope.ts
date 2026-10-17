@@ -18,13 +18,16 @@ export interface LoadedFunctionScope {
 
 // One immutable native-record materialization per live loader image/revision.
 // Weak keys retain no image bytes after the store's own bounded cache evicts them.
-const navigation = new WeakMap<LoadedImage, {
-  readonly project_id: string;
-  readonly revision: number;
-  readonly image: LoadedImage;
-  readonly functions: readonly FunctionRecord[];
-  references?: readonly ReferenceRecord[];
-}>();
+const navigation = new WeakMap<
+  LoadedImage,
+  {
+    readonly project_id: string;
+    readonly revision: number;
+    readonly image: LoadedImage;
+    readonly functions: readonly FunctionRecord[];
+    references?: readonly ReferenceRecord[];
+  }
+>();
 export function loadImage(store: ProjectStore, revision: number, id: string): LoadedImage {
   const slices = store.snapshot(revision).images.filter((item) => item.image_id === id);
   if (!slices.length) queryFailure('not_found', 'Image is absent from the requested snapshot');
@@ -95,7 +98,8 @@ export function loadFunctionGraph(
   let indexed = navigation.get(image);
   if (!indexed || indexed.project_id !== scope.store.project_id || indexed.revision !== revision) {
     indexed = {
-      project_id: scope.store.project_id, revision,
+      project_id: scope.store.project_id,
+      revision,
       image: {
         ...image,
         symbols: records(scope, revision, image.id, 'symbol').items,
@@ -121,7 +125,11 @@ export function loadFunctionGraph(
 
 /** Reuse the immutable native function/reference arrays already materialized for
  * graph reconstruction; annotation/name presentation stays revision-specific. */
-export function loadFunctionIndex(scope: ReadScope, revision: number, image: LoadedImage): {
+export function loadFunctionIndex(
+  scope: ReadScope,
+  revision: number,
+  image: LoadedImage,
+): {
   readonly functions: readonly FunctionRecord[];
   readonly references: readonly ReferenceRecord[];
 } {

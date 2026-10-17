@@ -30,7 +30,8 @@ export function sourceExpressionDemand(
   context: OperationContext,
 ): SourceExpressionDemand {
   context.checkpoint(0);
-  const demand = new Set<string>(), pending: string[] = [];
+  const demand = new Set<string>(),
+    pending: string[] = [];
   const queue: { operands: readonly Value[]; sources: readonly Value[] }[] = [];
   const add = (value: Value): void => {
     context.checkpoint(1);
@@ -112,7 +113,8 @@ export function normalizeSourceExpressions(
     // Newly published aliases often have no previous readers or cached fact.
     // They still enter the normalization queue; there is no state to traverse.
     if (!resolutions.has(id) && !users.has(id) && !identityUsers.has(id)) return;
-    const pending = [id], seen = new Set<string>();
+    const pending = [id],
+      seen = new Set<string>();
     while (pending.length) {
       context.checkpoint(1);
       const changed = pending.pop()!;
@@ -150,7 +152,8 @@ export function normalizeSourceExpressions(
       observe(value.id);
       return cached;
     }
-    const path: Value[] = [], seen = new Set<string>();
+    const path: Value[] = [],
+      seen = new Set<string>();
     for (;;) {
       if (seen.has(value.id)) return value;
       seen.add(value.id);
@@ -188,21 +191,29 @@ export function normalizeSourceExpressions(
       : null;
   };
   const factor = (value: Value, coefficient: bigint, block: string): Value =>
-    create(`integer-factor:${value.id}:${coefficient}`, value.type, block,
-      { kind: 'constant', bits: BigInt.asUintN(bitWidth(value.type), coefficient) }, [value]);
+    create(
+      `integer-factor:${value.id}:${coefficient}`,
+      value.type,
+      block,
+      { kind: 'constant', bits: BigInt.asUintN(bitWidth(value.type), coefficient) },
+      [value],
+    );
   const scaled = (value: Value): { value: Value; coefficient: bigint } | null => {
     const expression = observe(resolve(value).id);
     if (expression?.kind !== 'integer') return null;
     if (expression.op === 'mul') {
-      const left = constant(expression.left), right = constant(expression.right);
+      const left = constant(expression.left),
+        right = constant(expression.right);
       if (right !== null) return { value: resolve(expression.left), coefficient: right };
       if (left !== null) return { value: resolve(expression.right), coefficient: left };
     }
     if (expression.op === 'shl') {
       const count = constant(expression.right);
       if (count !== null)
-        return { value: resolve(expression.left),
-          coefficient: count >= BigInt(bitWidth(value.type)) ? 0n : 1n << count };
+        return {
+          value: resolve(expression.left),
+          coefficient: count >= BigInt(bitWidth(value.type)) ? 0n : 1n << count,
+        };
     }
     return null;
   };
@@ -224,8 +235,10 @@ export function normalizeSourceExpressions(
       });
       let replacement: Expression = expression;
       if (expression.kind === 'cast' && value.type.kind === 'integer') {
-        if (['truncate', 'zero_extend', 'sign_extend'].includes(expression.op) &&
-          sameType(value.type, expression.value.type))
+        if (
+          ['truncate', 'zero_extend', 'sign_extend'].includes(expression.op) &&
+          sameType(value.type, expression.value.type)
+        )
           replacement = { kind: 'cast', op: 'bitcast', value: expression.value };
         else if (expression.op === 'truncate')
           replacement = { kind: 'extract', value: expression.value, offset: 0 };
@@ -235,18 +248,31 @@ export function normalizeSourceExpressions(
         if (expression.op === 'shl') {
           const count = constant(expression.right);
           if (count !== null)
-            replacement = { kind: 'integer', op: 'mul', left: expression.left,
-              right: factor(value, count >= BigInt(value.type.bits) ? 0n : 1n << count, block) };
+            replacement = {
+              kind: 'integer',
+              op: 'mul',
+              left: expression.left,
+              right: factor(value, count >= BigInt(value.type.bits) ? 0n : 1n << count, block),
+            };
         } else if (expression.op === 'add') {
-          const left = scaled(expression.left), right = scaled(expression.right);
+          const left = scaled(expression.left),
+            right = scaled(expression.right);
           // Match only x + k*x (in either order), not arbitrary expression
           // reassociation. SSA identity keeps repeated effectful definitions
           // distinct, and no operand or shared DAG is duplicated.
-          const matched = right?.value.id === expression.left.id ? right
-            : left?.value.id === expression.right.id ? left : null;
+          const matched =
+            right?.value.id === expression.left.id
+              ? right
+              : left?.value.id === expression.right.id
+                ? left
+                : null;
           if (matched)
-            replacement = { kind: 'integer', op: 'mul', left: matched.value,
-              right: factor(value, matched.coefficient + 1n, block) };
+            replacement = {
+              kind: 'integer',
+              op: 'mul',
+              left: matched.value,
+              right: factor(value, matched.coefficient + 1n, block),
+            };
         }
       }
       if (expression.kind === 'extract') {
@@ -359,7 +385,14 @@ export function normalizeSourceExpressions(
       // Revisit this value for multi-step reductions as well as its readers.
       if (replacement !== expression || operandsChanged) {
         const checked = validation.check('bitvector', id, 'source expression rewrite', () =>
-          validateBitvectorCandidate(value, original, replacement, expressions, validation.allowance));
+          validateBitvectorCandidate(
+            value,
+            original,
+            replacement,
+            expressions,
+            validation.allowance,
+          ),
+        );
         if (checked.status === 'rejected') {
           validation.rejectedRewrites.add(id);
           continue;

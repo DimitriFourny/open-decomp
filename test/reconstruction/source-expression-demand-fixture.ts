@@ -25,47 +25,86 @@ export function checkSourceExpressionDemand(): { outcomes: number; scenarios: nu
     const ir = converted.value;
     const structured = structureControlFlow(ir, createOperationContext());
     assert.ok(structured.value);
-    return { ir, program: reconstruct({ function: structured.value, source }, createOperationContext()) };
+    return {
+      ir,
+      program: reconstruct({ function: structured.value, source }, createOperationContext()),
+    };
   };
   const inputs = (emission: Emission, program: Reconstruction, x: bigint, second: bigint) => {
     const values = new Map<string, bigint>();
     for (const formal of emittedFormals(emission)) {
       const root = program.parameter_registers.get(formal.statement_id)?.root;
-      assert.ok(root === rdi.root || root === rsi.root, `Unexpected source parameter ${formal.name}`);
+      assert.ok(
+        root === rdi.root || root === rsi.root,
+        `Unexpected source parameter ${formal.name}`,
+      );
       values.set(formal.statement_id, root === rdi.root ? x : second);
     }
     return values;
   };
   const originalSubjects = (ir: SSAForm, emission: Emission): void => {
-    const mapped = new Set(emission.mappings.flatMap((mapping) => mapping.semantic_refs.map((ref) => emission.ids[ref]!)));
+    const mapped = new Set(
+      emission.mappings.flatMap((mapping) =>
+        mapping.semantic_refs.map((ref) => emission.ids[ref]!),
+      ),
+    );
     for (const block of ir.blocks)
       for (const node of [...block.instructions, block.terminator])
         assert.ok(mapped.has(node.id), `Original subject lost from emitted provenance: ${node.id}`);
   };
   let outcomes = 0;
-  const b = builder('source-demand-unused-pure-not-effects'), entry = b.block('entry');
-  const x = entry.readRegister(rdi), pointer = entry.readRegister(rsi);
+  const b = builder('source-demand-unused-pure-not-effects'),
+    entry = b.block('entry');
+  const x = entry.readRegister(rdi),
+    pointer = entry.readRegister(rsi);
   const unused = entry.int('shl', x, entry.constant(i64, 1n));
   entry.load(i64, pointer);
   entry.load(i64, pointer, { endian: 'little', alignment: 8, volatile: true });
-  entry.call({ kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } }, [x], [i64],
-    { registers: [], flags: [], memory: 'unknown_read_write' });
+  entry.call(
+    { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+    [x],
+    [i64],
+    { registers: [], flags: [], memory: 'unknown_read_write' },
+  );
   entry.return([x]);
   const effects = prepare(b.finish(entry, [i64]));
   const unnormalized = effects.program.expressions.get(unused.id);
-  assert.ok(unnormalized?.kind === 'integer' && unnormalized.op === 'shl', 'undemanded pure operation remains original, not secretly rewritten');
-  assert.ok(!effects.program.local_validation?.some((record) => record.subject === unused.id), 'no proof is omitted for a performed dead rewrite');
+  assert.ok(
+    unnormalized?.kind === 'integer' && unnormalized.op === 'shl',
+    'undemanded pure operation remains original, not secretly rewritten',
+  );
+  assert.ok(
+    !effects.program.local_validation?.some((record) => record.subject === unused.id),
+    'no proof is omitted for a performed dead rewrite',
+  );
   for (const node of effects.ir.blocks.flatMap((block) => block.instructions))
-    if (node.kind === 'load' || node.kind === 'call') assert.ok(effects.program.retained.has(node.id));
+    if (node.kind === 'load' || node.kind === 'call')
+      assert.ok(effects.program.retained.has(node.id));
   for (const language of ['c-like', 'python-like'] as const) {
     const emission = emit(effects.ir, { source }, language).emission;
     originalSubjects(effects.ir, emission);
     for (const value of [0n, 1n, 0x8000000000000000n, 0xffffffffffffffffn]) {
       let calls = 0;
-      const callback = (args: readonly bigint[]) => { calls++; assert.deepEqual(args, [value]); return 9n; };
-      const bytes = new Map(Array.from({ length: 8 }, (_, offset) => [0x3000n + BigInt(offset), offset + 1]));
-      const observed = execute(emission, inputs(emission, effects.program, value, 0x3000n), bytes, 0n,
-        new Map(), new Map(), new Map([['sub_2000', callback], ['0x2000', callback]]));
+      const callback = (args: readonly bigint[]) => {
+        calls++;
+        assert.deepEqual(args, [value]);
+        return 9n;
+      };
+      const bytes = new Map(
+        Array.from({ length: 8 }, (_, offset) => [0x3000n + BigInt(offset), offset + 1]),
+      );
+      const observed = execute(
+        emission,
+        inputs(emission, effects.program, value, 0x3000n),
+        bytes,
+        0n,
+        new Map(),
+        new Map(),
+        new Map([
+          ['sub_2000', callback],
+          ['0x2000', callback],
+        ]),
+      );
       assert.equal(observed.exit, 'machine_return');
       assert.deepEqual(observed.values, [value]);
       assert.deepEqual(observed.events, ['load', 'load', 'call']);
@@ -77,10 +116,17 @@ export function checkSourceExpressionDemand(): { outcomes: number; scenarios: nu
   // This unresolved tail has no recovered source interface. Its physical return
   // channel must stay rooted before identity/snapshot reduction, even though the
   // function has no explicit source return value.
-  const tailBuilder = builder('source-demand-unknown-physical-channel'), tailEntry = tailBuilder.block('entry');
-  const argument = tailEntry.readRegister(rdi), target = tailEntry.readRegister(rsi);
+  const tailBuilder = builder('source-demand-unknown-physical-channel'),
+    tailEntry = tailBuilder.block('entry');
+  const argument = tailEntry.readRegister(rdi),
+    target = tailEntry.readRegister(rsi);
   tailEntry.writeRegister(rax, tailEntry.int('shl', argument, tailEntry.constant(i64, 1n)));
-  tailEntry.terminate({ kind: 'indirect', target, tail_call: true, reason: 'unresolved trusted fixture tail' });
+  tailEntry.terminate({
+    kind: 'indirect',
+    target,
+    tail_call: true,
+    reason: 'unresolved trusted fixture tail',
+  });
   const tail = prepare(tailBuilder.finish(tailEntry));
   const exits = [...tail.program.physical_exits.values()].flat();
   assert.ok(exits.some((binding) => binding.register.root === rax.root));
@@ -91,20 +137,30 @@ export function checkSourceExpressionDemand(): { outcomes: number; scenarios: nu
       const observed = execute(emission, inputs(emission, tail.program, value, 0x4000n));
       assert.equal(observed.exit, 'tail_call');
       assert.equal(observed.tail_target, 0x4000n);
-      assert.deepEqual(observed.registers.get(rax.root), { bits: BigInt.asUintN(64, value * 2n), known: 0xffffffffffffffffn });
+      assert.deepEqual(observed.registers.get(rax.root), {
+        bits: BigInt.asUintN(64, value * 2n),
+        known: 0xffffffffffffffffn,
+      });
       outcomes++;
     }
   }
 
   // An explicit scalar result does not classify another changed ABI return
   // word. Keep that uncertain physical overlay without inventing an aggregate.
-  const overlayBuilder = builder('source-demand-uncertain-return-overlay'), overlayEntry = overlayBuilder.block('entry');
+  const overlayBuilder = builder('source-demand-uncertain-return-overlay'),
+    overlayEntry = overlayBuilder.block('entry');
   const overlayArgument = overlayEntry.readRegister(rdi);
-  overlayEntry.writeRegister(rdx, overlayEntry.int('shl', overlayArgument, overlayEntry.constant(i64, 1n)));
+  overlayEntry.writeRegister(
+    rdx,
+    overlayEntry.int('shl', overlayArgument, overlayEntry.constant(i64, 1n)),
+  );
   overlayEntry.return([overlayArgument]);
   const overlay = prepare(overlayBuilder.finish(overlayEntry, [i64]));
-  assert.ok([...overlay.program.returns.values()].some((boundary) =>
-    boundary.outputs.some((binding) => binding.register.root === rdx.root)));
+  assert.ok(
+    [...overlay.program.returns.values()].some((boundary) =>
+      boundary.outputs.some((binding) => binding.register.root === rdx.root),
+    ),
+  );
   for (const language of ['c-like', 'python-like'] as const) {
     const emission = emit(overlay.ir, { source }, language).emission;
     originalSubjects(overlay.ir, emission);
@@ -112,14 +168,22 @@ export function checkSourceExpressionDemand(): { outcomes: number; scenarios: nu
       const observed = execute(emission, inputs(emission, overlay.program, value, 0n));
       assert.equal(observed.exit, 'machine_return');
       assert.deepEqual(observed.values, [value]);
-      assert.deepEqual(observed.registers.get(rdx.root), { bits: BigInt.asUintN(64, value * 2n), known: 0xffffffffffffffffn });
+      assert.deepEqual(observed.registers.get(rdx.root), {
+        bits: BigInt.asUintN(64, value * 2n),
+        known: 0xffffffffffffffffn,
+      });
       outcomes++;
     }
   }
 
-  const unknownBuilder = builder('source-demand-unknown-effect'), unknownEntry = unknownBuilder.block('entry');
+  const unknownBuilder = builder('source-demand-unknown-effect'),
+    unknownEntry = unknownBuilder.block('entry');
   const unknownArgument = unknownEntry.readRegister(rdi);
-  unknownEntry.unknown('trusted unresolved effect boundary', { registers: [], flags: [], memory: 'unknown_read_write' });
+  unknownEntry.unknown('trusted unresolved effect boundary', {
+    registers: [],
+    flags: [],
+    memory: 'unknown_read_write',
+  });
   unknownEntry.return([unknownArgument]);
   const unknown = prepare(unknownBuilder.finish(unknownEntry, [i64]));
   for (const language of ['c-like', 'python-like'] as const) {
