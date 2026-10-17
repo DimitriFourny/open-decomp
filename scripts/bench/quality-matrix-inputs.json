@@ -1,0 +1,731 @@
+{
+  "schema": 1,
+  "scope": "P2.2 broader source-known static-analysis corpus; no correctness/ranking claim",
+  "matrix": {
+    "compiler_variants": [
+      "apple-clang21",
+      "llvm-clang23"
+    ],
+    "expected_input_cells": 24,
+    "optimizations": [
+      "O0",
+      "O2"
+    ],
+    "selected_functions_per_cell": 12,
+    "symbol_states": [
+      "symbol-bearing",
+      "stripped"
+    ],
+    "targets": [
+      "macho-arm64",
+      "pe-x86_64",
+      "elf-x86_64"
+    ]
+  },
+  "source": {
+    "corpus_license": "MIT; repository LICENSE",
+    "files": [
+      {
+        "bytes": 1002,
+        "path": "/Users/df0/Documents/open-decomp-quality-matrix-inputs-reviewed-2026-10-17/source/LICENSE",
+        "sha256": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243"
+      },
+      {
+        "bytes": 4964,
+        "path": "/Users/df0/Documents/open-decomp-quality-matrix-inputs-reviewed-2026-10-17/source/adler32.c",
+        "sha256": "9cd1443a24ff2a3053961695bd432035c58347386a420d3388232376ebabe211"
+      },
+      {
+        "bytes": 1081,
+        "path": "/Users/df0/Documents/open-decomp-quality-matrix-inputs-reviewed-2026-10-17/source/corpus-LICENSE",
+        "sha256": "225a830013ac15a31827d8d1e63d81563c769dd02a0fff5ccd158696cba9c47c"
+      },
+      {
+        "bytes": 31605,
+        "path": "/Users/df0/Documents/open-decomp-quality-matrix-inputs-reviewed-2026-10-17/source/crc32.c",
+        "sha256": "8fd16f0a7714d51c89c2eb37eb98ec15e8a4dc57ba343e7b7398b19144039fda"
+      },
+      {
+        "bytes": 591749,
+        "path": "/Users/df0/Documents/open-decomp-quality-matrix-inputs-reviewed-2026-10-17/source/crc32.h",
+        "sha256": "9a2223575183ac2ee8a247f20bf3ac066e8bd0140369556bdbdffc777435749e"
+      },
+      {
+        "bytes": 2945,
+        "path": "/Users/df0/Documents/open-decomp-quality-matrix-inputs-reviewed-2026-10-17/source/quality-matrix-corpus.c",
+        "sha256": "bd645e96379d016e8bf1c2cae3673ca80b8a8414a6d51b75d1f8ba86c6efa41d"
+      },
+      {
+        "bytes": 16500,
+        "path": "/Users/df0/Documents/open-decomp-quality-matrix-inputs-reviewed-2026-10-17/source/zconf.h",
+        "sha256": "f5134250a67d57459234b63858f0d9d3ef8dcc48e9e1028d3f4fdcf6eae677ae"
+      },
+      {
+        "bytes": 96829,
+        "path": "/Users/df0/Documents/open-decomp-quality-matrix-inputs-reviewed-2026-10-17/source/zlib.h",
+        "sha256": "8a5579af72ea4f427ff00a4150f0ccb3fc5c1e4379f726e101133b1ab9fc600c"
+      },
+      {
+        "bytes": 6677,
+        "path": "/Users/df0/Documents/open-decomp-quality-matrix-inputs-reviewed-2026-10-17/source/zutil.h",
+        "sha256": "dddb2dc7a1dc339ecf2c8e089b366f08bb731c0839c7110240d17ce731bb4fea"
+      }
+    ],
+    "zlib_archive_sha256": "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
+    "zlib_license": "Zlib; original source/LICENSE retained verbatim",
+    "zlib_url": "https://zlib.net/fossils/zlib-1.3.1.tar.gz",
+    "zlib_version": "1.3.1"
+  },
+  "method": {
+    "entry": "matrix_entry is an analysis root, not platform process startup. No analyzed binary is executed.",
+    "library_configuration": "Actual unmodified zlib adler32.c/crc32.c, supported Z_SOLO configuration; real checksum workload, not full deflate/inflate coverage.",
+    "oracle_limits": "Source known; no behavioral-equivalence or undefined-input/exceptional FP environment claim.",
+    "source_or_sidecar_debug_types_supplied_to_decompilers": false,
+    "stripping": "Static/debug symbols removed, no exported fixture symbols. Function VAs inherited only after exact text-section byte equality is checked.",
+    "symbol_selection": "Exact VA from compiler symbol table of paired unstripped image, identically provided to both tools. Labels remain evidence-only, not injected annotations.",
+    "target_execution": false
+  },
+  "baseline": {
+    "archive": "quality-matrix-inputs.tar.gz",
+    "bytes": 639854,
+    "sha256": "96863c3783347be3fe75279401c3f4bd9808d29e9f16daed845f4cc96fe5e250",
+    "files": [
+      {
+        "path": "build-manifest.json",
+        "bytes": 246017,
+        "sha256": "51990cd5291a1bf06de87c13461fcd3f2fb4dfb4371ab45a78521ec6c7125197"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O0/stripped",
+        "bytes": 7464,
+        "sha256": "40ff9d28d5da8c3bcd5c1587a8f04cbbd1647c17eb24a40e13099e981eafb154"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O0/stripped.disassembly.txt",
+        "bytes": 72335,
+        "sha256": "f2d3c4eb36411fec66de7731ac8398c24e5d77ec6c443dca92448e053996e608"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O0/stripped.metadata.txt",
+        "bytes": 1709,
+        "sha256": "0ea4d1f48b052bb5a036e185bf27a6050a5dfe6850ffb238f867daae98ad9ecb"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O0/stripped.text.bin",
+        "bytes": 4520,
+        "sha256": "0203ce2ec9c0a04e9cf42d4da9031a088c35c30663ffa964afc20a1757619b24"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O0/symbol-bearing.disassembly.txt",
+        "bytes": 73809,
+        "sha256": "5f44e1ff81d93cf6799b67566714a7b1329732370d9b56dbe1c1d71338144f3a"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O0/symbol-bearing.metadata.txt",
+        "bytes": 7550,
+        "sha256": "08d93380de9f9467c65324fd62cad0c204e930449e5fda7cc9b31ebbc5d106cf"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O0/symbol-bearing.text.bin",
+        "bytes": 4520,
+        "sha256": "0203ce2ec9c0a04e9cf42d4da9031a088c35c30663ffa964afc20a1757619b24"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O0/symbols",
+        "bytes": 8912,
+        "sha256": "551e16d0b8f936942cc43a4aaabf2a575a3608e24596f6cf3af1358c1ca45eba"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O0/symbols.nm.txt",
+        "bytes": 706,
+        "sha256": "f35cad81a75829c97e96f6256dffeb9ecbfcb0bff5bc5f80888eb7beac77da49"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O2/stripped",
+        "bytes": 6704,
+        "sha256": "d829c6ee5e022eaaa7de3ee7246b4ecbf3a6972a67bc82fca4eab2f1189fe609"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O2/stripped.disassembly.txt",
+        "bytes": 60806,
+        "sha256": "eb39230d71bd56df76388769f5c4ba4bb9b3066ddc889ab110690691427a93d6"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O2/stripped.metadata.txt",
+        "bytes": 1709,
+        "sha256": "f1b2f4a234ec10784f96ae0bb5fde1604d8877c6482254ec81418cff4a56eafc"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O2/stripped.text.bin",
+        "bytes": 3761,
+        "sha256": "264e052c7f22ee5ae4761f8d0997c4f96b10380b5d8b930213e06fb70b857399"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O2/symbol-bearing.disassembly.txt",
+        "bytes": 62423,
+        "sha256": "4d6cb1d9a0d3c32f8ad2f242bfaf0d9fd7f3594ef27c67bc60d6018c7e85ad00"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O2/symbol-bearing.metadata.txt",
+        "bytes": 7059,
+        "sha256": "8cded3f84cd1d76dc246fc5a6b8a46a1cec1233e714e0ab2dd540420f0b113e7"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O2/symbol-bearing.text.bin",
+        "bytes": 3761,
+        "sha256": "264e052c7f22ee5ae4761f8d0997c4f96b10380b5d8b930213e06fb70b857399"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O2/symbols",
+        "bytes": 8048,
+        "sha256": "45d747cf5d886901c837419fcc33fe121181dd8f682253fbb37afa430f295c42"
+      },
+      {
+        "path": "elf-x86_64-apple-clang21-O2/symbols.nm.txt",
+        "bytes": 632,
+        "sha256": "f8194819c129f463f2ed8d3435061f9a8c1d960320e762d9f405cf2f8438f413"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O0/stripped",
+        "bytes": 7464,
+        "sha256": "40ff9d28d5da8c3bcd5c1587a8f04cbbd1647c17eb24a40e13099e981eafb154"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O0/stripped.disassembly.txt",
+        "bytes": 72334,
+        "sha256": "47d1e2b372bf35420a5d39fe588803bfcba818d76710adad199b82cb5f2298b1"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O0/stripped.metadata.txt",
+        "bytes": 1708,
+        "sha256": "238e03591345ce315f1213c404c9e3a8a834918f802d737071d272be38b2a866"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O0/stripped.text.bin",
+        "bytes": 4520,
+        "sha256": "0203ce2ec9c0a04e9cf42d4da9031a088c35c30663ffa964afc20a1757619b24"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O0/symbol-bearing.disassembly.txt",
+        "bytes": 73808,
+        "sha256": "a16be524f19980aa17778489950f900939eb3cf2d4cc0025a7746ea9cb1c3e67"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O0/symbol-bearing.metadata.txt",
+        "bytes": 7549,
+        "sha256": "5c13d8a80684d7466dd24dd72a8de85845c86124e8ad10997261d55b163a5338"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O0/symbol-bearing.text.bin",
+        "bytes": 4520,
+        "sha256": "0203ce2ec9c0a04e9cf42d4da9031a088c35c30663ffa964afc20a1757619b24"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O0/symbols",
+        "bytes": 8896,
+        "sha256": "10b83c338afe2a7f3f87a24c60aefb97438c4e6d3307a8a63b415cccbc427559"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O0/symbols.nm.txt",
+        "bytes": 706,
+        "sha256": "f35cad81a75829c97e96f6256dffeb9ecbfcb0bff5bc5f80888eb7beac77da49"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O2/stripped",
+        "bytes": 6600,
+        "sha256": "28e40fd68d14a5226aeab7de48440f9d1411ef2972ccedd9aa5f43903820fa74"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O2/stripped.disassembly.txt",
+        "bytes": 59411,
+        "sha256": "e4ceb286dcf85bf7dc73aae471aee11fa35d6112c1863c329e00c68fe24e6e16"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O2/stripped.metadata.txt",
+        "bytes": 1708,
+        "sha256": "cbf1af776976202bf30afb5295b791310626ad0b696e2386297b17f4b4b5285d"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O2/stripped.text.bin",
+        "bytes": 3662,
+        "sha256": "a41d253dd157129fcfc713471031fe2cc8f414a735171bf10c84bdd41bd341a5"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O2/symbol-bearing.disassembly.txt",
+        "bytes": 61029,
+        "sha256": "534267197fa8166149f46cbc8ef5cfaa6c684266f8dffe7fd8cd13a99d879363"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O2/symbol-bearing.metadata.txt",
+        "bytes": 7058,
+        "sha256": "9ff3c7253c94ed242e9c7d52f68bac13387de9e555177052bada3642114eb238"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O2/symbol-bearing.text.bin",
+        "bytes": 3662,
+        "sha256": "a41d253dd157129fcfc713471031fe2cc8f414a735171bf10c84bdd41bd341a5"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O2/symbols",
+        "bytes": 7936,
+        "sha256": "f410831b63a1843c788c93e9da9bd786d68442266022bb51698ae581d3cc277c"
+      },
+      {
+        "path": "elf-x86_64-llvm-clang23-O2/symbols.nm.txt",
+        "bytes": 632,
+        "sha256": "4f52dbe7a396f37d8675754e23b4c0d347155d80ea6b3e41a0a30d8b710ded96"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O0/stripped",
+        "bytes": 17168,
+        "sha256": "87eb12ccbdbe2fd2855a777d3cad47f1bddd68b20f24706e25a8c29bbd38abe5"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O0/stripped.disassembly.txt",
+        "bytes": 57601,
+        "sha256": "b8cb19f74df5f44dd0da5e100ac455bbff023402f775d73956b1a2d0f8d52c2c"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O0/stripped.metadata.txt",
+        "bytes": 1622,
+        "sha256": "c3dc064b9308589f53989f34fef336cef3b436a8c3ae4779a0f5a25a9295e9f2"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O0/stripped.text.bin",
+        "bytes": 5168,
+        "sha256": "75ed5fcd6d5b1ffe4b8ed2cf8bc2cbfe33a9a53c929bc2aedf2b8c2a5447aca3"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O0/symbol-bearing.disassembly.txt",
+        "bytes": 59314,
+        "sha256": "03c04b0f84a43f6543401d47ad73d62aa03aba059a2f770966eb54abf6b034fc"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O0/symbol-bearing.metadata.txt",
+        "bytes": 6690,
+        "sha256": "bc7ac2a3c7cb152af9b1701ba384fb9469faabecf6a4f933f460792ef7bc263c"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O0/symbol-bearing.text.bin",
+        "bytes": 5168,
+        "sha256": "75ed5fcd6d5b1ffe4b8ed2cf8bc2cbfe33a9a53c929bc2aedf2b8c2a5447aca3"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O0/symbols",
+        "bytes": 18000,
+        "sha256": "d976a41d0312c359278d516b9fa9a5edad0df4c06194eb3bd75f1538d2df99fe"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O0/symbols.nm.txt",
+        "bytes": 815,
+        "sha256": "d8184bba577c67b7a353ddd9e20ab3b2a9c63e51b93faeafc3a566b79d87fceb"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O2/stripped",
+        "bytes": 17168,
+        "sha256": "ebe17c0a018abb3b3985b3459c4ea4e5560fceba56cf68a4169da1d065259c74"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O2/stripped.disassembly.txt",
+        "bytes": 33363,
+        "sha256": "4f6962fc425666bbbebfc3c78cea82386076368bea802c354809524934a318ec"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O2/stripped.metadata.txt",
+        "bytes": 1621,
+        "sha256": "1039d8bef75d40a7a9dbe1c475e518395cf6ae4d8512fe293611e65977697b3f"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O2/stripped.text.bin",
+        "bytes": 2952,
+        "sha256": "60cb46c5b035329d350f2849f1db91509ac6f3fb30e717034c34b3c5ca8e85bd"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O2/symbol-bearing.disassembly.txt",
+        "bytes": 34837,
+        "sha256": "221ed3e2d101c00f4608924a96563c7c61cc4e77df3d02d0a1e51a20dd33e5c7"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O2/symbol-bearing.metadata.txt",
+        "bytes": 6160,
+        "sha256": "31fde7917245d5587d8b62a0acc3dd4d8e1cc6404a974588e376f36f400b91bb"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O2/symbol-bearing.text.bin",
+        "bytes": 2952,
+        "sha256": "60cb46c5b035329d350f2849f1db91509ac6f3fb30e717034c34b3c5ca8e85bd"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O2/symbols",
+        "bytes": 17920,
+        "sha256": "5d6d1d74cc2eedaec86bb3299e22639951ff438622ccb4c6cd29945b33439460"
+      },
+      {
+        "path": "macho-arm64-apple-clang21-O2/symbols.nm.txt",
+        "bytes": 736,
+        "sha256": "2266ffdfa716d93808a7c8273be283fe3670ba5b350c4cc74ba4f8b99e0dc3fb"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O0/stripped",
+        "bytes": 17168,
+        "sha256": "6dbdc5685725452c2bbfbb3204e106191633f17db40dbfb11f6dcc22c240f08d"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O0/stripped.disassembly.txt",
+        "bytes": 57228,
+        "sha256": "50bbcbbe3c82f48b1aac68734c114e354686d3cf1a314c4b192dd3c12a9f5b64"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O0/stripped.metadata.txt",
+        "bytes": 1621,
+        "sha256": "a202040da79924226163afcea5a81b0072869f21107c852eacd091fc6223ecd9"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O0/stripped.text.bin",
+        "bytes": 5124,
+        "sha256": "d2b9d5c33c1aae59cd2f28f6b6b17aecc7a3e0a01efbb4b4b6f4c7ed175fa6ff"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O0/symbol-bearing.disassembly.txt",
+        "bytes": 58945,
+        "sha256": "9067a8618e502dbc6863a9971f60528b5a7d8126928fe1655fd7a829e1ee81bf"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O0/symbol-bearing.metadata.txt",
+        "bytes": 6689,
+        "sha256": "07e7bd04d2f3b4552998089119a8a7499cb7a0624bf303a77d4bcd57af700d6c"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O0/symbol-bearing.text.bin",
+        "bytes": 5124,
+        "sha256": "d2b9d5c33c1aae59cd2f28f6b6b17aecc7a3e0a01efbb4b4b6f4c7ed175fa6ff"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O0/symbols",
+        "bytes": 18000,
+        "sha256": "342b4a1ae09bc7e39ad4221c3efb6afd1e6398114ca6ee58bb13bee2cbe55bd4"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O0/symbols.nm.txt",
+        "bytes": 815,
+        "sha256": "df8087a62b27325eb9606ef2837b949fadfaaedc0e66abc1ce4be97689880bd2"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O2/stripped",
+        "bytes": 17168,
+        "sha256": "a040703c3a1b0c8c5e98e45f7cd4b5a7456fc9d84966205ca2874f1f89d94b48"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O2/stripped.disassembly.txt",
+        "bytes": 34417,
+        "sha256": "53f5b60fdbda9502a6c8e0056c12412e5fe5c1498da7504b88100263f5df55bb"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O2/stripped.metadata.txt",
+        "bytes": 1620,
+        "sha256": "f9c85c797af92295bf3ac1451f8dc46f87bbd46b1f72658db54d3a191a86f2bd"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O2/stripped.text.bin",
+        "bytes": 3044,
+        "sha256": "fc63c8d02b72431280ad18a86549b986e8e23917af06566934bd669d125f92bf"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O2/symbol-bearing.disassembly.txt",
+        "bytes": 35899,
+        "sha256": "d941bdd1964234bfa93d288beba5a2d8c3bcf61ea45c91fbab353e132d5b1882"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O2/symbol-bearing.metadata.txt",
+        "bytes": 6159,
+        "sha256": "149826ef01c288d2acdb9acc4b29b0e363e24067ff26d49c1cd1a47f32643bfd"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O2/symbol-bearing.text.bin",
+        "bytes": 3044,
+        "sha256": "fc63c8d02b72431280ad18a86549b986e8e23917af06566934bd669d125f92bf"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O2/symbols",
+        "bytes": 17920,
+        "sha256": "e1bc9d8f3668b63db1c4ba860edfaf75271cb374dc0c87a6ead2929508d5efcc"
+      },
+      {
+        "path": "macho-arm64-llvm-clang23-O2/symbols.nm.txt",
+        "bytes": 736,
+        "sha256": "f628ab3ab0ce05b24df413f0298447a7f34827a4bc9983c0527893e9a62f2375"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O0/stripped.disassembly.txt",
+        "bytes": 67509,
+        "sha256": "4443390f0851a0f15249a16790c34956e9385b4eb65bdaf21cfc29f59032adca"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O0/stripped.exe",
+        "bytes": 6656,
+        "sha256": "4baa4a0ac5695214f6249b66382fe14d19fe1478d990a3c8c04696b85f0f09a7"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O0/stripped.metadata.txt",
+        "bytes": 3959,
+        "sha256": "a782c31bd796b0bda6b984517e2ce032e3602296b052abcda647f5001c0a6148"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O0/stripped.text.bin",
+        "bytes": 4508,
+        "sha256": "4c528b42a067e04b7ef10e488fe62a932e9d6659065f7c269c60fb229fa634e7"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O0/symbol-bearing.disassembly.txt",
+        "bytes": 69006,
+        "sha256": "61af312fb91ce7dbb9584b7d2872f6864a90b9b5d9eefc05feabeeec80ac8212"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O0/symbol-bearing.metadata.txt",
+        "bytes": 9634,
+        "sha256": "5066b4ba799c43131ef2eded728ce2ae5e84de8d2fec05974286c5313ec3d436"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O0/symbol-bearing.text.bin",
+        "bytes": 4508,
+        "sha256": "4c528b42a067e04b7ef10e488fe62a932e9d6659065f7c269c60fb229fa634e7"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O0/symbols.exe",
+        "bytes": 7680,
+        "sha256": "fa10a341dd58c9c7d18a09bbb7cb6ffc0e0c86ef39a549fb8141f3ea4ed22144"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O0/symbols.nm.txt",
+        "bytes": 853,
+        "sha256": "cdf62485a57e0d2fe4b449ce070a50037308ca4c492c0e81dc35341014a039bd"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O2/stripped.disassembly.txt",
+        "bytes": 58716,
+        "sha256": "1e2e22a4374dd4d3897ed145015ed78b9cfe77691a48f9673fd59b27a2792036"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O2/stripped.exe",
+        "bytes": 5632,
+        "sha256": "51c93f88f2daa5b6c62e430129fbce854b607a91c8015d68041a2108a5de23f9"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O2/stripped.metadata.txt",
+        "bytes": 3958,
+        "sha256": "40bd015319f702feda4d465c00278fe6e219dfb6dd06df090fd7446edcc87686"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O2/stripped.text.bin",
+        "bytes": 3456,
+        "sha256": "8d38d8d4cb26202c9b38a1ab208b3b703c6a227304655716e8c3ec390cc64016"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O2/symbol-bearing.disassembly.txt",
+        "bytes": 60319,
+        "sha256": "b2f3c4be2e1af0d5d16c77c78c8c9abe3cc291b576a16b5f992f5f80dce49e8a"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O2/symbol-bearing.metadata.txt",
+        "bytes": 9072,
+        "sha256": "6a29f1fda73ba2766ed5bca63d01c864cfd1668cbbe39447b44f98648bcfe443"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O2/symbol-bearing.text.bin",
+        "bytes": 3456,
+        "sha256": "8d38d8d4cb26202c9b38a1ab208b3b703c6a227304655716e8c3ec390cc64016"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O2/symbols.exe",
+        "bytes": 6656,
+        "sha256": "47bdb9f4b713cea42697cbfa6795bc8e2c2877e4552b9153974d2933f86d1e54"
+      },
+      {
+        "path": "pe-x86_64-apple-clang21-O2/symbols.nm.txt",
+        "bytes": 777,
+        "sha256": "367bc37d71082acc851ec4dbe37aaf51f0e30712fb2e8f2422e1362492919759"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O0/stripped.disassembly.txt",
+        "bytes": 67508,
+        "sha256": "39e3ebf8cf053e64eda0ef0bdb4822b4619a90a45cb7266f830b9c7176bb0d3a"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O0/stripped.exe",
+        "bytes": 6656,
+        "sha256": "4baa4a0ac5695214f6249b66382fe14d19fe1478d990a3c8c04696b85f0f09a7"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O0/stripped.metadata.txt",
+        "bytes": 3958,
+        "sha256": "801eba5ffe7063065b96a51a7ddcfa951c1fc88dc63a59f58a85479fccf9956b"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O0/stripped.text.bin",
+        "bytes": 4508,
+        "sha256": "4c528b42a067e04b7ef10e488fe62a932e9d6659065f7c269c60fb229fa634e7"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O0/symbol-bearing.disassembly.txt",
+        "bytes": 69005,
+        "sha256": "0124943e4510042cf3201c5f5157fe6d049b05cbb7d9797d65e9055615fa227a"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O0/symbol-bearing.metadata.txt",
+        "bytes": 9633,
+        "sha256": "984d6be04633c8ee4e0f6a166a8582cb461af0a075753725396fb4cb0f1c74b4"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O0/symbol-bearing.text.bin",
+        "bytes": 4508,
+        "sha256": "4c528b42a067e04b7ef10e488fe62a932e9d6659065f7c269c60fb229fa634e7"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O0/symbols.exe",
+        "bytes": 7680,
+        "sha256": "fa10a341dd58c9c7d18a09bbb7cb6ffc0e0c86ef39a549fb8141f3ea4ed22144"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O0/symbols.nm.txt",
+        "bytes": 853,
+        "sha256": "cdf62485a57e0d2fe4b449ce070a50037308ca4c492c0e81dc35341014a039bd"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O2/stripped.disassembly.txt",
+        "bytes": 56964,
+        "sha256": "abc5acbda02a982d3797d37b2187346af7429367d22b2204df7efa030b35099d"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O2/stripped.exe",
+        "bytes": 5632,
+        "sha256": "05ea33bb3eb84c893474f9078756fe1600567b024f8ce11ff0bcd30fd8f7047b"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O2/stripped.metadata.txt",
+        "bytes": 3957,
+        "sha256": "07888b51c58ddeacb208a26756d94061785103f4c4fa698e98db255c33895871"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O2/stripped.text.bin",
+        "bytes": 3341,
+        "sha256": "a06bb64f500014e4319464f5f0bfbbf237b02cd48305cd1ea5f6df4c4ec0a31d"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O2/symbol-bearing.disassembly.txt",
+        "bytes": 58558,
+        "sha256": "0639b6c262cbcc2a39f777f2bd1c18d69e3bbf71679efa67b8f14ba659e3927f"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O2/symbol-bearing.metadata.txt",
+        "bytes": 9071,
+        "sha256": "302e992cfcd282a1d0bae3c05f60f9d1cf3e084bfc29af920077790ae3f9b716"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O2/symbol-bearing.text.bin",
+        "bytes": 3341,
+        "sha256": "a06bb64f500014e4319464f5f0bfbbf237b02cd48305cd1ea5f6df4c4ec0a31d"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O2/symbols.exe",
+        "bytes": 6656,
+        "sha256": "5d88871b24f60f8d0ab6f252678fefe8bf40090b02a6840298413196ef7860f1"
+      },
+      {
+        "path": "pe-x86_64-llvm-clang23-O2/symbols.nm.txt",
+        "bytes": 777,
+        "sha256": "de857af4002b6d58d80fc8ab3f851fcb66d3feff9d7c0a3d8c38d23ec4adeb33"
+      },
+      {
+        "path": "source/LICENSE",
+        "bytes": 1002,
+        "sha256": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243"
+      },
+      {
+        "path": "source/adler32.c",
+        "bytes": 4964,
+        "sha256": "9cd1443a24ff2a3053961695bd432035c58347386a420d3388232376ebabe211"
+      },
+      {
+        "path": "source/corpus-LICENSE",
+        "bytes": 1081,
+        "sha256": "225a830013ac15a31827d8d1e63d81563c769dd02a0fff5ccd158696cba9c47c"
+      },
+      {
+        "path": "source/crc32.c",
+        "bytes": 31605,
+        "sha256": "8fd16f0a7714d51c89c2eb37eb98ec15e8a4dc57ba343e7b7398b19144039fda"
+      },
+      {
+        "path": "source/crc32.h",
+        "bytes": 591749,
+        "sha256": "9a2223575183ac2ee8a247f20bf3ac066e8bd0140369556bdbdffc777435749e"
+      },
+      {
+        "path": "source/quality-matrix-corpus.c",
+        "bytes": 2945,
+        "sha256": "bd645e96379d016e8bf1c2cae3673ca80b8a8414a6d51b75d1f8ba86c6efa41d"
+      },
+      {
+        "path": "source/zconf.h",
+        "bytes": 16500,
+        "sha256": "f5134250a67d57459234b63858f0d9d3ef8dcc48e9e1028d3f4fdcf6eae677ae"
+      },
+      {
+        "path": "source/zlib.h",
+        "bytes": 96829,
+        "sha256": "8a5579af72ea4f427ff00a4150f0ccb3fc5c1e4379f726e101133b1ab9fc600c"
+      },
+      {
+        "path": "source/zutil.h",
+        "bytes": 6677,
+        "sha256": "dddb2dc7a1dc339ecf2c8e089b366f08bb731c0839c7110240d17ce731bb4fea"
+      }
+    ],
+    "excluded": "Intermediate object files; installed compiler/linker tools and platform SDK. All 24 analyzed input binaries, source/licenses, exact compiler/linker commands, stripped-pair text hashes, symbol tables, readobj metadata and disassembly retained."
+  },
+  "review": {
+    "built_cells": 24,
+    "selected_function_cells": 288,
+    "symbol_stripping": "All selected static names absent after stripping; paired text-section hashes identical across all 12 built configurations.",
+    "independent_compiler_builds": "Apple clang21.0.0 clang-2100.3.34.2 vs Homebrew upstream LLVM clang23.1.3. Both share Clang lineage; not independent frontend algorithms.",
+    "jump_table_evidence": [
+      {
+        "configuration": "macho-arm64-apple-clang21-O2",
+        "symbol": "matrix_switch",
+        "evidence": "table-indexed LDRB then scaled ADD and BR x10 at VA 0x100000380"
+      },
+      {
+        "configuration": "macho-arm64-llvm-clang23-O2",
+        "symbol": "matrix_switch",
+        "evidence": "table-indexed LDRB then scaled ADD and BR x10 at VA 0x100000380"
+      },
+      {
+        "configuration": "pe-x86_64-apple-clang21-O2",
+        "symbol": "matrix_switch",
+        "evidence": "table-indexed MOVSLQ then ADD and indirect JMP at VA 0x140001058"
+      },
+      {
+        "configuration": "pe-x86_64-llvm-clang23-O2",
+        "symbol": "matrix_switch",
+        "evidence": "table-indexed MOVSLQ then ADD and indirect JMP at VA 0x140001058"
+      },
+      {
+        "configuration": "elf-x86_64-apple-clang21-O2",
+        "symbol": "matrix_switch",
+        "evidence": "table-indexed MOVSLQ then ADD and indirect JMP at VA 0x401ab8"
+      },
+      {
+        "configuration": "elf-x86_64-llvm-clang23-O2",
+        "symbol": "matrix_switch",
+        "evidence": "table-indexed MOVSLQ then ADD and indirect JMP at VA 0x401ab8"
+      }
+    ],
+    "analysis_run": "Completed at the coordinator-supplied immutable compiled checkpoint; results and all failure cells are retained separately in quality-matrix-results-2026-10-17.json and its hashed raw archive. Input review is not a correctness or ranking claim."
+  },
+  "rebuild_command": [
+    "python3",
+    "scripts/bench/quality-matrix-build.py",
+    "--output",
+    "<new-durable-directory>"
+  ]
+}

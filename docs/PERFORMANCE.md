@@ -226,3 +226,37 @@ Outputs must use a new durable non-hidden directory outside `/tmp`: the exercise
 Both tools use the same Python stdlib newline-JSON-RPC client, identical binary/symbol/address access and no injected source/types/annotations. The harness records raw requests/responses, schemas, tool/component identities, first/repeated samples, cache and semantic states, emitted artifacts and hashes. Large analysis artifacts are read across bounded resource pages and size/SHA256 checked. No analyzed binary executes. Client latency includes transport and raw logging; the selected bridge still creates a new `DecompInterface` per call, so these records are not persistent-interface engine-speed evidence.
 
 The exercised two-function smoke exited zero with eight matched C outputs, successful closes and both servers exiting zero. Arithmetic was complete, computed then cached; direct-call output remained explicitly partial, and its 630,962-byte artifact was retrieved across two pages. This smoke used the existing compiled application, not concurrent reconstruction changes, and supports harness functionality only. Durable smoke archive SHA256: `06e31569fd853ae44104c6d616d2ee263807f9dd406c7f7cbf2240bf3ce90587`; exact invocation and 80 member hashes are in `quality-evidence/smoke-2026-10-17.json`. Full-matrix, held-out, semantic/readability and normalized performance results remain separate gates.
+
+## Broader source-known paired matrix
+
+`quality-matrix-build.py` builds 24 inputs: Mach-O ARM64, PE x86-64 and ELF x86-64; independently built Apple clang 21.0.0 and Homebrew LLVM clang 23.1.3; `-O0`/`-O2`; symbol-bearing/truly stripped. These compilers share Clang lineage. The twelve selected functions cover multi-exit loops, real switch jump tables, aliases, aggregates, callbacks, variadic/mixed FP and an unchanged zlib 1.3.1 Adler-32/CRC-32 checksum workload—not full compression-library coverage. Exact flags, source/licenses, tools, disassembly and addresses are retained. All builds succeeded; stripping removed selected static names while preserving paired text-section hashes.
+
+Reviewed inputs: `quality-matrix-inputs.tar.gz`, SHA256 `96863c3783347be3fe75279401c3f4bd9808d29e9f16daed845f4cc96fe5e250`, with 118 member hashes in `quality-matrix-inputs.json`. The unmodified zlib archive is `quality-matrix-zlib-1.3.1.tar.gz`, SHA256 `9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23`; upstream notices are retained.
+
+```sh
+python3 scripts/bench/quality-matrix.py prepare --destination .local/performance/quality-matrix-reviewed
+python3 scripts/bench/quality-matrix.py run \
+  --inputs .local/performance/quality-matrix-reviewed \
+  --output "$HOME/Documents/open-decomp-quality-matrix-results" \
+  --entry dist/src/cli/entry.js \
+  --bridge "$HOME/Documents/open-decomp-quality-bridge" \
+  --ghidra /Users/df0/Downloads/ghidra_12.1.4_PUBLIC \
+  --java-home /opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home
+```
+
+Both tools receive identical binary bytes and compiler-grounded selected addresses, with no source, sidecars, types, prototypes, names or annotations injected. The same raw MCP client records every cell, including missing entries, failures, partial semantics and truncation; containing functions are not substituted for exact entries. No analyzed matrix target executes.
+
+The full default recording completed 24 input cells, 48 input/tool cells and 288 matched function pairs. All closes succeeded and servers exited zero. The complete compiled tree remained unchanged across the run: index SHA256 `db33db3bb8593018c7fb01ad60cee9e0393fc0a3ee635ae0dfd23ef3eb46b33c`. This checkpoint emitted `reconstructed-c-10`, pipeline/6 and reconstruction/9; later changes are outside its evaluated scope.
+
+**Text-return observations only—not correctness or usable-semantic-coverage scores:**
+
+| Target, 96 function cells/tool | Open Decomp text | OD complete / partial | OD missing entry / work failure | Ghidra MCP text | Ghidra missing-function failure |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Mach-O ARM64 | 92 | 32 / 60 | 0 / 4 | 96 | 0 |
+| PE x86-64 | 48 | 16 / 32 | 46 / 2 | 20 | 76 |
+| ELF x86-64 | 46 | 0 / 46 | 46 / 4 | 74 | 22 |
+| Total | 186 | 48 / 138 | 92 / 10 | 190 | 98 |
+
+All ten Open Decomp request errors were `adler32_z` work limits. Exact-address discovery gaps and all Ghidra selected-address-not-in-function errors remain present; these describe the pinned import/discovery/bridge configuration, not universal engine coverage. The harness verified 116 full Open Decomp artifacts by size/SHA256; no Ghidra text was truncated and no reconstruction-invariant rejection was reported. Ghidra semantic coverage is unavailable through the bridge.
+
+Durable raw results: `quality-matrix-results-2026-10-17.tar.gz`, SHA256 `701d79f537170bf715dfde4dd13b088f8c1ada44b5dcd8fa83a7bd518b14dec2`; its adjacent JSON indexes 3,248 retained members, the invocation and evaluated checkpoint. Numbered requests/responses, live schemas, emitted C, complete artifacts and matched results are retained; project databases and duplicate streams are omitted. This completes broader recording, not the parity gate. Behavioral correctness, held-out review and normalized performance remain separate; concurrent source-only smokes exclude performance conclusions.
