@@ -1206,6 +1206,10 @@ export class Renderer {
         ? `${this.language === 'c-like' ? 'C-like' : 'Python-like'} pseudocode; ${this.program.source.inferred ? 'inferred ABI interface' : 'recovered source interface'}.`
         : `${this.language === 'c-like' ? 'C-like' : 'Python-like'} reconstruction; explicit widths and ordered memory, not original source.`,
     );
+    for (const assumption of this.program.source?.assumptions ?? []) {
+      this.context.checkpoint(1);
+      w.comment(0, `Requirement: ${assumption}`);
+    }
     const displayName = this.names.get(this.input.function.id);
     const functionName = this.program.source
       ? this.sourceIdentifier(this.input.function.id, `fn_${displayName ?? 'function'}`)

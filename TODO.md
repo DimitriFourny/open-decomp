@@ -47,7 +47,7 @@ Surfaces: `src/analysis/stack/`, `src/analysis/calls/`, `src/abi/`, `src/reconst
 
 ### FP/vector inputs, results, and computations
 
-- [ ] Fix `fixture_float`: recover two floating inputs and the result of `a * 1.5 + b * 0.5`. Do not project an unrelated integer argument as the return value. Track FP/SIMD register banks and scalar lane widths independently of integer-register inference.
+- [x] Fix `fixture_float`: recover two floating inputs and the result of `a * 1.5 + b * 0.5`. Do not project an unrelated integer argument as the return value. Track FP/SIMD register banks and scalar lane widths independently of integer-register inference.
 - [ ] Fix variadic FP reconstruction and preserve vector lane operations through source projection. Cover the Darwin stack-based double sum, count-zero path, scalar/vector returns, mixed integer/FP calls, and vector stores.
   - Acceptance: finite supported-environment cases match the independent oracle; FP arithmetic remains live all the way to its actual result or memory effect. A scalar double return must not become a whole SIMD-register aggregate.
   - Keep FPCR/MXCSR, exceptional-value, rounding, underflow, and trap limitations honest. Retain the supported expression under explicit assumptions; do not erase it or claim unsupported environments are modeled.

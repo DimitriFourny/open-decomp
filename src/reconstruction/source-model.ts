@@ -7,6 +7,9 @@ export interface InferredCallee {
   readonly parameter_state?: 'observed' | 'ambiguous';
   readonly parameters: readonly RegisterDescriptor[];
   readonly returns: readonly RegisterDescriptor[];
+  /** Scalar lane types observed independently of architectural register capacity. */
+  readonly parameter_types?: readonly DataType[];
+  readonly return_types?: readonly DataType[];
   readonly evidence_ids: readonly string[];
 }
 export interface SourceAddress {
@@ -33,6 +36,8 @@ export interface SourcePresentation {
   readonly inferred: boolean;
   readonly parameter_names: ReadonlyMap<string, string>;
   readonly return_type: DataType | null;
+  /** Explicit preconditions of supported FP projection, not modeled control state. */
+  readonly assumptions?: readonly string[];
   readonly locals: ReadonlyMap<string, SourceLocal>;
   readonly stack: {
     readonly minimum_offset: bigint;

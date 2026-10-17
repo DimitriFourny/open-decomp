@@ -19,7 +19,7 @@ import { constructSSA } from '../../analysis/ssa/index.js';
 import { simplifySSA } from '../../analysis/values/index.js';
 import { inspectRegister, type StackFact } from '../../analysis/stack/index.js';
 import type { SuppliedTypeRecord, TypeRecoveryResult } from '../../analysis/types/index.js';
-import type { RegisterIR, SSAForm, Value } from '../../ir/index.js';
+import type { DataType, Expression, RegisterIR, SSAForm, Value } from '../../ir/index.js';
 import type { DebugRecovery } from '../../metadata/debug/index.js';
 import type { LibraryContracts } from '../../metadata/library-contracts/index.js';
 import type {
@@ -65,10 +65,14 @@ function parameterRegisters(abi: AbiProfile): readonly RegisterDescriptor[] {
     for (const parameter of layout.parameters)
       for (const location of parameter.locations)
         if (location.kind === 'register' && !registers.has(location.register.root))
-          registers.set(location.register.root, location.register);
+          registers.set(location.register.root, { ...location.register, width_bits: location.width_bits });
   }
   return [...registers.values()];
 }
+type ObservedInterface = Pick<
+  InferredCallee,
+  'parameters' | 'returns' | 'parameter_state' | 'parameter_types' | 'return_types'
+>;
 
 /** Roots count only when they reach semantic observations. Physical snapshots,
  * phi transport, register clobbers, private spills and preservation are not uses. */
@@ -77,10 +81,33 @@ function observeParameters(
   abi: AbiProfile,
   analysis: CallAnalysisResult,
   context: OperationContext,
-): Pick<InferredCallee, 'parameters' | 'returns' | 'parameter_state'> {
+): ObservedInterface {
   const candidates = parameterRegisters(abi),
     byRoot = new Map(candidates.map((register) => [register.root, register]));
   const observed = new Map<string, RegisterDescriptor>();
+  const scalarInputs = new Map<string, 32 | 64>();
+  const definitions = new Map<string, Expression>();
+  for (const block of ir.blocks)
+    for (const node of block.instructions) {
+      if (node.kind !== 'assign') continue;
+      definitions.set(node.result.id, node.expression);
+      if (node.result.type.kind !== 'float') continue;
+      for (const register of analysis.stack.values.get(node.result.id)?.incoming_registers ?? [])
+        if (register.bank === 'float' || register.bank === 'vector')
+          scalarInputs.set(register.root, node.result.type.bits);
+    }
+  const scalarOutput = (value: Value): Extract<DataType, { kind: 'float' }> | null => {
+    const seen = new Set<string>();
+    while (!seen.has(value.id)) {
+      context.checkpoint(1);
+      seen.add(value.id);
+      if (value.type.kind === 'float') return value.type;
+      const expression = definitions.get(value.id);
+      if (expression?.kind !== 'cast' || expression.op !== 'bitcast') return null;
+      value = expression.value;
+    }
+    return null;
+  };
   let ambiguous =
     analysis.state !== 'complete' ||
     analysis.stack.accesses.some(
@@ -179,6 +206,23 @@ function observeParameters(
       )
       .map((binding) => binding.register);
   }
+  const floatingPrimary = abi.classifyCall({
+    returns: { kind: 'float', bits: 64 }, parameters: [], variadic: false, fixed_parameter_count: 0,
+  }).returns.find((location) => location.kind === 'register');
+  let floatingType: Extract<DataType, { kind: 'float' }> | null = null;
+  if (floatingPrimary?.kind === 'register' && exits.length) {
+    const first = ir.register_states.find((row) => row.block === exits[0]!.id)?.exit.find(
+      (binding) => binding.register.root === floatingPrimary.register.root &&
+        binding.register.offset_bits === floatingPrimary.register.offset_bits);
+    floatingType = first ? scalarOutput(first.value) : null;
+    if (first && floatingType?.kind === 'float' && exits.every((exit) => {
+      const output = ir.register_states.find((row) => row.block === exit.id)?.exit.find(
+        (binding) => binding.register.id === first.register.id);
+      const type = output && scalarOutput(output.value);
+      return type?.kind === 'float' && type.bits === floatingType!.bits;
+    })) returns = [{ ...first.register, width_bits: floatingType.bits }];
+    else floatingType = null;
+  }
   for (const exit of exits) {
     const snapshot = analysis.stack.snapshots.get(exit.terminator.id);
     if (snapshot) for (const register of returns) note(inspectRegister(snapshot, register));
@@ -188,11 +232,21 @@ function observeParameters(
     if (!observed.has(candidate.root)) missingBanks.add(candidate.bank);
     else if (missingBanks.has(candidate.bank)) ambiguous = true;
   }
+  const parameters = candidates.flatMap((candidate) => {
+    const observedRegister = observed.get(candidate.root);
+    if (!observedRegister) return [];
+    const scalar = scalarInputs.get(candidate.root);
+    return [{ ...observedRegister, width_bits: scalar ?? observedRegister.width_bits }];
+  });
   return {
-    parameters: candidates.flatMap((candidate) =>
-      observed.has(candidate.root) ? [observed.get(candidate.root)!] : [],
-    ),
+    parameters,
+    parameter_types: parameters.map((register): DataType => {
+      const width = scalarInputs.get(register.root);
+      return width ? { kind: 'float', bits: width } : { kind: 'integer', bits: register.width_bits };
+    }),
     returns,
+    return_types: returns.map((register): DataType =>
+      floatingType ?? { kind: 'integer', bits: register.width_bits }),
     parameter_state: ambiguous ? 'ambiguous' : 'observed',
   };
 }
@@ -431,7 +485,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     }));
   for (const { fn, call_ids } of targets.values()) {
     context.checkpoint(1);
-    let observed: Pick<InferredCallee, 'parameters' | 'returns' | 'parameter_state'> = {
+    let observed: ObservedInterface = {
       parameters: [],
       returns: [],
       parameter_state: 'ambiguous',

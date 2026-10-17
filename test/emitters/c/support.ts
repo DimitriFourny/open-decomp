@@ -599,6 +599,7 @@ class Parser {
 export interface Observation {
   readonly exit: string;
   readonly values: readonly bigint[];
+  readonly source_calls?: readonly { readonly name: string; readonly arguments: readonly bigint[] }[];
   readonly registers: ReadonlyMap<string, { readonly bits: bigint; readonly known: bigint }>;
   readonly memory: ReadonlyMap<bigint, number>;
   readonly events: readonly string[];
@@ -618,6 +619,8 @@ export function execute(
   memory: Map<bigint, number> = new Map(),
   callDelta = 0n,
   entryRegisters: Observation['registers'] = new Map(),
+  unknownValues: ReadonlyMap<string, bigint> = new Map(),
+  sourceCalls: ReadonlyMap<string, (arguments_: readonly bigint[]) => bigint | readonly bigint[]> = new Map(),
 ): Observation {
   const text = emission.text,
     parser = new Parser(text),
@@ -641,6 +644,7 @@ export function execute(
     environment.set(match[1]!, inputs.get(id)!);
   }
   const calls: { target: bigint; arguments: bigint[] }[] = [];
+  const sourceCallsObserved: { name: string; arguments: bigint[] }[] = [];
   const number = (value: Data | undefined): bigint => {
     assert.equal(typeof value, 'bigint');
     return value as bigint;
@@ -987,13 +991,31 @@ export function execute(
       events.push('unknown');
       throw new Boundary('unknown', []);
     }
-    if (name === 'unknown_value' || name === 'undefined_value') return null;
+    if (name === 'unknown_value') return unknownValues.get(string(args[1])) ?? null;
+    if (name === 'undefined_value') return null;
+    if (name === 'unknown_arguments' || name === 'unknown_calling_convention' || name === 'unknown_results')
+      return { unresolved: name };
+    if (name === 'tail_call') {
+      assert.equal(object(args[1])['unresolved'], 'unknown_arguments');
+      assert.equal(object(args[2])['unresolved'], 'unknown_calling_convention');
+      assert.equal(object(args[3])['unresolved'], 'unknown_results');
+      events.push('tail_call');
+      return { exit: 'tail_call', target: number(args[0]), values: [], state: args.at(-1)! };
+    }
     if (name === 'physical_return' || name === 'source_return' || name.endsWith('_exit'))
       return {
         exit: name.endsWith('_return') ? 'machine_return' : name,
         values: name.endsWith('_return') ? array(args[0]) : [],
         state: args.at(-1)!,
       };
+    const sourceCall = sourceCalls.get(name);
+    if (sourceCall) {
+      const arguments_ = args.map(number);
+      events.push('call');
+      sourceCallsObserved.push({ name, arguments: arguments_ });
+      const returned = sourceCall(arguments_);
+      return typeof returned === 'bigint' ? returned : [...returned];
+    }
     throw new Error(`Oracle does not support helper ${name}`);
   };
   const evaluate = (expression: Expr): Data => {
@@ -1110,6 +1132,7 @@ export function execute(
               memory,
               events,
               calls,
+              source_calls: sourceCallsObserved,
             };
           const result = object(value);
           return {
@@ -1119,6 +1142,7 @@ export function execute(
             memory,
             events,
             calls,
+            source_calls: sourceCallsObserved,
           };
         }
       }
