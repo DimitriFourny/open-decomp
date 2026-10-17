@@ -169,3 +169,31 @@ Raw JSONL is retained locally under `.local/performance/`, not shipped as applic
 | `macos-release-current.jsonl`               | `2c9dd46c2cbaf56dcececb4e0dff2eb75dfcc9cea78df6504915f1397d2620d0` |
 
 Windows source acceptance, representative performance, and clean installed-artifact verification remain separately recorded gates. QEMU TCG results, when available, will be labeled emulated-host observations rather than native Windows throughput or an SLA.
+
+## Selected SQLite budget diagnosis (2026-10-17)
+
+This count-only diagnosis used SQLite 3.54.0 Mach-O ARM64, SHA256 `4e01e37ea6fc2cfb008521558f999ac06cdbb4504e3eeb422c1a84b5ead57e56`. Production traversal and budgets were unchanged. Durable evidence: `scripts/bench/selected-work-baseline.json`; runnable instrumentation: `scripts/bench/selected-work.ts` and `selected-work-hooks.ts`. Concurrent host activity excludes performance conclusions.
+
+| Image discovery profile | Decoded instructions | Successor-edge visits | Ownership queue visits | Functions | CFG blocks |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Ordinary 10,000-instruction ceiling | 10,000 | 10,190 | 13,499 | 3,389 | 4,181 |
+| Completed seeded traversal, raised observation ceilings | 287,720 | 317,051 | 319,301 | 3,521 | 79,496 |
+
+Both profiles recorded zero shared/overlapping instruction ownership records. The ten originally selected bodies total only 251 instructions after traversal finishes. Ordinary import retained just three instructions for most selected wrappers and six for each string-comparison loop. The unchanged public QueryService/worker path returned text for two selected SQLite functions; the other eight failed in decode/discovery before lifting or callee summaries.
+
+Separate causes:
+
+- Import spreads its instruction ceiling across unrelated image roots and persists the resulting partial observed ranges.
+- Each selected graph request repeats whole-image discovery. Neither measured result fits the 1,024-unit graph cache: 17,657 units at the ordinary ceiling; 367,216 after traversal finishes.
+- Native summaries repeat that global work. `sqlite3_complete` performs two entire-image traversals for only 306 body-plus-callee instructions. `changes64`, `total_changes64`, `errcode` and `limit` each perform three traversals for their body and two required native targets.
+- Raising a later query does not repair historically truncated discovery ranges, although it still pays for whole-image traversal. Finishing seeded discovery remains distinct from semantic coverage.
+
+Recorded reproduction commands (the retained contract selects the exact reviewed binary and ten functions):
+
+```sh
+node --import tsx scripts/bench/selected-work.ts --mode public --contract /tmp/open-decomp-ghidra-compare.sfUkLc/contract.json
+node --import tsx scripts/bench/selected-work.ts --mode diagnose --contract /tmp/open-decomp-ghidra-compare.sfUkLc/contract.json
+node --import tsx scripts/bench/selected-work.ts --mode diagnose --contract /tmp/open-decomp-ghidra-compare.sfUkLc/contract.json --import-instructions 1000000 --instructions 1000000
+```
+
+`public` uses ordinary defaults in a fresh isolated project. `diagnose` raises only non-instruction observation ceilings to 100,000 blocks, 10,000,000 IR nodes, 100,000,000 work and 300,000 ms; these are measurement settings, not a proposed repair. No analyzed input executes. The retained count record is historical evidence of the pre-repair implementation, not a promise that later instrumentation produces identical counts.
