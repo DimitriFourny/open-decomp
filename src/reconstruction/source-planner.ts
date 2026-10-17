@@ -387,6 +387,7 @@ export function planSource(
             kind: callee.parameter_state === 'ambiguous' ? 'physical' : 'inferred',
             signature: null,
             arguments: args,
+            ...(callee.argument_list_complete === false ? { argument_list_complete: false } : {}),
             results: returned,
             inputs: [],
             outputs: node.register_outputs,

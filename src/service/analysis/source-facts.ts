@@ -15,6 +15,7 @@ import {
   type CallAnalysisResult,
   type SuppliedCallContract,
 } from '../../analysis/calls/index.js';
+import { observeIndirectCallInterfaces } from '../../analysis/calls/observed.js';
 import { constructSSA } from '../../analysis/ssa/index.js';
 import { simplifySSA } from '../../analysis/values/index.js';
 import { recoverDataAddress } from '../../analysis/strings/source-data.js';
@@ -470,6 +471,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     abi = components.abi;
   const callees: InferredCallee[] = [],
     targets = new Map<string, { fn: FunctionRecord; call_ids: string[] }>();
+  callees.push(...observeIndirectCallInterfaces(input.ir, abi, input.types.calls, context));
   const nodes = new Map(
     input.ir.blocks.flatMap((block) => block.instructions).map((node) => [node.id, node]),
   );

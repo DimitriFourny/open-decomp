@@ -36,6 +36,21 @@ type Op =
   | { kind: 'return'; expression: Expr }
   | { kind: 'effect'; expression: Expr };
 
+interface EmittedText {
+  readonly text: string;
+  readonly mappings: readonly {
+    readonly start: number;
+    readonly end: number;
+    readonly statement_id: string;
+    readonly semantic_ids: readonly string[];
+  }[];
+}
+export interface EmittedFormal {
+  readonly name: string;
+  readonly statement_id: string;
+  readonly semantic_ids: readonly string[];
+}
+
 /** Small test-only parser for the emitted machine-expression/control grammar.
  * It consumes the OUTPUT, not IR or mappings, and never evals target text. Helper
  * semantics below are independent arithmetic/byte-array observations, not imports
@@ -45,6 +60,7 @@ class Parser {
   readonly tokens: string[] = [];
   readonly ops: Op[] = [];
   readonly labels = new Map<string, number>();
+  readonly headerEnd: number;
   private position = 0;
   private switchId = 0;
   private readonly loops: { start: number; breaks: number[] }[] = [];
@@ -56,9 +72,10 @@ class Parser {
         (line, index) => index >= header && /\):$|\) -> .*:$/.test(line),
       );
       assert.ok(endHeader >= header);
+      this.headerEnd = lines.slice(0, endHeader + 1).reduce((length, line) => length + line.length + 1, 0);
       const indents = [0];
       const token =
-        /[ \t]+|#[^\n]*|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|<<|>>|[.()[\],:=<>+*/%&|^~!-]/gy;
+        /[ \t]+|#[^\n]*|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|<<|>>|[.()[\],:=?<>+*/%&|^~!-]/gy;
       for (const line of lines.slice(endHeader + 1)) {
         if (/^\s*(?:#|$)/.test(line)) continue;
         const indent = line.length - line.trimStart().length;
@@ -92,16 +109,20 @@ class Parser {
     }
     const token =
       /\s+|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|<<|>>|[{}()[\],;:=?<>@+*/%&|^~!-]/gy;
-    let offset = 0;
+    let offset = 0, headerEnd = -1;
     while (offset < text.length) {
       token.lastIndex = offset;
       const match = token.exec(text);
       assert.ok(match, `Unrecognized emitted token near ${text.slice(offset, offset + 80)}`);
       offset = token.lastIndex;
-      if (!/^\s|^\/\*/.test(match[0])) this.tokens.push(match[0]);
+      if (!/^\s|^\/\*/.test(match[0])) {
+        if (match[0] === '{' && headerEnd < 0) headerEnd = match.index;
+        this.tokens.push(match[0]);
+      }
     }
     const start = this.tokens.indexOf('{');
     assert.ok(start >= 0);
+    this.headerEnd = headerEnd;
     this.position = start;
     this.block([]);
   }
@@ -635,16 +656,46 @@ export type SourceCallOracle = (
   arguments_: readonly bigint[],
   context: { readonly arguments_complete: boolean },
 ) => bigint | readonly bigint[];
+
+/** Formal identity comes from exact mapped declaration spans, never guessed
+ * argN spelling or commas inside an annotated/generic type. */
+export function emittedFormals(
+  emission: EmittedText,
+  headerEnd: number = new Parser(emission.text).headerEnd,
+): readonly EmittedFormal[] {
+  const python = /^def /m.test(emission.text);
+  const declarations = new Map<string, { formal: EmittedFormal; start: number; end: number }>();
+  for (const mapping of emission.mappings) {
+    if (mapping.end > headerEnd) continue;
+    const declaration = emission.text.slice(mapping.start, mapping.end).trim();
+    const match = python
+      ? /^([A-Za-z_]\w*)\s*:/.exec(declaration)
+      : /\b([A-Za-z_]\w*)\s*,?$/.exec(declaration);
+    if (!match) continue;
+    if (!python && !declaration.endsWith(',') &&
+        !/^\s*[,)]/.test(emission.text.slice(mapping.end, headerEnd)))
+      continue;
+    const name = match[1]!, previous = declarations.get(name);
+    if (previous) {
+      assert.ok(mapping.start < previous.end && mapping.end > previous.start,
+        `Duplicate formal declaration ${name}`);
+      declarations.set(name, {
+        formal: { ...previous.formal, semantic_ids: [...new Set([
+          ...previous.formal.semantic_ids, mapping.statement_id, ...mapping.semantic_ids,
+        ])] },
+        start: Math.min(previous.start, mapping.start), end: Math.max(previous.end, mapping.end),
+      });
+    } else declarations.set(name, {
+      formal: { name, statement_id: mapping.statement_id,
+        semantic_ids: [...new Set([mapping.statement_id, ...mapping.semantic_ids])] },
+      start: mapping.start, end: mapping.end,
+    });
+  }
+  return [...declarations.values()].sort((left, right) => left.start - right.start)
+    .map((declaration) => declaration.formal);
+}
 export function execute(
-  emission: {
-    readonly text: string;
-    readonly mappings: readonly {
-      readonly start: number;
-      readonly end: number;
-      readonly statement_id: string;
-      readonly semantic_ids: readonly string[];
-    }[];
-  },
+  emission: EmittedText,
   inputs: ReadonlyMap<string, bigint> = new Map(),
   memory: Map<bigint, number> = new Map(),
   callDelta = 0n,
@@ -658,20 +709,12 @@ export function execute(
     events: string[] = [];
   // Mappings supply only formal input identity; every operation below executes
   // parsed output independently of the analyzed IR and its reconstruction plan.
-  const python = /^def /m.test(text),
-    headerEnd = python ? text.search(/\)\s*(?:-> [^\n]+)?:/) : text.indexOf('{');
-  for (const mapping of emission.mappings) {
-    if (mapping.end > headerEnd) continue;
-    const line = text.slice(mapping.start, mapping.end).trim();
-    const match = python
-      ? /^([A-Za-z_]\w*)\s*:\s*[^,\n]+,?$/.exec(line)
-      : /^\S+\s+([A-Za-z_]\w*),?$/.exec(line);
-    if (!match) continue;
-    const id = inputs.has(mapping.statement_id)
-      ? mapping.statement_id
-      : mapping.semantic_ids.find((id) => inputs.has(id));
-    assert.ok(id, `Missing explicit input for ${match[1]}`);
-    environment.set(match[1]!, inputs.get(id)!);
+  for (const formal of emittedFormals(emission, parser.headerEnd)) {
+    const id = inputs.has(formal.statement_id)
+      ? formal.statement_id
+      : formal.semantic_ids.find((id) => inputs.has(id));
+    assert.ok(id, `Missing explicit input for ${formal.name}`);
+    environment.set(formal.name, inputs.get(id)!);
   }
   const calls: { target: bigint; arguments: bigint[]; arguments_complete?: boolean }[] = [];
   const sourceCallsObserved: { name: string; arguments: bigint[] }[] = [];

@@ -6,6 +6,8 @@ export interface InferredCallee {
   readonly call_id: string;
   readonly parameter_state?: 'observed' | 'ambiguous';
   readonly parameters: readonly RegisterDescriptor[];
+  /** False records an observed prefix without closing the target's source arity. */
+  readonly argument_list_complete?: boolean;
   readonly returns: readonly RegisterDescriptor[];
   /** Lane types observed independently of architectural register capacity. */
   readonly parameter_types?: readonly DataType[];

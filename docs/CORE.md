@@ -57,6 +57,16 @@ A complete list retains its count even if a type prevents physical allocation.
 Anonymous actuals remain call observations, not synthesized fixed formal
 parameters in a source signature.
 
+Indirect callback observations can preserve an ABI-register argument prefix
+without establishing a source prototype. The observed `fixture_indirect`
+register transfers establish the independent value input passed to the callback;
+the caller's subsequent 32-bit arithmetic establishes which result bits it
+consumes. Neither fact establishes a complete argument list or defined upper
+result bits. Both dialects retain the known argument, the consumed result and an
+explicit `unknown_argument_remainder()` marker. Unknown callback memory effects
+and potentially outgoing stack storage remain conservative. These observations
+do not follow or execute arbitrary callback targets.
+
 `AbiCallLayout.implicit_register_inputs` records machine requirements separately
 from source parameters. SysV variadic/unprototyped calls require AL to be an
 unsigned upper bound on vector-register usage, from the established count to
