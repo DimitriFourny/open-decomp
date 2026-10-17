@@ -2,6 +2,8 @@
 
 Import from `src/core/index.ts` or the owning module, using `.js` relative specifiers. Core has no MCP or decoder-library dependency. The root package export is owned by integration.
 
+Module names in the interface map below are relative to `src/core/`.
+
 ## Interface map
 
 | Module | Main exports / consumers |
@@ -199,6 +201,6 @@ Target strings, names and notes remain untrusted data. Workers do not execute ta
 
 The same unified entry serves these tools/resources with official SDK 2.3.1 `createMcpHandler` via `open-decomp mcp start --transport http --config ABSOLUTE_JSON_PATH`, or `bun run mcp:http --config ABSOLUTE_JSON_PATH` from a built checkout. Transport-specific help is `open-decomp mcp start --transport http --help`. The root embedding surface is `startHttpServer` / `HttpServerHandle` and `loadHttpConfig` / `HttpConfig`; the handle exposes the actual bound `url` and idempotent `close(): Promise<void>`. No new public analysis protocol or transport executable alias is introduced.
 
-See [REMOTE.md](../../REMOTE.md) for exact provisioning, limits and ownership. Every request uses private operator-provisioned high-entropy bearer authentication against stored hashes, not OAuth/SSO. Each principal has a separate service/worker pool, disjoint canonical private project root and authorized input roots; artifact/job/project IDs and annotation authors are not login credentials. Non-loopback listeners require native TLS; exact Host/Origin checks do not imply CORS support or an OS sandbox.
+See [REMOTE.md](REMOTE.md) for exact provisioning, limits and ownership. Every request uses private operator-provisioned high-entropy bearer authentication against stored hashes, not OAuth/SSO. Each principal has a separate service/worker pool, disjoint canonical private project root and authorized input roots; artifact/job/project IDs and annotation authors are not login credentials. Non-loopback listeners require native TLS; exact Host/Origin checks do not imply CORS support or an OS sandbox.
 
 HTTP ownership transfers at validated, authorized service dispatch, before any guaranteed durable commit. Transport loss, HTTP deadline and SDK cancellation do not automatically cancel dispatched work; use durable `analysis_status` / `analysis_cancel` and inspect state after a lost acknowledgement instead of replaying mutations. Network slots and dispatched work slots are separately bounded; status/cancel/close retain a control lane. Shutdown stops admission, aborts exchanges, closes sockets, settles dispatched bounded service calls, then cancels remaining queued jobs and closes all principal workers. Embedding-only worker runtime options remain trusted host code and are not accepted from JSON/network metadata.

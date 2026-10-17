@@ -40,7 +40,7 @@
     },
     {
       "path": "scripts/fixtures/generate.ts",
-      "sha256": "4258fa0aaa1ee19e29ad3892a0d2dabba08baff02c9f39b60686626a3688d8a5"
+      "sha256": "27c299c05f49b4dd60a3a392383bd599bb822feffd69a8ad54b0bb6c37bf484d"
     },
     {
       "path": "scripts/fixtures/inspect.ts",
@@ -2576,7 +2576,7 @@
   "expected": "fixtures/expected.json",
   "inventory": "fixtures/inventory.json",
   "loaderExpectations": "fixtures/loader-expectations.json",
-  "documentation": "fixtures/README.md",
+  "documentation": "docs/FIXTURES.md",
   "licenseFile": "fixtures/LICENSE",
   "rebuild": "node --import tsx scripts/fixtures/generate.ts",
   "notes": [

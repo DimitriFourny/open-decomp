@@ -1,6 +1,8 @@
 # Redistributable native corpus
 
-This is a trusted, first-party C corpus for **offline static analysis**. Inputs in `bin/` are actual Apple Clang/Apple ld and Clang/LLD output, not hand-built headers described as compiler output. `malformed/` contains explicitly identified mutations/extractions of that output. All authored source, recipes, tests and compiled corpus inputs are under [LICENSE](LICENSE). No private input, downloaded Arm reference material, Windows SDK, CRT object, compiler binary, system library, or sibling source file is bundled.
+This is a trusted, first-party C corpus for **offline static analysis**. Inputs in `bin/` are actual Apple Clang/Apple ld and Clang/LLD output, not hand-built headers described as compiler output. `malformed/` contains explicitly identified mutations/extractions of that output. All authored source, recipes, tests and compiled corpus inputs are under [LICENSE](../fixtures/LICENSE). No private input, downloaded Arm reference material, Windows SDK, CRT object, compiler binary, system library, or sibling source file is bundled.
+
+Corpus-relative paths in this document are under `fixtures/`; explicitly prefixed repository paths and shell commands are relative to the repository root.
 
 ## Index and stable expectations
 

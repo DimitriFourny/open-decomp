@@ -121,4 +121,4 @@ Opening failures that return a service envelope throw `BinaryOpenError`, carryin
 
 ## Advanced integration
 
-`ToolInput`, `ToolResult`, `WireJob`, `QueryCallOptions` and the task-oriented API's option/query/selector types are exported from `open-decomp/api`, with TypeScript declarations. The existing root `open-decomp` entry exposes lower-level `QueryService`, schemas and engine components; use it when you need annotations, memory reads, durable asynchronous jobs or direct project ownership. See the [core contracts](src/core/README.md). Remote clients should use MCP rather than treating the local API as an authenticated network service.
+`ToolInput`, `ToolResult`, `WireJob`, `QueryCallOptions` and the task-oriented API's option/query/selector types are exported from `open-decomp/api`, with TypeScript declarations. The existing root `open-decomp` entry exposes lower-level `QueryService`, schemas and engine components; use it when you need annotations, memory reads, durable asynchronous jobs or direct project ownership. See the [core contracts](CORE.md). Remote clients should use MCP rather than treating the local API as an authenticated network service.

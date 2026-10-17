@@ -4,7 +4,7 @@ import { startHttpServer } from './server.js';
 /** Foreground HTTP transport selected by the unified MCP command. */
 export async function runHttpCli(args: readonly string[]): Promise<void> {
   if (args.length === 1 && args[0] === '--help') {
-    process.stderr.write('Usage: open-decomp mcp start --transport http --config ABSOLUTE_JSON_PATH\nMandatory private hashed-bearer configuration; default 127.0.0.1:3000/mcp. Native TLS is required off loopback. See REMOTE.md.\n');
+    process.stderr.write('Usage: open-decomp mcp start --transport http --config ABSOLUTE_JSON_PATH\nMandatory private hashed-bearer configuration; default 127.0.0.1:3000/mcp. Native TLS is required off loopback. See docs/REMOTE.md.\n');
     return;
   }
   if (args.length !== 2 || args[0] !== '--config' || !args[1] || args[1].startsWith('--') || args[1].includes('\0')) throw new Error('Expected --config ABSOLUTE_JSON_PATH');

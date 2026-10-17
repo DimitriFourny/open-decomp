@@ -99,7 +99,7 @@ writeFileSync('fixtures/manifest.json',JSON.stringify({
   schemaVersion:1,license:'MIT',
   sourceFiles:sourcePaths.map(path=>({path,sha256:hash(readFileSync(path))})),
   tools:versions,commands,images,codeRanges,malformed,
-  expected:'fixtures/expected.json',inventory:'fixtures/inventory.json',loaderExpectations:'fixtures/loader-expectations.json',documentation:'fixtures/README.md',licenseFile:'fixtures/LICENSE',
+  expected:'fixtures/expected.json',inventory:'fixtures/inventory.json',loaderExpectations:'fixtures/loader-expectations.json',documentation:'docs/FIXTURES.md',licenseFile:'fixtures/LICENSE',
   rebuild:'node --import tsx scripts/fixtures/generate.ts',
   notes:[
     'Real compiler/linker output; malformed files are explicitly mutated copies, never called real compiler output.',
