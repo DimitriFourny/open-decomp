@@ -540,10 +540,12 @@ function observeNativeUnit(
 export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   const { scope, components, image, revision } = input,
     { context } = scope, abi = components.abi;
-  const callees: InferredCallee[] = [], diagnostics: Diagnostic[] = [], evidence: Evidence[] = [];
+  const diagnostics: Diagnostic[] = [], evidence: Evidence[] = [];
   const demand_index = createCallResultDemandIndex(input.ir, abi, context);
   const observedCalls = observePreparedCallInterfaces(input.ir, abi, input.types.calls, context, demand_index);
-  callees.push(...observedCalls);
+  // Exactly one record per call: a native dependency record already merges the
+  // local observation for its call and replaces it.
+  const callees = new Map<string, InferredCallee>(observedCalls.map((call) => [call.call_id, call]));
   let dependencies = nativeDependencies(input, input.ir, context, undefined, false, demand_index);
   const targets = new Map<string, FunctionRecord>();
   for (const dependency of dependencies) targets.set(dependency.target.id, dependency.target);
@@ -622,6 +624,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   let function_returns: SourceEvidence['function_returns'];
   let partialUnits: ReadonlyMap<string, PreparedNativeUnit> = new Map();
   let partialSummaries: ReadonlyMap<string, NativeSummary> = new Map();
+  const summarized = new Set<string>();
   const returnDemands = new Map<string, RegisterDescriptor[]>();
   for (const dependency of dependencies) {
     const known = returnDemands.get(dependency.target.id) ?? [];
@@ -699,9 +702,10 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         };
         evidence.push(proof); proofIds.push(proof.id);
       }
-      callees.push({ call_id: dependency.call_id, target: dependency.target.entry,
+      callees.set(dependency.call_id, { call_id: dependency.call_id, target: dependency.target.entry,
         target_subject_id: dependency.target.id, ...interface_,
         evidence_ids: proofIds });
+      summarized.add(dependency.call_id);
       for (const shape of parameter_shapes ?? []) evidence.push(...shape.evidence);
       if (summary?.reasons.length) diagnostics.push({ code: 'unavailable_semantics', severity: 'warning',
         message: `Native callee ${dependency.target.original_name ?? dependency.target.id} remains partial: ${summary.reasons.join('; ')}`,
@@ -719,6 +723,9 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       message: `Native dependency worklist stopped at its work sub-budget (${details.limit}); selected-body analysis remains available and unfinished interfaces remain unresolved`,
       evidence_ids: [], details });
     for (const dependency of dependencies) {
+      // A record finished before the cut keeps its established facts; the
+      // conservative fallback only covers calls the summary loop never reached.
+      if (summarized.has(dependency.call_id)) continue;
       const unit = partialUnits.get(dependency.target.id),
         prior = partialSummaries.get(dependency.target.id)?.observed ?? unit?.entry_prefix;
       let observed: NativeInterface = { ...prior, parameters: prior?.parameters ?? [], returns: [],
@@ -750,12 +757,12 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       if (unit) evidence.push(...unit.evidence);
       observed = mergeNativeInterface(observed, observedCalls.find((call) => call.call_id === dependency.call_id), abi, context);
       const { parameter_shapes: _shapes, written_result: _written, ...interface_ } = observed;
-      callees.push({ call_id: dependency.call_id, target: dependency.target.entry,
+      callees.set(dependency.call_id, { call_id: dependency.call_id, target: dependency.target.entry,
         target_subject_id: dependency.target.id, ...interface_,
         evidence_ids: unit?.evidence_ids ?? dependency.target.evidence_ids });
     }
   }
-  return { abi, callees, diagnostics, evidence, addresses: sourceAddresses(input), memory_transfers,
+  return { abi, callees: [...callees.values()], diagnostics, evidence, addresses: sourceAddresses(input), memory_transfers,
     ...(function_returns === undefined ? {} : { function_returns }),
     call_argument_counts: actualArgumentCounts(input.types.calls, input.library, context) };
 }
