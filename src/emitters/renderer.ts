@@ -31,6 +31,8 @@ import type { Reconstruction } from '../reconstruction/model.js';
 import { validateReconstruction, validateRenderedTransfers } from '../reconstruction/validate.js';
 import type { SourceAddress } from '../reconstruction/source-model.js';
 import { sourceDataValues } from '../reconstruction/source-data.js';
+import { LocalValidationSession, rejectTranslation, validateParallelMoves, type PlannedMove } from '../reconstruction/local-validation.js';
+import { validateEmittedControl, type EmittedEdge } from '../reconstruction/local-control-validation.js';
 import { planSourceNames, sourceIdentifierStem } from '../reconstruction/source-names.js';
 import { expressionText, machineType } from './expressions.js';
 import { Writer } from './writer.js';
@@ -57,6 +59,8 @@ export class Renderer {
   private readonly mappedControls = new Set<string>();
   private readonly labels = new Set<string>();
   private readonly gotos = new Set<ParallelTransfer>();
+  private readonly localValidation: LocalValidationSession;
+  private readonly emittedEdges = new Map<ParallelTransfer, EmittedEdge>();
   private readonly typeRecords = new Map<string, SuppliedTypeRecord | null>();
   private readonly sourceEvidence = new Map<string, { ids: Set<string>; evidence: Set<string> }>();
   private readonly expanding = new Set<string>();
@@ -82,6 +86,7 @@ export class Renderer {
   ) {
     this.writer = new Writer(context, options.indent, options.include_evidence, language);
     this.program = reconstruct(input, context);
+    this.localValidation = this.program.local_validation_session ?? new LocalValidationSession(context);
     this.sourceDataValue = sourceDataValues(
       this.program.expressions, this.program.source?.addresses ?? [], context);
     this.origins.set(input.function.id, input.function);
@@ -995,12 +1000,14 @@ export class Renderer {
     }
   }
 
-  private transfer(transfer: ParallelTransfer, depth: number): void {
+  private transfer(transfer: ParallelTransfer, depth: number, origin: Control): void {
     const copies = this.program.transfers.get(transfer);
     if (!copies) this.invalid('Reconstructed transfer is missing');
+    const moves: PlannedMove[] = [];
     // A write is safe only after all other RHS readers of its destination ran.
     if (copies.length === 1) {
       const copy = copies[0]!;
+      moves.push({ destination: copy.destination.id, source: copy.source });
       this.writer.statement(depth, `${this.local(copy.destination)} = ${
         this.sourceInterpretation(copy.destination, this.value(copy.source))}`);
     } else {
@@ -1067,6 +1074,7 @@ export class Renderer {
           }
           if (!candidate) this.invalid('Parallel transfer dependency cycle cannot be resolved');
           candidate.temporary = `transfer_${this.temporary++}`;
+          if (moves.length <= 128) moves.push({ destination: candidate.temporary, source: candidate.source });
           this.writer.statement(
             depth,
             this.writer.declaration(
@@ -1078,6 +1086,7 @@ export class Renderer {
           release(candidate);
         } else {
           const move = ready[next++]!;
+          if (moves.length <= 128) moves.push({ destination: move.destination.id, source: move.temporary ?? move.source });
           this.writer.statement(
             depth,
             `${this.local(move.destination)} = ${
@@ -1088,15 +1097,37 @@ export class Renderer {
         }
       }
     }
+    if (copies.length) {
+      const checked = this.localValidation.check('parallel-copy', transfer.effect.destination.id,
+        'actual phi-copy emission', () => {
+          this.localValidation.allowance.charge();
+          if (transfer.copies.length > 64) return { kind: 'parallel-copy', subject: transfer.effect.destination.id,
+            scope: 'actual phi-copy emission', status: 'unverified', reason: 'original edge copy bound exceeded' };
+          return validateParallelMoves(transfer.effect.destination.id,
+            transfer.copies.filter((copy) => {
+              this.localValidation.allowance.charge();
+              return this.program.live.has(copy.destination.id) && !this.program.inline.has(copy.destination.id);
+            }), moves, (id) => {
+              const expression = this.program.expressions.get(id);
+              return this.program.inline.has(id) || (expression?.kind === 'cast' && expression.op === 'bitcast')
+                ? expression : undefined;
+            }, this.localValidation.allowance);
+        }, [origin.id]);
+      if (checked.status === 'rejected')
+        rejectTranslation(checked, origin);
+    }
+    this.emittedEdges.set(transfer, this.gotos.has(transfer)
+      ? { kind: 'goto', target: transfer.target }
+      : { kind: transfer.mode === 'break' || transfer.mode === 'continue' ? transfer.mode : 'fallthrough' });
     if (this.gotos.has(transfer))
       this.writer.statement(depth, `goto ${this.identifier(transfer.target, 'label')}`);
     else if (transfer.mode === 'break' || transfer.mode === 'continue')
       this.writer.statement(depth, transfer.mode);
   }
 
-  private arm(arm: ControlArm, depth: number): void {
+  private arm(arm: ControlArm, depth: number, origin: Control): void {
     const start = this.writer.codeLines;
-    this.transfer(arm.transfer, depth);
+    this.transfer(arm.transfer, depth, origin);
     if (arm.body) this.region(arm.body, depth);
     if (this.language === 'python-like' && this.writer.codeLines === start)
       this.writer.statement(depth, 'pass');
@@ -1108,7 +1139,7 @@ export class Renderer {
     const ids = [control.effect.id];
     switch (control.kind) {
       case 'jump':
-        this.transfer(control.transfer, depth);
+        this.transfer(control.transfer, depth, control);
         ids.push(control.transfer.target, control.transfer.effect.destination.id);
         for (const copy of control.transfer.copies) ids.push(copy.source.id, copy.destination.id);
         break;
@@ -1134,9 +1165,9 @@ export class Renderer {
             ? `if ${grouped ? condition : `(${condition})`} {`
             : `if ${condition}:`,
         );
-        this.arm(control.when_true, depth + 1);
+        this.arm(control.when_true, depth + 1, control);
         this.writer.line(depth, this.language === 'c-like' ? '} else {' : 'else:');
-        this.arm(control.when_false, depth + 1);
+        this.arm(control.when_false, depth + 1, control);
         if (this.language === 'c-like') this.writer.line(depth, '}');
         break;
       }
@@ -1156,14 +1187,14 @@ export class Renderer {
               ? `case 0x${item.bits.toString(16)}: {`
               : `case 0x${item.bits.toString(16)}:`,
           );
-          this.arm(item.arm, depth + 2);
+          this.arm(item.arm, depth + 2, control);
           if (this.language === 'c-like') {
             this.writer.statement(depth + 2, 'break');
             this.writer.line(depth + 1, '}');
           }
         }
         this.writer.line(depth + 1, this.language === 'c-like' ? 'default: {' : 'case _:');
-        this.arm(control.otherwise, depth + 2);
+        this.arm(control.otherwise, depth + 2, control);
         if (this.language === 'c-like') {
           this.writer.statement(depth + 2, 'break');
           this.writer.line(depth + 1, '}');
@@ -1472,6 +1503,10 @@ export class Renderer {
         if (!this.mappedStatements.has(id))
           this.invalid('Reconstructed coverage contains an unmapped statement');
     }
+    validateEmittedControl(this.input.function, this.emittedEdges, this.language, this.localValidation);
+    for (const record of this.localValidation.records)
+      if (record.kind === 'control' && record.status === 'rejected')
+        rejectTranslation(record, this.controls.get(record.subject) ?? this.input.function);
     return {
       emission: {
         language: this.language,
@@ -1481,6 +1516,7 @@ export class Renderer {
         reconstruction: 'pseudocode',
         mappings: w.mappings,
         helpers: w.helpers,
+        local_validation: this.localValidation.records,
       },
       diagnostics: this.diagnostics,
       coverage: {

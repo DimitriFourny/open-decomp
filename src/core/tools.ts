@@ -118,6 +118,15 @@ export const sourceMappingSchema = z
     if (mapping.end < mapping.start)
       context.addIssue({ code: 'custom', message: 'Invalid output span' });
   });
+export const localValidationSchema = z.strictObject({
+  kind: z.enum(['bitvector', 'parallel-copy', 'stack-promotion', 'control']),
+  subject: z.string().min(1).max(1024),
+  subject_ids: z.array(z.string().min(1).max(1024)).max(64).optional(),
+  status: z.enum(['verified', 'unverified', 'rejected']),
+  scope: z.string().min(1).max(8192),
+  reason: z.string().min(1).max(8192).optional(),
+  counterexample: z.record(z.string().max(1024), z.string().max(8192)).optional(),
+});
 export const emissionSchema = z
   .strictObject({
     language: z.enum(['c-like', 'python-like']),
@@ -126,6 +135,7 @@ export const emissionSchema = z
     span_unit: z.literal('utf16'),
     reconstruction: z.literal('pseudocode'),
     mappings: z.array(sourceMappingSchema).max(100000),
+    local_validation: z.array(localValidationSchema).max(1000).optional(),
     helpers: z
       .array(z.strictObject({ name: z.string().min(1), explanation: z.string().min(1).max(8192) }))
       .max(1000),

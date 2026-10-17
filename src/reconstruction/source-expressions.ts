@@ -11,6 +11,7 @@ import {
   type Value,
 } from '../ir/index.js';
 import { identityOperand } from './expressions.js';
+import { LocalValidationSession, validateBitvectorCandidate } from './local-validation.js';
 
 /** ABI packing/unpacking is a pure view. Reduce adjacent cells back to the
  * source value without expanding DAGs or substituting mutable phi variables. */
@@ -26,6 +27,7 @@ export function normalizeSourceExpressions(
     contributors?: readonly Value[],
   ) => Value,
   context: OperationContext,
+  validation = new LocalValidationSession(context),
 ): void {
   const resolve = (value: Value): Value => {
     const seen = new Set<string>();
@@ -77,6 +79,7 @@ export function normalizeSourceExpressions(
     changed = false;
     for (const [id, original] of expressions) {
       context.checkpoint(1);
+      if (validation.rejectedRewrites.has(id)) continue;
       const value = values.get(id)!;
       let operandsChanged = false;
       const expression = mapExpression(original, (operand) => {
@@ -220,6 +223,12 @@ export function normalizeSourceExpressions(
       }
       // Only changed operand identities or a strictly reduced operation requeue.
       if (replacement !== expression || operandsChanged) {
+        const checked = validation.check('bitvector', id, 'source expression rewrite', () =>
+          validateBitvectorCandidate(value, original, replacement, expressions, validation.allowance));
+        if (checked.status === 'rejected') {
+          validation.rejectedRewrites.add(id);
+          continue;
+        }
         expressions.set(id, replacement);
         changed = true;
       }

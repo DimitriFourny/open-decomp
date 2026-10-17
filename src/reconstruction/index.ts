@@ -21,6 +21,7 @@ import { planSourceStack } from './source-stack.js';
 import { normalizeSourceExpressions } from './source-expressions.js';
 import { projectSourceTypes } from './source-types.js';
 import { normalizeSourceRanges } from './source-ranges.js';
+import { LocalValidationSession } from './local-validation.js';
 export type * from './model.js';
 
 function controlTransfers(control: Control): readonly ParallelTransfer[] {
@@ -143,6 +144,7 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
   const sourcePlan = input.source
     ? planSource(input, blocks, values, expressions, owner, context)
     : null;
+  const localValidation = new LocalValidationSession(context);
   const sourceStack = sourcePlan
     ? planSourceStack(
         input,
@@ -155,9 +157,10 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
         context,
         sourcePlan.incomingStack,
         sourcePlan.entryStack,
+        localValidation,
       )
     : null;
-  if (sourcePlan) normalizeSourceExpressions(values, expressions, owner, sourcePlan.make, context);
+  if (sourcePlan) normalizeSourceExpressions(values, expressions, owner, sourcePlan.make, context, localValidation);
 
   // A three-level identity lattice (unreached / exact identity / conflicting).
   // Ignoring unreached backedges discovers unchanged loop-carried registers;
@@ -213,7 +216,7 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
           value: values.get(identity)!,
         });
     }
-  if (sourcePlan) normalizeSourceExpressions(values, expressions, owner, sourcePlan.make, context);
+  if (sourcePlan) normalizeSourceExpressions(values, expressions, owner, sourcePlan.make, context, localValidation);
   const initial = new Map(entryBindings.map((binding) =>
     [binding.register.id, identities.get(binding.value.id) ?? binding.value.id]));
   const snapshot = (bindings: readonly RegisterBinding[]): readonly RegisterBinding[] =>
@@ -655,6 +658,8 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
     physical_inputs,
     physical_exits,
     memory,
+    local_validation: localValidation.records,
+    local_validation_session: localValidation,
     diagnostics,
     ...(source ? { source: { ...source,
       ...projectSourceTypes(input.types, source, values, expressions, returns, memory,

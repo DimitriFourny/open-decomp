@@ -3,6 +3,7 @@ import type { SignatureAssociation, MemoryShape, ObservedField } from '../analys
 import type { DataType, Expression, Instruction, Origin, Value } from '../ir/index.js';
 import type { BlockRegion, ParallelTransfer, StructuredFunction } from '../presentation/index.js';
 import type { SourcePresentation } from './source-model.js';
+import type { LocalValidationRecord, LocalValidationSession } from './local-validation.js';
 
 /** A source projection exists only when every physical location is an exact,
  * compatible whole value. Physical boundaries otherwise remain explicit. */
@@ -64,6 +65,8 @@ export interface Reconstruction {
     readonly { readonly register: RegisterDescriptor; readonly value: Value }[]
   >;
   readonly memory: ReadonlyMap<string, MemoryView>;
+  readonly local_validation?: readonly LocalValidationRecord[];
+  readonly local_validation_session?: LocalValidationSession;
   readonly diagnostics: readonly Diagnostic[];
 }
 export type Assignment = Extract<Instruction, { readonly kind: 'assign' }>;

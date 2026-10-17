@@ -13,6 +13,8 @@ import {
 import type { BlockRegion, ParallelTransfer } from '../presentation/index.js';
 import type { BoundaryProjection } from './model.js';
 import type { SourceLocal, SourceStackStorage } from './source-model.js';
+import { LocalValidationSession } from './local-validation.js';
+import { validateStackPromotion } from './local-storage-validation.js';
 
 type MemoryNode = Extract<Instruction, { kind: 'load' | 'store' }>;
 /** Exact private slots only. Escapes and overlapping access intervals retain one
@@ -32,6 +34,7 @@ export function planSourceStack(
     contributors: readonly Value[],
   ) => Value | null,
   entryStack: () => Value,
+  validation = new LocalValidationSession(context),
 ) {
   const addresses = new Map<string, bigint>(),
     facts = input.types?.calls?.stack;
@@ -356,6 +359,19 @@ export function planSourceStack(
     const forwarded =
       loads.every((access) => before.get(access.node.id) !== null) &&
       (acyclic || group.every((access) => access.block === group[0]!.block));
+    const subjects = [group[0]!.node.id];
+    const checked = validation.check('stack-promotion', `stack:${key}`, 'private stack promotion', () => {
+      const members = new Set<string>(), proposed = new Map<string, Value>();
+      for (const access of group) {
+        validation.allowance.charge();
+        members.add(access.node.id);
+        if (subjects.length < 64 && access.node.id !== subjects[0]) subjects.push(access.node.id);
+        if (forwarded && access.node.kind === 'load') proposed.set(access.node.id, before.get(access.node.id)!);
+      }
+      return validateStackPromotion(`stack:${key}`, input.function.entry, blocks, transfers, addresses,
+        members, forwarded ? proposed : null, expressions, validation.allowance);
+    }, subjects);
+    if (checked.status === 'rejected') continue;
     if (forwarded) {
       for (const access of group) {
         hidden.add(access.node.id);
