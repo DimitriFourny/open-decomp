@@ -31,6 +31,7 @@ import type { Reconstruction } from '../reconstruction/model.js';
 import { validateReconstruction, validateRenderedTransfers } from '../reconstruction/validate.js';
 import type { SourceAddress } from '../reconstruction/source-model.js';
 import { sourceDataValues } from '../reconstruction/source-data.js';
+import { planSourceNames, sourceIdentifierStem } from '../reconstruction/source-names.js';
 import { expressionText, machineType } from './expressions.js';
 import { Writer } from './writer.js';
 import type { EmissionInput, EmissionResult } from './model.js';
@@ -69,6 +70,7 @@ export class Renderer {
   private readonly sourceAddresses = new Map<string, SourceAddress | null>();
   private readonly sourceDataValue: (value: Value) => SourceAddress | undefined;
   private readonly sourceValueTypes = new Map<string, string>();
+  private readonly sourceRoleNames: ReadonlyMap<string, string | null>;
   private sourceTemporary = 0;
   private sourceLocal = 0;
   constructor(
@@ -102,6 +104,7 @@ export class Renderer {
         });
       } else if (previous === undefined) this.names.set(name.entity_id, name.name);
     }
+    this.sourceRoleNames = planSourceNames(this.program, this.names, input.types, context);
     for (const note of input.annotations ?? []) {
       context.checkpoint(1);
       if (note.status === 'retracted' || note.value.kind !== 'note') continue;
@@ -219,14 +222,8 @@ export class Renderer {
   private sourceIdentifier(id: string, preferred: string): string {
     const previous = this.identifiers.get(id);
     if (previous) return previous.identifier;
-    let stem = preferred.replace(/[^A-Za-z0-9_]/g, '_').slice(0, 64);
-    if (!/^[A-Za-z_]/.test(stem)) stem = `value_${stem}`;
-    if (
-      /^(?:auto|break|case|char|const|continue|def|default|do|double|else|enum|extern|False|float|for|goto|if|int|lambda|long|match|None|pass|register|return|short|signed|sizeof|static|struct|switch|True|typedef|union|unsigned|void|volatile|while|bool|uint\d+_t|int\d+_t)$/.test(
-        stem,
-      )
-    )
-      stem = `value_${stem}`;
+    const stack = this.program.source?.stack;
+    const stem = stack?.kind === 'entry' && stack.base.id === id ? 'entry_sp' : sourceIdentifierStem(preferred);
     let name = stem,
       suffix = 1;
     while (this.usedSourceNames.has(name)) {
@@ -248,7 +245,7 @@ export class Renderer {
       ? (this.identifiers.get(value.id)?.identifier ??
           this.sourceIdentifier(
             value.id,
-            this.names.get(value.id) ?? `value${this.sourceTemporary++}`,
+            this.names.get(value.id) ?? this.sourceRoleNames.get(value.id) ?? `value${this.sourceTemporary++}`,
           ))
       : this.identifier(value.id, 'v');
   }
@@ -611,7 +608,8 @@ export class Renderer {
     if (local)
       return (
         this.identifiers.get(local.id)?.identifier ??
-        this.sourceIdentifier(local.id, `local${this.sourceLocal++}`)
+        this.sourceIdentifier(local.id,
+          this.names.get(local.id) ?? this.sourceRoleNames.get(local.id) ?? `local${this.sourceLocal++}`)
       );
     let address = this.sourceAddressValue(node.address);
     const type = node.kind === 'load' ? node.result.type : node.value.type,
@@ -1311,7 +1309,9 @@ export class Renderer {
       const name = this.program.source
         ? this.sourceIdentifier(
             value.id,
-            this.program.source.parameter_names.get(value.id) ?? source?.name ?? `arg${i}`,
+            this.sourceRoleNames.has(value.id)
+              ? this.sourceRoleNames.get(value.id) ?? `arg${i}`
+              : this.program.source.parameter_names.get(value.id) ?? source?.name ?? `arg${i}`,
           )
         : this.identifier(value.id, source ? 'arg' : register ? 'reg' : 'arg');
       parameters.push({
@@ -1410,7 +1410,8 @@ export class Renderer {
       this.context.checkpoint(1);
       if (declaredLocals.has(local.id) || !this.program.retained.has(node)) continue;
       declaredLocals.add(local.id);
-      const name = this.sourceIdentifier(local.id, `local${this.sourceLocal++}`),
+      const name = this.sourceIdentifier(local.id,
+        this.names.get(local.id) ?? this.sourceRoleNames.get(local.id) ?? `local${this.sourceLocal++}`),
         start = w.offset;
       w.statement(1, w.declaration(this.dataType(local.type), name));
       this.mapped(this.dataOrigin(node), start, [node]);

@@ -2,10 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { StoredDecompilation } from '../../src/project/cache/index.js';
 import { project } from '../service/analysis/support.js';
-import { execute } from '../emitters/c/support.js';
+import { emittedFormals, execute, type EmittedFormal } from '../emitters/c/support.js';
 
 type StoredEmission = StoredDecompilation['data']['emission'];
-type StoredMapping = StoredEmission['mappings'][number];
 
 // Independent source oracle: fixtures/source/corpus.c fixture_stack_args uses
 // unsigned 64-bit inputs and a + 2*b + ... + 10*j. All input bit patterns and
@@ -34,16 +33,11 @@ for (const fixture of ['macho-arm64-symbols', 'macho-arm64-stripped'])
       const result: StoredDecompilation = p.payload((await p.decompile(fn.id, { options: { emitter } })).result).result;
       assert.equal(result.state, 'complete');
       const emission: StoredEmission = result.data.emission;
-      const headerEnd: number = emitter === 'python-like'
-        ? emission.text.search(/\)\s*(?:-> [^\n]+)?:/)
-        : emission.text.indexOf('{');
-      const formals: StoredEmission['mappings'] = emission.mappings.filter((mapping: StoredMapping) =>
-        mapping.end <= headerEnd && /\barg\d+\b/.test(emission.text.slice(mapping.start, mapping.end)),
-      );
+      const formals: readonly EmittedFormal[] = emittedFormals(emission).filter((formal) => formal.name !== 'entry_sp');
       assert.equal(formals.length, 10, emission.text);
       assert.doesNotMatch(emission.text, /\bstack_frame\b/, 'entry bytes are not private uninitialized storage');
       for (const args of cases) {
-        const inputs = new Map<string, bigint>(formals.map((mapping: StoredMapping, index: number): [string, bigint] =>
+        const inputs = new Map<string, bigint>(formals.map((mapping: EmittedFormal, index: number): [string, bigint] =>
           [mapping.statement_id, args[index]!]));
         const observation = execute(emission, inputs);
         const expected = BigInt.asUintN(64,

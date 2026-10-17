@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { openBinary, type BinarySession, type ToolResult } from '../../src/api/index.js';
 import type { WireEmission } from '../../src/core/index.js';
-import { execute } from '../emitters/c/support.js';
+import { emittedFormals, execute } from '../emitters/c/support.js';
 
 // Only trusted, locally compiled source is executed. Nearest-even, gradual
 // underflow, disabled traps, and noncontracted operations are the supported
@@ -80,13 +80,7 @@ int main(void) {
       assert.ok('data' in result && result.data.delivery === 'inline');
       const emission: WireEmission = result.data.emission;
       assert.match(emission.text, /nearest-even/);
-      const headerEnd = emitter === 'c-like' ? emission.text.indexOf('{') : emission.text.indexOf(':\n');
-      const formals: WireEmission['mappings'] = emission.mappings.filter((mapping: WireEmission['mappings'][number]) => {
-        if (mapping.end > headerEnd) return false;
-        return /^(?:double|ieee64_t)\s+arg\d+,?$|^arg\d+\s*:\s*(?:double|ieee64_t),?$/.test(
-          emission.text.slice(mapping.start, mapping.end).trim(),
-        );
-      });
+      const formals = emittedFormals(emission).filter((formal) => formal.name !== 'entry_sp');
       assert.equal(formals.length, 2, emission.text);
       for (const [index, [a, b]] of cases.entries()) {
         const observed = execute(
@@ -107,8 +101,7 @@ int main(void) {
       const consumer: ToolResult<'function_decompile'> = await session.decompile({ name: '_fixture_float_consumer' }, { emitter });
       assert.ok('data' in consumer && consumer.data.delivery === 'inline');
       const consumerEmission: WireEmission = consumer.data.emission;
-      const consumerHeader = emitter === 'c-like'
-        ? consumerEmission.text.indexOf('{') : consumerEmission.text.indexOf(':\n');
+      const consumerFormals = emittedFormals(consumerEmission);
       const calls = new Map<string, (args: readonly bigint[]) => bigint>();
       calls.set('_fixture_float', (args) => {
         assert.equal(args.length, 2);
@@ -124,19 +117,15 @@ int main(void) {
       environment.set('non-argument entry register', 0n);
       for (const [index, [a, b]] of cases.entries()) {
         const inputs = new Map<string, bigint>();
-        for (const mapping of consumerEmission.mappings) {
-          if (mapping.end > consumerHeader) continue;
-          const declaration = consumerEmission.text.slice(mapping.start, mapping.end).trim();
-          const formal = emitter === 'c-like'
-            ? /^\S+\s+(arg(\d+)|entry_sp),?$/.exec(declaration)
-            : /^(arg(\d+)|entry_sp)\s*:\s*[^,\n]+,?$/.exec(declaration);
-          if (!formal) continue;
-          if (formal[1] === 'entry_sp') inputs.set(mapping.statement_id, 0x9000n);
+        let sourceIndex = 0;
+        for (const formal of consumerFormals) {
+          if (formal.name === 'entry_sp') inputs.set(formal.statement_id, 0x9000n);
           else {
-            assert.ok(Number(formal[2]) < 2, `Unexpected source input ${formal[1]}`);
-            inputs.set(mapping.statement_id, Number(formal[2]) === 0 ? bits(a) : bits(b));
+            assert.ok(sourceIndex < 2, `Unexpected source input ${formal.name}`);
+            inputs.set(formal.statement_id, sourceIndex++ === 0 ? bits(a) : bits(b));
           }
         }
+        assert.equal(sourceIndex, 2);
         const memory = new Map<bigint, number>();
         for (let offset = -256; offset < 0; offset++) memory.set(0x9000n + BigInt(offset), 0xa5);
         const observed = execute(consumerEmission, inputs, memory, 0n, new Map(), environment, calls);

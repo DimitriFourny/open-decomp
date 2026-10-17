@@ -12,11 +12,10 @@ import { structureControlFlow } from '../../src/presentation/index.js';
 import { reconstruct } from '../../src/reconstruction/index.js';
 import type { StoredDecompilation } from '../../src/project/cache/index.js';
 import { builder, image, register, slice } from '../ir/support.js';
-import { emit, execute } from '../emitters/c/support.js';
+import { emit, emittedFormals, execute, type EmittedFormal } from '../emitters/c/support.js';
 import { project } from '../service/analysis/support.js';
 
 type StoredEmission = StoredDecompilation['data']['emission'];
-type StoredMapping = StoredEmission['mappings'][number];
 
 const u32 = integer(32), u64 = integer(64);
 const targets = [
@@ -41,12 +40,8 @@ function bytes(memory: Map<bigint, number>, address: bigint, value: bigint, coun
     memory.set(address + BigInt(index), Number((value >> BigInt(index * 8)) & 255n));
 }
 
-function formalInput(emission: Parameters<typeof execute>[0], name: string) {
-  const headerEnd = /^def /m.test(emission.text)
-    ? emission.text.search(/\)\s*(?:-> [^\n]+)?:/)
-    : emission.text.indexOf('{');
-  return emission.mappings.find((mapping) => mapping.end <= headerEnd &&
-    new RegExp(`\\b${name}\\b`).test(emission.text.slice(mapping.start, mapping.end)));
+function formalInput(emission: Parameters<typeof execute>[0], name: string): EmittedFormal | undefined {
+  return emittedFormals(emission).find((formal) => formal.name === name);
 }
 
 for (const { abi, incoming } of targets)
@@ -196,18 +191,14 @@ for (const fixture of [
           diagnostic.code === 'unavailable_semantics' && diagnostic.severity === 'warning'));
       }
       const emission: StoredEmission = result.data.emission;
-      const headerEnd: number = emitter === 'python-like'
-        ? emission.text.search(/\)\s*(?:-> [^\n]+)?:/)
-        : emission.text.indexOf('{');
-      const formals: StoredEmission['mappings'] = emission.mappings.filter((mapping: StoredMapping) => mapping.end <= headerEnd &&
-        /\barg\d+\b/.test(emission.text.slice(mapping.start, mapping.end)));
+      const formals: readonly EmittedFormal[] = emittedFormals(emission).filter((formal) => formal.name !== 'entry_sp');
       assert.equal(formals.length, fixture.count, emission.text);
       for (const values of [
         Array.from({ length: fixture.count }, (_, index) => BigInt(index + 1)),
         Array<bigint>(fixture.count).fill(0xffffffffffffffffn),
       ]) {
         const observation = execute(emission,
-          new Map<string, bigint>(formals.map((mapping: StoredMapping, index: number): [string, bigint] =>
+          new Map<string, bigint>(formals.map((mapping: EmittedFormal, index: number): [string, bigint] =>
             [mapping.statement_id, values[index]!])));
         const expected = BigInt.asUintN(64, values.reduce((sum, value, index) =>
           sum + value * (fixture.weighted ? BigInt(index + 1) : 1n), 0n));
@@ -231,13 +222,9 @@ test('Darwin stack varargs retain entry bytes across frame allocation and pointe
     assert.equal(result.state, 'partial');
     assert.equal(result.coverage.find((coverage) => coverage.layer === 'lift')?.state, 'partial');
     const emission: StoredEmission = result.data.emission;
-    const headerEnd: number = emitter === 'python-like'
-      ? emission.text.search(/\)\s*(?:-> [^\n]+)?:/)
-      : emission.text.indexOf('{');
-    const entry: StoredMapping | undefined = emission.mappings.find((mapping: StoredMapping) => mapping.end <= headerEnd &&
-      /\bentry_sp\b/.test(emission.text.slice(mapping.start, mapping.end)));
-    const count: StoredMapping | undefined = emission.mappings.find((mapping: StoredMapping) => mapping.end <= headerEnd &&
-      /\barg0\b/.test(emission.text.slice(mapping.start, mapping.end)));
+    const declared: readonly EmittedFormal[] = emittedFormals(emission);
+    const entry: EmittedFormal | undefined = declared.find((formal) => formal.name === 'entry_sp');
+    const count: EmittedFormal | undefined = declared.find((formal) => formal.name !== 'entry_sp');
     assert.ok(entry, emission.text);
     assert.ok(count, emission.text);
     assert.doesNotMatch(emission.text, /\bstack_frame\b/);
@@ -275,14 +262,11 @@ test('source-built SysV red-zone and dynamic framed locals preserve definite ini
       assert.equal(result.coverage.find((coverage) => coverage.layer === 'analysis')?.state, 'partial');
       assert.equal(result.coverage.find((coverage) => coverage.layer === 'reconstruction')?.state, 'complete');
       const emission: StoredEmission = result.data.emission;
-      const formal = (name: string): string => {
-        const mapping = formalInput(emission, name);
-        assert.ok(mapping, emission.text);
-        return mapping.statement_id;
-      };
-      const argument = formal('arg0');
-      const index = fixture.dynamic ? formal('arg1') : null;
-      const stack = fixture.dynamic ? formal('entry_sp') : null;
+      const declared: readonly EmittedFormal[] = emittedFormals(emission);
+      const sourceArguments = declared.filter((formal) => formal.name !== 'entry_sp');
+      const argument = sourceArguments[0]!.statement_id;
+      const index = fixture.dynamic ? sourceArguments[1]!.statement_id : null;
+      const stack = declared.find((formal) => formal.name === 'entry_sp')?.statement_id;
       for (const a of [0n, 0x8000000000000000n, 0xffffffffffffffffn])
         for (const offset of fixture.dynamic ? [0n, 1n, 39n, 40n, 0xffffffffn] : [0n]) {
           const inputs = new Map([[argument, a]]);
@@ -372,7 +356,8 @@ for (const { abi } of targets)
     const { ir, extra } = source(b.finish(block, [u64]), abi);
     for (const language of ['c-like', 'python-like'] as const) {
       const output = emit(ir, extra, language);
-      assert.doesNotMatch(output.emission.text, /\b(?:entry_sp|stack_frame|arg0)\b/);
+      assert.doesNotMatch(output.emission.text, /\b(?:entry_sp|stack_frame)\b/);
+      assert.equal(emittedFormals(output.emission).length, 0);
       const observation = execute(output.emission);
       assert.deepEqual(observation.values, [0n]);
       assert.deepEqual(observation.events, []);

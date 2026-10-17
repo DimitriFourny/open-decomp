@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { openBinary } from '../../src/api/index.js';
 import { contentHash, toolSchemas, type WireEmission, type ToolResult } from '../../src/core/index.js';
 import { callMcpTool, readAnalysis, withMcpClient } from '../../scripts/mcp-workflow.js';
-import { execute, type SourceCallOracle } from '../emitters/c/support.js';
+import { emittedFormals, execute, type EmittedFormal, type SourceCallOracle } from '../emitters/c/support.js';
 import { strnicmpCases, strnicmpOracle } from '../emitters/c/strnicmp-fixture.js';
 import { loadBytes } from '../metadata/fixture.js';
 
@@ -194,10 +194,9 @@ function read64(memory: ReadonlyMap<bigint, number>, address: bigint): bigint {
 }
 
 function checkBehavior(p: SourceQualityFixture, scenario: Scenario, emission: WireEmission): number {
-  const python = emission.language === 'python-like';
-  const headerEnd = python ? emission.text.search(/\)\s*(?:-> [^\n]+)?:/) : emission.text.indexOf('{');
-  const formals = emission.mappings.filter((mapping) => mapping.end <= headerEnd &&
-    /\barg\d+\b/.test(emission.text.slice(mapping.start, mapping.end)));
+  const parameters: readonly EmittedFormal[] = emittedFormals(emission);
+  const formals: readonly EmittedFormal[] = parameters.filter((formal) => formal.name !== 'entry_sp');
+  const entryStack = parameters.find((formal) => formal.name === 'entry_sp');
   const expectedArity = { stack: 10, float: 2, strnicmp: 3, memory: 2, loop: 2, effects: 2 };
   assert.equal(formals.length, expectedArity[scenario], emission.text);
   const cases = p.expected.filter((row) => row.scenario === scenario);
@@ -223,9 +222,6 @@ function checkBehavior(p: SourceQualityFixture, scenario: Scenario, emission: Wi
       values = [pointer, args[1]];
     }
     const inputs = new Map(formals.map((mapping, index) => [mapping.statement_id, values[index]!]));
-    const entryStack = emission.mappings.find((mapping) => mapping.end <= headerEnd &&
-      /\bentry_sp\b/.test(emission.text.slice(mapping.start, mapping.end)) &&
-      !/\barg\d+\b/.test(emission.text.slice(mapping.start, mapping.end)));
     if (entryStack) {
       // Explicit machine-boundary input, not an invented source parameter. The
       // source pointers do not alias this supplied mapped caller stack.

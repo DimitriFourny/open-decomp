@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { openBinary, type BinarySession } from '../../src/api/index.js';
-import { execute } from '../emitters/c/support.js';
+import { emittedFormals, execute } from '../emitters/c/support.js';
 
 const variadicCases = [
   [],
@@ -45,25 +45,15 @@ function store(memory: Map<bigint, number>, address: bigint, bits: bigint, size:
 }
 function formals(emission: Parameters<typeof execute>[0], args: readonly bigint[], entrySp: bigint): Map<string, bigint> {
   const result = new Map<string, bigint>();
-  const python = /^def /m.test(emission.text);
-  const headerEnd = python ? emission.text.indexOf(':\n') : emission.text.indexOf('{');
-  const seen = new Set<number>();
-  for (const mapping of emission.mappings) {
-    if (mapping.end > headerEnd) continue;
-    const text = emission.text.slice(mapping.start, mapping.end).trim();
-    const match = python
-      ? /^(arg(\d+)|entry_sp)\s*:\s*[^,\n]+,?$/.exec(text)
-      : /^\S+\s+(arg(\d+)|entry_sp),?$/.exec(text);
-    if (!match) continue;
-    if (match[1] === 'entry_sp') result.set(mapping.statement_id, entrySp);
+  let index = 0;
+  for (const formal of emittedFormals(emission)) {
+    if (formal.name === 'entry_sp') result.set(formal.statement_id, entrySp);
     else {
-      const index = Number(match[2]);
-      assert.ok(index < args.length, `Unexpected formal ${match[1]}: ${emission.text}`);
-      seen.add(index);
-      result.set(mapping.statement_id, args[index]!);
+      assert.ok(index < args.length, `Unexpected source input ${formal.name}`);
+      result.set(formal.statement_id, args[index++]!);
     }
   }
-  assert.equal(seen.size, args.length, emission.text);
+  assert.equal(index, args.length, emission.text);
   return result;
 }
 

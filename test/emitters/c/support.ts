@@ -25,6 +25,7 @@ type Expr =
   | { kind: 'literal'; value: Data }
   | { kind: 'ref'; name: string }
   | { kind: 'call'; name: string; args: Expr[] }
+  | { kind: 'invoke'; target: Expr; args: Expr[] }
   | { kind: 'list'; values: Expr[] }
   | { kind: 'binary'; op: string; left: Expr; right: Expr }
   | { kind: 'unary'; op: string; value: Expr }
@@ -556,6 +557,24 @@ class Parser {
   }
 
   private atom(): Expr {
+    let expression = this.primary();
+    while (this.peek() === '(') {
+      this.take('(');
+      const args: Expr[] = [];
+      if (this.peek() !== ')') {
+        args.push(this.expression());
+        while (this.peek() === ',') {
+          this.take(',');
+          args.push(this.expression());
+        }
+      }
+      this.take(')');
+      expression = { kind: 'invoke', target: expression, args };
+    }
+    return expression;
+  }
+
+  private primary(): Expr {
     const token = this.take();
     if (token === '&') {
       const name = this.take();
@@ -815,6 +834,23 @@ export function execute(
     }
     scratch.setFloat64(0, value, true);
     return scratch.getBigUint64(0, true);
+  };
+  const invokeSourceCall = (name: string, target: bigint | undefined, args: Data[]): Data => {
+    const sourceCall = sourceCalls.get(name) ??
+      (target === undefined ? undefined : sourceCalls.get(`0x${target.toString(16)}`));
+    if (!sourceCall) throw new Error(`Oracle does not support helper ${name}`);
+    const last = args.at(-1);
+    const remainder = last !== null && typeof last === 'object' && !Array.isArray(last) &&
+      (last['unresolved'] === 'unknown_arguments' || last['unresolved'] === 'unknown_argument_remainder');
+    const prefix = remainder ? args.slice(0, -1) : args;
+    if (prefix.includes(null)) throw new Boundary('unknown', []);
+    const arguments_ = prefix.map(number);
+    const context = { arguments_complete: !remainder };
+    events.push('call');
+    sourceCallsObserved.push({ name, arguments: arguments_ });
+    if (target !== undefined) calls.push({ target, arguments: arguments_, ...context });
+    const returned = sourceCall(arguments_, context);
+    return typeof returned === 'bigint' ? returned : [...returned];
   };
   const helper = (name: string, args: Data[]): Data => {
     const sourceCast = /^(u?int)(\d+)$/.exec(name);
@@ -1146,20 +1182,7 @@ export function execute(
       };
     const pointer = environment.get(name);
     const target = typeof pointer === 'bigint' ? pointer : undefined;
-    const sourceCall = sourceCalls.get(name) ?? (target === undefined ? undefined : sourceCalls.get(`0x${target.toString(16)}`));
-    if (sourceCall) {
-      const last = args.at(-1);
-      const remainder = last !== null && typeof last === 'object' && !Array.isArray(last) &&
-        (last['unresolved'] === 'unknown_arguments' || last['unresolved'] === 'unknown_argument_remainder');
-      const arguments_ = (remainder ? args.slice(0, -1) : args).map(number);
-      const context = { arguments_complete: !remainder };
-      events.push('call');
-      sourceCallsObserved.push({ name, arguments: arguments_ });
-      if (target !== undefined) calls.push({ target, arguments: arguments_, ...context });
-      const returned = sourceCall(arguments_, context);
-      return typeof returned === 'bigint' ? returned : [...returned];
-    }
-    throw new Error(`Oracle does not support helper ${name}`);
+    return invokeSourceCall(name, target, args);
   };
   const evaluate = (expression: Expr): Data => {
     switch (expression.kind) {
@@ -1175,6 +1198,12 @@ export function execute(
         return expression.values.map(evaluate);
       case 'call':
         return helper(expression.name, expression.args.map(evaluate));
+      case 'invoke': {
+        const bits = evaluate(expression.target);
+        if (bits === null) throw new Boundary('unknown', []);
+        const target = BigInt.asUintN(64, number(bits));
+        return invokeSourceCall(`0x${target.toString(16)}`, target, expression.args.map(evaluate));
+      }
       case 'select': {
         const condition = evaluate(expression.condition);
         if (condition === null) return null;

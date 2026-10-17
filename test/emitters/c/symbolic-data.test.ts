@@ -7,7 +7,7 @@ import { recoverDataAddress } from '../../../src/analysis/strings/source-data.js
 import { integer, type SSAForm } from '../../../src/ir/index.js';
 import { navigationBytes } from '../../analysis/navigation-fixture.js';
 import { builder, register } from '../../ir/support.js';
-import { emit, execute } from './support.js';
+import { emit, execute, emittedFormals } from './support.js';
 
 const i8 = integer(8);
 for (const language of ['c-like', 'python-like'] as const)
@@ -52,8 +52,7 @@ for (const language of ['c-like', 'python-like'] as const)
         for (const offset of [0n, 15n, 127n, 255n, 256n]) {
           const memory = new Map<bigint, number>();
           for (let index = 0; index < bytes.length; index++) memory.set(0x2000n + BigInt(index), bytes[index]!);
-          const parameter = output.emission.mappings.find((mapping) =>
-            output.emission.text.slice(mapping.start, mapping.end).includes('arg0'));
+          const parameter = emittedFormals(output.emission)[0];
           assert.ok(parameter);
           const inputs = new Map(parameter.semantic_ids.map((id) => [id, offset]));
           const observed = execute(output.emission, inputs, memory);
@@ -100,8 +99,7 @@ for (const language of ['c-like', 'python-like'] as const)
     assert.equal(ssa.form, 'ssa');
     const output = emit(ssa as SSAForm, { source: { abi: sysvAMD64Abi, callees: [], addresses } }, language);
     assert.match(output.emission.text, /data_address\("messages"/);
-    const parameter = output.emission.mappings.find((mapping) =>
-      output.emission.text.slice(mapping.start, mapping.end).includes('arg0'));
+    const parameter = emittedFormals(output.emission)[0];
     assert.ok(parameter);
     for (const [offset, expected] of [[0n, 97n], [8n, 98n]] as const) {
       const memory = new Map([...bytes].map((byte, index) => [0x2000n + BigInt(index), byte]));
