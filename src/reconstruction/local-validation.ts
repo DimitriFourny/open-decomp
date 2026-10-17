@@ -244,6 +244,9 @@ export class LocalValidationSession {
    * At most 256 checking actions can reject before the record bound stops work. */
   readonly rejectedRewrites = new Set<string>();
   readonly allowance: ValidationAllowance;
+  /** Identical outcomes (e.g. each step of a multi-step rewrite of one subject)
+   * state one fact, so they are published once. */
+  readonly #recorded = new Set<string>();
   constructor(context: OperationContext) { this.allowance = new ValidationAllowance(context); }
   check(kind: LocalValidationRecord['kind'], subject: string, scope: string,
     action: () => LocalValidationRecord, subjectIds?: readonly string[]): LocalValidationRecord {
@@ -256,6 +259,10 @@ export class LocalValidationSession {
     }
     const checked = bounded({ kind, subject, scope }, action);
     const record = subjectIds ? { ...checked, subject_ids: subjectIds.slice(0, 64) } : checked;
+    const key = JSON.stringify([record.kind, record.subject, record.scope, record.status, record.reason ?? null,
+      record.counterexample ?? null, record.subject_ids ?? null]);
+    if (this.#recorded.has(key)) return record;
+    this.#recorded.add(key);
     this.records.push(record);
     return record;
   }

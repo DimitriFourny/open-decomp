@@ -73,6 +73,14 @@ export function normalizeSourceRanges(
       : { minimum: 0n, maximum: mask(width), defined };
   const facts = new Map<string, Range>(), updates = new Map<string, number>();
   const reachable = new Set<string>([entry]), queued = new Set<string>([entry]), pending = [entry];
+  // A block run is a pure function of its inherited constraints and the facts it
+  // reads. Re-running it with neither changed repeats only no-op joins, so such a
+  // run replays just its target notifications, in the same order.
+  let clock = 0;
+  const changedAt = new Map<string, number>();
+  const runs = new Map<string, { readonly at: number; readonly inherited: ReadonlyMap<string, Range> | undefined;
+    readonly reads: ReadonlySet<string>; readonly targets: readonly string[] }>();
+  let reads = new Set<string>(), targets: string[] = [];
   for (const parameter of blocks.get(entry)!.parameters)
     if (demanded.has(parameter.id)) facts.set(parameter.id, top(parameter));
 
@@ -86,6 +94,7 @@ export function normalizeSourceRanges(
       const constrained = constraints.get(value.id);
       if (constrained) { cache.set(value.id, constrained); continue; }
       const parameter = facts.get(value.id);
+      reads.add(value.id);
       if (parameter) { cache.set(value.id, parameter); continue; }
       const expression = expressions.get(value.id);
       if (!expression || value.type.kind !== 'integer') {
@@ -220,7 +229,10 @@ export function normalizeSourceRanges(
   const evaluated = new Map<string, number>();
   const join = (destination: Value, incoming: Range): boolean => {
     const previous = facts.get(destination.id);
-    if (!previous) { facts.set(destination.id, incoming); updates.set(destination.id, 1); version++; return true; }
+    if (!previous) {
+      facts.set(destination.id, incoming); updates.set(destination.id, 1); changedAt.set(destination.id, ++clock);
+      version++; return true;
+    }
     let minimum = previous.minimum < incoming.minimum ? previous.minimum : incoming.minimum;
     let maximum = previous.maximum > incoming.maximum ? previous.maximum : incoming.maximum;
     const defined = previous.defined && incoming.defined;
@@ -232,6 +244,7 @@ export function normalizeSourceRanges(
       if (maximum > previous.maximum) maximum = mask(bitWidth(destination.type));
     }
     facts.set(destination.id, { minimum, maximum, defined }); updates.set(destination.id, count + 1);
+    changedAt.set(destination.id, ++clock);
     version++;
     return true;
   };
@@ -264,6 +277,11 @@ export function normalizeSourceRanges(
     inherited.set(target, next); inheritedUpdates.set(target, count + 1);
     return true;
   };
+  const notify = (target: string, changed: boolean): void => {
+    changed = !reachable.has(target) || (evaluated.get(target) ?? -1) < version || changed;
+    reachable.add(target);
+    if (changed && !queued.has(target)) { pending.push(target); queued.add(target); }
+  };
   const propagate = (transfer: ParallelTransfer, constraints: ReadonlyMap<string, Range>): void => {
     const cache = new Map<string, Fact>();
     const incoming: { destination: Value; range: Range }[] = [];
@@ -274,22 +292,39 @@ export function normalizeSourceRanges(
       if (!range) return;
       incoming.push({ destination: copy.destination, range });
     }
-    let changed = !reachable.has(transfer.target) || (evaluated.get(transfer.target) ?? -1) < version;
+    targets.push(transfer.target);
+    let changed = false;
     for (const { destination, range } of incoming) {
       context.checkpoint(1);
       changed = join(destination, range) || changed;
     }
     changed = inherit(transfer.target, constraints) || changed;
-    reachable.add(transfer.target);
-    if (changed && !queued.has(transfer.target)) { pending.push(transfer.target); queued.add(transfer.target); }
+    notify(transfer.target, changed);
   };
   for (let cursor = 0; cursor < pending.length; cursor++) {
     context.checkpoint(1);
     const id = pending[cursor]!; queued.delete(id); evaluated.set(id, version);
+    const previous = runs.get(id), entryConstraints = inherited.get(id);
+    if (previous && previous.inherited === entryConstraints) {
+      let unchanged = true;
+      for (const read of previous.reads) {
+        context.checkpoint(1);
+        if ((changedAt.get(read) ?? 0) > previous.at) { unchanged = false; break; }
+      }
+      if (unchanged) {
+        for (const target of previous.targets) {
+          context.checkpoint(1);
+          notify(target, false);
+        }
+        continue;
+      }
+    }
+    reads = new Set(); targets = [];
+    runs.set(id, { at: clock, inherited: entryConstraints, reads, targets });
     const control = blocks.get(id)!.control;
     // Values (re)defined in this block, including its parameters rebound by
     // the incoming transfer, are new instances: older constraints do not apply.
-    const base = new Map(inherited.get(id) ?? []);
+    const base = new Map(entryConstraints ?? []);
     if (base.size) {
       const block = blocks.get(id)!;
       for (const value of block.parameters) base.delete(value.id);

@@ -661,7 +661,16 @@ export function verifyIR(
   }
   return problems;
 }
+/** IR is immutable once produced, so a successfully verified object stays valid:
+ * consumers re-asserting the same object (builder output, then pass bounds) do
+ * not repeat identical work. Failures are never remembered. */
+const verified = new WeakSet<FunctionIR>();
 export function assertValidIR(ir: FunctionIR, checkpoint?: (work: number) => void): void {
+  if (verified.has(ir)) {
+    checkpoint?.(0);
+    return;
+  }
   const problems = verifyIR(ir, checkpoint);
   if (problems.length > 0) throw new IRValidationError(problems);
+  verified.add(ir);
 }

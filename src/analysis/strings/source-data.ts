@@ -4,6 +4,159 @@ import type { SourceAddress } from '../../reconstruction/source-model.js';
 const contains = (start: Address, size: bigint, address: Address): boolean =>
   start.image_id === address.image_id && start.space === address.space &&
   address.value >= start.value && address.value < start.value + size;
+const compare = (left: bigint, right: bigint): number => left < right ? -1 : left > right ? 1 : 0;
+const coordinate = (address: Address): string => `${address.image_id}\0${address.space}`;
+/** Only this many bytes after an address are ever examined as string bytes, so
+ * a boundary farther away cannot change the recovered result. */
+const STRING_WINDOW = 4096n;
+const pageKey = (address: Address, page = address.value / STRING_WINDOW): string =>
+  `${coordinate(address)}\0${page}`;
+
+interface Interval<T> { readonly start: bigint; readonly end: bigint; readonly order: number; readonly item: T }
+/** Centered interval tree over half-open ranges: point queries visit O(log n)
+ * nodes plus the ranges they return, never every image-wide record. */
+interface IntervalNode<T> {
+  readonly center: bigint;
+  readonly by_start: readonly Interval<T>[];
+  readonly by_end: readonly Interval<T>[];
+  readonly left: IntervalNode<T> | undefined;
+  readonly right: IntervalNode<T> | undefined;
+}
+function intervalNode<T>(sorted: readonly Interval<T>[], context: OperationContext): IntervalNode<T> | undefined {
+  if (!sorted.length) return undefined;
+  context.checkpoint(sorted.length);
+  // The median start is inside its own non-empty range, so both sides shrink;
+  // partitioning preserves start order.
+  const center = sorted[sorted.length >> 1]!.start;
+  const here: Interval<T>[] = [], left: Interval<T>[] = [], right: Interval<T>[] = [];
+  for (const item of sorted) (item.end <= center ? left : item.start > center ? right : here).push(item);
+  return { center, by_start: here, by_end: [...here].sort((first, second) => {
+    context.checkpoint(1);
+    return compare(second.end, first.end);
+  }), left: intervalNode(left, context), right: intervalNode(right, context) };
+}
+function intervalTree<T>(items: readonly Interval<T>[], context: OperationContext): IntervalNode<T> | undefined {
+  return intervalNode([...items].sort((left, right) => {
+    context.checkpoint(1);
+    return compare(left.start, right.start) || left.order - right.order;
+  }), context);
+}
+function stab<T>(root: IntervalNode<T> | undefined, point: bigint, context: OperationContext): T[] {
+  const found: Interval<T>[] = [];
+  for (let node = root; node;) {
+    context.checkpoint(1);
+    if (point === node.center) {
+      context.checkpoint(node.by_start.length);
+      found.push(...node.by_start);
+      break;
+    }
+    if (point < node.center) {
+      for (const item of node.by_start) {
+        context.checkpoint(1);
+        if (item.start > point) break;
+        found.push(item);
+      }
+      node = node.left;
+    } else {
+      for (const item of node.by_end) {
+        context.checkpoint(1);
+        if (item.end <= point) break;
+        found.push(item);
+      }
+      node = node.right;
+    }
+  }
+  return found.sort((left, right) => left.order - right.order).map((item) => item.item);
+}
+function grouped<T>(items: Iterable<T>, key: (item: T) => string | undefined, context: OperationContext): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    context.checkpoint(1);
+    const name = key(item);
+    if (name === undefined) continue;
+    const group = groups.get(name);
+    if (group) group.push(item);
+    else groups.set(name, [item]);
+  }
+  return groups;
+}
+const treesByCoordinate = <T>(groups: ReadonlyMap<string, readonly Interval<T>[]>, context: OperationContext) =>
+  new Map([...groups].map(([key, items]) => [key, intervalTree(items, context)]));
+type Pages<T extends { readonly start: bigint } = { readonly start: bigint }> = ReadonlyMap<string, readonly T[]>;
+/** Lower `end` to the first start in (va, end). Callers keep `end` within one
+ * string window of `va`, so at most two window-sized pages are visited. */
+function nearestStart(pages: Pages, va: Address, end: bigint, context: OperationContext): bigint {
+  if (end <= va.value) return end;
+  const last = (end - 1n) / STRING_WINDOW;
+  for (let page = va.value / STRING_WINDOW; page <= last; page++)
+    for (const { start } of pages.get(pageKey(va, page)) ?? []) {
+      context.checkpoint(1);
+      if (start > va.value && start < end) end = start;
+    }
+  return end;
+}
+
+interface SymbolIndex {
+  readonly objects: ReadonlyMap<string, IntervalNode<SymbolRecord> | undefined>;
+  readonly pages: Pages;
+}
+type DataHint = Extract<LoadedImage['hints'][number], { readonly kind: 'data' }>;
+interface ImageDataIndex {
+  readonly hints: ReadonlyMap<string, IntervalNode<DataHint> | undefined>;
+  readonly hint_pages: Pages;
+  /** Relocation slots bucketed by start page, with the widest slot's bytes. */
+  readonly relocations: Pages<{ readonly start: bigint; readonly end: bigint }>;
+  readonly relocation_bytes: bigint;
+}
+// Symbol snapshots and loaded images are immutable; one index serves every
+// address recovered from the same snapshot instead of rescanning it per address.
+const symbolIndexes = new WeakMap<readonly SymbolRecord[], SymbolIndex>();
+const imageIndexes = new WeakMap<LoadedImage, ImageDataIndex>();
+function symbolIndex(symbols: readonly SymbolRecord[], context: OperationContext): SymbolIndex {
+  const cached = symbolIndexes.get(symbols);
+  if (cached) return cached;
+  const objects = new Map<string, Interval<SymbolRecord>[]>(), pages = new Map<string, { start: bigint }[]>();
+  symbols.forEach((symbol, order) => {
+    context.checkpoint(1);
+    if (!symbol.address) return;
+    const page = pageKey(symbol.address), starts = pages.get(page);
+    if (starts) starts.push({ start: symbol.address.value });
+    else pages.set(page, [{ start: symbol.address.value }]);
+    if (symbol.kind !== 'object') return;
+    // Size-less objects identify exactly their own address: the unit range [a, a+1).
+    const item: Interval<SymbolRecord> = { start: symbol.address.value, order, item: symbol,
+      end: symbol.address.value + (symbol.size === null || symbol.size === 0n ? 1n : symbol.size) };
+    const key = coordinate(symbol.address), group = objects.get(key);
+    if (group) group.push(item);
+    else objects.set(key, [item]);
+  });
+  const indexed: SymbolIndex = { objects: treesByCoordinate(objects, context), pages };
+  symbolIndexes.set(symbols, indexed);
+  return indexed;
+}
+function imageDataIndex(image: LoadedImage, context: OperationContext): ImageDataIndex {
+  const cached = imageIndexes.get(image);
+  if (cached) return cached;
+  const data = image.hints.filter((hint): hint is DataHint => {
+    context.checkpoint(1);
+    return hint.kind === 'data';
+  });
+  const hints = grouped(data.map((hint, order): Interval<DataHint> => ({ start: hint.range.start.value,
+    end: hint.range.start.value + hint.range.size, order, item: hint })).filter((item) => item.end > item.start),
+  (item) => coordinate(item.item.range.start), context);
+  const hintPages = grouped(data, (hint) => pageKey(hint.range.start), context);
+  let relocationBytes = 0n;
+  const relocations = grouped(image.relocations, (relocation) => pageKey(relocation.address), context);
+  const indexed: ImageDataIndex = { hints: treesByCoordinate(hints, context),
+    hint_pages: new Map([...hintPages].map(([key, items]) => [key, items.map((hint) => ({ start: hint.range.start.value }))])),
+    relocations: new Map([...relocations].map(([key, items]) => [key, items.map((relocation) => {
+      const bytes = BigInt(Math.ceil(relocation.width_bits / 8));
+      if (bytes > relocationBytes) relocationBytes = bytes;
+      return { start: relocation.address.value, end: relocation.address.value + bytes };
+    })])), relocation_bytes: relocationBytes };
+  imageIndexes.set(image, indexed);
+  return indexed;
+}
 
 /** Recover an address's own storage identity before considering printable bytes.
  * Bounds are not extended to a neighbouring symbol, pool, mapping or section.
@@ -31,21 +184,13 @@ export function recoverDataAddress(
   const section = sections[0]!;
   const mutable = section.permissions.includes('write') || image.mappings.some((mapping) =>
     mapping.permissions.includes('write') && va.value >= mapping.va && va.value < mapping.va + mapping.memory_size);
-  const objects = symbols.filter((symbol) => {
-    context.checkpoint(1);
-    return symbol.kind === 'object' && symbol.address &&
-      (symbol.size === null || symbol.size === 0n ? symbol.address.value === va.value &&
-        symbol.address.image_id === va.image_id && symbol.address.space === va.space
-        : contains(symbol.address, symbol.size, va));
-  });
-  const hints = image.hints.filter((hint) => {
-    context.checkpoint(1);
-    if (hint.kind !== 'data' || !contains(hint.range.start, hint.range.size, va)) return false;
-    // Section ownership is a bound, not one source-level array containing every
-    // unrelated string/global in the section.
-    return !(hint.encoding === 'bytes' && hint.range.start.value === section.virtual_range.start.value &&
-      hint.range.size === section.virtual_range.size);
-  });
+  const owned = symbolIndex(symbols, context), indexed = imageDataIndex(image, context);
+  const objects = stab(owned.objects.get(coordinate(va)), va.value, context);
+  // Section ownership is a bound, not one source-level array containing every
+  // unrelated string/global in the section.
+  const hints = stab(indexed.hints.get(coordinate(va)), va.value, context).filter((hint) =>
+    !(hint.encoding === 'bytes' && hint.range.start.value === section.virtual_range.start.value &&
+      hint.range.size === section.virtual_range.size));
   const hint = hints.length === 1 && hints[0]?.kind === 'data' ? hints[0] : undefined;
   const bases = new Set(objects.map((symbol) => symbol.address!.value));
   const sizes = new Set(objects.map((symbol) => symbol.size));
@@ -71,29 +216,22 @@ export function recoverDataAddress(
   const fileEnd = section.virtual_range.start.value + section.file_range.size;
   if (fileEnd < end) end = fileEnd;
   if (size !== null && base.value + size < end) end = base.value + size;
+  if (end > va.value + STRING_WINDOW) end = va.value + STRING_WINDOW;
   // Even size-less symbols establish a boundary, never an inferred whole extent.
-  for (const item of symbols) {
-    context.checkpoint(1);
-    if (item.address?.image_id === va.image_id && item.address.space === 'va' &&
-      item.address.value > va.value && item.address.value < end) end = item.address.value;
-  }
-  for (const item of image.hints) {
-    context.checkpoint(1);
-    if (item.kind === 'data' && item.range.start.image_id === va.image_id &&
-      item.range.start.space === 'va' && item.range.start.value > va.value && item.range.start.value < end)
-      end = item.range.start.value;
-  }
-  for (const relocation of image.relocations) {
-    context.checkpoint(1);
-    if (relocation.address.image_id !== va.image_id || relocation.address.space !== 'va') continue;
-    const finish = relocation.address.value + BigInt(Math.ceil(relocation.width_bits / 8));
-    if (relocation.address.value <= va.value && finish > va.value) return result;
-    if (relocation.address.value > va.value && relocation.address.value < end) end = relocation.address.value;
-  }
+  const at: Address = { ...va, space: 'va' };
+  end = nearestStart(owned.pages, at, end, context);
+  end = nearestStart(indexed.hint_pages, at, end, context);
+  // Relocation slots are storage: an address inside one is never string bytes.
+  const reach = va.value + 1n > indexed.relocation_bytes ? va.value + 1n - indexed.relocation_bytes : 0n;
+  for (let page = reach / STRING_WINDOW; page <= va.value / STRING_WINDOW; page++)
+    for (const relocation of indexed.relocations.get(pageKey(at, page)) ?? []) {
+      context.checkpoint(1);
+      if (relocation.start <= va.value && relocation.end > va.value) return result;
+    }
+  end = nearestStart(indexed.relocations, at, end, context);
   const remaining = end - va.value;
   if (remaining <= 0n) return result;
-  const limit = remaining < 4096n ? remaining : 4096n;
-  const spans = [...image.address_map.spans(va, limit)];
+  const spans = [...image.address_map.spans(va, remaining)];
   const span = spans[0];
   if (!span || span.kind !== 'mapped' || span.file_offset === null) return result;
   const count = Number(span.range.size);
