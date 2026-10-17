@@ -105,6 +105,39 @@ function presentName<T extends { readonly id: string; readonly display_name: str
   );
   return names.size === 1 ? { ...record, display_name: [...names][0]! } : record;
 }
+/** Batch form of presentName: one bounded annotation query per 1000 entities, never one
+ * store round trip per image function. Presentation is identical to presentName. */
+function presentNames<T extends { readonly id: string; readonly display_name: string | null }>(
+  scope: Scope,
+  revision: number,
+  records: readonly T[],
+): T[] {
+  const named = new Map<string, Set<string>>();
+  for (let start = 0; start < records.length; start += 1000) {
+    const entity_ids = records.slice(start, start + 1000).map((record) => record.id);
+    let cursor: string | undefined;
+    do {
+      scope.context.checkpoint(1);
+      const page = scope.store.queryAnnotations({
+        revision,
+        entity_ids,
+        limit: 1000,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      for (const item of page.items) {
+        if (item.status !== 'asserted' || item.value.kind !== 'name') continue;
+        const names = named.get(item.entity_id) ?? new Set<string>();
+        names.add(item.value.value);
+        named.set(item.entity_id, names);
+      }
+      cursor = page.next_cursor ?? undefined;
+    } while (cursor !== undefined);
+  }
+  return records.map((record) => {
+    const names = named.get(record.id);
+    return names?.size === 1 ? { ...record, display_name: [...names][0]! } : record;
+  });
+}
 function resultEvidence(scope: Scope, revision: number, data: unknown, local: readonly Evidence[] = []): unknown {
   const ids = new Set<string>();
   const collect = (value: unknown): void => {
@@ -414,15 +447,19 @@ async function dispatch(
       for (const kind of new Set(args.kinds)) {
         const page = records(scope, args.revision, image.id, kind);
         if (page.state !== 'complete') state = page.state;
-        for (const item of page.items) {
+        const candidates = page.items.filter((item) => {
           const location = 'slot' in item ? (item.callable_entry ?? item.slot) : item.address;
-          const presented = presentName(scope, args.revision, item);
-          if (
-            matches(args.query, item.original_name, item.display_name, presented.display_name) &&
-            (address === null ||
-              location?.value === address ||
-              ('slot' in item && item.slot?.value === address))
-          )
+          return (
+            address === null ||
+            location?.value === address ||
+            ('slot' in item && item.slot?.value === address)
+          );
+        });
+        const presentedItems = presentNames(scope, args.revision, candidates);
+        for (const [index, item] of candidates.entries()) {
+          const location = 'slot' in item ? (item.callable_entry ?? item.slot) : item.address;
+          const presented = presentedItems[index]!;
+          if (matches(args.query, item.original_name, item.display_name, presented.display_name))
             output.push({ kind, [kind]: presented, id: item.id, location });
         }
       }
@@ -470,19 +507,21 @@ async function dispatch(
         page = records(scope, args.revision, image.id, 'function');
       const address = args.address ? virtual(image, decodeAddress(args.address)).value : null;
       const selected: FunctionRecord[] = [];
-      for (const item of page.items) {
-        const presented = presentName(scope, args.revision, item);
-        if (
+      const candidates = page.items.filter(
+        (item) =>
           (!args.id || item.id === args.id) &&
-          matches(args.query, item.original_name, item.display_name, presented.display_name) &&
           (!args.boundary || item.boundary === args.boundary) &&
           (!args.analysis || item.analysis === args.analysis) &&
           (address === null ||
             item.entry.value === address ||
             item.ranges.some(
               (range) => address >= range.start.value && address < range.start.value + range.size,
-            ))
-        )
+            )),
+      );
+      const presentedItems = presentNames(scope, args.revision, candidates);
+      for (const [index, item] of candidates.entries()) {
+        const presented = presentedItems[index]!;
+        if (matches(args.query, item.original_name, item.display_name, presented.display_name))
           selected.push(presented);
       }
       return paginate(scope, operation, args, selected, page.state, (item) =>

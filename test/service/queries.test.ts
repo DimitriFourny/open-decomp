@@ -717,6 +717,118 @@ test(
   },
 );
 
+test(
+  'navigation presents only unique asserted names and keeps native names searchable across batches',
+  { timeout: 60000 },
+  async (t) => {
+    const { root, service } = await setup(t);
+    const opened = await service.execute('project_open', {
+      wait: true,
+      source: {
+        kind: 'import',
+        input_path: join(fixtures, 'macho-arm64-symbols'),
+        project_path: join(root, 'project'),
+      },
+    });
+    const scope = {
+      project_id: opened.project_id!,
+      revision: opened.revision!,
+      image_id: openedImage(opened).id,
+    };
+    const listed = data(await service.execute('functions_find', scope)).items;
+    assert.ok(listed.length >= 3, 'fixture must contain three functions');
+    const [unique, conflicting, hypothesized] = listed as [
+      (typeof listed)[number],
+      (typeof listed)[number],
+      (typeof listed)[number],
+    ];
+    const name = (entity_id: string, value: string, status: 'asserted' | 'hypothesis') => ({
+      operation: 'set' as const,
+      id: newIdentity('annotation'),
+      entity_id,
+      value: { kind: 'name' as const, value },
+      status,
+      evidence_ids: [],
+    });
+    const edited = data(
+      await service.execute('annotations_apply', {
+        project_id: scope.project_id,
+        expected_revision: scope.revision,
+        author: 'batched-presentation',
+        origin: 'user',
+        edits: [
+          name(unique.id, 'reviewed_unique', 'asserted'),
+          name(conflicting.id, 'reviewed_first', 'asserted'),
+          name(conflicting.id, 'reviewed_second', 'asserted'),
+          name(hypothesized.id, 'reviewed_hypothesis', 'hypothesis'),
+        ],
+      }),
+    );
+    const current = { ...scope, revision: edited.revision };
+    const find = async (text: string, match: 'exact' | 'contains' = 'exact') =>
+      data(
+        await service.execute('functions_find', {
+          ...current,
+          query: { text, match, case_sensitive: true },
+        }),
+      ).items;
+    assert.deepEqual(
+      (await find('reviewed_unique')).map((fn) => [fn.id, fn.display_name, fn.original_name]),
+      [[unique.id, 'reviewed_unique', unique.original_name]],
+    );
+    // The previous native name stays searchable, but presents the assertion.
+    assert.ok(
+      (await find(unique.original_name!)).some(
+        (fn) => fn.id === unique.id && fn.display_name === 'reviewed_unique',
+      ),
+    );
+    assert.deepEqual(await find('reviewed_first'), []);
+    assert.deepEqual(await find('reviewed_hypothesis'), []);
+    const all = data(await service.execute('functions_find', current)).items;
+    assert.equal(all.length, listed.length);
+    assert.equal(all.find((fn) => fn.id === conflicting.id)?.display_name, conflicting.display_name);
+    assert.equal(
+      all.find((fn) => fn.id === hypothesized.id)?.display_name,
+      hypothesized.display_name,
+    );
+    // An early revision never sees later assertions.
+    assert.deepEqual(
+      data(
+        await service.execute('functions_find', {
+          ...scope,
+          query: { text: 'reviewed_unique', match: 'exact', case_sensitive: true },
+        }),
+      ).items,
+      [],
+    );
+    const symbol = data(
+      await service.execute('symbols_find', { ...current, kinds: ['symbol'] }),
+    ).items.find((item) => item.kind === 'symbol' && item.symbol.original_name !== null);
+    assert.ok(symbol?.kind === 'symbol');
+    const renamed = data(
+      await service.execute('annotations_apply', {
+        project_id: scope.project_id,
+        expected_revision: edited.revision,
+        author: 'batched-presentation',
+        origin: 'user',
+        edits: [name(symbol.symbol.id, 'reviewed_symbol', 'asserted')],
+      }),
+    );
+    const presented = data(
+      await service.execute('symbols_find', {
+        ...scope,
+        revision: renamed.revision,
+        kinds: ['symbol'],
+        query: { text: 'reviewed_symbol', match: 'exact', case_sensitive: true },
+      }),
+    ).items;
+    assert.deepEqual(
+      presented.map((item) => item.kind === 'symbol' && [item.symbol.id, item.symbol.display_name]),
+      [[symbol.symbol.id, 'reviewed_symbol']],
+    );
+  },
+);
+
 for (const [file, fragment] of [
   ['objc-cxx.dylib', 'fixture::bar'],
   ['metadata.dll', 'fixture::bar'],

@@ -198,6 +198,18 @@ node --import tsx scripts/bench/selected-work.ts --mode diagnose --contract /tmp
 
 `public` uses ordinary defaults in a fresh isolated project. `diagnose` raises only non-instruction observation ceilings to 100,000 blocks, 10,000,000 IR nodes, 100,000,000 work and 300,000 ms; these are measurement settings, not a proposed repair. No analyzed input executes. The retained count record is historical evidence of the pre-repair implementation, not a promise that later instrumentation produces identical counts.
 
+## Public-surface census (2026-10-17)
+
+`scripts/bench/public-surface-census.ts` drives every contract function through the real MCP stdio server (spawned from source, server and tool defaults, default 100-item pages, cursors followed) and the ordinary `functions`/`decompile` CLI commands, both dialects, without supplied prototypes or raised limits:
+
+```sh
+node --import tsx scripts/bench/public-surface-census.ts --out /tmp/od-census/surface-1 [--contract PATH] [--binary corpus-arm64] [--function NAME] [--surface mcp|cli|both]
+```
+
+Per call it records tool, state, reason, delivery, cache, diagnostic codes/messages, coverage, wire bytes and wall time (diagnostic only) to `calls.jsonl`, and writes `summary.json`/`summary.md`. MCP covers import job, `functions_find`/`symbols_find`/`strings_find`/`binary_info` page sweeps, selected-function lookup, `function_get`/`xrefs_get`, first and cached `function_decompile` (artifact chunks read through the published `resource_link`/`next_uri` when delivery is artifact), the default queued job path, and a real server restart that must hit the persisted cache. Each result is classified from its actual fields: `failed`, `resource_limit` (reason `budget`, `details.kind=limit`, or a coverage reason naming a sub-budget), `missing_instructions` (decode coverage), `missing_graph` (lift/analysis coverage for unresolved control flow), `unresolved_semantics` (reason `unsupported_subset`, reconstruction coverage, source-interface diagnostics), `metadata_gap` (reason `incomplete_index`, image-wide discovery diagnostics) and `delivery_limit` (reason `output_limit`; the semantic class comes from the published artifact body). Mach-O C symbols carry a leading underscore: the CLI is first tried with the unprefixed contract name and then with the actual symbol; failure of the former is recorded as an anomaly.
+
+Finding fixed: `functions_find`/`symbols_find` resolved annotation-assigned display names with one SQLite round trip per image function on every page, so a 10-item page of the 3,389-function SQLite image cost about 82 ms (about 35 ms after batching name lookup into one bounded annotation query per 1,000 functions). The default-page sweep of SQLite fell from 3.4 s to 1.9 s and the 339-page `limit: 10` sweep from 27 s to 12.7 s. Remaining per-page cost is decoding the image function records; paging semantics, cursors and delivery bounds are unchanged.
+
 ## Reviewed paired-decompiler harness
 
 `scripts/bench/quality.py` retains the original 16 native-corpus and ten SQLite 3.54.0 Mach-O ARM64 selections. `quality-inputs.json` pins hashes, selected addresses, compiler/source/license provenance, tool versions, budgets, semantic states and matched raw-response/output artifacts. Source and independently inspected instructions remain the oracle; Ghidra is a comparator, not truth.
