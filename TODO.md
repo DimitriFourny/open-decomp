@@ -31,7 +31,7 @@ These block a quality-parity claim. Diagnose and fix each at its owning layer be
 
 - [x] Minimize and fix the raised-budget `sqlite3_strnicmp` failure: the mismatch calculation is emitted after an unconditional `return 0`, although the underlying semantic state is `complete`. Trace the reachable native CFG through SSA, structured regions, reconstruction, and rendering to find the first incorrect transition.
   - Acceptance: mismatching non-NULL inputs reach the character-difference result; equal prefixes and exhausted counts return zero; NULL ordering, empty strings, negative counts, first-byte mismatches, and mismatches after several iterations match the source oracle.
-- [ ] Validate structured branch/loop exits, return placement, and edge-specific parallel copies. Preserve loop-carried values, short-circuit behavior, multiple exits, and cyclic phi transfers. Use explicit labels/gotos when needed to preserve a graph; do not force an attractive but incorrect structured shape.
+- [x] Validate structured branch/loop exits, return placement, and edge-specific parallel copies. Preserve loop-carried values, short-circuit behavior, multiple exits, and cyclic phi transfers. Use explicit labels/gotos when needed to preserve a graph; do not force an attractive but incorrect structured shape.
   - Acceptance: every reachable source CFG edge/effect has an equivalent representation; no reachable computation is stranded after a terminating statement; no path uses an undefined synthesized local.
 
 Surfaces: `src/analysis/cfg/`, `src/analysis/ssa/`, `src/presentation/`, `src/reconstruction/`, `src/emitters/renderer.ts`; behavioral cases in `test/presentation/`, `test/reconstruction/`, and emitter control tests.
