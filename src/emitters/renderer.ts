@@ -33,7 +33,9 @@ import { Writer } from './writer.js';
 import type { EmissionInput, EmissionResult } from './model.js';
 
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
-type Nest = { readonly kind: 'loop'; readonly header: string } | { readonly kind: 'switch' };
+type Nest =
+  | { readonly kind: 'loop'; readonly header: string; readonly follow: string | null }
+  | { readonly kind: 'switch' };
 
 /** Only syntax lives here: both dialects consume the same reconstructed program. */
 export class Renderer {
@@ -822,17 +824,24 @@ export class Renderer {
       );
   }
 
-  private ordinaryTransfer(transfer: ParallelTransfer, nesting: readonly Nest[]): boolean {
-    if (transfer.mode === 'next') return true;
+  private ordinaryTransfer(
+    transfer: ParallelTransfer,
+    nesting: readonly Nest[],
+    destination: string | null,
+  ): boolean {
+    if (transfer.mode === 'next') return transfer.target === destination;
+    if (transfer.mode === 'goto')
+      return !!this.program.source && transfer.target === destination;
     for (let i = nesting.length - 1; i >= 0; i--) {
       const item = nesting[i]!;
       if (item.kind !== 'loop') continue;
       if (transfer.loop !== item.header) return false;
-      return (
-        transfer.mode === 'continue' ||
-        (transfer.mode === 'break' &&
-          (this.language === 'python-like' || nesting[nesting.length - 1]?.kind === 'loop'))
-      );
+      // A loop may have several exits. Only its actual lexical successor can
+      // use break; other destinations must keep their explicit labeled edge.
+      return transfer.mode === 'continue'
+        ? transfer.target === item.header
+        : transfer.target === item.follow &&
+            (this.language === 'python-like' || nesting[nesting.length - 1]?.kind === 'loop');
     }
     return false;
   }
@@ -868,7 +877,7 @@ export class Renderer {
     if (region.kind === 'loop') {
       this.findLabels(
         region.body,
-        [...nesting, { kind: 'loop', header: region.header }],
+        [...nesting, { kind: 'loop', header: region.header, follow }],
         depth + 1,
         region.header,
       );
@@ -877,20 +886,14 @@ export class Renderer {
     const transfer = (item: ParallelTransfer): void => {
       if (!this.program.blocks.has(item.target))
         this.invalid('Transfer target has no structured block');
-      if (
-        !this.ordinaryTransfer(item, nesting) &&
-        (!this.program.source || item.target !== follow)
-      ) {
+      if (!this.ordinaryTransfer(item, nesting, follow)) {
         this.labels.add(item.target);
         this.gotos.add(item);
       }
     };
     const arm = (item: ControlArm, nested: readonly Nest[]): void => {
       const destination = item.body ? this.firstBlock(item.body) : follow;
-      if (
-        !this.ordinaryTransfer(item.transfer, nested) &&
-        (!this.program.source || item.transfer.target !== destination)
-      ) {
+      if (!this.ordinaryTransfer(item.transfer, nested, destination)) {
         this.labels.add(item.transfer.target);
         this.gotos.add(item.transfer);
       }
