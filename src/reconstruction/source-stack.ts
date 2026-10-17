@@ -12,7 +12,7 @@ import {
 } from '../ir/index.js';
 import type { BlockRegion, ParallelTransfer } from '../presentation/index.js';
 import type { BoundaryProjection } from './model.js';
-import type { SourceLocal } from './source-model.js';
+import type { SourceLocal, SourceStackStorage } from './source-model.js';
 
 type MemoryNode = Extract<Instruction, { kind: 'load' | 'store' }>;
 /** Exact private slots only. Escapes and overlapping access intervals retain one
@@ -22,7 +22,7 @@ export function planSourceStack(
   blocks: ReadonlyMap<string, BlockRegion>,
   expressions: Map<string, Expression>,
   transfers: readonly { transfer: ParallelTransfer; block: BlockRegion }[],
-  calls: ReadonlyMap<string, BoundaryProjection>,
+  calls: Map<string, BoundaryProjection>,
   returns: ReadonlyMap<string, BoundaryProjection>,
   alias: (value: Value, expression: Expression) => void,
   context: OperationContext,
@@ -31,6 +31,7 @@ export function planSourceStack(
     type: DataType,
     contributors: readonly Value[],
   ) => Value | null,
+  entryStack: () => Value,
 ) {
   const addresses = new Map<string, bigint>(),
     facts = input.types?.calls?.stack;
@@ -140,12 +141,27 @@ export function planSourceStack(
         changed = true;
       }
   }
-  let escaped = false;
+  let escaped = false,
+    unknownCallStorage = false;
   const accesses: { node: MemoryNode; block: string; offset: bigint; end: bigint; key: string }[] =
     [];
   for (const block of blocks.values()) {
     for (const node of block.statements) {
       context.checkpoint(1);
+      if (node.kind === 'call') {
+        const projection = calls.get(node.id)!;
+        const snapshot = facts?.snapshots.get(node.id);
+        const writtenStack = snapshot
+          ? snapshot.memory.size !== 0
+          : memory.some((access) => access.kind === 'store' && addresses.has(access.address.id));
+        // Register observations establish a prefix, not the absence of further
+        // stack arguments. Written bytes may also be saves or locals: retain the
+        // uncertainty instead of inventing an argument count from their extent.
+        if (projection.kind === 'inferred' && writtenStack)
+          calls.set(node.id, { ...projection, argument_list_complete: false });
+      }
+      if (node.kind === 'call' && calls.get(node.id)!.kind !== 'source')
+        unknownCallStorage = true;
       if (
         node.kind === 'call' &&
         (calls.get(node.id)!.kind === 'physical' ||
@@ -173,21 +189,37 @@ export function planSourceStack(
     )
       escaped = true;
   }
+  // Established ABI stack locations are outgoing argument storage at a call,
+  // even when their entry-SP offsets are negative. They are not private spills.
+  const outgoingRanges = (input.types?.calls?.calls ?? []).flatMap((call) =>
+    call.contracts
+      .filter((contract) => contract.status === 'established')
+      .flatMap((contract) => contract.parameters.flatMap((parameter) =>
+        parameter.locations.flatMap((observation) =>
+          observation.location.kind === 'stack' && observation.stack_offset !== null
+            ? [{ start: observation.stack_offset, end: observation.stack_offset + observation.location.size }]
+            : [],
+        ),
+      )),
+  );
   const groups = new Map<string, typeof accesses>();
   for (const access of accesses) {
     const group = groups.get(access.key) ?? [];
     group.push(access);
     groups.set(access.key, group);
   }
+  const aliased = facts?.frame.aliased === true ||
+    memory.some((node) => node.kind === 'store' && !addresses.has(node.address.id));
   const eligible = new Set<string>();
-  if (!escaped)
+  if (!escaped && !unknownCallStorage && !aliased)
     for (const [key, group] of groups) {
       const first = group[0]!;
       context.checkpoint(accesses.length);
       if (
         first.offset >= 0n ||
         first.end > 0n ||
-        group.some((access) => access.node.access.volatile)
+        group.some((access) => access.node.access.volatile) ||
+        outgoingRanges.some((range) => range.start < first.end && range.end > first.offset)
       )
         continue;
       if (
@@ -346,6 +378,23 @@ export function planSourceStack(
       }
     }
   }
+  const dynamicStorage = memory.some((node) =>
+    tainted.has(node.address.id) && !addresses.has(node.address.id),
+  );
+  const sharedEntry = escaped || aliased || dynamicStorage;
+  const entryAddresses = new Set(accesses.filter((access) =>
+    !hidden.has(access.node.id) &&
+    classifyStackRegion(input.source!.abi, access.offset, access.end - access.offset) !== 'local_candidate',
+  ).map((access) => access.node.address.id));
+  const entryStorage = sharedEntry || entryAddresses.size ? entryStack() : null;
+  const requiresEntry = (id: string): boolean => sharedEntry || entryAddresses.has(id);
+  if (entryStorage)
+    for (const binding of entry.register_entry)
+      if (
+        binding.register.root === input.source!.abi.stack_pointer.root &&
+        sameType(binding.value.type, entryStorage.type)
+      )
+        alias(binding.value, { kind: 'cast', op: 'bitcast', value: entryStorage });
   const returnAddressLoads = new Map<
     string,
     { node: Extract<Instruction, { kind: 'load' }>; block: string }
@@ -358,7 +407,7 @@ export function planSourceStack(
       access.end <= input.source!.abi.stack_return_address_bytes
     )
       returnAddressLoads.set(access.node.result.id, { node: access.node, block: access.block });
-  const frame = (retained: ReadonlySet<string>, live: ReadonlySet<string>) => {
+  const frame = (retained: ReadonlySet<string>, live: ReadonlySet<string>): SourceStackStorage | null => {
     const remaining = accesses.filter(
       (access) =>
         retained.has(access.node.id) && !hidden.has(access.node.id) && !locals.has(access.node.id),
@@ -379,11 +428,14 @@ export function planSourceStack(
       }
     return remaining.length || addressLive
       ? {
+          ...(entryStorage && live.has(entryStorage.id)
+            ? { kind: 'entry' as const, base: entryStorage, dynamic: dynamicStorage }
+            : { kind: 'private' as const }),
           minimum_offset: minimum,
           size: maximum - minimum,
           alignment: input.source!.abi.layout.stack_alignment,
         }
       : null;
   };
-  return { hidden, privateLoads, locals, addresses, returnAddressLoads, frame };
+  return { hidden, privateLoads, locals, addresses, returnAddressLoads, frame, entryStorage, requiresEntry };
 }

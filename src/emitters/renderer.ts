@@ -277,10 +277,19 @@ export class Renderer {
     this.context.checkpoint(1);
     const stack = this.program.source?.stack,
       offset = this.program.source?.stack_addresses.get(value.id);
-    if (stack && offset !== undefined)
+    if (stack && offset !== undefined) {
+      if (stack.kind === 'entry') {
+        const base = this.value(stack.base);
+        if (offset === 0n) return base;
+        const address = `(${base} ${offset < 0n ? '-' : '+'} ${offset < 0n ? -offset : offset})`;
+        return this.language === 'c-like'
+          ? `((uintptr_t)${address})`
+          : this.call('uint64', 'Wrap an entry-stack byte address to the target pointer width.', [address]);
+      }
       return this.language === 'c-like'
         ? `((uintptr_t)&stack_frame[${offset - stack.minimum_offset}])`
         : `address_of(stack_frame, ${offset - stack.minimum_offset})`;
+    }
     const expression = this.program.inline.has(value.id)
       ? this.program.expressions.get(value.id)
       : undefined;
@@ -621,10 +630,10 @@ export class Renderer {
         );
       return text;
     });
-    if (projection.kind === 'physical')
+    if (projection.argument_list_complete === false || projection.kind === 'physical')
       args.push(
         this.call(
-          'unknown_arguments',
+          projection.arguments.length ? 'unknown_argument_remainder' : 'unknown_arguments',
           'Unresolved remainder of a call interface; not zero arguments or a purity claim.',
           [],
         ),
@@ -1343,7 +1352,7 @@ export class Renderer {
     ]);
     const formals = new Set(parameters.map((parameter) => parameter.value.id));
     const stack = this.program.source?.stack;
-    if (stack) {
+    if (stack?.kind === 'private') {
       w.statement(
         1,
         this.language === 'c-like'

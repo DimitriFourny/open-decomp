@@ -39,7 +39,7 @@ Surfaces: `src/analysis/cfg/`, `src/analysis/ssa/`, `src/presentation/`, `src/re
 ### Incoming arguments are not local stack storage
 
 - [x] Fix `fixture_stack_args`: recover all ten inputs and the weighted sum. The current output declares eight inputs and reads the other two from an uninitialized local `stack_frame`.
-- [ ] Separate callee-entry incoming stack slots, outgoing call arguments, saved registers, private locals, and escaped/aliased storage throughout source projection. Model SP adjustments and frame-pointer aliases without reclassifying incoming bytes as freshly allocated local memory.
+- [x] Separate callee-entry incoming stack slots, outgoing call arguments, saved registers, private locals, and escaped/aliased storage throughout source projection. Model SP adjustments and frame-pointer aliases without reclassifying incoming bytes as freshly allocated local memory.
   - Acceptance: the ten-argument example returns 385 for arguments 1 through 10; high-bit/overflow cases retain 64-bit behavior. Cover framed/frameless functions, alignment, mixed register/stack arguments, Windows shadow space, SysV return-address offsets/red-zone rules, and Darwin stack varargs.
   - Unknown incoming slots must remain explicit inputs/unknown incoming storage, never silently become uninitialized private locals. Promote actual locals only with definite initialization and valid alias/escape evidence.
 

@@ -735,6 +735,7 @@ export function planSource(
     definitions,
   };
   const incomingParameters = new Map<bigint, Value>();
+  let entryParameter: Value | null = null;
   return {
     calls,
     returns,
@@ -745,6 +746,21 @@ export function planSource(
     forcedInline,
     alias,
     make,
+    entryStack(): Value {
+      if (!entryParameter) {
+        entryParameter = make(
+          'parameter:entry-sp',
+          integer(abi.layout.pointer_bits),
+          entry.id,
+          undefined,
+          entry.register_entry
+            .filter((binding) => binding.register.root === abi.stack_pointer.root)
+            .map((binding) => binding.value),
+        );
+        parameterNames.set(entryParameter.id, 'entry_sp');
+      }
+      return entryParameter;
+    },
     incomingStack(offset: bigint, type: DataType, contributors: readonly Value[]): Value | null {
       // Without a declaration, infer only a whole scalar word in an actual ABI
       // parameter slot. Entry return addresses, home space and alignment padding
@@ -794,7 +810,9 @@ export function planSource(
       demanded.forEach((value, index) => {
         if (!parameterNames.has(value.id)) parameterNames.set(value.id, `arg${index}`);
       });
-      return demanded;
+      return entryParameter && live.has(entryParameter.id)
+        ? [...demanded, entryParameter]
+        : demanded;
     },
   };
 }

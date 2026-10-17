@@ -285,6 +285,22 @@ class Parser {
 
   private statement(breaks: number[]): void {
     const token = this.take();
+    if (token === '_Alignas') {
+      this.take('(');
+      const alignment = this.expression();
+      this.take(')');
+      this.take('uint8_t');
+      const name = this.take();
+      this.take('[');
+      const size = this.expression();
+      this.take(']');
+      this.take(';');
+      this.ops.push({
+        kind: 'assign', names: [name], tuple: false,
+        expression: { kind: 'call', name: 'stack_storage', args: [size, alignment] },
+      });
+      return;
+    }
     if (token === '(' && this.peek() === '*') {
       this.position--;
       this.memoryStatement(';');
@@ -488,6 +504,13 @@ class Parser {
 
   private atom(): Expr {
     const token = this.take();
+    if (token === '&') {
+      const name = this.take();
+      this.take('[');
+      const offset = this.expression();
+      this.take(']');
+      return { kind: 'call', name: 'address_of', args: [{ kind: 'ref', name }, offset] };
+    }
     if (token === '*') {
       const pointer = this.atom();
       assert.ok(pointer.kind === 'call' && pointer.name === '__pointer');
@@ -599,13 +622,19 @@ class Parser {
 export interface Observation {
   readonly exit: string;
   readonly values: readonly bigint[];
+  /** Immutable literal bytes returned by the source-level pointer subset. */
+  readonly string_result?: string;
   readonly tail_target?: bigint;
   readonly source_calls?: readonly { readonly name: string; readonly arguments: readonly bigint[] }[];
   readonly registers: ReadonlyMap<string, { readonly bits: bigint; readonly known: bigint }>;
   readonly memory: ReadonlyMap<bigint, number>;
   readonly events: readonly string[];
-  readonly calls: readonly { readonly target: bigint; readonly arguments: readonly bigint[] }[];
+  readonly calls: readonly { readonly target: bigint; readonly arguments: readonly bigint[]; readonly arguments_complete?: boolean }[];
 }
+export type SourceCallOracle = (
+  arguments_: readonly bigint[],
+  context: { readonly arguments_complete: boolean },
+) => bigint | readonly bigint[];
 export function execute(
   emission: {
     readonly text: string;
@@ -621,7 +650,7 @@ export function execute(
   callDelta = 0n,
   entryRegisters: Observation['registers'] = new Map(),
   unknownValues: ReadonlyMap<string, bigint> = new Map(),
-  sourceCalls: ReadonlyMap<string, (arguments_: readonly bigint[]) => bigint | readonly bigint[]> = new Map(),
+  sourceCalls: ReadonlyMap<string, SourceCallOracle> = new Map(),
 ): Observation {
   const text = emission.text,
     parser = new Parser(text),
@@ -644,8 +673,10 @@ export function execute(
     assert.ok(id, `Missing explicit input for ${match[1]}`);
     environment.set(match[1]!, inputs.get(id)!);
   }
-  const calls: { target: bigint; arguments: bigint[] }[] = [];
+  const calls: { target: bigint; arguments: bigint[]; arguments_complete?: boolean }[] = [];
   const sourceCallsObserved: { name: string; arguments: bigint[] }[] = [];
+  const uninitializedStack = new Set<bigint>();
+  let nextStackAddress = 0x7000000000000000n;
   const number = (value: Data | undefined): bigint => {
     assert.equal(typeof value, 'bigint');
     return value as bigint;
@@ -729,6 +760,26 @@ export function execute(
     if (name === 'wrap') return BigInt.asUintN(Number(number(args[0])), number(args[1]));
     if (name === 'bit_pattern') return BigInt.asUintN(Number(number(args[1])), number(args[2]));
     if (name === 'image_address') return number(args[2]);
+    if (name === 'data_address') return number(args[1]) + number(args[2]);
+    if (name === 'address_of') return number(args[0]) + number(args[1]);
+    if (name === 'stack_storage') {
+      const size = number(args[0]), alignment = number(args[1]);
+      assert.ok(size >= 0n && size <= 1048576n && alignment > 0n);
+      let base = ((nextStackAddress + alignment - 1n) / alignment) * alignment;
+      for (;;) {
+        let overlap = false;
+        for (let offset = 0n; offset < size; offset++)
+          if (memory.has(base + offset)) { overlap = true; break; }
+        if (!overlap) break;
+        base += size + alignment;
+      }
+      for (let offset = 0n; offset < size; offset++) {
+        memory.set(base + offset, 0);
+        uninitializedStack.add(base + offset);
+      }
+      nextStackAddress = base + size + alignment;
+      return base;
+    }
     if (name === 'stack_slot' || name === 'field_view') return args[0]!;
     if (name === 'source_target') return args[1]!;
     if (name === 'physical_inputs' || name === 'explicit_values' || name === 'boundary')
@@ -968,8 +1019,13 @@ export function execute(
       for (let i = 0; i < count; i++) {
         const shift = BigInt((endian === 'little' ? i : count - 1 - i) * 8),
           cell = address + BigInt(i);
-        if (store) memory.set(cell, Number((number(args[1]) >> shift) & 255n));
-        else value |= BigInt(memory.get(cell)!) << shift;
+        if (store) {
+          memory.set(cell, Number((number(args[1]) >> shift) & 255n));
+          uninitializedStack.delete(cell);
+        } else {
+          if (uninitializedStack.has(cell)) return null;
+          value |= BigInt(memory.get(cell)!) << shift;
+        }
       }
       return store ? null : value;
     }
@@ -998,7 +1054,7 @@ export function execute(
     }
     if (name === 'unknown_value') return unknownValues.get(string(args[1])) ?? null;
     if (name === 'undefined_value') return null;
-    if (name === 'unknown_arguments' || name === 'unknown_calling_convention' || name === 'unknown_results')
+    if (name === 'unknown_arguments' || name === 'unknown_argument_remainder' || name === 'unknown_calling_convention' || name === 'unknown_results')
       return { unresolved: name };
     if (name === 'tail_call') {
       assert.equal(object(args[1])['unresolved'], 'unknown_arguments');
@@ -1013,12 +1069,19 @@ export function execute(
         values: name.endsWith('_return') ? array(args[0]) : [],
         state: args.at(-1)!,
       };
-    const sourceCall = sourceCalls.get(name);
+    const pointer = environment.get(name);
+    const target = typeof pointer === 'bigint' ? pointer : undefined;
+    const sourceCall = sourceCalls.get(name) ?? (target === undefined ? undefined : sourceCalls.get(`0x${target.toString(16)}`));
     if (sourceCall) {
-      const arguments_ = args.map(number);
+      const last = args.at(-1);
+      const remainder = last !== null && typeof last === 'object' && !Array.isArray(last) &&
+        (last['unresolved'] === 'unknown_arguments' || last['unresolved'] === 'unknown_argument_remainder');
+      const arguments_ = (remainder ? args.slice(0, -1) : args).map(number);
+      const context = { arguments_complete: !remainder };
       events.push('call');
       sourceCallsObserved.push({ name, arguments: arguments_ });
-      const returned = sourceCall(arguments_);
+      if (target !== undefined) calls.push({ target, arguments: arguments_, ...context });
+      const returned = sourceCall(arguments_, context);
       return typeof returned === 'bigint' ? returned : [...returned];
     }
     throw new Error(`Oracle does not support helper ${name}`);
@@ -1129,6 +1192,16 @@ export function execute(
         case 'return': {
           const value = evaluate(op.expression);
           if (value === null) throw new Boundary('unknown', []);
+          if (typeof value === 'string')
+            return {
+              exit: 'machine_return',
+              values: [],
+              string_result: value,
+              registers: new Map(),
+              memory,
+              events,
+              calls,
+            };
           if (typeof value === 'bigint' || Array.isArray(value))
             return {
               exit: 'machine_return',

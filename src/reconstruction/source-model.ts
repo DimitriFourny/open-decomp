@@ -41,6 +41,16 @@ export interface SourceLocal {
   readonly id: string;
   readonly type: DataType;
 }
+/** An entry-backed view shares original stack bytes across every region. Its
+ * bounds describe observed affine accesses, not a proven dynamic allocation. */
+export type SourceStackStorage = {
+  readonly minimum_offset: bigint;
+  readonly size: bigint;
+  readonly alignment: number;
+} & (
+  | { readonly kind: 'private' }
+  | { readonly kind: 'entry'; readonly base: Value; readonly dynamic: boolean }
+);
 /** Syntax-neutral source storage and interface information. All original SSA
  * identities and effects remain in the analyzed graph and source mappings. */
 export interface SourcePresentation {

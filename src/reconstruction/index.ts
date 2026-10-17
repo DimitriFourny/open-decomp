@@ -150,6 +150,7 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
         sourcePlan.alias,
         context,
         sourcePlan.incomingStack,
+        sourcePlan.entryStack,
       )
     : null;
   if (sourcePlan) normalizeSourceExpressions(values, expressions, owner, sourcePlan.make, context);
@@ -377,7 +378,11 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
       roots.set(returnAddress.node.id, [returnAddress.node.address]);
       use(returnAddress.node.address, returnAddress.block);
     }
-    if (sourceStack?.addresses.has(value.id)) continue;
+    if (sourceStack?.addresses.has(value.id)) {
+      if (sourceStack.entryStorage && sourceStack.requiresEntry(value.id))
+        use(sourceStack.entryStorage, owner.get(value.id)!);
+      continue;
+    }
     if (expression)
       for (const operand of expressionOperands(expression)) use(operand, owner.get(value.id)!);
     if (!sourcePlan || !expression || !identityOperand(value.type, expression))
@@ -524,6 +529,9 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
   )
     signature = null;
   if (sourcePlan) signature = sourcePlan.signature;
+  const entryStorage = sourceStack?.entryStorage;
+  const entryStorageLive = entryStorage !== null && entryStorage !== undefined && live.has(entryStorage.id);
+  if (entryStorageLive) signature = null;
   // A source return without a fully expressible function interface still retains
   // its proven result binding; physical outputs are never dropped by this choice.
   const parameters = sourcePlan
@@ -591,7 +599,8 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
           unavailable(node, 'An unknown machine value remains explicit.');
       } else if (node.kind === 'unknown_effect')
         unavailable(node, 'Unknown instruction effects remain ordered and explicit.');
-      else if (node.kind === 'call' && calls.get(node.id)?.kind === 'physical')
+      else if (node.kind === 'call' &&
+        (calls.get(node.id)?.kind === 'physical' || calls.get(node.id)?.argument_list_complete === false))
         unavailable(
           node,
           sourcePlan

@@ -10,6 +10,8 @@ export interface BoundaryProjection {
   readonly kind: 'source' | 'inferred' | 'physical';
   readonly signature: SignatureAssociation | null;
   readonly arguments: readonly Value[];
+  /** False preserves a known prefix without claiming that trailing source arguments are absent. */
+  readonly argument_list_complete?: boolean;
   readonly results: readonly Value[];
   readonly inputs: readonly { readonly register: RegisterDescriptor; readonly value: Value }[];
   readonly outputs: readonly { readonly register: RegisterDescriptor; readonly value: Value }[];
