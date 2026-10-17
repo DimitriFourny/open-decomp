@@ -2,7 +2,7 @@
 
 ## Status and method
 
-These historical macOS measurements were captured after Node 24.22.0 strict checking, **695/695 tests**, compilation and **24 compiled MCP release scenarios**. Later F01/F02/F03 macOS correctness/installed evidence is recorded in [release verification](RELEASE-VERIFICATION.md); it does not recast these older measurements as a rerun of later bytes. **macOS arm64 / Node 24.22.0 is the verified execution host.** Linux/WSL using Linux Node is intended but has no host performance/qualification claim. Native Windows execution is outside the product requirement; Windows VM measurements are not a release gate and no further native benchmark run is required. Windows PE x64 is a statically analyzed target in the macOS measurements, not the measurement host.
+These historical macOS measurements were captured after Node 24.22.0 strict checking, **695/695 tests**, compilation and **24 compiled MCP release scenarios**. They are a recorded baseline, not measurements of later revisions. **macOS arm64 / Node 24.22.0 is the verified execution host.** Linux/WSL using Linux Node is intended but has no host performance/qualification claim. Native Windows execution is outside the product requirement. Windows PE x64 is a statically analyzed target in the macOS measurements, not the measurement host.
 
 Host: Darwin 27.0.0, arm64, Mac18,5, Apple M6, 12 logical CPUs, 16 GiB RAM; Node v24.22.0, V8 13.6.233.17-node.57. A one-vCPU QEMU Windows verification guest was running concurrently. This was not a dedicated idle benchmark host.
 

@@ -1,4 +1,4 @@
-# Redistributable native corpus (T02)
+# Redistributable native corpus
 
 This is a trusted, first-party C corpus for **offline static analysis**. Inputs in `bin/` are actual Apple Clang/Apple ld and Clang/LLD output, not hand-built headers described as compiler output. `malformed/` contains explicitly identified mutations/extractions of that output. All authored source, recipes, tests and compiled corpus inputs are under [LICENSE](LICENSE). No private input, downloaded Arm reference material, Windows SDK, CRT object, compiler binary, system library, or sibling source file is bundled.
 
@@ -44,7 +44,7 @@ The dedicated `test/abi/sysv-amd64/fixtures/abi.c` corpus independently covers I
 
 ELF support requires ELF64LE EM_X86_64 ET_EXEC/ET_DYN, OSABI 0/3, bounded valid program/section tables and unique PT_LOAD mappings. Sectionless images, extended counts/indexes, ELF DWARF, PLT callable-entry recovery and runtime dependency/relocation/ASLR/IFUNC-result guessing are outside this subset. Native symbol-bearing inputs therefore still have unavailable debug types/signatures: aggregate analysis/reconstruction may truthfully be partial even when decode/lift/ABI are complete and every reconstruction unit/instruction mapping is emitted. SysV variadic declarations establish only a fixed prefix, not complete actual arguments; AL is an upper bound on vector-register use, not proof of arity.
 
-Current macOS proof passed strict checking, 852 tests and build, compiled stdio investigations for all eight fixtures/both dialects, real compiled HTTP/HTTPS investigations for all four ELF variants, and exact-archive offline installed acceptance. Exact evidence is in [RELEASE-VERIFICATION.md](../RELEASE-VERIFICATION.md). This is static analysis on the verified macOS execution host, not Linux/Windows target execution. Intended Linux/WSL host use remains unverified; Windows users are expected to use WSL/Linux Node, not native `win32` Node. Native Windows host qualification is outside current release scope; no VM or target execution is required to cross-compile/analyze the corpus.
+The corpus is statically analyzed on the verified macOS execution host, not executed as Linux/Windows targets. Intended Linux/WSL host use remains unverified; Windows users are expected to use WSL/Linux Node, not native `win32` Node. No VM or target execution is required to cross-compile/analyze the corpus.
 
 Generate only these SDK/CRT-free ELF inputs from the repository root with LLVM Clang/lld and repository Node/tsx dependencies:
 
@@ -75,28 +75,10 @@ Compiled acceptance remains `node dist/scripts/release-acceptance.js`; it now in
 * `source/corpus.c` / `corpus.h`: wrapping integer arithmetic, signed comparison/division, loops, volatile stack storage, aliased load/add/store, direct/indirect calls, 32-to-64-bit extension and masked variable shifts, ten integer arguments, binary64 arithmetic, 128-bit four-lane float/integer vectors, promoted floating varargs, and a referenced string.
 * `source/check.c`: all 24 deterministic cases, with stable failure IDs 1–14 and exit 0 on success. The Mach-O executable additionally prints exactly `open-decomp trusted fixture v1\n`. Finite FP test values are exact; contraction is disabled. No signed C division by zero or `INT_MIN/-1` is claimed defined.
 * `expected.json`: explicit arguments, results and memory-after expectations, independent of pseudocode wording.
-* `inventory.json`: exact compiler-corpus signatures, semantic families, observed instruction families, historical API boundaries and corpus exclusions. It does **not** describe total product coverage: targeted tests separately cover ADC/SBB, partial-register writes, logical authentication boundaries, TLS, ordinal/delay imports, forwarded exports and Objective-C/Swift metadata. Advanced-vector and runtime limitations remain explicit.
+* `inventory.json`: exact compiler-corpus signatures, semantic families, observed instruction families and corpus exclusions. It does **not** describe total product coverage: targeted tests separately cover ADC/SBB, partial-register writes, logical authentication boundaries, TLS, ordinal/delay imports, forwarded exports and Objective-C/Swift metadata. Advanced-vector and runtime limitations remain explicit.
 * `test/fixtures/oracle.ts`: isolated source-level BigInt width/wrapping and IEEE-number/`Math.fround` reference semantics. It never executes a user image or imports the service. Current typed-IR evaluator suites compare these vectors and memory/call/branch effects rather than generated source spelling.
 
 The trusted native harness establishes compiler-output behavior on compatible hosts; the mathematical oracle is an additional check, not a claim that a source evaluator decodes machine code. No tests or application modules load the sibling implementation. All normal fixture tests use checked-in bytes/results and require no network, private binaries, cross-compiler or target execution.
-
-## Existing ARM64 API baseline
-
-`baseline/arm64.json` is frozen historical evidence from direct calls to the reference **`decompile(bytes, options)` API**, not executions of its test suite or a current regression oracle. It retains image/reference/a64js hashes, input words/addresses, captured code, CFGs, mappings, diagnostics, source/API/rendered signatures and real process results. The migration-only collector and redundant C-file copies have been retired; historical command paths in the JSON describe that past run, not runnable current instructions. The reference implementation is neither vendored nor required.
-
-Existing behavior coverage was inspected in `../disass_arm/test/decompiler-core/`: API byte/record validation and sparse CFGs; integer/flag widths; native arithmetic/loops/memory; stack aliases/escapes; typed and unknown calls; Darwin variadic conventions; pointer authentication; native presentation/type-recovery and structured CFG tests. The new corpus carries forward the applicable scalar/stack/call/memory families and adds real FP/vector compiler cases. It does not report those old tests as run or automatically import every old regression/private fixture.
-
-Observed collection on macOS ARM64, Node **26.11.1** (collection host, not the project's Node 24 acceptance claim):
-
-* All three Mach-O executable variants exited 0 with the expected stdout and empty stderr.
-* Both dylibs were explicitly loaded by the trusted C `source/library-runner.c`, called through `int fixture_check(void)`, and exited 0. This driver is developer-only, never service functionality.
-* Contracted arithmetic, signed max, loop, stack, memory, direct calls, division and width/shift functions have all instructions supported and no error diagnostics. Compiling their reconstructed C with Apple Clang `-std=c11 -O1 -fsanitize=undefined` succeeded; both the scalar/memory harness and corrected direct-call harness exited 0. The captured compile has one unsuppressed precedence-style warning in `fixture_width`; no UBSan stderr occurred in these runs.
-* **EntryStatePrototypeBoundary:** source/API signature `uint32_t fixture_direct(uint32_t)` becomes a six-parameter rendered C prototype: source arg, `initial_sp`, `initial_x19`, `initial_x20`, `initial_x29`, `initial_x30`. The API explicitly warns about these requirements. The recorded direct-call harness supplies an aligned 128-byte backing array, a pointer to its midpoint as `initial_sp`, and all four initial register values. Calling the reconstruction as if it had the one-argument source ABI is invalid; an initial such harness was discarded and is **not** miscompilation/regression evidence. Preserve this source/API/output-signature distinction during migration.
-* Raw indirect calls have explicit unresolved-contract errors despite 8/8 recognized/supported instructions. No signature is inferred from a callback name.
-* Scalar FP: 1/6 supported; floating vector: 1/6; integer vector: 1/7; floating variadic: 11/14. Reachable unsupported semantics produce errors. The old public API rejects `double` signature types and ten-parameter signatures. Ten-argument raw instruction support (17/17) does not establish ABI support. The integrated `fixture_check` is also incomplete because of these families.
-* PE execution was **not run** during collection: no Windows x86-64 host, Wine executable, or configured SSH host was available. The later isolated Windows verification runs the analysis application, not these target programs; it does not retroactively establish native PE execution. PE generation and independent static metadata collection did complete.
-
-These observations are historical migration input, not the current support inventory. Current lifter, ABI, shared-analysis and emitter regressions exercise scalar/stack/call/memory and implemented FP/vector behavior against source-level semantic oracles, preserving explicit unsupported boundaries. Neither old instruction counts nor captured C text prove unexecuted families.
 
 ## Commands
 
@@ -109,7 +91,7 @@ bun run typecheck
 node --import tsx --test test/fixtures/*.test.ts
 ```
 
-These check hashes/manifest structure, independently pinned fields/bytes, exact universal slicing, stripping behavior, exports/imports and zero-fill, every malformed mutation, raw code/source binding, and the independent semantic vectors. They do not compile or execute fixtures. Captured API diagnostics and entry-state results are historical migration evidence, not passing tests of the new implementation. Run `bun run check` for the current lifter, ABI, analysis, emitter and service regressions; run `node dist/scripts/release-acceptance.js` for the compiled MCP scenarios.
+These check hashes/manifest structure, independently pinned fields/bytes, exact universal slicing, stripping behavior, exports/imports and zero-fill, every malformed mutation, raw code/source binding, and the independent semantic vectors. They do not compile or execute fixtures. Run `bun run check` for the current lifter, ABI, analysis, emitter and service regressions; run `node dist/scripts/release-acceptance.js` for the compiled MCP scenarios.
 
 ### Trusted native behavior, no compiler or sibling required
 
@@ -119,7 +101,7 @@ On macOS ARM64 or Windows x86-64:
 node --import tsx scripts/fixtures/execute-trusted.ts
 ```
 
-Only the checked-in hash-matching corpus is accepted. macOS runs the three executable variants. Windows runs both executable/DLL pairs in an isolated temporary directory, including the stripped DLL under its required import name. On other hosts the driver fails explicitly; static tests remain usable. Coordinator verification on Node 24.22.0/macOS arm64 executed this driver: all three executable variants exited 0 with the exact expected output. Windows execution remains unverified.
+Only the checked-in hash-matching corpus is accepted. macOS runs the three executable variants. Windows runs both executable/DLL pairs in an isolated temporary directory, including the stripped DLL under its required import name. On other hosts the driver fails explicitly; static tests remain usable. Windows target execution remains unverified.
 
 For direct dylib checks on macOS with Command Line Tools (uses only a trusted driver):
 
@@ -140,7 +122,7 @@ CC=/usr/bin/clang LLVM_BIN=/opt/homebrew/opt/llvm/bin LLD_LINK=lld-link \
 
 Defaults are the recorded local tool locations; the three environment variables override them. The exact source paths and flags are in `manifest.commands`: C11, `-O1 -g`, no auto-vectorization, no FP contraction, no stack protector or builtin library substitution; explicit `arm64-apple-macos13.0`, `x86_64-apple-macos13.0` and `x86_64-pc-windows-msvc`; PE timestamp 0, explicit bases, no default libraries, DLL no-entry and EXE explicit entry. LLVM tools independently inspect every result. The recipe removes its temporary object/import-library directory on success.
 
-Hashes pin the **checked-in** artifacts. SDK/tool/debug metadata/UUID changes may alter rebuilt bytes; do not promise cross-toolchain byte identity. After an intentional rebuild, inspect independent reports, review address/byte expectations in tests and `loader-expectations.json`, and run the current semantic suites. The historical ARM64 baseline remains bound to its recorded old image and is not regenerated. Do not derive expected semantic results from the decompiler under test.
+Hashes pin the **checked-in** artifacts. SDK/tool/debug metadata/UUID changes may alter rebuilt bytes; do not promise cross-toolchain byte identity. After an intentional rebuild, inspect independent reports, review address/byte expectations in tests and `loader-expectations.json`, and run the current semantic suites. Do not derive expected semantic results from the decompiler under test.
 
 ## Malformed inputs
 

@@ -92,7 +92,7 @@ export interface SSAForm extends FunctionBody {
   readonly register_states: readonly { readonly block: EntityId; readonly entry: readonly RegisterBinding[]; readonly exit: readonly RegisterBinding[] }[];
 }
 export type FunctionIR = RegisterIR | SSAForm;
-/** T16 supplies construction/optimization; no SSA algorithm is hidden in the lifter. */
+/** Construction and optimization are separate passes; no SSA algorithm is hidden in the lifter. */
 export interface SSAConstruction {
   construct(input: RegisterIR, checkpoint: (work: number) => void): SSAForm;
 }

@@ -19,12 +19,6 @@
     {"name":"fixture_string","signature":"const char*(void)","families":["data-reference"],"arm64":["ADRP","ADD X page offset","RET"],"x86_64":["LEA RIP-relative","RET"],"oracle":"address of open-decomp trusted fixture v1"},
     {"name":"fixture_check","signature":"int(void)","families":["trusted-harness"],"arm64":["source self-check integration; see complete LLVM disassembly"],"x86_64":["source self-check integration; see complete LLVM disassembly"],"oracle":"exit 0 iff all source expectations hold; nonzero IDs in expected.json"}
   ],
-  "legacyApiBoundaries": {
-    "floatAndVector":"Instruction recognition is not semantic support. Baseline records explicit unsupported instructions for scalar FP and vectors; double signatures are rejected.",
-    "stackArguments":"Ten source arguments exceed the old public signature limit of eight; raw instruction recognition does not establish ABI reconstruction.",
-    "indirectCall":"Raw strict mode reports unresolved indirect call contract; a name alone is not a signature.",
-    "entryState":"Reconstructed C may add initial_sp and preserved-register parameters. fixture_direct output requires source arg plus initial_sp, initial_x19, initial_x20, initial_x29, initial_x30; callers must provide valid backing storage. An initial one-argument reconstruction harness was invalid and is not regression evidence."
-  },
   "notExercised": ["AL/AH/AX partial-write distinctions beyond EAX zero extension", "ADC/SBB carry chains", "unsigned MUL/DIV", "pointer authentication", "AVX/AVX-512/SVE", "TLS callbacks", "PE delay/ordinal imports or forwarded exports", "C++ exceptions or Objective-C/Swift metadata"],
   "oracleStrategy":"Offline test-only BigInt/IEEE-number reference functions check deterministic vectors. Trusted native C harness checks compiler output on compatible hosts. Current typed IR evaluator suites compare the same cases and memory side effects; service code never executes targets."
 }

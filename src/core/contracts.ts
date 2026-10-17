@@ -43,7 +43,7 @@ export interface FunctionGraph {
   readonly coverage: z.infer<typeof coverageSchema>;
   readonly diagnostics: readonly Diagnostic[];
 }
-/** T04 supplies RegisterIR. Core does not define semantic operations or strings masquerading as IR. */
+/** The semantic IR module supplies RegisterIR. Core does not define semantic operations or strings masquerading as IR. */
 export interface Lifter<RegisterIR> extends ComponentIdentity {
   readonly architecture: Target['architecture'];
   lift(graph: FunctionGraph, abi: AbiProfile, context: OperationContext): {

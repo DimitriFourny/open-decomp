@@ -30,7 +30,7 @@ const manifestSchema=z.object({
   images:z.array(artifactSchema.extend({facts:factsSchema.nullable(),slices:z.array(z.object({architecture:z.enum(['arm64','x86_64']),offset:z.number().int().nonnegative(),size:z.number().int().positive(),sha256:hashSchema})),metadataPath:z.string(),metadataSha256:hashSchema,disassemblyPath:z.string(),disassemblySha256:hashSchema,symbolState:z.enum(['debug-stripped','symbol-bearing'])})),
   codeRanges:z.array(artifactSchema.extend({architecture:z.enum(['arm64','x86_64']),image:z.string(),symbol:z.string(),address:addressSchema,fileOffset:z.number().int().nonnegative(),boundaryEvidence:z.string()})),
   malformed:z.array(artifactSchema.extend({source:z.string(),mutation:z.string(),expected:z.string()})),
-  expected:z.string(),inventory:z.string(),loaderExpectations:z.string(),baseline:z.string(),rebuild:z.string(),
+  expected:z.string(),inventory:z.string(),loaderExpectations:z.string(),rebuild:z.string(),
   commands:z.array(z.object({executable:z.string(),arguments:z.array(z.string())})),tools:z.object({clang:z.string(),lld:z.string(),appleLinker:z.string()}),notes:z.array(z.string()),
 });
 const manifest=manifestSchema.parse(json('fixtures/manifest.json'));
@@ -159,7 +159,7 @@ test('malformed boundaries contain the advertised exact mutations, not unexplain
 test('all deterministic source expectations agree with isolated finite-width/FP/vector oracles',()=>{
   assert.equal(expected.cases.length,24);
   for(const c of expected.cases)assert.deepEqual(evaluate(c),{result:c.result,...(c.memoryAfter===undefined?{}:{memoryAfter:c.memoryAfter})},`${c.function} ${JSON.stringify(c.arguments)}`);
-  const inventory=z.object({functions:z.array(z.object({name:z.string(),signature:z.string(),families:z.array(z.string()),arm64:z.array(z.string()),x86_64:z.array(z.string()),oracle:z.string()})),legacyApiBoundaries:z.object({floatAndVector:z.string(),stackArguments:z.string(),indirectCall:z.string(),entryState:z.string()}),notExercised:z.array(z.string())}).parse(json(manifest.inventory));
+  const inventory=z.object({functions:z.array(z.object({name:z.string(),signature:z.string(),families:z.array(z.string()),arm64:z.array(z.string()),x86_64:z.array(z.string()),oracle:z.string()})),notExercised:z.array(z.string())}).parse(json(manifest.inventory));
   for(const c of expected.cases)assert.ok(inventory.functions.some(f=>f.name===c.function && f.families.includes(c.family)),`${c.function}/${c.family}`);
   for(const f of inventory.functions) {
     assert.ok(manifest.codeRanges.some(r=>r.architecture==='arm64' && r.symbol===`_${f.name}`));

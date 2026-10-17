@@ -22,7 +22,7 @@ interface Affine { base: string; offset: bigint; stride: bigint | null }
  * Source definitions, physical machine widths and observed byte extents remain
  * independent. A shape is an incomplete view, not proof of allocation size,
  * initialization, disjointness, parameter count, or source-language alias rules.
- * Physical ABI contracts use T17's pre-effect snapshots and T19's exact nominal
+ * Physical ABI contracts use pre-effect call snapshots and exact nominal
  * library declarations. Debug aggregates without alignment stay ABI-unknown.
  * All alternatives and their evidence survive; emitters must not silently pick
  * one conflicting association. On budget/cancellation failure no partial source

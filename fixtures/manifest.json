@@ -28,7 +28,7 @@
     },
     {
       "path": "fixtures/inventory.json",
-      "sha256": "f5f49835e2fab48fbfadf3c8603858f1482f795bae1144637f66c901b4f8e188"
+      "sha256": "51f1eea867db36141c385440caad79efff24834958f447c1782c7bef2e3b045b"
     },
     {
       "path": "fixtures/loader-expectations.json",
@@ -40,7 +40,7 @@
     },
     {
       "path": "scripts/fixtures/generate.ts",
-      "sha256": "29da24e6e7ca0881b2fcfa9f1f54ed2056da8bbd3d6234cea15d0df5e81ffcb2"
+      "sha256": "4258fa0aaa1ee19e29ad3892a0d2dabba08baff02c9f39b60686626a3688d8a5"
     },
     {
       "path": "scripts/fixtures/inspect.ts",
@@ -2576,7 +2576,6 @@
   "expected": "fixtures/expected.json",
   "inventory": "fixtures/inventory.json",
   "loaderExpectations": "fixtures/loader-expectations.json",
-  "baseline": "fixtures/baseline/arm64.json",
   "documentation": "fixtures/README.md",
   "licenseFile": "fixtures/LICENSE",
   "rebuild": "node --import tsx scripts/fixtures/generate.ts",
@@ -2584,8 +2583,6 @@
     "Real compiler/linker output; malformed files are explicitly mutated copies, never called real compiler output.",
     "Symbol ranges include compiler alignment padding; not a recovered instruction-only function-size oracle.",
     "PE exports survive debug stripping; symbol-bearing files carry DWARF, stripped files do not.",
-    "No sibling checkout or compiler is required to consume prebuilt bytes.",
-    "Legacy double/vector semantics, ten-argument signatures and raw indirect call contracts have explicit gaps; see inventory and baseline.",
-    "The ARM64 baseline is frozen historical migration evidence, not regenerated output or a current semantic oracle."
+    "No sibling checkout or compiler is required to consume prebuilt bytes."
   ]
 }

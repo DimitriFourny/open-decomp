@@ -99,15 +99,13 @@ writeFileSync('fixtures/manifest.json',JSON.stringify({
   schemaVersion:1,license:'MIT',
   sourceFiles:sourcePaths.map(path=>({path,sha256:hash(readFileSync(path))})),
   tools:versions,commands,images,codeRanges,malformed,
-  expected:'fixtures/expected.json',inventory:'fixtures/inventory.json',loaderExpectations:'fixtures/loader-expectations.json',baseline:'fixtures/baseline/arm64.json',documentation:'fixtures/README.md',licenseFile:'fixtures/LICENSE',
+  expected:'fixtures/expected.json',inventory:'fixtures/inventory.json',loaderExpectations:'fixtures/loader-expectations.json',documentation:'fixtures/README.md',licenseFile:'fixtures/LICENSE',
   rebuild:'node --import tsx scripts/fixtures/generate.ts',
   notes:[
     'Real compiler/linker output; malformed files are explicitly mutated copies, never called real compiler output.',
     'Symbol ranges include compiler alignment padding; not a recovered instruction-only function-size oracle.',
     'PE exports survive debug stripping; symbol-bearing files carry DWARF, stripped files do not.',
     'No sibling checkout or compiler is required to consume prebuilt bytes.',
-    'Legacy double/vector semantics, ten-argument signatures and raw indirect call contracts have explicit gaps; see inventory and baseline.',
-    'The ARM64 baseline is frozen historical migration evidence, not regenerated output or a current semantic oracle.',
   ],
 },null,2)+'\n');
 for (const name of ['macho-arm64-symbols','macho-arm64-stripped','macho-universal']) chmodSync(`fixtures/bin/${name}`,0o755);

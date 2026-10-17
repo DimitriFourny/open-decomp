@@ -327,8 +327,8 @@
     },
     {
       "path": "fixtures/inventory.json",
-      "size": 6240,
-      "sha256": "f5f49835e2fab48fbfadf3c8603858f1482f795bae1144637f66c901b4f8e188"
+      "size": 5416,
+      "sha256": "51f1eea867db36141c385440caad79efff24834958f447c1782c7bef2e3b045b"
     },
     {
       "path": "fixtures/LICENSE",

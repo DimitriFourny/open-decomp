@@ -1,5 +1,5 @@
 /**
- * Typed semantic IR (T04).
+ * Typed semantic IR.
  *
  * Lifter-facing API:
  *   const build = new IRBuilder(sliceId, functionId, instructionProvenance(first));
