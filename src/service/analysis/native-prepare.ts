@@ -1,5 +1,6 @@
 import { fingerprint, OperationError, type AbiProfile, type Evidence, type FunctionRecord, type Lifter, type LoadedImage, type OperationContext, type ReferenceRecord } from '../../core/index.js';
 import { constructSSA } from '../../analysis/ssa/index.js';
+import { abiObservableRegisterMasks } from '../../analysis/ssa/observable-masks.js';
 import { simplifySSA } from '../../analysis/values/index.js';
 import { recoverTypes, type SuppliedTypeRecord, type TypeRecoveryResult } from '../../analysis/types/index.js';
 import { observePreparedCallInterfaces } from '../../analysis/calls/observed.js';
@@ -21,6 +22,7 @@ import { parameterRegisters } from './native-abi.js';
 import { nativeCallContext, type NativeContext } from './native-context.js';
 import { nativeAnnotations } from './native-annotations.js';
 import type { AnalysisReadset } from '../../project/cache/dependencies.js';
+import { createNativeInterfaceIndex, type NativeInterfaceIndex } from './native-entry.js';
 
 export interface NativePreparationInput {
   readonly scope: AnalysisScope;
@@ -32,6 +34,7 @@ export interface NativePreparationInput {
   readonly library: LibraryContracts;
   readonly native_types: readonly SuppliedTypeRecord[];
   readonly components: { readonly abi: AbiProfile; readonly lifter: Lifter<RegisterIR> };
+  readonly observable_register_masks?: ReadonlyMap<string, bigint>;
 }
 export interface PreparedNativeUnit extends NativeSummaryUnit {
   readonly ir: SSAForm | null;
@@ -42,6 +45,7 @@ export interface PreparedNativeUnit extends NativeSummaryUnit {
   readonly context_assumptions?: NativeContext;
   readonly dependency_readset?: AnalysisReadset;
   readonly demand_index?: CallResultDemandIndex;
+  readonly interface_index?: NativeInterfaceIndex;
 }
 
 /** Resolve exact direct calls and discovery-established direct tails only. The
@@ -145,7 +149,8 @@ export function prepareNativeUnit(
   const passOptions = { max_work: ssaLimit, max_ir_nodes: context.budget.ir_nodes,
     max_blocks: context.budget.blocks, checkpoint: (work: number) => ssaContext.checkpoint(work) };
   try {
-    const constructed = constructSSA(lifted.ir, passOptions);
+    const constructed = constructSSA(lifted.ir, { ...passOptions,
+      observable_register_masks: input.observable_register_masks ?? abiObservableRegisterMasks(abi, ssaContext) });
     requirePass(constructed.state, constructed.diagnostics, ssaContext);
     if (constructed.value.form !== 'ssa') throw new OperationError({ code: 'internal_error', severity: 'error',
       message: 'Native dependency preparation did not produce SSA', evidence_ids: fn.evidence_ids });
@@ -225,8 +230,9 @@ export function prepareNativeUnit(
     }
   }
   const demand_index = createCallResultDemandIndex(ir, abi, context);
+  const interface_index = createNativeInterfaceIndex(ir, abi, context);
   const observed_calls = observePreparedCallInterfaces(ir, abi, analysis, context, demand_index);
   const dependencies = nativeDependencies(input, ir, context, undefined, true, demand_index);
   return { ...base, blocks: Math.max(base.blocks, lifted.ir.blocks.length, ir.blocks.length),
-    nodes, required_nodes: requiredNodes, ir, types, analysis, observed_calls, dependencies, reasons, demand_index };
+    nodes, required_nodes: requiredNodes, ir, types, analysis, observed_calls, dependencies, reasons, demand_index, interface_index };
 }

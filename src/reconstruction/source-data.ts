@@ -75,14 +75,24 @@ export function sourceDataValues(
       previous.string !== item.string || previous.name !== item.name)) byValue.set(item.address.value, null);
   }
   const bits = sourceConstantValues(expressions, context, images.size === 1 ? [...images][0] : undefined);
+  // A value's exact/negative lookup is stable for this immutable expression and
+  // address index. Mapping the same contributor to several spans must not
+  // re-evaluate its transport graph each time.
+  const resolved = new Map<string, SourceAddress | null>();
   return (value) => {
+    context.checkpoint(0);
+    const cached = resolved.get(value.id);
+    if (cached !== undefined) return cached ?? undefined;
     const expression = expressions.get(value.id);
+    let item: SourceAddress | null | undefined;
     if (expression?.kind === 'address') {
       const address = expression.address;
-      return exact.get(`${address.image_id}:${address.space}:${address.value}`) ?? undefined;
+      item = exact.get(`${address.image_id}:${address.space}:${address.value}`);
+    } else {
+      const constant = bits(value);
+      item = constant === undefined ? undefined : byValue.get(constant);
     }
-    const constant = bits(value);
-    const item = constant === undefined ? undefined : byValue.get(constant);
+    resolved.set(value.id, item ?? null);
     return item ?? undefined;
   };
 }

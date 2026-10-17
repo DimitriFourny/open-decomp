@@ -4,6 +4,7 @@ import { createOperationContext } from '../../../src/core/index.js';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { createCallResultDemandIndex, observeCallResultDemands } from '../../../src/analysis/calls/result-demands.js';
+import { preparedCallArguments } from '../../../src/analysis/calls/argument-preparation.js';
 import { integer, type SSAForm, type Value } from '../../../src/ir/index.js';
 import { builder, image, register } from '../../ir/support.js';
 
@@ -66,6 +67,9 @@ test('context-specialized SSA identities require new indexes and do not reuse ea
   assert.deepEqual(widths(index.query(narrow, sysvAMD64Abi, context), f.calls),
     [[['integer', 32]], [], []]);
   assert.throws(() => index.query(full, sysvAMD64Abi, context), TypeError);
+  const preparation = index.preparation(narrow, sysvAMD64Abi, context);
+  assert.throws(() => index.preparation(full, sysvAMD64Abi, context), TypeError);
+  assert.throws(() => preparedCallArguments(full, context, preparation), TypeError);
   const other = createCallResultDemandIndex(full, sysvAMD64Abi, context);
   assert.deepEqual(widths(other.query(full, sysvAMD64Abi, context), f.calls),
     [[['integer', 64]], [], []]);

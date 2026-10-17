@@ -48,13 +48,16 @@ export function localValidationCounterexamples(): void {
     sourceDefinitions.set(factor.id, { kind: 'constant', bits: expression.bits + 1n });
     return factor;
   };
-  normalizeSourceExpressions(sourceValues, sourceDefinitions, sourceOwner, makeWrongFactor, sourceContext, sourceValidation);
+  const sourceNormalization = normalizeSourceExpressions(sourceValues, sourceDefinitions, sourceOwner, makeWrongFactor, sourceContext, sourceValidation);
   assert.equal(sourceDefinitions.get(sourceResult.id), originalSource, 'rejected source candidate preserves original evidence and expression');
   assert.ok(sourceValidation.records.some((record) => record.subject === sourceResult.id &&
     localValidationSchema.parse(record).status === 'rejected' && record.counterexample));
   for (let i = 0; i < 256; i++) sourceValidation.check('bitvector', result.id, 'exhaustion regression', () =>
     validateBitvectorCandidate(result, { kind: 'integer', op: 'add', left: x, right: y },
       { kind: 'integer', op: 'add', left: x, right: y }, new Map(), sourceValidation.allowance));
+  sourceNormalization.changed(sourceResult.id);
+  sourceNormalization.run();
+  assert.equal(sourceDefinitions.get(sourceResult.id), originalSource, 'resuming after proof/record exhaustion preserves the rewrite veto');
   normalizeSourceExpressions(sourceValues, sourceDefinitions, sourceOwner, makeWrongFactor, sourceContext, sourceValidation);
   assert.equal(sourceDefinitions.get(sourceResult.id), originalSource, 'proof/record exhaustion cannot reapply a previously rejected rewrite');
   assert.equal(factors, 1);

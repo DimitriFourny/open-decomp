@@ -217,39 +217,75 @@ export function verifyIR(
       report('identity', id, 'Malformed or duplicate entity identity');
     identities.add(id);
   };
+  // Generated nodes deliberately share immutable provenance. Validate that
+  // payload once per invocation, but retain every node-specific diagnostic.
+  const provenanceFacts = new WeakMap<Origin['provenance'], {
+    readonly missing: boolean;
+    readonly invalid: boolean;
+    readonly missing_range: boolean;
+  }>();
   const origin = (node: Origin): void => {
     identify(node.id);
     const p = node.provenance;
-    checkpoint?.(
-      p.instruction_ids.length + p.evidence_ids.length + p.synthetic.length + p.ranges.length,
-    );
-    if (p.instruction_ids.length === 0 && p.synthetic.length === 0)
-      report('provenance', node.id, 'Missing instruction or synthetic origin');
-    if (
-      p.instruction_ids.some((id) => !entityIdSchema.safeParse(id).success) ||
-      p.evidence_ids.some((id) => !evidenceIdSchema.safeParse(id).success) ||
-      p.synthetic.some((reason) => reason.trim().length === 0) ||
-      p.ranges.some((range) => !machineRangeSchema.safeParse(range).success || range.size === 0n)
-    )
-      report('provenance', node.id, 'Invalid source identity, range, evidence or justification');
-    if (p.instruction_ids.length > 0 && p.ranges.length === 0)
-      report('provenance', node.id, 'Instruction origin needs a source range');
+    let facts = provenanceFacts.get(p);
+    if (!facts) {
+      checkpoint?.(
+        p.instruction_ids.length + p.evidence_ids.length + p.synthetic.length + p.ranges.length,
+      );
+      facts = {
+        missing: p.instruction_ids.length === 0 && p.synthetic.length === 0,
+        invalid:
+          p.instruction_ids.some((id) => !entityIdSchema.safeParse(id).success) ||
+          p.evidence_ids.some((id) => !evidenceIdSchema.safeParse(id).success) ||
+          p.synthetic.some((reason) => reason.trim().length === 0) ||
+          p.ranges.some((range) => !machineRangeSchema.safeParse(range).success || range.size === 0n),
+        missing_range: p.instruction_ids.length > 0 && p.ranges.length === 0,
+      };
+      provenanceFacts.set(p, facts);
+    } else checkpoint?.(0);
+    if (facts.missing) report('provenance', node.id, 'Missing instruction or synthetic origin');
+    if (facts.invalid) report('provenance', node.id, 'Invalid source identity, range, evidence or justification');
+    if (facts.missing_range) report('provenance', node.id, 'Instruction origin needs a source range');
   };
   const registerRoots = new Map<string, number>();
   const registers = new Map<string, RegisterDescriptor>();
+  const registerFacts = new WeakMap<RegisterDescriptor, readonly string[]>();
   const register = (r: RegisterDescriptor, node: string): boolean => {
-    checkpoint?.(1);
-    if (!registerSchema.safeParse(r).success) {
-      report('register', node, 'Invalid core register descriptor');
-      return false;
+    let facts = registerFacts.get(r);
+    if (facts && registers.get(r.id) === r && registerRoots.get(r.root) === r.root_width_bits) {
+      checkpoint?.(0);
+      for (const message of facts) report('register', node, message);
+      return true;
     }
-    if (
-      r.write_rule === 'replace_root' &&
-      (r.offset_bits !== 0 || r.width_bits !== r.root_width_bits)
-    )
-      report('register', node, 'replace_root must cover the root');
-    if (r.write_rule === 'zero_extend_root' && r.offset_bits !== 0)
-      report('register', node, 'zero_extend_root must start at bit zero');
+    checkpoint?.(1);
+    if (!facts) {
+      const parsed = registerSchema.safeParse(r);
+      if (!parsed.success) {
+        report('register', node, 'Invalid core register descriptor');
+        return false;
+      }
+      const errors: string[] = [];
+      if (r.write_rule === 'replace_root' &&
+        (r.offset_bits !== 0 || r.width_bits !== r.root_width_bits))
+        errors.push('replace_root must cover the root');
+      if (r.write_rule === 'zero_extend_root' && r.offset_bits !== 0)
+        errors.push('zero_extend_root must start at bit zero');
+      facts = errors;
+      if (Object.isFrozen(r)) {
+        const fields = Object.getOwnPropertyDescriptors(r);
+        // Frozen accessors/inherited fields are not immutable descriptor data.
+        const flat = Reflect.ownKeys(fields).every((key) => {
+          const field = fields[key as keyof typeof fields]!;
+          return 'value' in field &&
+            (typeof field.value === 'string' || typeof field.value === 'number');
+        }) && Object.keys(parsed.data).every((key) => {
+          const field = fields[key];
+          return field !== undefined && 'value' in field;
+        });
+        if (flat) registerFacts.set(r, facts);
+      }
+    }
+    for (const message of facts) report('register', node, message);
     if (registerRoots.has(r.root) && registerRoots.get(r.root) !== r.root_width_bits)
       report('register', node, 'Conflicting root widths');
     registerRoots.set(r.root, r.root_width_bits);
@@ -278,16 +314,52 @@ export function verifyIR(
       stateRows.some((state) => !blocks.has(state.block)))
   )
     report('register', ir.id, 'SSA requires exactly one architectural-state row per block');
+  const layout = states.get(ir.entry)?.entry ?? [];
+  let tracked: Map<string, bigint> | undefined;
+  const layoutOverlaps: number[] = [];
+  const layoutDescriptors: RegisterDescriptor[] = [];
   const masks = (bindings: readonly RegisterBinding[], node: string): Map<string, bigint> => {
-    const result = new Map<string, bigint>();
-    for (const binding of bindings) {
-      const r = binding.register;
-      if (!register(r, node)) continue;
+    const initial = tracked === undefined ? new Map<string, bigint>() : undefined;
+    let canonical = tracked !== undefined && bindings.length === layoutDescriptors.length;
+    let invalid: Set<number> | undefined;
+    for (let index = 0; index < bindings.length; index++) {
+      const binding = bindings[index]!, r = binding.register;
+      if (initial) layoutDescriptors.push(r);
+      if (!register(r, node)) {
+        canonical = false;
+        (invalid ??= new Set()).add(index);
+        continue;
+      }
+      canonical &&= r === layoutDescriptors[index] && registerFacts.has(r);
       if (r.write_rule !== 'preserve_other_bits' || r.role === 'zero')
         report('register', node, 'SSA bindings must preserve disjoint physical register slices');
       if (binding.value.type.kind !== 'integer' || bitWidth(binding.value.type) !== r.width_bits)
         report('type', node, 'SSA register binding requires an equal-width integer value');
-      const mask = ((1n << BigInt(r.width_bits)) - 1n) << BigInt(r.offset_bits),
+      if (initial) {
+        const mask = ((1n << BigInt(r.width_bits)) - 1n) << BigInt(r.offset_bits),
+          previous = initial.get(r.root) ?? 0n;
+        if ((previous & mask) !== 0n) {
+          report('register', node, 'Overlapping SSA register bindings');
+          layoutOverlaps.push(index);
+        }
+        initial.set(r.root, previous | mask);
+      }
+    }
+    if (initial) return initial;
+    if (canonical) {
+      checkpoint?.(layoutOverlaps.length);
+      for (let index = 0; index < layoutOverlaps.length; index++)
+        report('register', node, 'Overlapping SSA register bindings');
+      return tracked!;
+    }
+    // Descriptor identity/order differs: recompute the actual mask after the
+    // mandatory per-binding checks above. Never reuse a merely similar layout.
+    const result = new Map<string, bigint>();
+    for (let index = 0; index < bindings.length; index++) {
+      checkpoint?.(1);
+      if (invalid?.has(index)) continue;
+      const r = bindings[index]!.register,
+        mask = ((1n << BigInt(r.width_bits)) - 1n) << BigInt(r.offset_bits),
         previous = result.get(r.root) ?? 0n;
       if ((previous & mask) !== 0n) report('register', node, 'Overlapping SSA register bindings');
       result.set(r.root, previous | mask);
@@ -299,6 +371,7 @@ export function verifyIR(
     expected: ReadonlyMap<string, bigint>,
     node: string,
   ): void => {
+    if (actual === expected) { checkpoint?.(0); return; }
     checkpoint?.(expected.size);
     if (
       actual.size !== expected.size ||
@@ -306,7 +379,7 @@ export function verifyIR(
     )
       report('register', node, 'SSA architectural-state coverage mismatch');
   };
-  const tracked = masks(states.get(ir.entry)?.entry ?? [], ir.id);
+  tracked = masks(layout, ir.id);
   for (const block of ir.blocks) {
     origin(block);
     const local = new Map<string, IRType>();

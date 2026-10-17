@@ -262,7 +262,7 @@ export function planSourceNames(
       storageLinks.set(parameter.id, forward); storageLinks.set(origin, reverse);
     }
   const resolvedNames = new Map<string, string | null>(), visitedNames = new Set<string>();
-  for (const root of new Set([...storageLinks.keys(), ...supplied.keys()])) {
+  for (const root of supplied.keys()) {
     if (visitedNames.has(root)) continue;
     const pending = [root], component: string[] = [], candidates = new Set<string>();
     let conflict = false;

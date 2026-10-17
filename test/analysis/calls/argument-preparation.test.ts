@@ -5,6 +5,7 @@ import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { analyzeCalls } from '../../../src/analysis/calls/index.js';
 import { observePreparedCallInterfaces } from '../../../src/analysis/calls/observed.js';
+import { createCallResultDemandIndex } from '../../../src/analysis/calls/result-demands.js';
 import { integer } from '../../../src/ir/index.js';
 import { builder, image, register } from '../../ir/support.js';
 
@@ -34,11 +35,14 @@ for (const targetKind of ['direct', 'indirect'] as const)
       assert.equal(ssa.form, 'ssa');
       if (ssa.form !== 'ssa') throw new Error('Expected SSA');
       const context = createOperationContext();
-      const observed = observePreparedCallInterfaces(ssa, sysvAMD64Abi, analyzeCalls(ssa, sysvAMD64Abi, context), context);
+      const analysis = analyzeCalls(ssa, sysvAMD64Abi, context);
+      const index = createCallResultDemandIndex(ssa, sysvAMD64Abi, context);
+      const observed = observePreparedCallInterfaces(ssa, sysvAMD64Abi, analysis, context, index);
       assert.equal(observed.length, 1);
       const accepted = ['load', 'constant', 'computation', 'forwarded'].includes(preparation) ||
         targetKind === 'direct' && ['target', 'target-copy'].includes(preparation);
-      assert.deepEqual(observed[0]!.parameters.map((parameter) => parameter.root), accepted ? ['x86_64:rdi'] : []);
+      assert.deepEqual(observed[0]!.parameters.map((parameter) => [parameter.root, parameter.width_bits]), accepted ? [['x86_64:rdi', 64]] : []);
+      assert.deepEqual(observed[0]!.parameter_types, accepted ? [integer(64)] : []);
       assert.equal(observed[0]!.argument_list_complete, false);
       assert.deepEqual(observed[0]!.returns.map((result) => [result.root, result.width_bits]), [['x86_64:rax', 32]]);
     });
@@ -60,7 +64,10 @@ for (const allPaths of [false, true])
     assert.equal(ssa.form, 'ssa');
     if (ssa.form !== 'ssa') throw new Error('Expected SSA');
     const context = createOperationContext();
-    const observed = observePreparedCallInterfaces(ssa, sysvAMD64Abi, analyzeCalls(ssa, sysvAMD64Abi, context), context);
-    assert.deepEqual(observed[0]!.parameters.map((parameter) => parameter.root), allPaths ? ['x86_64:rdi'] : []);
+    const analysis = analyzeCalls(ssa, sysvAMD64Abi, context);
+    const index = createCallResultDemandIndex(ssa, sysvAMD64Abi, context);
+    const observed = observePreparedCallInterfaces(ssa, sysvAMD64Abi, analysis, context, index);
+    assert.deepEqual(observed[0]!.parameters.map((parameter) => [parameter.root, parameter.width_bits]), allPaths ? [['x86_64:rdi', 64]] : []);
+    assert.deepEqual(observed[0]!.parameter_types, allPaths ? [integer(64)] : []);
     assert.equal(observed[0]!.argument_list_complete, false);
   });

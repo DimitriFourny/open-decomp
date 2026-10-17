@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createOperationContext } from '../../../src/core/index.js';
 import { constructSSA, RegisterSSAConstruction } from '../../../src/analysis/ssa/index.js';
-import { integer, successors, verifyIR } from '../../../src/ir/index.js';
+import { evaluateIR, integer, successors, verifyIR } from '../../../src/ir/index.js';
 import { builder, register, returned } from '../../ir/support.js';
 import { equivalent, forms } from './support.js';
 
@@ -220,4 +220,25 @@ test('deterministic construction preserves existing definition identities and so
     .flatMap((origin) => origin.synthetic);
   assert.ok(origins.includes('write-origin'));
   assert.ok(origins.includes('read-origin'));
+});
+
+test('indexed register slices preserve partial writes without scanning unrelated roots', () => {
+  const ir = builder('ssa-root-index-budget');
+  const entry = ir.block('entry');
+  const roots = Array.from({ length: 64 }, (_, index) =>
+    register(`root-${index}`, 64, 0, 'replace_root', `independent-root-${index}`));
+  for (const [index, root] of roots.entries())
+    entry.writeRegister(root, entry.constant(i64, index ? BigInt(index) : 0x1122334455667788n));
+  const middle = register('middle-slice', 16, 16, 'preserve_other_bits', roots[0]!.root);
+  for (let value = 0; value < 200; value++)
+    entry.writeRegister(middle, entry.constant(integer(16), BigInt(value)));
+  entry.return([entry.readRegister(roots[0]!), entry.readRegister(roots[63]!)]);
+  const program = ir.finish(entry, [i64, i64]);
+  const expected = [0x1122334400c77788n, 63n];
+  assert.deepEqual(returned(evaluateIR(program)), expected);
+  const constructed = constructSSA(program, { max_work: 10_000 });
+  assert.equal(constructed.state, 'complete', JSON.stringify(constructed.diagnostics));
+  assert.equal(constructed.value.form, 'ssa');
+  assert.deepEqual(verifyIR(constructed.value), []);
+  assert.deepEqual(returned(evaluateIR(constructed.value)), expected);
 });

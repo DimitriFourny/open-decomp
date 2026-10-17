@@ -1,0 +1,196 @@
+{
+  "schema": 1,
+  "status": "PREPARED ONLY; no prospective or measured run started; requires coordinator final coherent build and explicit serialized release",
+  "purpose": "Full prospective rerun of all frozen broader and held-out cells without modifying historical evidence or tuning from held-out details",
+  "historical_checkpoint": "db33db3bb8593018c7fb01ad60cee9e0393fc0a3ee635ae0dfd23ef3eb46b33c",
+  "prospective_checkpoint": {
+    "status": "Awaiting coordinator build; record actual complete dist-file identity before/after every cell and suite; do not substitute historical identity"
+  },
+  "frozen_inputs": {
+    "broader": {
+      "root": ".local/performance/quality-matrix-reviewed",
+      "cells": 24,
+      "functions_per_cell": 12,
+      "matched_function_pairs": 288,
+      "tool_function_cells": 576,
+      "archive": "scripts/bench/quality-matrix-inputs.tar.gz",
+      "sha256": "96863c3783347be3fe75279401c3f4bd9808d29e9f16daed845f4cc96fe5e250"
+    },
+    "heldout": {
+      "root": "/Users/df0/Documents/open-decomp-quality-heldout-inputs-2026-10-17",
+      "cells": 24,
+      "functions_per_cell": 5,
+      "matched_function_pairs": 120,
+      "tool_function_cells": 240,
+      "archive": "scripts/bench/quality-heldout-inputs-2026-10-17.tar.gz",
+      "sha256": "e6acbf080ee0b6203e99aa2ecec2aea4d475fa635fc7666737fcdb41ecf4d362",
+      "source_sha256": "4daef9d0963bfcc5dd5d4440bb8dbfaaa7ded76ab8350b86bb0c4413ee34753b"
+    }
+  },
+  "method": {
+    "bridge_commit": "73ea1c8eaa4bb364f7338f8180e623583bb1d340",
+    "ghidra_version": "12.1.4",
+    "budget_profile": "default; explicit unchanged public budgets",
+    "source_debug_types_annotations_supplied": false,
+    "target_binaries_executed": false,
+    "all_failed_cells_retained": true,
+    "serialized_lock": ".local/performance/quality.measurement.lock",
+    "heldout_separation": "Reconstruction workers have not received held-out source/results/review tree. Coordinator has seen historical aggregates; disclose that fact and do not feed details to tuners. Prospective results belong only to the new recorded checkpoint.",
+    "blind_review": "New blank reviewers A/B; new seeded X/Y mapping and full available-pair cohort. Never narrow to a favorable subset. Historical 60 paired cases are preserved as a cohort; if availability changes retain every missing/newly available cell and review all available pairs, reporting the changed denominator.",
+    "performance": "No performance conclusions from ordinary comparison/functional runs. Actual normalized measurements only in separate exclusive host slot under coordinator/P2.5 owner."
+  },
+  "outputs": {
+    "broader": "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/broader",
+    "heldout": "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/heldout",
+    "gold": "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/gold",
+    "exact_emitted_subset": "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/correctness",
+    "blind_packets": "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/review",
+    "immutable_submissions": "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/submissions",
+    "readability_aggregation": "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/readability"
+  },
+  "commands": [
+    {
+      "phase": "broader_all_cells",
+      "argv": [
+        "python3",
+        "scripts/bench/quality-matrix.py",
+        "run",
+        "--inputs",
+        ".local/performance/quality-matrix-reviewed",
+        "--output",
+        "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/broader",
+        "--bridge",
+        "/tmp/open-decomp-ghidra-compare.sfUkLc/ghidra/lean",
+        "--entry",
+        "dist/src/cli/entry.js",
+        "--ghidra",
+        "/Users/df0/Downloads/ghidra_12.1.4_PUBLIC",
+        "--java-home",
+        "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home"
+      ]
+    },
+    {
+      "phase": "heldout_all_cells",
+      "argv": [
+        "python3",
+        "scripts/bench/quality-heldout.py",
+        "run",
+        "--inputs",
+        "/Users/df0/Documents/open-decomp-quality-heldout-inputs-2026-10-17",
+        "--output",
+        "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/heldout",
+        "--bridge",
+        "/tmp/open-decomp-ghidra-compare.sfUkLc/ghidra/lean",
+        "--entry",
+        "dist/src/cli/entry.js",
+        "--ghidra",
+        "/Users/df0/Downloads/ghidra_12.1.4_PUBLIC",
+        "--java-home",
+        "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home"
+      ]
+    },
+    {
+      "phase": "unchanged_source_gold",
+      "argv": [
+        "python3",
+        "scripts/bench/quality-heldout-oracle.py",
+        "--output",
+        "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/gold"
+      ]
+    },
+    {
+      "phase": "actual_emitted_subset",
+      "argv": [
+        "python3",
+        "scripts/bench/quality-heldout-evaluate.py",
+        "run",
+        "--results",
+        "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/heldout",
+        "--output",
+        "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/correctness"
+      ]
+    },
+    {
+      "phase": "fresh_blind_packets",
+      "argv": [
+        "python3",
+        "scripts/bench/quality-heldout-packets.py",
+        "--results",
+        "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/heldout",
+        "--oracle",
+        "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/gold",
+        "--output",
+        "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/review"
+      ]
+    },
+    {
+      "phase": "after_both_complete_submissions_only",
+      "argv": [
+        "python3",
+        "scripts/bench/quality-heldout-review-results.py",
+        "--packets",
+        "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/review",
+        "--review-a",
+        "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/submissions/review-A.json",
+        "--review-b",
+        "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/submissions/review-B.json",
+        "--output",
+        "/Users/df0/Documents/open-decomp-quality-prospective-2026-10-17/readability"
+      ]
+    }
+  ],
+  "harness_and_oracle_identity": [
+    {
+      "path": "scripts/bench/quality.py",
+      "sha256": "0ab063614e4f193642424d8a616c0356470fc4fc29d35cd9993429b9a8481c0b"
+    },
+    {
+      "path": "scripts/bench/quality-matrix.py",
+      "sha256": "73f2d07f244f149e4c421246959589d2e94f72297d38b32b336547d30bf82c62"
+    },
+    {
+      "path": "scripts/bench/quality-heldout.py",
+      "sha256": "41a87c32b2ff179ec4debb28946f83eab4e4fd01dcbf7e352a8fc3adf1823c1a"
+    },
+    {
+      "path": "scripts/bench/quality-heldout-oracle.py",
+      "sha256": "a0f051b1c5de8a0dbe1ee5497af6c0eb92e6c0ef9807a30d5bd439a0d22d6d4b"
+    },
+    {
+      "path": "scripts/bench/quality-heldout-evaluate.py",
+      "sha256": "c1bd37b436b5cc3e23aa3f166000da6f1e4f11e2dfb2a84f297c29135d32e165"
+    },
+    {
+      "path": "scripts/bench/quality-heldout-packets.py",
+      "sha256": "7075c22851ef48896e82023c03fc26ee36b06cdef853328f3432aa80cd20cd7e"
+    },
+    {
+      "path": "scripts/bench/quality-heldout-review-results.py",
+      "sha256": "61a1c1021a1ed100df4e29460dcdfb8a0ad1faa2dbd13959e8bba975f451136e"
+    },
+    {
+      "path": "scripts/bench/quality-heldout-selection.json",
+      "sha256": "d043f01b8d2d85080088cf382334623f10584f8148bb4fdf41c6259f6a0d8abc"
+    },
+    {
+      "path": "scripts/bench/quality-heldout-corpus.c",
+      "sha256": "4daef9d0963bfcc5dd5d4440bb8dbfaaa7ded76ab8350b86bb0c4413ee34753b"
+    }
+  ],
+  "gold_replay_identity": {
+    "historical_cases_path": "/Users/df0/Documents/open-decomp-quality-heldout-oracles-2026-10-17/source-oracle-cases.json",
+    "historical_cases_sha256": "427f9357f605f145465b5ac55a0f118185bdb99fbab55b70de253bfef880d2a6",
+    "required": "Fresh source-oracle-cases.json must match the historical case hash; source gold agreement is not engine correctness."
+  },
+  "acceptance": [
+    "All24 broader and24 held-out input cells, original names/VAs/configurations and unchanged input bytes; all failures retained.",
+    "New actual dist-file identity stable across both suites; if coordinator rebuilds or files change, flag the evaluated scope rather than conflating checkpoints.",
+    "No production tuning or generated-code repair using held-out details; unsupported exact-output helpers/interfaces remain unverified.",
+    "Actual new independent reviewer submissions all available pairs, strict schema/case/evidence validation before reading sealed mapping; no score templates or old review reuse.",
+    "Retain fresh raw responses/artifacts/manifests and label availability, finite correctness, bounded usable subset, LLM readability and normalized performance separately."
+  ],
+  "gaps": [
+    "The broader P2.2 harness is a full static-availability/source-known recording, not a source-behavior oracle for every broad corpus function. Existing held-out gold and exact-output subset checks are replayable as listed; do not relabel them as broader whole-corpus equivalence.",
+    "Normalized performance commands belong to NavigationCache separate exclusive-slot contract, not this plan."
+  ]
+}

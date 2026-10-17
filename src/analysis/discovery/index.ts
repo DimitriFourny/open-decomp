@@ -15,6 +15,7 @@ import {
   type LoadedImage,
   type OperationContext,
   type ReferenceRecord,
+  type FunctionRecord,
 } from '../../core/index.js';
 import { buildCFG, instructionSuccessors } from '../cfg/index.js';
 import { reconcileGraphs, type DiscoveryLineage } from './lineage.js';
@@ -33,6 +34,12 @@ export interface DiscoveryInput {
   readonly decoder: Decoder;
   readonly revision: number;
   readonly assertions?: readonly FunctionAssertion[];
+  /** Reusable immutable metadata preparation, independent of traversal budgets. */
+  readonly index?: DiscoveryIndex;
+  /** Decode only this grounded root; calls and other known roots are boundaries. */
+  readonly selected_entry?: Address;
+  /** Already-published roots remain boundaries even if not loader-named. */
+  readonly functions?: readonly FunctionRecord[];
   readonly previous?: readonly FunctionGraph[];
 }
 export interface JumpTableCandidate {
@@ -65,8 +72,14 @@ export interface DiscoveryResult {
   readonly coverage: FunctionGraph['coverage'];
   readonly diagnostics: readonly Diagnostic[];
 }
-interface Seed {
+interface IndexedSeed {
   readonly entry: Address;
+  readonly evidence: ReadonlySet<string>;
+  readonly names: ReadonlySet<string>;
+  readonly claims: readonly AddressRange[];
+  readonly established: boolean;
+}
+interface Seed extends IndexedSeed {
   readonly evidence: Set<string>;
   readonly names: Set<string>;
   readonly claims: AddressRange[];
@@ -79,6 +92,35 @@ interface DataRegion {
 interface ExecutableRange {
   readonly start: bigint;
   end: bigint;
+}
+
+/** Native roots/data/executable lookup prepared once for an immutable image revision.
+ * Lookup operations always charge the current operation, never the preparing clock. */
+export interface DiscoveryIndex {
+  readonly image_id: string;
+  readonly slice_id: string;
+  readonly revision: number;
+  readonly seeds: ReadonlyMap<bigint, IndexedSeed>;
+  readonly ordered_seeds: readonly IndexedSeed[];
+  readonly evidence: ReadonlyMap<string, Evidence>;
+  readonly data: readonly DataRegion[];
+  readonly jump_tables: readonly JumpTableCandidate[];
+  readonly boundary_claims: readonly DiscoveryBoundaryClaim[];
+  data_after(value: bigint, context: OperationContext): number;
+  executable_end(value: bigint, context: OperationContext): bigint;
+}
+
+function evidenceDeriver(image: LoadedImage, revision: number, evidence: Map<string, Evidence>) {
+  return (rule: string, address: Address, parents: readonly string[]): string => {
+    const derived_from = [...new Set(parents)].sort();
+    const id = `evidence_${fingerprint([image.selected_slice_id, 'discovery/1', rule, address.value, derived_from])}`;
+    if (!evidence.has(id)) evidence.set(id, {
+      id, origin: { kind: 'analysis', analyzer: 'open-decomp/discovery', version: '1', rule },
+      claim: `${rule} at 0x${address.value.toString(16)}`,
+      derived_from, conflicts_with: [], revision,
+    });
+    return id;
+  };
 }
 
 /** Discovery is recursive traversal from evidence, never a prologue scan or linear sweep.
@@ -115,59 +157,69 @@ export function discoverFunctions(
         message: 'Previous discovery belongs to another image slice',
         evidence_ids: [],
       });
+  const index = input.index ?? prepareDiscoveryIndex(input, context);
+  if (
+    index.image_id !== image.id || index.slice_id !== image.selected_slice_id ||
+    index.revision !== revision
+  ) throw new OperationError({
+    code: 'invalid_input', severity: 'error',
+    message: 'Discovery index belongs to another immutable image revision',
+    evidence_ids: [],
+  });
+  const selected = input.selected_entry;
+  if (selected && (
+    selected.image_id !== image.id || selected.space !== 'va' ||
+    !index.seeds.has(selected.value)
+  )) throw new OperationError({
+    code: 'invalid_address', severity: 'error',
+    message: 'Selected discovery requires an indexed virtual function root',
+    evidence_ids: [],
+  });
   const diagnostics: Diagnostic[] = [];
-  const evidence = new Map(image.evidence.map((item) => [item.id, item]));
+  const evidence = selected ? new Map<string, Evidence>() : new Map(index.evidence);
   const instructionEvidence = new Map<string, readonly string[]>();
   const seeds = new Map<bigint, Seed>();
+  if (!selected)
+    for (const [entry, item] of index.seeds) seeds.set(entry, {
+      ...item, evidence: new Set(item.evidence), names: new Set(item.names),
+      claims: [...item.claims],
+    });
+  const seedAt = (value: bigint): IndexedSeed | undefined => seeds.get(value) ?? index.seeds.get(value);
   const decoded = new Map<bigint, DecodedInstruction>();
   const gaps = new Map<bigint, DecodeGap>();
-  const queue: Address[] = [];
-  const queued = new Set<bigint>();
-  const data: DataRegion[] = [];
-  // Prefix maxima retain the first overlapping data claim (and its provenance),
-  // including nested claims; a predecessor-only lookup would miss long outer ranges.
-  const dataEnds: bigint[] = [];
-  const dataAfter = (value: bigint): number => {
-    let low = 0,
-      high = dataEnds.length;
-    while (low < high) {
-      context.checkpoint(1);
-      const mid = (low + high) >>> 1;
-      if (dataEnds[mid]! <= value) low = mid + 1;
-      else high = mid;
-    }
-    return low;
+  const queue: Address[] = selected ? [selected] : [...seeds.values()].map((item) => item.entry);
+  const queued = new Set(queue.map((address) => address.value));
+  const data = index.data;
+  const dataAfter = (value: bigint): number => index.data_after(value, context);
+  const executableEnd = (value: bigint): bigint => index.executable_end(value, context);
+  const jumpTables: JumpTableCandidate[] = selected ? [] : [...index.jump_tables];
+  const boundaryClaims = selected
+    ? seedAt(selected.value)!.claims.map((range) => ({
+        entry: selected, range, evidence_ids: [...seedAt(selected.value)!.evidence],
+      }))
+    : [...index.boundary_claims];
+  const va = (value: bigint): Address => ({ image_id: image.id, space: 'va', value });
+  const derive = evidenceDeriver(image, revision, evidence);
+  const enqueue = (address: Address): void => {
+    if (selected && address.value !== selected.value && seedAt(address.value)) return;
+    if (!queued.has(address.value)) { queued.add(address.value); queue.push(address); }
   };
-  const executableRanges: ExecutableRange[] = [];
-  for (const mapping of image.mappings) {
+  const seed = (address: Address, rule: string, parents: readonly string[], established: boolean): void => {
     context.checkpoint(1);
-    if (mapping.permissions.includes('execute') && mapping.file_size > 0n)
-      executableRanges.push({ start: mapping.va, end: mapping.va + mapping.file_size });
-  }
-  executableRanges.sort((a, b) => {
-    context.checkpoint(1);
-    return a.start < b.start ? -1 : a.start > b.start ? 1 : 0;
-  });
-  let rangeCount = 0;
-  for (const range of executableRanges) {
-    context.checkpoint(1);
-    const previous = executableRanges[rangeCount - 1];
-    if (previous && range.start <= previous.end) {
-      if (range.end > previous.end) previous.end = range.end;
-    } else executableRanges[rangeCount++] = range;
-  }
-  executableRanges.length = rangeCount;
-  const executableEnd = (value: bigint): bigint => {
-    let low = 0,
-      high = executableRanges.length;
-    while (low < high) {
-      context.checkpoint(1);
-      const mid = (low + high) >>> 1;
-      if (executableRanges[mid]!.end <= value) low = mid + 1;
-      else high = mid;
+    if (executableEnd(address.value) <= address.value) return;
+    const id = derive(rule, address, parents);
+    let item = seeds.get(address.value);
+    if (!item) {
+      const original = index.seeds.get(address.value);
+      item = {
+        entry: address, evidence: new Set(original?.evidence), names: new Set(original?.names),
+        claims: [...(original?.claims ?? [])], established: original?.established ?? false,
+      };
+      seeds.set(address.value, item);
+      if (!selected) enqueue(address);
     }
-    const range = executableRanges[low];
-    return range && range.start <= value ? range.end : value;
+    item.evidence.add(id);
+    item.established ||= established;
   };
   // The byte window is lookahead for ONE instruction, not permission to decode
   // the rest. Delegate all accounting to the original cumulative operation.
@@ -177,214 +229,6 @@ export function discoverFunctions(
     checkpoint: (work) => context.checkpoint(work),
     progress: (phase, completed, total) => context.progress(phase, completed, total),
   };
-  const objectAddresses = new Set<bigint>();
-  const jumpTables: JumpTableCandidate[] = [];
-  const boundaryClaims: DiscoveryBoundaryClaim[] = [];
-  const va = (value: bigint): Address => ({ image_id: image.id, space: 'va', value });
-  const normalize = (address: Address): Address => {
-    if (address.image_id !== image.id)
-      throw new OperationError({
-        code: 'invalid_address',
-        severity: 'error',
-        message: 'Discovery address belongs to another image',
-        evidence_ids: [],
-      });
-    checkedU64(address.value);
-    if (address.space === 'va') return address;
-    if (address.space === 'rva') return va(checkedU64(image.image_base + address.value));
-    const translated = image.address_map.translate(address, 'va');
-    if (translated.kind !== 'mapped')
-      throw new OperationError({
-        code: 'invalid_address',
-        severity: 'error',
-        message: 'Discovery file address has no virtual mapping',
-        address,
-        evidence_ids: [],
-      });
-    return translated.address;
-  };
-  const ranges = (range: AddressRange): AddressRange[] => {
-    checkedEnd(range.start.value, range.size);
-    if (range.start.space !== 'file') {
-      const start = normalize(range.start);
-      checkedEnd(start.value, range.size);
-      return [{ start, size: range.size }];
-    }
-    if (range.start.image_id !== image.id) normalize(range.start);
-    const end = range.start.value + range.size;
-    const result: AddressRange[] = [];
-    for (const mapping of image.mappings) {
-      context.checkpoint(1);
-      const start =
-        mapping.file_offset > range.start.value ? mapping.file_offset : range.start.value;
-      const stop =
-        mapping.file_offset + mapping.file_size < end
-          ? mapping.file_offset + mapping.file_size
-          : end;
-      if (start < stop)
-        result.push({ start: va(mapping.va + start - mapping.file_offset), size: stop - start });
-    }
-    return result;
-  };
-  const derive = (rule: string, address: Address, parents: readonly string[]): string => {
-    const derived_from = [...new Set(parents)].sort();
-    const id = `evidence_${fingerprint([image.selected_slice_id, 'discovery/1', rule, address.value, derived_from])}`;
-    if (!evidence.has(id))
-      evidence.set(id, {
-        id,
-        origin: { kind: 'analysis', analyzer: 'open-decomp/discovery', version: '1', rule },
-        claim: `${rule} at 0x${address.value.toString(16)}`,
-        derived_from,
-        conflicts_with: [],
-        revision,
-      });
-    return id;
-  };
-  const enqueue = (address: Address): void => {
-    if (!queued.has(address.value)) {
-      queued.add(address.value);
-      queue.push(address);
-    }
-  };
-  const seed = (
-    source: Address,
-    rule: string,
-    parents: readonly string[],
-    established: boolean,
-    name: string | null = null,
-    claims: readonly AddressRange[] = [],
-  ): void => {
-    context.checkpoint(1);
-    const address = normalize(source);
-    // Data exports and pointer storage are not callable just because they have names.
-    if (
-      executableEnd(address.value) <= address.value &&
-      rule !== 'asserted function' &&
-      rule !== 'image entry'
-    )
-      return;
-    if (rule === 'executable export candidate' || rule === 'executable symbol candidate') {
-      const region = data[dataAfter(address.value)];
-      if (
-        objectAddresses.has(address.value) ||
-        (region && region.range.start.value <= address.value)
-      )
-        return;
-    }
-    const id = derive(rule, address, parents);
-    let item = seeds.get(address.value);
-    if (!item) {
-      item = {
-        entry: address,
-        evidence: new Set(),
-        names: new Set(),
-        claims: [],
-        established: false,
-      };
-      seeds.set(address.value, item);
-      enqueue(address);
-    }
-    item.evidence.add(id);
-    item.established ||= established;
-    if (name !== null) item.names.add(name);
-    item.claims.push(...claims);
-    for (const range of claims) boundaryClaims.push({ entry: address, range, evidence_ids: [id] });
-  };
-  for (const hint of image.hints) {
-    context.checkpoint(1);
-    if (hint.kind === 'data')
-      for (const range of ranges(hint.range)) {
-        if (range.size > 0n) data.push({ range, evidence_ids: hint.evidence_ids });
-        if (hint.encoding === 'jump_table')
-          jumpTables.push({
-            instruction_id: null,
-            address: range.start,
-            range,
-            status: 'candidate',
-            evidence_ids: hint.evidence_ids,
-          });
-      }
-  }
-  for (const symbol of image.symbols) {
-    context.checkpoint(1);
-    if (symbol.kind !== 'object' || !symbol.address) continue;
-    objectAddresses.add(normalize(symbol.address).value);
-    if (symbol.size && symbol.size > 0n)
-      for (const range of ranges({ start: symbol.address, size: symbol.size }))
-        data.push({ range, evidence_ids: symbol.evidence_ids });
-  }
-  data.sort((a, b) => {
-    context.checkpoint(1);
-    return a.range.start.value < b.range.start.value
-      ? -1
-      : a.range.start.value > b.range.start.value
-        ? 1
-        : 0;
-  });
-  for (const region of data) {
-    context.checkpoint(1);
-    const end = region.range.start.value + region.range.size;
-    const previous = dataEnds.at(-1) ?? 0n;
-    dataEnds.push(end > previous ? end : previous);
-  }
-  for (const entry of image.entry_points) seed(entry, 'image entry', [], true);
-  for (const symbol of image.symbols) {
-    context.checkpoint(1);
-    if (symbol.address && (symbol.kind === 'function' || symbol.kind === 'unknown'))
-      seed(
-        symbol.address,
-        symbol.kind === 'function' ? 'function symbol' : 'executable symbol candidate',
-        symbol.evidence_ids,
-        symbol.kind === 'function',
-        symbol.original_name,
-        symbol.size && symbol.size > 0n ? ranges({ start: symbol.address, size: symbol.size }) : [],
-      );
-  }
-  for (const item of image.exports)
-    if (item.address && item.forwarder === null)
-      seed(
-        item.address,
-        'executable export candidate',
-        item.evidence_ids,
-        false,
-        item.original_name,
-      );
-  for (const hint of image.hints) {
-    context.checkpoint(1);
-    if (hint.kind === 'function')
-      seed(
-        hint.address,
-        'loader function start',
-        hint.evidence_ids,
-        true,
-        null,
-        hint.size && hint.size > 0n ? ranges({ start: hint.address, size: hint.size }) : [],
-      );
-    // Unwind coverage can coalesce adjacent functions (notably Mach-O compact
-    // unwind). Its start is a candidate, not a claim that one function owns the range.
-    if (hint.kind === 'unwind')
-      seed(hint.range.start, 'unwind region candidate', hint.evidence_ids, false);
-  }
-  for (const assertion of input.assertions ?? []) {
-    context.checkpoint(1);
-    if (assertion.evidence.origin.kind !== 'assertion')
-      throw new OperationError({
-        code: 'invalid_input',
-        severity: 'error',
-        message: 'Function assertions require assertion-origin evidence',
-        evidence_ids: [assertion.evidence.id],
-      });
-    evidence.set(assertion.evidence.id, assertion.evidence);
-    if (assertion.evidence.origin.status !== 'retracted')
-      seed(
-        assertion.entry,
-        'asserted function',
-        [assertion.evidence.id],
-        false,
-        null,
-        (assertion.ranges ?? []).flatMap(ranges),
-      );
-  }
   // Sort initial roots; discovered successors follow structured flow order, never display names.
   queue.sort((a, b) => (a.value < b.value ? -1 : a.value > b.value ? 1 : 0));
   let exhausted = false;
@@ -484,7 +328,7 @@ export function discoverFunctions(
     if (instruction.validity !== 'valid') continue;
     if (instruction.flow.kind === 'call' && instruction.flow.target) {
       seed(instruction.flow.target, 'direct call target', [flowEvidence], true);
-      enqueue(instruction.flow.target);
+      if (!selected) enqueue(instruction.flow.target);
     }
     for (const successor of instructionSuccessors(instruction)) enqueue(successor);
     if (
@@ -545,13 +389,14 @@ export function discoverFunctions(
       }
     }
   }
-  const functionEntries = new Set(seeds.keys());
+  const functionEntries = { has: (value: bigint): boolean => seedAt(value) !== undefined };
   const graphs: FunctionGraph[] = [];
   let blockCount = 0;
-  const orderedSeeds = [...seeds.values()].sort((a, b) => {
+  const orderedSeeds = selected ? [seedAt(selected.value)!] : [...seeds.values()].sort((a, b) => {
     context.checkpoint(1);
     return a.entry.value < b.entry.value ? -1 : a.entry.value > b.entry.value ? 1 : 0;
   });
+  const claimBoundaries = selected ? index.ordered_seeds : orderedSeeds;
   for (const item of orderedSeeds) {
     context.checkpoint(1);
     const members: DecodedInstruction[] = [];
@@ -562,16 +407,23 @@ export function discoverFunctions(
     let conflict = false;
     for (const claim of item.claims) {
       let low = 0,
-        high = orderedSeeds.length;
+        high = claimBoundaries.length;
       while (low < high) {
         context.checkpoint(1);
         const mid = (low + high) >>> 1;
-        if (orderedSeeds[mid]!.entry.value < claim.start.value) low = mid + 1;
+        if (claimBoundaries[mid]!.entry.value < claim.start.value) low = mid + 1;
         else high = mid;
       }
-      if (orderedSeeds[low]?.entry.value === item.entry.value) low++;
-      const other = orderedSeeds[low];
+      if (claimBoundaries[low]?.entry.value === item.entry.value) low++;
+      const other = claimBoundaries[low];
       if (other && other.entry.value < claim.start.value + claim.size) conflict = true;
+      if (selected)
+        for (const candidate of seeds.values()) {
+          context.checkpoint(1);
+          if (candidate.entry.value !== item.entry.value &&
+            candidate.entry.value >= claim.start.value &&
+            candidate.entry.value < claim.start.value + claim.size) conflict = true;
+        }
     }
     for (let cursor = 0; cursor < pending.length; cursor++) {
       context.checkpoint(1);
@@ -599,7 +451,7 @@ export function discoverFunctions(
               severity: 'warning',
               message: 'Intraprocedural flow reaches another function entry',
               address: successor,
-              evidence_ids: [...item.evidence, ...seeds.get(successor.value)!.evidence],
+              evidence_ids: [...item.evidence, ...seedAt(successor.value)!.evidence],
             });
           }
           continue;
@@ -779,7 +631,7 @@ export function discoverFunctions(
         kind =
           !flow.conditional &&
           flow.target.value !== graph.function.entry.value &&
-          byEntry.has(flow.target.value)
+          functionEntries.has(flow.target.value)
             ? 'tail_call'
             : 'branch';
         target = flow.target;
@@ -796,7 +648,9 @@ export function discoverFunctions(
           from_instruction: instruction.id,
           target_role: target ? 'code' : 'unknown',
           to: target,
-          to_entity: target ? (byEntry.get(target.value) ?? null) : null,
+          to_entity: target ? (byEntry.get(target.value) ??
+            (functionEntries.has(target.value)
+              ? entityIdentity(image.selected_slice_id, 'function', { entry: target.value }) : null)) : null,
           kind,
           status: target ? 'established' : 'unresolved',
           evidence_ids: instructionEvidence.get(instruction.id) ?? [],
@@ -875,10 +729,27 @@ export function discoverFunctions(
     ...new Set([
       ...finalGraphs.flatMap((graph) => graph.coverage.reasons),
       ...(exhausted ? ['instruction budget'] : []),
-      ...(seeds.size === 0 ? ['no grounded function seeds'] : []),
+      ...(orderedSeeds.length === 0 ? ['no grounded function seeds'] : []),
     ]),
   ];
   context.progress('discovery', finalGraphs.length, finalGraphs.length);
+  if (selected) {
+    const pending = [
+      ...finalGraphs.flatMap((graph) => graph.function.evidence_ids),
+      ...references.flatMap((reference) => reference.evidence_ids),
+    ];
+    const visited = new Set<string>();
+    for (let cursor = 0; cursor < pending.length; cursor++) {
+      context.checkpoint(1);
+      const id = pending[cursor]!;
+      if (visited.has(id)) continue;
+      visited.add(id);
+      const proof = evidence.get(id) ?? index.evidence.get(id);
+      if (!proof) continue; // Durable evidence is closed by the publishing caller.
+      evidence.set(id, proof);
+      pending.push(...proof.derived_from, ...proof.conflicts_with);
+    }
+  }
   return {
     graphs: finalGraphs,
     references,
@@ -894,5 +765,261 @@ export function discoverFunctions(
       completed_units: decoded.size,
       reasons,
     },
+  };
+}
+
+/** Prepare grounded roots and immutable interval indexes without decoding bodies. */
+export function prepareDiscoveryIndex(
+  input: Pick<DiscoveryInput, 'image' | 'revision' | 'assertions' | 'functions'>,
+  context: OperationContext,
+): DiscoveryIndex {
+  const { image, revision } = input;
+  const evidence = new Map(image.evidence.map((item) => [item.id, item]));
+  const seeds = new Map<bigint, Seed>();
+  const data: DataRegion[] = [];
+  // Prefix maxima retain the first overlapping data claim (and its provenance),
+  // including nested claims; a predecessor-only lookup would miss long outer ranges.
+  const dataEnds: bigint[] = [];
+  const dataAfter = (value: bigint, operation: OperationContext): number => {
+    let low = 0,
+      high = dataEnds.length;
+    while (low < high) {
+      operation.checkpoint(1);
+      const mid = (low + high) >>> 1;
+      if (dataEnds[mid]! <= value) low = mid + 1;
+      else high = mid;
+    }
+    return low;
+  };
+  const executableRanges: ExecutableRange[] = [];
+  for (const mapping of image.mappings) {
+    context.checkpoint(1);
+    if (mapping.permissions.includes('execute') && mapping.file_size > 0n)
+      executableRanges.push({ start: mapping.va, end: mapping.va + mapping.file_size });
+  }
+  executableRanges.sort((a, b) => {
+    context.checkpoint(1);
+    return a.start < b.start ? -1 : a.start > b.start ? 1 : 0;
+  });
+  let rangeCount = 0;
+  for (const range of executableRanges) {
+    context.checkpoint(1);
+    const previous = executableRanges[rangeCount - 1];
+    if (previous && range.start <= previous.end) {
+      if (range.end > previous.end) previous.end = range.end;
+    } else executableRanges[rangeCount++] = range;
+  }
+  executableRanges.length = rangeCount;
+  const executableEnd = (value: bigint, operation: OperationContext): bigint => {
+    let low = 0,
+      high = executableRanges.length;
+    while (low < high) {
+      operation.checkpoint(1);
+      const mid = (low + high) >>> 1;
+      if (executableRanges[mid]!.end <= value) low = mid + 1;
+      else high = mid;
+    }
+    const range = executableRanges[low];
+    return range && range.start <= value ? range.end : value;
+  };
+  const objectAddresses = new Set<bigint>();
+  const jumpTables: JumpTableCandidate[] = [];
+  const boundaryClaims: DiscoveryBoundaryClaim[] = [];
+  const va = (value: bigint): Address => ({ image_id: image.id, space: 'va', value });
+  const normalize = (address: Address): Address => {
+    if (address.image_id !== image.id)
+      throw new OperationError({
+        code: 'invalid_address',
+        severity: 'error',
+        message: 'Discovery address belongs to another image',
+        evidence_ids: [],
+      });
+    checkedU64(address.value);
+    if (address.space === 'va') return address;
+    if (address.space === 'rva') return va(checkedU64(image.image_base + address.value));
+    const translated = image.address_map.translate(address, 'va');
+    if (translated.kind !== 'mapped')
+      throw new OperationError({
+        code: 'invalid_address',
+        severity: 'error',
+        message: 'Discovery file address has no virtual mapping',
+        address,
+        evidence_ids: [],
+      });
+    return translated.address;
+  };
+  const ranges = (range: AddressRange): AddressRange[] => {
+    checkedEnd(range.start.value, range.size);
+    if (range.start.space !== 'file') {
+      const start = normalize(range.start);
+      checkedEnd(start.value, range.size);
+      return [{ start, size: range.size }];
+    }
+    if (range.start.image_id !== image.id) normalize(range.start);
+    const end = range.start.value + range.size;
+    const result: AddressRange[] = [];
+    for (const mapping of image.mappings) {
+      context.checkpoint(1);
+      const start =
+        mapping.file_offset > range.start.value ? mapping.file_offset : range.start.value;
+      const stop =
+        mapping.file_offset + mapping.file_size < end
+          ? mapping.file_offset + mapping.file_size
+          : end;
+      if (start < stop)
+        result.push({ start: va(mapping.va + start - mapping.file_offset), size: stop - start });
+    }
+    return result;
+  };
+  const derive = evidenceDeriver(image, revision, evidence);
+  const seed = (
+    source: Address,
+    rule: string,
+    parents: readonly string[],
+    established: boolean,
+    name: string | null = null,
+    claims: readonly AddressRange[] = [],
+  ): void => {
+    context.checkpoint(1);
+    const address = normalize(source);
+    // Data exports and pointer storage are not callable just because they have names.
+    if (
+      executableEnd(address.value, context) <= address.value &&
+      rule !== 'asserted function' &&
+      rule !== 'image entry'
+    )
+      return;
+    if (rule === 'executable export candidate' || rule === 'executable symbol candidate') {
+      const region = data[dataAfter(address.value, context)];
+      if (
+        objectAddresses.has(address.value) ||
+        (region && region.range.start.value <= address.value)
+      )
+        return;
+    }
+    const id = derive(rule, address, parents);
+    let item = seeds.get(address.value);
+    if (!item) {
+      item = {
+        entry: address,
+        evidence: new Set(),
+        names: new Set(),
+        claims: [],
+        established: false,
+      };
+      seeds.set(address.value, item);
+    }
+    item.evidence.add(id);
+    item.established ||= established;
+    if (name !== null) item.names.add(name);
+    item.claims.push(...claims);
+    for (const range of claims) boundaryClaims.push({ entry: address, range, evidence_ids: [id] });
+  };
+  for (const hint of image.hints) {
+    context.checkpoint(1);
+    if (hint.kind === 'data')
+      for (const range of ranges(hint.range)) {
+        if (range.size > 0n) data.push({ range, evidence_ids: hint.evidence_ids });
+        if (hint.encoding === 'jump_table')
+          jumpTables.push({
+            instruction_id: null,
+            address: range.start,
+            range,
+            status: 'candidate',
+            evidence_ids: hint.evidence_ids,
+          });
+      }
+  }
+  for (const symbol of image.symbols) {
+    context.checkpoint(1);
+    if (symbol.kind !== 'object' || !symbol.address) continue;
+    objectAddresses.add(normalize(symbol.address).value);
+    if (symbol.size && symbol.size > 0n)
+      for (const range of ranges({ start: symbol.address, size: symbol.size }))
+        data.push({ range, evidence_ids: symbol.evidence_ids });
+  }
+  data.sort((a, b) => {
+    context.checkpoint(1);
+    return a.range.start.value < b.range.start.value
+      ? -1
+      : a.range.start.value > b.range.start.value
+        ? 1
+        : 0;
+  });
+  for (const region of data) {
+    context.checkpoint(1);
+    const end = region.range.start.value + region.range.size;
+    const previous = dataEnds.at(-1) ?? 0n;
+    dataEnds.push(end > previous ? end : previous);
+  }
+  for (const entry of image.entry_points) seed(entry, 'image entry', [], true);
+  for (const symbol of image.symbols) {
+    context.checkpoint(1);
+    if (symbol.address && (symbol.kind === 'function' || symbol.kind === 'unknown'))
+      seed(
+        symbol.address,
+        symbol.kind === 'function' ? 'function symbol' : 'executable symbol candidate',
+        symbol.evidence_ids,
+        symbol.kind === 'function',
+        symbol.original_name,
+        symbol.size && symbol.size > 0n ? ranges({ start: symbol.address, size: symbol.size }) : [],
+      );
+  }
+  for (const item of image.exports)
+    if (item.address && item.forwarder === null)
+      seed(
+        item.address,
+        'executable export candidate',
+        item.evidence_ids,
+        false,
+        item.original_name,
+      );
+  for (const hint of image.hints) {
+    context.checkpoint(1);
+    if (hint.kind === 'function')
+      seed(
+        hint.address,
+        'loader function start',
+        hint.evidence_ids,
+        true,
+        null,
+        hint.size && hint.size > 0n ? ranges({ start: hint.address, size: hint.size }) : [],
+      );
+    // Unwind coverage can coalesce adjacent functions (notably Mach-O compact
+    // unwind). Its start is a candidate, not a claim that one function owns the range.
+    if (hint.kind === 'unwind')
+      seed(hint.range.start, 'unwind region candidate', hint.evidence_ids, false);
+  }
+  for (const assertion of input.assertions ?? []) {
+    context.checkpoint(1);
+    if (assertion.evidence.origin.kind !== 'assertion')
+      throw new OperationError({
+        code: 'invalid_input',
+        severity: 'error',
+        message: 'Function assertions require assertion-origin evidence',
+        evidence_ids: [assertion.evidence.id],
+      });
+    evidence.set(assertion.evidence.id, assertion.evidence);
+    if (assertion.evidence.origin.status !== 'retracted')
+      seed(
+        assertion.entry,
+        'asserted function',
+        [assertion.evidence.id],
+        false,
+        null,
+        (assertion.ranges ?? []).flatMap(ranges),
+      );
+  }
+  for (const fn of input.functions ?? [])
+    seed(fn.entry, 'published function root', fn.evidence_ids,
+      fn.boundary === 'established', fn.original_name);
+  const ordered_seeds = [...seeds.values()].sort((a, b) => {
+    context.checkpoint(1);
+    return a.entry.value < b.entry.value ? -1 : a.entry.value > b.entry.value ? 1 : 0;
+  });
+  return {
+    image_id: image.id, slice_id: image.selected_slice_id, revision,
+    seeds, ordered_seeds, evidence, data, jump_tables: jumpTables,
+    boundary_claims: boundaryClaims, data_after: dataAfter, executable_end: executableEnd,
   };
 }

@@ -54,10 +54,10 @@ export interface SourceEvidence {
   /** Explicit optional-dependency limitations; never substitutes a zero interface. */
   readonly diagnostics?: readonly Diagnostic[];
   readonly evidence?: readonly Evidence[];
-  /** Bounded native parameter-associated shape constraints over original values. */
-  readonly memory_transfers?: readonly MemoryShapeTransfer[];
   /** Proven complete actual counts for contextual variadic calls. */
   readonly call_argument_counts?: ReadonlyMap<string, number>;
+  /** Bounded native parameter-associated shape constraints over original values. */
+  readonly memory_transfers?: readonly MemoryShapeTransfer[];
   /** Actual proven written result storage, not an inferred author aggregate. */
   readonly function_returns?: {
     readonly registers: readonly RegisterDescriptor[];

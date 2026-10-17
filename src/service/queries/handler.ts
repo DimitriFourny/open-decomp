@@ -16,6 +16,7 @@ import type {
   Address,
   CanonicalValue,
   CursorBinding,
+  Evidence,
   FunctionRecord,
   LoadedImage,
   OperationContext,
@@ -104,7 +105,7 @@ function presentName<T extends { readonly id: string; readonly display_name: str
   );
   return names.size === 1 ? { ...record, display_name: [...names][0]! } : record;
 }
-function resultEvidence(scope: Scope, revision: number, data: unknown): unknown {
+function resultEvidence(scope: Scope, revision: number, data: unknown, local: readonly Evidence[] = []): unknown {
   const ids = new Set<string>();
   const collect = (value: unknown): void => {
     scope.context.checkpoint(1);
@@ -121,6 +122,7 @@ function resultEvidence(scope: Scope, revision: number, data: unknown): unknown 
   };
   collect(data);
   const evidence = [];
+  const localById = new Map(local.map((item) => [item.id, item]));
   const pending = [...ids];
   let offset = 0;
   while (offset < pending.length) {
@@ -129,7 +131,14 @@ function resultEvidence(scope: Scope, revision: number, data: unknown): unknown 
       queryFailure('resource_limit', 'Query evidence exceeds the result bound');
     const requested = pending.slice(offset, offset + 1000);
     offset += requested.length;
-    const batch = scope.store.readEvidence(requested, revision);
+    const durable = requested.filter((id) => !localById.has(id));
+    const batch = [
+      ...requested.flatMap((id) => {
+        const proof = localById.get(id);
+        return proof ? [proof] : [];
+      }),
+      ...(durable.length ? scope.store.readEvidence(durable, revision) : []),
+    ];
     for (const item of batch) {
       scope.context.checkpoint(1);
       evidence.push(item);
@@ -496,8 +505,12 @@ async function dispatch(
             record_lookup: 'original emission inference/requirement IDs and mapping indexes in the selected artifact',
             analysis_state: result.state, proof_delivery: 'artifact_references',
             selection: projection.selection, helpers: projection.helpers,
+            diagnostic_lookup: 'result.diagnostics[artifact_index] in the selected artifact',
+            analysis_diagnostics: result.diagnostics.map(({ message: _message, entity_id, evidence_ids, ...diagnostic }, artifact_index) => ({
+              ...diagnostic, artifact_index, entity_known: entity_id !== undefined, evidence_count: evidence_ids.length,
+            })),
           }, 'id', 'incomplete_index',
-          { coverage: result.coverage, diagnostics: result.diagnostics,
+          { coverage: result.coverage, diagnostics: [],
             artifacts: [encodeArtifact(selected.artifact)] }, [], 'artifact_references',
           (items) => investigationPage(items, projection.instructionLocations));
       }
@@ -531,7 +544,7 @@ async function dispatch(
                     code: 'conflicting_evidence',
                     severity: 'warning',
                     message: 'Incompatible active asserted names remain separate annotations',
-                    entity_id: fn.id,
+                    entity_id: subject.id,
                     evidence_ids: [],
                   },
                 ]
@@ -540,7 +553,7 @@ async function dispatch(
           data,
         };
       }
-      const graph = loadFunctionGraph(scope, args.revision, loaded);
+      const graph = loadFunctionGraph(scope, args.revision, loaded, args.view === 'disassembly' && args.detail === 'compact');
       const state = graph.coverage.state === 'complete' ? 'complete' : 'partial';
       const partialReason = graph.gaps.some((gap) => gap.reason === 'budget')
         ? 'budget'
@@ -555,18 +568,25 @@ async function dispatch(
           operation,
           args,
           graph.instructions.map(
-            (item) => encodeInstruction(item) as { id: string; address: { value: string } },
+            (item) => encodeInstruction(args.detail === 'compact' ? {
+              id: item.id, address: item.address, size: item.size, validity: item.validity,
+              architecture: item.payload?.architecture ?? loaded.image.target.architecture,
+              flow: item.flow, diagnostics: item.diagnostics, evidence_ids: item.evidence_ids,
+              presentation: graph.presentations?.get(item.id) ?? null,
+            } : item) as { id: string; address: { value: string } },
           ),
           state,
           (item) => `${BigInt(item.address.value).toString(16).padStart(16, '0')}:${item.id}`,
           {
             view: args.view,
             function_id: fn.id,
+            ...(args.detail === 'compact' ? { detail: 'compact' } : {}),
             gaps: wireValue(graph.gaps.map(({ range, reason }) => ({ range, reason }))),
           },
           'address_id',
           partialReason,
           details,
+          graph.evidence,
         );
       return paginate(
         scope,
@@ -579,6 +599,7 @@ async function dispatch(
         'address_id',
         partialReason,
         details,
+        graph.evidence,
       );
     }
     case 'xrefs_get': {

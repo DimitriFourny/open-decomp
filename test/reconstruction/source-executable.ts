@@ -92,9 +92,10 @@ class _Memory:
 `;
 
 /** Compile and execute only exact emitted bodies from trusted source fixtures.
- * This declared subset is integer arithmetic/shifts and byte-addressed scalar
- * loads/stores with structured control. It is NOT a claim that all pseudocode,
- * unknown effects, indirect calls, FP environments or aggregate syntax compile. */
+ * The declared subset is unsigned 32/64-bit arithmetic/shifts and byte-addressed
+ * loads/stores of supplied initialized scalar/array objects with structured
+ * control. This does NOT claim unknown effects/storage, indirect calls, FP
+ * environments, label/goto syntax, or by-value aggregate syntax compile. */
 export function checkExecutableSource(
   emission: Parameters<typeof emittedFormals>[0] & { readonly language: 'c-like' | 'python-like' },
   cases: readonly ExecutableSourceCase[],

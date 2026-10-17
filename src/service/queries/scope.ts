@@ -1,12 +1,12 @@
 import type {
-  FunctionGraph,
   FunctionRecord,
   LoadedImage,
   OperationContext,
   ProjectStore,
+  ReferenceRecord,
   StoredRecordKinds,
 } from '../../core/index.js';
-import { reconstructFunctionGraph } from './graphs.js';
+import { reconstructFunctionGraph, type QueryFunctionGraph } from './graphs.js';
 import { queryFailure } from './shared.js';
 
 export type IndexState = 'complete' | 'partial' | 'not_started';
@@ -16,9 +16,15 @@ export interface LoadedFunctionScope {
   readonly function: FunctionRecord;
 }
 
-// Immutable metadata only; annotation presentation always reads the requested revision.
-// Four entries of at most 16 MiB bound retained bytes to 64 MiB per child.
-const imageCache = new Map<string, LoadedImage>();
+// One immutable native-record materialization per live loader image/revision.
+// Weak keys retain no image bytes after the store's own bounded cache evicts them.
+const navigation = new WeakMap<LoadedImage, {
+  readonly project_id: string;
+  readonly revision: number;
+  readonly image: LoadedImage;
+  readonly functions: readonly FunctionRecord[];
+  references?: readonly ReferenceRecord[];
+}>();
 export function loadImage(store: ProjectStore, revision: number, id: string): LoadedImage {
   const slices = store.snapshot(revision).images.filter((item) => item.image_id === id);
   if (!slices.length) queryFailure('not_found', 'Image is absent from the requested snapshot');
@@ -27,15 +33,7 @@ export function loadImage(store: ProjectStore, revision: number, id: string): Lo
       'ambiguous_slice',
       'Image-only query cannot select among multiple imported slices',
     );
-  const key = `${store.project_id}:${revision}:${id}`;
-  const cached = imageCache.get(key);
-  if (cached) return cached;
-  const image = store.readLoadedImage(id, slices[0]!.selected_slice_id, revision);
-  if (image.bytes.length <= 16 * 1024 * 1024) {
-    if (imageCache.size >= 4) imageCache.delete(imageCache.keys().next().value!);
-    imageCache.set(key, image);
-  }
-  return image;
+  return store.readLoadedImage(id, slices[0]!.selected_slice_id, revision);
 }
 export function records<K extends keyof StoredRecordKinds>(
   scope: ReadScope,
@@ -85,27 +83,54 @@ export function loadFunctionScope(
   return queryFailure('not_found', 'Function is absent from the requested snapshot');
 }
 
-/** Navigation and semantic analysis consume the same durable discovery boundaries. */
+/** Navigation and analysis share selected-local traversal rooted in the same
+ * durable native facts. Published observed ranges remain immutable metadata. */
 export function loadFunctionGraph(
   scope: ReadScope,
   revision: number,
   loaded: LoadedFunctionScope,
-): FunctionGraph {
+  formatting = false,
+): QueryFunctionGraph {
   const image = loaded.image;
-  const navigationImage = {
-    ...image,
-    symbols: records(scope, revision, image.id, 'symbol').items,
-    imports: records(scope, revision, image.id, 'import').items,
-    exports: records(scope, revision, image.id, 'export').items,
-  };
+  let indexed = navigation.get(image);
+  if (!indexed || indexed.project_id !== scope.store.project_id || indexed.revision !== revision) {
+    indexed = {
+      project_id: scope.store.project_id, revision,
+      image: {
+        ...image,
+        symbols: records(scope, revision, image.id, 'symbol').items,
+        imports: records(scope, revision, image.id, 'import').items,
+        exports: records(scope, revision, image.id, 'export').items,
+      },
+      functions: records(scope, revision, image.id, 'function').items,
+    };
+    navigation.set(image, indexed);
+  }
   return reconstructFunctionGraph(
     {
       project_id: scope.store.project_id,
       revision,
-      image: navigationImage,
+      image: indexed.image,
       function: loaded.function,
-      functions: records(scope, revision, image.id, 'function').items,
+      functions: indexed.functions,
+      formatting,
     },
     scope.context,
   );
+}
+
+/** Reuse the immutable native function/reference arrays already materialized for
+ * graph reconstruction; annotation/name presentation stays revision-specific. */
+export function loadFunctionIndex(scope: ReadScope, revision: number, image: LoadedImage): {
+  readonly functions: readonly FunctionRecord[];
+  readonly references: readonly ReferenceRecord[];
+} {
+  const indexed = navigation.get(image);
+  if (!indexed || indexed.project_id !== scope.store.project_id || indexed.revision !== revision)
+    return {
+      functions: records(scope, revision, image.id, 'function').items,
+      references: records(scope, revision, image.id, 'reference').items,
+    };
+  indexed.references ??= records(scope, revision, image.id, 'reference').items;
+  return { functions: indexed.functions, references: indexed.references };
 }

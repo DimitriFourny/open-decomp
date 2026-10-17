@@ -18,6 +18,7 @@ import {
   type ToolResult,
 } from '../../core/index.js';
 import { constructSSA } from '../../analysis/ssa/index.js';
+import { abiObservableRegisterMasks } from '../../analysis/ssa/observable-masks.js';
 import { simplifySSA } from '../../analysis/values/index.js';
 import {
   recoverTypes,
@@ -43,10 +44,10 @@ import {
   type AnalysisDependencyCollector,
   type StoredDecompilation,
 } from '../../project/cache/index.js';
-import { loadFunctionGraph, loadFunctionScope, records } from '../queries/scope.js';
+import { loadFunctionGraph, loadFunctionIndex, loadFunctionScope } from '../queries/scope.js';
 import { MAX_FRAME_BYTES } from '../../workers/protocol.js';
 import { callDeclarations, resolveCalls } from './calls.js';
-import { closeEvidence, evidenceReferences, semanticCatalog } from './catalog.js';
+import { closeEvidence, emissionEvidenceReferences, evidenceReferences, semanticCatalog } from './catalog.js';
 import { pipelineComponents, pipelineVersions } from './versions.js';
 import { boundIR, requirePass } from './passes.js';
 import { recoverSourceEvidence } from './source-facts.js';
@@ -127,10 +128,12 @@ export async function executeDecompilation(
       context.progress('lift', 1, 7);
       const lifted = components.lifter.lift(graph, components.abi, context);
       let requiredNodes = boundIR(lifted.ir, context);
+      const observable_register_masks = abiObservableRegisterMasks(components.abi, context);
       const passOptions = {
         max_work: context.budget.work,
         max_ir_nodes: context.budget.ir_nodes,
         max_blocks: context.budget.blocks,
+        observable_register_masks,
         checkpoint: (work: number) => context.checkpoint(work),
       };
       context.progress('ssa', 2, 7);
@@ -154,8 +157,7 @@ export async function executeDecompilation(
         { image, abi: components.abi, revision: args.revision },
         fullContext,
       );
-      const functions = records(scope, args.revision, image.id, 'function').items;
-      const references = records(scope, args.revision, image.id, 'reference').items;
+      const { functions, references } = loadFunctionIndex(scope, args.revision, image);
       const calls = resolveCalls(
         ir,
         image,
@@ -442,6 +444,7 @@ export async function executeDecompilation(
         debug,
         native_types: nativeTypes,
         components,
+        observable_register_masks,
       });
       types = refineMemoryShapes(ir, types, fullContext, {
         slice_id: image.selected_slice_id,
@@ -485,6 +488,7 @@ export async function executeDecompilation(
         ...structured.diagnostics,
         ...nameDiagnostics,
         ...emitted.diagnostics,
+        ...(source.diagnostics ?? []),
       ];
       const uniqueDiagnostics = [
         ...new Map(
@@ -523,6 +527,7 @@ export async function executeDecompilation(
         ...new Set([
           ...graph.coverage.reasons,
           ...(types.state === 'partial' ? ['Source metadata or type recovery is incomplete'] : []),
+          ...(source.diagnostics ?? []).map((diagnostic) => diagnostic.message),
         ]),
       ];
       const coverage: ResultMetadata['coverage'] = [
@@ -546,7 +551,8 @@ export async function executeDecompilation(
         {
           layer: 'analysis',
           state:
-            graph.coverage.state === 'complete' && types.state === 'complete'
+            graph.coverage.state === 'complete' && types.state === 'complete' &&
+            !(source.diagnostics?.length)
               ? 'complete'
               : 'partial',
           completed_units: analysisReasons.length ? 0 : 1,
@@ -582,26 +588,28 @@ export async function executeDecompilation(
         );
         if (keys.size === 1) signature = signatures[0]!.signature;
       }
-      const catalog = semanticCatalog(image, ir, types, context);
+      const catalog = types === baseline ? baselineCatalog : semanticCatalog(image, ir, types, context);
       const proofIds = evidenceReferences(
         [
           catalog.types,
           types.associations,
           types.signatures,
           types.shapes,
-          emitted.emission,
           uniqueDiagnostics,
           active.annotations,
           signature,
         ],
         context,
       );
+      emissionEvidenceReferences(emitted.emission, context, proofIds);
       const evidence = closeEvidence(
         store,
         args.revision,
         proofIds,
         [
           ...image.evidence,
+          ...(graph.evidence ?? []),
+          ...(source.evidence ?? []),
           ...debug.evidence,
           ...library.evidence,
           ...baseline.evidence,

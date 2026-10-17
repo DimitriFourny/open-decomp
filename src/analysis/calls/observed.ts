@@ -50,7 +50,7 @@ export function observePreparedCallInterfaces(
     variadic: false, fixed_parameter_count: 16,
   });
   const primary = layout.returns.find((location) => location.kind === 'register');
-  const prepared = preparedCallArguments(ir, context);
+  const prepared = preparedCallArguments(ir, context, demandIndex?.preparation(ir, abi, context));
   const argumentRoots = new Set<string>();
   for (const parameter of layout.parameters)
     for (const location of parameter.locations)

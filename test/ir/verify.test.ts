@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { entityIdentity } from '../../src/core/index.js';
 import type { DecodedInstruction } from '../../src/core/index.js';
+import { constructSSA } from '../../src/analysis/ssa/index.js';
 import {
   IRBuilder,
   IRValidationError,
@@ -256,4 +257,92 @@ test('block identities are stable across construction order; every block must te
   assert.equal(a.id, b.id);
   assert.throws(() => first.block(['address', 1n]), TypeError);
   assert.throws(() => first.finish(a), TypeError);
+});
+
+test('shared provenance validation retains every origin-specific rejection and is invocation-local', () => {
+  const program = baseProgram();
+  const shared = { ...provenance, synthetic: [''] };
+  const nodes = program.blocks[0]!.instructions.map((node) => ({ ...node, provenance: shared }));
+  const broken = replaceInstructions(program, nodes);
+  const problems = verifyIR(broken);
+  const invalid = new Set(problems.filter((problem) => problem.code === 'provenance' &&
+    problem.message === 'Invalid source identity, range, evidence or justification').map((problem) => problem.node));
+  assert.deepEqual(invalid, new Set(nodes.map((node) => node.id)));
+  assert.deepEqual(verifyIR(broken), problems);
+  assert.deepEqual(verifyIR(program), []);
+});
+
+test('canonical binding layouts retain reordered, cloned and overlapping descriptor checks', () => {
+  const ir = builder('canonical-binding-layout'), entry = ir.block('entry'), end = ir.block('end');
+  entry.readRegister(register('r.low', 32, 0, 'preserve_other_bits', 'r'));
+  entry.readRegister(register('r.high', 32, 32, 'preserve_other_bits', 'r'));
+  entry.jump(end);
+  end.return();
+  const built = constructSSA(ir.finish(entry));
+  if (built.value.form !== 'ssa') throw new TypeError('Expected SSA');
+  const program = built.value;
+  assert.deepEqual(verifyIR(program), []);
+  const row = program.register_states[1]!;
+  const replaceExit = (exit: typeof row.exit) => ({ ...program, register_states: [
+    program.register_states[0]!, { ...row, exit },
+  ] });
+  assert.deepEqual(verifyIR(replaceExit([...row.exit].reverse())), []);
+  assert.deepEqual(verifyIR(replaceExit(row.exit.map((binding) =>
+    ({ ...binding, register: { ...binding.register } })))), []);
+  const changed = row.exit.map((binding, index) => index === 0
+    ? { ...binding, register: { ...binding.register, offset_bits: 16 } } : binding);
+  assert.ok(verifyIR(replaceExit(changed)).some((problem) =>
+    problem.message === 'Overlapping SSA register bindings'));
+  assert.ok(verifyIR(replaceExit(changed)).some((problem) =>
+    problem.message === 'SSA architectural-state coverage mismatch'));
+  const overlapping = { ...program.register_states[0]!.entry[1]!.register, offset_bits: 16 };
+  const overlap = { ...program, register_states: program.register_states.map((state) => ({
+    ...state,
+    entry: state.entry.map((binding, index) => index === 1 ? { ...binding, register: overlapping } : binding),
+    exit: state.exit.map((binding, index) => index === 1 ? { ...binding, register: overlapping } : binding),
+  })) };
+  const reports = verifyIR(overlap).filter((problem) => problem.message === 'Overlapping SSA register bindings');
+  assert.equal(reports.filter((problem) => problem.node === program.id).length, 1);
+  for (const block of program.blocks)
+    assert.equal(reports.filter((problem) => problem.node === block.id).length, 2);
+});
+
+test('descriptor validation reuses only frozen flat cells and retains mutable clone diagnostics', () => {
+  const low = register('mutable.low', 32, 0, 'preserve_other_bits', 'mutable'),
+    high = register('mutable.high', 32, 32, 'preserve_other_bits', 'mutable');
+  const ir = builder('descriptor-immutability'), entry = ir.block('entry'), end = ir.block('end');
+  entry.readRegister(low);
+  entry.readRegister(high);
+  entry.jump(end);
+  end.return();
+  const built = constructSSA(ir.finish(entry));
+  if (built.value.form !== 'ssa') throw new TypeError('Expected SSA');
+  const program = built.value, first = program.register_states[0]!.entry[0]!.register;
+  assert.ok(Object.isFrozen(first));
+  assert.equal(Object.isFrozen(low), false);
+  assert.equal(Reflect.set(first, 'offset_bits', 16), false);
+  assert.deepEqual(verifyIR(program), []);
+  const mutable = { ...first };
+  const replace = (replacement: typeof first) => ({ ...program,
+    register_states: program.register_states.map((row) => ({ ...row,
+      entry: row.entry.map((binding) => binding.register.id === first.id
+        ? { ...binding, register: replacement } : binding),
+      exit: row.exit.map((binding) => binding.register.id === first.id
+        ? { ...binding, register: replacement } : binding),
+    })) });
+  const mutableProgram = replace(mutable);
+  assert.deepEqual(verifyIR(mutableProgram), []);
+  assert.equal(Object.isFrozen(mutable), false);
+  mutable.offset_bits = 16;
+  const changed = verifyIR(mutableProgram).filter((problem) =>
+    problem.message === 'Overlapping SSA register bindings');
+  assert.equal(changed.filter((problem) => problem.node === program.id).length, 1);
+  for (const block of program.blocks)
+    assert.equal(changed.filter((problem) => problem.node === block.id).length, 2);
+  const invalid = Object.freeze({ ...first, write_rule: 'replace_root' as const });
+  const repeated = verifyIR(replace(invalid)).filter((problem) =>
+    problem.message === 'replace_root must cover the root');
+  assert.equal(repeated.filter((problem) => problem.node === program.id).length, 1);
+  for (const block of program.blocks)
+    assert.equal(repeated.filter((problem) => problem.node === block.id).length, 2);
 });

@@ -111,6 +111,10 @@ export class TrustedSemanticCatalog {
       readonly evidence?: readonly Evidence[];
     },
     context: OperationContext,
+    // Analysis artifacts are single-scope; merged annotation catalogs may span images.
+    expected?: Pick<AnnotationSubject, 'image_id' | 'slice_id' | 'abi'> & {
+      readonly function_id: string;
+    },
   ): TrustedSemanticCatalog {
     const snapshot = store.snapshot(revision),
       subjects = new Map<string, AnnotationSubject>(),
@@ -120,9 +124,17 @@ export class TrustedSemanticCatalog {
       snapshot.images.map((image) => [`${image.image_id}:${image.selected_slice_id}`, image]),
     );
     const abis = new Map<string, Target['abi']>();
+    let functionKind: AnnotationSubject['kind'] | undefined;
     for (const subject of input.subjects) {
       context.checkpoint(1);
       entityIdSchema.parse(subject.id);
+      if (expected) {
+        if (subject.image_id !== expected.image_id || subject.slice_id !== expected.slice_id ||
+          subject.abi !== expected.abi)
+          missing('Analysis catalog subject escapes its image scope');
+        if (subject.id === expected.function_id && functionKind === undefined)
+          functionKind = subject.kind;
+      }
       const imageKey = `${subject.image_id}:${subject.slice_id}`;
       if (!images.has(imageKey))
         missing('Semantic subject does not belong to this project snapshot');
@@ -143,6 +155,8 @@ export class TrustedSemanticCatalog {
         missing('Semantic subject identity is ambiguous');
       subjects.set(subject.id, Object.freeze({ ...subject }));
     }
+    if (expected && functionKind !== 'function')
+      missing('Analysis catalog lacks its function subject');
     for (const record of input.types ?? []) {
       context.checkpoint(
         1 +

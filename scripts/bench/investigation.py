@@ -105,19 +105,20 @@ async def record(args, tool, questions):
                     decompiled, _, failed = await client.call('function_decompile', {**selected, 'wait': True, 'delivery': 'artifact'})
                     require(not failed and decompiled.get('artifacts'), 'No published function artifact')
                     artifact = decompiled['artifacts'][0]
+                    row['artifact_id'] = artifact['id']
                     # Query records, never parse generated source or guess the latest artifact.
                     pages, model_pages, cursor, seen = [], [], None, set()
                     row['model_text_bytes'] = 0
                     row['structured_answering_payload_bytes'] = 0
                     while True:
-                        filters = {'kinds': list(dict.fromkeys(FOCUSED_KINDS[name] + ['parameter', 'source', 'unresolved', 'fp_environment', 'conflict', 'annotation']))} if args.projection_mode == 'focused' else {}
+                        filters = {'kinds': list(dict.fromkeys(FOCUSED_KINDS[name] + ['source', 'unresolved', 'fp_environment', 'conflict', 'annotation']))} if args.projection_mode == 'focused' else {}
                         value, call_record, failed = await client.call('function_get', {**selected, **filters,
-                            'view': 'investigation', 'artifact_id': artifact['id'],
+                            'view': 'investigation', 'artifact_id': artifact['id'], 'include_quotes': True,
                             'page': {'limit': 25, **({'cursor': cursor} if cursor else {})}})
                         require(not failed and value.get('data', {}).get('view') == 'investigation', 'Investigation query failed')
                         require(value['artifacts'][0]['sha256'] == artifact['sha256'], 'Artifact hash mismatch')
                         pages.append({'analysis_state': value['data']['analysis_state'], 'coverage': value['coverage'],
-                                      'diagnostics': value['diagnostics'], 'records': value['data']['items'],
+                                      'diagnostics': value['data']['analysis_diagnostics'], 'records': value['data']['items'],
                                       'references': value['data']['references'], 'selection': value['data']['selection']})
                         material, text_bytes, structured_bytes = answering_delivery(client, call_record)
                         model_pages.extend(material)
@@ -128,8 +129,17 @@ async def record(args, tool, questions):
                             break
                         require(cursor not in seen, 'Repeated cursor')
                         seen.add(cursor)
+                    native, native_record, failed = await client.call('function_get', {**selected,
+                        'view': 'disassembly', 'detail': 'compact', 'page': {'limit': count}})
+                    require(not failed and native.get('data', {}).get('detail') == 'compact', 'Explicit native instruction query failed')
+                    require(len(native['data']['items']) == count and native['data']['page']['next_cursor'] is None,
+                            'Frozen native instruction count mismatch; no instructions silently discarded')
+                    native_material, native_text_bytes, native_structured_bytes = answering_delivery(client, native_record)
+                    row['model_text_bytes'] += native_text_bytes
+                    row['structured_answering_payload_bytes'] += native_structured_bytes or 0
                     row['structured_pages'] = pages
-                    row['answering_payload'] = {'pages': model_pages}
+                    row['native_disassembly'] = native
+                    row['answering_payload'] = {'pages': model_pages, 'native_disassembly': native_material}
                 else:
                     found, _, failed = await client.call('symbols_list', {**scope, 'contains': name})
                     require(not failed and isinstance(found, list), 'Selected function discovery failed')
@@ -236,6 +246,8 @@ Read ONLY packet-A.json and packet-B.json in this directory. Do not inspect sour
 For every case on each side independently answer the frozen question from only its material. Cite original instruction IDs/addresses or proof IDs, distinguish inferred inputs from an exact source declaration, preserve open arity/unknown bounds/unresolved behavior and hypothesis/assertion distinctions. Do not repair missing facts from the opposite side. Retain failures visibly.
 Where a page has references, ref objects and *_refs are zero-based aliases into that same page's references array. Entries are original IDs OR exact original instruction ranges such as file:0x300+0x4; cite the stated address space, never relabel file offsets as VA. Alias packing creates no facts. Source span/mapping_indexes and inference record.id are proof locators inside the named artifact. Exact source spans quote pseudocode, not recovered declarations. Scope count pairs are [selected,total] and expose omitted/unresolved regions, not whole-function completeness.
 Body quotations exclude only an exact producer-recorded function-declaration interval; original declarations/graphs/helper definitions remain in the named artifact. Typed parameter roles are observed evidence domains: entry_storage is infrastructure, not proof of an author parameter. Compact text may omit next_cursor only at end of pagination. Do not infer a closed source signature or invent helper semantics from names.
+The native_disassembly material is a separate, explicitly requested public native instruction query, not generated-source inference. Its columns label original space-qualified address, byte size, canonical decoder mnemonic and operands. Validity/unknown-flow exceptions, actual gaps, partial coverage and diagnostics remain explicit. Full original instruction IDs/descriptors remain available through the same public disassembly query with detail full; complete pseudocode/graphs remain in the selected artifact. Absence of source quotations in this workflow does not establish any original source contract.
+All relevant_material_paths and irrelevant_material_paths MUST be absolute RFC6901 JSON pointers into that same side's frozen packet, rooted /cases/N/material (for example /cases/0/material/pages/0/items). Do not prefix a filename or use JSONPath syntax. Select disjoint subtrees across labels: if a child is irrelevant, expand its relevant parent into specific relevant siblings/fields rather than marking both parent and child. Unmarked material and JSON framing remain unclassified, not automatically irrelevant. This is selector syntax clarification only, not a changed relevance or repair rubric.
 Return JSON {reviewer, sides:{A:[{function, answer, references, uncertainty, unsupported_claims, manual_repair_needed, relevant_material_paths, irrelevant_material_paths}], B:[...]}, paired:[{function, preferred_side_or_tie, reason}]}. Count repair as additional interpretive/reconstruction work needed, not as an invented performed edit. Do not infer gold correctness or claim objective byte relevance; list paths so coordinator can measure those bytes reproducibly after answers. Do not rank runtime or general decompiler quality. Answer all five cases on both sides.\n'''
     (args.output / 'review' / 'INSTRUCTIONS.md').write_text(instructions)
     summary = {'review_directory': str(args.output / 'review'), 'selected_functions': len(FUNCTIONS),

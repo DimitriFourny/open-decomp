@@ -1,8 +1,9 @@
 import type { AbiProfile, OperationContext, RegisterDescriptor } from '../../core/index.js';
 import type { CallAnalysisResult } from '../../analysis/calls/index.js';
 import { inspectRegister, inspectStackMemory, type StackFact } from '../../analysis/stack/index.js';
-import { bitWidth, sameType, successors, type DataType, type Expression, type RegisterBinding, type SSAForm, type Value } from '../../ir/index.js';
-import { registerTypeSlices, registerTypes, unchangedStorage, type RegisterTypeSlice, type StorageCopy } from '../../reconstruction/source-register-types.js';
+import { bitWidth, sameType, type DataType, type RegisterBinding, type SSAForm, type Value } from '../../ir/index.js';
+import { registerTypeSlices, registerTypes, unchangedStorage, type RegisterTypeSlice } from '../../reconstruction/source-register-types.js';
+import { createNativeInterfaceIndex, type NativeInterfaceIndex } from './native-entry.js';
 import type { NativeInterface } from './native-worklist.js';
 
 /** Seed physical cells with independently observed scalar/vector lane types.
@@ -12,6 +13,7 @@ export function nativeTypeSlices(
   ir: SSAForm,
   interfaces: ReadonlyMap<string, NativeInterface>,
   context: OperationContext,
+  index?: NativeInterfaceIndex,
 ): readonly (readonly [Value, RegisterTypeSlice])[] {
   const result: (readonly [Value, RegisterTypeSlice])[] = [];
   const note = (bindings: readonly RegisterBinding[], registers: readonly RegisterDescriptor[],
@@ -27,19 +29,34 @@ export function nativeTypeSlices(
       }
     }
   };
-  const states = new Map(ir.register_states.map((state) => [state.block, state]));
-  for (const block of ir.blocks) {
-    for (const node of block.instructions) {
+  const prepared = index?.preparation(ir, context);
+  const noteCall = (node: { readonly id: string; readonly register_inputs: readonly RegisterBinding[];
+    readonly register_outputs: readonly RegisterBinding[] }): void => {
+    const observed = interfaces.get(node.id);
+    if (!observed) return;
+    note(node.register_inputs, observed.parameters, observed.parameter_types, false);
+    note(node.register_outputs, observed.returns, observed.return_types, true);
+  };
+  if (prepared) {
+    for (const call of prepared.calls) {
       context.checkpoint(1);
-      if (node.kind !== 'call') continue;
-      const observed = interfaces.get(node.id);
-      if (!observed) continue;
-      note(node.register_inputs, observed.parameters, observed.parameter_types, false);
-      note(node.register_outputs, observed.returns, observed.return_types, true);
+      noteCall(call);
     }
-    const tail = interfaces.get(block.terminator.id);
-    if (block.terminator.kind === 'indirect' && block.terminator.tail_call && tail)
-      note(states.get(block.id)?.exit ?? [], tail.parameters, tail.parameter_types, false);
+    for (const block of prepared.tails) {
+      const tail = interfaces.get(block.terminator.id);
+      if (tail) note(prepared.states.get(block.id)?.exit ?? [], tail.parameters, tail.parameter_types, false);
+    }
+  } else {
+    const states = new Map(ir.register_states.map((state) => [state.block, state]));
+    for (const block of ir.blocks) {
+      for (const node of block.instructions) {
+        context.checkpoint(1);
+        if (node.kind === 'call') noteCall(node);
+      }
+      const tail = interfaces.get(block.terminator.id);
+      if (block.terminator.kind === 'indirect' && block.terminator.tail_call && tail)
+        note(states.get(block.id)?.exit ?? [], tail.parameters, tail.parameter_types, false);
+    }
   }
   return result;
 }
@@ -76,9 +93,10 @@ export function nativeStackParameters(
   ir: SSAForm,
   analysis: CallAnalysisResult,
   context: OperationContext,
+  index?: NativeInterfaceIndex,
 ): NonNullable<NativeInterface['stack_parameters']> {
-  const loads = new Map(ir.blocks.flatMap((block) => block.instructions.flatMap((node) =>
-    node.kind === 'load' ? [[node.id, node] as const] : [])));
+  const loads = index?.preparation(ir, context).loads ?? new Map(ir.blocks.flatMap((block) =>
+    block.instructions.flatMap((node) => node.kind === 'load' ? [[node.id, node] as const] : [])));
   const parameters = new Map<string, NonNullable<NativeInterface['stack_parameters']>[number]>();
   for (const access of analysis.stack.accesses) {
     context.checkpoint(1);
@@ -108,58 +126,19 @@ export function nativeReturnInterface(
   seed = false,
   demandedReturns: readonly RegisterDescriptor[] = [],
   assumedEntry = false,
+  index?: NativeInterfaceIndex,
 ): Pick<NativeInterface, 'returns' | 'return_types' | 'written_result'> {
-  const states = new Map(ir.register_states.map((state) => [state.block, state]));
-  const entry = states.get(ir.entry)?.entry ?? [];
-  const assumed = new Set(assumedEntry ? ir.blocks.find((block) => block.id === ir.entry)!.instructions
-    .flatMap((node) => node.kind === 'assign' ? [node.result.id] : []) : []);
-  const expressions = new Map<string, Expression>(), values = new Map<string, Value>();
-  const sources = new Map<string, Value[]>(), copies: StorageCopy[] = [];
-  const blocks = new Map(ir.blocks.map((block) => [block.id, block]));
-  const outputs = new Map<string, { readonly call: string; readonly binding: RegisterBinding }>();
-  const loads = new Set<string>();
-  for (const state of ir.register_states)
-    for (const binding of [...state.entry, ...state.exit]) values.set(binding.value.id, binding.value);
-  for (const block of ir.blocks) {
-    for (const parameter of block.parameters) values.set(parameter.id, parameter);
-    for (const node of block.instructions) {
-      context.checkpoint(1);
-      if ('result' in node) values.set(node.result.id, node.result);
-      if (node.kind === 'assign') expressions.set(node.result.id, node.expression);
-      if (node.kind === 'load') loads.add(node.result.id);
-      if (node.kind === 'call')
-        for (const binding of node.register_outputs) {
-          values.set(binding.value.id, binding.value);
-          outputs.set(binding.value.id, { call: node.id, binding });
-        }
-    }
-    for (const edge of successors(block.terminator))
-      for (const [index, source] of edge.arguments.entries()) {
-        context.checkpoint(1);
-        const destination = blocks.get(edge.target)?.parameters[index];
-        if (!destination) continue;
-        const known = sources.get(destination.id) ?? [];
-        known.push(source);
-        sources.set(destination.id, known);
-        copies.push({ source, destination });
-      }
-  }
-  const typed = registerTypeSlices(values, expressions, copies, [], context, nativeTypeSlices(ir, interfaces, context));
-  const primary = [
-    abi.classifyCall({ returns: { kind: 'pointer' }, parameters: [], variadic: false, fixed_parameter_count: 0 }),
-    abi.classifyCall({ returns: { kind: 'float', bits: 64 }, parameters: [], variadic: false, fixed_parameter_count: 0 }),
-  ].flatMap((layout) => layout.returns.filter((location) => location.kind === 'register'));
-  const word = abi.layout.pointer_bits, bytes = BigInt(word / 8);
-  const aggregate = abi.classifyCall({ returns: { kind: 'aggregate', size: bytes * 2n, alignment: Number(bytes),
-    fields: [{ offset: 0n, type: { kind: 'integer', bits: word, signed: false } },
-      { offset: bytes, type: { kind: 'integer', bits: word, signed: false } }] },
-    parameters: [], variadic: false, fixed_parameter_count: 0 });
-  for (const location of aggregate.returns) {
-    if (location.kind !== 'register' || primary.some((item) => item.register.root === location.register.root)) continue;
+  const prepared = index ?? createNativeInterfaceIndex(ir, abi, context);
+  const { states, entry, entry_assignments, expressions, values, sources, copies, outputs,
+    loaded_values: loads, exits, tails, primary: primaryLocations, aggregate, type_graph } = prepared.preparation(ir, context, abi);
+  const assumed = assumedEntry ? entry_assignments : undefined;
+  const typed = registerTypeSlices(values, expressions, copies, [], context,
+    nativeTypeSlices(ir, interfaces, context, prepared), type_graph);
+  const primary = [...primaryLocations];
+  for (const location of aggregate) {
+    if (primary.some((item) => item.register.root === location.register.root)) continue;
     if (demandedReturns.some((register) => register.root === location.register.root)) primary.push(location);
   }
-  const exits = ir.blocks.filter((block) => block.terminator.kind === 'return');
-  const tails = ir.blocks.filter((block) => block.terminator.kind === 'indirect' && block.terminator.tail_call);
   if (!exits.length && !tails.length) return { returns: [], return_types: [] };
   const proven = (value: Value, start: number, width: number, allowEntry: boolean): boolean => {
     const pending = [{ value, start, width }], seen = new Set<string>();
@@ -171,7 +150,7 @@ export function nativeReturnInterface(
       seen.add(key);
       // Prologue constants are assumptions about entry storage, not native
       // writes. They cannot seed recursive write/extension guarantees.
-      if (assumed.has(item.value.id)) {
+      if (assumed?.has(item.value.id)) {
         if (!allowEntry) return false;
         authored = true;
         continue;

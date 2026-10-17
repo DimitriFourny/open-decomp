@@ -52,3 +52,11 @@ test('artifact delivery preference is top-level and never changes analysis optio
   assert.equal(functionDecompileArgsSchema.safeParse({ ...scope, delivery: 'inline' }).success, false);
   assert.equal(functionDecompileArgsSchema.safeParse({ ...scope, options: { delivery: 'artifact' } }).success, false);
 });
+
+test('compact native detail is explicit and restricted to public disassembly', () => {
+  assert.equal(functionGetArgsSchema.parse({ ...scope, view: 'disassembly' }).detail, undefined);
+  for (const detail of ['full', 'compact'])
+    assert.equal(functionGetArgsSchema.parse({ ...scope, view: 'disassembly', detail }).detail, detail);
+  for (const view of ['metadata', 'cfg', 'investigation'])
+    assert.equal(functionGetArgsSchema.safeParse({ ...scope, view, artifact_id, detail: 'compact' }).success, false);
+});

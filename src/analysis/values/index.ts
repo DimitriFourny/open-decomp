@@ -67,110 +67,136 @@ function propagate(
 ): void {
   const { facts, reachable_blocks: reachable, executable_edges: edges } = analysis;
   const blocks = new Map(input.blocks.map((block) => [block.id, block]));
-  const incoming = new Map<EntityId, Edge[]>();
+  const users = new Map<EntityId, Set<EntityId>>();
+  const phiUsers = new Map<EntityId, { edge: Edge; index: number }[]>();
+  const operands = new Map<EntityId, readonly Value[]>();
+  const connect = (index: Map<EntityId, Set<EntityId>>, value: Value, block: EntityId): void => {
+    budget.charge();
+    const row = index.get(value.id) ?? new Set<EntityId>();
+    row.add(block);
+    index.set(value.id, row);
+  };
   for (const block of input.blocks) {
     budget.charge();
-    for (const edge of successors(block.terminator)) {
-      const list = incoming.get(edge.target) ?? [];
-      list.push(edge);
-      incoming.set(edge.target, list);
+    for (const node of block.instructions) {
+      budget.charge();
+      if (node.kind !== 'assign') continue;
+      const values = expressionOperands(node.expression);
+      operands.set(node.id, values);
+      for (const value of values) connect(users, value, block.id);
     }
+    if (block.terminator.kind === 'branch') connect(users, block.terminator.condition, block.id);
+    else if (block.terminator.kind === 'switch') connect(users, block.terminator.value, block.id);
   }
+  const queue: BasicBlock[] = [], queued = new Set<EntityId>();
+  const enqueue = (id: EntityId): void => {
+    if (queued.has(id)) return;
+    queued.add(id);
+    queue.push(blocks.get(id)!);
+  };
+  let active: EntityId | null = null;
+  const notifications: EntityId[] = [];
+  const change = (value: Value, fact: ValueFact | undefined): boolean => {
+    if (!fact) return false;
+    const previous = facts.get(value.id);
+    if (previous?.kind === 'varying' ||
+      (previous?.kind === 'constant' && fact.kind === 'constant' && previous.bits === fact.bits)) return false;
+    facts.set(value.id, previous ? varying : fact);
+    notifications.push(value.id);
+    return true;
+  };
+  const flush = (): void => {
+    for (let cursor = 0; cursor < notifications.length; cursor++) {
+      budget.charge();
+      const id = notifications[cursor]!;
+      for (const block of users.get(id) ?? []) {
+        budget.charge();
+        // Local SSA uses follow their definitions. Phi delivery below also
+        // schedules the active block when a backedge changes an entry value.
+        if (block !== active) enqueue(block);
+      }
+      for (const { edge, index } of phiUsers.get(id) ?? []) {
+        budget.charge();
+        if (change(blocks.get(edge.target)!.parameters[index]!, facts.get(id)))
+          enqueue(edge.target);
+      }
+    }
+    notifications.length = 0;
+  };
+  const update = (value: Value, fact: ValueFact | undefined): void => {
+    change(value, fact);
+    flush();
+  };
   reachable.add(input.entry);
   for (const parameter of blocks.get(input.entry)!.parameters) facts.set(parameter.id, varying);
-  let changed = true;
-  const update = (value: Value, fact: ValueFact | undefined): void => {
-    if (!fact) return;
-    const previous = facts.get(value.id);
-    if (
-      previous?.kind === 'varying' ||
-      (previous?.kind === 'constant' && fact.kind === 'constant' && previous.bits === fact.bits)
-    )
-      return;
-    facts.set(value.id, previous ? varying : fact);
-    changed = true;
-  };
-  while (changed) {
-    changed = false;
-    for (const block of input.blocks) {
+  enqueue(input.entry);
+  for (let cursor = 0; cursor < queue.length; cursor++) {
+    budget.charge();
+    const block = queue[cursor]!;
+    queued.delete(block.id);
+    if (!reachable.has(block.id)) continue;
+    active = block.id;
+    // Each executable incoming edge contributes monotonically on activation
+    // and whenever its source fact changes. No full phi-vector rescan is needed.
+    for (const node of block.instructions) {
       budget.charge();
-      if (!reachable.has(block.id)) continue;
-      if (block.id !== input.entry)
-        for (const edge of incoming.get(block.id) ?? []) {
-          budget.charge();
-          if (!edges.has(edge)) continue;
-          block.parameters.forEach((parameter, index) => {
-            budget.charge();
-            update(parameter, facts.get(edge.arguments[index]!.id));
-          });
-        }
-      for (const node of block.instructions) {
-        budget.charge();
-        if (node.kind !== 'assign') {
-          for (const result of instructionResults(node)) update(result, varying);
+      if (node.kind !== 'assign') {
+        for (const result of instructionResults(node)) update(result, varying);
+        continue;
+      }
+      const expression = node.expression;
+      if (expression.kind === 'select') {
+        const condition = facts.get(expression.condition.id);
+        if (condition?.kind === 'constant') {
+          update(node.result, facts.get((condition.bits === 0n ? expression.when_false : expression.when_true).id));
           continue;
         }
-        const expression = node.expression;
-        if (expression.kind === 'select') {
-          const condition = facts.get(expression.condition.id);
-          if (condition?.kind === 'constant') {
-            update(
-              node.result,
-              facts.get((condition.bits === 0n ? expression.when_false : expression.when_true).id),
-            );
-            continue;
-          }
-        }
-        const operands = expressionOperands(expression).map((value) => facts.get(value.id));
-        if (
-          operands.some((fact) => fact?.kind === 'varying') ||
-          expression.kind === 'indeterminate'
-        ) {
-          update(node.result, varying);
-          continue;
-        }
-        if (operands.some((fact) => !fact)) continue;
-        const result = evaluateExpression(node.result.type, expression, (value) => {
-          const fact = facts.get(value.id)!;
-          return fact.kind === 'constant'
-            ? { kind: 'bits', bits: fact.bits }
-            : { kind: 'unknown', reason: 'Nonconstant analysis operand' };
-        });
-        update(
-          node.result,
-          result.kind === 'bits' ? { kind: 'constant', bits: result.bits } : varying,
-        );
       }
-      const terminator = block.terminator;
-      let selected: readonly Edge[];
-      if (terminator.kind === 'branch') {
-        const condition = facts.get(terminator.condition.id);
-        selected =
-          condition?.kind === 'constant'
-            ? [condition.bits === 0n ? terminator.when_false : terminator.when_true]
-            : condition
-              ? successors(terminator)
-              : [];
-      } else if (terminator.kind === 'switch') {
-        const selector = facts.get(terminator.value.id);
-        selected =
-          selector?.kind === 'constant'
-            ? [
-                terminator.cases.find((item) => item.bits === selector.bits)?.edge ??
-                  terminator.otherwise,
-              ]
-            : selector
-              ? successors(terminator)
-              : [];
-      } else selected = successors(terminator);
-      for (const edge of selected) {
+      const inputs = operands.get(node.id)!.map((value) => facts.get(value.id));
+      if (inputs.some((fact) => fact?.kind === 'varying') || expression.kind === 'indeterminate') {
+        update(node.result, varying);
+        continue;
+      }
+      if (inputs.some((fact) => !fact)) continue;
+      const result = evaluateExpression(node.result.type, expression, (value) => {
+        const fact = facts.get(value.id)!;
+        return fact.kind === 'constant' ? { kind: 'bits', bits: fact.bits } :
+          { kind: 'unknown', reason: 'Nonconstant analysis operand' };
+      });
+      update(node.result, result.kind === 'bits' ? { kind: 'constant', bits: result.bits } : varying);
+    }
+    const terminator = block.terminator;
+    let selected: readonly Edge[];
+    if (terminator.kind === 'branch') {
+      const condition = facts.get(terminator.condition.id);
+      selected = condition?.kind === 'constant'
+        ? [condition.bits === 0n ? terminator.when_false : terminator.when_true]
+        : condition ? successors(terminator) : [];
+    } else if (terminator.kind === 'switch') {
+      const selector = facts.get(terminator.value.id);
+      selected = selector?.kind === 'constant'
+        ? [terminator.cases.find((item) => item.bits === selector.bits)?.edge ?? terminator.otherwise]
+        : selector ? successors(terminator) : [];
+    } else selected = successors(terminator);
+    for (const edge of selected) {
+      budget.charge();
+      if (edges.has(edge)) continue;
+      edges.add(edge);
+      const newlyReachable = !reachable.has(edge.target);
+      reachable.add(edge.target);
+      let changed = false;
+      edge.arguments.forEach((argument, index) => {
         budget.charge();
-        if (!edges.has(edge)) {
-          edges.add(edge);
-          reachable.add(edge.target);
-          changed = true;
-        }
-      }
+        // Subscription and initial contribution share this executable-edge
+        // visit. Sources changed before activation contribute their latest fact;
+        // later changes notify only consumers that can actually execute.
+        const row = phiUsers.get(argument.id) ?? [];
+        row.push({ edge, index });
+        phiUsers.set(argument.id, row);
+        changed = change(blocks.get(edge.target)!.parameters[index]!, facts.get(argument.id)) || changed;
+      });
+      flush();
+      if (changed || newlyReachable) enqueue(edge.target);
     }
   }
 }

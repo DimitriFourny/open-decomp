@@ -23,6 +23,12 @@ export * from './budget.js';
 type Cell = RegisterDescriptor;
 const key = (cell: Cell): string => `${cell.root}:${cell.offset_bits}:${cell.width_bits}`;
 
+export interface SSAConstructionOptions extends AnalysisOptions {
+  /** Source-view ABI storage masks, not a prototype. Every actual architectural
+   * read/write root stays whole; omission retains the full machine view. */
+  readonly observable_register_masks?: ReadonlyMap<string, bigint>;
+}
+
 /**
  * Region SSA: every block receives architectural cells as explicit parameters.
  * All predecessor edges, including backedges and unreachable components, pass
@@ -33,11 +39,11 @@ const key = (cell: Cell): string => `${cell.root}:${cell.offset_bits}:${cell.wid
  */
 export function constructSSA(
   input: RegisterIR,
-  options: AnalysisOptions = {},
+  options: SSAConstructionOptions = {},
 ): AnalysisResult<RegisterIR | SSAForm> {
   const budget = new AnalysisBudget(options);
   try {
-    return budget.result(build(input, budget));
+    return budget.result(build(input, budget, options.observable_register_masks));
   } catch (error) {
     return budget.result(input, error);
   }
@@ -50,20 +56,57 @@ export class RegisterSSAConstruction implements SSAConstruction {
   }
 }
 
-function build(input: RegisterIR, budget: AnalysisBudget): SSAForm {
+/** Add run boundaries without visiting every bit of a wide architectural root. */
+function observableCuts(mask: bigint, width: number, cuts: Set<number>, budget: AnalysisBudget): void {
+  const full = (1n << BigInt(width)) - 1n;
+  mask &= full;
+  if (mask === full) return;
+  let boundaries = mask ^ (mask << 1n), base = 0;
+  while (boundaries !== 0n) {
+    budget.charge();
+    let word = Number(boundaries & 0xffffffffn);
+    while (word !== 0) {
+      budget.charge();
+      const offset = base + 31 - Math.clz32(word & -word);
+      if (offset > 0 && offset < width) cuts.add(offset);
+      word &= word - 1;
+    }
+    boundaries >>= 32n;
+    base += 32;
+  }
+}
+
+function build(input: RegisterIR, budget: AnalysisBudget,
+  observableMasks?: ReadonlyMap<string, bigint>): SSAForm {
   const capacity = new IRConstructionBudget({
     ...budget.options,
     checkpoint: (work) => budget.charge(work),
   });
   budget.charge(0);
+  // Discover actual uses before filtering clobbers: a later access can require
+  // an earlier clobber's slice boundary. The second pass retains original order.
+  const actualRoots = observableMasks === undefined ? null : new Set<string>();
+  if (actualRoots)
+    for (const block of input.blocks) {
+      budget.charge();
+      for (const node of block.instructions) {
+        budget.charge();
+        if (node.kind === 'read_register' || node.kind === 'write_register')
+          actualRoots.add(node.register.root);
+      }
+    }
   const roots = new Map<string, { descriptor: RegisterDescriptor; cuts: Set<number> }>();
   const register = (descriptor: RegisterDescriptor): void => {
     budget.charge();
     if (descriptor.role === 'zero') return;
-    const root = roots.get(descriptor.root) ?? {
+    const known = roots.get(descriptor.root);
+    const root = known ?? {
       descriptor,
       cuts: new Set([0, descriptor.root_width_bits]),
     };
+    if (!known && observableMasks !== undefined && !actualRoots!.has(descriptor.root))
+      observableCuts(observableMasks.get(descriptor.root) ?? 0n,
+        descriptor.root_width_bits, root.cuts, budget);
     if (root.descriptor.root_width_bits !== descriptor.root_width_bits)
       throw new TypeError('Inconsistent architectural register root width');
     // Preserve explicit architectural roles even when the first view was a general slice.
@@ -81,24 +124,37 @@ function build(input: RegisterIR, budget: AnalysisBudget): SSAForm {
       budget.charge();
       if (node.kind === 'read_register' || node.kind === 'write_register') register(node.register);
       if (node.kind === 'call' || node.kind === 'unknown_effect')
-        for (const descriptor of [...node.clobbers.registers, ...node.clobbers.flags])
-          register(descriptor);
+        for (const descriptor of [...node.clobbers.registers, ...node.clobbers.flags]) {
+          if (observableMasks === undefined || (observableMasks.get(descriptor.root) ?? 0n) !== 0n ||
+            actualRoots!.has(descriptor.root))
+            register(descriptor);
+          else budget.charge(); // The original clobber metadata is still visited and retained.
+        }
     }
   }
   const cells: Cell[] = [];
+  const cellsByRoot = new Map<string, Cell[]>();
   for (const [root, { descriptor, cuts }] of roots) {
+    const rootCells: Cell[] = [];
+    cellsByRoot.set(root, rootCells);
     const ordered = [...cuts].sort((a, b) => a - b);
     for (let i = 1; i < ordered.length; i++) {
       const offset = ordered[i - 1]!,
         width = ordered[i]! - offset;
       budget.charge();
-      cells.push({
+      if (observableMasks !== undefined && !actualRoots!.has(root) &&
+        ((observableMasks.get(root) ?? 0n) & (((1n << BigInt(width)) - 1n) << BigInt(offset))) === 0n)
+        continue;
+      const cell: Cell = Object.freeze({
         ...descriptor,
         id: `ssa:${fingerprint([root, offset, width]).slice(0, 32)}`,
         offset_bits: offset,
         width_bits: width,
         write_rule: 'preserve_other_bits',
       });
+      budget.charge(); // Flat immutable descriptor publication enables local validation reuse.
+      cells.push(cell);
+      rootCells.push(cell);
     }
   }
   const identity = (...birth: readonly (string | number)[]): EntityId =>
@@ -134,15 +190,16 @@ function build(input: RegisterIR, budget: AnalysisBudget): SSAForm {
       nodes.push({ kind: 'assign', id, result: value, expression, provenance });
       return value;
     };
-    const matching = (descriptor: RegisterDescriptor): Cell[] =>
-      cells.filter((cell) => {
+    const matching = (descriptor: RegisterDescriptor): Cell[] => {
+      budget.charge();
+      return (cellsByRoot.get(descriptor.root) ?? []).filter((cell) => {
         budget.charge();
         return (
-          cell.root === descriptor.root &&
           cell.offset_bits >= descriptor.offset_bits &&
           cell.offset_bits + cell.width_bits <= descriptor.offset_bits + descriptor.width_bits
         );
       });
+    };
     const snapshot = (): RegisterBinding[] =>
       cells.map((cell) => {
         budget.charge();
@@ -189,9 +246,8 @@ function build(input: RegisterIR, budget: AnalysisBudget): SSAForm {
                 { kind: 'cast', op: 'bitcast', value: node.value },
                 node.provenance,
               );
-        for (const cell of cells) {
+        for (const cell of cellsByRoot.get(descriptor.root) ?? []) {
           budget.charge();
-          if (cell.root !== descriptor.root) continue;
           const inside =
             cell.offset_bits >= descriptor.offset_bits &&
             cell.offset_bits + cell.width_bits <= descriptor.offset_bits + descriptor.width_bits;

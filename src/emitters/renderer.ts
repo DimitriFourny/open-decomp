@@ -31,10 +31,10 @@ import type { Reconstruction } from '../reconstruction/model.js';
 import { validateReconstruction, validateRenderedTransfers } from '../reconstruction/validate.js';
 import type { SourceAddress } from '../reconstruction/source-model.js';
 import { sourceDataValues } from '../reconstruction/source-data.js';
-import { LocalValidationSession, rejectTranslation, validateParallelMoves, type PlannedMove } from '../reconstruction/local-validation.js';
-import { validateEmittedControl, type EmittedEdge } from '../reconstruction/local-control-validation.js';
 import { planSourceNames, sourceIdentifierStem } from '../reconstruction/source-names.js';
 import { sourceRequirementPredicates, sourceRequirementProofs, type SourceRequirementPredicate } from '../reconstruction/source-requirements.js';
+import { LocalValidationSession, rejectTranslation, validateParallelMoves, type PlannedMove } from '../reconstruction/local-validation.js';
+import { validateEmittedControl, type EmittedEdge } from '../reconstruction/local-control-validation.js';
 import { expressionText, machineType } from './expressions.js';
 import { Writer } from './writer.js';
 import type { EmissionInput, EmissionResult } from './model.js';
@@ -413,15 +413,19 @@ export class Renderer {
     end = this.writer.offset,
   ): void {
     const contributors = this.program.source?.value_origins;
-    const resolve = (id: string): readonly string[] => contributors?.get(id) ?? [id];
-    const subjects = [...resolve(origin.id), ...ids.flatMap(resolve)];
-    this.context.checkpoint(subjects.length);
-    const dataEvidence = new Set(evidence), semanticSubjects = new Set(subjects);
-    for (const id of [origin.id, ...ids, ...subjects]) {
+    const references = this.writer.references();
+    for (const id of [origin.id, ...ids])
+      for (const subject of contributors?.get(id) ?? [id]) references.add(subject);
+    if (references.ids.length === 0) references.add(origin.id);
+    const subjects = references.ids;
+    const dataEvidence = new Set(evidence);
+    const dataSubjects = new Set([origin.id, ...ids]);
+    for (const id of subjects) dataSubjects.add(id);
+    for (const id of dataSubjects) {
       const type = this.program.source?.value_types?.get(id);
       if (type) {
-        semanticSubjects.add(type.type_id);
-        for (const subject of [...type.association_ids, ...type.subject_ids]) semanticSubjects.add(subject);
+        references.add(type.type_id);
+        for (const subject of [...type.association_ids, ...type.subject_ids]) references.add(subject);
         for (const evidenceId of type.evidence_ids) dataEvidence.add(evidenceId);
       }
       const value = this.program.values.get(id);
@@ -429,7 +433,7 @@ export class Renderer {
       const data = this.sourceDataValue(value);
       for (const evidenceId of data?.object?.evidence_ids ?? []) dataEvidence.add(evidenceId);
     }
-    this.writer.map({ ...origin, id: subjects[0] ?? origin.id }, start, [...semanticSubjects], [...dataEvidence], end);
+    this.writer.map({ ...origin, id: subjects[0] ?? origin.id }, start, references, [...dataEvidence], end);
   }
 
   private map(
@@ -1539,6 +1543,8 @@ export class Renderer {
       this.input, this.program, w.mappings, this.localValidation.records, w, this.context,
       this.inferenceSites, this.sourceDataValue,
     );
+    const declarationSpan = { start: this.headerStart, end: this.headerEnd };
+    w.metadata(Buffer.byteLength(JSON.stringify(declarationSpan)));
     return {
       emission: {
         language: this.language,

@@ -33,7 +33,7 @@ import type { CallScope } from './calls.js';
 import { nativeDependencies, prepareNativeUnit, type PreparedNativeUnit } from './native-prepare.js';
 import { nativeDependencyWorklist, type NativeInterface, type NativeSummary } from './native-worklist.js';
 import { nativeCallInputs, nativeReturnInterface, nativeStackParameters, nativeTypeSlices } from './native-transfer.js';
-import { nativeEntryRegisters } from './native-entry.js';
+import { createNativeInterfaceIndex, nativeEntryRegisters, type NativeInterfaceIndex } from './native-entry.js';
 import { pipelineVersions } from './versions.js';
 import { nativeArgumentValues } from './native-arguments.js';
 import { parameterRegisters } from './native-abi.js';
@@ -60,6 +60,7 @@ interface SourceFactsInput {
   readonly debug: DebugRecovery;
   readonly components: { readonly abi: AbiProfile; readonly lifter: Lifter<RegisterIR> };
   readonly native_types: readonly SuppliedTypeRecord[];
+  readonly observable_register_masks?: ReadonlyMap<string, bigint>;
 }
 const addressKey = (address: Address): string =>
   `${address.image_id}:${address.space}:${address.value}`;
@@ -112,6 +113,7 @@ function observeParameters(
   seed: boolean,
   demandedReturns: readonly RegisterDescriptor[],
   assumedEntry = false,
+  interfaceIndex?: NativeInterfaceIndex,
 ): ObservedInterface {
   const candidates = parameterRegisters(abi),
     byRoot = new Map(candidates.map((register) => [register.root, register]));
@@ -148,7 +150,7 @@ function observeParameters(
   for (const state of ir.register_states)
     for (const binding of [...state.entry, ...state.exit]) values.set(binding.value.id, binding.value);
   const typedSlices = registerTypeSlices(values, definitions, storageCopies, [], context,
-    nativeTypeSlices(ir, interfaces, context));
+    nativeTypeSlices(ir, interfaces, context, interfaceIndex));
   const entryBindings = ir.register_states.find((row) => row.block === ir.entry)?.entry ?? [];
   // This is the lifter's precise FPCR failure boundary, not a blanket exemption
   // for unknown instructions. Its supported-path observations remain conditional.
@@ -243,7 +245,8 @@ function observeParameters(
     else if (terminator.kind === 'return') for (const value of terminator.values) use(value);
   }
   for (const fact of nativeCallInputs(analysis, interfaces, context)) note(fact);
-  const { returns, return_types, written_result } = nativeReturnInterface(ir, abi, analysis, interfaces, context, seed, demandedReturns, assumedEntry);
+  const { returns, return_types, written_result } = nativeReturnInterface(ir, abi, analysis, interfaces, context, seed,
+    demandedReturns, assumedEntry, interfaceIndex);
   const exits = ir.blocks.filter((block) => block.terminator.kind === 'return');
   for (const exit of exits) {
     const snapshot = analysis.stack.snapshots.get(exit.terminator.id);
@@ -273,7 +276,7 @@ function observeParameters(
     ...(written_result === undefined ? {} : { written_result }),
     parameter_state: ambiguous ? 'ambiguous' : 'observed',
     argument_list_complete: false,
-    stack_parameters: nativeStackParameters(ir, analysis, context),
+    stack_parameters: nativeStackParameters(ir, analysis, context, interfaceIndex),
     requirements: [...new Set([
       ...(conditionalFpFailures.size || localFpEnvironment ? ['fp_environment' as const] : []),
       ...[...interfaces.values()].flatMap((callee) => callee.requirements ?? []),
@@ -493,12 +496,12 @@ function observeNativeUnit(
     interfaces.set(observed.call_id, mergeNativeInterface(interfaces.get(observed.call_id), observed, input.components.abi, context));
   let observed: NativeInterface;
   if (unit.analysis) observed = observeParameters(unit.ir, input.components.abi, unit.analysis,
-    context, interfaces, seed, demandedReturns, unit.context_assumptions !== undefined);
+    context, interfaces, seed, demandedReturns, unit.context_assumptions !== undefined, unit.interface_index);
   else {
     const result = nativeReturnInterface(unit.ir, input.components.abi, null, interfaces, context, seed, demandedReturns,
-      unit.context_assumptions !== undefined);
+      unit.context_assumptions !== undefined, unit.interface_index);
     const parameters = nativeEntryRegisters(unit.ir, parameterRegisters(input.components.abi), interfaces,
-      result.returns, context);
+      result.returns, context, unit.interface_index);
     const localFpEnvironment = unit.ir.blocks.some((block) => block.instructions.some((node) => {
       context.checkpoint(1);
       return node.kind === 'assign' && needsSourceFpEnvironment(node.expression);
@@ -605,7 +608,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     observed_calls: observedCalls, dependencies, instructions: input.instruction_count, blocks: input.ir.blocks.length,
     nodes: selectedNodes, required_nodes: input.required_nodes ?? selectedNodes, evidence: input.types.evidence,
     evidence_ids: selected.evidence_ids, reasons: input.coverage_reasons, budget_truncated: false,
-    demand_index,
+    demand_index, interface_index: createNativeInterfaceIndex(input.ir, abi, summaryContext),
     ...(scope.dependencies ? { dependency_readset: scope.dependencies.finish() } : {}),
   } : undefined;
   if (selectedUnit && input.required_nodes !== undefined && input.types.state === 'complete' &&
@@ -705,7 +708,8 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         entity_id: dependency.target.id, evidence_ids: dependency.target.evidence_ids });
     }
     if (selectedUnit) memory_transfers = nativeShapeTransfers(selectedUnit, interfaces, summaryContext);
-    function_returns = nativeReturnInterface(input.ir, abi, input.types.calls, interfaces, summaryContext).written_result;
+    function_returns = nativeReturnInterface(input.ir, abi, input.types.calls, interfaces, summaryContext, false,
+      [], false, selectedUnit?.interface_index).written_result;
   } catch (error) {
     const details = error instanceof OperationError ? error.diagnostic.details : undefined;
     if (!(error instanceof OperationError) || error.code !== 'resource_limit' || details?.kind !== 'limit' ||
@@ -722,8 +726,9 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       if (unit?.ir) {
         try {
           const returned = nativeReturnInterface(unit.ir, abi, unit.analysis, new Map(), summaryContext, false,
-            returnDemands.get(dependency.target.id) ?? []);
-          const inputs = nativeEntryRegisters(unit.ir, parameterRegisters(abi), new Map(), returned.returns, summaryContext);
+            returnDemands.get(dependency.target.id) ?? [], false, unit.interface_index);
+          const inputs = nativeEntryRegisters(unit.ir, parameterRegisters(abi), new Map(), returned.returns, summaryContext,
+            unit.interface_index);
           const parameters = new Map((prior?.parameters ?? []).map((register) => [register.root, register]));
           for (const register of inputs) {
             const previous = parameters.get(register.root);

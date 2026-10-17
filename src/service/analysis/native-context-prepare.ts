@@ -9,7 +9,7 @@ import { callDeclarations, resolveCalls } from './calls.js';
 import { boundIR, requirePass } from './passes.js';
 import { nativeDependencies, type NativePreparationInput, type PreparedNativeUnit } from './native-prepare.js';
 import { specializeNativeSSA, type NativeContext } from './native-context.js';
-import { nativeEntryRegisters } from './native-entry.js';
+import { createNativeInterfaceIndex, nativeEntryRegisters } from './native-entry.js';
 import { parameterRegisters } from './native-abi.js';
 import { nativeReturnInterface } from './native-transfer.js';
 
@@ -27,9 +27,10 @@ export function prepareNativeContext(
   // Physical snapshots do not establish source inputs. Only baseline semantic
   // reads can turn a proven storage relation into a callee input assumption.
   const interfaces = new Map(baseline.observed_calls.map((call) => [call.call_id, call]));
-  const returned = nativeReturnInterface(baseline.ir, input.components.abi, baseline.analysis, interfaces, context, true);
+  const returned = nativeReturnInterface(baseline.ir, input.components.abi, baseline.analysis, interfaces, context, true,
+    [], false, baseline.interface_index);
   const observed = nativeEntryRegisters(baseline.ir, parameterRegisters(input.components.abi),
-    interfaces, returned.returns, context);
+    interfaces, returned.returns, context, baseline.interface_index);
   const roots = new Set(observed.map((register) => register.root));
   assumptions = { ...assumptions, constants: assumptions.constants.filter((item) => roots.has(item.register.root)),
     aliases: assumptions.aliases.map((group) => group.filter((register) => roots.has(register.root)))
@@ -91,6 +92,7 @@ export function prepareNativeContext(
     reasons.push(`native context optional type work limit (${limit})`);
   }
   const demand_index = createCallResultDemandIndex(ir, input.components.abi, context);
+  const interface_index = createNativeInterfaceIndex(ir, input.components.abi, context);
   const observed_calls = observePreparedCallInterfaces(ir, input.components.abi, analysis, context, demand_index);
   const dependencies = nativeDependencies(input, ir, context, constants, true, demand_index);
   const indirect = new Set(baseline.ir.blocks.flatMap((block) => block.instructions.flatMap((node) =>
@@ -111,6 +113,6 @@ export function prepareNativeContext(
     reasons: [...baseline.reasons, 'native context evidence capacity: conservative generic interface'] };
   return { ...baseline, ir, types, analysis, observed_calls, nodes, required_nodes: nodes,
     blocks: ir.blocks.length, context_assumptions: assumptions,
-    dependencies, reasons, demand_index,
+    dependencies, reasons, demand_index, interface_index,
     evidence: [...baseline.evidence, ...(types?.evidence ?? []), proof], evidence_ids: [...baseline.evidence_ids, proof.id] };
 }

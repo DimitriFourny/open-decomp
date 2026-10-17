@@ -36,7 +36,7 @@ export interface CFGInput {
   readonly function_id: string;
   readonly entry: Address;
   readonly instructions: readonly DecodedInstruction[];
-  readonly function_entries: ReadonlySet<bigint>;
+  readonly function_entries: Pick<ReadonlySet<bigint>, 'has'>;
   readonly evidence: ReadonlyMap<string, readonly string[]>;
 }
 

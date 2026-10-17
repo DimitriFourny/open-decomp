@@ -6,6 +6,29 @@ type InvestigationResult = ToolResult<'function_get'>;
  * model. structuredContent stays complete; this text interns repeated IDs once
  * and omits transport/version/budget boilerplate and full instruction payloads. */
 export function investigationText(result: InvestigationResult): string | undefined {
+  if ('data' in result && result.data.view === 'disassembly' && result.data.detail === 'compact') {
+    const data = result.data;
+    return JSON.stringify({
+      view: 'disassembly', state: result.state,
+      columns: ['address', 'size', 'mnemonic', 'operands'],
+      instructions: data.items.map((item) => [
+        `${item.address.space}:${item.address.value}`, item.size,
+        item.presentation?.mnemonic ?? null, item.presentation?.operands ?? null,
+      ]),
+      ...(data.items.some((item) => item.validity !== 'valid' || item.flow.kind === 'unknown' || item.diagnostics.length) ? {
+        instruction_status: data.items.flatMap((item, index) =>
+          item.validity !== 'valid' || item.flow.kind === 'unknown' || item.diagnostics.length ? [{
+            index, validity: item.validity,
+            ...(item.flow.kind === 'unknown' ? { flow: item.flow } : {}),
+            diagnostics: item.diagnostics,
+          }] : []),
+      } : {}),
+      gaps: data.gaps,
+      coverage_incomplete: result.coverage.filter((coverage) => coverage.state !== 'complete'),
+      diagnostics: result.diagnostics,
+      ...(data.page.next_cursor === null ? {} : { next_cursor: data.page.next_cursor }),
+    });
+  }
   if (!('data' in result) || result.data.view !== 'investigation') return undefined;
   const data = result.data;
   const references: string[] = [];
@@ -53,7 +76,7 @@ export function investigationText(result: InvestigationResult): string | undefin
     return value;
   };
   const items = compact(data.items);
-  const diagnostics = compact(result.diagnostics);
+  const diagnostics = compact(data.analysis_diagnostics);
   const count = data.selection.counts;
   return JSON.stringify({ artifact_id: data.artifact_id, query_state: result.state,
     analysis_state: data.analysis_state,

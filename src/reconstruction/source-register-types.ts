@@ -13,6 +13,88 @@ export interface StorageCopy {
   readonly destination: Value;
 }
 
+interface RegisterTypeLinks {
+  propagate(value: Value, slice: RegisterTypeSlice,
+    note: (value: Value, type: DataType, offset: number, written: boolean) => void, context: OperationContext): void;
+}
+
+/** Structural physical-storage transport and original typed values for one
+ * owned immutable stage. Call observations and propagated slices stay fresh. */
+export interface RegisterTypeGraph {
+  originalTypedValues(values: ReadonlyMap<string, Value>, expressions: ReadonlyMap<string, Expression>,
+    copies: readonly StorageCopy[], context: OperationContext): readonly Value[];
+  query(values: ReadonlyMap<string, Value>, expressions: ReadonlyMap<string, Expression>,
+    copies: readonly StorageCopy[], context: OperationContext): RegisterTypeLinks;
+}
+
+export function createRegisterTypeGraph(
+  values: ReadonlyMap<string, Value>,
+  expressions: ReadonlyMap<string, Expression>,
+  copies: readonly StorageCopy[],
+): RegisterTypeGraph {
+  let prepared: RegisterTypeLinks | undefined;
+  let originalTypedValues: readonly Value[] | undefined;
+  return Object.freeze({
+    originalTypedValues(inputValues: ReadonlyMap<string, Value>, inputExpressions: ReadonlyMap<string, Expression>,
+      inputCopies: readonly StorageCopy[], context: OperationContext): readonly Value[] {
+      context.checkpoint(0);
+      if (inputValues !== values || inputExpressions !== expressions || inputCopies !== copies)
+        throw new TypeError('Register type graph belongs to a different storage stage');
+      if (!originalTypedValues) {
+        const typed: Value[] = [];
+        for (const value of values.values())
+          if (value.type.kind !== 'integer') typed.push(value);
+        originalTypedValues = Object.freeze(typed);
+      }
+      return originalTypedValues;
+    },
+    query(inputValues: ReadonlyMap<string, Value>, inputExpressions: ReadonlyMap<string, Expression>,
+      inputCopies: readonly StorageCopy[], context: OperationContext): RegisterTypeLinks {
+      context.checkpoint(0);
+      if (inputValues !== values || inputExpressions !== expressions || inputCopies !== copies)
+        throw new TypeError('Register type graph belongs to a different storage stage');
+      if (prepared) return prepared;
+      const links = new Map<string, { readonly value: Value; readonly delta: number }[]>();
+      const connect = (whole: Value, part: Value, offset: number): void => {
+        context.checkpoint(1);
+        const forward = links.get(whole.id) ?? [];
+        forward.push({ value: part, delta: offset });
+        links.set(whole.id, forward);
+        const backward = links.get(part.id) ?? [];
+        backward.push({ value: whole, delta: -offset });
+        links.set(part.id, backward);
+      };
+      for (const [id, expression] of expressions) {
+        context.checkpoint(1);
+        const result = values.get(id);
+        if (!result) continue;
+        if (expression.kind === 'cast' && ['bitcast', 'truncate', 'zero_extend', 'sign_extend'].includes(expression.op))
+          connect(expression.value, result, 0);
+        else if (expression.kind === 'extract') connect(expression.value, result, expression.offset);
+        else if (expression.kind === 'insert') connect(result, expression.value, expression.offset);
+        else if (expression.kind === 'concat') {
+          let offset = 0;
+          for (const part of expression.values) {
+            connect(result, part, offset);
+            offset += bitWidth(part.type);
+          }
+        }
+      }
+      for (const copy of copies) connect(copy.source, copy.destination, 0);
+      prepared = Object.freeze({
+        propagate(value: Value, slice: RegisterTypeSlice,
+          note: (value: Value, type: DataType, offset: number, written: boolean) => void, context: OperationContext): void {
+          for (const link of links.get(value.id) ?? []) {
+            context.checkpoint(1);
+            note(link.value, slice.type, slice.offset + link.delta, slice.written);
+          }
+        },
+      });
+      return prepared;
+    },
+  });
+}
+
 /** Typed uses constrain storage slices, not the capacity of an architectural root.
  * Keep multiple interpretations: a scalar lane and its enclosing SIMD value are
  * different views, and neither can silently replace the other's return bank. */
@@ -23,34 +105,9 @@ export function registerTypeSlices(
   callResults: Iterable<readonly Value[]>,
   context: OperationContext,
   additionalSlices?: Iterable<readonly [Value, RegisterTypeSlice]>,
+  graph?: RegisterTypeGraph,
 ): ReadonlyMap<string, readonly RegisterTypeSlice[]> {
-  const links = new Map<string, { readonly value: Value; readonly delta: number }[]>();
-  const connect = (whole: Value, part: Value, offset: number): void => {
-    context.checkpoint(1);
-    const forward = links.get(whole.id) ?? [];
-    forward.push({ value: part, delta: offset });
-    links.set(whole.id, forward);
-    const backward = links.get(part.id) ?? [];
-    backward.push({ value: whole, delta: -offset });
-    links.set(part.id, backward);
-  };
-  for (const [id, expression] of expressions) {
-    context.checkpoint(1);
-    const result = values.get(id);
-    if (!result) continue;
-    if (expression.kind === 'cast' && ['bitcast', 'truncate', 'zero_extend', 'sign_extend'].includes(expression.op))
-      connect(expression.value, result, 0);
-    else if (expression.kind === 'extract') connect(expression.value, result, expression.offset);
-    else if (expression.kind === 'insert') connect(result, expression.value, expression.offset);
-    else if (expression.kind === 'concat') {
-      let offset = 0;
-      for (const part of expression.values) {
-        connect(result, part, offset);
-        offset += bitWidth(part.type);
-      }
-    }
-  }
-  for (const copy of copies) connect(copy.source, copy.destination, 0);
+  context.checkpoint(0);
   const slices = new Map<string, RegisterTypeSlice[]>();
   const queue: { readonly value: Value; readonly slice: RegisterTypeSlice }[] = [];
   const note = (value: Value, type: DataType, offset: number, written: boolean): void => {
@@ -65,7 +122,7 @@ export function registerTypeSlices(
     slices.set(value.id, known);
     queue.push({ value, slice });
   };
-  for (const value of values.values()) {
+  for (const value of graph ? graph.originalTypedValues(values, expressions, copies, context) : values.values()) {
     if (value.type.kind === 'integer') continue;
     const expression = expressions.get(value.id);
     const written = expression !== undefined && expression.kind !== 'extract' && expression.kind !== 'concat' &&
@@ -77,12 +134,16 @@ export function registerTypeSlices(
       if (value.type.kind !== 'integer') note(value, value.type, 0, true);
   for (const [value, slice] of additionalSlices ?? [])
     note(value, slice.type, slice.offset, slice.written);
+  // Without a typed observation there is nothing to propagate. Enumerate every
+  // original seed source before allocating the physical-storage adjacency.
+  if (queue.length === 0) {
+    context.checkpoint(0);
+    return slices;
+  }
+  const links = (graph ?? createRegisterTypeGraph(values, expressions, copies)).query(values, expressions, copies, context);
   for (let index = 0; index < queue.length; index++) {
     const { value, slice } = queue[index]!;
-    for (const link of links.get(value.id) ?? []) {
-      context.checkpoint(1);
-      note(link.value, slice.type, slice.offset + link.delta, slice.written);
-    }
+    links.propagate(value, slice, note, context);
   }
   return slices;
 }

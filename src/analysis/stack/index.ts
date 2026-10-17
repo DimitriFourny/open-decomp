@@ -7,7 +7,7 @@ import type {
   RegisterDescriptor,
 } from '../../core/index.js';
 import { bitWidth, evaluateExpression, expressionOperands, successors } from '../../ir/index.js';
-import type { Expression, RegisterBinding, SSAForm, Value } from '../../ir/index.js';
+import type { Edge, Expression, RegisterBinding, SSAForm, Value } from '../../ir/index.js';
 import { AnalysisBudget, type AnalysisOptions } from '../ssa/budget.js';
 
 export type Initialization = 'initialized' | 'uninitialized' | 'maybe_initialized' | 'unknown';
@@ -158,6 +158,7 @@ function combine(
   };
 }
 function join(a: StackFact, b: StackFact): StackFact {
+  if (sameFact(a, b)) return a;
   return combine(
     [a, b],
     sameValue(a.value, b.value)
@@ -168,12 +169,15 @@ function join(a: StackFact, b: StackFact): StackFact {
   );
 }
 function sameFact(a: StackFact, b: StackFact): boolean {
-  return (
+  return a === b || (
     sameValue(a.value, b.value) &&
     a.initialization === b.initialization &&
-    a.value_ids.join() === b.value_ids.join() &&
-    a.evidence_ids.join() === b.evidence_ids.join() &&
-    a.incoming_registers.map((r) => r.id).join() === b.incoming_registers.map((r) => r.id).join()
+    a.value_ids.length === b.value_ids.length &&
+    a.value_ids.every((id, index) => id === b.value_ids[index]) &&
+    a.evidence_ids.length === b.evidence_ids.length &&
+    a.evidence_ids.every((id, index) => id === b.evidence_ids[index]) &&
+    a.incoming_registers.length === b.incoming_registers.length &&
+    a.incoming_registers.every((register, index) => register.id === b.incoming_registers[index]?.id)
   );
 }
 function absent(offset: bigint, aliased: boolean): StackFact {
@@ -317,8 +321,101 @@ export function inspectRegister(
 interface State {
   parameters: StackFact[];
   memory: Map<bigint, StackByte>;
+  memory_shared: boolean;
   escaped: boolean;
   aliased: boolean;
+}
+
+/** Bounded reverse-postorder priority scheduling; every pending block has one
+ * fixed slot, including backedges and disconnected components. */
+function stackWorklist(input: SSAForm, budget: AnalysisBudget) {
+  const count = input.blocks.length, slots = new Map<EntityId, number>();
+  const outgoing = new Array<readonly Edge[]>(count);
+  for (let slot = 0; slot < count; slot++) {
+    budget.charge();
+    slots.set(input.blocks[slot]!.id, slot);
+    outgoing[slot] = successors(input.blocks[slot]!.terminator);
+  }
+  const slotFor = (id: EntityId): number => {
+    const slot = slots.get(id);
+    if (slot === undefined) throw new TypeError('Stack worklist references a missing SSA block');
+    return slot;
+  };
+  const marked = new Uint8Array(count), cursor = new Uint32Array(count);
+  const frames = new Uint32Array(count), postorder = new Uint32Array(count);
+  let ordered = 0;
+  // The entry component comes first; remaining components use original order.
+  for (let start = -1; start < count; start++) {
+    budget.charge();
+    const root = start < 0 ? slotFor(input.entry) : start;
+    if (marked[root]) continue;
+    let depth = 1;
+    frames[0] = root;
+    marked[root] = 1;
+    budget.charge();
+    while (depth > 0) {
+      const slot = frames[depth - 1]!, edges = outgoing[slot]!;
+      if (cursor[slot]! < edges.length) {
+        budget.charge();
+        const target = slotFor(edges[cursor[slot]!]!.target);
+        cursor[slot] = cursor[slot]! + 1;
+        if (marked[target]) continue;
+        marked[target] = 1;
+        frames[depth++] = target;
+        budget.charge();
+      } else {
+        postorder[ordered++] = slot;
+        depth--;
+      }
+    }
+  }
+  // Reuse DFS storage for ranks, the heap and membership; no enqueue allocates.
+  const rank = cursor, heap = frames;
+  for (let index = 0; index < ordered; index++) {
+    budget.charge();
+    rank[postorder[index]!] = ordered - index - 1;
+  }
+  budget.charge(count);
+  marked.fill(0);
+  let size = 0;
+  return {
+    add(id: EntityId): void {
+      const slot = slotFor(id);
+      if (marked[slot]) return;
+      marked[slot] = 1;
+      let child = size++;
+      while (child > 0) {
+        budget.charge();
+        const parent = (child - 1) >>> 1, previous = heap[parent]!;
+        if (rank[previous]! <= rank[slot]!) break;
+        heap[child] = previous;
+        child = parent;
+      }
+      heap[child] = slot;
+    },
+    take(): EntityId | undefined {
+      if (size === 0) return undefined;
+      const first = heap[0]!, last = heap[--size]!;
+      marked[first] = 0;
+      if (size > 0) {
+        let parent = 0;
+        while (parent * 2 + 1 < size) {
+          let child = parent * 2 + 1;
+          if (child + 1 < size) {
+            budget.charge();
+            if (rank[heap[child + 1]!]! < rank[heap[child]!]!) child++;
+          }
+          budget.charge();
+          if (rank[last]! <= rank[heap[child]!]!) break;
+          heap[parent] = heap[child]!;
+          parent = child;
+        }
+        heap[parent] = last;
+      }
+      return input.blocks[first]!.id;
+    },
+    edges(id: EntityId): readonly Edge[] { return outgoing[slotFor(id)]!; },
+  };
 }
 
 /** Shared, nonrewriting stack interpreter for validated immutable SSA. Uses affine
@@ -381,6 +478,22 @@ export function recoverStack(
         if ('register_outputs' in node) noteStackBindings(node.register_outputs);
       }
     const values = new Map<EntityId, StackFact>();
+    const edgeUsers = new Map<EntityId, { edge: Edge; index: number }[]>();
+    const dirtyEdges = new Map<Edge, Set<number>>();
+    const dirtyParameters = new Map<EntityId, Set<number>>();
+    const transferred = new Set<EntityId>();
+    const publish = (id: EntityId, fact: StackFact): StackFact => {
+      const previous = values.get(id);
+      if (previous && sameFact(previous, fact)) return previous;
+      values.set(id, fact);
+      for (const { edge, index } of edgeUsers.get(id) ?? []) {
+        budget.charge();
+        const row = dirtyEdges.get(edge) ?? new Set<number>();
+        row.add(index);
+        dirtyEdges.set(edge, row);
+      }
+      return fact;
+    };
     const entryBlock = blocks.get(input.entry)!;
     const entryBindings = rows.get(input.entry)!.entry;
     budget.charge(entryBindings.length + entryBlock.parameters.length);
@@ -410,10 +523,10 @@ export function recoverStack(
           }
         : { ...unknown, value_ids: [parameter.id] };
     });
-    const initial: State = { parameters, memory: new Map(), escaped: false, aliased: false };
+    const initial: State = { parameters, memory: new Map(), memory_shared: false, escaped: false, aliased: false };
     const incoming = new Map<EntityId, State>([[input.entry, initial]]);
-    const queue = [input.entry],
-      queued = new Set(queue);
+    const pendingBlocks = stackWorklist(input, budget);
+    pendingBlocks.add(input.entry);
     const snapshots = new Map<EntityId, StackSnapshot>();
     const accesses: StackAccess[] = [];
     const frame = {
@@ -426,21 +539,34 @@ export function recoverStack(
     const get = (value: Value): StackFact => {
       const fact = values.get(value.id) ?? unknown;
       if (stackValues.has(value.id) && !isStack(fact.value) && fact.value.kind !== 'undefined') {
-        const dynamic: StackFact = { ...fact, value: { kind: 'dynamic_stack' } };
-        values.set(value.id, dynamic);
-        return dynamic;
+        return publish(value.id, { ...fact, value: { kind: 'dynamic_stack' } });
       }
       return fact;
     };
+    // Working states borrow predecessor/snapshot maps until their first write.
+    // Every fork marks both states shared; byte/fact records are immutable.
+    // A barrier's byte transform is idempotent until this exact private map is
+    // written. COW preserves the invariant on unmodified predecessor snapshots.
+    const barrierInvariant = new WeakSet<Map<bigint, StackByte>>();
+    const mutableMemory = (state: State): Map<bigint, StackByte> => {
+      if (state.memory_shared) {
+        budget.charge(state.memory.size);
+        state.memory = new Map(state.memory);
+        state.memory_shared = false;
+      }
+      barrierInvariant.delete(state.memory);
+      return state.memory;
+    };
     const snapshot = (state: State, bindings: readonly RegisterBinding[]): StackSnapshot => {
-      budget.charge(state.memory.size + bindings.length);
+      budget.charge(bindings.length);
       const registers = bindings.map((binding) => ({
         register: binding.register,
         fact: get(binding.value),
       }));
+      state.memory_shared = true;
       return {
         registers,
-        memory: new Map(state.memory),
+        memory: state.memory,
         stack_pointer: inspectRegister({ registers }, abi.stack_pointer),
         escaped: state.escaped,
         aliased: state.aliased,
@@ -448,9 +574,13 @@ export function recoverStack(
     };
     const barrier = (state: State): void => {
       state.aliased = true;
+      budget.charge();
+      if (barrierInvariant.has(state.memory)) return;
       for (const [offset, byte] of state.memory) {
         budget.charge();
-        state.memory.set(offset, {
+        if (byte.fact.initialization === 'unknown' &&
+          (byte.fact.value.kind === 'unknown' || byte.fact.value.kind === 'dynamic_stack')) continue;
+        mutableMemory(state).set(offset, {
           fact: {
             ...byte.fact,
             value: isStack(byte.fact.value) ? { kind: 'dynamic_stack' } : { kind: 'unknown' },
@@ -459,6 +589,7 @@ export function recoverStack(
           value_offset_bits: byte.value_offset_bits,
         });
       }
+      barrierInvariant.add(state.memory);
     };
     const region = (offset: bigint | null, size: bigint): StackAccess['region'] =>
       classifyStackRegion(abi, offset, size);
@@ -562,16 +693,25 @@ export function recoverStack(
     const transfer = (id: EntityId, record: boolean): State => {
       const block = blocks.get(id)!,
         incomingState = incoming.get(id)!;
-      budget.charge(incomingState.memory.size + block.parameters.length);
-      const state: State = { ...incomingState, memory: new Map(incomingState.memory) };
-      block.parameters.forEach((parameter, index) =>
-        values.set(parameter.id, incomingState.parameters[index]!),
-      );
+      incomingState.memory_shared = true;
+      const state: State = { ...incomingState };
+      if (!transferred.has(id)) {
+        budget.charge(block.parameters.length);
+        block.parameters.forEach((parameter, index) =>
+          publish(parameter.id, incomingState.parameters[index]!));
+        transferred.add(id);
+      } else {
+        const changed = dirtyParameters.get(id);
+        dirtyParameters.delete(id);
+        budget.charge(changed?.size ?? 0);
+        for (const index of changed ?? [])
+          publish(block.parameters[index]!.id, incomingState.parameters[index]!);
+      }
       for (const node of block.instructions) {
         budget.charge();
         if (node.kind === 'assign') {
           const fact = evaluate(node.expression, node.result);
-          values.set(node.result.id, {
+          publish(node.result.id, {
             ...fact,
             value_ids: union(fact.value_ids, [node.result.id]).sort(),
             evidence_ids: union(fact.evidence_ids, node.provenance.evidence_ids).sort(),
@@ -610,7 +750,7 @@ export function recoverStack(
               evidence_ids: node.provenance.evidence_ids,
             });
           if (node.kind === 'load')
-            values.set(node.result.id, {
+            publish(node.result.id, {
               ...fact,
               value_ids: union(fact.value_ids, [node.result.id]).sort(),
               evidence_ids: union(fact.evidence_ids, node.provenance.evidence_ids).sort(),
@@ -618,9 +758,10 @@ export function recoverStack(
           else if (offset !== null) {
             for (let index = 0n; index < size; index++) {
               budget.charge();
-              if (!state.memory.has(offset + index) && state.memory.size >= maxBytes)
+              const at = offset + index, previous = state.memory.get(at);
+              if (!previous && state.memory.size >= maxBytes)
                 budget.charge(budget.limit + 1);
-              state.memory.set(offset + index, {
+              const byte: StackByte = {
                 fact:
                   width % 8 === 0
                     ? fact
@@ -633,7 +774,10 @@ export function recoverStack(
                       },
                 value_offset_bits:
                   Number(node.access.endian === 'little' ? index : size - index - 1n) * 8,
-              });
+              };
+              if (!previous || previous.value_offset_bits !== byte.value_offset_bits ||
+                !sameFact(previous.fact, byte.fact))
+                mutableMemory(state).set(at, byte);
             }
           } else {
             if (isStack(fact.value)) state.escaped = true;
@@ -650,20 +794,25 @@ export function recoverStack(
             ].some((fact) => isStack(fact.value))
           )
             state.escaped = true;
-          for (const byte of state.memory.values()) {
-            budget.charge();
-            if (isStack(byte.fact.value)) state.escaped = true;
+          if (!state.escaped) {
+            for (const byte of state.memory.values()) {
+              budget.charge();
+              if (isStack(byte.fact.value)) {
+                state.escaped = true;
+                break;
+              }
+            }
           }
           if (node.clobbers.memory === 'unknown_read_write') barrier(state);
           for (const binding of node.register_outputs)
-            values.set(binding.value.id, {
+            publish(binding.value.id, {
               ...unknown,
               value_ids: [binding.value.id],
               evidence_ids: node.provenance.evidence_ids,
             });
           if (node.kind === 'call')
             for (const value of node.results)
-              values.set(value.id, {
+              publish(value.id, {
                 ...unknown,
                 value_ids: [value.id],
                 evidence_ids: node.provenance.evidence_ids,
@@ -714,61 +863,90 @@ export function recoverStack(
       }
       return state;
     };
-    while (queue.length) {
+    const posted = new Map<Edge, Readonly<Pick<State, 'memory' | 'escaped' | 'aliased'>>>();
+    for (let id = pendingBlocks.take(); id !== undefined; id = pendingBlocks.take()) {
       budget.charge();
-      const id = queue.shift()!;
-      queued.delete(id);
       const state = transfer(id, false);
-      for (const edge of successors(blocks.get(id)!.terminator)) {
-        budget.charge(state.memory.size + edge.arguments.length + 1);
+      for (const edge of pendingBlocks.edges(id)) {
+        budget.charge();
+        const last = posted.get(edge), pending = dirtyEdges.get(edge);
+        const memoryChanged = !last || last.memory !== state.memory ||
+          last.escaped !== state.escaped || last.aliased !== state.aliased;
+        if (last && !pending?.size && !memoryChanged) continue;
+        dirtyEdges.delete(edge);
+        budget.charge(last ? pending?.size ?? 0 : edge.arguments.length);
+        state.memory_shared = true;
+        const previous = incoming.get(edge.target);
         const next: State = {
           ...state,
-          parameters: edge.arguments.map(get),
-          memory: new Map(state.memory),
+          parameters: previous?.parameters ?? new Array<StackFact>(edge.arguments.length),
+          memory_shared: true,
         };
-        const previous = incoming.get(edge.target);
         let changed = !previous;
-        if (previous) {
-          next.parameters = next.parameters.map((fact, index) => {
-            const merged = join(previous.parameters[index]!, fact);
-            changed ||= !sameFact(previous.parameters[index]!, merged);
-            return merged;
+        const contribute = (index: number): void => {
+          const fact = get(edge.arguments[index]!);
+          if (!previous) { next.parameters[index] = fact; return; }
+          const prior = previous.parameters[index]!, merged = join(prior, fact);
+          if (sameFact(prior, merged)) return;
+          // Entry snapshots retain the original ABI inputs even if an unusual
+          // backedge targets the entry. Other parameter arrays are solver-owned.
+          if (next.parameters === parameters) {
+            budget.charge(parameters.length);
+            next.parameters = [...parameters];
+          }
+          next.parameters[index] = merged;
+          if (transferred.has(edge.target)) {
+            const row = dirtyParameters.get(edge.target) ?? new Set<number>();
+            row.add(index);
+            dirtyParameters.set(edge.target, row);
+          }
+          changed = true;
+        };
+        if (!last) {
+          edge.arguments.forEach((argument, index) => {
+            const row = edgeUsers.get(argument.id) ?? [];
+            row.push({ edge, index });
+            edgeUsers.set(argument.id, row);
+            contribute(index);
           });
+        } else for (const index of pending ?? []) contribute(index);
+        // get() can promote this edge's own SP source during the visit; its
+        // returned fact has already contributed. Other edges retain their events.
+        dirtyEdges.delete(edge);
+        if (previous) {
           next.escaped ||= previous.escaped;
           next.aliased ||= previous.aliased;
           changed ||= next.escaped !== previous.escaped || next.aliased !== previous.aliased;
-          for (const offset of new Set([...previous.memory.keys(), ...next.memory.keys()])) {
-            budget.charge();
-            const a = previous.memory.get(offset),
-              b = next.memory.get(offset);
-            const merged = join(
-              a?.fact ?? absent(offset, previous.aliased),
-              b?.fact ?? absent(offset, state.aliased),
-            );
-            const sameOffset = a && b && a.value_offset_bits === b.value_offset_bits;
-            const byte = {
-              fact: sameOffset
-                ? merged
-                : {
-                    ...merged,
-                    value: isStack(merged.value)
-                      ? { kind: 'dynamic_stack' as const }
-                      : { kind: 'unknown' as const },
-                  },
-              value_offset_bits: sameOffset ? a.value_offset_bits : 0,
-            };
-            next.memory.set(offset, byte);
-            changed ||=
-              !a || a.value_offset_bits !== byte.value_offset_bits || !sameFact(a.fact, byte.fact);
-          }
+          previous.memory_shared = true;
+          next.memory = previous.memory;
+          if (memoryChanged && previous.memory !== state.memory)
+            for (const offset of new Set([...previous.memory.keys(), ...state.memory.keys()])) {
+              budget.charge();
+              const a = previous.memory.get(offset), b = state.memory.get(offset);
+              const merged = join(
+                a?.fact ?? absent(offset, previous.aliased),
+                b?.fact ?? absent(offset, state.aliased),
+              );
+              const sameOffset = a && b && a.value_offset_bits === b.value_offset_bits;
+              const byte = {
+                fact: sameOffset ? merged : {
+                  ...merged,
+                  value: isStack(merged.value)
+                    ? { kind: 'dynamic_stack' as const } : { kind: 'unknown' as const },
+                },
+                value_offset_bits: sameOffset ? a.value_offset_bits : 0,
+              };
+              if (!a || a.value_offset_bits !== byte.value_offset_bits || !sameFact(a.fact, byte.fact)) {
+                mutableMemory(next).set(offset, byte);
+                changed = true;
+              }
+            }
           if (next.memory.size > maxBytes) budget.charge(budget.limit + 1);
         }
+        posted.set(edge, { memory: state.memory, escaped: state.escaped, aliased: state.aliased });
         if (changed) {
           incoming.set(edge.target, next);
-          if (!queued.has(edge.target)) {
-            queue.push(edge.target);
-            queued.add(edge.target);
-          }
+          pendingBlocks.add(edge.target);
         }
       }
     }

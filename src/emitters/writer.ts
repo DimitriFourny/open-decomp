@@ -1,6 +1,33 @@
 import { OperationError, type Emission, type OperationContext } from '../core/index.js';
 import type { Origin } from '../ir/index.js';
 
+const NO_IDS: readonly string[] = [];
+
+/** One-pass normalized IDs and exact metadata lengths, owned by one writer. */
+class MappingReferences {
+  private readonly seen = new Set<string>();
+  private readonly items: string[] = [];
+  private sealed = false;
+  characters = 0;
+  bytes = 0;
+  constructor(readonly owner: Writer) {}
+  get ids(): readonly string[] { return this.items; }
+  add(id: string): void {
+    this.owner.context.checkpoint(1);
+    if (this.sealed) throw new TypeError('Published mapping references are immutable');
+    if (this.seen.has(id)) return;
+    this.seen.add(id);
+    this.items.push(id);
+    this.characters += id.length;
+    this.bytes += Buffer.byteLength(id);
+    this.owner.guard(this.bytes);
+  }
+  seal(): readonly string[] {
+    this.sealed = true;
+    return Object.freeze(this.items);
+  }
+}
+
 /** UTF-16 offsets and UTF-8 resource accounting deliberately use different units.
  * Temporary lists/strings are bounded before joining; no silent truncation. */
 export class Writer {
@@ -8,6 +35,8 @@ export class Writer {
   readonly mappings: Emission['mappings'][number][] = [];
   readonly helpers: Emission['helpers'][number][] = [];
   private readonly helperNames = new Set<string>();
+  private readonly idUnions = new WeakMap<readonly string[], readonly string[]>();
+  private readonly referenceLengths = new WeakMap<readonly string[], { readonly characters: number; readonly bytes: number }>();
   private bytes = 0;
   private metadataBytes = 0;
   offset = 0;
@@ -143,38 +172,40 @@ export class Writer {
     return name;
   }
 
+  references(): MappingReferences {
+    return new MappingReferences(this);
+  }
+
   map(
     origin: Origin,
     start: number,
-    semanticIds: readonly string[] = [],
+    semanticIds: readonly string[] | MappingReferences = [],
     extraEvidence: readonly string[] = [],
     end = this.offset,
   ): void {
-    this.context.checkpoint(
-      1 +
-        semanticIds.length +
-        origin.provenance.instruction_ids.length +
-        origin.provenance.ranges.length +
-        origin.provenance.evidence_ids.length +
-        extraEvidence.length,
-    );
+    this.context.checkpoint(1);
     if (end === start) return;
+    const prepared = semanticIds instanceof MappingReferences ? semanticIds : undefined;
+    const semanticInput = semanticIds instanceof MappingReferences ? semanticIds.ids : semanticIds;
+    if (prepared && (prepared.owner !== this || prepared.ids[0] !== origin.id))
+      throw new TypeError('Prepared mapping references must belong to this writer and begin with the mapped origin');
     if (
       this.mappings.length >= 100000 ||
-      semanticIds.length >= 10000 ||
+      semanticInput.length >= 10000 ||
       origin.provenance.instruction_ids.length > 10000 ||
       origin.provenance.ranges.length > 10000
     )
       this.fail('Pseudocode mapping cardinality limit exceeded');
     const evidence = this.evidence
       ? this.joinIds(origin.provenance.evidence_ids, extraEvidence)
-      : [];
-    const semantic = this.joinIds([origin.id], semanticIds);
+      : NO_IDS;
+    const semantic = prepared ? prepared.seal() : this.joinIds([origin.id], semanticInput);
+    if (prepared) this.guard(prepared.bytes);
     this.metadata(
       64 +
-        this.join(semantic, '').length +
-        this.join(origin.provenance.instruction_ids, '').length +
-        this.join(evidence, '').length +
+        (prepared?.characters ?? this.referenceLength(semantic)) +
+        this.referenceLength(origin.provenance.instruction_ids) +
+        this.referenceLength(evidence) +
         origin.provenance.ranges.length * 160,
     );
     this.mappings.push({
@@ -182,16 +213,47 @@ export class Writer {
       start,
       end,
       semantic_ids: semantic,
-      instruction_ids: [...origin.provenance.instruction_ids],
-      ranges: [...origin.provenance.ranges],
+      instruction_ids: origin.provenance.instruction_ids,
+      ranges: origin.provenance.ranges,
       evidence_ids: evidence,
     });
     if (evidence.length > 1000) this.fail('Pseudocode mapping evidence limit exceeded');
   }
 
-  private joinIds(a: readonly string[], b: readonly string[]): string[] {
+  /** IDs/provenance are immutable during one render. Reuse empty-right unions
+   * and lengths instead of repeatedly allocating concatenated metadata strings. */
+  private joinIds(a: readonly string[], b: readonly string[]): readonly string[] {
     if (a.length + b.length > 10000) this.fail('Pseudocode mapping reference limit exceeded');
-    return [...new Set([...a, ...b])];
+    if (b.length === 0) {
+      const cached = this.idUnions.get(a);
+      if (cached) { this.context.checkpoint(0); return cached; }
+    }
+    const ids = new Set<string>();
+    for (let index = 0; index < a.length + b.length; index++) {
+      this.context.checkpoint(1);
+      ids.add(index < a.length ? a[index]! : b[index - a.length]!);
+    }
+    const result = [...ids];
+    if (b.length === 0) this.idUnions.set(a, result);
+    return result;
+  }
+
+  private referenceLength(ids: readonly string[]): number {
+    const cached = this.referenceLengths.get(ids);
+    if (cached) {
+      this.context.checkpoint(0);
+      this.guard(cached.bytes);
+      return cached.characters;
+    }
+    let characters = 0, bytes = 0;
+    for (const id of ids) {
+      this.context.checkpoint(1);
+      characters += id.length;
+      bytes += Buffer.byteLength(id);
+      this.guard(bytes);
+    }
+    this.referenceLengths.set(ids, { characters, bytes });
+    return characters;
   }
 
   text(): string {

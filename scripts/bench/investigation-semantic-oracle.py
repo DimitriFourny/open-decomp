@@ -10,7 +10,8 @@ import sys
 
 root = Path(sys.argv[1])
 rows = json.loads((root / 'private/projection/functions.json').read_text())
-by_name = {row['function']: {'pages': row['structured_pages']} for row in rows}
+by_name = {row['function']: {'pages': row['structured_pages'], 'native': row.get('native_disassembly'),
+                           'artifact_id': row.get('artifact_id')} for row in rows}
 assert set(by_name) == {'investigation_mix', 'investigation_caller', 'investigation_field',
                        'investigation_signed', 'investigation_callback'}
 
@@ -45,6 +46,21 @@ linked = 0
 for name, material in by_name.items():
     instructions = {page['references'][ref] for page in material['pages'] for record in page['records']
                     if record['kind'] == 'source' for ref in record['instruction_refs']}
+    native = material['native']
+    if native:
+        native_ids = {item['id'] for item in native['data']['items']}
+        artifact = json.loads((root / 'private/projection/project/artifacts' / material['artifact_id']).read_text())
+        original_records = {item['id']: item for item in artifact['result']['data']['emission']['inferences']}
+        assert native_ids and all(item['architecture'] == 'arm64' and item['size'] == 4
+                                  for item in native['data']['items'])
+        expected = {'investigation_mix': [(0x304, 'eor'), (0x308, 'add')],
+                    'investigation_caller': [(0x31c, 'bl'), (0x320, 'add')],
+                    'investigation_field': [(0x330, 'ldr'), (0x334, 'ldr')],
+                    'investigation_signed': [(0x340, 'sdiv')],
+                    'investigation_callback': [(0x350, 'mov'), (0x354, 'mov'), (0x358, 'blr'), (0x35c, 'add')]}
+        for address, mnemonic in expected[name]:
+            actual = next(item for item in native['data']['items'] if int(item['address']['value'], 16) == address)
+            assert actual['presentation']['mnemonic'].lower() == mnemonic
     for page in material['pages']:
         assert len(page['references']) == len(set(page['references']))
         for record in page['records']:
@@ -54,7 +70,11 @@ for name, material in by_name.items():
             for ref in semantic['instruction_refs']:
                 assert 0 <= ref < len(page['references'])
             if semantic['details']['kind'] != 'parameter':
-                assert any(page['references'][ref] in instructions for ref in semantic['instruction_refs'])
+                if native:
+                    assert native_ids.intersection(original_records[semantic['id']]['instruction_ids'])
+                    assert semantic['instruction_refs']
+                else:
+                    assert any(page['references'][ref] in instructions for ref in semantic['instruction_refs'])
                 linked += 1
 result = {'selected_functions': len(by_name), 'source_and_instruction_assertions': 'passed',
     'instruction_linked_nonparameter_records': linked, 'target_executed': False,
@@ -62,6 +82,7 @@ result = {'selected_functions': len(by_name), 'source_and_instruction_assertions
     'unknown_field_bounds_preserved': True,
     'signed_division_width_domains': {'machine_register_bits_gold': 64, 'ir_result_bits': sdiv['result_width_bits'],
                                     'domains_not_equated': True},
+    'native_instruction_workflow': all(material['native'] is not None for material in by_name.values()),
     'blind_answer_score': None, 'equivalence_claim': False}
 (root / 'private/trusted-semantic-oracle.json').write_text(json.dumps(result, indent=2) + '\n')
 print(json.dumps(result))

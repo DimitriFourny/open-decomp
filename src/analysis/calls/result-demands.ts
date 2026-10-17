@@ -1,8 +1,18 @@
 import type { AbiProfile, OperationContext, RegisterDescriptor } from '../../core/index.js';
 import { bitWidth, expressionOperands, successors, type Expression, type RegisterBinding, type SSAForm, type Value } from '../../ir/index.js';
 
+/** Read-only access to private stage structure, never shared witness results. */
+export interface CallPreparationIndex {
+  assertStage(ir: SSAForm, context: OperationContext): void;
+  entry(id: string): RegisterDescriptor | undefined;
+  expression(id: string): Expression | undefined;
+  isLoad(id: string): boolean;
+  appendSources(id: string, target: Value[]): boolean;
+}
+
 /** Structural facts for one unchanged SSA stage. Demand results are never cached. */
 export interface CallResultDemandIndex {
+  preparation(ir: SSAForm, abi: AbiProfile, context: OperationContext): CallPreparationIndex;
   query(
     ir: SSAForm, abi: AbiProfile, context: OperationContext,
     additionalRoots?: readonly Value[],
@@ -29,6 +39,7 @@ export function createCallResultDemandIndex(
     variadic: false, fixed_parameter_count: 0 }).returns.find((location) => location.kind === 'register');
   const expressions = new Map<string, Expression>(), incoming = new Map<string, Value[]>();
   const outputs = new Map<string, { readonly call: string; readonly binding: RegisterBinding }>();
+  const loads = new Set<string>();
   const blocks = new Map(ir.blocks.map((block) => [block.id, block]));
   const states = new Map(ir.register_states.map((state) => [state.block, state]));
   const entry = new Map((states.get(ir.entry)?.entry ?? []).map((binding) => [binding.register.id, binding.value.id]));
@@ -37,7 +48,7 @@ export function createCallResultDemandIndex(
     for (const node of block.instructions) {
       context.checkpoint(1);
       if (node.kind === 'assign') expressions.set(node.result.id, node.expression);
-      else if (node.kind === 'load') roots.push(node.address);
+      else if (node.kind === 'load') { loads.add(node.result.id); roots.push(node.address); }
       else if (node.kind === 'store') roots.push(node.address, node.value);
       else if (node.kind === 'call') {
         roots.push(...node.arguments);
@@ -72,7 +83,36 @@ export function createCallResultDemandIndex(
       }
     }
   }
+  let preparation: CallPreparationIndex | undefined;
   return Object.freeze({
+    preparation(input: SSAForm, profile: AbiProfile, queryContext: OperationContext): CallPreparationIndex {
+      queryContext.checkpoint(0);
+      if (input !== ir || profile !== abi)
+        throw new TypeError('Call preparation index belongs to a different SSA or ABI stage');
+      if (!preparation) {
+        const entryByValue = new Map<string, RegisterDescriptor>();
+        for (const binding of states.get(ir.entry)?.entry ?? []) {
+          queryContext.checkpoint(1);
+          entryByValue.set(binding.value.id, binding.register);
+        }
+        preparation = Object.freeze({
+          assertStage(input: SSAForm, queryContext: OperationContext): void {
+            queryContext.checkpoint(0);
+            if (input !== ir) throw new TypeError('Call preparation index belongs to a different SSA stage');
+          },
+          entry: (id: string) => entryByValue.get(id),
+          expression: (id: string) => expressions.get(id),
+          isLoad: (id: string) => loads.has(id),
+          appendSources(id: string, target: Value[]): boolean {
+            const sources = incoming.get(id);
+            if (!sources?.length) return false;
+            for (const source of sources) target.push(source);
+            return true;
+          },
+        });
+      }
+      return preparation;
+    },
     query(
       input: SSAForm, profile: AbiProfile, queryContext: OperationContext,
       additionalRoots: readonly Value[] = [],

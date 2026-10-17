@@ -94,7 +94,7 @@ export function readImageMetadata(
   imageId: string,
   sliceId: string,
   revision: number,
-): ImageMetadata {
+): { metadata: ImageMetadata; byte_length: number } {
   const { collections: counts, ...metadata } = headerSchema.parse(decodeStored(payload));
   if (metadata.id !== imageId || metadata.selected_slice_id !== sliceId)
     fail('invalid_input', 'Stored image identity mismatch');
@@ -130,5 +130,5 @@ export function readImageMetadata(
     if (collections[name].length !== counts[name])
       fail('invalid_input', 'Stored image collection is incomplete');
   // Domain records are validated together with the immutable bytes/address map by readLoadedImage.
-  return { ...metadata, ...collections } as ImageMetadata;
+  return { metadata: { ...metadata, ...collections } as ImageMetadata, byte_length: bytes };
 }

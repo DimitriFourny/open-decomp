@@ -11,6 +11,7 @@ import {
   addressSchema,
   rangeSchema,
   hexU64Schema,
+  targetSchema,
   diagnosticSchema,
   evidenceSchema,
   evidenceRefsSchema,
@@ -254,6 +255,7 @@ export const functionGetArgsSchema = z.strictObject({
   kinds: z.array(z.enum(['signature', 'parameter', 'type', 'interpretation', 'field', 'identity',
     'call', 'rewrite', 'conflict', 'annotation', 'fp_environment', 'unresolved', 'source'])).min(1).max(13).optional(),
   include_quotes: z.boolean().optional(),
+  detail: z.enum(['full', 'compact']).optional().describe('Disassembly only; omitted means full'),
   ...paging,
 }).superRefine((args, context) => {
   if (args.view === 'investigation' && args.artifact_id === undefined)
@@ -262,6 +264,8 @@ export const functionGetArgsSchema = z.strictObject({
     context.addIssue({ code: 'custom', path: ['kinds'], message: 'Kind filters require investigation view' });
   if (args.view !== 'investigation' && args.include_quotes)
     context.addIssue({ code: 'custom', path: ['include_quotes'], message: 'Output quotations require investigation view' });
+  if (args.detail !== undefined && args.view !== 'disassembly')
+    context.addIssue({ code: 'custom', path: ['detail'], message: 'Instruction detail requires disassembly view' });
   if (args.view !== 'metadata' && args.view !== 'investigation' &&
     (args.subject_id !== undefined || args.artifact_id !== undefined))
     context.addIssue({ code: 'custom', message: 'Subject and artifact scope require metadata or investigation view' });
@@ -600,6 +604,47 @@ const investigationItemSchema = z.discriminatedUnion('kind', [
     }),
   }),
 ]);
+const compactInstructionSchema = z.strictObject({
+  id: instructionSchema.shape.id,
+  address: instructionSchema.shape.address,
+  size: instructionSchema.shape.size,
+  validity: instructionSchema.shape.validity,
+  flow: instructionSchema.shape.flow,
+  diagnostics: instructionSchema.shape.diagnostics,
+  evidence_ids: instructionSchema.shape.evidence_ids,
+  architecture: targetSchema.shape.architecture,
+  presentation: z.strictObject({ mnemonic: z.string().min(1), operands: z.string() }).nullable(),
+}).superRefine((instruction, context) => {
+  if (instruction.validity === 'valid' && instruction.presentation === null)
+    context.addIssue({ code: 'custom', message: 'Valid compact instructions require decoder presentation' });
+  if (instruction.architecture === 'arm64' && instruction.size !== 4)
+    context.addIssue({ code: 'custom', message: 'ARM64 instructions have four bytes' });
+});
+const disassemblyDataFields = {
+  view: z.literal('disassembly'),
+  function_id: entityIdSchema,
+  gaps: z.array(z.strictObject({
+    range: rangeSchema, reason: z.enum(['truncated', 'unmapped', 'data', 'budget']),
+  })).max(1000),
+  page: pageInfoSchema,
+};
+const disassemblyDataSchema = z.discriminatedUnion('detail', [
+  z.strictObject({
+    ...disassemblyDataFields, detail: z.literal('full').optional(),
+    items: z.array(instructionSchema).max(1000),
+  }),
+  z.strictObject({
+    ...disassemblyDataFields, detail: z.literal('compact'),
+    items: z.array(compactInstructionSchema).max(1000),
+  }),
+]);
+const investigationDiagnosticSchema = diagnosticSchema.omit({
+  message: true, entity_id: true, evidence_ids: true,
+}).extend({
+  artifact_index: z.int().min(0).max(999),
+  entity_known: z.boolean(),
+  evidence_count: z.int().min(0).max(1000),
+});
 const functionGetDataSchema = z.discriminatedUnion('view', [
   z.strictObject({
     view: z.literal('metadata'),
@@ -609,20 +654,7 @@ const functionGetDataSchema = z.discriminatedUnion('view', [
     annotations: z.array(annotationSchema).max(1000),
     lineage: z.array(lineageSchema).max(1000),
   }),
-  z.strictObject({
-    view: z.literal('disassembly'),
-    function_id: entityIdSchema,
-    items: z.array(instructionSchema).max(1000),
-    gaps: z
-      .array(
-        z.strictObject({
-          range: rangeSchema,
-          reason: z.enum(['truncated', 'unmapped', 'data', 'budget']),
-        }),
-      )
-      .max(1000),
-    page: pageInfoSchema,
-  }),
+  disassemblyDataSchema,
   z.strictObject({
     view: z.literal('cfg'),
     function_id: entityIdSchema,
@@ -637,6 +669,8 @@ const functionGetDataSchema = z.discriminatedUnion('view', [
     items: z.array(investigationItemSchema).max(1000),
     analysis_state: z.enum(['complete', 'partial']),
     proof_delivery: z.literal('artifact_references'),
+    diagnostic_lookup: z.literal('result.diagnostics[artifact_index] in the selected artifact'),
+    analysis_diagnostics: z.array(investigationDiagnosticSchema).max(1000),
     references: z.array(z.union([entityIdSchema,
       z.string().regex(/^(va|rva|file):0x[0-9a-f]{1,16}\+0x[0-9a-f]{1,16}$/)])).max(10000),
     selection: z.strictObject({

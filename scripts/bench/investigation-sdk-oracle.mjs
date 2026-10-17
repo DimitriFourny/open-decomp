@@ -40,6 +40,11 @@ async function call(name, args) {
       JSON.stringify(model.scope.omitted_requirements) === JSON.stringify(result.data.selection.omitted_requirement_kinds),
       'compact text preserves selected/omitted uncertainty scope');
     check(new Set(model.references).size === model.references.length, 'compact model references interned once');
+    check(model.diagnostics.length === result.data.analysis_diagnostics.length &&
+      model.diagnostics.every((diagnostic, index) => diagnostic.code === result.data.analysis_diagnostics[index].code &&
+        diagnostic.severity === result.data.analysis_diagnostics[index].severity &&
+        diagnostic.artifact_index === result.data.analysis_diagnostics[index].artifact_index),
+      'all original diagnostic codes/severities/artifact locators remain visible');
     const coreQuotes = result.data.items.filter((item) => item.kind === 'source');
     const modelQuotes = model.items.filter((item) => item.kind === 'source');
     check(JSON.stringify(modelQuotes.map((item) => [item.span, item.text])) ===
@@ -162,6 +167,17 @@ try {
   check(filtered.data.items.length > 0 && filtered.data.items.every((item) => item.kind === 'inference' &&
     item.record.details.kind === 'field' && decompiled.data.emission.inferences.some((record) =>
       record.id === item.record.id && record.subject_ids.includes(subject))), 'kind and original subject filtering');
+  check(filtered.data.items.every((item) => item.kind !== 'signature' &&
+    (item.kind !== 'inference' || item.record.details.kind !== 'parameter')),
+    'requesting field facts never silently adds all parameters or signature');
+  check(filtered.diagnostics.length === 0 &&
+    filtered.data.analysis_diagnostics.length === stored.result.diagnostics.length &&
+    filtered.data.analysis_diagnostics.every((diagnostic, index) => {
+      const original = stored.result.diagnostics[index];
+      return diagnostic.artifact_index === index && diagnostic.code === original.code &&
+        diagnostic.severity === original.severity && diagnostic.entity_known === (original.entity_id !== undefined) &&
+        diagnostic.evidence_count === original.evidence_ids.length && !('message' in diagnostic);
+    }), 'compact diagnostic records retain every original code/severity/index/presence/count without graph/message copies');
   const quoted = await call('function_get', { ...request, kinds: ['source', 'field'], subject_id: subject,
     include_quotes: true, page: { limit: 100 } });
   const sourceQuotes = quoted.data.items.filter((item) => item.kind === 'source');

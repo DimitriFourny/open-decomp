@@ -100,6 +100,8 @@ const STORE_SCHEMA_VERSION = 5;
 const annotationActorSchema = annotationSchema.pick({ author: true, origin: true });
 const MAX_IMAGE_BYTES = 512 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
+const MAX_LOADED_IMAGE_CACHE_BYTES = 64 * 1024 * 1024;
+const MAX_LOADED_IMAGE_CACHE_ENTRIES = 4;
 const RECORD_SCHEMAS = {
   function: functionSchema,
   string: stringRecordSchema,
@@ -209,6 +211,13 @@ function validateImage(image: LoadedImage): void {
   for (const item of image.diagnostics) encodeDiagnostic(item);
 }
 
+/** Only decoded metadata is frozen; bytes and address maps already expose immutable interfaces. */
+function freezeMetadata(value: unknown): void {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return;
+  for (const child of Object.values(value)) freezeMetadata(child);
+  Object.freeze(value);
+}
+
 /** Owns one exclusive SQLite connection. OS releases the lock after a worker crash. */
 export class SqliteProjectStore implements ProjectStore {
   readonly project_id: string;
@@ -216,6 +225,10 @@ export class SqliteProjectStore implements ProjectStore {
   readonly #path: string;
   #closed = false;
   #transaction = false;
+  // The exclusive connection owns immutable metadata revisions. Keep their validated
+  // indexes, not a second cache keyed to unrelated annotation revisions.
+  readonly #loadedImages = new Map<string, { image: LoadedImage; byte_length: number }>();
+  #loadedImageBytes = 0;
 
   private constructor(path: string, db: DatabaseSync) {
     this.#path = path;
@@ -423,7 +436,7 @@ export class SqliteProjectStore implements ProjectStore {
     return { image_id, existing: false };
   }
 
-  readImage(imageId: string): ImmutableBytes {
+  #readImageBytes(imageId: string): Uint8Array {
     this.#current();
     imageIdSchema.parse(imageId);
     const row = this.#db.prepare('SELECT sha256 FROM images WHERE image_id=?').get(imageId);
@@ -431,7 +444,11 @@ export class SqliteProjectStore implements ProjectStore {
     const sha = digestSchema.parse(row['sha256']);
     const bytes = checkedFile(this.#storagePath('images', sha), MAX_IMAGE_BYTES);
     if (contentHash(bytes) !== sha) fail('invalid_input', 'Stored image integrity check failed');
-    return new ImmutableBytes(bytes);
+    return bytes;
+  }
+
+  readImage(imageId: string): ImmutableBytes {
+    return new ImmutableBytes(this.#readImageBytes(imageId));
   }
 
   readLoadedImage(imageId: string, sliceId: string, revision = this.#current()): LoadedImage {
@@ -445,12 +462,23 @@ export class SqliteProjectStore implements ProjectStore {
       )
       .get(imageId, sliceId, revision);
     if (!row) fail('not_found', 'Image has not been loaded for this slice');
-    const metadata = readImageMetadata(
+    const metadataRevision = numberField(row, 'revision');
+    const key = `${imageId}:${sliceId}:${metadataRevision}`;
+    const cached = this.#loadedImages.get(key);
+    if (cached) {
+      // Retain the original full-file integrity check even on a warm metadata hit.
+      // Do not trust timestamps or a cached digest of externally replaceable files.
+      this.#readImageBytes(imageId);
+      this.#loadedImages.delete(key);
+      this.#loadedImages.set(key, cached);
+      return cached.image;
+    }
+    const { metadata, byte_length } = readImageMetadata(
       this.#db,
       row['payload'],
       imageId,
       sliceId,
-      numberField(row, 'revision'),
+      metadataRevision,
     );
     const bytes = this.readImage(imageId);
     const slice = metadata.slices.find((item) => item.id === sliceId);
@@ -465,6 +493,21 @@ export class SqliteProjectStore implements ProjectStore {
     });
     const image = { ...metadata, bytes, address_map };
     validateImage(image);
+    freezeMetadata(metadata);
+    Object.freeze(image);
+    const retainedBytes = bytes.length + byte_length;
+    if (retainedBytes <= MAX_LOADED_IMAGE_CACHE_BYTES) {
+      while (
+        this.#loadedImages.size >= MAX_LOADED_IMAGE_CACHE_ENTRIES ||
+        this.#loadedImageBytes + retainedBytes > MAX_LOADED_IMAGE_CACHE_BYTES
+      ) {
+        const oldest = this.#loadedImages.keys().next().value!;
+        this.#loadedImageBytes -= this.#loadedImages.get(oldest)!.byte_length;
+        this.#loadedImages.delete(oldest);
+      }
+      this.#loadedImages.set(key, { image, byte_length: retainedBytes });
+      this.#loadedImageBytes += retainedBytes;
+    }
     return image;
   }
 
@@ -1332,6 +1375,8 @@ export class SqliteProjectStore implements ProjectStore {
     if (this.#transaction) fail('invalid_input', 'Cannot close a project inside a transaction');
     this.#db.close();
     this.#closed = true;
+    this.#loadedImages.clear();
+    this.#loadedImageBytes = 0;
   }
 }
 

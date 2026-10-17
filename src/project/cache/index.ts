@@ -199,19 +199,12 @@ function validateComputation(
     })),
     evidence: wireCatalog.evidence.map(decodeEvidence),
   };
-  for (const subject of catalog.subjects) {
-    context.checkpoint(1);
-    if (
-      subject.image_id !== image.id ||
-      subject.slice_id !== identity.slice_id ||
-      subject.abi !== identity.target.abi
-    )
-      fail('invalid_input', 'Analysis catalog subject escapes its image scope');
-  }
-  const functionSubject = catalog.subjects.find((subject) => subject.id === identity.function_id);
-  if (!functionSubject || functionSubject.kind !== 'function')
-    fail('invalid_input', 'Analysis catalog lacks its function subject');
-  createTrustedSemanticCatalog(store, revision, catalog, context);
+  createTrustedSemanticCatalog(store, revision, catalog, context, {
+    image_id: image.id,
+    slice_id: identity.slice_id,
+    abi: identity.target.abi,
+    function_id: identity.function_id,
+  });
   const proofs = new Map<string, Evidence>();
   for (const proof of [...catalog.evidence, ...result.evidence.map(decodeEvidence)]) {
     context.checkpoint(1);

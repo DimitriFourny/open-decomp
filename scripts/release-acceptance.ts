@@ -454,7 +454,7 @@ async function unsupportedEffects(
         view: 'disassembly',
       }),
     );
-    assert.ok(disassembly.view === 'disassembly');
+    assert.ok(disassembly.view === 'disassembly' && disassembly.detail === 'full');
     const instruction = disassembly.items.find((item) => item.address.value === scenario.address);
     assert.ok(instruction);
     assert.equal(

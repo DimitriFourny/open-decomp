@@ -15,9 +15,17 @@ import type { AnnotationSubject } from '../../project/annotations/index.js';
 export function evidenceReferences(value: unknown, context: OperationContext): Set<string> {
   const ids = new Set<string>(),
     pending: unknown[] = [value];
+  const visited = new WeakSet<object>();
   while (pending.length) {
-    context.checkpoint(1);
     const item = pending.pop();
+    if (item !== null && typeof item === 'object') {
+      if (visited.has(item)) {
+        context.checkpoint(0);
+        continue;
+      }
+      visited.add(item);
+    }
+    context.checkpoint(1);
     if (Array.isArray(item)) pending.push(...item);
     else if (item !== null && typeof item === 'object')
       for (const [key, child] of Object.entries(item)) {
@@ -32,6 +40,37 @@ export function evidenceReferences(value: unknown, context: OperationContext): S
         message: 'Analysis evidence exceeds the catalog bound',
         evidence_ids: [],
       });
+  }
+  return ids;
+}
+
+/** Emission proof fields are closed-schema locations, not arbitrary semantic IDs. */
+export function emissionEvidenceReferences(
+  emission: {
+    readonly mappings: readonly { readonly evidence_ids: readonly string[] }[];
+    readonly inferences?: readonly { readonly evidence_ids: readonly string[] }[] | undefined;
+    readonly requirements?: readonly {
+      readonly evidence_ids: readonly string[];
+      readonly sites: readonly { readonly evidence_ids: readonly string[] }[];
+    }[] | undefined;
+  },
+  context: OperationContext,
+  ids = new Set<string>(),
+): Set<string> {
+  const add = (proofs: readonly string[]): void => {
+    context.checkpoint(1 + proofs.length);
+    for (const id of proofs) ids.add(id);
+    if (ids.size > 10000)
+      throw new OperationError({
+        code: 'resource_limit', severity: 'error',
+        message: 'Analysis evidence exceeds the catalog bound', evidence_ids: [],
+      });
+  };
+  for (const mapping of emission.mappings) add(mapping.evidence_ids);
+  for (const inference of emission.inferences ?? []) add(inference.evidence_ids);
+  for (const requirement of emission.requirements ?? []) {
+    add(requirement.evidence_ids);
+    for (const site of requirement.sites) add(site.evidence_ids);
   }
   return ids;
 }

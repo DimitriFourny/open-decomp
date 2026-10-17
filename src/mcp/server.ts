@@ -40,7 +40,7 @@ const descriptions: Record<ToolName, string> = {
   functions_find:
     'Find stable functions by identity, name, address, boundary certainty and analysis status. Discovery is evidence-based, not proof that all functions are known.',
   function_get:
-    'Read bounded function metadata, original-subject annotations (including retractions) and lineage, disassembly or CFG. investigation requires an explicit current published artifact_id, pages compact typed facts by kinds/subject_id, and quotes exact mapped body intervals without reanalysis. Full original records, declaration and helper definitions remain in that artifact. Compact text omits next_cursor at end; nonnull cursors remain explicit. Derived metadata subject_id review requires its trusted artifact_id. Unknowns, omitted scope and hypothesis/assertion distinctions stay visible.',
+    'Read bounded metadata, original-subject annotation history, disassembly or CFG. Disassembly detail:compact explicitly requests actual decoder-formatted native instructions; omitted/full keeps original descriptors. Compact native text uses address,size,mnemonic,operands columns; IDs/full fields remain structured. investigation requires an explicit current published artifact_id and pages only requested kinds/subjects without reanalysis. Exact mapped body quotes are optional; full records, declarations and helper definitions remain in the artifact. analysis_diagnostics preserves codes/severity/original artifact indexes and counts; full messages/provenance are result.diagnostics[index] there. Compact text omits next_cursor only at end. Derived metadata requires trusted artifact scope. Unknowns, omitted scope and hypothesis/assertion distinctions stay visible.',
   function_decompile:
     'Analyze using the real homemade target engine and reconstruct readable c-like (default) or python-like pseudocode. Both dialects share expression, data-flow and ABI reconstruction with source mappings and evidence; unresolved machine boundaries remain explicit, not guessed source. Output is not recovered original or executable source. Defaults to a durable queued job; inspect analysis_status and its artifact links. wait:true awaits inline or explicit artifact delivery. Semantic partialness differs from output_limit.',
   xrefs_get:
@@ -163,7 +163,7 @@ export function createMcpServer(service: QueryService, policy: McpServerPolicy =
           await service.execute(name, args as ToolInput<typeof name>, {
             ...(policy.preserveJobsOnDisconnect ? {} : { signal: context.mcpReq.signal }),
             ...(onProgress === undefined ? {} : { onProgress }),
-            ...(name === 'annotations_apply' ? { max_result_bytes: MUTATION_RESULT_BYTES } : {}),
+            max_result_bytes: MCP_CORE_RESULT_BYTES,
           }),
           args,
         );

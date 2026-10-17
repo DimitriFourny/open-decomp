@@ -18,9 +18,9 @@ import { foldExpressions, identityOperand } from './expressions.js';
 import type { Assignment, BoundaryProjection, MemoryView, Reconstruction, TailProjection } from './model.js';
 import { planSource } from './source-planner.js';
 import { planSourceStack } from './source-stack.js';
-import { normalizeSourceExpressions } from './source-expressions.js';
-import { projectSourceTypes } from './source-types.js';
+import { normalizeSourceExpressions, sourceExpressionDemand, type SourceExpressionDemand } from './source-expressions.js';
 import { normalizeSourceRanges } from './source-ranges.js';
+import { projectSourceTypes } from './source-types.js';
 import { LocalValidationSession } from './local-validation.js';
 export type * from './model.js';
 
@@ -160,7 +160,82 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
         localValidation,
       )
     : null;
-  if (sourcePlan) normalizeSourceExpressions(values, expressions, owner, sourcePlan.make, context, localValidation);
+  let normalizationDemand: SourceExpressionDemand | undefined;
+  if (sourcePlan) {
+    // These roots deliberately overapproximate the liveness roots below, before
+    // identities/snapshots are reduced. No effect or original definition is
+    // removed: only source-undemanded pure normalization/aliasing is avoided.
+    const roots: Value[] = [...sourcePlan.parameters];
+    let complete = true;
+    const boundaryRoots = (boundary: BoundaryProjection): void => {
+      roots.push(...boundary.arguments, ...boundary.results);
+      for (const binding of boundary.inputs) roots.push(binding.value);
+      for (const binding of boundary.outputs) roots.push(binding.value);
+    };
+    if (sourceStack?.entryStorage) roots.push(sourceStack.entryStorage);
+    for (const block of blocks.values()) {
+      for (const node of block.statements) {
+        context.checkpoint(1);
+        switch (node.kind) {
+          case 'assign': break;
+          case 'read_register': roots.push(node.result); break;
+          case 'write_register': roots.push(node.value); break;
+          case 'load':
+            // Include even promoted/hidden loads: storage planning is fixed,
+            // but normalization must not assume an unused read has no effect.
+            roots.push(node.address, node.result);
+            break;
+          case 'store': roots.push(node.address, node.value); break;
+          case 'call': {
+            const boundary = sourcePlan.calls.get(node.id);
+            if (boundary) boundaryRoots(boundary);
+            else complete = false;
+            roots.push(...node.arguments, ...node.results);
+            if (node.target.kind === 'indirect') roots.push(node.target.value);
+            break;
+          }
+          case 'unknown_effect':
+            for (const binding of node.register_inputs) roots.push(binding.value);
+            for (const binding of node.register_outputs) roots.push(binding.value);
+            break;
+          case 'memory_fence': break;
+          default: complete = false;
+        }
+      }
+      const control = block.control;
+      context.checkpoint(1);
+      switch (control.kind) {
+        case 'jump': break;
+        case 'if': roots.push(control.condition); break;
+        case 'switch': roots.push(control.value); break;
+        case 'return': {
+          const boundary = sourcePlan.returns.get(control.id);
+          if (boundary) boundaryRoots(boundary);
+          else complete = false;
+          roots.push(...control.values);
+          break;
+        }
+        case 'indirect':
+          roots.push(control.target);
+          // Do not predict the eventual identity-reduced exit snapshot.
+          for (const binding of block.register_exit) roots.push(binding.value);
+          break;
+        case 'unknown':
+        case 'trap':
+          for (const binding of block.register_exit) roots.push(binding.value);
+          break;
+        default: complete = false;
+      }
+      const tail = sourcePlan.tails.get(control.id);
+      if (tail) boundaryRoots(tail.boundary);
+    }
+    // Missing/unrecognized consumers conservatively retain full normalization.
+    if (complete)
+      normalizationDemand = sourceExpressionDemand(roots, expressions, parameterSources, context);
+  }
+  const sourceExpressions = sourcePlan
+    ? normalizeSourceExpressions(values, expressions, owner, sourcePlan.make, context, localValidation, normalizationDemand)
+    : null;
 
   // A three-level identity lattice (unreached / exact identity / conflicting).
   // Ignoring unreached backedges discovers unchanged loop-carried registers;
@@ -209,14 +284,22 @@ export function reconstruct(input: EmissionInput, context: OperationContext): Re
   if (sourcePlan)
     for (const [id, identity] of identities) {
       context.checkpoint(1);
-      if (identity && id !== identity && values.has(identity))
-        sourcePlan.alias(values.get(id)!, {
+      if (normalizationDemand && !normalizationDemand.values.has(id)) continue;
+      if (identity && id !== identity && values.has(identity)) {
+        const value = values.get(id)!,
+          previous = expressions.get(id),
+          unchanged = previous && identityOperand(value.type, previous)?.id === identity;
+        sourcePlan.alias(value, {
           kind: 'cast',
           op: 'bitcast',
           value: values.get(identity)!,
         });
+        // alias() also marks forced-inline source views. Replacing an already
+        // identical bitcast changes that presentation flag, not normalization.
+        if (!unchanged) sourceExpressions!.changed(id);
+      }
     }
-  if (sourcePlan) normalizeSourceExpressions(values, expressions, owner, sourcePlan.make, context, localValidation);
+  sourceExpressions?.run();
   const initial = new Map(entryBindings.map((binding) =>
     [binding.register.id, identities.get(binding.value.id) ?? binding.value.id]));
   const snapshot = (bindings: readonly RegisterBinding[]): readonly RegisterBinding[] =>
