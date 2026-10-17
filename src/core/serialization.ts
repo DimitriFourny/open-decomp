@@ -114,6 +114,10 @@ export function encodeEmission(value: Emission): WireEmission {
       ...record,
       ranges: record.ranges.map(encodeRange),
     })),
+    requirements: value.requirements?.map((record) => ({
+      ...record,
+      ranges: record.ranges.map(encodeRange),
+    })),
   });
 }
 export function decodeEmission(value: WireEmission): Emission {
@@ -125,6 +129,10 @@ export function decodeEmission(value: WireEmission): Emission {
       ranges: mapping.ranges.map(decodeRange),
     })),
     inferences: parsed.inferences?.map((record) => ({
+      ...record,
+      ranges: record.ranges.map(decodeRange),
+    })),
+    requirements: parsed.requirements?.map((record) => ({
       ...record,
       ranges: record.ranges.map(decodeRange),
     })),

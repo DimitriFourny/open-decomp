@@ -34,6 +34,7 @@ import { sourceDataValues } from '../reconstruction/source-data.js';
 import { LocalValidationSession, rejectTranslation, validateParallelMoves, type PlannedMove } from '../reconstruction/local-validation.js';
 import { validateEmittedControl, type EmittedEdge } from '../reconstruction/local-control-validation.js';
 import { planSourceNames, sourceIdentifierStem } from '../reconstruction/source-names.js';
+import { sourceRequirementPredicates, sourceRequirementProofs, type SourceRequirementPredicate } from '../reconstruction/source-requirements.js';
 import { expressionText, machineType } from './expressions.js';
 import { Writer } from './writer.js';
 import type { EmissionInput, EmissionResult } from './model.js';
@@ -77,6 +78,7 @@ export class Renderer {
   private readonly sourceDataValue: (value: Value) => SourceAddress | undefined;
   private readonly sourceValueTypes = new Map<string, string>();
   private readonly sourceRoleNames: ReadonlyMap<string, string | null>;
+  private readonly requirementPredicates: ReadonlyMap<string, SourceRequirementPredicate>;
   private sourceTemporary = 0;
   private sourceLocal = 0;
   constructor(
@@ -88,6 +90,7 @@ export class Renderer {
   ) {
     this.writer = new Writer(context, options.indent, options.include_evidence, language);
     this.program = reconstruct(input, context);
+    this.requirementPredicates = sourceRequirementPredicates(this.program.source?.requirements);
     this.localValidation = this.program.local_validation_session ?? new LocalValidationSession(context);
     this.sourceDataValue = sourceDataValues(
       this.program.expressions, this.program.source?.addresses ?? [], context);
@@ -1151,7 +1154,15 @@ export class Renderer {
         break;
       case 'if': {
         ids.push(control.condition.id);
-        const condition = this.value(control.condition);
+        const requirement = this.requirementPredicates.get(control.id);
+        const originalCondition = this.value(control.condition);
+        const condition = requirement
+          ? this.call('requirement_predicate',
+              'A pure predicate at its original control site. Arguments: requirement ID, site ID, exact SSA state epoch, original predicate, supported predicate result (0 or 1). Evaluate the original pure predicate and preserve any known result, including unsupported state. Only an unknown result may be resolved by explicit matching acknowledgment to the documented supported result; this never changes surrounding values, effects, other sites or epochs, or moves or erases the guard.',
+              [this.writer.quote(requirement.requirement.id), this.writer.quote(requirement.site.id),
+                this.writer.quote(requirement.site.state_epoch), originalCondition,
+                requirement.site.supported_predicate_value ? '1' : '0'])
+          : originalCondition;
         let conditionValue = control.condition,
           expression: Expression | undefined;
         for (
@@ -1164,7 +1175,7 @@ export class Renderer {
           if (expression?.kind !== 'cast' || expression.op !== 'bitcast') break;
           conditionValue = expression.value;
         }
-        const grouped = expression?.kind === 'compare';
+        const grouped = !requirement && expression?.kind === 'compare';
         this.writer.line(
           depth,
           this.language === 'c-like'
@@ -1354,9 +1365,10 @@ export class Renderer {
         ? `${this.language === 'c-like' ? 'C-like' : 'Python-like'} pseudocode; ${this.program.source.inferred ? 'inferred ABI interface' : 'recovered source interface'}.`
         : `${this.language === 'c-like' ? 'C-like' : 'Python-like'} reconstruction; explicit widths and ordered memory, not original source.`,
     );
-    for (const assumption of this.program.source?.assumptions ?? []) {
+    for (const requirement of this.program.source?.requirements ?? []) {
       this.context.checkpoint(1);
-      w.comment(0, `Requirement: ${assumption}`);
+      if (requirement.kind === 'fp_environment')
+        w.comment(0, `Requirement ${requirement.id} (${requirement.status}): ${requirement.explanation}`);
     }
     const displayName = this.names.get(this.input.function.id);
     const functionName = this.program.source
@@ -1516,6 +1528,9 @@ export class Renderer {
     for (const record of this.localValidation.records)
       if (record.kind === 'control' && record.status === 'rejected')
         rejectTranslation(record, this.controls.get(record.subject) ?? this.input.function);
+    const requirements = sourceRequirementProofs(
+      this.program, w.mappings, this.context, (bytes) => w.metadata(bytes),
+    );
     const inferences = collectInferences(
       this.input, this.program, w.mappings, this.localValidation.records, w, this.context,
       this.inferenceSites, this.sourceDataValue,
@@ -1531,6 +1546,7 @@ export class Renderer {
         helpers: w.helpers,
         local_validation: this.localValidation.records,
         inferences,
+        requirements,
       },
       diagnostics: this.diagnostics,
       coverage: {

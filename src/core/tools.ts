@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { inferenceSchema } from './inference.js';
+import { inferenceSchema, requirementSchema } from './inference.js';
 import {
   SCHEMA_VERSION,
   projectIdSchema,
@@ -138,6 +138,7 @@ export const emissionSchema = z
     mappings: z.array(sourceMappingSchema).max(100000),
     local_validation: z.array(localValidationSchema).max(1000).optional(),
     inferences: z.array(inferenceSchema).max(10000).optional(),
+    requirements: z.array(requirementSchema).max(1000).optional(),
     helpers: z
       .array(z.strictObject({ name: z.string().min(1), explanation: z.string().min(1).max(8192) }))
       .max(1000),
@@ -145,9 +146,10 @@ export const emissionSchema = z
   .superRefine((emission, context) => {
     if (emission.mappings.some((mapping) => mapping.end > emission.text.length))
       context.addIssue({ code: 'custom', message: 'Source mapping exceeds emitted text' });
-    for (const record of emission.inferences ?? [])
-      if (record.output_spans.some((span) => span.end > emission.text.length))
-        context.addIssue({ code: 'custom', message: 'Inference span exceeds emitted text' });
+    for (const records of [emission.inferences, emission.requirements])
+      for (const record of records ?? [])
+        if (record.output_spans.some((span) => span.end > emission.text.length))
+          context.addIssue({ code: 'custom', message: 'Inference span exceeds emitted text' });
   });
 export type WireEmission = z.infer<typeof emissionSchema>;
 export type Emission = Internal<WireEmission>;

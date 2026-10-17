@@ -55,6 +55,13 @@ const mxcsr: RegisterDescriptor = {
   role: 'general',
   write_rule: 'replace_root',
 };
+export const x86FpEnvironmentGuard = Object.freeze({
+  control_root: 'x86_64:mxcsr',
+  offset_bits: 6,
+  width_bits: 10,
+  supported_bits: 0x7en,
+  unsupported_exit: 'Unsupported MXCSR environment (rounding, DAZ, FTZ or unmasked exception)',
+});
 export const unknownClobbers: CallClobbers = {
   registers: [
     ...[
@@ -339,14 +346,14 @@ export class X86Semantics {
       state = b.readRegister({
         ...mxcsr,
         id: 'x86_64:mxcsr[6:16]',
-        offset_bits: 6,
-        width_bits: 10,
+        offset_bits: x86FpEnvironmentGuard.offset_bits,
+        width_bits: x86FpEnvironmentGuard.width_bits,
         write_rule: 'preserve_other_bits',
       });
     this.guard(
-      b.compare('ne', state, this.c(10, 0x7en)),
+      b.compare('ne', state, this.c(x86FpEnvironmentGuard.width_bits, x86FpEnvironmentGuard.supported_bits)),
       [],
-      'Unsupported MXCSR environment (rounding, DAZ, FTZ or unmasked exception)',
+      x86FpEnvironmentGuard.unsupported_exit,
       false,
     );
     this.abstractFP();

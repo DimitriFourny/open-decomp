@@ -23,8 +23,9 @@ import type { Assignment, BoundaryProjection, TailProjection } from './model.js'
 import type { InferredCallee, SourcePresentation } from './source-model.js';
 import { sourceDataValues } from './source-data.js';
 import type { SignatureAssociation } from '../analysis/types/model.js';
-import { FP_ENVIRONMENT_ASSUMPTION, registerTypeSlices, registerTypes, unchangedStorage, type StorageCopy } from './source-register-types.js';
+import { registerTypeSlices, registerTypes, unchangedStorage, type StorageCopy } from './source-register-types.js';
 import { sourceStackArgumentParts } from './source-stack-arguments.js';
+import { planSourceRequirements } from './source-requirements.js';
 
 /** Source ABI abstraction: architectural snapshots are retained in the input,
  * not treated as extra source arguments or memory-fault observables. */
@@ -578,7 +579,8 @@ export function planSource(
       alias(binding.value, {
         kind: 'indeterminate',
         state: 'unknown',
-        reason: binding.register.root === 'arm64:fpcr' ? 'FPCR environment' : 'non-argument entry register',
+        reason: binding.register.root === 'arm64:fpcr' ? 'FPCR environment'
+          : binding.register.root === 'x86_64:mxcsr' ? 'MXCSR environment' : 'non-argument entry register',
       });
   }
   let returnType: DataType | null = null;
@@ -714,13 +716,7 @@ export function planSource(
     parameter_names: parameterNames,
     return_type: returnType,
     ...(returnPointer === undefined ? {} : { return_pointer: returnPointer }),
-    assumptions: [...new Set([
-      ...evidence.callees.flatMap((callee) => callee.assumptions ?? []),
-      ...([...expressions.values()].some((expression) =>
-        expression.kind === 'float' || expression.kind === 'float_unary' ||
-        expression.kind === 'float_compare' || expression.kind === 'vector_float')
-        ? [FP_ENVIRONMENT_ASSUMPTION] : []),
-    ])],
+    requirements: planSourceRequirements(input, blocks, expressions, originalDefinitions, calls, context),
     locals: new Map(),
     stack: null,
     stack_addresses: new Map(),

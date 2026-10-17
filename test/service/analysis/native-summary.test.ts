@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { openBinary, type BinarySession } from '../../../src/api/index.js';
-import { emittedFormals, execute, type SourceCallOracle } from '../../emitters/c/support.js';
+import { acknowledgeRequirements, emittedFormals, execute, type SourceCallOracle } from '../../emitters/c/support.js';
 import { project } from './support.js';
 
 const cases = [0n, 1n, 0x7fffffffn, 0x80000000n, 0xffffffffn, 0x1234567887654321n];
@@ -91,7 +91,7 @@ test('public default native summaries carry nested, recursive, tail, preserved, 
     const names: Record<string, string> = { outer: 'outer', signed: 'signed_caller', preserved: 'preserved',
       identity: 'identity_caller', recursive: 'recursive', mutual: 'mutual_a', stack: 'stack_caller',
       tail: 'tail_caller', tail_body: 'tail', fp: 'fp_caller', vector: 'vector_caller' };
-    const environment = new Map([['non-argument entry register', 0n], ['FPCR environment', 0n], ['call clobbers fpcr', 0n]]);
+    const environment = new Map([['non-argument entry register', 0n]]);
     const stack = 0x9000n;
     for (const emitter of ['c-like', 'python-like'] as const)
       for (const [name, symbol] of Object.entries(names)) {
@@ -109,7 +109,8 @@ test('public default native summaries carry nested, recursive, tail, preserved, 
           for (const poison of [0xa5, 0x5a]) {
             const memory = new Map<bigint, number>();
             for (let offset = -512n; offset < 64n; offset++) memory.set(stack + offset, poison);
-            const observed = execute(emission, formals(emission, args, stack), memory, 0n, new Map(), environment, oracles);
+            const observed = execute(emission, formals(emission, args, stack), memory, 0n, new Map(), environment, oracles,
+              acknowledgeRequirements(emission));
             assert.equal(observed.exit, 'machine_return', `${emitter} ${name} ${index}`);
             assert.deepEqual(observed.values, [expected.get(`${name}:${index}`)!], `${emitter} ${name} ${index}`);
             assert.ok(observed.events.includes('call'), `${name} must retain its native call effect`);

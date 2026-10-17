@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { openBinary, type BinarySession } from '../../src/api/index.js';
-import { emittedFormals, execute } from '../emitters/c/support.js';
+import { acknowledgeRequirements, emittedFormals, execute } from '../emitters/c/support.js';
 
 const variadicCases = [
   [],
@@ -89,8 +89,6 @@ test(
     assert.equal(oracle.size, variadicCases.length + vectorCases.length * 2 + mixedCases.length);
     session = await openBinary(binary, { cachePath: join(root, 'cache') });
     const environment = new Map<string, bigint>();
-    environment.set('FPCR environment', 0n);
-    environment.set('call clobbers fpcr', 0n);
     environment.set('non-argument entry register', 0n);
     const entrySp = 0x9000n;
     for (const emitter of ['c-like', 'python-like'] as const) {
@@ -107,7 +105,8 @@ test(
           for (let offset = -8; offset < 0; offset++) memory.set(entrySp + BigInt(offset), poison);
           args.forEach((value, argument) => store(memory, entrySp + BigInt(argument * 8), floatBits(value, 64), 8));
           const observed = execute(variadicEmission,
-            formals(variadicEmission, [BigInt(args.length)], entrySp), memory, 0n, new Map(), environment);
+            formals(variadicEmission, [BigInt(args.length)], entrySp), memory, 0n, new Map(), environment,
+            new Map(), acknowledgeRequirements(variadicEmission));
           assert.equal(observed.exit, 'machine_return', `${emitter}: variadic ${index}`);
           assert.deepEqual(observed.values, oracle.get(`variadic:${index}`));
           assert.equal(observed.events[0], 'store');
@@ -121,7 +120,7 @@ test(
       for (const [index, [left, right]] of vectorCases.entries()) {
         const observed = execute(vectorEmission,
           formals(vectorEmission, [vectorBits(left), vectorBits(right)], entrySp),
-          new Map(), 0n, new Map(), environment);
+          new Map(), 0n, new Map(), environment, new Map(), acknowledgeRequirements(vectorEmission));
         assert.equal(observed.exit, 'machine_return', `${emitter}: vector ${index}`);
         const expected = oracle.get(`vector:${index}`)!;
         assert.deepEqual(observed.values, [expected.reduce((packed, lane, i) => packed | (lane << BigInt(i * 32)), 0n)]);
@@ -136,7 +135,7 @@ test(
         store(memory, 0x1000n, (1n << 128n) - 1n, 16);
         const observed = execute(storeEmission,
           formals(storeEmission, [0x1000n, 0x2000n, 0x3000n], entrySp),
-          memory, 0n, new Map(), environment);
+          memory, 0n, new Map(), environment, new Map(), acknowledgeRequirements(storeEmission));
         assert.equal(observed.exit, 'machine_return', `${emitter}: store ${index}`);
         // The source returns void: caller-saved result-register contents are
         // not an observable return contract without native prototype evidence.
@@ -168,7 +167,7 @@ test(
           for (let offset = -256; offset < 0; offset++) memory.set(entrySp + BigInt(offset), poison);
           const observed = execute(mixedEmission,
             formals(mixedEmission, [BigInt(count), floatBits(left, 64), floatBits(right, 64)], entrySp),
-            memory, 0n, new Map(), environment, calls);
+            memory, 0n, new Map(), environment, calls, acknowledgeRequirements(mixedEmission));
           assert.equal(observed.exit, 'machine_return', `${emitter}: mixed ${index}`);
           assert.deepEqual(observed.values, oracle.get(`mixed:${index}`));
           assert.deepEqual(observed.source_calls, [

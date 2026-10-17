@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { openBinary } from '../../src/api/index.js';
 import { contentHash, toolSchemas, type WireEmission, type ToolResult } from '../../src/core/index.js';
 import { callMcpTool, readAnalysis, withMcpClient } from '../../scripts/mcp-workflow.js';
-import { emittedFormals, execute, type EmittedFormal, type SourceCallOracle } from '../emitters/c/support.js';
+import { acknowledgeRequirements, emittedFormals, execute, type EmittedFormal, type SourceCallOracle } from '../emitters/c/support.js';
 import { strnicmpCases, strnicmpOracle } from '../emitters/c/strnicmp-fixture.js';
 import { loadBytes } from '../metadata/fixture.js';
 
@@ -240,8 +240,8 @@ function checkBehavior(p: SourceQualityFixture, scenario: Scenario, emission: Wi
     });
     const unknownValues = new Map<string, bigint>();
     if (entryStack) unknownValues.set('non-argument entry register', 0x1122334455667788n);
-    if (scenario === 'float') unknownValues.set('FPCR environment', 0n);
-    const observed = execute(emission, inputs, memory, 0n, new Map(), unknownValues, sourceCalls);
+    const observed = execute(emission, inputs, memory, 0n, new Map(), unknownValues, sourceCalls,
+      scenario === 'float' ? acknowledgeRequirements(emission) : []);
     const description = `${scenario}[${row.index}] ${emission.language}`;
     assert.equal(observed.exit, 'machine_return', description);
     assert.deepEqual(observed.values, [BigInt(`0x${row.value}`)], description);

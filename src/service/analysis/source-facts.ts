@@ -36,7 +36,8 @@ import { pipelineVersions } from './versions.js';
 import { nativeArgumentValues } from './native-arguments.js';
 import { parameterRegisters } from './native-abi.js';
 import { fpEnvironmentGuard } from '../../lifters/arm64/semantics.js';
-import { FP_ENVIRONMENT_ASSUMPTION, registerTypeSlices, registerTypes, type StorageCopy } from '../../reconstruction/source-register-types.js';
+import { registerTypeSlices, registerTypes, type StorageCopy } from '../../reconstruction/source-register-types.js';
+import { needsSourceFpEnvironment } from '../../reconstruction/source-requirements.js';
 
 interface SourceFactsInput {
   readonly scope: AnalysisScope;
@@ -114,12 +115,14 @@ function observeParameters(
   const storageCopies: StorageCopy[] = [];
   const byBlock = new Map(ir.blocks.map((block) => [block.id, block]));
   const predecessors = new Map<string, SSAForm['blocks'][number][]>();
+  let localFpEnvironment = false;
   for (const block of ir.blocks) {
     for (const value of block.parameters) values.set(value.id, value);
     for (const node of block.instructions) {
       if ('result' in node) values.set(node.result.id, node.result);
       if (node.kind === 'assign') {
         definitions.set(node.result.id, node.expression);
+        localFpEnvironment ||= needsSourceFpEnvironment(node.expression);
       }
     }
     const control = block.terminator;
@@ -265,9 +268,9 @@ function observeParameters(
     parameter_state: ambiguous ? 'ambiguous' : 'observed',
     argument_list_complete: false,
     stack_parameters: nativeStackParameters(ir, analysis, context),
-    assumptions: [...new Set([
-      ...(conditionalFpFailures.size ? [FP_ENVIRONMENT_ASSUMPTION] : []),
-      ...[...interfaces.values()].flatMap((callee) => callee.assumptions ?? []),
+    requirements: [...new Set([
+      ...(conditionalFpFailures.size || localFpEnvironment ? ['fp_environment' as const] : []),
+      ...[...interfaces.values()].flatMap((callee) => callee.requirements ?? []),
     ])],
   };
 }
@@ -489,10 +492,15 @@ function observeNativeUnit(
     const result = nativeReturnInterface(unit.ir, input.components.abi, null, interfaces, context, seed, demandedReturns);
     const parameters = nativeEntryRegisters(unit.ir, parameterRegisters(input.components.abi), interfaces,
       result.returns, context);
+    const localFpEnvironment = unit.ir.blocks.some((block) => block.instructions.some((node) => {
+      context.checkpoint(1);
+      return node.kind === 'assign' && needsSourceFpEnvironment(node.expression);
+    }));
     observed = { ...result, parameters, parameter_types: parameters.map((register) =>
       ({ kind: 'integer' as const, bits: register.width_bits })), parameter_state: 'ambiguous', argument_list_complete: false,
-      assumptions: [...new Set([
-        ...[...interfaces.values()].flatMap((callee) => callee.assumptions ?? []),
+      requirements: [...new Set([
+        ...(localFpEnvironment ? ['fp_environment' as const] : []),
+        ...[...interfaces.values()].flatMap((callee) => callee.requirements ?? []),
       ])] };
   }
   if (unit.budget_truncated) observed = { ...observed, returns: [], return_types: [],

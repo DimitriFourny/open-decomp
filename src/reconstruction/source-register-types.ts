@@ -1,8 +1,6 @@
 import type { OperationContext } from '../core/index.js';
 import { bitWidth, sameType, type DataType, type Expression, type RegisterBinding, type Value } from '../ir/index.js';
 import { identityOperand } from './expressions.js';
-export const FP_ENVIRONMENT_ASSUMPTION =
-  'FP arithmetic assumes nearest-even rounding, gradual underflow and disabled exception traps; FPCR/FPSR/MXCSR status and exceptional environments are not modeled.';
 
 export interface RegisterTypeSlice {
   readonly type: DataType;

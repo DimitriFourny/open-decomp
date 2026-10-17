@@ -12,7 +12,7 @@ import { structureControlFlow } from '../../src/presentation/index.js';
 import { reconstruct } from '../../src/reconstruction/index.js';
 import type { StoredDecompilation } from '../../src/project/cache/index.js';
 import { builder, image, register, slice } from '../ir/support.js';
-import { emit, emittedFormals, execute, type EmittedFormal } from '../emitters/c/support.js';
+import { acknowledgeRequirements, emit, emittedFormals, execute, type EmittedFormal } from '../emitters/c/support.js';
 import { project } from '../service/analysis/support.js';
 
 type StoredEmission = StoredDecompilation['data']['emission'];
@@ -239,7 +239,7 @@ test('Darwin stack varargs retain entry bytes across frame allocation and pointe
       bytes(memory, 0x8ff8n, 0n, 8);
       const observation = execute(emission,
         new Map([[entry.statement_id, 0x9000n], [count.statement_id, BigInt(length)]]),
-        memory, 0n, new Map(), new Map([['FPCR environment', 0n]]));
+        memory, 0n, new Map(), new Map(), new Map(), acknowledgeRequirements(emission));
       const expected = values.slice(0, length).reduce((sum, value) => sum + value, 0);
       assert.deepEqual(observation.values, [toBits(expected)]);
     }

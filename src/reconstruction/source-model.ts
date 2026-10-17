@@ -1,6 +1,7 @@
 import type { AbiProfile, Address, Diagnostic, Evidence, RegisterDescriptor } from '../core/index.js';
 import type { DataType, Instruction, Value } from '../ir/index.js';
 import type { MemoryShapeTransfer } from '../analysis/types/memory-shapes.js';
+import type { Requirement } from '../core/inference.js';
 
 /** Observed native callee inputs, not a user-supplied or proven source prototype. */
 export interface InferredCallee {
@@ -22,7 +23,7 @@ export interface InferredCallee {
   readonly parameter_types?: readonly DataType[];
   readonly return_types?: readonly DataType[];
   /** Preconditions of these observations; absent means no inferred FP condition. */
-  readonly assumptions?: readonly string[];
+  readonly requirements?: readonly 'fp_environment'[];
   readonly evidence_ids: readonly string[];
 }
 export interface SourceAddress {
@@ -87,8 +88,8 @@ export interface SourcePresentation {
   readonly value_types?: ReadonlyMap<string, SourceTypeView>;
   readonly return_source_type?: string;
   readonly field_subjects?: ReadonlyMap<string, readonly string[]>;
-  /** Explicit preconditions of supported FP projection, not modeled control state. */
-  readonly assumptions?: readonly string[];
+  /** Localized preconditions and residual sites; never a blanket CFG assumption. */
+  readonly requirements?: readonly Requirement[];
   readonly locals: ReadonlyMap<string, SourceLocal>;
   readonly stack: SourceStackStorage | null;
   readonly stack_addresses: ReadonlyMap<string, bigint>;

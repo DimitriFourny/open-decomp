@@ -52,6 +52,28 @@ export interface EmittedFormal {
   readonly semantic_ids: readonly string[];
 }
 
+export type RequirementAcknowledgments = readonly {
+  readonly requirement_id: string;
+  readonly site_id: string;
+  readonly state_epoch: string;
+}[];
+
+/** A trusted source oracle may explicitly assert supported FP state at each
+ * actual guard epoch. Merely executing emitted output never calls this helper. */
+export function acknowledgeRequirements(
+  emission: { readonly requirements?: readonly {
+    readonly id: string;
+    readonly kind: string;
+    readonly sites: readonly { readonly id: string; readonly state_epoch: string; readonly predicate_value_id?: string | undefined }[];
+  }[] | undefined },
+  siteIds?: ReadonlySet<string>,
+): RequirementAcknowledgments {
+  return (emission.requirements ?? []).filter((requirement) => requirement.kind === 'fp_environment')
+    .flatMap((requirement) => requirement.sites
+      .filter((site) => site.predicate_value_id !== undefined && (!siteIds || siteIds.has(site.id)))
+      .map((site) => ({ requirement_id: requirement.id, site_id: site.id, state_epoch: site.state_epoch })));
+}
+
 /** Small test-only parser for the emitted machine-expression/control grammar.
  * It consumes the OUTPUT, not IR or mappings, and never evals target text. Helper
  * semantics below are independent arithmetic/byte-array observations, not imports
@@ -753,6 +775,7 @@ export function execute(
   entryRegisters: Observation['registers'] = new Map(),
   unknownValues: ReadonlyMap<string, bigint> = new Map(),
   sourceCalls: ReadonlyMap<string, SourceCallOracle> = new Map(),
+  requirementAcknowledgments: RequirementAcknowledgments = [],
 ): Observation {
   const text = emission.text,
     parser = new Parser(text),
@@ -1197,6 +1220,21 @@ export function execute(
       case 'list':
         return expression.values.map(evaluate);
       case 'call':
+        if (expression.name === 'requirement_predicate') {
+          assert.equal(expression.args.length, 5);
+          const requirement = string(evaluate(expression.args[0]!));
+          const site = string(evaluate(expression.args[1]!));
+          const epoch = string(evaluate(expression.args[2]!));
+          // The fourth argument is structurally guaranteed pure by production
+          // planning. Acknowledgment never resets unrelated unknown state and
+          // cannot replace a known supported or unsupported predicate result.
+          const predicate = evaluate(expression.args[3]!);
+          if (predicate !== null) return predicate;
+          const supported = number(evaluate(expression.args[4]!));
+          assert.ok(supported === 0n || supported === 1n);
+          return requirementAcknowledgments.some((ack) => ack.requirement_id === requirement &&
+            ack.site_id === site && ack.state_epoch === epoch) ? supported : null;
+        }
         return helper(expression.name, expression.args.map(evaluate));
       case 'invoke': {
         const bits = evaluate(expression.target);

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { openBinary, type BinarySession, type ToolResult } from '../../src/api/index.js';
 import type { WireEmission } from '../../src/core/index.js';
-import { emittedFormals, execute } from '../emitters/c/support.js';
+import { acknowledgeRequirements, emittedFormals, execute } from '../emitters/c/support.js';
 
 // Only trusted, locally compiled source is executed. Nearest-even, gradual
 // underflow, disabled traps, and noncontracted operations are the supported
@@ -89,7 +89,9 @@ int main(void) {
           new Map(),
           0n,
           new Map(),
-          new Map([['FPCR environment', 0n]]),
+          new Map(),
+          new Map(),
+          acknowledgeRequirements(emission),
         );
         assert.equal(observed.exit, 'machine_return');
         assert.deepEqual(observed.values, [expected[index]![0]!], `${emitter}: ${a}, ${b}`);
@@ -112,8 +114,6 @@ int main(void) {
         return bits(a * 1.5 + bytes.getFloat64(0, true) * 0.5);
       });
       const environment = new Map<string, bigint>();
-      environment.set('FPCR environment', 0n);
-      environment.set('call clobbers fpcr', 0n);
       environment.set('non-argument entry register', 0n);
       for (const [index, [a, b]] of cases.entries()) {
         const inputs = new Map<string, bigint>();
@@ -128,7 +128,8 @@ int main(void) {
         assert.equal(sourceIndex, 2);
         const memory = new Map<bigint, number>();
         for (let offset = -256; offset < 0; offset++) memory.set(0x9000n + BigInt(offset), 0xa5);
-        const observed = execute(consumerEmission, inputs, memory, 0n, new Map(), environment, calls);
+        const observed = execute(consumerEmission, inputs, memory, 0n, new Map(), environment, calls,
+          acknowledgeRequirements(consumerEmission));
         assert.equal(observed.exit, 'machine_return');
         assert.deepEqual(observed.values, [expected[index]![1]!]);
         assert.deepEqual(observed.source_calls, [
