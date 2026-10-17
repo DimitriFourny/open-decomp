@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "item": "P2.3 held-out source preparation, separate from P2.2; not yet built/evaluated",
+  "source": {
+    "path": "scripts/bench/quality-heldout-corpus.c",
+    "bytes": 2976,
+    "sha256": "4daef9d0963bfcc5dd5d4440bb8dbfaaa7ded76ab8350b86bb0c4413ee34753b",
+    "license": "MIT; repository LICENSE"
+  },
+  "separation": {
+    "prepared_before_decompiler_outputs": true,
+    "used_to_tune_reconstruction": false,
+    "policy": "Do not disclose source/oracles/outputs to reconstruction tuners or change passes in response to these held-out cases. If this policy is breached, mark contaminated and retire as held-out; do not silently rename/reselect favorable programs."
+  },
+  "selected_functions": [
+    {
+      "name": "heldout_roll",
+      "category": "byte processing, modular rotation recurrence, count/terminator exits",
+      "review_question": "Describe the packed result and both loop stop conditions."
+    },
+    {
+      "name": "heldout_runs",
+      "category": "bounded run-length encoding, capacity failure, ordered memory writes",
+      "review_question": "Describe the output format, maximum run length and insufficient-capacity behavior."
+    },
+    {
+      "name": "heldout_merge",
+      "category": "stable two-source merge with exhaustion tails",
+      "review_question": "Describe tie ordering, exhaustion behavior and output capacity contract."
+    },
+    {
+      "name": "heldout_saturate",
+      "category": "unsigned narrow storage, saturating arithmetic, mutation count",
+      "review_question": "Describe the value bound, stores and returned count."
+    },
+    {
+      "name": "heldout_weighted",
+      "category": "filtered FP accumulation and zero-denominator branch",
+      "review_question": "Describe filtering, normalization and empty-effective-input return."
+    }
+  ],
+  "valid_input_contract": [
+    "All arrays cover stated counts/capacities; null only where count is zero and no read occurs.",
+    "heldout_runs input/output nonoverlapping; capacity is available output bytes.",
+    "heldout_merge inputs sorted ascending, output nonoverlapping, left_count+right_count fits u32 and output allocation.",
+    "FP ordinary finite values/default rounding; exclude cases overflowing/underflowing sums or products and exceptional/trapping environments."
+  ],
+  "planned_matrix": {
+    "targets": [
+      "macho-arm64",
+      "pe-x86_64",
+      "elf-x86_64"
+    ],
+    "symbols": [
+      "symbol-bearing",
+      "stripped"
+    ],
+    "optimizations": [
+      "O0",
+      "O2"
+    ],
+    "compiler_builds": [
+      "apple-clang21",
+      "llvm-clang23"
+    ]
+  },
+  "equal_access": "Identical binary bytes and selected VA per pair, no source/debug sidecars/prototypes/annotation injection. Unsupported cells retained explicitly.",
+  "blind_review_protocol": {
+    "source_and_tool_labels": "Hidden from readability reviewers; independent source-derived answer key held separately from paired output sheets.",
+    "paired_order": "Assign randomized A/B tool ordering after raw outputs exist; retain seed/mapping separately and do not show to reviewer.",
+    "rubric": "For each dimension score 0 unusable/misleading, 1 severe impediments, 2 mixed/partly recoverable, 3 clear with minor impediments, 4 clear and faithful to visible task. No missing-output score substitutes for coverage reporting.",
+    "dimensions": [
+      "algorithm comprehension",
+      "types/interfaces",
+      "control flow",
+      "unresolved semantics",
+      "irrelevant machine-state clutter"
+    ],
+    "reporting": "Retain per-case answers/scores and disagreements; separate readability from correctness and usable coverage; text length is diagnostic only."
+  },
+  "status": "Source/selection frozen; no decompiler run, reviewer score, semantic correctness or comparative win claimed."
+}

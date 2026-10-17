@@ -260,3 +260,40 @@ The full default recording completed 24 input cells, 48 input/tool cells and 288
 All ten Open Decomp request errors were `adler32_z` work limits. Exact-address discovery gaps and all Ghidra selected-address-not-in-function errors remain present; these describe the pinned import/discovery/bridge configuration, not universal engine coverage. The harness verified 116 full Open Decomp artifacts by size/SHA256; no Ghidra text was truncated and no reconstruction-invariant rejection was reported. Ghidra semantic coverage is unavailable through the bridge.
 
 Durable raw results: `quality-matrix-results-2026-10-17.tar.gz`, SHA256 `701d79f537170bf715dfde4dd13b088f8c1ada44b5dcd8fa83a7bd518b14dec2`; its adjacent JSON indexes 3,248 retained members, the invocation and evaluated checkpoint. Numbered requests/responses, live schemas, emitted C, complete artifacts and matched results are retained; project databases and duplicate streams are omitted. This completes broader recording, not the parity gate. Behavioral correctness, held-out review and normalized performance remain separate; concurrent source-only smokes exclude performance conclusions.
+
+## Frozen held-out equal-access evaluation
+
+The held-out source and five-function selection were frozen before inspecting decompiler output in `scripts/bench/quality-heldout-selection.json`: source SHA256 `4daef9d0963bfcc5dd5d4440bb8dbfaaa7ded76ab8350b86bb0c4413ee34753b`. No held-out source or output was supplied to reconstruction workers, and no production pass was tuned against it. Publication makes this suite unsuitable for claiming fresh held-out status after future tuning.
+
+All 24 source-built cells succeeded: three supported targets × independently built Apple clang21/LLVM clang23 × O0/O2 × symbol-bearing/stripped. Selected symbols were removed from stripped variants; paired text-section hashes matched. Both tools received identical binaries and compiler-derived selected addresses, without source/debug sidecars, prototypes or annotations. No analyzed image executed.
+
+The recording exited zero: 48 tool/input cells, 120 matched function pairs, 240 function/tool cells; every project close and server exit succeeded. All 6,222 compiled `dist/` files remained unchanged at index digest `db33db3bb8593018c7fb01ad60cee9e0393fc0a3ee635ae0dfd23ef3eb46b33c`, the broader-matrix checkpoint. Later source/build changes are outside this evaluation.
+
+| Target / selected cells per tool | Open Decomp text | OD complete / partial | OD undiscovered | Ghidra MCP text | Ghidra missing-function failures |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Mach-O ARM64 / 40 | 40 | 28 / 12 | 0 | 40 | 0 |
+| PE x86-64 / 40 | 20 | 14 / 6 | 20 | 0 | 40 |
+| ELF x86-64 / 40 | 20 | 0 / 20 | 20 | 30 | 10 |
+| Total / 120 | 80 | 42 / 38 | 40 | 70 | 50 |
+
+These are text-availability observations, not correctness, usable-coverage or readability scores. Ghidra exposes no semantic-coverage state through this bridge. Its failures identify selected addresses outside discovered functions in this pinned import/discovery/MCP configuration, not universal engine limitations. Every missing/unsupported cell remains recorded; no budget retry or performance claim is made.
+
+```sh
+python3 scripts/bench/quality-heldout.py build \
+  --output "$HOME/Documents/open-decomp-heldout-new-inputs"
+python3 scripts/bench/quality-heldout.py run \
+  --inputs "$HOME/Documents/open-decomp-heldout-new-inputs" \
+  --output "$HOME/Documents/open-decomp-heldout-new-results" \
+  --entry dist/src/cli/entry.js \
+  --bridge "$HOME/Documents/open-decomp-quality-bridge" \
+  --ghidra /Users/df0/Downloads/ghidra_12.1.4_PUBLIC \
+  --java-home /opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home
+```
+
+Use the pinned bridge setup and a new durable output directory outside `/tmp`; the shared measurement lock rejects overlapping harness runs. Commands, tool identities, raw requests/responses, full artifacts, source text and failures are retained under `scripts/bench/`:
+
+- `quality-heldout-inputs-2026-10-17.tar.gz`: 119,901 bytes; SHA256 `e6acbf080ee0b6203e99aa2ecec2aea4d475fa635fc7666737fcdb41ecf4d362`.
+- `quality-heldout-results-2026-10-17.tar.gz`: 45,648,755 bytes; SHA256 `5f1f3f063a3298b89b1ce6b5e97280119d8f8dd2693aca6ca8cf52d79cbe5872`.
+- `quality-heldout-results-2026-10-17.json`: scope, checkpoint, invocation, observations and member hashes.
+
+Intermediate objects, project databases and duplicate streams are omitted; complete run objects remain in `comparison.json`. Uncompressed originals are in `~/Documents/open-decomp-quality-heldout-{inputs,results}-2026-10-17/`. Independent source gold, actual executable-output subset checks and blind readability reviews are separate lanes. This recording does not establish the parity gate.
