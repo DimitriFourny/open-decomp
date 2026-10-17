@@ -315,6 +315,33 @@ Use the pinned bridge setup and a new durable output directory outside `/tmp`; t
 
 Intermediate objects, project databases and duplicate streams are omitted; complete run objects remain in `comparison.json`. Uncompressed originals are in `~/Documents/open-decomp-quality-heldout-{inputs,results}-2026-10-17/`. Independent source gold, actual executable-output subset checks and blind readability reviews are separate lanes. This recording does not establish the parity gate.
 
+## Prospective rerun of all frozen cells (2026-10-17, commit `901602b`)
+
+Executed `scripts/bench/quality-prospective-plan.json` phases 1–5 unchanged (all nine harness/oracle hashes matched; both input archives byte-identical to their roots). All 6,381 compiled `dist/` files kept aggregate digest `dd0ea2635b5fea63933ec3d58da52e4efbdd6a7b60b9cc6769014fa89dfc2e4d` at every snapshot. Output root: `~/Documents/open-decomp-quality-prospective-2026-10-17/` (`records/summary.json`). The held-out lane is a **frozen published suite**: its source, gold and historical results are tracked in this repository, so it no longer supports a fresh held-out claim.
+
+| Lane                                                            | Open Decomp now                                                                                  | Open Decomp historical | Ghidra now           | Ghidra historical   |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------- | -------------------- | ------------------- |
+| Broader availability (576 tool-cells, 288 pairs)                | 194 texts: 44 complete / 150 partial; 2 work-limit errors (`adler32_z`, PE O0)                   | 186: 48 / 138          | 190 texts            | 190                 |
+| Frozen held-out availability (240 tool-cells, 120 pairs)        | 80 texts: 36 complete / 44 partial; 40 undiscovered                                              | 80: 42 / 38; 40        | 70 texts, 50 missing | 70 / 50             |
+| Source gold (4 builds × 184 cases)                              | 736/736 (oracle self-check, not engine correctness)                                              | 736/736                | —                    | —                   |
+| Exact unchanged-output executable subset (120 cells)            | **0 cells** (no text 40, does not compile 42, interface arity differs 34, machine-entry input 4) | 4 cells, 156/156       | 36 cells, 1346/1346  | 36 cells, 1346/1346 |
+| Blind LLM readability (2 new reviewers, all 60 available pairs) | preferred in 0/120                                                                               | 0/120                  | preferred in 120/120 | 120/120             |
+
+Mean blind ratings (0–4, 120 ratings per tool): algorithm comprehension 2.62 vs 3.78; control flow 1.79 vs 3.28; irrelevant machine-state clutter 0.63 vs 3.18; style 1.24 vs 2.72; types/interfaces 1.29 vs 2.73; unresolved semantics 2.54 vs 3.73 (Open Decomp vs Ghidra). The executable-subset regression is a presentation regression: the four previously plain-C cells now use renderer helpers (`field_view`, `stack_slot`, unaligned aliases) or recovered `type_N` names that the exact-text policy correctly refuses to repair. This run establishes neither the parity gate nor a performance result.
+
+## Agent investigation blind task, run10 (2026-10-17, commit `901602b`)
+
+Same five frozen questions, binary, gold and rubric as runs 1–9; workflow adds paged `source` quotations and the 14th investigation kind `helper`. SDK oracle 665/665, native SDK oracle 80/80 (ARM64 + PE x86-64) and the trusted source/instruction oracle passed. Two new blank reviewers (R7, R8) saw only the frozen bundle `investigation-evidence-2026-10-17/paired-run10/review/` (local evidence, not versioned). A = comparator, B = Open Decomp.
+
+| Reviewer                                                         | Irrelevant bytes A / B | Relevant A / B | Manual-repair cases A / B | Preferences A / B / tie |
+| ---------------------------------------------------------------- | ---------------------: | -------------: | ------------------------: | ----------------------: |
+| run9 R5                                                          |              564 / 326 |   2257 / 10037 |                     3 / 5 |               2 / 2 / 1 |
+| run9 R6                                                          |              175 / 120 |   2782 / 11259 |                     3 / 5 |               1 / 2 / 2 |
+| run10 R7                                                         |             508 / 2826 |   2665 / 27247 |                     3 / 0 |               0 / 3 / 2 |
+| run10 R8 (repair field normalized from prose; original retained) |             419 / 2784 |   2754 / 27775 |                     4 / 2 |               0 / 4 / 1 |
+
+All 12 fact atoms and 9/10 uncertainty atoms present on every side (the tenth qualified everywhere, as in run9); no unsupported claims. **Gate FAIL**: B now needs less manual repair for both reviewers, but carries more irrelevant bytes (both reviewers marked the `stack_slot`/`unaligned_uint64_t` helper contracts, call-clobber placeholder locals and native prologue/epilogue in the caller/callback cases). Packets A 5,445 / B 33,500 bytes; full wire A 47,822 / B 510,506 bytes.
+
 ## Measured optimized conversion coverage
 
 `scripts/bench/quality-matrix-rank.py` verifies the retained broader comparison output hashes and counts emitted unsupported-instruction sites across every reviewed input cell. These are static occurrences, not dynamic frequency or independent-program counts. Discovery, budget, unresolved-interface/control and FP-environment gaps remain separate in `quality-matrix-rank-2026-10-17.json`; they were not relabeled as ISA demand.
