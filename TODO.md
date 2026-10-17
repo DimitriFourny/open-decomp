@@ -86,7 +86,7 @@ Surfaces: `src/analysis/types/`, `src/analysis/references/`, `src/analysis/strin
 
 ### Expressions, local variables, and idiomatic control flow
 
-- [ ] Collapse register-cell extract/concat chains and redundant casts into source-width values. Recover `3 * b`, zero-extended addition, masked shifts, and pointer indexing without exposing high/low halves unnecessarily.
+- [x] Collapse register-cell extract/concat chains and redundant casts into source-width values. Recover `3 * b`, zero-extended addition, masked shifts, and pointer indexing without exposing high/low halves unnecessarily.
 - [ ] Simplify copies, dead pure temporaries, equivalent phi values, conditions, induction variables, and loop bounds. Inline only when scope, evaluation order, and expression size remain safe; do not duplicate effectful operations or expand shared expression DAGs exponentially.
 - [ ] Introduce semantic local names from proven roles and stable evidence, with deterministic neutral names otherwise. Prefer `count`, pointer/element roles, and established field names over registers; never invent the program author's intent.
   - Acceptance: the arithmetic, sum-loop, width, stack-argument, and indirect-call examples communicate their algorithms without machine-state plumbing. Preserve modulo arithmetic, signed comparisons, division/shift edge behavior, evaluation order, aliases, and volatile/atomic semantics.

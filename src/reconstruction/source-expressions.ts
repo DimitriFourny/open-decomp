@@ -47,6 +47,31 @@ export function normalizeSourceExpressions(
           value,
           offset: 0,
         });
+  const constant = (value: Value): bigint | null => {
+    const expression = expressions.get(resolve(value).id);
+    return expression?.kind === 'constant'
+      ? BigInt.asUintN(bitWidth(value.type), expression.bits)
+      : null;
+  };
+  const factor = (value: Value, coefficient: bigint, block: string): Value =>
+    make(`integer-factor:${value.id}:${coefficient}`, value.type, block,
+      { kind: 'constant', bits: BigInt.asUintN(bitWidth(value.type), coefficient) }, [value]);
+  const scaled = (value: Value): { value: Value; coefficient: bigint } | null => {
+    const expression = expressions.get(resolve(value).id);
+    if (expression?.kind !== 'integer') return null;
+    if (expression.op === 'mul') {
+      const left = constant(expression.left), right = constant(expression.right);
+      if (right !== null) return { value: resolve(expression.left), coefficient: right };
+      if (left !== null) return { value: resolve(expression.right), coefficient: left };
+    }
+    if (expression.op === 'shl') {
+      const count = constant(expression.right);
+      if (count !== null)
+        return { value: resolve(expression.left),
+          coefficient: count >= BigInt(bitWidth(value.type)) ? 0n : 1n << count };
+    }
+    return null;
+  };
   let changed = true;
   while (changed) {
     changed = false;
@@ -60,12 +85,32 @@ export function normalizeSourceExpressions(
         return resolved;
       });
       let replacement: Expression = expression;
-      if (
-        expression.kind === 'cast' &&
-        expression.op === 'truncate' &&
-        value.type.kind === 'integer'
-      )
-        replacement = { kind: 'extract', value: expression.value, offset: 0 };
+      if (expression.kind === 'cast' && value.type.kind === 'integer') {
+        if (['truncate', 'zero_extend', 'sign_extend'].includes(expression.op) &&
+          sameType(value.type, expression.value.type))
+          replacement = { kind: 'cast', op: 'bitcast', value: expression.value };
+        else if (expression.op === 'truncate')
+          replacement = { kind: 'extract', value: expression.value, offset: 0 };
+      }
+      if (expression.kind === 'integer' && value.type.kind === 'integer') {
+        const block = owner.get(id)!;
+        if (expression.op === 'shl') {
+          const count = constant(expression.right);
+          if (count !== null)
+            replacement = { kind: 'integer', op: 'mul', left: expression.left,
+              right: factor(value, count >= BigInt(value.type.bits) ? 0n : 1n << count, block) };
+        } else if (expression.op === 'add') {
+          const left = scaled(expression.left), right = scaled(expression.right);
+          // Match only x + k*x (in either order), not arbitrary expression
+          // reassociation. SSA identity keeps repeated effectful definitions
+          // distinct, and no operand or shared DAG is duplicated.
+          const matched = right?.value.id === expression.left.id ? right
+            : left?.value.id === expression.right.id ? left : null;
+          if (matched)
+            replacement = { kind: 'integer', op: 'mul', left: matched.value,
+              right: factor(value, matched.coefficient + 1n, block) };
+        }
+      }
       if (expression.kind === 'extract') {
         const source = expressions.get(expression.value.id),
           width = bitWidth(value.type);
