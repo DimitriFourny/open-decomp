@@ -70,7 +70,10 @@ test('source tracking retains actual writes and observable capabilities without 
     ],
     'Actual uses do not mutate ABI capacity',
   );
-  assert.equal(full.register_states[0]!.entry.length, 67);
+  // Without ABI capacities every register the function names is bound at entry, exactly once.
+  const named = new Set([written, result, preserved, ...unrelated].map((r) => r.root));
+  assert.equal(full.register_states[0]!.entry.length, named.size);
+  assert.deepEqual(new Set(full.register_states[0]!.entry.map((b) => b.register.root)), named);
   assert.equal(source.register_states[0]!.entry.length, 3);
   assert.deepEqual(
     source.register_states[0]!.entry.map((binding) => binding.register.root),

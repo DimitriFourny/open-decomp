@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "status": "PREPARED ONLY; no prospective or measured run started; requires coordinator final coherent build and explicit serialized release",
-  "purpose": "Full prospective rerun of all frozen broader and held-out cells without modifying historical evidence or tuning from held-out details",
+  "purpose": "Full prospective rerun of all frozen broader cells and the frozen published suite (formerly labelled held-out; its source, gold and results are tracked in this repository, so it is a fixed regression suite, not a held-out set) without modifying historical evidence or tuning from published-suite details",
   "historical_checkpoint": "db33db3bb8593018c7fb01ad60cee9e0393fc0a3ee635ae0dfd23ef3eb46b33c",
   "prospective_checkpoint": {
     "status": "Awaiting coordinator build; record actual complete dist-file identity before/after every cell and suite; do not substitute historical identity"
@@ -35,7 +35,7 @@
     "target_binaries_executed": false,
     "all_failed_cells_retained": true,
     "serialized_lock": ".local/performance/quality.measurement.lock",
-    "heldout_separation": "Reconstruction workers have not received held-out source/results/review tree. Coordinator has seen historical aggregates; disclose that fact and do not feed details to tuners. Prospective results belong only to the new recorded checkpoint.",
+    "heldout_separation": "The frozen published suite's source, gold, results and review tree are tracked in this repository, so it is NOT held out: any worker with the tree can read them. Treat it as a frozen regression suite; do not claim fresh held-out status for results on it. A genuinely held-out set must be generated and stored outside the repository, committing only hashes. Do not feed published-suite details to tuners for the sake of this plan; prospective results belong only to the new recorded checkpoint.",
     "blind_review": "New blank reviewers A/B; new seeded X/Y mapping and full available-pair cohort. Never narrow to a favorable subset. Historical 60 paired cases are preserved as a cohort; if availability changes retain every missing/newly available cell and review all available pairs, reporting the changed denominator.",
     "performance": "No performance conclusions from ordinary comparison/functional runs. Actual normalized measurements only in separate exclusive host slot under coordinator/P2.5 owner."
   },
@@ -183,14 +183,14 @@
     "required": "Fresh source-oracle-cases.json must match the historical case hash; source gold agreement is not engine correctness."
   },
   "acceptance": [
-    "All24 broader and24 held-out input cells, original names/VAs/configurations and unchanged input bytes; all failures retained.",
+    "All24 broader and24 frozen-published-suite input cells, original names/VAs/configurations and unchanged input bytes; all failures retained.",
     "New actual dist-file identity stable across both suites; if coordinator rebuilds or files change, flag the evaluated scope rather than conflating checkpoints.",
-    "No production tuning or generated-code repair using held-out details; unsupported exact-output helpers/interfaces remain unverified.",
+    "No production tuning or generated-code repair using frozen-published-suite details; unsupported exact-output helpers/interfaces remain unverified.",
     "Actual new independent reviewer submissions all available pairs, strict schema/case/evidence validation before reading sealed mapping; no score templates or old review reuse.",
     "Retain fresh raw responses/artifacts/manifests and label availability, finite correctness, bounded usable subset, LLM readability and normalized performance separately."
   ],
   "gaps": [
-    "The broader P2.2 harness is a full static-availability/source-known recording, not a source-behavior oracle for every broad corpus function. Existing held-out gold and exact-output subset checks are replayable as listed; do not relabel them as broader whole-corpus equivalence.",
+    "The broader P2.2 harness is a full static-availability/source-known recording, not a source-behavior oracle for every broad corpus function. Existing frozen-published-suite gold and exact-output subset checks are replayable as listed; do not relabel them as broader whole-corpus equivalence.",
     "Normalized performance commands belong to NavigationCache separate exclusive-slot contract, not this plan."
   ]
 }

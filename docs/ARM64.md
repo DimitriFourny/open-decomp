@@ -54,8 +54,6 @@ Run from the repository root after integration (not executed by this implementat
 ```sh
 node --import tsx --test test/decoders/arm64/decoder.test.ts
 node --import tsx test/decoders/arm64/smoke.ts
-# After the coordinator's production build:
-node dist/test/decoders/arm64/smoke.js
 ```
 
-The compiled smoke loads the real Mach-O image and exercises the adapter's missing-EOR completion through actual loader/address-map output. No sibling checkout, external decoder, Arm XML or target execution is needed.
+The smoke script is source-only (`tsconfig.build.json` compiles `src`, `vendor` and the release/smoke/benchmark drivers that run from `dist`, not `test/`). It loads the real Mach-O image and exercises the adapter's missing-EOR completion through actual loader/address-map output. No sibling checkout, external decoder, Arm XML or target execution is needed.

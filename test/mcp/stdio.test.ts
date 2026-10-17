@@ -19,11 +19,18 @@ import {
 import { callMcpTool, resultData, runMcpWorkflows } from '../../scripts/mcp-workflow.js';
 
 const entry = fileURLToPath(new URL('../../src/cli/entry.ts', import.meta.url));
+const stallEntry = fileURLToPath(new URL('./stdio-stall-entry.ts', import.meta.url));
+// Shortened from the 30 s production deadline through the test-only runStdio option.
+const TEST_OUTPUT_STALL_MS = 1000;
 const fixtures = resolve('fixtures/bin');
 const nodeArgs = ['--import', 'tsx'];
 
-function launch(t: TestContext, args: readonly string[]) {
-  const child = spawn(process.execPath, [...nodeArgs, entry, 'mcp', 'start', ...args], {
+function launch(t: TestContext, args: readonly string[], options: { stallMs?: number } = {}) {
+  const command =
+    options.stallMs === undefined
+      ? [entry, 'mcp', 'start', ...args]
+      : [stallEntry, String(options.stallMs), ...args];
+  const child = spawn(process.execPath, [...nodeArgs, ...command], {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   const output = { stdout: '', stderr: '' };
@@ -138,7 +145,7 @@ for (const shutdown of [
   test(
     `source CLI ${shutdown} reaps a real owned worker and leaves its project resumable`,
     {
-      timeout: shutdown === 'stalled-output' ? 120000 : 60000,
+      timeout: 60000,
       skip:
         process.platform === 'win32' && (shutdown === 'SIGINT' || shutdown === 'SIGTERM')
           ? 'Windows child.kill terminates rather than delivering catchable POSIX signals; EOF and backpressure lifecycle remain covered'
@@ -146,7 +153,11 @@ for (const shutdown of [
     },
     async (t) => {
       const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-mcp-lifecycle-')));
-      const process = launch(t, ['--root', root, '--root', fixtures]);
+      const process = launch(
+        t,
+        ['--root', root, '--root', fixtures],
+        shutdown === 'stalled-output' ? { stallMs: TEST_OUTPUT_STALL_MS } : {},
+      );
       t.after(async () => {
         await rm(root, { recursive: true, force: true });
       });

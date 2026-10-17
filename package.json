@@ -40,8 +40,12 @@
     "format": "node --import tsx scripts/format.ts",
     "format:check": "node --import tsx scripts/format.ts --check",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test \"test/**/*.test.ts\"",
-    "check": "bun run typecheck && bun run test && bun run build",
+    "lint": "eslint .",
+    "test": "node --import tsx scripts/test.ts all",
+    "test:unit": "node --import tsx scripts/test.ts unit",
+    "test:integration": "node --import tsx scripts/test.ts integration",
+    "fingerprints": "node --import tsx scripts/output-fingerprints.ts",
+    "check": "bun run typecheck && bun run format:check && bun run test:unit && bun run test:integration && bun run build",
     "cli": "node dist/src/cli/entry.js",
     "smoke": "node dist/scripts/smoke.js",
     "mcp": "node dist/src/cli/entry.js mcp start",
@@ -58,7 +62,8 @@
     "eslint": "10.13.0",
     "prettier": "3.9.10",
     "tsx": "4.20.6",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.2"
   },
   "dependencies": {
     "@modelcontextprotocol/core": "2.3.1",

@@ -7,10 +7,14 @@ import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { openBinary } from '../../src/api/index.js';
+import { FunctionSelectionError, openBinary } from '../../src/api/index.js';
 import { toolSchemas } from '../../src/core/index.js';
 import type { ToolResult } from '../../src/core/index.js';
 import { manyFunctions } from './many-functions.js';
+
+/** The CLI reports the API's own selection error; compare against that, not a copy of its prose. */
+const selectionMessage = (reason: FunctionSelectionError['reason']): string =>
+  new FunctionSelectionError(reason, []).message;
 
 interface CommandOutput {
   code: number | null;
@@ -210,7 +214,7 @@ test(
     const ambiguous = await run(['decompile', binary, '--function', 'duplicate']);
     assert.equal(ambiguous.code, 1, ambiguous.stderr);
     assert.equal(ambiguous.stdout, '');
-    assert.match(ambiguous.stderr, /ambiguous/i);
+    assert.ok(ambiguous.stderr.includes(selectionMessage('ambiguous')), ambiguous.stderr);
     for (const item of candidates) {
       assert.ok(ambiguous.stderr.includes(item.id));
       assert.ok(ambiguous.stderr.includes(item.entry.value));
@@ -219,7 +223,7 @@ test(
     const absent = await run(['decompile', binary, '--function', 'not_present']);
     assert.equal(absent.code, 1, absent.stderr);
     assert.equal(absent.stdout, '');
-    assert.match(absent.stderr, /no function matches/i);
+    assert.ok(absent.stderr.includes(selectionMessage('not_found')), absent.stderr);
   },
 );
 
@@ -240,7 +244,7 @@ test(
     const incomplete = await run(['decompile', binary, '--cache', cache, '--function', 'absent']);
     assert.equal(incomplete.code, 2, incomplete.stderr);
     assert.equal(incomplete.stdout, '');
-    assert.match(incomplete.stderr, /incomplete/i);
+    assert.ok(incomplete.stderr.includes(selectionMessage('incomplete')), incomplete.stderr);
   },
 );
 
@@ -256,14 +260,15 @@ test(
     const resolved = await run(['decompile', binary, '--cache', cache, '--function', 'task_010']);
     assert.ok(resolved.code === 0 || resolved.code === 2, resolved.stderr);
     assert.notEqual(resolved.stdout, '', resolved.stderr);
-    assert.doesNotMatch(resolved.stderr, /incomplete|ambiguous|no function matches/i);
+    for (const reason of ['incomplete', 'ambiguous', 'not_found'] as const)
+      assert.ok(!resolved.stderr.includes(selectionMessage(reason)), resolved.stderr);
     const ambiguous = await run(['decompile', binary, '--cache', cache, '--function', 'duplicate']);
     assert.equal(ambiguous.code, 1, ambiguous.stderr);
     assert.equal(ambiguous.stdout, '');
-    assert.match(ambiguous.stderr, /ambiguous/i);
+    assert.ok(ambiguous.stderr.includes(selectionMessage('ambiguous')), ambiguous.stderr);
     const absent = await run(['decompile', binary, '--cache', cache, '--function', 'task_absent']);
     assert.equal(absent.code, 2, absent.stderr);
-    assert.match(absent.stderr, /incomplete/i);
+    assert.ok(absent.stderr.includes(selectionMessage('incomplete')), absent.stderr);
   },
 );
 

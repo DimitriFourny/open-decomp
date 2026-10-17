@@ -94,30 +94,17 @@ test('compact native detail is explicit and restricted to public disassembly', (
     );
 });
 
-const allKinds = [
-  'signature',
-  'parameter',
-  'type',
-  'interpretation',
-  'field',
-  'identity',
-  'call',
-  'rewrite',
-  'conflict',
-  'annotation',
-  'fp_environment',
-  'unresolved',
-  'source',
-  'helper',
-] as const;
+// Derived from the schema so adding a kind can never leave this list silently stale.
+const allKinds = functionGetArgsSchema.shape.kinds.unwrap().element.options;
 const helperDomain =
   'renderer pseudocode semantic contract; not original source or an executable helper definition';
 const helperLocator =
   'result.data.emission.helpers[artifact_helper_index] in the selected artifact';
 
-test('helper is the fourteenth bounded investigation kind and default selection covers it', () => {
+test('helper is a bounded investigation kind and the default selection covers every kind', () => {
   const investigation = { ...scope, view: 'investigation', artifact_id };
-  assert.equal(allKinds.length, 14);
+  assert.equal(new Set(allKinds).size, allKinds.length, 'kinds are unique');
+  assert.ok(allKinds.includes('helper'));
   assert.deepEqual(functionGetArgsSchema.parse({ ...investigation, kinds: [...allKinds] }).kinds, [
     ...allKinds,
   ]);
@@ -146,7 +133,6 @@ test('helper is the fourteenth bounded investigation kind and default selection 
   );
 });
 
-const image = `image_${'5'.repeat(64)}`;
 const counts = (helpers: { total: number; selected: number }) => ({
   inferences: { total: 0, selected: 0 },
   requirements: { total: 0, selected: 0 },

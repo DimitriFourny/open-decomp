@@ -11,6 +11,7 @@ import {
   execute,
   type SourceCallOracle,
 } from '../../emitters/c/support.js';
+import { nativeOracleSkip } from '../../support/host-tools.js';
 import { project } from './support.js';
 
 const cases = [0n, 1n, 0x7fffffffn, 0x80000000n, 0xffffffffn, 0x1234567887654321n];
@@ -64,7 +65,7 @@ function formals(
 // never invoked by the decompiler or the output interpreter.
 test(
   'public default native summaries carry nested, recursive, tail, preserved, stack and FP constraints',
-  { skip: process.platform !== 'darwin' || process.arch !== 'arm64', timeout: 120000 },
+  { skip: nativeOracleSkip(), timeout: 120000 },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), 'open-decomp-native-summary-'));
     let session: BinarySession | undefined;

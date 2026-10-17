@@ -51,8 +51,6 @@ import type {
   TypeConflict,
   TypeRecoveryOptions,
   TypeRecoveryResult,
-  TypeSource,
-  TypeStatus,
 } from './model.js';
 export type * from './model.js';
 export { refineMemoryShapes, parameterMemoryShapes } from './memory-shapes.js';

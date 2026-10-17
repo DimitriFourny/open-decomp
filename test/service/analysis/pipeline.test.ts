@@ -26,6 +26,7 @@ import {
   pipelineVersions,
 } from '../../../src/service/analysis/versions.js';
 import { execute } from '../../emitters/c/support.js';
+import { assertEvidenceClosed } from '../../support/evidence.js';
 import { loadImage, project } from './support.js';
 
 for (const fixture of [
@@ -51,12 +52,7 @@ for (const fixture of [
         'machine register liveness never invents a source signature',
       );
       assert.equal(p.state.store.readJob(before.job_id)?.state, 'completed');
-      const proofIds = new Set(full.evidence.map((proof) => proof.id));
-      for (const proof of full.evidence)
-        for (const parent of [...proof.derived_from, ...proof.conflicts_with])
-          assert.ok(proofIds.has(parent));
-      for (const mapping of expandEmission(full.data.emission).mappings)
-        for (const proof of mapping.evidence_ids) assert.ok(proofIds.has(proof));
+      assertEvidenceClosed(full);
       const scope = { store: p.state.store, context: createOperationContext() };
       const graph = loadFunctionGraph(scope, 2, loadFunctionScope(scope, 2, fn.id));
       const lifted = fixture.arm

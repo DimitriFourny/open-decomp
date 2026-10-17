@@ -66,7 +66,7 @@ export function emissionEvidenceReferences(
 /** Every advertised proof has its complete dependency/conflict closure. Missing
  * analyzer provenance is an integration failure, never silently omitted evidence. */
 export function closeEvidence(
-  store: ProjectStore,
+  store: Pick<ProjectStore, 'readEvidence'>,
   revision: number,
   seeds: Iterable<string>,
   available: readonly Evidence[],

@@ -1,5 +1,18 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["src/**/*.ts", "scripts/**/*.ts", "vendor/**/*.ts", "vendor/**/*.js"],
+  "include": [
+    "src/**/*.ts",
+    "vendor/**/*.ts",
+    "vendor/**/*.js",
+    "scripts/smoke.ts",
+    "scripts/mcp-smoke.ts",
+    "scripts/release-acceptance.ts",
+    "scripts/bench/pipeline.ts",
+    "scripts/bench/worker.ts",
+    "scripts/bench/resources.ts",
+    "scripts/bench/resources-worker.ts",
+    "scripts/bench/incremental-controlled.ts",
+    "scripts/bench/incremental-controlled-worker.ts"
+  ],
   "exclude": ["node_modules", "dist", "test", "vendor/**/test", "vendor/**/tools"]
 }

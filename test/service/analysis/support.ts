@@ -27,6 +27,7 @@ import { executeAnnotations, executeDecompilation } from '../../../src/service/a
 import type { AnnotationSubject } from '../../../src/project/annotations/index.js';
 import type { StoredDecompilation } from '../../../src/project/cache/index.js';
 import { encodeAnnotationEdit } from '../../../src/core/index.js';
+import { assertEvidenceClosed } from '../../support/evidence.js';
 
 export function loadImage(input: Uint8Array): LoadedImage {
   const bytes = new ImmutableBytes(input),
@@ -132,10 +133,15 @@ export async function project(t: TestContext, fixture: string | Uint8Array) {
     catalog: { subjects: AnnotationSubject[]; types: { id: string; source: string }[] };
   } {
     const artifact = decodeArtifact(result.artifacts[0]!);
-    return JSON.parse(Buffer.from(state.store.readArtifactBytes(artifact)).toString('utf8')) as {
+    const stored = JSON.parse(
+      Buffer.from(state.store.readArtifactBytes(artifact)).toString('utf8'),
+    ) as {
       result: StoredDecompilation;
       catalog: { subjects: AnnotationSubject[]; types: { id: string; source: string }[] };
     };
+    // Every decompile-path test reads its result here, so closure is checked for all of them.
+    assertEvidenceClosed(stored.result);
+    return stored;
   }
   async function reopen(): Promise<void> {
     await state.store.close();

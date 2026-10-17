@@ -19,6 +19,12 @@ import {
 export const MCP_VERSION = '0.1.0';
 const OUTPUT_STALL_MS = 30_000;
 
+/** Test-only knobs for `runStdio`; the shipped CLI always uses the defaults. */
+export interface RunStdioOptions {
+  /** Deadline for one blocked output write (default 30,000 ms). */
+  readonly outputStallMs?: number;
+}
+
 const HELP = `Usage: open-decomp mcp start [--transport stdio] --root PATH [--root PATH ...] [--max-workers N] [--max-queued N]
 
 Serve the local analysis engine over MCP stdio. At least one explicit authorized
@@ -93,7 +99,8 @@ class OwnedStdioTransport extends StdioServerTransport {
   #outputTail: Promise<void> = Promise.resolve();
   readonly #requests = new Set<string | number>();
   #closing = false;
-  constructor(closed: () => void) {
+  readonly #stallMs: number;
+  constructor(closed: () => void, stallMs: number) {
     const output = new Writable({
       // SDK send must await the write callback even for a small blocked frame.
       highWaterMark: 1,
@@ -136,6 +143,7 @@ class OwnedStdioTransport extends StdioServerTransport {
     super(process.stdin, output, { maxBufferSize: MAX_MCP_INPUT_BYTES });
     this.#output = output;
     this.#closed = closed;
+    this.#stallMs = stallMs;
   }
 
   accept(message: JSONRPCMessage): boolean {
@@ -172,8 +180,9 @@ class OwnedStdioTransport extends StdioServerTransport {
     // messages, not repeatedly serialized copies, until the previous write drains.
     const sent = this.#outputTail.then(async () => {
       const timer = setTimeout(
-        () => this.#output.destroy(new Error('MCP output stalled for 30 seconds')),
-        OUTPUT_STALL_MS,
+        () =>
+          this.#output.destroy(new Error(`MCP output stalled for ${this.#stallMs / 1000} seconds`)),
+        this.#stallMs,
       );
       try {
         await super.send(message);
@@ -215,7 +224,10 @@ class OwnedStdioTransport extends StdioServerTransport {
   }
 }
 
-export async function runStdio(args: readonly string[]): Promise<void> {
+export async function runStdio(
+  args: readonly string[],
+  testOptions: RunStdioOptions = {},
+): Promise<void> {
   const options = parseCliArguments(args);
   if (options.action !== 'serve') {
     process.stderr.write(options.action === 'help' ? HELP : `${MCP_VERSION}\n`);
@@ -265,7 +277,7 @@ export async function runStdio(args: readonly string[]): Promise<void> {
   };
   const transport = new OwnedStdioTransport(() => {
     void stop().catch(report);
-  });
+  }, testOptions.outputStallMs ?? OUTPUT_STALL_MS);
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
   try {

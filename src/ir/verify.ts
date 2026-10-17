@@ -19,6 +19,14 @@ import type {
   Value,
 } from './model.js';
 
+/** Messages callers and tests match together with `IRProblem.code`; defined once so prose edits cannot desynchronize them. */
+export const IR_PROBLEM_MESSAGE = {
+  invalidProvenance: 'Invalid source identity, range, evidence or justification',
+  registerOverlap: 'Overlapping SSA register bindings',
+  registerCoverage: 'SSA architectural-state coverage mismatch',
+  replaceRootCoverage: 'replace_root must cover the root',
+} as const;
+
 export interface IRProblem {
   readonly code:
     | 'identity'
@@ -253,8 +261,7 @@ export function verifyIR(
       provenanceFacts.set(p, facts);
     } else checkpoint?.(0);
     if (facts.missing) report('provenance', node.id, 'Missing instruction or synthetic origin');
-    if (facts.invalid)
-      report('provenance', node.id, 'Invalid source identity, range, evidence or justification');
+    if (facts.invalid) report('provenance', node.id, IR_PROBLEM_MESSAGE.invalidProvenance);
     if (facts.missing_range)
       report('provenance', node.id, 'Instruction origin needs a source range');
   };
@@ -280,7 +287,7 @@ export function verifyIR(
         r.write_rule === 'replace_root' &&
         (r.offset_bits !== 0 || r.width_bits !== r.root_width_bits)
       )
-        errors.push('replace_root must cover the root');
+        errors.push(IR_PROBLEM_MESSAGE.replaceRootCoverage);
       if (r.write_rule === 'zero_extend_root' && r.offset_bits !== 0)
         errors.push('zero_extend_root must start at bit zero');
       facts = errors;
@@ -357,7 +364,7 @@ export function verifyIR(
         const mask = ((1n << BigInt(r.width_bits)) - 1n) << BigInt(r.offset_bits),
           previous = initial.get(r.root) ?? 0n;
         if ((previous & mask) !== 0n) {
-          report('register', node, 'Overlapping SSA register bindings');
+          report('register', node, IR_PROBLEM_MESSAGE.registerOverlap);
           layoutOverlaps.push(index);
         }
         initial.set(r.root, previous | mask);
@@ -367,7 +374,7 @@ export function verifyIR(
     if (canonical) {
       checkpoint?.(layoutOverlaps.length);
       for (let index = 0; index < layoutOverlaps.length; index++)
-        report('register', node, 'Overlapping SSA register bindings');
+        report('register', node, IR_PROBLEM_MESSAGE.registerOverlap);
       return tracked!;
     }
     // Descriptor identity/order differs: recompute the actual mask after the
@@ -379,7 +386,7 @@ export function verifyIR(
       const r = bindings[index]!.register,
         mask = ((1n << BigInt(r.width_bits)) - 1n) << BigInt(r.offset_bits),
         previous = result.get(r.root) ?? 0n;
-      if ((previous & mask) !== 0n) report('register', node, 'Overlapping SSA register bindings');
+      if ((previous & mask) !== 0n) report('register', node, IR_PROBLEM_MESSAGE.registerOverlap);
       result.set(r.root, previous | mask);
     }
     return result;
@@ -398,7 +405,7 @@ export function verifyIR(
       actual.size !== expected.size ||
       [...expected].some(([root, mask]) => actual.get(root) !== mask)
     )
-      report('register', node, 'SSA architectural-state coverage mismatch');
+      report('register', node, IR_PROBLEM_MESSAGE.registerCoverage);
   };
   tracked = masks(layout, ir.id);
   const trackedCells = new Set(
@@ -414,7 +421,7 @@ export function verifyIR(
       const cell = `${r.root}:${r.offset_bits}:${r.width_bits}`;
       if (r.write_rule !== 'preserve_other_bits' || r.role === 'zero' || !trackedCells.has(cell))
         report('register', node, 'SSA state rows bind only tracked disjoint register cells');
-      if (seen.has(cell)) report('register', node, 'Overlapping SSA register bindings');
+      if (seen.has(cell)) report('register', node, IR_PROBLEM_MESSAGE.registerOverlap);
       seen.add(cell);
       if (binding.value.type.kind !== 'integer' || bitWidth(binding.value.type) !== r.width_bits)
         report('type', node, 'SSA register binding requires an equal-width integer value');

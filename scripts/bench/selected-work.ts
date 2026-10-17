@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
+import { loadSelectedContract } from './selected-contract.js';
 import { observeSelectedWork } from './selected-work-hooks.js';
 import type {
   Budget,
@@ -11,7 +12,9 @@ import type {
 } from '../../src/core/index.js';
 
 // Usage: node --import tsx scripts/bench/selected-work.ts --mode diagnose|public
-//   --contract /retained/contract.json [--import-instructions 1000000]
+//   --inputs DIR [--contract selected-contract.json] [--import-instructions 1000000]
+//   (DIR holds corpus-arm64 and sqlite3-arm64, e.g. extracted from
+//   quality-evidence/baseline-2026-10-17.tar.gz; $OPEN_DECOMP_BENCH_INPUTS also works)
 //   [--instructions 10000] [--function sqlite3_complete] [--binary corpus-arm64]
 //   [--work 1000000] (count-only observation ceiling; public defaults stay unchanged)
 //   [--work-sites true|all|PHASE] (expensive checkpoint-site census, never timing)
@@ -27,6 +30,7 @@ for (let i = 2; i < process.argv.length; i += 2) {
       [
         '--mode',
         '--contract',
+        '--inputs',
         '--import-instructions',
         '--instructions',
         '--function',
@@ -44,14 +48,9 @@ const mode = flags.get('--mode') ?? 'diagnose';
 assert.ok(mode === 'diagnose' || mode === 'public');
 const emitter = flags.get('--emitter') ?? 'c-like';
 assert.ok(emitter === 'c-like' || emitter === 'python-like');
-const contractPath = resolve(
-  flags.get('--contract') ?? '/tmp/open-decomp-ghidra-compare.sfUkLc/contract.json',
-);
-const contract = JSON.parse(await readFile(contractPath, 'utf8')) as {
-  binaries: { path: string; functions: string[] }[];
-};
+const { contractPath, binaries } = await loadSelectedContract(flags);
 const selectedBinary = flags.get('--binary') ?? 'sqlite3-arm64';
-const target = contract.binaries.find((entry) => entry.path.endsWith(`/${selectedBinary}`));
+const target = binaries.find((entry) => entry.name === selectedBinary);
 assert.ok(target, 'Contract must identify the reviewed binary and selected functions');
 const selectedNames = flags.has('--function') ? [flags.get('--function')!] : target.functions;
 for (const name of selectedNames)

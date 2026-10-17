@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createWriteStream, type WriteStream } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { toolSchemas } from '../../src/core/index.js';
+import { loadSelectedContract } from './selected-contract.js';
 import type {
   ToolInput,
   ToolName,
@@ -19,7 +20,7 @@ import type {
 } from '../../src/core/index.js';
 
 // Usage: node --import tsx scripts/bench/public-surface-census.ts --out DIR
-//   [--contract /retained/contract.json] [--binary corpus-arm64] [--function NAME]
+//   --inputs DIR [--contract selected-contract.json] [--binary corpus-arm64] [--function NAME]
 //   [--surface mcp|cli|both]
 //
 // Public-surface census: every contract function through the REAL MCP stdio server
@@ -52,16 +53,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '..', '..');
 const outDir = resolve(flags.get('--out') ?? '');
 assert.ok(flags.has('--out'), '--out DIR is required');
-const contractPath = resolve(
-  flags.get('--contract') ?? '/tmp/open-decomp-ghidra-compare.sfUkLc/contract.json',
-);
 const surfaceFlag = flags.get('--surface') ?? 'both';
 assert.ok(['mcp', 'cli', 'both'].includes(surfaceFlag));
-const contract = JSON.parse(await readFile(contractPath, 'utf8')) as {
-  binaries: { path: string; functions: string[] }[];
-};
-const selected = contract.binaries.filter(
-  (entry) => !flags.has('--binary') || basename(entry.path) === flags.get('--binary'),
+const { binaries: contractBinaries } = await loadSelectedContract(flags);
+const selected = contractBinaries.filter(
+  (entry) => !flags.has('--binary') || entry.name === flags.get('--binary'),
 );
 assert.ok(selected.length > 0, 'No contract binary selected');
 const dialects = ['c-like', 'python-like'] as const;

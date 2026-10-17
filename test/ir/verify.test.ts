@@ -5,6 +5,7 @@ import type { DecodedInstruction } from '../../src/core/index.js';
 import { constructSSA } from '../../src/analysis/ssa/index.js';
 import {
   IRBuilder,
+  IR_PROBLEM_MESSAGE,
   IRValidationError,
   assertValidIR,
   evaluateIR,
@@ -280,8 +281,7 @@ test('shared provenance validation retains every origin-specific rejection and i
     problems
       .filter(
         (problem) =>
-          problem.code === 'provenance' &&
-          problem.message === 'Invalid source identity, range, evidence or justification',
+          problem.code === 'provenance' && problem.message === IR_PROBLEM_MESSAGE.invalidProvenance,
       )
       .map((problem) => problem.node),
   );
@@ -319,12 +319,14 @@ test('canonical binding layouts retain reordered, cloned and overlapping descrip
   );
   assert.ok(
     verifyIR(replaceExit(changed)).some(
-      (problem) => problem.message === 'Overlapping SSA register bindings',
+      (problem) =>
+        problem.code === 'register' && problem.message === IR_PROBLEM_MESSAGE.registerOverlap,
     ),
   );
   assert.ok(
     verifyIR(replaceExit(changed)).some(
-      (problem) => problem.message === 'SSA architectural-state coverage mismatch',
+      (problem) =>
+        problem.code === 'register' && problem.message === IR_PROBLEM_MESSAGE.registerCoverage,
     ),
   );
   const overlapping = { ...program.register_states[0]!.entry[1]!.register, offset_bits: 16 };
@@ -341,7 +343,8 @@ test('canonical binding layouts retain reordered, cloned and overlapping descrip
     })),
   };
   const reports = verifyIR(overlap).filter(
-    (problem) => problem.message === 'Overlapping SSA register bindings',
+    (problem) =>
+      problem.code === 'register' && problem.message === IR_PROBLEM_MESSAGE.registerOverlap,
   );
   assert.equal(reports.filter((problem) => problem.node === program.id).length, 1);
   // Each nonempty row naming the overlapping cell reports it once.
@@ -388,7 +391,8 @@ test('descriptor validation reuses only frozen flat cells and retains mutable cl
   assert.equal(Object.isFrozen(mutable), false);
   mutable.offset_bits = 16;
   const changed = verifyIR(mutableProgram).filter(
-    (problem) => problem.message === 'Overlapping SSA register bindings',
+    (problem) =>
+      problem.code === 'register' && problem.message === IR_PROBLEM_MESSAGE.registerOverlap,
   );
   assert.equal(changed.filter((problem) => problem.node === program.id).length, 1);
   for (const state of program.register_states)
@@ -398,7 +402,8 @@ test('descriptor validation reuses only frozen flat cells and retains mutable cl
     );
   const invalid = Object.freeze({ ...first, write_rule: 'replace_root' as const });
   const repeated = verifyIR(replace(invalid)).filter(
-    (problem) => problem.message === 'replace_root must cover the root',
+    (problem) =>
+      problem.code === 'register' && problem.message === IR_PROBLEM_MESSAGE.replaceRootCoverage,
   );
   assert.equal(repeated.filter((problem) => problem.node === program.id).length, 1);
   for (const state of program.register_states)

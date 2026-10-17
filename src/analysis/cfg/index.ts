@@ -49,9 +49,6 @@ export function buildCFG(input: CFGInput, context: OperationContext): readonly C
   const sorted = [...input.instructions].sort((a, b) =>
     a.address.value < b.address.value ? -1 : a.address.value > b.address.value ? 1 : 0,
   );
-  const instructions = new Map(
-    sorted.map((instruction) => [instruction.address.value, instruction]),
-  );
   const leaders = new Set<bigint>([input.entry.value]);
   const incoming = new Map<bigint, number>();
   for (const instruction of sorted) {

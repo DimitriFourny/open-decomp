@@ -189,12 +189,12 @@ Separate causes:
 - Native summaries repeat that global work. `sqlite3_complete` performs two entire-image traversals for only 306 body-plus-callee instructions. `changes64`, `total_changes64`, `errcode` and `limit` each perform three traversals for their body and two required native targets.
 - Raising a later query does not repair historically truncated discovery ranges, although it still pays for whole-image traversal. Finishing seeded discovery remains distinct from semantic coverage.
 
-Recorded reproduction commands (the retained contract selects the exact reviewed binary and ten functions):
+Recorded reproduction commands. The committed `scripts/bench/selected-contract.json` (the default `--contract`) selects the reviewed binaries and functions; `--inputs` (or `$OPEN_DECOMP_BENCH_INPUTS`) names a directory holding `corpus-arm64` and `sqlite3-arm64`, for example `inputs/` extracted from `scripts/bench/quality-evidence/baseline-2026-10-17.tar.gz` (`--binary` defaults to `sqlite3-arm64`; the ten-function selection belongs to it):
 
 ```sh
-node --import tsx scripts/bench/selected-work.ts --mode public --contract /tmp/open-decomp-ghidra-compare.sfUkLc/contract.json
-node --import tsx scripts/bench/selected-work.ts --mode diagnose --contract /tmp/open-decomp-ghidra-compare.sfUkLc/contract.json
-node --import tsx scripts/bench/selected-work.ts --mode diagnose --contract /tmp/open-decomp-ghidra-compare.sfUkLc/contract.json --import-instructions 1000000 --instructions 1000000
+node --import tsx scripts/bench/selected-work.ts --mode public --inputs "$INPUTS"
+node --import tsx scripts/bench/selected-work.ts --mode diagnose --inputs "$INPUTS"
+node --import tsx scripts/bench/selected-work.ts --mode diagnose --inputs "$INPUTS" --import-instructions 1000000 --instructions 1000000
 ```
 
 `public` uses ordinary defaults in a fresh isolated project. `diagnose` raises only non-instruction observation ceilings to 100,000 blocks, 10,000,000 IR nodes, 100,000,000 work and 300,000 ms; these are measurement settings, not a proposed repair. No analyzed input executes. The retained count record is historical evidence of the pre-repair implementation, not a promise that later instrumentation produces identical counts.
@@ -204,7 +204,7 @@ node --import tsx scripts/bench/selected-work.ts --mode diagnose --contract /tmp
 `scripts/bench/public-surface-census.ts` drives every contract function through the real MCP stdio server (spawned from source, server and tool defaults, default 100-item pages, cursors followed) and the ordinary `functions`/`decompile` CLI commands, both dialects, without supplied prototypes or raised limits:
 
 ```sh
-node --import tsx scripts/bench/public-surface-census.ts --out /tmp/od-census/surface-1 [--contract PATH] [--binary corpus-arm64] [--function NAME] [--surface mcp|cli|both]
+node --import tsx scripts/bench/public-surface-census.ts --out "$CENSUS_OUT" --inputs "$INPUTS" [--contract PATH] [--binary corpus-arm64] [--function NAME] [--surface mcp|cli|both]
 ```
 
 Per call it records tool, state, reason, delivery, cache, diagnostic codes/messages, coverage, wire bytes and wall time (diagnostic only) to `calls.jsonl`, and writes `summary.json`/`summary.md`. MCP covers import job, `functions_find`/`symbols_find`/`strings_find`/`binary_info` page sweeps, selected-function lookup, `function_get`/`xrefs_get`, first and cached `function_decompile` (artifact chunks read through the published `resource_link`/`next_uri` when delivery is artifact), the default queued job path, and a real server restart that must hit the persisted cache. Each result is classified from its actual fields: `failed`, `resource_limit` (reason `budget`, `details.kind=limit`, or a coverage reason naming a sub-budget), `missing_instructions` (decode coverage), `missing_graph` (lift/analysis coverage for unresolved control flow), `unresolved_semantics` (reason `unsupported_subset`, reconstruction coverage, source-interface diagnostics), `metadata_gap` (reason `incomplete_index`, image-wide discovery diagnostics) and `delivery_limit` (reason `output_limit`; the semantic class comes from the published artifact body). Mach-O C symbols carry a leading underscore: the CLI is first tried with the unprefixed contract name and then with the actual symbol; failure of the former is recorded as an anomaly.
@@ -232,8 +232,8 @@ python3 scripts/bench/quality.py run \
   --inputs .local/performance/quality-reviewed \
   --output "$HOME/Documents/open-decomp-quality/smoke" \
   --ghidra-bridge "$HOME/Documents/open-decomp-quality-bridge" \
-  --ghidra /Users/df0/Downloads/ghidra_12.1.4_PUBLIC \
-  --java-home /opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home \
+  --ghidra "$GHIDRA_HOME" \
+  --java-home "$JAVA_HOME" \
   --input corpus-arm64 --function fixture_arithmetic --function fixture_direct \
   --cold-runs 1 --warm-runs 1
 ```
@@ -257,8 +257,8 @@ python3 scripts/bench/quality-matrix.py run \
   --output "$HOME/Documents/open-decomp-quality-matrix-results" \
   --entry dist/src/cli/entry.js \
   --bridge "$HOME/Documents/open-decomp-quality-bridge" \
-  --ghidra /Users/df0/Downloads/ghidra_12.1.4_PUBLIC \
-  --java-home /opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home
+  --ghidra "$GHIDRA_HOME" \
+  --java-home "$JAVA_HOME"
 ```
 
 Both tools receive identical binary bytes and compiler-grounded selected addresses, with no source, sidecars, types, prototypes, names or annotations injected. The same raw MCP client records every cell, including missing entries, failures, partial semantics and truncation; containing functions are not substituted for exact entries. No analyzed matrix target executes.
@@ -278,9 +278,9 @@ All ten Open Decomp request errors were `adler32_z` work limits. Exact-address d
 
 Durable raw results: `quality-matrix-results-2026-10-17.tar.gz`, SHA256 `701d79f537170bf715dfde4dd13b088f8c1ada44b5dcd8fa83a7bd518b14dec2`; its adjacent JSON indexes 3,248 retained members, the invocation and evaluated checkpoint. Numbered requests/responses, live schemas, emitted C, complete artifacts and matched results are retained; project databases and duplicate streams are omitted. This completes broader recording, not the parity gate. Behavioral correctness, held-out review and normalized performance remain separate; concurrent source-only smokes exclude performance conclusions.
 
-## Frozen held-out equal-access evaluation
+## Frozen published-suite equal-access evaluation (formerly "held-out")
 
-The held-out source and five-function selection were frozen before inspecting decompiler output in `scripts/bench/quality-heldout-selection.json`: source SHA256 `4daef9d0963bfcc5dd5d4440bb8dbfaaa7ded76ab8350b86bb0c4413ee34753b`. No held-out source or output was supplied to reconstruction workers, and no production pass was tuned against it. Publication makes this suite unsuitable for claiming fresh held-out status after future tuning.
+The held-out source and five-function selection were frozen before inspecting decompiler output in `scripts/bench/quality-heldout-selection.json`: source SHA256 `4daef9d0963bfcc5dd5d4440bb8dbfaaa7ded76ab8350b86bb0c4413ee34753b`. No suite source or output was supplied to reconstruction workers during that run, and no production pass was tuned against it. The source, gold, results and review packets are now tracked in this repository, so the suite is a **frozen published suite**, not a held-out set: results on it after any future tuning must not be described as held-out. A new held-out set must live outside the repository, with only its hashes committed.
 
 All 24 source-built cells succeeded: three supported targets × independently built Apple clang21/LLVM clang23 × O0/O2 × symbol-bearing/stripped. Selected symbols were removed from stripped variants; paired text-section hashes matched. Both tools received identical binaries and compiler-derived selected addresses, without source/debug sidecars, prototypes or annotations. No analyzed image executed.
 
@@ -303,11 +303,11 @@ python3 scripts/bench/quality-heldout.py run \
   --output "$HOME/Documents/open-decomp-heldout-new-results" \
   --entry dist/src/cli/entry.js \
   --bridge "$HOME/Documents/open-decomp-quality-bridge" \
-  --ghidra /Users/df0/Downloads/ghidra_12.1.4_PUBLIC \
-  --java-home /opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home
+  --ghidra "$GHIDRA_HOME" \
+  --java-home "$JAVA_HOME"
 ```
 
-Use the pinned bridge setup and a new durable output directory outside `/tmp`; the shared measurement lock rejects overlapping harness runs. Commands, tool identities, raw requests/responses, full artifacts, source text and failures are retained under `scripts/bench/`:
+Use the pinned bridge setup and a new durable output directory outside the system temporary directory; the shared measurement lock rejects overlapping harness runs. Commands, tool identities, raw requests/responses, full artifacts, source text and failures are retained under `scripts/bench/`:
 
 - `quality-heldout-inputs-2026-10-17.tar.gz`: 119,901 bytes; SHA256 `e6acbf080ee0b6203e99aa2ecec2aea4d475fa635fc7666737fcdb41ecf4d362`.
 - `quality-heldout-results-2026-10-17.tar.gz`: 45,648,755 bytes; SHA256 `5f1f3f063a3298b89b1ce6b5e97280119d8f8dd2693aca6ca8cf52d79cbe5872`.
@@ -322,7 +322,7 @@ Executed `scripts/bench/quality-prospective-plan.json` phases 1–5 unchanged (a
 | Lane                                                            | Open Decomp now                                                                                  | Open Decomp historical | Ghidra now           | Ghidra historical   |
 | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------- | -------------------- | ------------------- |
 | Broader availability (576 tool-cells, 288 pairs)                | 194 texts: 44 complete / 150 partial; 2 work-limit errors (`adler32_z`, PE O0)                   | 186: 48 / 138          | 190 texts            | 190                 |
-| Frozen held-out availability (240 tool-cells, 120 pairs)        | 80 texts: 36 complete / 44 partial; 40 undiscovered                                              | 80: 42 / 38; 40        | 70 texts, 50 missing | 70 / 50             |
+| Frozen published-suite availability (240 tool-cells, 120 pairs) | 80 texts: 36 complete / 44 partial; 40 undiscovered                                              | 80: 42 / 38; 40        | 70 texts, 50 missing | 70 / 50             |
 | Source gold (4 builds × 184 cases)                              | 736/736 (oracle self-check, not engine correctness)                                              | 736/736                | —                    | —                   |
 | Exact unchanged-output executable subset (120 cells)            | **0 cells** (no text 40, does not compile 42, interface arity differs 34, machine-entry input 4) | 4 cells, 156/156       | 36 cells, 1346/1346  | 36 cells, 1346/1346 |
 | Blind LLM readability (2 new reviewers, all 60 available pairs) | preferred in 0/120                                                                               | 0/120                  | preferred in 120/120 | 120/120             |

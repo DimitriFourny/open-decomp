@@ -187,23 +187,22 @@ export class AnalysisDependencyCollector {
     readonly revision: number,
     readonly context: OperationContext,
   ) {
-    const collector = this;
     this.store = new Proxy(source, {
-      get(target, property) {
+      get: (target, property) => {
         switch (property) {
           case 'readSignature':
             return (id: string, at: number) => {
               const result = target.readSignature(id, at);
               if (at === revision) {
-                collector.capture({ kind: 'signature', id }, result);
-                collector.recordSignatureClosure(result);
+                this.capture({ kind: 'signature', id }, result);
+                this.recordSignatureClosure(result);
               }
               return result;
             };
           case 'readType':
             return (id: string, at: number) => {
               const result = target.readType(id, at);
-              if (at === revision) collector.recordType(id, result);
+              if (at === revision) this.recordType(id, result);
               return result;
             };
           case 'readEvidence':
@@ -212,7 +211,7 @@ export class AnalysisDependencyCollector {
               if (at === revision) {
                 const found = new Map<string, Evidence>();
                 for (const proof of result) found.set(proof.id, proof);
-                for (const id of ids) collector.recordProof(id, found.get(id) ?? null);
+                for (const id of ids) this.recordProof(id, found.get(id) ?? null);
               }
               return result;
             };
@@ -220,16 +219,16 @@ export class AnalysisDependencyCollector {
             return (id: string, at: number) => {
               const result = target.readAnnotations(id, at);
               if (at === revision) {
-                collector.capture({ kind: 'annotations', id }, result);
-                collector.recordAnnotationValues(result);
+                this.capture({ kind: 'annotations', id }, result);
+                this.recordAnnotationValues(result);
               }
               return result;
             };
           case 'queryAnnotations':
             return (query: AnnotationQuery) => {
               const result = target.queryAnnotations(query);
-              if (query.revision === revision && collector.#annotationDepth === 0)
-                collector.recordAnnotationScope(null, []);
+              if (query.revision === revision && this.#annotationDepth === 0)
+                this.recordAnnotationScope(null, []);
               return result;
             };
           case 'queryRecords':
@@ -237,8 +236,8 @@ export class AnalysisDependencyCollector {
               const result = target.queryRecords(query);
               if (query.revision === revision) {
                 if (query.kind === 'function' && query.ids !== undefined)
-                  for (const id of query.ids) collector.recordFunction(query.image_id, id);
-                else collector.recordRecordScope(query.image_id, query.kind);
+                  for (const id of query.ids) this.recordFunction(query.image_id, id);
+                else this.recordRecordScope(query.image_id, query.kind);
               }
               return result;
             };
