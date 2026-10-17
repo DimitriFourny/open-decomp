@@ -17,6 +17,17 @@ export interface SourceAddress {
   readonly name?: string;
   /** Only immutable, terminated strings with exact image/address provenance. */
   readonly string?: string;
+  readonly string_byte_length?: bigint;
+  readonly string_encoding?: 'ascii' | 'utf8';
+  /** Byte storage identity; an unknown extent is never inferred from a use. */
+  readonly object?: {
+    readonly address: Address;
+    readonly byte_length: bigint | null;
+    readonly offset: bigint;
+    readonly mutable: boolean;
+    readonly kind: 'bytes' | 'jump_table' | 'literal_pool' | 'unknown';
+    readonly evidence_ids: readonly string[];
+  };
 }
 /** Facts supplied by the native analysis pipeline; never selected by host ABI. */
 export interface SourceEvidence {
@@ -36,6 +47,8 @@ export interface SourcePresentation {
   readonly inferred: boolean;
   readonly parameter_names: ReadonlyMap<string, string>;
   readonly return_type: DataType | null;
+  /** Source pointer interpretation, separate from the machine result bit width. */
+  readonly return_pointer?: 'char' | 'byte';
   /** Explicit preconditions of supported FP projection, not modeled control state. */
   readonly assumptions?: readonly string[];
   readonly locals: ReadonlyMap<string, SourceLocal>;

@@ -28,6 +28,8 @@ import type {
 import type { SuppliedTypeRecord } from '../analysis/types/index.js';
 import { reconstruct } from '../reconstruction/index.js';
 import type { Reconstruction } from '../reconstruction/model.js';
+import type { SourceAddress } from '../reconstruction/source-model.js';
+import { sourceDataValues } from '../reconstruction/source-data.js';
 import { expressionText, machineType } from './expressions.js';
 import { Writer } from './writer.js';
 import type { EmissionInput, EmissionResult } from './model.js';
@@ -63,11 +65,8 @@ export class Renderer {
 
   private readonly sourceNames = new Map<string, string>();
   private readonly usedSourceNames = new Set<string>();
-  private readonly sourceAddresses = new Map<
-    string,
-    { readonly name?: string; readonly string?: string } | null
-  >();
-  private readonly sourceAddressesByValue = new Map<bigint, Address | null>();
+  private readonly sourceAddresses = new Map<string, SourceAddress | null>();
+  private readonly sourceDataValue: (value: Value) => SourceAddress | undefined;
   private readonly sourceValueTypes = new Map<string, string>();
   private sourceTemporary = 0;
   private sourceLocal = 0;
@@ -80,6 +79,8 @@ export class Renderer {
   ) {
     this.writer = new Writer(context, options.indent, options.include_evidence, language);
     this.program = reconstruct(input, context);
+    this.sourceDataValue = sourceDataValues(
+      this.program.expressions, this.program.source?.addresses ?? [], context);
     this.origins.set(input.function.id, input.function);
     for (const diagnostic of this.program.diagnostics) {
       context.checkpoint(1);
@@ -136,15 +137,6 @@ export class Renderer {
       if (previous === undefined) this.sourceAddresses.set(key, item);
       else if (previous && (previous.name !== item.name || previous.string !== item.string))
         this.sourceAddresses.set(key, null);
-      if (item.address.space === 'va') {
-        const address = this.sourceAddressesByValue.get(item.address.value);
-        this.sourceAddressesByValue.set(
-          item.address.value,
-          address === undefined || (address && this.addressKey(address) === key)
-            ? item.address
-            : null,
-        );
-      }
     }
     for (const projection of this.program.calls.values()) {
       if (!projection.signature) continue;
@@ -382,7 +374,14 @@ export class Renderer {
     const resolve = (id: string): readonly string[] => contributors?.get(id) ?? [id];
     const subjects = [...resolve(origin.id), ...ids.flatMap(resolve)];
     this.context.checkpoint(subjects.length);
-    this.writer.map({ ...origin, id: subjects[0] ?? origin.id }, start, subjects, evidence, end);
+    const dataEvidence = new Set(evidence);
+    for (const id of [origin.id, ...ids, ...subjects]) {
+      const value = this.program.values.get(id);
+      if (!value) continue;
+      const data = this.sourceDataValue(value);
+      for (const evidenceId of data?.object?.evidence_ids ?? []) dataEvidence.add(evidenceId);
+    }
+    this.writer.map({ ...origin, id: subjects[0] ?? origin.id }, start, subjects, [...dataEvidence], end);
   }
 
   private map(
@@ -410,16 +409,31 @@ export class Renderer {
   private addressKey(address: Address): string {
     return `${address.image_id}:${address.space}:${address.value}`;
   }
-  private sourceAddress = (address: Address): string => {
+  private sourceAddress = (address: Address, literal = false): string => {
     const key = this.addressKey(address),
       item = this.sourceAddresses.get(key);
-    if (item?.string !== undefined)
+    if (literal && item?.string !== undefined)
       return this.writer
         .quote(item.string)
         .replace(/\\u000a/g, '\\n')
         .replace(/\\u000d/g, '\\r')
         .replace(/\\u0009/g, '\\t')
         .replace(/\\u0000/g, '\\0');
+    if (item?.object) {
+      const object = item.object;
+      return this.call(
+        'data_address',
+        'Exact image-backed byte storage address: identity, original VA base, byte offset, known extent (or unknown), mutability and data kind. Returns base + offset without reading, folding, allocating or rebasing storage. Not indexing into a neighbouring literal; original memory ordering and faults remain explicit.',
+        [
+          this.writer.quote(item.name ?? `data_${object.address.value.toString(16)}`),
+          `0x${object.address.value.toString(16)}`,
+          `0x${object.offset.toString(16)}`,
+          object.byte_length === null ? this.writer.quote('unknown') : `0x${object.byte_length.toString(16)}`,
+          this.language === 'c-like' ? String(object.mutable) : object.mutable ? 'True' : 'False',
+          this.writer.quote(object.kind),
+        ],
+      );
+    }
     if (item?.name) {
       const name = this.sourceNames.get(key) ?? this.sourceIdentifier(key, item.name);
       this.sourceNames.set(key, name);
@@ -428,18 +442,19 @@ export class Renderer {
     if (address.space === 'va') return `0x${address.value.toString(16)}`;
     return this.address(address);
   };
-  private sourceAddressValue(value: Value): string {
-    const expression = this.program.expressions.get(value.id);
+  private sourceAddressValue(value: Value, literal = false): string {
     const fact = this.input.types?.calls?.stack.values.get(value.id)?.value;
-    if (fact?.kind === 'address') return this.sourceAddress(fact.address);
-    const bits =
-      expression?.kind === 'constant'
-        ? expression.bits
-        : fact?.kind === 'constant'
-          ? fact.bits
-          : null;
-    const address = bits === null ? undefined : this.sourceAddressesByValue.get(bits);
-    return address ? this.sourceAddress(address) : this.value(value);
+    if (fact?.kind === 'address') return this.sourceAddress(fact.address, literal);
+    const item = this.sourceDataValue(value);
+    if (item) return this.sourceAddress(item.address, literal);
+    if (fact?.kind === 'constant') {
+      for (const address of this.program.source?.addresses ?? []) {
+        this.context.checkpoint(1);
+        if (address.address.space === 'va' && address.address.value === fact.bits)
+          return this.sourceAddress(address.address, literal);
+      }
+    }
+    return this.value(value);
   }
 
   private sourceCallee(node: Extract<Instruction, { kind: 'call' }>): string {
@@ -594,7 +609,7 @@ export class Renderer {
       const parameter = projection.signature?.signature.parameters[index];
       const pointer =
         parameter && this.typeRecords.get(parameter.type_id)?.definition.kind === 'pointer';
-      const text = pointer ? this.sourceAddressValue(value) : this.value(value);
+      const text = pointer ? this.sourceAddressValue(value, true) : this.value(value);
       if (pointer && this.language === 'c-like')
         return `((${this.sourceType(parameter.type_id)})(uintptr_t)(${text}))`;
       const type = parameter && this.typeRecords.get(parameter.type_id)?.definition;
@@ -1102,7 +1117,8 @@ export class Renderer {
         for (const value of control.values) ids.push(value.id);
         for (const binding of block.register_exit) ids.push(binding.value.id);
         if (projection && projection.kind !== 'physical' && projection.outputs.length === 0) {
-          const values = this.writer.list(projection.results, this.value);
+          const values = this.writer.list(projection.results, (value) =>
+            this.program.source?.return_pointer ? this.sourceAddressValue(value, true) : this.value(value));
           this.writer.statement(
             depth,
             values.length
@@ -1260,9 +1276,13 @@ export class Renderer {
     const returnType = signature
       ? this.sourceType(signature.signature.return_type)
       : this.program.source
-        ? this.program.source.return_type
-          ? this.dataType(this.program.source.return_type)
-          : hasTailCall ? 'unknown_result' : 'void'
+        ? this.program.source.return_pointer
+          ? this.language === 'c-like'
+            ? `${this.program.source.return_pointer === 'char' ? 'char' : 'uint8_t'} *`
+            : `pointer[${this.program.source.return_pointer === 'char' ? 'char' : 'uint8_t'}]`
+          : this.program.source.return_type
+            ? this.dataType(this.program.source.return_type)
+            : hasTailCall ? 'unknown_result' : 'void'
         : 'physical_result';
     this.headerStart = w.offset;
     if (this.program.source && parameters.length <= 4) {

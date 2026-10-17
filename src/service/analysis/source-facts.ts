@@ -17,6 +17,8 @@ import {
 } from '../../analysis/calls/index.js';
 import { constructSSA } from '../../analysis/ssa/index.js';
 import { simplifySSA } from '../../analysis/values/index.js';
+import { recoverDataAddress } from '../../analysis/strings/source-data.js';
+import { sourceConstantValues } from '../../reconstruction/source-data.js';
 import { inspectRegister, type StackFact } from '../../analysis/stack/index.js';
 import type { SuppliedTypeRecord, TypeRecoveryResult } from '../../analysis/types/index.js';
 import type { DataType, Expression, RegisterIR, SSAForm, Value } from '../../ir/index.js';
@@ -300,56 +302,26 @@ function actualArgumentCounts(
   return counts;
 }
 
-/** Read only address-qualified, file-backed, immutable data sections. Mach-O
- * __TEXT contains both code and cstrings: instruction flags, not segment execute
- * permission, distinguish its data sections (the same rule as the string index). */
-function stringAt(
-  image: LoadedImage,
-  address: Address,
-  context: OperationContext,
-): string | undefined {
-  if (address.image_id !== image.id) return undefined;
-  const translated = image.address_map.translate(address, 'va');
-  if (translated.kind !== 'mapped') return undefined;
-  const section = image.sections.find(
-    (section) =>
-      section.kind === 'section' &&
-      section.file_range !== null &&
-      section.permissions.includes('read') &&
-      !section.permissions.includes('write') &&
-      (image.target.format === 'macho'
-        ? (section.flags & 0x80000400n) === 0n && (section.flags & 255n) !== 8n
-        : !section.permissions.includes('execute')) &&
-      translated.address.value >= section.virtual_range.start.value &&
-      translated.address.value < section.virtual_range.start.value + section.virtual_range.size,
-  );
-  if (!section?.file_range) return undefined;
-  const offset = translated.address.value - section.virtual_range.start.value;
-  const remaining = section.file_range.size - offset;
-  if (remaining <= 0n) return undefined;
-  const file = image.address_map.translate(translated.address, 'file');
-  if (file.kind !== 'mapped') return undefined;
-  const limit = Number(remaining < 4096n ? remaining : 4096n);
-  let length = 0;
-  while (length < limit && image.bytes.at(Number(file.address.value) + length) !== 0) {
-    context.checkpoint(1);
-    length++;
-  }
-  if (length === limit || length === 0) return undefined;
-  try {
-    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
-      image.bytes.read(file.address.value, length),
-    );
-    return /^[\p{L}\p{M}\p{N}\p{P}\p{S}\p{Zs}\t\r\n]+$/u.test(text) ? text : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
   const { image, scope, revision } = input,
     context = scope.context;
   const candidates = new Map<string, Address>();
+  const expressions = new Map(
+    input.ir.blocks.flatMap((block) => block.instructions.flatMap((node) =>
+      node.kind === 'assign' ? [[node.result.id, node.expression] as const] : [])),
+  );
+  const constant = sourceConstantValues(expressions, context, image.id);
+  for (const block of input.ir.blocks)
+    for (const node of block.instructions) {
+      context.checkpoint(1);
+      if (node.kind !== 'assign' || node.result.type.kind !== 'integer' ||
+        node.result.type.bits !== image.target.address_bits) continue;
+      const bits = constant(node.result);
+      if (bits !== undefined && bits < U64_LIMIT) {
+        const address: Address = { image_id: image.id, space: 'va', value: bits };
+        candidates.set(addressKey(address), address);
+      }
+    }
   for (const fact of input.types.calls?.stack.values.values() ?? []) {
     context.checkpoint(1);
     const address: Address | undefined =
@@ -387,9 +359,21 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
       }
     }
   const names = new Map<string, Set<string>>();
-  for (const symbol of records(scope, revision, image.id, 'symbol').items) {
+  const symbols = records(scope, revision, image.id, 'symbol').items.map((symbol) => {
     context.checkpoint(1);
-    if (!symbol.address || !candidates.has(addressKey(symbol.address))) continue;
+    if (!symbol.address) return symbol;
+    const start = symbol.address;
+    let relevant = candidates.has(addressKey(start));
+    if (!relevant && symbol.kind === 'object' && symbol.size !== null)
+      for (const candidate of candidates.values()) {
+        context.checkpoint(1);
+        if (candidate.image_id === start.image_id && candidate.space === start.space &&
+          candidate.value >= start.value && candidate.value < start.value + symbol.size) {
+          relevant = true;
+          break;
+        }
+      }
+    if (!relevant) return symbol;
     const annotations = scope.store
       .readAnnotations(symbol.id, revision)
       .filter(
@@ -414,19 +398,20 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
       values.add(name);
       names.set(key, values);
     }
-  }
+    return { ...symbol, original_name: name ?? null, display_name: null };
+  });
   const result: SourceAddress[] = [];
   for (const [key, address] of candidates) {
     context.checkpoint(1);
     const aliases = names.get(key),
       name = aliases?.size === 1 ? [...aliases][0] : undefined;
-    const string = stringAt(image, address, context);
-    if (name !== undefined || string !== undefined)
+    const recovered = recoverDataAddress(image, address, context, symbols);
+    if (recovered)
       result.push({
-        address,
+        ...recovered,
         ...(name === undefined ? {} : { name }),
-        ...(string === undefined ? {} : { string }),
       });
+    else if (name !== undefined) result.push({ address, name });
   }
   return result;
 }

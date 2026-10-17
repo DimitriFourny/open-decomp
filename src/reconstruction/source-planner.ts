@@ -20,6 +20,7 @@ import {
 import type { BlockRegion } from '../presentation/index.js';
 import type { Assignment, BoundaryProjection } from './model.js';
 import type { SourcePresentation } from './source-model.js';
+import { sourceDataValues } from './source-data.js';
 import type { SignatureAssociation } from '../analysis/types/model.js';
 
 /** Source ABI abstraction: architectural snapshots are retained in the input,
@@ -706,10 +707,21 @@ export function planSource(
         });
     }
   }
+  const addressValue = sourceDataValues(expressions, evidence.addresses, context);
+  const returnedData = [...returns.values()].map((boundary) =>
+    boundary.results.length === 1 && boundary.results[0]!.type.kind === 'integer' &&
+      bitWidth(boundary.results[0]!.type) === abi.layout.pointer_bits
+      ? addressValue(boundary.results[0]!) : undefined);
+  const returnPointer = (!functionSignature || functionSignature.declaration.returns.kind === 'pointer') &&
+    returnedData.length && returnedData.every((item) =>
+      item?.object !== undefined || item?.string !== undefined)
+    ? returnedData.every((item) => item!.string !== undefined) ? 'char' as const : 'byte' as const
+    : undefined;
   const presentation: SourcePresentation = {
     inferred: !functionSignature,
     parameter_names: parameterNames,
     return_type: returnType,
+    ...(returnPointer === undefined ? {} : { return_pointer: returnPointer }),
     ...([...returns.values()].some((boundary) =>
       boundary.results.some((value) => value.type.kind === 'float'))
       ? { assumptions: ['FP arithmetic assumes nearest-even rounding, gradual underflow and disabled exception traps; FPCR/FPSR status and exceptional environments are not modeled.'] }
