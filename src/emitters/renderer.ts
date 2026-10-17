@@ -28,6 +28,7 @@ import type {
 import type { SuppliedTypeRecord } from '../analysis/types/index.js';
 import { reconstruct } from '../reconstruction/index.js';
 import type { Reconstruction } from '../reconstruction/model.js';
+import { validateReconstruction, validateRenderedTransfers } from '../reconstruction/validate.js';
 import type { SourceAddress } from '../reconstruction/source-model.js';
 import { sourceDataValues } from '../reconstruction/source-data.js';
 import { expressionText, machineType } from './expressions.js';
@@ -167,6 +168,8 @@ export class Renderer {
     if (!this.program.blocks.has(input.function.entry))
       this.invalid('Structured function has no entry block');
     this.findLabels(input.function.body, [], 0);
+    validateReconstruction(this.program, context);
+    validateRenderedTransfers(input.function, this.gotos, language, context);
   }
 
   private invalid(message: string): never {
