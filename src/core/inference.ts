@@ -92,7 +92,9 @@ export const inferenceDetailsByKind = {
     ]),
     ordered_arguments: z.array(argument).max(10000),
     result_width_bits: z.array(width).max(10000), arity_complete: z.boolean(),
-    signature_id: entityIdSchema.nullable(),
+    // Analysis/debug/library declarations are entities; a user/agent-asserted
+    // signature is identified by its authoring annotation, never a derived alias.
+    signature_id: z.union([entityIdSchema, annotationIdSchema]).nullable(),
     context_assumptions: callContext.optional(),
   }),
   rewrite: z.strictObject({

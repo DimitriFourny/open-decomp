@@ -104,38 +104,47 @@ export function decodeArtifact(value: WireArtifact): Artifact {
   return { ...parsed, size: parseHexU64(parsed.size) };
 }
 export function encodeEmission(value: Emission): WireEmission {
+  const { inferences, requirements, ...rest } = value;
   return emissionSchema.parse({
-    ...value,
+    ...rest,
     mappings: value.mappings.map((mapping) => ({
       ...mapping,
       ranges: mapping.ranges.map(encodeRange),
     })),
-    inferences: value.inferences?.map((record) => ({
-      ...record,
-      ranges: record.ranges.map(encodeRange),
-    })),
-    requirements: value.requirements?.map((record) => ({
-      ...record,
-      ranges: record.ranges.map(encodeRange),
-    })),
+    ...(inferences && {
+      inferences: inferences.map((record) => ({
+        ...record,
+        ranges: record.ranges.map(encodeRange),
+      })),
+    }),
+    ...(requirements && {
+      requirements: requirements.map((record) => ({
+        ...record,
+        ranges: record.ranges.map(encodeRange),
+      })),
+    }),
   });
 }
 export function decodeEmission(value: WireEmission): Emission {
-  const parsed = emissionSchema.parse(value);
+  const { inferences, requirements, ...parsed } = emissionSchema.parse(value);
   return {
     ...parsed,
     mappings: parsed.mappings.map((mapping) => ({
       ...mapping,
       ranges: mapping.ranges.map(decodeRange),
     })),
-    inferences: parsed.inferences?.map((record) => ({
-      ...record,
-      ranges: record.ranges.map(decodeRange),
-    })),
-    requirements: parsed.requirements?.map((record) => ({
-      ...record,
-      ranges: record.ranges.map(decodeRange),
-    })),
+    ...(inferences && {
+      inferences: inferences.map((record) => ({
+        ...record,
+        ranges: record.ranges.map(decodeRange),
+      })),
+    }),
+    ...(requirements && {
+      requirements: requirements.map((record) => ({
+        ...record,
+        ranges: record.ranges.map(decodeRange),
+      })),
+    }),
   };
 }
 export function encodeJob(value: Job): WireJob {

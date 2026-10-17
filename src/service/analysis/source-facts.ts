@@ -744,8 +744,10 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
             recoveryDetails.limit > summaryWorkLimit) throw recoveryError;
           context.checkpoint(0);
         }
-        evidence.push(...unit.evidence);
       }
+      // The callee record cites this unit's graph-refined function proofs even when
+      // SSA preparation stopped, so its graph evidence is published either way.
+      if (unit) evidence.push(...unit.evidence);
       observed = mergeNativeInterface(observed, observedCalls.find((call) => call.call_id === dependency.call_id), abi, context);
       const { parameter_shapes: _shapes, written_result: _written, ...interface_ } = observed;
       callees.push({ call_id: dependency.call_id, target: dependency.target.entry,
