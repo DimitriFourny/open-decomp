@@ -85,13 +85,14 @@ is idempotent, and makes subsequent `decode`/`format` calls fail explicitly.
 
 ## Coordinator verification
 
-These commands exercise the actual adapter and checked-in compiler-produced PE
-function bytes, not pre-rendered library output:
+With Node 24.22.0 and Bun 1.4.3, first install source dependencies using
+`bun install --frozen-lockfile`. These commands exercise the actual adapter
+and checked-in compiler-produced PE function bytes, not pre-rendered library output:
 
 ```sh
 node --import tsx --test --test-name-pattern='PE corpus' test/decoders/x86_64/decoder.test.ts
 node --import tsx --test 'test/decoders/x86_64/*.test.ts'
-npm run build
+bun run build
 node --expose-gc dist/scripts/bench/resources.js --fixtures fixtures/bin --iterations 100
 ```
 

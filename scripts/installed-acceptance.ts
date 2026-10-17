@@ -8,7 +8,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import { readMcpFixture } from './mcp-workflow.js';
-import { releaseArchiveIdentity, releaseManifestSchema, releaseNpmCli, runReleaseNpm } from './package-release.js';
+import { releaseArchiveIdentity, releaseArchiveInventory, releaseManifestSchema, releaseBunCli, runReleaseBun } from './package-release.js';
 import { runReleaseAcceptance } from './release-acceptance.js';
 
 const host = { node: process.version, platform: platform(), architecture: arch() };
@@ -69,7 +69,7 @@ for (const [name, format, language, fragment] of [
 
 async function installedAcceptance(): Promise<void> {
   if (process.argv.length === 3 && process.argv[2] === '--help') {
-    process.stdout.write('Usage: npm run verify:installed -- --artifact FILE --fixtures fixtures/bin\nRequires FILE.release.json beside the tgz. Installs offline into a disposable external root with an empty cache, checks the installed public API/decoders/demanglers and runs the maintained MCP release suite using copied fixtures. Never executes target binaries.\n');
+    process.stdout.write('Usage: bun run verify:installed --artifact FILE --fixtures fixtures/bin\nRequires FILE.release.json beside the tgz and the host tar utility. Installs offline into a disposable external root with an empty cache, checks the installed public API/decoders/demanglers and runs the maintained MCP release suite using copied fixtures. Never executes target binaries.\n');
     return;
   }
   let artifactArgument: string | undefined, fixtureArgument: string | undefined;
@@ -84,19 +84,17 @@ async function installedAcceptance(): Promise<void> {
     if (flag === '--artifact') artifactArgument = value;
     else fixtureArgument = value;
   }
-  assert.ok(artifactArgument && fixtureArgument, 'Usage: npm run verify:installed -- --artifact FILE --fixtures fixtures/bin');
-  const npm = await releaseNpmCli();
+  assert.ok(artifactArgument && fixtureArgument, 'Usage: bun run verify:installed --artifact FILE --fixtures fixtures/bin');
+  const bun = await releaseBunCli();
   const artifact = await realpath(resolve(artifactArgument));
-  assert.ok((await lstat(artifact)).isFile() && artifact.endsWith('.tgz'), 'Artifact must be an actual npm tgz file');
+  assert.ok((await lstat(artifact)).isFile() && artifact.endsWith('.tgz'), 'Artifact must be an actual package tgz file');
   const manifestPath = `${artifact}.release.json`;
   const manifest = releaseManifestSchema.parse(JSON.parse(await readFile(manifestPath, 'utf8')));
   assert.equal(manifest.artifact.filename, basename(artifact));
-  assert.equal(manifest.npm_pack.filename, manifest.artifact.filename);
-  assert.equal(manifest.npm_pack.name, manifest.package.name);
-  assert.equal(manifest.npm_pack.version, manifest.package.version);
-  assert.equal(manifest.npm_pack.size, manifest.artifact.size);
-  assert.equal(manifest.npm_pack.integrity, manifest.artifact.integrity);
-  assert.equal(manifest.npm_pack.shasum, manifest.artifact.shasum);
+  assert.equal(manifest.bun_pack.filename, manifest.artifact.filename);
+  assert.equal(manifest.bun_pack.name, manifest.package.name);
+  assert.equal(manifest.bun_pack.version, manifest.package.version);
+  assert.equal(manifest.bun_pack.size, manifest.artifact.size);
   const sourceFixtures = await realpath(resolve(fixtureArgument));
   const sourceManifestBytes = await readFile(join(dirname(sourceFixtures), 'manifest.json'));
   const sourceManifest = fixtureManifestSchema.parse(JSON.parse(sourceManifestBytes.toString('utf8')));
@@ -107,7 +105,7 @@ async function installedAcceptance(): Promise<void> {
   try {
     const outsideSource = relative(sourceRoot, temporary);
     assert.ok(outsideSource === '..' || outsideSource.startsWith(`..${sep}`) || isAbsolute(outsideSource), 'Installation must be outside the source checkout; configure an external OS temporary directory');
-    const install = join(temporary, 'install'), cache = join(temporary, 'empty-npm-cache'), inputs = join(temporary, 'inputs');
+    const install = join(temporary, 'install'), cache = join(temporary, 'empty-bun-cache'), inputs = join(temporary, 'inputs');
     const fixtures = join(inputs, 'bin');
     await mkdir(install);
     await mkdir(cache);
@@ -129,37 +127,48 @@ async function installedAcceptance(): Promise<void> {
     assert.equal(identity.sha256, manifest.artifact.sha256);
     assert.equal(identity.shasum, manifest.artifact.shasum);
     assert.equal(identity.integrity, manifest.artifact.integrity);
-    const npmVersion = (await runReleaseNpm(npm, ['--version'], install)).trim();
-    process.stdout.write(`${JSON.stringify({ scenario: 'installed-artifact-identity', outcome: 'passed', artifact, manifest: manifestPath, ...identity, host: { ...host, npm: npmVersion }, built_with: manifest.toolchain, lockfile: manifest.lockfile, fixture_manifest_sha256: createHash('sha256').update(sourceManifestBytes).digest('hex'), elf_fixture_manifest_sha256: createHash('sha256').update(elfManifestBytes).digest('hex'), fixtures: fixtureIdentities })}\n`);
+    const inventory = await releaseArchiveInventory(copiedArtifact, join(temporary, 'archive'));
+    assert.deepEqual(inventory.files, manifest.bun_pack.files, 'Manifest inventory differs from the actual archive');
+    assert.deepEqual(inventory.bundled, manifest.bun_pack.bundled, 'Manifest bundle differs from the actual archive');
+    assert.equal(inventory.files.reduce((size, file) => size + file.size, 0), manifest.bun_pack.unpackedSize);
+    for (const dependency of Object.keys(manifest.source_package.production_dependencies)) assert.ok(inventory.bundled.includes(dependency), `Missing bundled production dependency: ${dependency}`);
+    const bunVersion = (await runReleaseBun(bun, ['--version'], install)).trim();
+    process.stdout.write(`${JSON.stringify({ scenario: 'installed-artifact-identity', outcome: 'passed', artifact, manifest: manifestPath, ...identity, host: { ...host, bun: bunVersion }, built_with: manifest.toolchain, lockfile: manifest.lockfile, source_package: manifest.source_package, fixture_manifest_sha256: createHash('sha256').update(sourceManifestBytes).digest('hex'), elf_fixture_manifest_sha256: createHash('sha256').update(elfManifestBytes).digest('hex'), fixtures: fixtureIdentities })}\n`);
     await writeFile(join(install, 'package.json'), JSON.stringify({ name: 'open-decomp-installed-acceptance', private: true, type: 'module' }), { flag: 'wx' });
-    const userConfig = join(temporary, 'user.npmrc'), globalConfig = join(temporary, 'global.npmrc');
-    await writeFile(userConfig, '', { flag: 'wx' });
-    await writeFile(globalConfig, '', { flag: 'wx' });
-    // No inherited NODE_OPTIONS, NODE_PATH, npm configuration or source loaders.
+    // No inherited NODE_OPTIONS, NODE_PATH, package-manager configuration or source loaders.
     const environment: Record<string, string> = {};
     for (const [name, value] of Object.entries(process.env)) {
-      if (value !== undefined && /^(PATH|PATHEXT|SYSTEMROOT|WINDIR|COMSPEC|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|TEMP|TMP|LOCALAPPDATA|APPDATA)$/i.test(name)) environment[name] = value;
+      if (value !== undefined && /^(PATH|PATHEXT|SYSTEMROOT|WINDIR|COMSPEC|TEMP|TMP)$/i.test(name)) environment[name] = value;
     }
+    const home = join(temporary, 'home');
+    await mkdir(home);
+    environment.HOME = home;
+    environment.USERPROFILE = home;
+    environment.XDG_CONFIG_HOME = home;
+    const config = join(temporary, 'bunfig.toml');
+    await writeFile(config, '', { flag: 'wx' });
     assert.deepEqual(await readdir(cache), [], 'Offline installation must start with an empty cache');
-    const installOutput = await runReleaseNpm(npm, ['install', '--offline', '--ignore-scripts', '--omit=dev', '--no-audit', '--no-fund', '--no-update-notifier', '--package-lock=false', '--cache', cache, '--userconfig', userConfig, '--globalconfig', globalConfig, '--', copiedArtifact], install, environment);
+    const installOutput = await runReleaseBun(bun, ['install', '--offline', '--production', '--ignore-scripts', '--no-save', '--cache-dir', cache, `--config=${config}`, copiedArtifact], install, environment);
     if (installOutput) process.stderr.write(installOutput);
     const installedPackage = join(install, 'node_modules', manifest.package.name);
-    const installedMetadata = z.object({ name: z.string(), version: z.string(), bin: z.object({ 'open-decomp': z.string() }) }).parse(JSON.parse(await readFile(join(installedPackage, 'package.json'), 'utf8')));
+    const installedMetadata = z.object({ name: z.string(), version: z.string(), bin: z.object({ 'open-decomp': z.string() }), bundleDependencies: z.array(z.string()), dependencies: z.never().optional(), devDependencies: z.never().optional() }).parse(JSON.parse(await readFile(join(installedPackage, 'package.json'), 'utf8')));
     assert.equal(installedMetadata.name, manifest.package.name);
     assert.equal(installedMetadata.version, manifest.package.version);
+    assert.deepEqual([...installedMetadata.bundleDependencies].sort(), Object.keys(manifest.source_package.production_dependencies).sort(), 'Installed bundle declarations differ from source production dependencies');
     assert.equal(installedMetadata.bin['open-decomp'].replace(/^\.\//, ''), 'dist/src/mcp/stdio.js');
-    for (const file of manifest.npm_pack.files) {
-      assert.ok(file.path !== '' && !file.path.includes('\\') && !isAbsolute(file.path) && !file.path.split('/').some(part => part === '..' || part === '.'), `Unsafe npm inventory path: ${file.path}`);
+    for (const file of manifest.bun_pack.files) {
+      assert.ok(file.path !== '' && !file.path.includes('\\') && !isAbsolute(file.path) && !file.path.split('/').some(part => part === '..' || part === '.'), `Unsafe archive inventory path: ${file.path}`);
       const installedFile = join(installedPackage, file.path);
       const actual = await realpath(installedFile), inside = relative(install, actual);
       assert.ok(inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside), `Installed file escapes isolated root: ${file.path}`);
       const stat = await lstat(actual);
       assert.ok(stat.isFile(), `Installed inventory entry is not a file: ${file.path}`);
-      assert.equal(stat.size, file.size, `Installed size differs from npm inventory: ${file.path}`);
+      assert.equal(stat.size, file.size, `Installed size differs from archive inventory: ${file.path}`);
+      assert.equal(createHash('sha256').update(await readFile(actual)).digest('hex'), file.sha256, `Installed checksum differs from archive inventory: ${file.path}`);
     }
     const serverEntry = join(installedPackage, 'dist', 'src', 'mcp', 'stdio.js');
     const publicEntry = pathToFileURL(join(installedPackage, 'dist', 'src', 'index.js')).href;
-    process.stdout.write(`${JSON.stringify({ scenario: 'empty-cache-offline-install', outcome: 'passed', host, package: installedMetadata.name, version: installedMetadata.version, inventory_files: manifest.npm_pack.files.length, artifact_sha256: identity.sha256 })}\n`);
+    process.stdout.write(`${JSON.stringify({ scenario: 'empty-cache-offline-install', outcome: 'passed', host: { ...host, bun: bunVersion }, package: installedMetadata.name, version: installedMetadata.version, inventory_files: manifest.bun_pack.files.length, artifact_sha256: identity.sha256 })}\n`);
     const probe = join(install, 'installed-probe.mjs');
     await writeFile(probe, installedProbe, { flag: 'wx' });
     const probeProcess = spawn(process.execPath, [probe, fixtures, publicEntry], { cwd: install, env: environment, shell: false, stdio: 'inherit' });
@@ -173,7 +182,7 @@ async function installedAcceptance(): Promise<void> {
     // SDK and typed client-side validation are developer assets; the application
     // and every server/worker run strictly from the installed package and inputs.
     await runReleaseAcceptance({ serverEntry, fixtures, serverCwd: install, serverEnv: environment, temporaryRoot: temporary });
-    process.stdout.write(`${JSON.stringify({ scenario: 'installed-acceptance-complete', outcome: 'passed', artifact, artifact_sha256: identity.sha256, integrity: identity.integrity, host: { ...host, npm: npmVersion }, mcp: 'complete-maintained-release-suite' })}\n`);
+    process.stdout.write(`${JSON.stringify({ scenario: 'installed-acceptance-complete', outcome: 'passed', artifact, artifact_sha256: identity.sha256, integrity: identity.integrity, host: { ...host, bun: bunVersion }, mcp: 'complete-maintained-release-suite' })}\n`);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

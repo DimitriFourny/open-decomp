@@ -6,7 +6,7 @@ Full dependency notices are retained verbatim under [licenses/](licenses/), with
 
 ## Runtime dependency inventory
 
-Exact package versions are pinned by the source lockfile. Archive SHA256/npm integrity, the lockfile digest and npm file inventory are bound by the produced archive's sibling `<archive>.release.json` manifest. An installed run is a separate verification event; documentation bundled inside that archive is only its build-time snapshot.
+Exact package versions are pinned by the source `bun.lock`. Archive SHA256/SHA512 integrity, the `bun.lock` digest, Node/Bun tool versions, original source package metadata and archive inventory are bound by the produced archive's sibling schema-version-2 `<archive>.release.json` manifest. Its `bun_pack` inventory records file paths, sizes, modes, SHA256 hashes and bundled package names. An installed run is a separate verification event; documentation bundled inside that archive is only its build-time snapshot. Historical npm-built release manifests remain evidence for their original sealed archives.
 
 | Component | Version / revision | Applicable notices retained here |
 | --- | --- | --- |
@@ -20,7 +20,7 @@ Exact package versions are pinned by the source lockfile. Archive SHA256/npm int
 | `swift-demangle-wasm` | 1.0.2 | [MIT wrapper](licenses/swift-demangle-wasm/LICENSE), copyright 2025 Yuta Saito; [exact package NOTICE](licenses/swift-demangle-wasm/NOTICE), [actual upstream Swift license and Runtime Library Exception](licenses/swift-demangle-wasm/Swift-LICENSE.txt). See discrepancy/source boundary below. |
 | `@bjorn3/browser_wasi_shim` | 0.4.2 | [MIT](licenses/@bjorn3/browser_wasi_shim/LICENSE-MIT) OR [Apache-2.0](licenses/@bjorn3/browser_wasi_shim/LICENSE-APACHE); transitive Swift WASI runtime. |
 
-Node/npm, Node's SQLite implementation, operating-system libraries and the user's MCP host are separate prerequisites, not bundled application runtimes. The source-only acceptance client `@modelcontextprotocol/client` 2.3.1 and build/test dependencies are not shipped production dependencies; their own installed/source notices still apply when using the development checkout. Do not infer their inclusion or an application license from the fixture license.
+Node 24.22.0, Bun 1.4.3 for package management, Node's SQLite implementation, operating-system libraries and the user's MCP host are separate prerequisites, not bundled application runtimes. Bun does not replace Node as the application/test runtime. The source-only acceptance client `@modelcontextprotocol/client` 2.3.1 and build/test dependencies are not shipped production dependencies; their own installed/source notices still apply when using the development checkout. Do not infer their inclusion or an application license from the fixture license.
 
 ## MCP SDK licensing transition
 

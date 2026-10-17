@@ -100,16 +100,16 @@ These observations are historical migration input, not the current support inven
 
 ## Commands
 
-Run all commands from the repository root. Fixture rebuilds are deliberately separate from `npm run build`.
+Run all commands from the repository root using Node 24.22.0 and Bun 1.4.3. Install source dependencies with `bun install --frozen-lockfile`; Node/tsx remains the execution toolchain. Fixture rebuilds are deliberately separate from `bun run build`.
 
 ### Offline fixture maintenance validation
 
 ```sh
-npm run typecheck
+bun run typecheck
 node --import tsx --test test/fixtures/*.test.ts
 ```
 
-These check hashes/manifest structure, independently pinned fields/bytes, exact universal slicing, stripping behavior, exports/imports and zero-fill, every malformed mutation, raw code/source binding, and the independent semantic vectors. They do not compile or execute fixtures. Captured API diagnostics and entry-state results are historical migration evidence, not passing tests of the new implementation. Run `npm run check` for the current lifter, ABI, analysis, emitter and service regressions; run `node dist/scripts/release-acceptance.js` for the compiled MCP scenarios.
+These check hashes/manifest structure, independently pinned fields/bytes, exact universal slicing, stripping behavior, exports/imports and zero-fill, every malformed mutation, raw code/source binding, and the independent semantic vectors. They do not compile or execute fixtures. Captured API diagnostics and entry-state results are historical migration evidence, not passing tests of the new implementation. Run `bun run check` for the current lifter, ABI, analysis, emitter and service regressions; run `node dist/scripts/release-acceptance.js` for the compiled MCP scenarios.
 
 ### Trusted native behavior, no compiler or sibling required
 

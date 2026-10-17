@@ -15,7 +15,7 @@ A successful investigation can open a binary, inspect its structure, search impo
 | Area | Decision | Reason / boundary |
 | --- | --- | --- |
 | First-party implementation | Strict TypeScript, ESM | Reuse existing work; explicit types and exhaustive handling of IR variants. No handwritten Rust/C++ backend in the initial implementation. |
-| Runtime and development | Node.js 24 LTS, npm lockfile, TypeScript compiler; `tsx` for development and `node:test` for tests | Pin tested tool versions. Compile distributable code; do not require a sibling checkout at runtime. |
+| Runtime and development | Node.js 24.22.0 runtime; Bun 1.4.3 package manager with `bun.lock`; TypeScript `tsc`, `tsx` for development and `node:test` for tests | Pin Bun with `.bun-version` and `package.json`'s `packageManager`; install with `bun install --frozen-lockfile`. Use `bun run test`, not Bun's test runner. Compile distributable code; do not require a sibling checkout at runtime. |
 | ARM64 decoder | a64js | Preserve its canonical encoding identity, fields, operands, and feature/validity information. Pin and record the imported revision. |
 | x86-64 decoder | iced-x86 official JavaScript/WebAssembly package | Structured operands, implicit register effects, flags metadata, control flow, and TypeScript declarations. Pin the package version. |
 | Name demangling | Pinned local WASM engines for Itanium C++, Microsoft C++, and Swift | Display-only decoration; preserve native names and identities. Demangled text never establishes an ABI signature or object layout. |

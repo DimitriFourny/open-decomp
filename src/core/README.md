@@ -172,11 +172,11 @@ Outer test watchdogs are distinct from service deadlines: the three multi-owner 
 
 ## Local MCP launch and artifact access
 
-Use Node 24 LTS; integration verification pins 24.22.0. After `npm ci` and `npm run build`:
+Use Node 24.22.0 as the runtime and Bun 1.4.3 as the package manager. After `bun install --frozen-lockfile` and `bun run build`:
 
 ```sh
-npm run mcp -- --root /absolute/input-directory --root /absolute/project-directory
-npm run smoke:mcp
+bun run mcp --root /absolute/input-directory --root /absolute/project-directory
+bun run smoke:mcp
 ```
 
 The compiled entry is `dist/src/mcp/stdio.js`; the package binary is `open-decomp`. At least one existing authorized root is required. `--root` is repeatable; `--max-workers` accepts 1–32 and `--max-queued` accepts 0–1,024. No cwd/home root is implicit. Help, version and diagnostics go to stderr; stdout is SDK protocol traffic only. EOF and catchable termination signals cancel/reap project owners. Closing the owned stdin descriptor also releases a writer blocked on oversized input.
@@ -197,7 +197,7 @@ Target strings, names and notes remain untrusted data. Workers do not execute ta
 
 ## Authenticated HTTP development entry
 
-The current checkout also serves these same tools/resources with official SDK 2.3.1 `createMcpHandler` via `open-decomp-mcp-http --config ABSOLUTE_JSON_PATH`, compiled entry `dist/src/mcp/http/entry.js`, or `npm run mcp:http -- --config ABSOLUTE_JSON_PATH`. The root embedding surface is `startHttpServer` / `HttpServerHandle` and `loadHttpConfig` / `HttpConfig`; the handle exposes the actual bound `url` and idempotent `close(): Promise<void>`. No new public analysis protocol or stdio command alias is introduced.
+The current checkout also serves these same tools/resources with official SDK 2.3.1 `createMcpHandler` via `open-decomp-mcp-http --config ABSOLUTE_JSON_PATH`, compiled entry `dist/src/mcp/http/entry.js`, or `bun run mcp:http --config ABSOLUTE_JSON_PATH`. The root embedding surface is `startHttpServer` / `HttpServerHandle` and `loadHttpConfig` / `HttpConfig`; the handle exposes the actual bound `url` and idempotent `close(): Promise<void>`. No new public analysis protocol or stdio command alias is introduced.
 
 See [REMOTE.md](../../REMOTE.md) for exact provisioning, limits and ownership. Every request uses private operator-provisioned high-entropy bearer authentication against stored hashes, not OAuth/SSO. Each principal has a separate service/worker pool, disjoint canonical private project root and authorized input roots; artifact/job/project IDs and annotation authors are not login credentials. Non-loopback listeners require native TLS; exact Host/Origin checks do not imply CORS support or an OS sandbox.
 

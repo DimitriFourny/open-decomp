@@ -16,10 +16,11 @@ The compiled harnesses use the actual `QueryService`, production handler, persis
 
 ## Reproduction
 
-Use the pinned Node runtime and lockfile dependencies from a source checkout:
+Use Node 24.22.0 as the runtime and Bun 1.4.3 for the pinned `bun.lock` dependencies from a source checkout. These current reproduction commands do not recast the historical measurements below as Bun-era runs:
 
 ```sh
-npm run check
+bun install --frozen-lockfile
+bun run check
 node --import tsx scripts/bench/fetch-inputs.ts
 node dist/scripts/bench/pipeline.js --fixtures fixtures/bin --large-macho .local/benchmark-inputs/sqlite-3.54.0/macos-arm64/sqlite3 --large-pe .local/benchmark-inputs/sqlite-3.54.0/windows-x64/sqlite3.exe --large-instructions 50000
 node --expose-gc dist/scripts/bench/resources.js --fixtures fixtures/bin --iterations 100

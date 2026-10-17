@@ -1,6 +1,28 @@
 # Local release verification
 
-## Current status
+## Bun package-manager migration — macOS verification
+
+With Node **24.22.0** on PATH and Bun **1.4.3**, the migrated checkout passed `bun run check`: strict typechecking, **878/878 tests** across six suites (zero failures, cancellations or skips), and compilation. `bun run smoke` preserved the full-width `0x20000000000001` public-codec round trip. A separate clean temporary checkout of the package metadata and `bun.lock`, with an empty Bun cache, passed frozen installation and actual Node/tsx/TypeScript/runtime-dependency execution. All **53** migrated lock entries retained their previous exact versions and integrity hashes.
+
+The following commands then both exited **0**:
+
+```sh
+bun run pack:release --out .local/release/bun-migration-20261017
+bun run verify:installed --artifact .local/release/bun-migration-20261017/open-decomp-0.1.0.tgz --fixtures fixtures/bin
+```
+
+The new immutable pair is under `.local/release/bun-migration-20261017/`:
+
+| File | Bytes | SHA256 |
+| --- | ---: | --- |
+| `open-decomp-0.1.0.tgz` | 7,384,352 | `b3e9a8e26aeec861a17f64816d6aaf75fa510b2087fec91c0b3c261d6f801a99` |
+| `open-decomp-0.1.0.tgz.release.json` | 1,607,566 | `215ac801109d68c574c87775d01b15bacfb485b8621833aafb38098c3498ebde` |
+
+The schema-version-2 manifest binds `bun.lock`, original source package metadata, Node/Bun versions and **7,210** archive files with individual hashes. Installed acceptance independently checked the archive and installed inventory, installed offline with an initially empty Bun cache and scripts/dev dependencies disabled, imported the actual installed package, decoded Mach-O/PE/ELF with both ISA decoders, exercised all three WASM demanglers, and completed the maintained real installed MCP release suite, including all eight investigations, cancellation and reopened/restarted caches. No npm subprocess, source runtime fallback or target execution was used.
+
+This is macOS arm64 verification, not a Bun application-runtime migration, a Linux/WSL host pass or a performance comparison with npm. This record was added **after** packaging and installed acceptance; the immutable pair was not rewritten to include its own results. The npm-era records below remain evidence only for their named historical source/artifact identities.
+
+## Historical pre-Bun status
 
 The current F01/F02/F03 macOS development checkout passed strict typechecking, **852/852 tests** (six suites, zero skipped), compilation and actual compiled stdio acceptance for all **eight maintained fixtures and both dialects** under **Node 24.22.0**. Compiled HTTP/HTTPS additionally investigated all four ELF executable/shared symbol-bearing/stripped variants with both dialects, annotations, hash-paged artifacts, cache and full server restart. The corrected bounded-body implementation passed the retained eight-process overflow stress. A fresh immutable extension candidate from source **`0d3e40bd8e67d6d0afa02edbd5973d1239ff6b7a`** subsequently passed clean empty-cache offline installed acceptance on macOS, as recorded below. Frozen v0.1 archive results do not qualify these bytes. **The verified execution host and current first-local-release acceptance scope are macOS arm64 / Node 24.22.0.** Linux/WSL is intended but not host-qualified; native Windows execution is outside product scope, not a release blocker.
 
@@ -132,14 +154,15 @@ Retained evidence: **14 JSONL records** in `.local/extension-verification/macos-
 
 ## Reproducing the source-build acceptance
 
-From the repository root, with lockfile dependencies installed:
+From the repository root, with Node 24.22.0 on PATH and Bun 1.4.3 installed (pinned by `.bun-version` and `package.json`'s `packageManager`):
 
 ```sh
-npm exec --yes --package=node@24.22.0 -- npm run check
-npm exec --yes --package=node@24.22.0 -- node dist/scripts/release-acceptance.js
+bun install --frozen-lockfile
+bun run check
+node dist/scripts/release-acceptance.js
 ```
 
-With the verified Node executable already on PATH, the equivalent commands are `npm run check` and `node dist/scripts/release-acceptance.js`. The maintained harness accepts `--server-entry PATH --fixtures PATH`; fixtures is the `bin` directory alongside `manifest.json`, `elf-manifest.json` and `malformed`. It checks input hashes, launches the real official-SDK stdio client/server, emits JSON Lines evidence, and exits nonzero on an assertion or protocol failure. The client and corpus are developer acceptance assets, not installed runtime dependencies.
+These are current reproduction instructions, not a rewrite of the npm-era measured runs or sealed artifacts recorded elsewhere in this document. Bun manages the pinned `bun.lock` dependencies and package scripts; the existing `tsc`, `tsx` and Node `node:test` execution remain unchanged (`bun run test`, not `bun test`). The maintained harness accepts `--server-entry PATH --fixtures PATH`; fixtures is the `bin` directory alongside `manifest.json`, `elf-manifest.json` and `malformed`. It checks input hashes, launches the real official-SDK stdio client/server, emits JSON Lines evidence, and exits nonzero on an assertion or protocol failure. The client and corpus are developer acceptance assets, not installed runtime dependencies.
 
 The earlier frozen first-local-release compiled macOS run passed 24 scenario records followed by `release-scenarios-complete` (separate from the F01/F02 workflows above):
 

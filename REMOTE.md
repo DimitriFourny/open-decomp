@@ -4,13 +4,13 @@ F02 serves the existing Open Decomp tools and artifact resources over the pinned
 
 ## Start and provision
 
-Use Node 24 (verification used 24.22.0). The development package declares a separate HTTP command; a newly produced artifact must receive its own installed acceptance before it is qualified:
+Use Node 24.22.0 as the runtime and Bun 1.4.3 as the package manager. For checkout commands, first install the pinned `bun.lock` dependencies with `bun install --frozen-lockfile`. The development package declares a separate HTTP command; a newly produced artifact must receive its own installed acceptance before it is qualified:
 
 ```sh
 open-decomp-mcp-http --config /absolute/private/open-decomp-http.json
 ```
 
-The development/compiled entry is `src/mcp/http/entry.ts` / `dist/src/mcp/http/entry.js`; from the checkout use `npm run mcp:http -- --config /absolute/private/open-decomp-http.json`. `--help` prints usage. No roots, tokens or worker modules are accepted as network arguments. The actual installed local stdio binary is **`open-decomp`**, not `open-decomp-mcp`; no alias is provided. Its compiled entry remains `dist/src/mcp/stdio.js`.
+The development/compiled entry is `src/mcp/http/entry.ts` / `dist/src/mcp/http/entry.js`; from the checkout use `bun run mcp:http --config /absolute/private/open-decomp-http.json`. `--help` prints usage. No roots, tokens or worker modules are accepted as network arguments. The actual installed local stdio binary is **`open-decomp`**, not `open-decomp-mcp`; no alias is provided. Its compiled entry remains `dist/src/mcp/stdio.js`.
 
 Provision an existing, private project **parent directory** for each principal, and separate existing directories containing operator-approved input binaries. Clients choose absolute project paths strictly beneath their principal's project root. Creating a project requires its immediate parent to exist; the server does not recursively create arbitrary directories. Clients may import only existing files beneath that principal's input roots. There is no upload, URL import, symbol-server download, target execution, target-library loading, plugin endpoint or arbitrary file resource endpoint.
 

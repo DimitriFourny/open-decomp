@@ -18,20 +18,19 @@ Bundled verification/plan/backlog documents are **build-time snapshots**, not ev
 
 ## Install the private artifact
 
-Obtain the produced `.tgz` **and its sibling `<tgz filename>.release.json`**, for example `open-decomp-0.1.0.tgz` and `open-decomp-0.1.0.tgz.release.json`. Keep them together. The manifest binds SHA256, byte size, npm integrity, lockfile digest, Node/npm versions and package inventory to the archive. A worktree-derived build is not necessarily a clean Git commit; no bit-identical cross-host build is promised.
+Obtain the produced `.tgz` **and its sibling `<tgz filename>.release.json`**, for example `open-decomp-0.1.0.tgz` and `open-decomp-0.1.0.tgz.release.json`. Keep them together. The schema-version-2 manifest binds archive SHA256, byte size, SHA1 shasum and SHA512 integrity, the `bun.lock` digest, Node/Bun versions, original source package metadata and archive inventory to the archive. Its `bun_pack` inventory records each file's path, size, mode and SHA256, plus bundled package names. A worktree-derived build is not necessarily a clean Git commit; no bit-identical cross-host build is promised.
 
-Install in an application directory outside the source checkout with Node/npm already available. For example, in a POSIX shell (substitute actual absolute paths):
+Install in an application directory outside the source checkout with Node 24.22.0 and Bun 1.4.3 already available. Bun manages packages; Node remains the application runtime. For example, in a POSIX shell (substitute actual absolute paths):
 
 ```sh
 mkdir open-decomp-local
 cd open-decomp-local
-npm init -y
-npm install --offline --ignore-scripts --omit=dev /absolute/path/open-decomp-0.1.0.tgz
+bun add --offline --ignore-scripts --production /absolute/path/open-decomp-0.1.0.tgz
 ```
 
-Production dependencies, their WASM assets, compiled `dist/src` and compiled `dist/vendor/a64js` are bundled. Installation requires neither a sibling repository, compiler, network fetch, fixture corpus nor development dependencies. It does not execute analyzed targets. Keep the archive and manifest as the installation/update provenance record; ordinary npm installation does not itself validate the separate manifest. The source-only installed-acceptance driver below performs that validation and the empty-cache offline closure check. For intended WSL use, install/run inside the Linux distribution with its Linux Node and POSIX paths; this is guidance, not a claim that Linux/WSL installation has been verified.
+Production dependencies, their WASM assets, compiled `dist/src` and compiled `dist/vendor/a64js` are bundled. The private archive declares its bundled packages explicitly but omits source dependency/devDependency declarations, so Bun does not try to resolve those packages from the registry during offline installation; the release manifest retains the original source metadata and dependency versions. `bun add` creates the application's `package.json` if needed; do not run `bun init`, which sets up an unrelated development toolchain. Installation requires neither a sibling repository, compiler, network fetch, fixture corpus nor development dependencies. It does not execute analyzed targets. Keep the archive and manifest as the installation/update provenance record; ordinary Bun installation does not itself validate the separate manifest. The source-only installed-acceptance driver below performs that validation and the empty-cache offline closure check. For intended WSL use, install/run inside the Linux distribution with its Linux Node and POSIX paths; this is guidance, not a claim that Linux/WSL installation has been verified.
 
-Do not use a registry `npx open-decomp` command or patch `node_modules` to compensate for a broken artifact. A successful `--help` alone does not establish runtime closure: package import, worker startup, both decoders and all three demangler WASM paths must also work.
+Do not fetch a registry copy with `bunx` or patch `node_modules` to compensate for a broken artifact. A successful `--help` alone does not establish runtime closure: package import, worker startup, both decoders and all three demangler WASM paths must also work.
 
 ## Launch and configure local MCP
 
@@ -41,9 +40,9 @@ Create separate existing directories for input binaries and persistent projects.
 node /absolute/app/node_modules/open-decomp/dist/src/mcp/stdio.js --root /absolute/inputs --root /absolute/projects
 ```
 
-The package binary is `open-decomp` (npm installs its local executable under `node_modules/.bin`). Direct Node invocation avoids shell/PATH and Windows shim differences. The CLI help's usage label is `open-decomp-mcp`; this is not a second installed binary.
+The package binary is `open-decomp` (Bun installs its local executable under `node_modules/.bin`). Direct Node invocation avoids shell/PATH and Windows shim differences. The CLI help's usage label is `open-decomp-mcp`; this is not a second installed binary.
 
-A typical MCP host configuration is below; the outer configuration location/shape is host-specific. Use the absolute Node 24.22.0 executable and installed entry, not a source-checkout npm script:
+A typical MCP host configuration is below; the outer configuration location/shape is host-specific. Use the absolute Node 24.22.0 executable and installed entry, not a source-checkout package script:
 
 ```json
 {
@@ -73,7 +72,7 @@ For intended WSL use, the MCP process must execute Linux Node and the installed 
 
 The first local release uses **stdio**. Stdout must remain protocol traffic; consume stderr separately. The SDK owns framing and version negotiation. EOF and catchable termination signals cancel/reap project owners; use `project_close` for an orderly durable close before disconnecting.
 
-The current development checkout also provides `open-decomp-mcp-http --config /absolute/private/config.json` (`dist/src/mcp/http/entry.js`, or `npm run mcp:http -- --config ...`) for the same tools/resources over official-SDK Streamable HTTP. [REMOTE.md](REMOTE.md) documents provisioning, exact limits and lifecycle. Authentication is private, operator-provisioned high-entropy bearer authentication with stored SHA256 hashes, **not OAuth/SSO**. Every request is authenticated; each principal has disjoint private project ownership, its own service/worker pool, and authorized input roots. Non-loopback listeners require native TLS; Host/Origin allowlists do not create CORS/browser support or an OS sandbox.
+The current development checkout also provides `open-decomp-mcp-http --config /absolute/private/config.json` (`dist/src/mcp/http/entry.js`, or `bun run mcp:http --config ...`) for the same tools/resources over official-SDK Streamable HTTP. [REMOTE.md](REMOTE.md) documents provisioning, exact limits and lifecycle. Authentication is private, operator-provisioned high-entropy bearer authentication with stored SHA256 hashes, **not OAuth/SSO**. Every request is authenticated; each principal has disjoint private project ownership, its own service/worker pool, and authorized input roots. Non-loopback listeners require native TLS; Host/Origin allowlists do not create CORS/browser support or an OS sandbox.
 
 HTTP work transfers to the principal at validated, authorized service dispatch, not at a guaranteed durable commit. After dispatch, disconnects, HTTP deadlines and SDK cancellation do not automatically cancel work; use `analysis_cancel`, and inspect durable state after a lost acknowledgement rather than replaying mutations. This ownership differs from a local stdio process's EOF shutdown.
 
@@ -204,24 +203,26 @@ Dependency updates require reviewed exact pins/lockfile, full license/notices an
 
 ## Developer commands — source checkout only
 
-These commands require the source repository and development dependencies. They are **not installed-app runtime requirements** and are not claims that a command has been run for your artifact. Use Node 24.22.0 and the checked-in lockfile:
+These commands require the source repository and development dependencies. They are **not installed-app runtime requirements** and are not claims that a command has been run for your artifact. Use Node 24.22.0 for application/test execution and Bun 1.4.3 for package management, pinned by `.bun-version` and `package.json`'s `packageManager` field. Release packaging and installed acceptance also require native `tar` on PATH to inspect and stage archives; application execution does not. Install the checked-in `bun.lock` without changing its resolutions:
 
 ```sh
-npm ci
-npm run check
+bun install --frozen-lockfile
+bun run check
 node dist/scripts/release-acceptance.js
-npm run smoke:mcp
+bun run smoke:mcp
 ```
 
-`check` runs typecheck, tests and compilation. The release harness is the maintained official-SDK client driving the actual compiled server; its `--server-entry PATH --fixtures PATH` options select another entry/corpus. Fixture `bin`, sibling `manifest.json`, `elf-manifest.json` and `malformed` inputs must agree. It never executes analyzed binaries. General fixture rebuild/native trusted-execution commands are separate explicit developer actions documented in [fixtures/README.md](fixtures/README.md), not install/service behavior.
+`check` runs typecheck, tests and compilation using the existing `tsc`, Node `node:test` and `tsx` toolchain. Run tests with `bun run test`, **not `bun test`**; Bun is not the application or test runtime. The release harness is the maintained official-SDK client driving the actual compiled server; its `--server-entry PATH --fixtures PATH` options select another entry/corpus. Fixture `bin`, sibling `manifest.json`, `elf-manifest.json` and `malformed` inputs must agree. It never executes analyzed binaries. General fixture rebuild/native trusted-execution commands are separate explicit developer actions documented in [fixtures/README.md](fixtures/README.md), not install/service behavior.
 
 Produce and verify a private artifact:
 
 ```sh
-npm run pack:release -- --out .local/release
-npm run verify:installed -- --artifact /absolute/path/open-decomp-0.1.0.tgz --fixtures fixtures/bin
+bun run pack:release --out .local/release
+bun run verify:installed --artifact /absolute/path/open-decomp-0.1.0.tgz --fixtures fixtures/bin
 ```
 
-Packaging invokes the existing build after cleaning only declared generated `dist`, then uses standard `npm pack --ignore-scripts --json`; retain both archive and `<archive>.release.json`. Use a fresh output location if the driver rejects a collision. Installed acceptance verifies the sibling manifest, installs the actual archive outside the repository with an empty npm cache and offline/ignore-scripts/omit-dev, checks the public import, both real decoders and all three WASM demanglers, then reuses real MCP release scenarios with copied hash-bound fixture inputs. Harness/client SDK assets are developer-only; the installed server must not depend on them or on the source tree. Record actual results separately for each host; a script's existence is not an installed pass.
+Packaging invokes the existing build after cleaning only declared generated `dist`, then uses Bun packing to create a true bundled `.tgz`; retain both archive and `<archive>.release.json`. To keep Bun 1.4.3 offline installation self-contained, the driver stages the Bun-packed contents, lists bundled packages explicitly and omits staged dependency/dev-dependency declarations before the final `bun pm pack --destination DIR --ignore-scripts --quiet`. It does not change source `package.json`; the manifest retains its SHA256 and original production declarations. Use a fresh output location if the driver rejects a collision. Installed acceptance verifies the sibling manifest, installs the actual archive outside the repository with an empty Bun cache and `--offline --ignore-scripts --production`, checks the public import, both real decoders and all three WASM demanglers, then reuses real MCP release scenarios with copied hash-bound fixture inputs. Harness/client SDK assets are developer-only; the installed server must not depend on them or on the source tree. Record actual results separately for each host; a script's existence is not an installed pass.
+
+The Bun migration changes package management, not runtime qualification. Earlier npm-built sealed archives, manifests, measured commands and outcomes in [release verification](RELEASE-VERIFICATION.md) remain historical evidence for those exact bytes; they do not qualify a newly Bun-packed archive. Retain the matching historical verifier when reproducing an npm-era artifact's acceptance: its manifest is not a compatibility input for the current Bun release verifier.
 
 For measured benchmark reproduction and reviewed external input setup, follow [PERFORMANCE.md](PERFORMANCE.md). The runtime does not fetch benchmark inputs, raw Arm references, symbol servers or target-selected URLs. Preserve manifests, host/runtime details, typed failures and partial states alongside successful measurements.
