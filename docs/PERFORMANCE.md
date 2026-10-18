@@ -575,6 +575,60 @@ The x86-64 `heldout_weighted` text is now a plain typed loop over `double*` with
 - missing `const` on read-only FP pointers;
 - generic `valueN` names.
 
+## Source view round 7, three-tool frozen-suite rerun (2026-10-18, commit `21f4089`)
+
+Root: `.local/quality-rounds/round7-2026-10-18/`. Same inputs, gold (`427f9357…`, 736/736) and harness hashes as round 6. The OD+Ghidra recording was staged in `~/open-decomp-stage/` and moved in. Ghidra 70/70 and angr 120/120 texts are byte-identical to round 6; 76 of 80 Open Decomp texts changed.
+
+The changes in this round:
+
+- frame-private locals promoted across more calls (`call_return_address`, `wide_slot_parts`, `fp_guard_frame`; flags are not argument storage);
+- `do`/`while` and exit-copy loop forms (`loop_exit_copies`, `loop_test_restatement`);
+- `shift_idiom` (masked rotates and sign-fill to plain shifts);
+- `single_use_call_inlining`;
+- FP copy propagation through identity bitcasts;
+- `const` formals across open-arity calls;
+- loop-role names.
+
+On the 4-cell development matrix, the C outputs changed as follows:
+
+| Matrix metric (C)               | Before | After |
+| ------------------------------- | -----: | ----: |
+| `while (true)` loops            |     54 |    33 |
+| `bv_ror`/`bv_rol` uses          |     46 |     0 |
+| outputs with raw `entry_sp - …` |     21 |    13 |
+| `valueN` declarations           |    380 |   228 |
+| files with `call_result`        |     74 |     6 |
+
+| Lane                    | Open Decomp                                          | Ghidra                   | angr                   |
+| ----------------------- | ---------------------------------------------------- | ------------------------ | ---------------------- |
+| Exact executable subset | **54 cells, 1994/1994** (round 6: 50; no regression) | 36 cells, 1346/1346      | 42 cells, 1542/1542    |
+| Blind preference vs OD  | —                                                    | Ghidra 57, OD 46, tie 17 | angr 45, OD 83, tie 32 |
+
+Round 6 had Ghidra 66, OD 36, tie 18, and angr 62, OD 82, tie 16. The four newly passing cells are Mach-O ARM64 O0 `heldout_weighted`, which round 6 rejected for recovering four inputs.
+
+Reviewers disagreed on 28 of 60 Ghidra-set pairs and 29 of 80 angr-set pairs.
+
+| Dimension            | OD   | Ghidra | Gap r6 → r7   | OD (angr set) | angr |
+| -------------------- | ---- | ------ | ------------- | ------------- | ---- |
+| Algorithm            | 3.12 | 3.45   | 0.31 → 0.33   | 3.11          | 2.92 |
+| Control flow         | 2.87 | 3.17   | 0.44 → 0.30   | 3.01          | 2.58 |
+| Clutter              | 2.01 | 2.73   | 0.65 → 0.72   | 2.01          | 2.14 |
+| Style                | 2.14 | 2.38   | 0.33 → 0.24   | 2.29          | 2.11 |
+| Types/interfaces     | 3.02 | 1.97   | −0.65 → −1.05 | 2.81          | 2.51 |
+| Unresolved semantics | 3.22 | 3.61   | 0.30 → 0.39   | 3.35          | 2.96 |
+
+Results by function against Ghidra (round 6 in parentheses):
+
+| Function   | OD wins | Ghidra wins |  Ties |
+| ---------- | ------: | ----------: | ----: |
+| `runs`     | 16 (16) |       2 (4) | 6 (4) |
+| `saturate` | 15 (16) |       9 (8) | 0 (0) |
+| `roll`     |  10 (0) |     12 (16) | 2 (8) |
+| `weighted` |   5 (0) |     14 (22) | 5 (2) |
+| `merge`    |   0 (4) |     20 (16) | 4 (4) |
+
+One reviewer flagged a conditionally incremented change counter named `index` in O0 `saturate`. The `index` role should require an unconditional step on every back edge.
+
 ## Normalized four-lane performance (2026-10-17, commit `901602b`)
 
 Exclusive serialized slot (`.local/performance/quality.measurement.lock`), `dist/` aggregate `dd0ea263…` unchanged before/after, Node **v26.11.1** (not the historical 24.22.0 host), Ghidra 12.1.4, bridge `73ea1c8e…`. Protocol `scripts/bench/quality-persistent.py` unchanged: same MCP client for all four lanes (Open Decomp unobserved/observed, pinned Ghidra MCP bridge, persistent Ghidra `DecompInterface`), 11 equal requests in 156/156 matched cells, 3 fresh runs, 10 warm, 30 pings, balanced order. 1,716/1,716 observer/control pairs and 6/6 import controls equivalent. Raw evidence: `~/Documents/open-decomp-perf-2026-10-17-final/p25-normalized/comparison.json`.
