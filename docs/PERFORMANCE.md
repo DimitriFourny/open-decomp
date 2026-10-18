@@ -627,7 +627,7 @@ Results by function against Ghidra (round 6 in parentheses):
 | `weighted` |   5 (0) |     14 (22) | 5 (2) |
 | `merge`    |   0 (4) |     20 (16) | 4 (4) |
 
-One reviewer flagged a conditionally incremented change counter named `index` in O0 `saturate`. The `index` role should require an unconditional step on every back edge.
+One reviewer flagged a conditionally incremented change counter named `index` in O0 `saturate`. An audit of the 12-cell development matrix against source then found 294 wrong role names in the round-7 output, 278 of them `accumulator`. Commit `f690362` fixes this: a role prints only when it holds on every iteration and for every coalesced member, and copies and unrolled intermediates stay neutral. The same audit then finds 0 wrong names. The round-7 numbers above were measured before this fix.
 
 ## Normalized four-lane performance (2026-10-17, commit `901602b`)
 
