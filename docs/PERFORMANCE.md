@@ -422,6 +422,70 @@ Low-score evidence still remaining:
 
 On x86-64 `heldout_weighted`, the source view projects `rax` (`uint32_t` loop index) as the result and labels `zmm0` as scratch. The `double` result and its multiply–accumulate chain then disappear from the readable text; they stay in exit metadata.
 
+## angr as a third frozen-suite tool (2026-10-18)
+
+**Tool.** angr **10.0.4.post1** (PyPI, latest stable on 2026-10-18) on CPython 3.13.16, macOS arm64, in the gitignored venv `.local/angr-venv/`. `scripts/bench/angr-requirements.txt` pins it and every dependency (`archinfo`/`cle`/`pyvex` 10.0.4, `capstone` 5.0.9, `pypcode` 4.0.1, `z3-solver` 5.1.0.0, …). The PyPI wheel set ships no unicorn library. angr logs that unicorn support is disabled; the lane never needs it.
+
+**Method.** `scripts/bench/angr-decompile.py run` records every built cell of the frozen suite. Each selected function is decompiled in a fresh worker process with `PYTHONHASHSEED=0`, so no knowledge-base state carries over between functions. The worker runs:
+
+1. `angr.Project(input, auto_load_libs=False)`;
+2. `CFGFast(normalize=True)` (the normalization the Decompiler requires; every other argument is the angr default);
+3. a lookup of the function whose entry is exactly the selected address;
+4. `Decompiler(function, cfg=cfg.model)` with the default preset and default options. `comparison.json` → `tool_identity` records all option defaults (`structurer_cls` SAILR, `llm_refine` false, …).
+
+angr's own default fallback is kept: after a decompiler error it retries once with its `basic` preset. Decompiler errors are recorded; the smoke run had none.
+
+**Fairness.** angr gets the same binaries as the other two lanes, hash-checked against the build manifest. It is addressed like the Ghidra and Open Decomp lanes: every cell, symbol-bearing or stripped, uses the compiler-derived VA from `build-manifest.json` (`llvm-nm` on the unstripped link). In symbol-bearing cells angr's function name comes from the symbol table. angr gets no names, prototypes, types, debug data, source or tuning. The script never creates a SimulationManager and never executes or emulates the analyzed binary. CFGFast's default indirect-jump resolution does its own static block-level analysis. Every non-text result stays an unavailable cell (`function_not_discovered`, `no_text`, `tool_error`, `tool_timeout`, `build_failed`). Nothing is retried selectively. Wall times include a fresh process, load and CFGFast for each function, so they are not a performance comparison.
+
+**Harness integration.** All changes are generic over tool names:
+
+- `quality-heldout-evaluate.py run` accepts repeated `--results` and an optional `--tools`. Every tool goes through the same header, name binding, PE plain-`long` rule, unverified reasons, oracle and worker. The PE rule now rejects only bare `long` (32-bit under Windows LLP64, 64-bit on the host); `long long` is 64-bit on both and is no longer matched. This applies to every tool.
+- `quality-heldout-packets.py` takes `--extra-results <dir>` and `--tools A B` (default `open-decomp ghidra`). With extra results, the sealed map also records their `comparison.json` hashes.
+- `quality-heldout-review-results.py` takes `--tools A B`, which must equal the sealed pair. It adds `tools`, `preference_counts` (zero-filled) and `dimension_means` to `readability.json`.
+- `quality-heldout-instructions.py` renders the round-4 reviewer instructions for any packet directory. Its output for round 4 is byte-identical to `review-instructions/reviewer-instructions.md`.
+
+No angr types header was added. angr's scalar types are standard C, and `uint128_t` is already defined. A diagnostic recompile of all 38 failing angr texts with the real `__m128i`/`__m128d`/`__m128` vector typedefs compiled none of them: the failures are helper calls (VEX `arm64g_calculate_condition`, `CONCAT`, `__CFADD__`, `__ROL__`, `__double_as_longlong`, `_mm_*` intrinsics), undeclared variables, and pointer/integer mismatches. The policy repairs none of these.
+
+**Neutrality on round 4** (`/tmp/od-angr-smoke/records/neutrality-round4.json`):
+
+- **Evaluator** (both the generic change and the narrowed PE rule). Rerunning on round-4 `heldout/` gives the same summary (Open Decomp 46 passed / 74 unverified; Ghidra 36 / 84) and the same records apart from `library_sha256`. All 140 driver sources, all 140 `compile.json` files (after substituting the output root) and all worker logs are byte-identical; only `evaluator_sha256` and the non-reproducible dylib UUIDs differ. No round-4 Open Decomp or Ghidra PE text contains `long long`. The three-tool run gives the same Open Decomp/Ghidra records.
+- **Packets.** With the sealed round-4 seed, 184 of 185 files are byte-identical, including `mapping.json`. `packet-manifest.json` differs only in its absolute directory fields.
+- **Readability.** Re-aggregating the round-4 submissions reproduces `readability.json` byte for byte once the three added fields are removed.
+
+**Smoke run.** All 120 cells, `/tmp/od-angr-smoke/`, round-4 Open Decomp/Ghidra texts. Two angr recordings produced identical text hashes.
+
+| Lane (120 function cells)         | angr 10.0.4.post1                                                                                                               | Ghidra 12.1.4 (round 4)   | Open Decomp (round 4)                   |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------- | --------------------------------------- |
+| Text availability (Mach-O/PE/ELF) | **120** (40/40/40)                                                                                                              | 70 (40/0/30)              | 80 (40/20/20)                           |
+| Exact executable subset           | **42 cells, 1542/1542** (Mach-O 14, ELF 14, PE 14)                                                                              | 36 cells, 1346/1346       | 46 cells, 1706/1706                     |
+| Other angr outcomes               | 16 counterexamples (`heldout_roll`, 4/36 each), 4 execution timeouts (ELF O2 `heldout_runs`), 38 no compile, 20 PE plain-`long` | 34 no compile, 50 no text | 24 no compile, 40 no text, 10 interface |
+
+The 16 `heldout_roll` counterexamples load `uint8_t` bytes as signed `char` and sign-extend them (for example, the all-`0xff` case). The 4 timeouts are emitted inner loops with no counter increment. Before the PE rule was narrowed to bare `long`, angr scored 36 cells, 1322/1322, with 32 PE plain-`long` rejections. Twelve of those 32 PE texts contained only `long long`: six now pass, four are `heldout_roll` counterexamples, and two use SSE intrinsics and do not compile.
+
+Round-5 commands, with `R=<new round root>` and `IN=~/Documents/open-decomp-quality-heldout-inputs-2026-10-17`:
+
+```sh
+python3 scripts/bench/quality-heldout-oracle.py --output "$R/gold"
+python3 scripts/bench/quality-heldout.py run --inputs "$IN" --output "$R/heldout" --entry dist/src/cli/entry.js \
+  --bridge "$BRIDGE" --ghidra "$GHIDRA_HOME" --java-home "$JAVA_HOME"
+.local/angr-venv/bin/python scripts/bench/angr-decompile.py run --inputs "$IN" --output "$R/angr"
+python3 scripts/bench/quality-heldout-evaluate.py run --results "$R/heldout" --results "$R/angr" --output "$R/correctness"
+python3 scripts/bench/quality-heldout-packets.py --results "$R/heldout" --oracle "$R/gold" --output "$R/review"
+python3 scripts/bench/quality-heldout-packets.py --results "$R/heldout" --extra-results "$R/angr" \
+  --tools open-decomp angr --oracle "$R/gold" --output "$R/review-angr"
+python3 scripts/bench/quality-heldout-instructions.py --packets "$R/review" --submissions "$R/submissions" \
+  --output "$R/review-instructions/reviewer-instructions.md"
+python3 scripts/bench/quality-heldout-instructions.py --packets "$R/review-angr" --submissions "$R/submissions-angr" \
+  --output "$R/review-instructions-angr/reviewer-instructions.md"
+# after both blind submissions per set exist:
+python3 scripts/bench/quality-heldout-review-results.py --packets "$R/review" \
+  --review-a "$R/submissions/review-A.json" --review-b "$R/submissions/review-B.json" --output "$R/readability"
+python3 scripts/bench/quality-heldout-review-results.py --packets "$R/review-angr" --tools open-decomp angr \
+  --review-a "$R/submissions-angr/review-A.json" --review-b "$R/submissions-angr/review-B.json" --output "$R/readability-angr"
+```
+
+Both packet sets show the same Open Decomp texts. Reviewers who have seen one set can recognize Open Decomp's style in the other, so each set should get its own fresh reviewers.
+
 ## Normalized four-lane performance (2026-10-17, commit `901602b`)
 
 Exclusive serialized slot (`.local/performance/quality.measurement.lock`), `dist/` aggregate `dd0ea263…` unchanged before/after, Node **v26.11.1** (not the historical 24.22.0 host), Ghidra 12.1.4, bridge `73ea1c8e…`. Protocol `scripts/bench/quality-persistent.py` unchanged: same MCP client for all four lanes (Open Decomp unobserved/observed, pinned Ghidra MCP bridge, persistent Ghidra `DecompInterface`), 11 equal requests in 156/156 matched cells, 3 fresh runs, 10 warm, 30 pings, balanced order. 1,716/1,716 observer/control pairs and 6/6 import controls equivalent. Raw evidence: `~/Documents/open-decomp-perf-2026-10-17-final/p25-normalized/comparison.json`.

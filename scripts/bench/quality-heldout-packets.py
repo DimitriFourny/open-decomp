@@ -37,25 +37,41 @@ RUBRIC = {
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--results', type=Path, required=True)
+    parser.add_argument('--extra-results', type=Path, action='append', default=[],
+                        help='Additional tool recording (e.g. angr-decompile.py output) matched by cell/function')
+    parser.add_argument('--tools', nargs=2, default=['open-decomp', 'ghidra'], metavar=('TOOL', 'TOOL'),
+                        help='The blinded pair (default: open-decomp ghidra)')
     parser.add_argument('--oracle', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
+    quality.require(args.tools[0] != args.tools[1], 'A packet pair needs two distinct tools')
     result = json.loads((args.results / 'comparison.json').read_text())
     frozen = json.loads((HERE / 'quality-heldout-selection.json').read_text())
     quality.require(result['build_manifest']['selection']['source']['sha256'] == frozen['source']['sha256'], 'Only frozen held-out suite authorized')
+    roots = {run['tool']: args.results for run in result['runs']}
+    pairs = list(result['matched'])
+    for root in args.extra_results:
+        extra = json.loads((root / 'comparison.json').read_text())
+        quality.require(extra['build_manifest'] == result['build_manifest'], 'Extra recording used different inputs')
+        tools = {run['tool'] for run in extra['runs']}
+        quality.require(not tools & set(roots), 'Each tool must come from exactly one recording')
+        roots.update(dict.fromkeys(tools, root))
+        rows = {(row['cell'], row['name']): row for row in extra['matched']}
+        quality.require(len(rows) == len(pairs) and set(rows) == {(row['cell'], row['name']) for row in pairs}, 'Extra recording cells differ')
+        pairs = [{**pair, **{tool: rows[(pair['cell'], pair['name'])][tool] for tool in tools}} for pair in pairs]
+    quality.require(set(args.tools) <= set(roots), 'Requested tool has no recording')
     args.output.mkdir(parents=True, exist_ok=False)
     reviewer, private = args.output / 'reviewer', args.output / 'private'
     reviewer.mkdir()
     private.mkdir(mode=0o700)
     seed = secrets.token_hex(32)
     rng = random.Random(int(seed, 16))
-    pairs = list(result['matched'])
     rng.shuffle(pairs)
     mapping, availability = [], []
     questions = {row['name']: row['review_question'] for row in frozen['selected_functions']}
     for index, pair in enumerate(pairs):
         identifier = f'case-{index + 1:03}'
-        order = ['open-decomp', 'ghidra']
+        order = list(args.tools)
         rng.shuffle(order)
         labels = dict(zip(('X', 'Y'), order))
         secret = {'case': identifier, 'cell': pair['cell'], 'function': pair['name'], 'mapping': labels,
@@ -72,7 +88,7 @@ def main():
         directory.mkdir()
         outputs = {}
         for label, tool in labels.items():
-            source = args.results / pair[tool]['output']['path']
+            source = roots[tool] / pair[tool]['output']['path']
             quality.require(quality.digest(source) == pair[tool]['output']['sha256'], 'Recorded output changed')
             shutil.copyfile(source, directory / (label + '.c'))
             outputs[label] = {'path': label + '.c', 'sha256': quality.digest(source),
@@ -82,6 +98,8 @@ def main():
     seal = {'seed': seed, 'selection_sha256': quality.digest(HERE / 'quality-heldout-selection.json'),
             'comparison_sha256': quality.digest(args.results / 'comparison.json'), 'cases': mapping,
             'policy': 'Do not disclose this mapping/seed or source gold to reviewers until all reviews are submitted and hashed.'}
+    if args.extra_results:
+        seal['extra_comparison_sha256s'] = {str(root): quality.digest(root / 'comparison.json') for root in args.extra_results}
     quality.save(private / 'mapping.json', seal)
     shutil.copyfile(args.oracle / 'source-oracle-cases.json', private / 'source-oracle-cases.json')
     quality.save(reviewer / 'rubric.json', {'dimensions_0_through_4': RUBRIC,

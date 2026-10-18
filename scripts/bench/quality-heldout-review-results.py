@@ -17,6 +17,8 @@ def main():
     parser.add_argument('--review-a', type=Path, required=True)
     parser.add_argument('--review-b', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--tools', nargs=2, default=['open-decomp', 'ghidra'], metavar=('TOOL', 'TOOL'),
+                        help='The sealed pair, in report order (must equal the tools in private/mapping.json)')
     args = parser.parse_args()
     meta = json.loads((args.packets / 'packet-manifest.json').read_text())
     available = json.loads((args.packets / 'reviewer/availability.json').read_text())
@@ -48,8 +50,10 @@ def main():
     quality.require(quality.digest(mapping_path) == meta['mapping_commitment_sha256'], 'Sealed mapping changed')
     mapping = json.loads(mapping_path.read_text())
     by_case = {row['case']: row for row in mapping['cases']}
+    quality.require({tool for row in mapping['cases'] for tool in row['mapping'].values()} == set(args.tools),
+                    'Sealed mapping pairs different tools than --tools')
     aggregate, per_reviewer = [], []
-    pooled = {tool: {dimension: [] for dimension in dimensions} for tool in ('open-decomp', 'ghidra')}
+    pooled = {tool: {dimension: [] for dimension in dimensions} for tool in args.tools}
     preferences = Counter()
     decoded = []
     for review in reviews:
@@ -84,20 +88,24 @@ def main():
                       for dimension in dimensions} for side in ('X', 'Y')}
         disagreements.append({'case': case, 'preference_disagrees': first[case]['preference'] != second[case]['preference'],
                               'absolute_score_differences': gaps})
+    preference_counts = {choice: preferences[choice] for choice in (*args.tools, 'tie', 'neither')}
+    dimension_means = {tool: {dimension: statistics.mean(values) for dimension, values in sorted(items.items())}
+                       for tool, items in pooled.items()}
     report = {'schema': 1, 'method': 'Two independently submitted blinded LLM reviews; NOT a human study',
               'submissions_before_unsealing': receipts, 'mapping_commitment_sha256': meta['mapping_commitment_sha256'],
               'mapping_read_only_after_both_validated': True, 'paired_cases': len(expected),
               'missing_pairs_retained': meta['missing_pair_cells'], 'preferences': dict(preferences),
+              'tools': args.tools, 'preference_counts': preference_counts, 'dimension_means': dimension_means,
               'dimension_ratings': aggregate, 'per_reviewer': per_reviewer, 'disagreements': disagreements,
               'decoded_reviews': decoded,
               'limitations': ['Only readability/task comprehension; not behavioral correctness or usable-coverage proof.',
-                             'Repeated target/compiler/optimization/symbol variants are correlated; not 60 independent programs.',
+                             f'Repeated target/compiler/optimization/symbol variants are correlated; not {len(expected)} independent programs.',
                              'LLM reviewer bias and shared model lineage; no human or population-level generalization.',
                              'Engine style can imperfectly unblind X/Y; reviewers disclose suspected style inference.',
                              'No text-length score, no performance ranking, no universal parity claim.']}
     args.output.mkdir(parents=True, exist_ok=False)
     quality.save(args.output / 'readability.json', report)
-    print(json.dumps({'paired_cases': len(expected), 'preferences': dict(preferences),
+    print(json.dumps({'paired_cases': len(expected), 'preferences': preference_counts, 'dimension_means': dimension_means,
                       'preference_disagreements': sum(row['preference_disagrees'] for row in disagreements)}))
     return 0
 

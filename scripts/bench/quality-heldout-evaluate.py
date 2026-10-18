@@ -114,15 +114,24 @@ def wrapper(text, function):
 
 
 def evaluate(args):
-    result = json.loads((args.results / 'comparison.json').read_text())
     frozen = json.loads((HERE / 'quality-heldout-selection.json').read_text())
-    quality.require(result['build_manifest']['selection']['source']['sha256'] == frozen['source']['sha256'], 'Only frozen trusted held-out outputs are authorized')
+    recordings = []
+    for root in args.results:
+        result = json.loads((root / 'comparison.json').read_text())
+        quality.require(result['build_manifest']['selection']['source']['sha256'] == frozen['source']['sha256'], 'Only frozen trusted held-out outputs are authorized')
+        recordings.extend((root, run) for run in result['runs'])
+    present = list(dict.fromkeys(run['tool'] for _, run in recordings))
+    tools = args.tools or present
+    quality.require(set(tools) <= set(present), 'Requested tool has no recorded runs')
+    quality.require(len({(run['cell'], run['tool']) for _, run in recordings}) == len(recordings), 'Duplicate cell/tool recording')
     args.output.mkdir(parents=True, exist_ok=False)
     records = []
     quality.save(args.output / 'helper-definitions.json', {'header': HEADER,
                  'contracts': CONTRACTS, 'source_sha256': frozen['source']['sha256'],
                  'policy': 'Exact emitted text compiled unchanged. Scalar aliases have explicit real widths; no unknown/helper/no-op fallback. PE plain long rejected because host C long width differs.'})
-    for run in result['runs']:
+    for root, run in recordings:
+        if run['tool'] not in tools:
+            continue
         for row in run['functions']:
             record = {'cell': run['cell'], 'tool': run['tool'], 'function': row['name'],
                       'status': 'unverified', 'output_state': row['status']}
@@ -130,12 +139,12 @@ def evaluate(args):
             if row['status'] != 'text_returned':
                 record['reason'] = 'No emitted source text'
                 continue
-            original = args.results / row['output']['path']
+            original = root / row['output']['path']
             quality.require(quality.digest(original) == row['output']['sha256'], 'Recorded emitted text changed')
             record['emitted_sha256'] = row['output']['sha256']
             text = original.read_text()
-            # C keyword long has a different target data model on Windows.
-            if run['target'].startswith('pe') and re.search(r'\blong\b', text):
+            # Plain C long is 32-bit on Windows (LLP64) but 64-bit on the host; long long is 64-bit on both.
+            if run['target'].startswith('pe') and re.search(r'\blong\b', re.sub(r'\blong\s+long\b', '', text)):
                 record['reason'] = 'Target plain-long data model not host-executable without rewriting'
                 continue
             directory = args.output / run['cell'] / run['tool'] / row['name']
@@ -182,7 +191,7 @@ def evaluate(args):
                              'Host execution of explicit scalar subset only; PE long data-model differences excluded.',
                              'Finite case agreement is not whole-program or all-input equivalence.',
                              'Cases compare return values, destination bytes and write guard bytes; do not establish absence of every extra read.'],
-              'summary': {tool: dict(Counter(record['status'] for record in records if record['tool'] == tool)) for tool in ('open-decomp', 'ghidra')},
+              'summary': {tool: dict(Counter(record['status'] for record in records if record['tool'] == tool)) for tool in tools},
               'records': records}
     quality.save(args.output / 'correctness.json', report)
     print(json.dumps(report['summary']))
@@ -193,7 +202,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     run = commands.add_parser('run')
-    run.add_argument('--results', type=Path, required=True)
+    run.add_argument('--results', type=Path, action='append', required=True,
+                     help='Recording directory with comparison.json; repeat to add another tool recording (e.g. angr)')
+    run.add_argument('--tools', nargs='+', help='Tools to evaluate, in report order (default: every recorded tool)')
     run.add_argument('--output', type=Path, required=True)
     work = commands.add_parser('worker')
     work.add_argument('--library', type=Path, required=True)
