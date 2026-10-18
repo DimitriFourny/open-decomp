@@ -76,7 +76,13 @@ def wrapper(text, function):
     # Parse only the declaration for a positional caller adapter. The source text
     # itself is retained verbatim; unsupported declarations are not repaired.
     clean = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
-    match = re.search(r'([A-Za-z_]\w*)\s*\(([^()]*)\)\s*\{', clean)
+    # Bind the definition named like the target (or its Mach-O underscore form);
+    # else the unique non-static definition; else the first definition.
+    matches = list(re.finditer(r'([A-Za-z_]\w*)\s*\(([^()]*)\)\s*\{', clean))
+    named = [match for match in matches if match.group(1) in (function, '_' + function)]
+    external = [match for match in matches if match.group(1) not in ('if', 'while', 'for', 'switch')
+                and not re.search(r'\bstatic\b', clean[clean.rfind('\n', 0, match.start()) + 1:match.start()])]
+    match = named[0] if named else external[0] if len(external) == 1 else matches[0] if matches else None
     if not match:
         raise ValueError('No supported plain C function declaration')
     name, parameters = match.groups()
