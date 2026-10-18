@@ -4,6 +4,15 @@ import type { Writer } from './writer.js';
 
 const floatLiteralStorage = new DataView(new ArrayBuffer(8));
 
+/** Whether IEEE binary32/binary64 storage bits denote a finite value. */
+export function finiteFloatBits(bits: bigint, width: number): boolean {
+  return width === 32
+    ? ((bits >> 23n) & 0xffn) !== 0xffn
+    : width === 64
+      ? ((bits >> 52n) & 0x7ffn) !== 0x7ffn
+      : false;
+}
+
 /** These are machine storage types, never inferred C source types. */
 export function machineType(type: DataType): string {
   switch (type.kind) {
@@ -364,6 +373,12 @@ export interface Printed {
    * comparisons and converting contexts may use it; call arguments keep the
    * widening because variadic/unprototyped callees do not convert. */
   readonly widened?: Printed;
+  /** The operand of the explicit conversion to `bits` bits that produced this
+   * text. A conversion preserves its operand's value modulo 2^bits, so a later
+   * conversion that keeps no more bits converts the operand itself. */
+  readonly from?: { readonly operand: Printed; readonly bits: number };
+  /** The one-bit operand of a logical negation: negating twice is the identity. */
+  readonly negated?: Printed;
 }
 /** Binding strength shared by both dialects; only binary operators differ. */
 export const PRIMARY = 16;
@@ -423,12 +438,49 @@ export function usualArithmetic(left: IntegerCType, right: IntegerCType): Intege
   return unsigned.bits >= signed.bits ? unsigned : signed;
 }
 
+/** Records one source-view presentation rewrite; false when its record bound is
+ * reached and the explicit form must stay. Only a source view that records its
+ * rewrites simplifies at all: the checked view never receives a recorder. */
+export type SimplificationRecorder = (rule: string, scope: string) => boolean;
+
+const simplifications = {
+  zero_high_join:
+    'a join whose upper parts are constant zero is the zero extension of its lowest part',
+  conversion_collapse:
+    'an integer conversion that keeps no more bits than an inner conversion or zero extension preserves converts the inner operand; value modulo 2^bits, or the value itself for a zero extension, is unchanged',
+  double_negation: 'logical negation of a logical negation of a one-bit value is that value',
+  redundant_mask:
+    'a constant mask holding every bit of the unsigned type of its other operand leaves that operand unchanged',
+  idempotent_bitwise:
+    'a bitwise and/or of a variable (under the same conversions) with itself is that variable; one expression reads a variable at one program point',
+  complement_xor:
+    'xor with the all-ones constant of the result width is the bitwise complement of the other operand',
+  negative_addend:
+    'adding a constant in the upper half of the result width is subtracting its two-complement magnitude: the same value modulo 2^width',
+} as const;
+
 /** Source-view syntax shared by expression and memory printing. */
 export class SourcePrinter {
   constructor(
     private readonly writer: Writer,
     private readonly nativeWidths = false,
+    private readonly record?: SimplificationRecorder,
   ) {}
+
+  /** Permission (and record) for one exact simplification rule. */
+  simplify(rule: keyof typeof simplifications): boolean {
+    return this.record?.(rule, simplifications[rule]) === true;
+  }
+
+  /** Both printings are one bare variable under the same conversions: pure,
+   * and equal wherever one expression reads them together. */
+  sameVariable(left: Printed, right: Printed): boolean {
+    if (left.text !== right.text) return false;
+    if (!this.python)
+      return /^(?:\((?:u?int(?:8|16|32|64|128)_t|uintptr_t)\))*[A-Za-z_]\w*$/.test(left.text);
+    const match = /^((?:u?int\d+\()*)[A-Za-z_]\w*(\)*)$/.exec(left.text);
+    return match !== null && match[1]!.split('(').length - 1 === match[2]!.length;
+  }
 
   get python(): boolean {
     return this.writer.language === 'python-like';
@@ -465,15 +517,18 @@ export class SourcePrinter {
   }
 
   /** Logical negation; exact for a one-bit value in any printed representation
-   * whose zero is the zero bit pattern. */
+   * whose zero is the zero bit pattern. Negating a negation is that one-bit
+   * operand itself. */
   not(value: Printed): Printed {
+    if (value.negated && this.simplify('double_negation')) return value.negated;
     return this.python
       ? {
           text: `not ${this.group(value, PRIMARY)}`,
           precedence: PYTHON_NOT,
           ctype: { bits: 1, signed: false },
+          negated: value,
         }
-      : { text: `!${this.group(value, UNARY)}`, precedence: UNARY, ctype: INT };
+      : { text: `!${this.group(value, UNARY)}`, precedence: UNARY, ctype: INT, negated: value };
   }
 
   /** Conjunction/disjunction of one-bit values. Pure operands make evaluation
@@ -493,6 +548,28 @@ export class SourcePrinter {
     };
   }
 
+  /** The operand a conversion to `bits` bits may read in place of `value`.
+   * An inner conversion keeps the operand's value modulo 2^(its own width), so
+   * converting to no more than that many bits needs only the operand; a
+   * zero-extension (`widened`) keeps the value itself, so any conversion may
+   * start from the narrow operand. */
+  private converted(bits: number, value: Printed): Printed {
+    for (;;) {
+      const widened = value.widened,
+        // Python-like signed formals carry their bit pattern as an unsigned
+        // interpretation: `int32(uint32(x))` is kept, never elided to `x`.
+        from =
+          value.from &&
+          bits <= value.from.bits &&
+          !(this.python && value.from.operand.ctype?.signed)
+            ? value.from.operand
+            : undefined,
+        inner = widened?.ctype && !widened.ctype.signed ? widened : from;
+      if (!inner || !this.simplify('conversion_collapse')) return value;
+      value = inner;
+    }
+  }
+
   /** Explicit conversion: C cast, or the documented Python-like reduction helper. */
   cast(bits: number, signed: boolean, value: Printed): Printed {
     if (value.ctype?.bits === bits && value.ctype.signed === signed) return value;
@@ -506,6 +583,8 @@ export class SourcePrinter {
       value.unreduced.ctype.signed
     )
       return value.unreduced;
+    const operand = this.converted(bits, value);
+    if (operand !== value) return this.cast(bits, signed, operand);
     if (bits === 1 && !signed)
       return this.binary(
         '&',
@@ -531,10 +610,12 @@ export class SourcePrinter {
       );
     }
     const ctype = { bits, signed };
-    const inverse =
-      !this.python && !signed && value.ctype?.bits === bits && value.ctype.signed
+    const inverse = {
+      ...(!this.python && !signed && value.ctype?.bits === bits && value.ctype.signed
         ? { unreduced: value }
-        : {};
+        : {}),
+      ...(value.ctype ? { from: { operand: value, bits } } : {}),
+    };
     if (!this.python)
       return {
         text: `(${signed ? 'int' : 'uint'}${bits}_t)${this.group(value, UNARY)}`,
@@ -555,6 +636,8 @@ export class SourcePrinter {
   /** Reduce a value to exactly unsigned `bits` unless its type already is that. */
   reduce(bits: number, value: Printed): Printed {
     if (value.ctype && !value.ctype.signed && value.ctype.bits === bits) return value;
+    const operand = this.converted(bits, value);
+    if (operand !== value) return this.reduce(bits, operand);
     return { ...this.cast(bits, false, value), unreduced: value };
   }
 
@@ -618,6 +701,8 @@ export interface ExpressionOptions {
   /** Proven constant value of an operand, when it prints as a literal. */
   readonly constant?: (value: Value) => bigint | undefined;
   readonly nativeIntegerStorage?: boolean;
+  /** Source view: records each exact simplification it applies. */
+  readonly presentation?: SimplificationRecorder;
   /** Approved scalar operation under the recorded FP environment requirement. */
   readonly nativeFp?: boolean;
   readonly floatLiterals?: boolean;
@@ -648,7 +733,7 @@ export function expressionText(
       ctype: null,
     };
   }
-  const printer = new SourcePrinter(writer, options.nativeIntegerStorage),
+  const printer = new SourcePrinter(writer, options.nativeIntegerStorage, options.presentation),
     python = printer.python,
     width = bitWidth(type);
   const helper = (): Printed => ({
@@ -669,6 +754,31 @@ export function expressionText(
   };
   const range = (value: Printed, bits: number): IntegerCType =>
     value.ctype ?? { bits, signed: false };
+  /** Prefix `-`/`~` at the result width; a 1-bit complement is logical negation. */
+  const prefix = (symbol: '-' | '~', printed: Printed): Printed => {
+    if (symbol === '~' && width === 1 && type.kind === 'integer') return printer.not(printed);
+    if (python)
+      return printer.reduce(width, {
+        text: `${symbol}${printer.group(printed, UNARY)}`,
+        precedence: UNARY,
+        ctype: null,
+      });
+    let ctype = promote(range(printed, width));
+    if (!ctype.signed && ctype.bits < width) {
+      printed = printer.cast(width, false, printed);
+      ctype = printed.ctype!;
+    }
+    // `--x` is the C decrement, never a double negation.
+    const operandText =
+      symbol === '-' && printed.text.startsWith('-')
+        ? `(${printed.text})`
+        : printer.group(printed, UNARY);
+    return printer.reduce(width, {
+      text: `${symbol}${operandText}`,
+      precedence: UNARY,
+      ctype,
+    });
+  };
   if (options.nativeFp) {
     if (expression.kind === 'float_compare') {
       const operators: Record<string, string> = {
@@ -704,6 +814,35 @@ export function expressionText(
         { bits: 1, signed: false },
       );
       return expression.op === 'unordered' ? unordered : printer.not(unordered);
+    }
+    if (expression.kind === 'float_unary' && (width === 32 || width === 64)) {
+      const value = name(expression.value);
+      if (expression.op === 'neg' && (!python || width === 64)) {
+        // A leading sign would otherwise form `--`.
+        const operandText =
+          value.precedence < UNARY || /^[-+]/.test(value.text) ? `(${value.text})` : value.text;
+        return { text: `-${operandText}`, precedence: UNARY, ctype: null };
+      }
+      if (expression.op === 'abs' && python && width === 64)
+        return printer.primary(`abs(${value.text})`);
+      if (!python && (expression.op === 'abs' || expression.op === 'sqrt')) {
+        // Compiler builtins: no header, and no clash with an analyzed libm callee.
+        const helper = `__builtin_${expression.op === 'abs' ? 'fabs' : 'sqrt'}${width === 32 ? 'f' : ''}`;
+        return printer.primary(`${helper}(${value.text})`);
+      }
+    }
+    if (
+      expression.kind === 'cast' &&
+      !python &&
+      (expression.op === 'float_to_signed' || expression.op === 'float_to_unsigned') &&
+      [8, 16, 32, 64].includes(width)
+    ) {
+      const signed = expression.op === 'float_to_signed';
+      return {
+        text: `(${signed ? 'int' : 'uint'}${width}_t)${printer.group(name(expression.value), UNARY)}`,
+        precedence: UNARY,
+        ctype: { bits: width, signed },
+      };
     }
     if (expression.kind === 'float' && (!python || (width === 64 && expression.op !== 'div'))) {
       const operators: Record<string, string> = { add: '+', sub: '-', mul: '*', div: '/' };
@@ -781,6 +920,40 @@ export function expressionText(
           right = bitwise(expression.right),
           l = range(left, width),
           r = range(right, width);
+        // A mask holding every bit its other operand can have changes nothing.
+        if (expression.op === 'and')
+          for (const [kept, mask, known] of [
+            [left, options.constant?.(expression.right), l],
+            [right, options.constant?.(expression.left), r],
+          ] as const) {
+            const all = (1n << BigInt(known.bits)) - 1n;
+            if (
+              mask !== undefined &&
+              !known.signed &&
+              (mask & all) === all &&
+              printer.simplify('redundant_mask')
+            )
+              return kept;
+          }
+        // A variable combined with itself (a flag test of one register) is the variable.
+        if (
+          (expression.op === 'and' || expression.op === 'or') &&
+          printer.sameVariable(left, right) &&
+          printer.simplify('idempotent_bitwise')
+        )
+          return left;
+        // x ^ ones is the complement of x.
+        if (expression.op === 'xor')
+          for (const [kept, mask] of [
+            [expression.left, options.constant?.(expression.right)],
+            [expression.right, options.constant?.(expression.left)],
+          ] as const)
+            if (
+              mask === (1n << BigInt(width)) - 1n &&
+              options.constant?.(kept) === undefined &&
+              printer.simplify('complement_xor')
+            )
+              return prefix('~', operand(kept));
         // Bitwise results of non-negative operands never leave [0, 2^width).
         const ctype = python
           ? {
@@ -796,9 +969,31 @@ export function expressionText(
         );
       }
       if (expression.op === 'add' || expression.op === 'sub' || expression.op === 'mul') {
-        const op = expression.op === 'add' ? '+' : expression.op === 'sub' ? '-' : '*';
-        let left = operand(expression.left);
-        const right = operand(expression.right);
+        let op = expression.op === 'add' ? '+' : expression.op === 'sub' ? '-' : '*';
+        let leftValue = expression.left,
+          subtrahend: bigint | undefined;
+        // x + c with c in the upper half of the width is x - (2^width - c): the same
+        // modular result, spelled as the subtraction a reader expects.
+        if (expression.op === 'add' && width > 1) {
+          const half = 1n << BigInt(width - 1);
+          const [variable, constant] =
+            options.constant?.(expression.left) === undefined
+              ? [expression.left, options.constant?.(expression.right)]
+              : [expression.right, options.constant?.(expression.left)];
+          if (
+            constant !== undefined &&
+            constant > half &&
+            options.constant?.(variable) === undefined &&
+            printer.simplify('negative_addend')
+          ) {
+            op = '-';
+            leftValue = variable;
+            subtrahend = (1n << BigInt(width)) - constant;
+          }
+        }
+        let left = operand(leftValue);
+        const right =
+          subtrahend === undefined ? operand(expression.right) : printer.literal(subtrahend, width);
         if (python) {
           const l = range(left, width).bits,
             r = range(right, width).bits;
@@ -815,8 +1010,11 @@ export function expressionText(
           const known = range(printed, width);
           return Math.min(width, known.signed ? known.bits - 1 : known.bits);
         };
-        const lm = magnitude(expression.left, left),
-          rm = magnitude(expression.right, right),
+        const lm = magnitude(leftValue, left),
+          rm =
+            subtrahend === undefined
+              ? magnitude(expression.right, right)
+              : subtrahend.toString(2).length,
           needed = op === '*' ? lm + rm : Math.max(lm, rm) + 1;
         const fits = (type: IntegerCType): boolean =>
           needed <= (type.signed ? type.bits - 1 : type.bits);
@@ -846,6 +1044,10 @@ export function expressionText(
         const amount = printer.literal(count, bitWidth(expression.right.type));
         let left = operand(expression.left);
         if (expression.op === 'lshr') {
+          // A narrowed zero-extension needs its full width for a count the
+          // narrow C type cannot shift by (shifting a uint32_t by 32 is undefined).
+          if (!python && count >= BigInt(promote(range(left, width)).bits))
+            left = printer.cast(width, false, left);
           const l = range(left, width);
           return printer.binary(
             '>>',
@@ -878,29 +1080,9 @@ export function expressionText(
       }
       return helper();
     }
-    case 'integer_unary': {
+    case 'integer_unary':
       if (expression.op !== 'neg' && expression.op !== 'not') return helper();
-      let value = operand(expression.value);
-      if (expression.op === 'not' && width === 1 && type.kind === 'integer')
-        return printer.not(value);
-      const symbol = expression.op === 'neg' ? '-' : '~';
-      if (python)
-        return printer.reduce(width, {
-          text: `${symbol}${printer.group(value, UNARY)}`,
-          precedence: UNARY,
-          ctype: null,
-        });
-      let ctype = promote(range(value, width));
-      if (!ctype.signed && ctype.bits < width) {
-        value = printer.cast(width, false, value);
-        ctype = value.ctype!;
-      }
-      return printer.reduce(width, {
-        text: `${symbol}${printer.group(value, UNARY)}`,
-        precedence: UNARY,
-        ctype,
-      });
-    }
+      return prefix(expression.op === 'neg' ? '-' : '~', operand(expression.value));
     case 'compare': {
       const bits = bitWidth(expression.left.type);
       const isSigned = expression.op.startsWith('s');
@@ -977,10 +1159,19 @@ export function expressionText(
         !expression.values.every((value) => value.type.kind === 'integer')
       )
         return helper();
+      const zeros = expression.values.map((value) => options.constant?.(value) === 0n),
+        dropZeros =
+          zeros.includes(true) && !zeros.every(Boolean) && printer.simplify('zero_high_join');
       let offset = 0,
+        kept = 0,
         result: Printed | null = null;
-      for (const value of expression.values) {
+      for (const [index, value] of expression.values.entries()) {
         writer.context.checkpoint(1);
+        // A constant-zero part contributes nothing to the join.
+        if (dropZeros && zeros[index]) {
+          offset += bitWidth(value.type);
+          continue;
+        }
         let part = operand(value);
         if (offset) {
           // Shift within the full result width; each part is below 2^its width.
@@ -1002,6 +1193,14 @@ export function expressionText(
             )
           : part;
         offset += bitWidth(value.type);
+        kept++;
+      }
+      // Only the lowest part remains: that is a zero extension of it.
+      if (dropZeros && kept === 1 && !zeros[0] && !python) {
+        const narrow = result!.ctype!.signed
+          ? printer.cast(result!.ctype!.bits, false, result!)
+          : result!;
+        return { ...printer.cast(width, false, narrow), widened: narrow };
       }
       return result!;
     }

@@ -183,15 +183,34 @@ interference keep separate storage. The `phi_copy_coalescing` presentation recor
 names the affected values; simultaneous edge copies still pass the existing move
 validator.
 
-Source presentation expands single-use integer computations at their dominated
-SSA uses, including pure synthesized pointer increments. Nonvolatile loads may
-expand only at unconditional same-block uses when no store, call, fence, unknown
-effect or independent load intervenes. Dependent nested loads retain their
+Source presentation expands single-use pure integer and IEEE scalar computations
+at their dominated SSA uses, including pure synthesized pointer increments.
+FP-environment-dependent ones (arithmetic, compares, conversions) move only when
+no call, unknown effect or register write lies on any path from definition to
+use; each FP site keeps its recorded environment requirement (which excludes
+contraction). Reads in hidden FP-guard failure blocks are not uses. Nonvolatile
+loads may expand only at unconditional same-block uses when no store, call,
+fence, unknown effect or independent load intervenes; private-local reads and
+writes are no memory and may intervene. Dependent nested loads retain their
 address/data evaluation order; independent faulting loads never become
 unsequenced C operands. Both explicit addresses and symbolic-table indices
 participate in use/liveness accounting. `single_use_inlining` records one
 function-level presentation inference, and original load/definition identities
-map to their consuming expression.
+map to their consuming expression. `copy_propagation` reads a plain multi-use
+copy (same presented type) as its source variable at every use; liveness and
+phi coalescing treat each read as a read of the source.
+
+`nested_condition_merge` prints `if (A) { if (B) S }` as `if (A && B) S` when
+nothing else prints in either `if` (no statements, definitions, labels, notes or
+edge copies) and neither has an `else`; short-circuit evaluation keeps B
+conditional on A. When the merged tests are inline predicates over shared
+operands, `merged_condition_flags` replaces the conjunction by the exact
+enumerated-outcome fold (integer relations; IEEE less/equal/greater/unordered),
+e.g. `!(x < 0 || x > 0) && !isunordered(x, 0)` is `x == 0`, using only leaves
+the merged tests already read. Header notes: the ABI scratch comment is printed
+only when a scratch register name occurs in the text (`abi_scratch_note`), and
+the FP-environment assumption trails the signature with an unambiguous
+requirement ID prefix (`requirement_note`); full records stay in metadata.
 
 Source-only `private_stack_promotion` gives exact, initialized, nonvolatile
 negative entry-SP slots stable location names (`local_38` means offset -0x38),
@@ -251,7 +270,7 @@ Parameter roles distinguish observed source inputs, physical-register inputs and
 
 Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level `fp_environment` explanation names every affected guard/operation and its original state epoch. Source-only `fp_environment_guard` presentation selects the supported edge of an exact lifter guard when its state is an unchanged entry value or call clobber, there are no explicit environment writes, and the unsupported arm is exclusively owned. This is conditional on the recorded requirement at **each** epoch, not proof that calls preserve FP state. Omitted guard/failure provenance maps to the top requirement comment; checked guards and ordered effects remain intact. Computed, loaded, known unsupported, or opaque-written control state retains explicit guards.
 
-Source-only `fp_native_operations` prints scalar IEEE arithmetic/comparisons and compatible conversions under the FP requirement plus the target IEEE representation, no-excess-precision and disabled-contraction (`-ffp-contract=off`) contract. Backwards consumer tracing retains helpers where arithmetic payloads escape through integer operations, memory, calls or physical boundaries. Float-to-integer conversions, fused operations, payload-sensitive operations, Python binary32 arithmetic and Python division retain explicit helpers; their rounding, NaN or exceptional behavior is not silently changed. Finite floating literals retain exact target bits. FP/integer copies preserve representation bitcasts, never numeric assignment conversions. Exhausted presentation records retain the explicit form.
+Source-only `fp_native_operations` prints scalar IEEE arithmetic, negation, absolute value, square root, comparisons and compatible conversions under the FP requirement plus the target IEEE representation, no-excess-precision and disabled-contraction (`-ffp-contract=off`) contract. Every operation the recorded `fp_environment` requirement covers prints natively unless a rule below keeps it explicit: C uses `-x`, `__builtin_fabs[f]`/`__builtin_sqrt[f]` (no header, so no clash with an analyzed libm callee) and `(intN_t)x`/`(uintN_t)x`; Python-like prints `-x` and `abs(x)` for binary64. Backwards consumer tracing retains helpers for operations whose arithmetic NaN payload escapes through integer operations, memory, calls or physical boundaries; a promoted local slot is private storage, so a store to it is exactly as observable as the loads that read it back. Comparisons and float-to-integer conversions never observe a payload (a NaN converts to an undefined value, as in the IR), and negation/absolute value change only the sign bit, so none of them forces helpers on their operands or their own result. Float-to-integer conversion truncates toward zero and is undefined for NaN, infinities and out-of-range values, exactly as the IR specifies. Helpers remain for fused and vector operations, payload-escaping arithmetic and square roots, whole functions whose environment is not a recorded default epoch (explicit environment writes or unknown environment effects keep every guard and every FP helper), Python binary32 arithmetic, Python division, square root and float-to-integer conversion (Python raises where the IR yields a value). Finite floating literals retain exact target bits, including integer constants that join an established FP value as a bitcast operand, phi copy or select arm. FP/integer copies preserve representation bitcasts, never numeric assignment conversions. Exhausted presentation records retain the explicit form.
 
 Source-only `condition_flags` folds compare flags and their condition-code
 consumers into native relations (`src/reconstruction/source-conditions.ts`).
@@ -413,6 +432,37 @@ on the replaced subject and on views that observed it; full-width expressions
 still preserve their ordered opaque dependencies.
 Checked-view normalization keeps its original rules and text.
 
+Source-only exact integer simplification removes trivially reducible forms in
+both dialects. Reconstruction (`integer_identity`, `extension_fold`; both in
+`normalizeSourceExpressions`, not applied to checked normalization) rewrites a
+same-width `x & x`, `x | x`, `x & ones`, `ones & x`, `x | 0`, `x + 0`, `x - 0`,
+`x ^ 0`, `x * 1`, `x << 0`/`>> 0` to the operand itself and a sign extension of a
+strictly narrower zero extension to the zero extension of the original operand
+(its sign bit is zero), each behind the bitvector veto. `x ^ x`, `x - x`, `x * 0`
+and `x & 0` are never rewritten: they would drop an unknown/undefined operand.
+The printer applies the width- and signedness-exact rules below only when its
+recorder accepts a presentation record, so checked text never changes:
+`zero_high_join` (constant-zero concat parts are omitted; one remaining lowest
+part is its zero extension), `conversion_collapse` (an inner conversion keeps the
+operand's value modulo 2^bits, so a later conversion to no more bits converts the
+operand itself, and any conversion of a zero extension converts the narrow
+operand; `(uint32_t)(uint64_t)x32` is `x32`, but `(int64_t)(uint32_t)x64` keeps
+both casts because the inner conversion discards bits the outer one reads),
+`double_negation` (`!!x` of a one-bit value), `redundant_mask` (`x & m` where `m`
+holds every bit of x's unsigned type), `idempotent_bitwise` (`v & v`/`v | v` of
+one bare variable under identical conversions), `complement_xor` (`x ^ ones` is
+`~x`) and `negative_addend` (`x + c` with `c` in the upper half of the width is
+`x - (2^width - c)`, the same value modulo 2^width). One aggregated presentation
+record per rule and function lists the simplified subjects. A narrowed
+zero-extended operand shifted right by a count its C type cannot shift by is
+widened first (shifting a `uint32_t` by 32 is undefined), and a negated negation
+is parenthesized (`--x` is the C decrement).
+`test/emitters/source-simplify-oracle.test.ts` compiles (UB-sanitized) and
+evaluates randomly generated typed expressions in both dialects against the IR
+semantics and the unsimplified printing; `test/emitters/c/source-simplify.test.ts`
+and `test/reconstruction/source-integer-identity.test.ts` pin the signed/width
+edge cases where a cast or an unknown operand must stay.
+
 Source-only unsigned range analysis combines edge guards, definedness and parallel phi transfers before removing proven singleton register-cell plumbing. It widens unresolved loops and preserves unsupported signed guards, underflow paths and unknown definitions. The emitted-output induction smoke covers 294 observations, including zero trips, maximal counts, early exits, wrong guards and additional phi inputs; this is not a proof for arbitrary loops.
 
 Source names use live dataflow roles and established field evidence, with deterministic neutral fallbacks. Explicit user displays and supplied prototype names outrank inferred roles; conflicting callable/data uses do not invent intent. Cross-dialect keywords, helper names and duplicate displays cannot shadow declarations, and the explicit `entry_sp` storage input remains protected. Trusted regressions compile and execute the declared integer/structured-memory subset as C11 and Python with real width and byte-memory helpers; incomplete indirect calls and general pseudocode are not claimed compilable.
@@ -529,9 +579,20 @@ It adds C `const` only without writes through that formal, escape to a potential
 writing call, or unknown effects; unrelated stores and known read-only calls do
 not remove the qualifier. Python annotations use `pointer[T]`; the presentation
 record retains the read-only/write-capable formal observation in both dialects.
-C `typed_index` prints `p[i]` / `p[k]` for an access through a declared scalar
-pointer of exactly the accessed width whose addend is the index scaled by the
-element size (unscaled for bytes) or a constant multiple of it.
+C `typed_index` prints `p[i]` / `p[k]` / `p[i + k]` / `p[i - k]` for an access
+through a declared scalar pointer (integer or IEEE element) of exactly the
+accessed width and kind. The address is flattened through nested inline
+additions and constant subtractions into one pointer base, at most one index
+scaled by the element size (unscaled for bytes) and a constant byte displacement
+that is an exact multiple of the element size; the constant is added in the
+index's own 64-bit unsigned arithmetic, so the scaling wraps like the address.
+A misaligned displacement, a second or unscaled index, a signed or narrower
+index joined to a constant, a mismatched width or kind, or a volatile,
+big-endian or aligned access keeps the explicit `*(T *)(...)` address. Python
+memory views are byte-addressed, so `typed_address_sum` prints the same address
+as one modular sum `uint64(p + i * size + bytes)` instead of nested reductions.
+The `scaled_pointer_arithmetic` assignment form of a typed pointer update
+extends the same way: `p = p + index * size + k` prints `p + index + k/size`.
 `slot_pointer_type` gives a promoted frame-private slot, and its reloads, the
 type of a pointer formal when every value stored to the slot is such a formal,
 a reload of a slot of the same element kind, or a whole-element constant step of
@@ -570,7 +631,7 @@ components whose nonliteral incoming paths are established FP values and whose
 consumers never interpret the carrier as an integer. Literal joins cannot
 establish FP interpretation alone; independently approved finite `fp_literal`
 spelling preserves exact bits, while nonfinite payloads retain bit-pattern constructors.
-A store, integer operation, unresolved
+A store outside `fp_memory_access`, an integer operation, unresolved
 boundary use, conflicting type or unknown incoming value keeps that component
 explicit. Redundant bitcasts between approved FP spellings disappear; actual
 integer/FP reinterpretations and exact NaN payload constants remain explicit.
@@ -579,6 +640,24 @@ guards; their independent presentation gates apply separately. One bounded
 presentation inference and `abi_conformance` requirement record the native IEEE representation assumption;
 failure to record it keeps all original spellings. Supplied signatures are not
 overridden, and checked-view types and bitcasts are unchanged.
+
+`fp_memory_access` extends those components to ordinary memory: little-endian,
+non-volatile, IR-alignment-1 32/64-bit loads and stores outside promoted and
+hidden frame-save slots. A load joins a component only by consumer evidence (a
+same-width bitcast to an IEEE value, or an edge/select transport into an
+established carrier) and like a literal cannot establish a carrier through its
+own incoming path. A store of a component member is a whole-bit FP write. Any
+other consumer of the loaded value (integer arithmetic, a narrowing store, an
+address, a boundary or control use) keeps the whole component, the integer
+access and its bitcast explicit; a load/store copy without IEEE evidence stays
+integer. Approved accesses print through `*(double *)` / `*(float *)` lvalues
+(Python `memory.f64[...]` / `memory.f32[...]`) and never as integer data tables.
+They count as IEEE element accesses for `formal_pointer` and
+`slot_pointer_type`, so formals become `const double*` / `float*` and use
+`typed_index` subscripts. One bounded presentation inference and an
+`abi_conformance` requirement (same IEEE bytes, unaligned access permitted by
+IR alignment 1) record the rewrite; failing to record it re-projects without
+memory typing. Checked view is unchanged.
 
 `primary_result` chooses between the ABI integer and FP primary result registers
 of an undeclared function whose returns carry no explicit IR values. A register

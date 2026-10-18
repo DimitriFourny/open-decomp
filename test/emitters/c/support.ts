@@ -30,7 +30,8 @@ type CType =
   | { readonly kind: 'float'; readonly bits: number }
   | { readonly kind: 'pointer'; readonly to: Pointee | null }
   | { readonly kind: 'math' };
-type Pointee = Extract<CType, { kind: 'int' }> | { readonly kind: 'struct'; readonly name: string };
+type Pointee =
+  Extract<CType, { kind: 'int' | 'float' }> | { readonly kind: 'struct'; readonly name: string };
 interface StructLayout {
   readonly size: bigint;
   readonly fields: ReadonlyMap<
@@ -108,6 +109,9 @@ function helperType(call: Extract<Expr, { kind: 'call' }>): CType {
   const bitcastFloat = /^__od_bitcast_f(32|64)_u(?:32|64)$/.exec(call.name);
   if (bitcastFloat) return { kind: 'float', bits: Number(bitcastFloat[1]) };
   if (call.name === 'float') return { kind: 'float', bits: 64 };
+  if (call.name === 'abs') return { kind: 'float', bits: 64 };
+  const unary = /^__builtin_(?:fabs|sqrt)(f?)$/.exec(call.name);
+  if (unary) return { kind: 'float', bits: unary[1] ? 32 : 64 };
   if (/^fp_(?:add|sub|mul|div|neg|abs|sqrt)$/.test(call.name) && typeof literal === 'bigint')
     return { kind: 'float', bits: Number(literal) };
   if (/^(?:fp_(?:eq|ne|lt|le|gt|ge|ordered|unordered)|flag_|isunordered$)/.test(call.name))
@@ -260,8 +264,9 @@ class Parser {
     if (this.python) {
       const lines = text.split('\n'),
         header = lines.findIndex((line) => line.startsWith('def '));
+      // The header line may end with a trailing `# ...` requirement note.
       const endHeader = lines.findIndex(
-        (line, index) => index >= header && /\):$|\) -> .*:$/.test(line),
+        (line, index) => index >= header && /(?:\):|\) -> [^#]*:)(?:\s+#.*)?$/.test(line),
       );
       assert.ok(endHeader >= header);
       this.headerEnd = lines
@@ -272,7 +277,7 @@ class Parser {
         .join(' ')
         .matchAll(/(\w+): (float|double)\b/g))
         this.symbols.set(match[1]!, { kind: 'float', bits: match[2] === 'float' ? 32 : 64 });
-      const result = /-> (float|double):$/.exec(lines[endHeader]!);
+      const result = /-> (float|double):(?:\s+#.*)?$/.exec(lines[endHeader]!);
       if (result) this.returnType = { kind: 'float', bits: result[1] === 'float' ? 32 : 64 };
       const indents = [0];
       const token =
@@ -440,8 +445,10 @@ class Parser {
     const name = type.scalar,
       integer = /^(u?)int(\d+)_t$/.exec(name),
       bits = /^bits(\d+)_t$/.exec(name);
-    if (type.pointers === 0 && /^(?:float|double|ieee(?:32|64)_t)$/.test(name))
-      return { kind: 'float', bits: name === 'float' || name === 'ieee32_t' ? 32 : 64 };
+    const floating = /^(?:float|double|ieee(?:32|64)_t)$/.test(name)
+      ? ({ kind: 'float', bits: name === 'float' || name === 'ieee32_t' ? 32 : 64 } as const)
+      : null;
+    if (type.pointers === 0 && floating) return floating;
     const scalar: CType =
       name === 'bool'
         ? { kind: 'int', bits: 1, signed: false, bool: true }
@@ -457,6 +464,7 @@ class Parser {
     if (type.pointers === 0) return scalar;
     if (type.pointers > 1) return { kind: 'pointer', to: null };
     if (scalar.kind === 'int') return { kind: 'pointer', to: scalar };
+    if (floating) return { kind: 'pointer', to: floating };
     return {
       kind: 'pointer',
       to: this.structs.has(name) ? { kind: 'struct', name } : null,
@@ -918,7 +926,13 @@ class Parser {
     assert.ok(memory.kind === 'call' && memory.name === 'read_memory');
     if (this.peek() === '=') {
       this.take('=');
-      const value = this.expression();
+      const assigned = this.expression();
+      // C assignment converts to the lvalue type: an integer stored through a
+      // float/double lvalue is a numeric conversion, not a bit copy.
+      const value: Expr =
+        memory.ctype?.kind === 'float'
+          ? { kind: 'cast', type: memory.ctype, value: assigned }
+          : assigned;
       this.ops.push({
         kind: 'effect',
         expression: {
@@ -1089,20 +1103,20 @@ class Parser {
   private dereference(pointer: Expr): Expr {
     const type = this.typeOf(pointer);
     assert.ok(
-      type.kind === 'pointer' && type.to?.kind === 'int',
+      type.kind === 'pointer' && (type.to?.kind === 'int' || type.to?.kind === 'float'),
       'Dereference of a non-scalar pointer',
     );
     return this.read(pointer, type.to);
   }
 
-  private read(address: Expr, type: Extract<CType, { kind: 'int' }>): Expr {
-    assert.ok(type.bits % 8 === 0 && !type.bool);
+  private read(address: Expr, type: Extract<CType, { kind: 'int' | 'float' }>): Expr {
+    assert.ok(type.bits % 8 === 0 && (type.kind === 'float' || !type.bool));
     return {
       kind: 'call',
       name: 'read_memory',
       args: [
         address,
-        { kind: 'literal', value: `bits${type.bits}_t` },
+        { kind: 'literal', value: `${type.kind === 'float' ? 'ieee' : 'bits'}${type.bits}_t` },
         { kind: 'literal', value: 'little' },
         { kind: 'literal', value: 'natural' },
         { kind: 'literal', value: false },
@@ -1166,7 +1180,7 @@ class Parser {
       return layout.size;
     }
     assert.ok(
-      type.to.kind === 'int' && type.to.bits % 8 === 0,
+      (type.to.kind === 'int' || type.to.kind === 'float') && type.to.bits % 8 === 0,
       'Pointer arithmetic needs a sized scalar element',
     );
     return BigInt(type.to.bits / 8);
@@ -1185,7 +1199,9 @@ class Parser {
       const pointer = this.atom();
       if (pointer.kind === 'call' && pointer.name === '__pointer') {
         const type = pointer.ctype;
-        assert.ok(type?.kind === 'pointer' && type.to?.kind === 'int');
+        assert.ok(
+          type?.kind === 'pointer' && (type.to?.kind === 'int' || type.to?.kind === 'float'),
+        );
         return { kind: 'call', name: 'read_memory', args: pointer.args, ctype: type.to };
       }
       return this.dereference(pointer);
@@ -1193,7 +1209,7 @@ class Parser {
     if (token === 'memory' && this.peek() === '.') {
       this.take('.');
       const view = this.take(),
-        match = /^(volatile_)?(be_)?u(\d+)$/.exec(view);
+        match = /^(volatile_)?(be_)?([uf])(\d+)$/.exec(view);
       assert.ok(match);
       this.take('[');
       const address = this.expression();
@@ -1203,34 +1219,36 @@ class Parser {
         name: 'read_memory',
         args: [
           address,
-          { kind: 'literal', value: `bits${match[3]}_t` },
+          { kind: 'literal', value: `${match[3] === 'f' ? 'ieee' : 'bits'}${match[4]}_t` },
           { kind: 'literal', value: match[2] ? 'big' : 'little' },
           { kind: 'literal', value: 1n },
           { kind: 'literal', value: !!match[1] },
         ],
+        ...(match[3] === 'f' ? { ctype: { kind: 'float', bits: Number(match[4]) } } : {}),
       };
     }
     if (['-', '~', '!'].includes(token)) return { kind: 'unary', op: token, value: this.atom() };
     if (token === '(') {
       if (
         this.peek() === 'volatile' ||
-        (/^(?:unaligned_|aligned\d+_)?u?int\d+_t$/.test(this.peek()) &&
+        (/^(?:(?:unaligned_|aligned\d+_)?u?int\d+_t|float|double)$/.test(this.peek()) &&
           this.tokens[this.position + 1] === '*' &&
           this.tokens[this.position + 2] === ')')
       ) {
         const volatile = this.peek() === 'volatile' ? (this.take(), true) : false;
         const type = this.take(),
-          match = /^(?:(unaligned_)|aligned(\d+)_)?(u?)int(\d+)_t$/.exec(type);
+          match = /^(?:(unaligned_)|aligned(\d+)_)?(u?)int(\d+)_t$|^(float|double)$/.exec(type);
         assert.ok(match);
         this.take('*');
         this.take(')');
-        const bits = Number(match[4]);
+        const floating = match[5] !== undefined;
+        const bits = floating ? (match[5] === 'float' ? 32 : 64) : Number(match[4]);
         return {
           kind: 'call',
           name: '__pointer',
           args: [
             this.atom(),
-            { kind: 'literal', value: `bits${bits}_t` },
+            { kind: 'literal', value: `${floating ? 'ieee' : 'bits'}${bits}_t` },
             { kind: 'literal', value: 'little' },
             {
               kind: 'literal',
@@ -1245,7 +1263,10 @@ class Parser {
             { kind: 'literal', value: volatile },
           ],
           // As a value this is an ordinary pointer conversion; `*` reads through it.
-          ctype: { kind: 'pointer', to: { kind: 'int', bits, signed: !match[3] } },
+          ctype: {
+            kind: 'pointer',
+            to: floating ? { kind: 'float', bits } : { kind: 'int', bits, signed: !match[3] },
+          },
         };
       }
       const castStart = this.position,
@@ -2132,6 +2153,18 @@ export function execute(
           )
             ? supported
             : null;
+        }
+        // Python `abs` and the GCC/Clang `__builtin_fabs[f]`/`__builtin_sqrt[f]`
+        // on a typed native float: sign-bit clear and the correctly rounded root.
+        if (/^(?:abs|__builtin_(?:fabs|sqrt)f?)$/.test(expression.name)) {
+          assert.equal(expression.args.length, 1);
+          const type = typeOf(expression.args[0]!);
+          assert.equal(type.kind, 'float');
+          const bits = evaluate(expression.args[0]!);
+          if (bits === null || type.kind !== 'float') return null;
+          return expression.name.includes('sqrt')
+            ? encodeFloat(Math.sqrt(decodeFloat(number(bits), type.bits)), type.bits)
+            : number(bits) & ((1n << BigInt(type.bits - 1)) - 1n);
         }
         // C99 <math.h> / documented Python-like helper: 1 iff either is a NaN.
         if (expression.name === 'isunordered') {

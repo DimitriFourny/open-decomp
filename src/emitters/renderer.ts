@@ -1,4 +1,5 @@
 import {
+  fingerprint,
   OperationError,
   type Address,
   type Annotation,
@@ -7,10 +8,12 @@ import {
   type Emitter,
   type OperationContext,
   type RegisterDescriptor,
+  type Requirement,
 } from '../core/index.js';
 import {
   bitWidth,
   expressionOperands,
+  integer,
   type DataType,
   type Expression,
   type Instruction,
@@ -31,6 +34,7 @@ import type { SuppliedTypeRecord } from '../analysis/types/index.js';
 import { reconstruct } from '../reconstruction/index.js';
 import type { BoundaryProjection, Reconstruction } from '../reconstruction/model.js';
 import { validateReconstruction, validateRenderedTransfers } from '../reconstruction/validate.js';
+import { foldSourceCondition } from '../reconstruction/source-conditions.js';
 import type { SourceAddress, SourceFormalType } from '../reconstruction/source-model.js';
 import { sourceDataValues } from '../reconstruction/source-data.js';
 import {
@@ -66,10 +70,12 @@ import {
   UNARY,
   expressionText,
   machineType,
+  finiteFloatBits,
   integerStorageBits,
   usualArithmetic,
   type IntegerCType,
   type Printed,
+  type SimplificationRecorder,
 } from './expressions.js';
 import { Writer } from './writer.js';
 import type { EmissionInput, EmissionResult } from './model.js';
@@ -93,9 +99,17 @@ import { planSourceInlining, type InlineSite } from './source-inlining.js';
 import { SourceStructs, type ObservedMember } from './source-structs.js';
 
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
+/** Element kind of a declared scalar pointer: integer or IEEE. */
+type PointeeKind = Extract<SourceFormalType, { kind: 'pointer' }>['pointee'];
 type Nest =
   | { readonly kind: 'loop'; readonly header: string; readonly follow: string | null }
   | { readonly kind: 'switch'; readonly id: string };
+/** One test of a merged `if` chain: its printed form and the value it tests. */
+interface ConditionTerm {
+  readonly printed: Printed;
+  readonly value: Value;
+  readonly positive: boolean;
+}
 /** Exact complement of each integer predicate (no NaN case for integers). */
 const NEGATED_PREDICATE: Readonly<Record<IntegerPredicate, IntegerPredicate>> = {
   eq: 'ne',
@@ -158,6 +172,8 @@ export class Renderer {
   /** Do-while tests restated over the values written by their repeat copies. */
   private readonly rebased = new Map<string, Extract<Expression, { kind: 'compare' }>>();
   private readonly synthetic = new Map<string, Expression>();
+  /** Tests of enclosing `if`s merged into the next printed `if` (nestedIf). */
+  private conjunct: readonly ConditionTerm[] | undefined;
   /** Edge copies printed in a `for` header (by destination variable), not at their edge. */
   private readonly hoisted = new Map<ParallelTransfer, ReadonlySet<string>>();
   /** `for` header edges keyed by the loop test control. */
@@ -490,6 +506,17 @@ export class Renderer {
     return local && this.program.source?.local_types?.get(local.id);
   }
 
+  /** Source element type of a memory access: IEEE for an `fp_memory_access`
+   * (whose integer value is a `float_values` member), else the machine type. */
+  private accessType(node: Extract<Instruction, { kind: 'load' | 'store' }>): DataType {
+    const value = node.kind === 'load' ? node.result : node.value;
+    const bits =
+      this.sourceView && this.program.source?.float_accesses?.has(node.id)
+        ? this.program.source.float_values?.get(value.id)
+        : undefined;
+    return bits ? { kind: 'float', bits } : value.type;
+  }
+
   /** C pointer spelling of a value proven to be of a typed slot's pointer kind:
    * a declared pointer, a typed-slot reload or a whole-element constant step. */
   private pointerText(value: Value, formal: SourceFormalType, depth = 0): string | null {
@@ -543,7 +570,20 @@ export class Renderer {
 
   private printerCache?: SourcePrinter;
   private get printer(): SourcePrinter {
-    return (this.printerCache ??= new SourcePrinter(this.writer, this.nativeIntegerStorage));
+    return (this.printerCache ??= new SourcePrinter(
+      this.writer,
+      this.nativeIntegerStorage,
+      this.recorder,
+    ));
+  }
+  /** Source view only: every exact printer simplification leaves a presentation
+   * record; the checked view never simplifies. */
+  private recorderCache?: SimplificationRecorder;
+  private get recorder(): SimplificationRecorder | undefined {
+    return this.sourceView
+      ? (this.recorderCache ??= (rule, scope) =>
+          this.localValidation.presentation(rule, this.input.function.id, scope))
+      : undefined;
   }
   /** Exact declared spelling of each formal/local, recorded where declared. */
   private readonly declaredTypes = new Map<string, string>();
@@ -590,7 +630,11 @@ export class Renderer {
             operand.id === expression.condition.id
               ? this.printed(operand)
               : this.scalarReturn(operand, bits, signed, depth + 1),
-          { view: 'source', source: { address: (address) => this.addressPrinted(address) } },
+          {
+            view: 'source',
+            source: { address: (address) => this.addressPrinted(address) },
+            ...(this.recorder ? { presentation: this.recorder } : {}),
+          },
         );
     }
     return signed
@@ -687,9 +731,10 @@ export class Renderer {
       : null;
   }
 
-  /** `p = p + k` on the same declared scalar pointer type prints as C pointer
-   * arithmetic `p + k/size` when the byte displacement k is a multiple of the
-   * element size; C scales by exactly that size, so the address bits agree. */
+  /** `p = p + index * size + k` on the same declared scalar pointer type prints
+   * as C pointer arithmetic `p + index + k/size` when the index is scaled by
+   * exactly the element size and the byte displacement k is a multiple of it;
+   * C scales by exactly that size, so the address bits agree. */
   private pointerStep(id: string, expression: Expression, bits: number): Printed | null {
     const element = this.scalarPointee(id);
     if (
@@ -698,48 +743,42 @@ export class Renderer {
       !element
     )
       return null;
-    const candidates =
-      expression.op === 'add'
-        ? [
-            [expression.left, expression.right],
-            [expression.right, expression.left],
-          ]
-        : [[expression.left, expression.right]];
-    for (const [base, offset] of candidates) {
-      const bytes = this.constantOf(offset!);
+    const size = BigInt(element.bits / 8);
+    const sum = this.addressSum(expression, bits, size, (value) => {
       const baseType =
-        this.sourceValueTypes.get(base!.id) ??
-        this.program.source?.value_types?.get(base!.id)?.type_id;
-      if (
-        bytes === undefined ||
-        this.inline.has(base!.id) ||
-        !baseType ||
-        this.sourceType(baseType) !== this.sourceType(id)
+        this.sourceValueTypes.get(value.id) ??
+        this.program.source?.value_types?.get(value.id)?.type_id;
+      return (
+        !this.inline.has(value.id) &&
+        !!baseType &&
+        this.sourceType(baseType) === this.sourceType(id)
+      );
+    });
+    if (
+      !sum ||
+      sum.displacement % size !== 0n ||
+      (sum.index && this.declaredSpelling(sum.index).endsWith('*')) ||
+      !this.localValidation.presentation(
+        'scaled_pointer_arithmetic',
+        this.input.function.id,
+        'typed pointer update; an index is scaled by exactly the element size and the byte displacement is an exact multiple of it',
       )
-        continue;
-      const signed = BigInt.asIntN(bits, bytes) * (expression.op === 'sub' ? -1n : 1n);
-      const size = BigInt(element.bits / 8);
-      if (signed % size !== 0n) continue;
-      if (
-        !this.localValidation.presentation(
-          'scaled_pointer_arithmetic',
-          this.input.function.id,
-          'typed pointer update; byte displacement is an exact multiple of the element size',
-        )
-      )
-        return null;
-      const name = this.printer.primary(this.local(base!));
-      const count = signed / size;
-      return count === 0n
-        ? name
-        : this.printer.binary(
-            count < 0n ? '-' : '+',
-            name,
-            this.printer.literal(count < 0n ? -count : count, 64),
-            null,
-          );
+    )
+      return null;
+    let result = this.printer.primary(this.local(sum.base));
+    if (sum.index) {
+      const index = this.printed(sum.index);
+      result = this.printer.binary('+', result, index.widened ?? index, null);
     }
-    return null;
+    const count = sum.displacement / size;
+    return count === 0n
+      ? result
+      : this.printer.binary(
+          count < 0n ? '-' : '+',
+          result,
+          this.printer.literal(count < 0n ? -count : count, 64),
+          null,
+        );
   }
 
   private constantOf = (value: Value): bigint | undefined => {
@@ -763,6 +802,20 @@ export class Renderer {
       this.program.source?.float_values?.get(expression.value.id) === type.bits
     )
       return this.printed(expression.value);
+    if (
+      this.sourceView &&
+      type.kind === 'float' &&
+      expression.kind === 'cast' &&
+      expression.op === 'bitcast'
+    ) {
+      const constant = this.program.expressions.get(expression.value.id);
+      if (
+        constant?.kind === 'constant' &&
+        this.fpPresentation.expressions.has(constant) &&
+        finiteFloatBits(constant.bits, type.bits)
+      )
+        return this.expression(constant, type);
+    }
     if (
       this.sourceView &&
       this.language === 'c-like' &&
@@ -854,6 +907,7 @@ export class Renderer {
         : {}),
       constant: this.constantOf,
       nativeIntegerStorage: this.nativeIntegerStorage,
+      ...(this.recorder ? { presentation: this.recorder } : {}),
       nativeFp: this.fpPresentation.expressions.has(expression),
       floatLiterals: this.fpPresentation.expressions.has(expression),
     });
@@ -1014,6 +1068,16 @@ export class Renderer {
           text: `(uintptr_t)${storage}`,
           precedence: UNARY,
           ctype: { bits: bitWidth(value.type), signed: false },
+        };
+      }
+      if (this.sourceView && this.program.source?.float_accesses?.has(load.id)) {
+        // A native float/double lvalue read is an IEEE value, not integer bits.
+        this.expanding.delete(value.id);
+        this.writer.guard(Buffer.byteLength(storage));
+        return {
+          text: storage,
+          precedence: storage.startsWith('*') ? UNARY : PRIMARY,
+          ctype: null,
         };
       }
       const id =
@@ -1615,63 +1679,189 @@ export class Renderer {
     return this.sourceView && this.language === 'c-like' ? this.sourceStructs.layout(id) : null;
   }
 
-  /** `p[i]` for an inline address `p + term` through a declared scalar pointer
-   * of exactly the accessed width: the term is the index scaled by the element
-   * size (unscaled for bytes), or a constant multiple of that size. */
-  private typedIndex(address: Value, bits: number): string | null {
-    const expression = this.program.expressions.get(address.id);
+  /** Flattens an inline `add` / constant-`sub` tree into its single base, at
+   * most one index scaled by `size` (unscaled for bytes) and the wrapped signed
+   * byte displacement. A second index, an unscaled addend, a variable
+   * subtrahend or a mixed width refuses, keeping the explicit address. */
+  private addressSum(
+    root: Extract<Expression, { kind: 'integer' }>,
+    bits: number,
+    size: bigint,
+    isBase: (value: Value) => boolean,
+  ): { base: Value; index: Value | null; displacement: bigint } | null {
+    let base: Value | null = null,
+      index: Value | null = null,
+      displacement = 0n;
+    const visit = (value: Value, depth: number): boolean => {
+      const constant = this.constantOf(value);
+      if (constant !== undefined) {
+        displacement += constant;
+        return true;
+      }
+      const node =
+        depth < 16 &&
+        this.inline.has(value.id) &&
+        value.type.kind === 'integer' &&
+        value.type.bits === bits
+          ? this.program.expressions.get(value.id)
+          : undefined;
+      if (node?.kind === 'integer' && (node.op === 'add' || node.op === 'sub')) {
+        const saved = { base, index, displacement };
+        if (descend(node, depth + 1)) return true;
+        ({ base, index, displacement } = saved);
+      }
+      if (!base && isBase(value)) {
+        base = value;
+        return true;
+      }
+      if (!index) {
+        const scaled = this.scaledIndex(value, size);
+        if (scaled) {
+          index = scaled;
+          return true;
+        }
+      }
+      return false;
+    };
+    const descend = (node: Extract<Expression, { kind: 'integer' }>, depth: number): boolean => {
+      if (node.op === 'add') return visit(node.left, depth) && visit(node.right, depth);
+      const amount = this.constantOf(node.right);
+      if (amount === undefined) return false;
+      displacement -= amount;
+      return visit(node.left, depth);
+    };
+    if (!descend(root, 0) || !base) return null;
+    return { base, index, displacement: BigInt.asIntN(bits, displacement) };
+  }
+
+  /** The index of a term scaled by exactly `size` bytes (the term itself for
+   * bytes); undefined for any other term. */
+  private scaledIndex(term: Value, size: bigint): Value | undefined {
+    if (size === 1n) return term;
+    const scaled = this.inline.has(term.id) ? this.program.expressions.get(term.id) : undefined;
+    if (scaled?.kind !== 'integer') return undefined;
+    const right = this.constantOf(scaled.right),
+      left = this.constantOf(scaled.left);
+    if (scaled.op === 'shl' && right !== undefined && right < 64n && 1n << right === size)
+      return scaled.left;
+    if (scaled.op === 'mul' && right === size) return scaled.left;
+    if (scaled.op === 'mul' && left === size) return scaled.right;
+    return undefined;
+  }
+
+  /** An address `p + index * size + k` through a declared scalar pointer `p` of
+   * exactly the accessed width and kind, where the byte displacement is a
+   * multiple of the element size; other shapes refuse. */
+  private typedAddress(
+    address: Value,
+    bits: number,
+    kind: PointeeKind,
+  ): {
+    base: Value;
+    index: Value | null;
+    displacement: bigint;
+    count: bigint;
+    size: bigint;
+  } | null {
+    const root = this.program.expressions.get(address.id);
     if (
-      expression?.kind !== 'integer' ||
-      expression.op !== 'add' ||
-      address.type.kind !== 'integer'
+      root?.kind !== 'integer' ||
+      (root.op !== 'add' && root.op !== 'sub') ||
+      address.type.kind !== 'integer' ||
+      bits % 8 !== 0
     )
       return null;
     const size = BigInt(bits / 8);
-    for (const [base, term] of [
-      [expression.left, expression.right],
-      [expression.right, expression.left],
-    ] as const) {
-      const pointer = this.scalarPointerBase(base, bits);
-      if (pointer === null) continue;
-      const displacement = this.constantOf(term);
-      if (displacement !== undefined) {
-        const signed = BigInt.asIntN(address.type.bits, displacement);
-        if (signed % size !== 0n) continue;
-        return `${pointer}[${signed / size}]`;
-      }
-      let index: Value | undefined = size === 1n ? term : undefined;
-      const scaled = this.inline.has(term.id) ? this.program.expressions.get(term.id) : undefined;
-      if (!index && scaled?.kind === 'integer') {
-        const right = this.constantOf(scaled.right),
-          left = this.constantOf(scaled.left);
-        if (scaled.op === 'shl' && right !== undefined && right < 64n && 1n << right === size)
-          index = scaled.left;
-        else if (scaled.op === 'mul' && right === size) index = scaled.left;
-        else if (scaled.op === 'mul' && left === size) index = scaled.right;
-      }
-      if (!index || this.declaredSpelling(index).endsWith('*')) continue;
-      const printed = this.printed(index);
-      return `${pointer}[${(printed.widened ?? printed).text}]`;
-    }
-    return null;
+    const sum = this.addressSum(root, address.type.bits, size, (value) => {
+      const pointer = this.scalarPointer(value);
+      return pointer?.bits === bits && pointer.kind === kind;
+    });
+    if (!sum || sum.displacement % size !== 0n) return null;
+    if (sum.index && this.declaredSpelling(sum.index).endsWith('*')) return null;
+    return { ...sum, count: sum.displacement / size, size };
   }
 
-  /** Name of a declared scalar pointer of exactly `bits` element width: a
-   * printed variable, or an inline reload of a typed promoted slot. */
-  private scalarPointerBase(value: Value, bits: number): string | null {
+  /** C `p[i + k]` / `p[k]` for an inline address through a typed scalar
+   * pointer (see typedAddress). A constant joined to an index is added in the
+   * index's own 64-bit unsigned arithmetic, where the scaling wraps like the
+   * address; any other index type keeps the explicit form. */
+  private typedIndex(address: Value, bits: number, kind: PointeeKind): string | null {
+    const typed = this.typedAddress(address, bits, kind);
+    const pointer = typed && this.scalarPointerBase(typed.base, bits, kind);
+    if (!typed || pointer === null) return null;
+    if (!typed.index) return `${pointer}[${typed.count}]`;
+    const printed = this.printed(typed.index);
+    if (typed.count === 0n) return `${pointer}[${(printed.widened ?? printed).text}]`;
+    if (
+      address.type.kind !== 'integer' ||
+      !printed.ctype ||
+      printed.ctype.signed ||
+      printed.ctype.bits !== address.type.bits
+    )
+      return null;
+    const offset = this.printer.primary(String(typed.count < 0n ? -typed.count : typed.count), {
+      bits: 32,
+      signed: true,
+    });
+    return `${pointer}[${this.printer.binary(typed.count < 0n ? '-' : '+', printed, offset, printed.ctype).text}]`;
+  }
+
+  /** Python-like byte address `uint64(p + index * size + bytes)` of the same
+   * typed-pointer access: one modular sum instead of nested reductions. Python
+   * memory views are byte-addressed, so no element subscript is printed. */
+  private typedAddressSum(address: Value, bits: number, kind: PointeeKind): Printed | null {
+    const typed = this.typedAddress(address, bits, kind);
+    if (!typed?.index || address.type.kind !== 'integer') return null;
+    const index = this.printed(typed.index);
+    let sum = this.printed(typed.base);
+    sum = this.printer.binary(
+      '+',
+      sum,
+      typed.size === 1n
+        ? index
+        : this.printer.binary('*', index, this.printer.literal(typed.size, 64), null),
+      null,
+    );
+    if (typed.displacement !== 0n)
+      sum = this.printer.binary(
+        typed.displacement < 0n ? '-' : '+',
+        sum,
+        this.printer.literal(
+          typed.displacement < 0n ? -typed.displacement : typed.displacement,
+          64,
+        ),
+        null,
+      );
+    return this.printer.cast(address.type.bits, false, sum);
+  }
+
+  /** Element kind and width of a declared scalar pointer value: a printed
+   * variable, or an inline reload of a typed promoted slot. */
+  private scalarPointer(value: Value): { bits: number; kind: PointeeKind } | null {
     const load = this.inlined.get(value.id)?.node;
     if (load?.kind === 'load' && this.slotType(load.id)) {
       const slot = this.slotType(load.id)!;
-      return this.language === 'c-like' &&
-        slot.kind === 'pointer' &&
-        slot.pointee === 'integer' &&
-        slot.pointee_bits === bits
-        ? this.storage(load)
-        : null;
+      return slot.kind === 'pointer' ? { bits: slot.pointee_bits, kind: slot.pointee } : null;
     }
-    return !this.inline.has(value.id) && this.declaredPointer(value)?.bits === bits
-      ? this.local(value)
-      : null;
+    if (this.inline.has(value.id)) return null;
+    const spelling = this.declaredSpelling(value);
+    const match =
+      this.language === 'c-like'
+        ? /^(?:const )?(?:u?int(8|16|32|64)_t|(float|double))\s*\*$/.exec(spelling)
+        : /^pointer\[(?:u?int(8|16|32|64)_t|(float|double))\]$/.exec(spelling);
+    if (!match) return null;
+    return match[2]
+      ? { bits: match[2] === 'float' ? 32 : 64, kind: 'float' }
+      : { bits: Number(match[1]), kind: 'integer' };
+  }
+
+  /** Name of a declared scalar pointer of exactly `bits` element width and
+   * `kind` (C): a printed variable, or an inline reload of a typed slot. */
+  private scalarPointerBase(value: Value, bits: number, kind: PointeeKind): string | null {
+    const pointer = this.scalarPointer(value);
+    if (this.language !== 'c-like' || pointer?.bits !== bits || pointer.kind !== kind) return null;
+    const load = this.inlined.get(value.id)?.node;
+    return load?.kind === 'load' && this.slotType(load.id) ? this.storage(load) : this.local(value);
   }
 
   /** `p->f_<offset>` for an access at `p + offset` through a declared pointer to
@@ -2081,36 +2271,35 @@ export class Renderer {
         });
       return `${table.name}[${index.text}]`;
     }
-    const type = node.kind === 'load' ? node.result.type : node.value.type,
+    const type = this.accessType(node),
       access = node.access,
-      plain =
-        type.kind === 'integer' &&
-        access.endian === 'little' &&
-        !access.volatile &&
-        access.alignment === 1;
+      scalar = access.endian === 'little' && !access.volatile && access.alignment === 1,
+      plain = type.kind === 'integer' && scalar,
+      kind: PointeeKind | null =
+        type.kind === 'integer' ? 'integer' : type.kind === 'float' ? 'float' : null;
     const pointerAddress = this.uncast(node.address, ['bitcast']);
-    if (this.language === 'c-like' && plain) {
-      const pointer = this.scalarPointerBase(pointerAddress, bitWidth(type));
+    if (this.language === 'c-like' && scalar && kind) {
+      const pointer = this.scalarPointerBase(pointerAddress, bitWidth(type), kind);
       if (
         pointer !== null &&
         this.permitUnaligned(node) &&
         this.localValidation.presentation(
           'typed_dereference',
           this.input.function.id,
-          'declared scalar pointer of exactly the accessed width at displacement 0',
+          'declared scalar pointer of exactly the accessed width and kind at displacement 0',
         )
       )
         return `*${pointer}`;
-    }
-    if (this.language === 'c-like' && plain && this.inline.has(pointerAddress.id)) {
-      const indexed = this.typedIndex(pointerAddress, bitWidth(type));
+      const indexed = this.inline.has(pointerAddress.id)
+        ? this.typedIndex(pointerAddress, bitWidth(type), kind)
+        : null;
       if (
         indexed &&
         this.permitUnaligned(node) &&
         this.localValidation.presentation(
           'typed_index',
           this.input.function.id,
-          'declared scalar pointer of exactly the accessed width plus an index scaled by, or a constant displacement that is a multiple of, the element size; C subscript scaling yields the same address bits',
+          "declared scalar pointer of exactly the accessed width and kind plus any combination of one index scaled by the element size and a constant byte displacement that is a multiple of it; C subscript scaling yields the same address bits, and a constant joined to an index is added in that index's 64-bit unsigned arithmetic",
         )
       )
         return indexed;
@@ -2121,7 +2310,20 @@ export class Renderer {
     }
     let address = this.sourceAddressPrinted(node.address);
     if (this.language === 'python-like') {
-      const name = `${access.volatile ? 'volatile_' : ''}${access.endian === 'big' ? 'be_' : ''}${type.kind === 'integer' ? `u${type.bits}` : machineType(type)}`;
+      const sum =
+        kind && this.inline.has(pointerAddress.id)
+          ? this.typedAddressSum(pointerAddress, bitWidth(type), kind)
+          : null;
+      if (
+        sum &&
+        this.localValidation.presentation(
+          'typed_address_sum',
+          this.input.function.id,
+          'declared scalar pointer of exactly the accessed width and kind plus an index scaled by the element size and a constant byte displacement that is a multiple of it; one modular sum of the same address bits, memory views stay byte-addressed',
+        )
+      )
+        address = sum;
+      const name = `${access.volatile ? 'volatile_' : ''}${access.endian === 'big' ? 'be_' : ''}${type.kind === 'integer' ? `u${type.bits}` : this.program.source?.float_accesses?.has(node.id) ? `f${bitWidth(type)}` : machineType(type)}`;
       this.writer.helper(
         `memory.${name}`,
         `Ordered ${access.endian}-endian ${bitWidth(type)}-bit memory view, alignment ${access.alignment}; aliasing and faults are preserved. It is not a scalar local.`,
@@ -2147,7 +2349,9 @@ export class Renderer {
         ctype: { bits: 64, signed: false },
       };
     let name: string;
-    if (type.kind !== 'integer') name = machineType(type);
+    if (this.program.source?.float_accesses?.has(node.id))
+      name = type.kind === 'float' && type.bits === 32 ? 'float' : 'double';
+    else if (type.kind !== 'integer') name = machineType(type);
     else if (access.alignment === 1 && this.permitUnaligned(node)) name = `uint${type.bits}_t`;
     else {
       name = `aligned${access.alignment}_uint${type.bits}_t`;
@@ -3257,50 +3461,235 @@ export class Renderer {
       this.writer.line(depth - 1, `} while (${text});`);
       return;
     }
-    const open = (text: string): void =>
+    // Conjuncts of enclosing `if`s whose only content is this `if` (see nestedIf).
+    const pending = this.conjunct;
+    this.conjunct = undefined;
+    const term = (positive: boolean): ConditionTerm => ({
+      printed: positive
+        ? condition
+        : inverted
+          ? this.printed(inverted)
+          : compare
+            ? this.expression({ ...compare, op: NEGATED_PREDICATE[compare.op] }, compared.type)
+            : this.printer.not(condition),
+      value: control.condition,
+      positive,
+    });
+    const open = (positive: boolean): void => {
+      const text = pending ? this.conjunction([...pending, term(positive)]) : test(positive);
       this.writer.line(depth, c ? `if (${text}) {` : `if ${text}:`);
+    };
     const close = (): void => {
       if (c) this.writer.line(depth, '}');
     };
-    const empty = (arm: ControlArm): boolean =>
-      !arm.body &&
-      this.actions.get(arm.transfer) === 'fallthrough' &&
-      this.printedCopies(arm.transfer).length === (this.hoisted.get(arm.transfer)?.size ?? 0);
     const yes = control.when_true,
       no = control.when_false;
     const shaped =
-      (empty(yes) || empty(no) || this.terminates(yes) || this.terminates(no)) &&
+      (this.emptyArm(yes) || this.emptyArm(no) || this.terminates(yes) || this.terminates(no)) &&
       this.localValidation.presentation(
         'branch_layout',
         this.input.function.id,
         'an empty arm is dropped (inverting the exact integer test) and an arm that cannot fall through ends its if; the other arm follows unchanged',
       );
-    if (shaped && empty(no)) {
-      open(test(true));
+    // `if (A) { if (B) S }` with nothing else printed in either `if` is
+    // `if (A && B) S`: B still runs only when A holds, in the same order.
+    if (shaped && this.emptyArm(no) !== this.emptyArm(yes)) {
+      const positive = this.emptyArm(no),
+        body = positive ? yes : no,
+        inner = this.nestedIf(body);
+      if (
+        inner &&
+        this.localValidation.presentation(
+          'nested_condition_merge',
+          control.id,
+          'an if whose only printed content is another else-less if (no statements, definitions, labels, notes or edge copies between them) and whose other arm prints nothing becomes one if over the short-circuit conjunction; the inner test is still evaluated only when the outer one holds',
+          [inner],
+        )
+      ) {
+        this.conjunct = [...(pending ?? []), term(positive)];
+        this.transfer((positive ? no : yes).transfer, depth, control);
+        this.arm(body, depth, control);
+        if (this.conjunct) this.invalid('A merged condition was not printed');
+        return;
+      }
+    }
+    if (shaped && this.emptyArm(no)) {
+      open(true);
       this.transfer(no.transfer, depth + 1, control);
-      if (empty(yes)) {
+      if (this.emptyArm(yes)) {
         this.transfer(yes.transfer, depth + 1, control);
         if (!c) this.writer.statement(depth + 1, 'pass');
       } else this.arm(yes, depth + 1, control);
       close();
-    } else if (shaped && empty(yes)) {
-      open(test(false));
+    } else if (shaped && this.emptyArm(yes)) {
+      open(false);
       this.transfer(yes.transfer, depth + 1, control);
       this.arm(no, depth + 1, control);
       close();
-    } else if (shaped) {
+    } else if (pending) this.invalid('A merged condition reached an if with an else');
+    else if (shaped) {
       const first = this.terminates(yes) ? yes : no;
-      open(test(first === yes));
+      open(first === yes);
       this.arm(first, depth + 1, control);
       close();
       this.arm(first === yes ? no : yes, depth, control);
     } else {
-      open(test(true));
+      open(true);
       this.arm(yes, depth + 1, control);
       this.writer.line(depth, c ? '} else {' : 'else:');
       this.arm(no, depth + 1, control);
       close();
     }
+  }
+
+  private emptyArm(arm: ControlArm): boolean {
+    return !arm.body && this.silentTransfer(arm.transfer);
+  }
+
+  /** A fallthrough edge whose printed copies all moved into a `for` header. */
+  private silentTransfer(transfer: ParallelTransfer): boolean {
+    return (
+      this.actions.get(transfer) === 'fallthrough' &&
+      this.printedCopies(transfer).length === (this.hoisted.get(transfer)?.size ?? 0)
+    );
+  }
+
+  /** The `if` control an arm consists of, when nothing of the arm prints before
+   * it (silent jump blocks aside) and it prints with exactly one non-empty arm
+   * and no `else`. */
+  private nestedIf(arm: ControlArm): string | null {
+    if (!arm.body || !this.silentTransfer(arm.transfer)) return null;
+    const blocks: BlockRegion[] = [];
+    const flatten = (region: Region): boolean => {
+      if (region.kind === 'sequence') return region.regions.every(flatten);
+      if (region.kind !== 'block') return false;
+      blocks.push(region);
+      return true;
+    };
+    if (!flatten(arm.body) || !blocks.length) return null;
+    const definitions = this.program.source?.definitions;
+    const printed = (anchor: string): boolean =>
+      definitions?.get(anchor)?.some((definition) => !this.inlined.has(definition.result.id)) ??
+      false;
+    for (const [index, block] of blocks.entries()) {
+      const control = block.control;
+      if (
+        this.notes.has(block.id) ||
+        this.notes.has(control.id) ||
+        (this.labels.has(block.id) && !this.clones.has(block)) ||
+        printed(block.id) ||
+        printed(control.id) ||
+        block.statements.some(
+          (node) =>
+            printed(node.id) ||
+            (this.program.retained.has(node.id) &&
+              !('result' in node && this.inlined.has(node.result.id))),
+        ) ||
+        (index < blocks.length - 1 &&
+          (control.kind !== 'jump' || !this.silentTransfer(control.transfer)))
+      )
+        return null;
+    }
+    const control = blocks.at(-1)!.control;
+    return control.kind === 'if' &&
+      !this.loopTests.has(control.id) &&
+      !this.requirementPredicates.has(control.id) &&
+      this.emptyArm(control.when_true) !== this.emptyArm(control.when_false)
+      ? control.id
+      : null;
+  }
+
+  /** The conjunction of merged `if` tests. When every test is an inline
+   * predicate over shared operands, the exact enumerated-outcome fold of the
+   * conjunction (IEEE less/equal/greater/unordered; integer relations) may be
+   * one simpler predicate, e.g. `!(x < 0 || x > 0) && !isunordered(x, 0)` is
+   * `x == 0`. Folded operands are leaves the merged tests already read here. */
+  private conjunction(terms: readonly ConditionTerm[]): string {
+    let plain = terms[0]!.printed;
+    for (const item of terms.slice(1)) plain = this.printer.logical('and', plain, item.printed);
+    const created = new Map<string, Expression>();
+    const make = (key: string, type: DataType, expression?: Expression): Value => {
+      const value = {
+        id: `entity_${fingerprint(['source-merged-condition', this.input.function.id, key])}`,
+        type,
+      };
+      if (expression) created.set(value.id, expression);
+      return value;
+    };
+    const observe = (id: string): Expression | undefined =>
+      created.get(id) ??
+      this.synthetic.get(id) ??
+      (this.inline.has(id) && this.inlined.get(id)?.node.kind !== 'load'
+        ? this.program.expressions.get(id)
+        : undefined);
+    let root: Value | undefined;
+    for (const item of terms) {
+      const value = item.positive
+        ? item.value
+        : make(`not:${item.value.id}`, integer(1), {
+            kind: 'integer_unary',
+            op: 'not',
+            value: item.value,
+          });
+      root = root
+        ? make(`and:${root.id}:${value.id}`, integer(1), {
+            kind: 'integer',
+            op: 'and',
+            left: root,
+            right: value,
+          })
+        : value;
+    }
+    const folded = foldSourceCondition(
+      root!,
+      created.get(root!.id)!,
+      observe,
+      (value) => value,
+      (key, type, _block, expression) => make(key, type, expression),
+      '',
+      this.context,
+    );
+    if (!folded) return plain.text;
+    const leaves = new Set(terms.flatMap((item) => this.leafIds(item.value)));
+    for (const expression of created.values())
+      for (const operand of expressionOperands(expression))
+        if (!created.has(operand.id) && !this.synthetic.has(operand.id) && !leaves.has(operand.id))
+          return plain.text;
+    for (const operand of expressionOperands(folded))
+      if (!created.has(operand.id) && !leaves.has(operand.id)) return plain.text;
+    for (const [id, expression] of created) this.synthetic.set(id, expression);
+    const text = this.expression(folded, integer(1)).text;
+    if (
+      text.length >= plain.text.length ||
+      !this.localValidation.presentation(
+        'merged_condition_flags',
+        this.input.function.id,
+        'a merged conjunction of compare predicates is re-expressed as fewer native predicates, exact over every feasible equal/unsigned/signed outcome and IEEE less/equal/greater/unordered outcome of each shared operand pair',
+      )
+    )
+      return plain.text;
+    return text;
+  }
+
+  /** Values printed while printing `value` (inline expressions expanded). */
+  private leafIds(value: Value): string[] {
+    const ids: string[] = [],
+      pending = [value],
+      seen = new Set<string>();
+    while (pending.length && seen.size < 1024) {
+      this.context.checkpoint(1);
+      const current = pending.pop()!;
+      if (seen.has(current.id)) continue;
+      seen.add(current.id);
+      ids.push(current.id);
+      const expression =
+        this.synthetic.get(current.id) ??
+        (this.inline.has(current.id) && this.inlined.get(current.id)?.node.kind !== 'load'
+          ? this.program.expressions.get(current.id)
+          : undefined);
+      if (expression) pending.push(...expressionOperands(expression));
+    }
+    return ids;
   }
 
   /** Source view: coalesce phi copies, then lay out return tails and loop
@@ -3311,18 +3700,58 @@ export class Renderer {
       program = this.program;
     this.indexedData = indexedDataAccesses(program, this.context);
     const indices = new Map([...this.indexedData].map(([id, table]) => [id, table.index]));
+    const typeId = (value: Value): string | undefined =>
+      this.sourceValueTypes.get(value.id) ?? program.source?.value_types?.get(value.id)?.type_id;
     const candidates = planSourceInlining(
       program,
       this.context,
       (value) => this.names.has(value.id),
       (node) => indices.get(node.id),
+      (destination, expression) => {
+        // Same presented storage: the same IEEE width (whole value, or its low
+        // slice that is the presented IEEE value), or the same plain integer type.
+        const source =
+          (expression.kind === 'cast' &&
+            (expression.op === 'bitcast' || expression.op === 'truncate')) ||
+          (expression.kind === 'extract' && expression.offset === 0)
+            ? expression.value
+            : undefined;
+        if (!source) return undefined;
+        const floating = program.source?.float_values;
+        const left = floating?.get(destination.id),
+          right = floating?.get(source.id);
+        if (left || right)
+          return left === right && bitWidth(destination.type) === left ? source : undefined;
+        return expression.kind === 'cast' &&
+          expression.op === 'bitcast' &&
+          destination.type.kind === 'integer' &&
+          source.type.kind === 'integer' &&
+          destination.type.bits === source.type.bits &&
+          typeId(destination) === typeId(source) &&
+          !program.source?.formal_types?.has(destination.id) &&
+          !program.source?.formal_types?.has(source.id)
+          ? source
+          : undefined;
+      },
+      this.fpPresentation.omitted,
     );
+    const propagated = [...candidates.values()].filter((site) => site.propagated);
+    if (
+      propagated.length &&
+      !this.localValidation.presentation(
+        'copy_propagation',
+        subject,
+        'a plain copy of a printed variable with the same presented type is read as that variable at every use; phi coalescing and liveness treat each read as a read of the source, so its storage is never reassigned in between',
+        propagated.map(({ node }) => node.id),
+      )
+    )
+      for (const site of propagated) candidates.delete(site.node.result.id);
     if (
       candidates.size &&
       this.localValidation.presentation(
         'single_use_inlining',
         subject,
-        'single-use integer expressions expand at dominated SSA uses; nonvolatile loads expand only at unconditional same-block uses with no intervening effects except nested dependent loads; initialized private-local reads may cross unrelated effects but never a write to that local',
+        'single-use pure integer/IEEE scalar expressions expand at dominated SSA uses; FP-environment-dependent ones only when no call, unknown effect or register write lies on any path from definition to use (each FP site keeps its recorded environment requirement, which excludes contraction); reads in hidden FP-guard failure blocks are not uses; nonvolatile loads expand only at unconditional same-block uses with no intervening effects except nested dependent loads and private-local reads/writes; initialized private-local reads may cross unrelated effects but never a write to that local',
         [...candidates.values()].map(({ node }) => node.id),
       )
     ) {
@@ -3337,8 +3766,6 @@ export class Renderer {
     const liveness = new VariableLiveness(program, this.context, 4096, this.inlined, indices);
     this.liveness = liveness;
     const formals = new Set(program.parameters.map((value) => value.id));
-    const typeId = (value: Value): string | undefined =>
-      this.sourceValueTypes.get(value.id) ?? program.source?.value_types?.get(value.id)?.type_id;
     // Widening copies may share unsigned storage. Interference is checked
     // at every other definition; narrow reads retain their original C type.
     const widening = new Map<string, Value>();
@@ -4046,43 +4473,65 @@ export class Renderer {
         ? `${this.language === 'c-like' ? 'C-like' : 'Python-like'} pseudocode; ${this.program.source.inferred ? 'inferred ABI interface' : 'recovered source interface'}.`
         : `${this.language === 'c-like' ? 'C-like' : 'Python-like'} reconstruction; explicit widths and ordered memory, not original source.`,
     );
-    if (this.sourceView) {
-      const scratch = new Set<string>();
+    // Source view: the ABI scratch note is inserted after rendering, and only
+    // when a scratch register name occurs in the text (exit metadata keeps
+    // every slice either way).
+    const scratch = new Set<string>();
+    if (this.sourceView)
       for (const boundary of this.program.returns.values())
         for (const { register } of boundary.exit_scratch ?? [])
           scratch.add(register.root.slice(register.root.lastIndexOf(':') + 1));
-      if (scratch.size)
-        w.comment(
-          0,
-          `ABI scratch at return: ${[...scratch].join(', ')}; exact slices and values retained in exit metadata, not additional results.`,
-        );
-    }
-    for (const requirement of this.program.source?.requirements ?? []) {
-      this.context.checkpoint(1);
-      if (requirement.kind === 'fp_environment') {
+    const scratchAt = w.offset;
+    const environment = (this.program.source?.requirements ?? []).filter(
+      (requirement) => requirement.kind === 'fp_environment',
+    );
+    const mapSites = (requirement: Requirement, start: number, end: number): void => {
+      for (const site of requirement.sites) {
+        const origin = this.origins.get(site.subject_ids[0]!);
+        if (origin && this.fpPresentation.guards.has(origin.id)) {
+          this.map(origin, start, site.subject_ids, end);
+          const control = this.controls.get(origin.id);
+          if (control?.kind === 'if') {
+            const failure = site.supported_predicate_value ? control.when_false : control.when_true;
+            const block = this.program.blocks.get(failure.transfer.target)!;
+            this.map(block, start, [], end);
+            this.map(block.control, start, [], end);
+            for (const node of block.statements) this.map(node, start, [], end);
+          }
+        }
+      }
+    };
+    // Source view: the FP-environment assumption trails the signature, naming
+    // its requirement by an unambiguous ID prefix.
+    const ids = (this.program.source?.requirements ?? []).map((requirement) => requirement.id);
+    const reference = (id: string): string => {
+      for (let length = 'requirement_'.length + 12; length < id.length; length += 4) {
+        const prefix = id.slice(0, length);
+        if (ids.every((other) => other === id || !other.startsWith(prefix))) return `${prefix}…`;
+      }
+      return id;
+    };
+    const note =
+      this.sourceView &&
+      environment.length > 0 &&
+      this.localValidation.presentation(
+        'requirement_note',
+        this.input.function.id,
+        'the FP-environment assumption is a trailing signature comment naming each requirement by an unambiguous ID prefix; full ID, explanation and sites remain in requirements metadata',
+        environment.map((requirement) => requirement.id),
+      )
+        ? `assumes nearest-even rounding and masked FP traps (${environment.map((requirement) => reference(requirement.id)).join(', ')})`
+        : undefined;
+    if (!note)
+      for (const requirement of environment) {
+        this.context.checkpoint(1);
         const start = w.offset;
         w.comment(
           0,
           `Requirement ${requirement.id} (${requirement.status}): ${this.sourceView ? 'assumes nearest-even rounding and masked FP traps; full text in requirements metadata.' : requirement.explanation}`,
         );
-        for (const site of requirement.sites) {
-          const origin = this.origins.get(site.subject_ids[0]!);
-          if (origin && this.fpPresentation.guards.has(origin.id)) {
-            this.map(origin, start, site.subject_ids);
-            const control = this.controls.get(origin.id);
-            if (control?.kind === 'if') {
-              const failure = site.supported_predicate_value
-                ? control.when_false
-                : control.when_true;
-              const block = this.program.blocks.get(failure.transfer.target)!;
-              this.map(block, start);
-              this.map(block.control, start);
-              for (const node of block.statements) this.map(node, start);
-            }
-          }
-        }
+        mapSites(requirement, start, w.offset);
       }
-    }
     if (this.sourceView) {
       const renamed: string[] = [];
       for (const [id, spelling] of this.linkageNames)
@@ -4188,14 +4637,22 @@ export class Renderer {
     this.declareDataTables();
     this.declareSourceCallees();
     this.headerStart = w.offset;
+    let noteSpan: { start: number; end: number } | undefined;
+    const closing = (text: string): void => {
+      if (!note) return w.line(0, text);
+      const separator = this.language === 'c-like' ? ' ' : '  ',
+        comment = this.language === 'c-like' ? `/* ${note} */` : `# ${note}`,
+        start = w.offset + text.length + separator.length;
+      w.line(0, `${text}${separator}${comment}`);
+      noteSpan = { start, end: start + comment.length };
+    };
     if (this.program.source && parameters.length <= 4) {
       const declarations = parameters.map((parameter) =>
         w.declaration(parameter.type, parameter.name),
       );
       const prefix =
         this.language === 'c-like' ? `${returnType} ${functionName}(` : `def ${functionName}(`;
-      w.line(
-        0,
+      closing(
         `${prefix}${this.writer.join(declarations)}${this.language === 'c-like' ? ') {' : `) -> ${returnType}:`}`,
       );
       let offset = this.headerStart + prefix.length;
@@ -4233,10 +4690,9 @@ export class Renderer {
         );
         this.inferenceSites.set(parameter.value.id, { start, end: w.offset });
       }
-      w.line(0, this.language === 'c-like' ? ') {' : `) -> ${returnType}:`);
+      closing(this.language === 'c-like' ? ') {' : `) -> ${returnType}:`);
     } else
-      w.line(
-        0,
+      closing(
         this.language === 'c-like'
           ? `${returnType} ${functionName}() {`
           : `def ${functionName}() -> ${returnType}:`,
@@ -4246,6 +4702,8 @@ export class Renderer {
     this.mapped(this.input.function, this.headerStart, proof ? [...proof.ids] : [], [
       ...(proof?.evidence ?? []),
     ]);
+    if (noteSpan)
+      for (const requirement of environment) mapSites(requirement, noteSpan.start, noteSpan.end);
     const formals = new Set(parameters.map((parameter) => parameter.value.id));
     const stack = this.program.source?.stack;
     if (stack?.kind === 'private') {
@@ -4300,14 +4758,35 @@ export class Renderer {
     if (this.language === 'c-like') w.line(0, '}');
     // Hidden subjects retain annotations without resurrecting dead declarations.
     for (const subject of this.notes.keys()) this.emitNotes(subject, 0);
-    if (supportAt !== undefined) {
-      const delta = w.insertLines(supportAt, cScalarSupport(w.text().slice(supportAt)));
+    const insert = (at: number, lines: readonly string[]): number => {
+      const delta = w.insertLines(at, lines);
       this.headerStart += delta;
       this.headerEnd += delta;
       for (const [id, site] of this.inferenceSites)
-        if (site.start >= supportAt)
+        if (site.start >= at)
           this.inferenceSites.set(id, { start: site.start + delta, end: site.end + delta });
+      return delta;
+    };
+    let support = supportAt;
+    if (scratch.size) {
+      const text = w.text().slice(scratchAt);
+      if (
+        [...scratch].some((name) => new RegExp(`\\b${name}\\b`).test(text)) ||
+        !this.localValidation.presentation(
+          'abi_scratch_note',
+          this.input.function.id,
+          'no ABI scratch register name occurs in the text, so the scratch-at-return comment is omitted; exit metadata keeps every exact slice and value',
+          [...this.program.returns.keys()].slice(0, 64),
+        )
+      ) {
+        const comment = `ABI scratch at return: ${[...scratch].join(', ')}; exact slices and values retained in exit metadata, not additional results.`;
+        const delta = insert(scratchAt, [
+          this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
+        ]);
+        if (support !== undefined) support += delta;
+      }
     }
+    if (support !== undefined) insert(support, cScalarSupport(w.text().slice(support)));
     for (const item of this.input.function.coverage) {
       this.context.checkpoint(1 + item.statement_ids.length);
       if (!this.program.blocks.has(item.block_id) || !this.mappedControls.has(item.terminator_id))

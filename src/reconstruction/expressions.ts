@@ -29,6 +29,42 @@ export function identityOperand(type: Value['type'], expression: Expression): Va
     ? expression.value
     : null;
 }
+/** Same-type integer identities whose result is exactly one operand: x+0, x-0,
+ * x|0, x^0, x<<0, x>>0, x rotated by 0, x*1, x/1 and x&ones. `source` (the
+ * source view's own rewrite only; the checked view stays untouched) adds the
+ * commuted ones&x and the self-idempotent x&x and x|x: all bitwise exact, and
+ * the result propagates the same indeterminate operand as x itself. x^x, x-x
+ * and x*0 are never rewritten: they would drop an unknown operand. `a`/`b`
+ * are the proven constant values of the left/right operands. */
+export function integerIdentity(
+  type: Value['type'],
+  e: Extract<Expression, { kind: 'integer' }>,
+  a: bigint | null,
+  b: bigint | null,
+  source = false,
+): Value | null {
+  if (
+    sameType(type, e.left.type) &&
+    ((b === 0n &&
+      ['add', 'sub', 'or', 'xor', 'shl', 'lshr', 'ashr', 'rol', 'ror'].includes(e.op)) ||
+      (b === 1n && ['mul', 'udiv'].includes(e.op)) ||
+      (b === (1n << BigInt(bitWidth(e.left.type))) - 1n && e.op === 'and'))
+  )
+    return e.left;
+  if (
+    sameType(type, e.right.type) &&
+    ((a === 0n && ['add', 'or', 'xor'].includes(e.op)) ||
+      (a === 1n && e.op === 'mul') ||
+      (source && a === (1n << BigInt(bitWidth(e.right.type))) - 1n && e.op === 'and'))
+  )
+    return e.right;
+  return source &&
+    (e.op === 'and' || e.op === 'or') &&
+    e.left.id === e.right.id &&
+    sameType(type, e.left.type)
+    ? e.left
+    : null;
+}
 /** Rewrites only pure SSA expressions. No load, effect, or mutable physical name
  * enters this algebra. In particular x-x and x*0 retain unknown operands. */
 export function foldExpressions(
@@ -181,19 +217,8 @@ export function foldExpressions(
     if (e.kind === 'integer') {
       const a = constant(e.left),
         b = constant(e.right);
-      if (
-        sameType(node.result.type, e.left.type) &&
-        ((b === 0n &&
-          ['add', 'sub', 'or', 'xor', 'shl', 'lshr', 'ashr', 'rol', 'ror'].includes(e.op)) ||
-          (b === 1n && ['mul', 'udiv'].includes(e.op)) ||
-          (b === (1n << BigInt(bitWidth(e.left.type))) - 1n && e.op === 'and'))
-      )
-        return alias(e.left);
-      if (
-        sameType(node.result.type, e.right.type) &&
-        ((a === 0n && ['add', 'or', 'xor'].includes(e.op)) || (a === 1n && e.op === 'mul'))
-      )
-        return alias(e.right);
+      const identity = integerIdentity(node.result.type, e, a, b);
+      if (identity) return alias(identity);
       if (node.result.type.kind === 'integer' && node.result.type.bits === 1) {
         const leftFlag = flag(e.left),
           rightFlag = flag(e.right);

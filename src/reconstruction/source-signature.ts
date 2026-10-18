@@ -1,6 +1,6 @@
 import type { OperationContext } from '../core/index.js';
 import type { EmissionInput } from '../emitters/model.js';
-import { bitWidth, expressionOperands, type Value } from '../ir/index.js';
+import { bitWidth, expressionOperands, type Instruction, type Value } from '../ir/index.js';
 import type { BoundaryProjection, Reconstruction } from './model.js';
 import type { SourceFormalType, SourcePresentation } from './source-model.js';
 import { validateBitvectorCandidate } from './local-validation.js';
@@ -33,12 +33,17 @@ export function permitsVoidSourceSignature(
 
 /** Native FP spelling requires typed IEEE evidence. Integer carriers qualify
  * only as closed whole-bit transports: an integer consumer keeps the entire
- * carrier component explicit, rather than silently adding numeric conversions. */
+ * carrier component explicit, rather than silently adding numeric conversions.
+ * An ordinary same-width memory read joins such a component only by consumer
+ * evidence (an IEEE reinterpretation or a transport into a carrier); an
+ * ordinary store of a component member is a whole-bit FP write. Both then
+ * read/write through a native float/double lvalue (`float_accesses`). */
 export function projectSourceFloating(
   program: Reconstruction,
   input: EmissionInput,
   context: OperationContext,
-): Pick<SourcePresentation, 'float_values' | 'return_float'> {
+  memory = true,
+): Pick<SourcePresentation, 'float_values' | 'return_float' | 'float_accesses'> {
   const validation = program.local_validation_session;
   if (
     program.view !== 'source' ||
@@ -83,6 +88,38 @@ export function projectSourceFloating(
     if (expression?.kind === 'select') return [expression.when_true, expression.when_false];
     return incoming.get(value.id) ?? [];
   };
+  // Ordinary storage views only: little-endian, non-volatile, IR alignment 1,
+  // outside promoted and hidden frame-save slots.
+  const frameSaves = program.source.frame_saves;
+  const plain = (node: Extract<Instruction, { kind: 'load' | 'store' }>): boolean => {
+    const bits = bitWidth(node.kind === 'load' ? node.result.type : node.value.type);
+    return (
+      memory &&
+      (bits === 32 || bits === 64) &&
+      program.retained.has(node.id) &&
+      !program.source!.locals.has(node.id) &&
+      !frameSaves?.stores.has(node.id) &&
+      !frameSaves?.reloads.has(node.id) &&
+      node.access.endian === 'little' &&
+      !node.access.volatile &&
+      node.access.alignment === 1
+    );
+  };
+  const accesses: Extract<Instruction, { kind: 'load' | 'store' }>[] = [];
+  const loads = new Map<string, Value>();
+  for (const block of program.blocks.values())
+    for (const node of block.statements) {
+      context.checkpoint(1);
+      if ((node.kind !== 'load' && node.kind !== 'store') || !plain(node)) continue;
+      accesses.push(node);
+      if (
+        node.kind === 'load' &&
+        node.result.type.kind === 'integer' &&
+        program.live.has(node.result.id) &&
+        !conflicting(node.result)
+      )
+        loads.set(node.result.id, node.result);
+    }
   const floating = new Map<string, 32 | 64>();
   const carriers = new Set<string>();
   for (const value of program.values.values()) {
@@ -112,9 +149,11 @@ export function projectSourceFloating(
         evidence = true;
         continue;
       }
-      // Literal bits can join an established FP transport, but cannot establish
-      // its interpretation alone. Rendering retains their exact bit pattern.
-      if (program.expressions.get(current.id)?.kind === 'constant') continue;
+      // Literal bits and ordinary memory reads can join an established FP
+      // transport, but cannot establish its interpretation alone. Rendering
+      // retains literal bit patterns; reads need their own evidence below.
+      if (program.expressions.get(current.id)?.kind === 'constant' || loads.has(current.id))
+        continue;
       const sources = parents(current);
       if (!sources.length) valid = false;
       else pending.push(...sources);
@@ -124,6 +163,26 @@ export function projectSourceFloating(
       carriers.add(value.id);
     }
   }
+  // Consumer evidence for a memory read: a same-width IEEE reinterpretation
+  // of it, or its transport into an established carrier. Any other consumer
+  // invalidates it (and its connected carriers) below.
+  const evidenced = new Set<string>();
+  for (const id of carriers)
+    for (const parent of parents(program.values.get(id)!)) evidenced.add(parent.id);
+  for (const [id, expression] of program.expressions)
+    if (
+      program.live.has(id) &&
+      expression.kind === 'cast' &&
+      expression.op === 'bitcast' &&
+      loads.has(expression.value.id) &&
+      floating.get(id) === bitWidth(expression.value.type)
+    )
+      evidenced.add(expression.value.id);
+  for (const [id, value] of loads)
+    if (evidenced.has(id)) {
+      floating.set(id, bitWidth(value.type) as 32 | 64);
+      carriers.add(id);
+    }
   const invalid = new Set<string>();
   const neighbors = new Map<string, Set<string>>();
   const connect = (a: string, b: string): void => {
@@ -178,7 +237,9 @@ export function projectSourceFloating(
       context.checkpoint(1);
       if (!program.retained.has(node.id)) continue;
       if (node.kind === 'load' || node.kind === 'store') direct(node.address);
-      if (node.kind === 'store' || node.kind === 'write_register') direct(node.value);
+      // An ordinary store writes the whole carrier bits through a float/double lvalue.
+      if ((node.kind === 'store' && !plain(node)) || node.kind === 'write_register')
+        direct(node.value);
     }
   }
   const rejected = [...invalid];
@@ -212,6 +273,22 @@ export function projectSourceFloating(
     )
       ? returned.bits
       : undefined;
+  const floatAccesses = new Set(
+    accesses
+      .filter((node) => floating.has((node.kind === 'load' ? node.result : node.value).id))
+      .map((node) => node.id),
+  );
+  if (
+    floatAccesses.size &&
+    !validation.presentation(
+      'fp_memory_access',
+      program.function.id,
+      'ordinary little-endian, non-volatile, IR-alignment-1 32/64-bit memory accesses outside frame slots whose loaded value is consumed only as a same-width IEEE reinterpretation or closed FP carrier, or whose stored value is a member of such a carrier component; presented as a float/double lvalue of the same bytes',
+      [...floatAccesses].slice(0, 64),
+      `${floatAccesses.size} accesses read or write exactly the original bytes; a mixed integer/FP use keeps the explicit integer access and bit reinterpretation`,
+    )
+  )
+    return projectSourceFloating(program, input, context, false);
   if (
     !floating.size ||
     !validation.presentation(
@@ -228,15 +305,27 @@ export function projectSourceFloating(
     [program.function.id],
     'Source float/double denote the target IEEE binary32/binary64 representation in the established ABI FP carriers; whole-bit transport is not a numeric integer/FP conversion. Existing FP-environment requirements still apply.',
   );
-  return { float_values: floating, ...(returnFloat ? { return_float: returnFloat } : {}) };
+  if (floatAccesses.size)
+    validation.requireAbi(
+      'fp_memory_access',
+      [program.function.id],
+      'A float/double lvalue accesses the same little-endian IEEE binary32/binary64 bytes as the original same-width integer access, with the storage-view convention of plain integer dereferences; IR alignment 1 states that the target permits the unaligned access without a fault.',
+    );
+  return {
+    float_values: floating,
+    ...(floatAccesses.size ? { float_accesses: floatAccesses } : {}),
+    ...(returnFloat ? { return_float: returnFloat } : {}),
+  };
 }
 
 /** Infer a presentation interface from observed uses, retaining every machine
- * value. Narrow carriers are interpreted only under the native C ABI. */
+ * value. Narrow carriers are interpreted only under the native C ABI. An
+ * approved `fp_memory_access` is a float element access of its width. */
 export function projectSourceSignature(
   program: Reconstruction,
   input: EmissionInput,
   context: OperationContext,
+  floatAccesses: ReadonlySet<string> = new Set(),
 ): Pick<SourcePresentation, 'formal_types' | 'local_types' | 'return_scalar'> & {
   readonly returns?: ReadonlyMap<string, BoundaryProjection>;
 } {
@@ -380,10 +469,9 @@ export function projectSourceSignature(
         for (const root of parameterRoots(node.value, false)) escaped.add(root);
       }
       const value = node.kind === 'load' ? node.result : node.value;
+      const kind = floatAccesses.has(node.id) ? 'float' : value.type.kind;
       const element =
-        value.type.kind === 'integer' || value.type.kind === 'float'
-          ? `${value.type.kind}:${bitWidth(value.type)}`
-          : 'other';
+        kind === 'integer' || kind === 'float' ? `${kind}:${bitWidth(value.type)}` : 'other';
       for (const root of parameterRoots(node.address)) {
         const row = accesses.get(root) ?? { elements: new Set<string>(), sites: [] };
         row.elements.add(element);

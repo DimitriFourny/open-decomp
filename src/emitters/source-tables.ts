@@ -35,6 +35,7 @@ export function indexedDataAccesses(
     const bits = bitWidth(node.result.type);
     if (
       node.result.type.kind !== 'integer' ||
+      program.source?.float_accesses?.has(node.id) ||
       ![8, 16, 32, 64].includes(bits) ||
       node.access.volatile ||
       node.access.endian !== 'little' ||

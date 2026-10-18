@@ -1,5 +1,11 @@
 import type { OperationContext } from '../core/index.js';
-import { expressionOperands, type Instruction, type Value } from '../ir/index.js';
+import {
+  type CastOp,
+  expressionOperands,
+  type Expression,
+  type Instruction,
+  type Value,
+} from '../ir/index.js';
 import type { BlockRegion } from '../presentation/index.js';
 import type { Reconstruction } from '../reconstruction/model.js';
 import { controlArms } from './source-control.js';
@@ -7,22 +13,54 @@ import { controlArms } from './source-control.js';
 export type InlineInstruction = Extract<Instruction, { kind: 'assign' | 'load' }>;
 export interface InlineSite {
   readonly node: InlineInstruction;
-  /** Original statement/control that evaluates this value exactly once. */
+  /** Original statement/control that evaluates this value exactly once (a
+   * propagated copy: its first reading statement; every reader prints its source). */
   readonly anchor: string;
   /** Original anchor of a synthetic pure definition. */
   readonly origin?: string;
+  /** A plain copy printed as its source variable at every reader. */
+  readonly propagated?: boolean;
 }
 
-/** Single-use integer expressions may be delayed to their dominated SSA use:
- * they read immutable values, not memory. Loads additionally require an
+/** Conversions whose result depends on the dynamic FP environment (rounding,
+ * flush/denormal modes); bitcasts, negation and absolute value only move bits. */
+const ENVIRONMENT_CASTS: Partial<Record<CastOp, true>> = {
+  signed_to_float: true,
+  unsigned_to_float: true,
+  float_to_signed: true,
+  float_to_unsigned: true,
+  float_convert: true,
+};
+
+function environmental(expression: Expression): boolean {
+  return (
+    expression.kind === 'float' ||
+    expression.kind === 'float_compare' ||
+    (expression.kind === 'float_unary' && expression.op === 'sqrt') ||
+    (expression.kind === 'cast' && ENVIRONMENT_CASTS[expression.op] === true)
+  );
+}
+
+/** Single-use pure integer expressions may be delayed to their dominated SSA
+ * use: they read immutable values, not memory. Pure IEEE scalar expressions
+ * (arithmetic, compares, conversions) additionally read the FP environment, so
+ * no call, unknown effect or register write may lie on any path from their
+ * definition to that use (their recorded FP-environment requirement already
+ * excludes contraction). Plain copies of a variable with the same presented
+ * type are propagated to every reader. Loads additionally require an
  * unconditional same-block use and an unbroken effect path: every intervening
- * load must belong to their nested address/data dependency chain. Independent
- * potentially faulting loads therefore never become unsequenced C operands. */
+ * load must belong to their nested address/data dependency chain or read/write
+ * a private local. Independent potentially faulting loads therefore never
+ * become unsequenced C operands. Blocks in `omitted` are not printed (hidden
+ * FP-environment guard failures); their reads are no uses. */
 export function planSourceInlining(
   program: Reconstruction,
   context: OperationContext,
   preserve: (value: Value) => boolean,
   alternateIndex: (node: Instruction) => Value | undefined,
+  /** The variable a multi-use pure definition merely re-presents, if any. */
+  plainCopy: (destination: Value, expression: Expression) => Value | undefined = () => undefined,
+  omitted: ReadonlySet<string> = new Set(),
 ): Map<string, InlineSite> {
   type Use = {
     block: string;
@@ -32,6 +70,11 @@ export function planSourceInlining(
     transfer: boolean;
     alternative?: boolean;
   };
+  /** The use of `operand` inside `expression`, evaluated at `at`. */
+  const operandAt = (expression: Expression, operand: Value, at: Use): Use =>
+    expression.kind === 'select' && operand.id !== expression.condition.id
+      ? { ...at, conditional: true }
+      : at;
   type Candidate = {
     block: BlockRegion;
     position: number;
@@ -64,13 +107,7 @@ export function planSourceInlining(
     const expression = program.inline.has(value.id) ? program.expressions.get(value.id) : undefined;
     if (expression) {
       for (const operand of expressionOperands(expression)) {
-        use(
-          operand,
-          expression.kind === 'select' && operand.id !== expression.condition.id
-            ? { ...at, conditional: true }
-            : at,
-          depth + 1,
-        );
+        use(operand, operandAt(expression, operand, at), depth + 1);
         if (!complete) return;
       }
       return;
@@ -96,6 +133,7 @@ export function planSourceInlining(
       });
   };
   for (const block of program.blocks.values()) {
+    if (omitted.has(block.id)) continue;
     const definitions = (anchor: string, position: number): void => {
       for (const definition of program.source?.definitions?.get(anchor) ?? []) {
         const node: InlineInstruction = {
@@ -115,13 +153,7 @@ export function planSourceInlining(
           transfer: false,
         };
         for (const value of expressionOperands(definition.expression))
-          use(
-            value,
-            definition.expression.kind === 'select' &&
-              value.id !== definition.expression.condition.id
-              ? { ...at, conditional: true }
-              : at,
-          );
+          use(value, operandAt(definition.expression, value, at));
       }
     };
     definitions(block.id, -1);
@@ -142,12 +174,7 @@ export function planSourceInlining(
         if (node.kind === 'assign') {
           const expression = program.expressions.get(node.result.id) ?? node.expression;
           for (const value of expressionOperands(expression))
-            use(
-              value,
-              expression.kind === 'select' && value.id !== expression.condition.id
-                ? { ...at, conditional: true }
-                : at,
-            );
+            use(value, operandAt(expression, value, at));
         } else if (node.kind === 'load' || node.kind === 'store') {
           if (!program.source?.locals.has(node.id)) use(node.address, at);
           if (node.kind === 'store') use(node.value, at);
@@ -197,34 +224,68 @@ export function planSourceInlining(
     if (!complete) return new Map();
   }
   const result = new Map<string, InlineSite>();
-  const eligible = (node: InlineInstruction): boolean =>
-    node.result.type.kind === 'integer' &&
-    !preserve(node.result) &&
-    !program.inline.has(node.result.id) &&
-    uses.get(node.result.id)?.count === 1;
-  const integerOnly = (value: Value, depth = 0): boolean => {
+  const scalar = (value: Value): boolean =>
+    value.type.kind === 'integer' || value.type.kind === 'float';
+  /** Whether expanding `value` evaluates an FP-environment-dependent operation;
+   * null when some printed leaf is not an integer/IEEE scalar. */
+  const scan = (value: Value, depth = 0): boolean | null => {
     context.checkpoint(1);
-    if (value.type.kind !== 'integer' || depth > 128) return false;
+    if (!scalar(value) || depth > 128) return null;
     const expression = program.inline.has(value.id) ? program.expressions.get(value.id) : undefined;
-    return (
-      !expression ||
-      [...expressionOperands(expression)].every((operand) => integerOnly(operand, depth + 1))
-    );
+    if (!expression) return false;
+    let environment = environmental(expression);
+    for (const operand of expressionOperands(expression)) {
+      const nested = scan(operand, depth + 1);
+      if (nested === null) return null;
+      environment ||= nested;
+    }
+    return environment;
   };
-  for (const { node, origin } of candidates) {
-    if (node.kind !== 'assign' || !eligible(node) || !program.expressions.has(node.result.id))
-      continue;
+  /** Propagated multi-use copies (to their source): never a consumer of another expansion. */
+  const shared = new Map<string, Value>();
+  const sensitive: Candidate[] = [];
+  for (const candidate of candidates) {
+    const { node, origin } = candidate;
+    const expression = program.expressions.get(node.result.id);
+    const row = uses.get(node.result.id);
     if (
-      ![...expressionOperands(program.expressions.get(node.result.id)!)].every((value) =>
-        integerOnly(value),
-      )
+      node.kind !== 'assign' ||
+      !expression ||
+      !row ||
+      !scalar(node.result) ||
+      preserve(node.result) ||
+      program.inline.has(node.result.id)
     )
       continue;
+    let environment: boolean | null = environmental(expression);
+    for (const operand of expressionOperands(expression)) {
+      const nested = scan(operand);
+      environment = nested === null ? null : environment || nested;
+      if (environment === null) break;
+    }
+    if (environment === null) continue;
+    if (row.count !== 1) {
+      // A plain copy of a printed variable: each reader prints the variable.
+      const source = plainCopy(node.result, expression);
+      if (
+        !source ||
+        program.inline.has(source.id) ||
+        program.source?.stack_addresses.has(source.id)
+      )
+        continue;
+      shared.set(node.result.id, source);
+    }
+    if (environment) sensitive.push(candidate);
     result.set(node.result.id, {
       node,
-      anchor: uses.get(node.result.id)!.first.anchor,
+      anchor: row.first.anchor,
       ...(origin ? { origin } : {}),
     });
+  }
+  for (const [id, source] of shared) {
+    if (!result.has(source.id)) continue;
+    result.delete(id);
+    shared.delete(id);
   }
   const destination = (node: InlineInstruction): { at: Use; nested: Set<string> } | null => {
     let at = uses.get(node.result.id)!.first;
@@ -232,21 +293,82 @@ export function planSourceInlining(
     for (let depth = 0; depth < 128; depth++) {
       const consumer = anchors.get(at.anchor);
       if (!consumer || !result.has(consumer.result.id)) return { at, nested };
-      if (nested.has(consumer.id)) return null;
+      if (nested.has(consumer.id) || shared.has(consumer.result.id)) return null;
       nested.add(consumer.id);
       const next = uses.get(consumer.result.id)!.first;
       at = { ...next, conditional: at.conditional || next.conditional };
     }
     return null;
   };
+  // FP-environment readers: no call, unknown effect or register write on any
+  // path from the definition to its (final) use that does not re-execute it.
+  const writes = (node: Instruction): boolean =>
+    node.kind === 'call' || node.kind === 'unknown_effect' || node.kind === 'write_register';
+  const successors = (block: BlockRegion): string[] =>
+    (block.control.kind === 'jump'
+      ? [block.control.transfer]
+      : controlArms(block.control).map((arm) => arm.transfer)
+    ).map((transfer) => transfer.target);
+  let predecessors: Map<string, string[]> | undefined;
+  let walked = 0;
+  const reach = (
+    start: readonly string[],
+    next: (id: string) => readonly string[],
+    stop: string,
+  ) => {
+    const seen = new Set<string>();
+    const pending = [...start];
+    while (pending.length) {
+      context.checkpoint(1);
+      if (++walked > 65536) return null;
+      const id = pending.pop()!;
+      if (id === stop || seen.has(id) || !program.blocks.has(id)) continue;
+      seen.add(id);
+      pending.push(...next(id));
+    }
+    return seen;
+  };
+  const quiet = (from: BlockRegion, position: number, at: Use): boolean => {
+    const target = program.blocks.get(at.block);
+    if (!target) return false;
+    const clean = (block: BlockRegion, start: number, end: number): boolean =>
+      block.statements.slice(Math.max(start, 0), end).every((node) => !writes(node));
+    if (from.id === target.id)
+      return at.position > position && clean(from, position + 1, at.position);
+    if (!predecessors) {
+      predecessors = new Map();
+      for (const block of program.blocks.values())
+        for (const successor of successors(block))
+          predecessors.set(successor, [...(predecessors.get(successor) ?? []), block.id]);
+    }
+    const forward = reach(successors(from), (id) => successors(program.blocks.get(id)!), from.id);
+    const backward = reach([target.id], (id) => predecessors!.get(id) ?? [], from.id);
+    if (!forward || !backward || !forward.has(target.id)) return false;
+    if (!clean(from, position + 1, from.statements.length)) return false;
+    for (const id of forward) {
+      if (!backward.has(id)) continue;
+      const block = program.blocks.get(id)!;
+      const again = id === target.id && successors(block).some((next) => backward.has(next));
+      if (!clean(block, 0, id === target.id && !again ? at.position : block.statements.length))
+        return false;
+    }
+    return true;
+  };
+  for (const { node, block, position } of sensitive) {
+    const target = destination(node);
+    if (!target || !quiet(block, position, target.at)) result.delete(node.result.id);
+  }
   for (let index = candidates.length - 1; index >= 0; index--) {
     const { block, position, node } = candidates[index]!;
     if (
       node.kind !== 'load' ||
-      !eligible(node) ||
+      node.result.type.kind !== 'integer' ||
+      preserve(node.result) ||
+      program.inline.has(node.result.id) ||
+      uses.get(node.result.id)?.count !== 1 ||
       !program.source ||
       node.access.volatile ||
-      ![8, 16, 32, 64].includes(node.result.type.kind === 'integer' ? node.result.type.bits : 0)
+      ![8, 16, 32, 64].includes(node.result.type.bits)
     )
       continue;
     const target = destination(node);
@@ -257,11 +379,15 @@ export function planSourceInlining(
     let ordered = true;
     for (let p = position + 1; p < at.position; p++) {
       const between = block.statements[p]!;
+      // A private local is no memory: its reads and writes cannot fault or alias.
+      const privateLocal =
+        (between.kind === 'load' || between.kind === 'store') &&
+        program.source.locals.has(between.id);
       if (
         (program.retained.has(between.id) &&
           (local
             ? between.kind === 'store' && program.source.locals.get(between.id)?.id === local.id
-            : between.kind !== 'assign' && !nested.has(between.id))) ||
+            : between.kind !== 'assign' && !nested.has(between.id) && !privateLocal)) ||
         program.source?.definitions
           ?.get(between.id)
           ?.some((definition) => !result.has(definition.result.id))
@@ -277,7 +403,11 @@ export function planSourceInlining(
   for (const [id, site] of result) {
     const target = destination(site.node);
     if (!target) return new Map();
-    result.set(id, { ...site, anchor: target.at.anchor });
+    result.set(id, {
+      ...site,
+      anchor: target.at.anchor,
+      ...(shared.has(id) ? { propagated: true } : {}),
+    });
   }
   return result;
 }

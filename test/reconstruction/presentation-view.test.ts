@@ -16,6 +16,7 @@ import { reconstruct, type Reconstruction } from '../../src/reconstruction/index
 import type { InferredCallee, SourceEvidence } from '../../src/reconstruction/source-model.js';
 import { builder, image, slice } from '../ir/support.js';
 import { emit, emittedFormals, execute } from '../emitters/c/support.js';
+import type { EmissionResult } from '../../src/emitters/model.js';
 
 const u64 = integer(64),
   abi = darwinArm64Abi;
@@ -91,6 +92,21 @@ function framed(name: string, options: { reloadX19?: boolean; closure?: boolean 
   };
 }
 
+/** No scratch register is named in the text, so the scratch comment is omitted
+ * under a recorded presentation; exit metadata keeps the slices. */
+function scratchNoteOmitted(
+  emission: EmissionResult['emission'],
+  registers: readonly string[],
+): void {
+  assert.doesNotMatch(emission.text, /ABI scratch at return/);
+  for (const name of registers) assert.doesNotMatch(emission.text, new RegExp(`\\b${name}\\b`));
+  assert.ok(
+    emission.local_validation?.some(
+      (record) => record.kind === 'presentation' && record.rule === 'abi_scratch_note',
+    ),
+  );
+}
+
 const rules = (program: Reconstruction): string[] =>
   (program.local_validation ?? [])
     .filter((record) => record.kind === 'presentation')
@@ -155,10 +171,7 @@ test('source view moves ABI-scratch exit clobbers out of line', () => {
   assert.ok(rules(source).includes('exit_scratch'));
   for (const language of ['c-like', 'python-like'] as const) {
     const { emission } = fixture.emit(language);
-    assert.match(
-      emission.text,
-      /ABI scratch at return: x1, v0, v1, v2, v3; exact slices and values retained in exit metadata/,
-    );
+    scratchNoteOmitted(emission, ['x1', 'v0', 'v1', 'v2', 'v3']);
     assert.doesNotMatch(emission.text, /also at exit:.* = value\d/);
   }
 });
@@ -219,10 +232,7 @@ test('undemanded computed exit slices move out of line without dropping load eff
   );
   for (const language of ['c-like', 'python-like'] as const) {
     const { emission } = emit(fixture.ir, fixture.extra, language);
-    assert.match(
-      emission.text,
-      /ABI scratch at return: x1; exact slices and values retained in exit metadata/,
-    );
+    scratchNoteOmitted(emission, ['x1']);
     assert.doesNotMatch(emission.text, /also at exit:.* = value\d/);
     assert.doesNotMatch(emission.text, /return physical_return/);
     // The out-of-line value does not rescue a faulting load from execution.
@@ -239,10 +249,7 @@ test('exit expressions stay in metadata without manufacturing a dead local', () 
   const fixture = computedExit({}, true, true);
   for (const language of ['c-like', 'python-like'] as const) {
     const { emission } = emit(fixture.ir, fixture.extra, language);
-    assert.match(
-      emission.text,
-      /ABI scratch at return: x1; exact slices and values retained in exit metadata/,
-    );
+    scratchNoteOmitted(emission, ['x1']);
     const inputs = new Map(
       emittedFormals(emission).map((formal) => [formal.statement_id, 0x1000n]),
     );

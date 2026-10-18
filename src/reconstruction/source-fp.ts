@@ -10,6 +10,8 @@ export const SOURCE_FP_ENVIRONMENT =
 export interface SourceFpPresentation {
   readonly body: Region;
   readonly guards: ReadonlySet<string>;
+  /** Unsupported-environment failure blocks of `guards`, not printed. */
+  readonly omitted: ReadonlySet<string>;
   readonly expressions: ReadonlySet<Expression>;
 }
 
@@ -21,26 +23,45 @@ export function sourceFpPresentation(
   context: OperationContext,
 ): SourceFpPresentation {
   const guards = new Set<string>(),
+    omitted = new Set<string>(),
     expressions = new Set<Expression>();
-  const unchanged = { body: program.function.body, guards, expressions };
+  const unchanged = { body: program.function.body, guards, omitted, expressions };
   const validation = program.local_validation_session;
   if (program.view !== 'source' || !program.source || !validation) return unchanged;
-  const literals: [string, Expression][] = [];
-  for (const [id] of program.source.float_values ?? []) {
-    context.checkpoint(1);
+  // Literals are the typed constants plus the integer-typed constants that join
+  // an established FP value as bitcast operands, phi copies or select arms; each
+  // prints as its exact IEEE value only where a float is expected.
+  const literals = new Map<string, Expression>();
+  const literal = (id: string): void => {
     const expression = program.expressions.get(id);
-    if (expression?.kind === 'constant') literals.push([id, expression]);
+    if (expression?.kind === 'constant') literals.set(id, expression);
+  };
+  const floating = program.source.float_values;
+  for (const [id] of floating ?? []) {
+    context.checkpoint(1);
+    literal(id);
+    const expression = program.expressions.get(id);
+    if (expression?.kind === 'cast' && expression.op === 'bitcast') literal(expression.value.id);
+    if (expression?.kind === 'select') {
+      literal(expression.when_true.id);
+      literal(expression.when_false.id);
+    }
   }
+  for (const copies of program.transfers.values())
+    for (const copy of copies) {
+      context.checkpoint(1);
+      if (floating?.has(copy.destination.id)) literal(copy.source.id);
+    }
   if (
-    literals.length &&
+    literals.size &&
     validation.presentation(
       'fp_literal',
       program.function.id,
       'exact finite IEEE binary32/binary64 value spelled as a round-tripping decimal; no arithmetic or environment assumption; nonfinite payloads retain bit patterns',
-      literals.map(([id]) => id).slice(0, 64),
+      [...literals.keys()].slice(0, 64),
     )
   )
-    for (const [, expression] of literals) expressions.add(expression);
+    for (const expression of literals.values()) expressions.add(expression);
   if (!program.source.requirements?.some((item) => item.kind === 'fp_environment'))
     return unchanged;
   const predicates = sourceRequirementPredicates(program.source.requirements);
@@ -116,7 +137,6 @@ export function sourceFpPresentation(
         !guardSubjects.has(block.control.id)
       )
         return unchanged;
-  const omitted = new Set<string>();
   const failureOnly = (region: Region | undefined, id: string): boolean =>
     !region ||
     (region.kind === 'block'
@@ -199,10 +219,20 @@ export function sourceFpPresentation(
       pending.push(id);
     }
   };
+  // A promoted local slot is private storage: its stores are as observable as
+  // the loads that read it back, no more.
+  const slotStores = new Map<string, string[]>();
+  const slotOfLoad = new Map<string, string>();
   for (const block of program.blocks.values()) {
     for (const node of block.statements) {
       if (!program.retained.has(node.id)) continue;
-      if (node.kind === 'store' || node.kind === 'write_register') mark(node.value.id);
+      const local = program.source.locals.get(node.id);
+      if (local && node.kind === 'store') {
+        const row = slotStores.get(local.id) ?? [];
+        row.push(node.value.id);
+        slotStores.set(local.id, row);
+      } else if (local && node.kind === 'load') slotOfLoad.set(node.result.id, local.id);
+      else if (node.kind === 'store' || node.kind === 'write_register') mark(node.value.id);
     }
   }
   for (const bindings of [...program.physical_inputs.values(), ...program.physical_exits.values()])
@@ -216,12 +246,19 @@ export function sourceFpPresentation(
     for (const binding of [...boundary.inputs, ...boundary.outputs]) mark(binding.value.id);
     for (const value of boundary.results) if (value.type.kind !== 'float') mark(value.id);
   }
+  // Comparisons yield one bit of the value order and float-to-integer
+  // conversions of a NaN are undefined: neither observes arithmetic payloads,
+  // whatever consumes their results.
+  const payloadFree = (expression: Expression): boolean =>
+    expression.kind === 'float_compare' ||
+    (expression.kind === 'cast' &&
+      (expression.op === 'float_to_signed' || expression.op === 'float_to_unsigned'));
   for (const [id, expression] of program.expressions)
     if (
       program.live.has(id) &&
       expression.kind !== 'float' &&
       expression.kind !== 'float_unary' &&
-      expression.kind !== 'float_compare' &&
+      !payloadFree(expression) &&
       !(expression.kind === 'cast' && expression.op === 'bitcast') &&
       expression.kind !== 'select' &&
       !(
@@ -234,8 +271,11 @@ export function sourceFpPresentation(
     context.checkpoint(1);
     const id = pending[i]!;
     const expression = program.expressions.get(id);
-    if (expression) for (const value of expressionOperands(expression)) mark(value.id);
+    if (expression && !payloadFree(expression))
+      for (const value of expressionOperands(expression)) mark(value.id);
     for (const parent of incoming.get(id) ?? []) mark(parent);
+    const slot = slotOfLoad.get(id);
+    if (slot) for (const stored of slotStores.get(slot) ?? []) mark(stored);
   }
   const sites = new Set(
     program.source.requirements
@@ -246,7 +286,9 @@ export function sourceFpPresentation(
   for (const [id, expression] of program.expressions) {
     context.checkpoint(1);
     if (
-      (expression.kind !== 'float_compare' && !program.source.float_values?.has(id)) ||
+      (expression.kind !== 'float_compare' &&
+        !(expression.kind === 'cast' && payloadFree(expression)) &&
+        !program.source.float_values?.has(id)) ||
       expressionOperands(expression).some(
         (value) => value.type.kind === 'float' && !program.source!.float_values?.has(value.id),
       )
@@ -270,10 +312,12 @@ export function sourceFpPresentation(
       });
     if (!sites.has(id) && !derived) continue;
     if (
-      (expression.kind === 'float_compare' &&
-        ['eq', 'ne', 'lt', 'le', 'gt', 'ge', 'ordered', 'unordered'].includes(expression.op)) ||
+      payloadFree(expression) ||
+      // Negation and absolute value only change the sign bit, payload included.
+      (expression.kind === 'float_unary' && expression.op !== 'sqrt') ||
       (!sensitive.has(id) &&
         ((expression.kind === 'float' && ['add', 'sub', 'mul', 'div'].includes(expression.op)) ||
+          (expression.kind === 'float_unary' && expression.op === 'sqrt') ||
           (expression.kind === 'cast' &&
             ['signed_to_float', 'unsigned_to_float', 'float_convert'].includes(expression.op))))
     )
@@ -284,16 +328,16 @@ export function sourceFpPresentation(
     validation.presentation(
       'fp_native_operations',
       program.function.id,
-      'typed IEEE scalar operations and exact finite literals under recorded per-site default environment; no payload-sensitive arithmetic consumers; float-to-integer, fused and exceptional-dialect operations retain helpers',
+      'typed IEEE scalar operations (arithmetic, negation, absolute value, square root, comparisons, integer/float conversions) and exact finite literals under recorded per-site default environment; no payload-sensitive arithmetic consumers; fused and exceptional-dialect operations, vector operations and Python binary32/division/square-root/float-to-integer retain helpers',
       candidates.map(([id]) => id).slice(0, 64),
     )
   ) {
     validation.requireAbi(
       'fp_native_operations',
       [program.function.id],
-      'Native C arithmetic follows IEC 60559, including infinities and NaNs, in IEEE binary32/binary64 with no excess precision, no fast-math and FP contraction disabled (-ffp-contract=off). Source floating results are consumed as values, not inspected for arithmetic NaN payloads; local payload-sensitive consumers retain helpers. The recorded fp_environment requirement applies at every operation, including after calls.',
+      'Native C arithmetic follows IEC 60559, including infinities and NaNs, in IEEE binary32/binary64 with no excess precision, no fast-math and FP contraction disabled (-ffp-contract=off). Negation and absolute value change only the sign bit; float-to-integer conversion truncates toward zero and, as in the IR, is undefined for NaN, infinities and out-of-range values. Source floating results are consumed as values, not inspected for arithmetic NaN payloads; local payload-sensitive consumers retain helpers. The recorded fp_environment requirement applies at every operation, including after calls.',
     );
     for (const [, expression] of candidates) expressions.add(expression);
   }
-  return { body, guards, expressions };
+  return { body, guards, omitted, expressions };
 }

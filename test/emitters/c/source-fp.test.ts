@@ -202,7 +202,16 @@ test('repeated guard epochs retain call effects and ignore MXCSR status-only wri
       const f = fixture(abi, 64, 'mul', false, 3, false, call);
       const { emission } = emit(f.ir, { source: f.source }, language);
       assert.doesNotMatch(emission.text, /requirement_predicate\(/);
-      assert.equal((emission.text.match(/Requirement requirement_/g) ?? []).length, 1);
+      // One visible requirement reference, a prefix of the metadata ID.
+      const references = [...emission.text.matchAll(/\b(requirement_[0-9a-f]+)…?/g)];
+      assert.equal(references.length, 1);
+      const environment = emission.requirements!.find((item) => item.kind === 'fp_environment')!;
+      assert.ok(environment.id.startsWith(references[0]![1]!));
+      assert.ok(
+        environment.output_spans.some((span) =>
+          emission.text.slice(span.start, span.end).includes(references[0]![1]!),
+        ),
+      );
       const sites = emission
         .requirements!.find((item) => item.kind === 'fp_environment')!
         .sites.filter((site) => site.predicate_value_id);
@@ -233,8 +242,9 @@ for (const bits of [32, 64] as const)
           const { emission } = emit(f.ir, { source: f.source }, language);
           const native =
             !payload &&
-            operation !== 'integer' &&
-            (language === 'c-like' || (bits === 64 && operation !== 'div'));
+            (operation === 'integer'
+              ? language === 'c-like'
+              : language === 'c-like' || (bits === 64 && operation !== 'div'));
           const helper =
             operation === 'convert'
               ? 'cast_unsigned_to_float('
@@ -281,7 +291,7 @@ test('native FP agrees with checked IEEE operations on zeros, subnormals, infini
         const source = emit(f.ir, { source: f.source }, language).emission;
         const checked = emit(f.ir, { source: f.source }, language, 'checked').emission;
         for (const input of FP_CASES[bits]) {
-          const [actual, expected] = [source, checked].map((emission) =>
+          const run = (emission: typeof source) =>
             execute(
               emission,
               new Map(
@@ -289,8 +299,19 @@ test('native FP agrees with checked IEEE operations on zeros, subnormals, infini
                   formal.semantic_ids.map((id) => [id, input] as const),
                 ),
               ),
-            ),
-          );
+            );
+          const expected = run(checked);
+          // A native C float-to-integer conversion is undefined exactly where
+          // the IEEE-helper conversion is: NaN, infinity and out-of-range values.
+          if (
+            operation === 'integer' &&
+            language === 'c-like' &&
+            expected.exit !== 'machine_return'
+          ) {
+            assert.throws(() => run(source), /float-to-integer/);
+            continue;
+          }
+          const actual = run(source);
           assert.equal(actual!.exit, expected!.exit);
           assert.deepEqual(actual!.values, expected!.values);
         }

@@ -159,6 +159,9 @@ export interface SourcePresentation {
   /** IEEE values and closed whole-bit carriers approved for native FP spelling. */
   readonly float_values?: ReadonlyMap<string, 32 | 64>;
   readonly return_float?: 32 | 64;
+  /** Load/store node ids proven by `fp_memory_access`: the access reads or
+   * writes its `float_values` member through a native float/double lvalue. */
+  readonly float_accesses?: ReadonlySet<string>;
   /** Source view only: the primary-result rule rejected the native written-result
    * storage, which then no longer counts as result evidence for exit overlays. */
   readonly observed_result_rejected?: true;

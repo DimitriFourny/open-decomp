@@ -10,7 +10,7 @@ import {
   type Expression,
   type Value,
 } from '../ir/index.js';
-import { identityOperand } from './expressions.js';
+import { identityOperand, integerIdentity } from './expressions.js';
 import { LocalValidationSession, validateBitvectorCandidate } from './local-validation.js';
 import { recombineBitSlices } from './source-bit-slices.js';
 import { foldSourceCondition } from './source-conditions.js';
@@ -434,6 +434,36 @@ export function normalizeSourceExpressions(
         replacement = recombined;
         cellRewrite = true;
       }
+      // Source view only: exact same-type identities (x&x, x|x, ones&x and the
+      // constant neutral elements) leave the operand itself.
+      let identity = false;
+      if (sourceCells && replacement.kind === 'integer' && value.type.kind === 'integer') {
+        const operand = integerIdentity(
+          value.type,
+          replacement,
+          constant(replacement.left),
+          constant(replacement.right),
+          true,
+        );
+        if (operand) {
+          replacement = { kind: 'cast', op: 'bitcast', value: operand };
+          identity = true;
+        }
+      }
+      // A sign extension of a strictly narrower zero extension never sees a set
+      // sign bit: it is the zero extension of the original operand.
+      let extensionFold = false;
+      if (sourceCells && replacement.kind === 'cast' && replacement.op === 'sign_extend') {
+        const inner = observe(replacement.value.id);
+        if (
+          inner?.kind === 'cast' &&
+          inner.op === 'zero_extend' &&
+          bitWidth(inner.value.type) < bitWidth(replacement.value.type)
+        ) {
+          replacement = { kind: 'cast', op: 'zero_extend', value: inner.value };
+          extensionFold = true;
+        }
+      }
       const operands = expressionOperands(replacement);
       context.checkpoint(operands.length);
       if (
@@ -498,6 +528,26 @@ export function normalizeSourceExpressions(
             'register_cell_recombination',
             id,
             'bounded integer DAG wiring preserves every bit and ordered opaque dependencies; contiguous slices, zero extension, masked inserts and power-of-two packing shifts only',
+            expressionOperands(original).map((operand) => operand.id),
+          )
+        )
+          continue;
+        if (
+          identity &&
+          !validation.presentation(
+            'integer_identity',
+            id,
+            'same-width integer operation with a proven neutral operand or two identical operands (x&x, x|x, x&ones, x|0, x+0, x^0, x*1, x<<0) is exactly that operand; operands that could carry an unknown (x^x, x-x, x*0) are never dropped',
+            expressionOperands(original).map((operand) => operand.id),
+          )
+        )
+          continue;
+        if (
+          extensionFold &&
+          !validation.presentation(
+            'extension_fold',
+            id,
+            'sign extension of a strictly narrower zero extension: the sign bit is zero, so it is the zero extension of the original operand',
             expressionOperands(original).map((operand) => operand.id),
           )
         )

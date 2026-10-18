@@ -58,7 +58,9 @@ function fixture(
   const negative = no.assign(fp, { kind: 'float_unary', op: 'neg', value: input });
   no.jump(join, [no.cast('bitcast', word, negative)]);
   const carried = join.parameters[0]!;
-  if (integerUse) join.store(join.constant(integer(64), 0x1000n), carried);
+  // A narrowing integer consumer; a whole-width store is an FP write instead.
+  if (integerUse)
+    join.store(join.constant(integer(64), 0x1000n), join.cast('truncate', integer(8), carried));
   join.return([join.cast('bitcast', fp, carried)]);
   const ir = constructSSA(b.finish(entry, [fp])).value as SSAForm;
   const source = { abi, callees: [], addresses: [] };
@@ -163,16 +165,14 @@ test('FP native spelling refuses exhausted records and conflicted FP values', ()
   assert.equal(fresh.abiConformance.length, 0);
 });
 
-test('native FP phi copies keep the bit reinterpretation of integer memory reads', () => {
+test('native FP phi copies read IEEE-only integer memory through a native lvalue', () => {
   const f = fixture(sysvAMD64Abi, 64, false, true);
+  assert.ok(f.program.local_validation?.some((record) => record.rule === 'fp_memory_access'));
   for (const language of ['c-like', 'python-like'] as const) {
     const { emission } = emit(f.ir, { source: f.source }, language);
     assert.match(emission.text, /\bdouble\b/);
-    assert.match(
-      emission.text,
-      language === 'c-like' ? /__od_bitcast_f64_u64\(/ : /cast_bitcast\("ieee64_t", "bits64_t",/,
-    );
-    assert.doesNotMatch(emission.text, /return cast_bitcast/);
+    assert.match(emission.text, language === 'c-like' ? /\*\(double \*\)/ : /memory\.f64\[/);
+    assert.doesNotMatch(emission.text, /__od_bitcast_|cast_bitcast\(/);
     for (const input of [0n, 0x8000000000000000n, 0x7ff0123456789abcn]) {
       const memory = new Map(
         Array.from({ length: 8 }, (_, index) => [

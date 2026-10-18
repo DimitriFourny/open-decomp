@@ -1209,10 +1209,13 @@ export function reconstruct(
       : {}),
   };
   if (!program.source || view !== 'source') return program;
+  // FP memory accesses decide formal pointee kinds, so they project first.
+  const floating = projectSourceFloating(program, input, context);
   const { returns: signatureReturns, ...signatureTypes } = projectSourceSignature(
     program,
     input,
     context,
+    floating.float_accesses,
   );
   return {
     ...program,
@@ -1220,7 +1223,7 @@ export function reconstruct(
     source: {
       ...program.source,
       ...signatureTypes,
-      ...projectSourceFloating(program, input, context),
+      ...floating,
     },
   };
 }
