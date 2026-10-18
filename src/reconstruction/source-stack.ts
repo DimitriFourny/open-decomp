@@ -234,8 +234,48 @@ export function planSourceStack(
   const aliased =
     facts?.frame.aliased === true ||
     memory.some((node) => node.kind === 'store' && !addresses.has(node.address.id));
+  // An open argument list describes an unbounded caller-SP-relative area.
+  // Do not infer its end from observed registers or written bytes. A slot used
+  // only after the last such call, however, cannot supply that call's arguments.
+  const openCallPositions = new Map<string, number>(),
+    reachesOpenCall = new Set<string>(),
+    openCallSuccessors = new Set<string>();
+  if (view === 'source' && unknownCallStorage) {
+    for (const block of blocks.values())
+      for (let position = 0; position < block.statements.length; position++) {
+        const node = block.statements[position]!;
+        if (node.kind === 'call' && calls.get(node.id)!.kind !== 'source') {
+          openCallPositions.set(block.id, position);
+          reachesOpenCall.add(block.id);
+        }
+      }
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const { transfer, block } of transfers) {
+        context.checkpoint(1);
+        if (!reachesOpenCall.has(transfer.target)) continue;
+        openCallSuccessors.add(block.id);
+        if (!reachesOpenCall.has(block.id)) {
+          reachesOpenCall.add(block.id);
+          changed = true;
+        }
+      }
+    }
+  }
+  // Under activation-private storage ownership an external pointer cannot name
+  // this activation's negative entry-SP offsets until a frame address escapes.
+  // The original alias facts stay intact; source promotion records this ABI
+  // premise and the independent byte validator receives the exact disjoint set.
+  const disjointStores =
+    view === 'source' && !saveEscaped
+      ? new Set(
+          memory
+            .filter((node) => node.kind === 'store' && !addresses.has(node.address.id))
+            .map((node) => node.id),
+        )
+      : undefined;
   const eligible = new Set<string>();
-  if (!escaped && !unknownCallStorage && !aliased)
+  if (view === 'source' ? !saveEscaped : !escaped && !unknownCallStorage && !aliased)
     for (const [key, group] of groups) {
       const first = group[0]!;
       context.checkpoint(accesses.length);
@@ -243,6 +283,13 @@ export function planSourceStack(
         first.offset >= 0n ||
         first.end > 0n ||
         group.some((access) => access.node.access.volatile) ||
+        (view === 'source' &&
+          group.some(
+            (access) =>
+              openCallSuccessors.has(access.block) ||
+              blocks.get(access.block)!.statements.indexOf(access.node) <
+                (openCallPositions.get(access.block) ?? -1),
+          )) ||
         outgoingRanges.some((range) => range.start < first.end && range.end > first.offset)
       )
         continue;
@@ -357,6 +404,18 @@ export function planSourceStack(
         const inner = reloadBits(expression.value, members, active, depth + 1);
         return inner === null ? null : inner + expression.offset;
       }
+      if (expression?.kind === 'concat') {
+        let start: number | null = null,
+          width = 0;
+        for (const part of expression.values) {
+          const offset = reloadBits(part, members, active, depth + 1);
+          if (offset === null) return null;
+          if (start === null) start = offset;
+          else if (offset !== start + width) return null;
+          width += bitWidth(part.type);
+        }
+        return width === bitWidth(value.type) ? start : null;
+      }
       const sources = expression ? undefined : incoming.get(value.id);
       if (!sources?.length) return null;
       active.add(value.id);
@@ -374,7 +433,6 @@ export function planSourceStack(
     };
     for (const [key, group] of groups) {
       context.checkpoint(group.length);
-      if (eligible.has(key)) continue;
       const first = group[0]!;
       const stores = group.filter((access) => access.node.kind === 'store'),
         loads = group.filter((access) => access.node.kind === 'load');
@@ -446,6 +504,9 @@ export function planSourceStack(
         )
       )
         continue;
+      // A proven save is machine bookkeeping, not a scalar source local.
+      // Classify it before promotion even in leaf functions without calls.
+      eligible.delete(key);
       saveStores.add(save.node.id);
       for (let byte = first.offset; byte < first.end; byte++) saveBytes.add(byte);
       for (const load of loads) {
@@ -640,7 +701,13 @@ export function planSourceStack(
     if (loads.some((access) => before.get(access.node.id) === undefined)) continue;
     const forwarded =
       loads.every((access) => before.get(access.node.id) !== null) &&
-      (acyclic || group.every((access) => access.block === group[0]!.block));
+      (acyclic ||
+        group.every((access) => access.block === group[0]!.block) ||
+        (view === 'source' &&
+          !predecessors.get(input.function.entry)?.length &&
+          group.every(
+            (access) => access.node.kind !== 'store' || access.block === input.function.entry,
+          )));
     const subjects = [group[0]!.node.id];
     const checked = validation.check(
       'stack-promotion',
@@ -666,11 +733,28 @@ export function planSourceStack(
           forwarded ? proposed : null,
           expressions,
           validation.allowance,
+          disjointStores,
         );
       },
       subjects,
     );
     if (checked.status === 'rejected') continue;
+    if (
+      view === 'source' &&
+      !validation.presentation(
+        'private_stack_promotion',
+        `stack:${key}`,
+        'exact nonvolatile nonoverlapping negative entry-SP slot; no frame address escapes; definitely initialized reads; no established outgoing argument overlap or access preceding an open-arity call',
+        subjects,
+      )
+    )
+      continue;
+    if (view === 'source' && (disjointStores?.size || callNodes.length))
+      validation.requireAbi(
+        'frame_private_to_activation',
+        subjects,
+        'Nonescaping frame-private storage belongs to this activation: pointers supplied by callers, globals, external loads and call results cannot alias it. Callees observe only declared argument storage; open-arity calls precede every access to this promoted slot. Original memory effects and alias facts remain in the checked view.',
+      );
     if (forwarded) {
       for (const access of group) {
         hidden.add(access.node.id);
@@ -686,6 +770,7 @@ export function planSourceStack(
       const local: SourceLocal = {
         id: `entity_${fingerprint(['source-local', input.function.id, key])}`,
         type: first.kind === 'load' ? first.result.type : first.value.type,
+        ...(view === 'source' ? { stack_offset: group[0]!.offset } : {}),
       };
       for (const access of group) {
         locals.set(access.node.id, local);

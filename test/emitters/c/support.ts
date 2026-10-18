@@ -424,7 +424,7 @@ class Parser {
     if (this.peek() === 'const') this.take('const');
     const token = this.take();
     const scalar =
-      /^(?:bits\d+_t|u?int\d+_t|uintptr_t|bool|char|void|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t|type_\d+)$/;
+      /^(?:bits\d+_t|u?int\d+_t|uintptr_t|bool|char|void|float|double|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t|type_\d+)$/;
     let pointers = 0;
     if (python && token === 'pointer' && this.peek() === '[') {
       this.take('[');
@@ -1789,7 +1789,7 @@ export function execute(
         });
       return [...results, ...outputs];
     }
-    if (name === 'opaque_effect') {
+    if (name === 'opaque_effect' || name === '__unknown_effect') {
       events.push('unknown');
       throw new Boundary('unknown', []);
     }

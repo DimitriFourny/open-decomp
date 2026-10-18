@@ -331,6 +331,83 @@ for (const language of ['c-like', 'python-like'] as const)
           assert.equal(observed.memory.get(0x1000n), stored);
         }
     });
+
+    test('removing a duplicated tail home also removes its owned return continuation', () => {
+      const b = program('source-control-owned-return-tail'),
+        entry = b.block('entry', [i32, i32]),
+        head = b.block('head', [i32, i32, i64]),
+        add = b.block('add'),
+        step = b.block('step'),
+        done = b.block('done', [i32]),
+        overflow = b.block('overflow'),
+        zero = b.block('zero');
+      const [count, stop] = entry.parameters as [Value, Value];
+      entry.branch(
+        entry.compare('eq', count, entry.constant(i32, 0n)),
+        entry.edge(zero),
+        entry.edge(head, [count, entry.constant(i32, 0n), entry.constant(i64, 0x1000n)]),
+      );
+      zero.return([zero.constant(i32, 0n)]);
+      const [remaining, sum, pointer] = head.parameters as [Value, Value, Value];
+      const loaded = head.load(i32, pointer);
+      head.branch(head.compare('eq', loaded, stop), head.edge(done, [sum]), head.edge(add));
+      const next = add.int('add', sum, loaded);
+      add.branch(
+        add.compare('ugt', next, add.constant(i32, 10n)),
+        add.edge(overflow),
+        add.edge(step),
+      );
+      step.branch(
+        step.compare('ne', remaining, step.constant(i32, 1n)),
+        step.edge(head, [
+          step.int('sub', remaining, step.constant(i32, 1n)),
+          next,
+          step.int('add', pointer, step.constant(i64, 4n)),
+        ]),
+        step.edge(done, [next]),
+      );
+      overflow.jump(done, [overflow.int('xor', next, remaining)]);
+      done.return(done.parameters);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      assert.ok(rules(source).includes('return_tail_duplication'));
+      assert.equal(source.emission.text.match(/\breturn\b/g)?.length, 3, source.emission.text);
+      assert.doesNotMatch(source.emission.text, /\breturn[^\n]*\n\s*return\b|\bgoto\b/);
+      for (const [n, sentinel, words, value, loads] of [
+        [0, 99, [], 0, 0],
+        [3, 99, [1, 2, 3], 6, 3],
+        [3, 0, [1, 0, 3], 1, 2],
+        [2, 99, [8, 5], 12, 2],
+        [1, 99, [10], 10, 1],
+        [3, 99, [0, 0, 0], 0, 3],
+      ] as const) {
+        for (const output of [source, checked]) {
+          const observed = execute(
+            output.emission,
+            new Map([
+              [count.id, BigInt(n)],
+              [stop.id, BigInt(sentinel)],
+            ]),
+            memory(words),
+          );
+          assert.deepEqual(observed.values, [BigInt(value)]);
+          assert.deepEqual(observed.events, Array<string>(loads).fill('load'));
+        }
+      }
+      for (const output of [source, checked]) {
+        const fault = execute(
+          output.emission,
+          new Map([
+            [count.id, 1n],
+            [stop.id, 99n],
+          ]),
+          new Map(),
+        );
+        assert.equal(fault.exit, 'fault');
+        assert.deepEqual(fault.events, ['load']);
+      }
+    });
     test('unsigned widening copies share storage but signed extension stays explicit', () => {
       for (const op of ['zero_extend', 'sign_extend'] as const) {
         const b = program(`source-width-copy-${op}`),

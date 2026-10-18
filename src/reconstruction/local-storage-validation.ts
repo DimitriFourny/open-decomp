@@ -113,12 +113,16 @@ export function validateStackPromotion(
   forwarded: ReadonlyMap<string, Value> | null,
   expressions: ReadonlyMap<string, Expression>,
   allowance: ValidationAllowance,
+  disjointStores?: ReadonlySet<string>,
 ): LocalValidationRecord {
   const base = {
     kind: 'stack-promotion' as const,
     subject,
     scope:
-      'all bounded acyclic CFG paths; ordered original bytes versus proposed scalar/forwarding',
+      'all bounded acyclic CFG paths; ordered original bytes versus proposed scalar/forwarding' +
+      (disjointStores?.size
+        ? '; external stores disjoint under activation-private ABI storage'
+        : ''),
   };
   if (blocks.size > 32)
     return { ...base, status: 'unverified', reason: 'stack CFG block bound exceeded' };
@@ -162,7 +166,7 @@ export function validateStackPromotion(
         events.push({ kind: 'barrier', subject: node.id });
       if (node.kind === 'load' && !addresses.has(node.address.id))
         events.push({ kind: 'barrier', subject: `unknown-address load ${node.id}` });
-      if (node.kind === 'store')
+      if (node.kind === 'store' && !disjointStores?.has(node.id))
         events.push({
           kind: 'store',
           offset: addresses.get(node.address.id) ?? null,

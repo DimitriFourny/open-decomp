@@ -36,7 +36,11 @@ import {
 } from './source-expressions.js';
 import { normalizeSourceRanges } from './source-ranges.js';
 import { projectSourceTypes } from './source-types.js';
-import { projectSourceSignature } from './source-signature.js';
+import {
+  permitsVoidSourceSignature,
+  projectSourceFloating,
+  projectSourceSignature,
+} from './source-signature.js';
 import { LocalValidationSession } from './local-validation.js';
 export type * from './model.js';
 
@@ -323,6 +327,7 @@ export function reconstruct(
         context,
         localValidation,
         normalizationDemand,
+        view === 'source',
       )
     : null;
 
@@ -491,15 +496,28 @@ export function reconstruct(
   // and untouched entry values are ABI scratch; locally computed slices may
   // also move out of line under an explicit, evidence-gated ABI assumption.
   if (sourcePlan && view === 'source') {
-    const evidence = input.source!,
-      primary = evidence.abi.classifyCall({
-        returns: { kind: 'pointer' },
-        parameters: [],
-        variadic: false,
-        fixed_parameter_count: 0,
-      }).returns;
+    const evidence = input.source!;
+    const resultType = returns.values().next().value?.results[0]?.type;
+    const primary = evidence.abi.classifyCall({
+      returns:
+        resultType?.kind === 'float'
+          ? resultType
+          : resultType?.kind === 'vector'
+            ? {
+                kind: 'vector',
+                element: resultType.element.kind,
+                element_bits: bitWidth(resultType.element),
+                lanes: resultType.lanes,
+              }
+            : { kind: 'pointer' },
+      parameters: [],
+      variadic: false,
+      fixed_parameter_count: 0,
+    }).returns;
     const primaryRegisters = primary.flatMap((location) =>
-      location.kind === 'register' ? [location.register] : [],
+      location.kind === 'register'
+        ? [{ ...location.register, width_bits: location.width_bits }]
+        : [],
     );
     const resultEvidence = [
       ...(evidence.function_return_demands ?? []),
@@ -512,25 +530,26 @@ export function reconstruct(
       a.root === b.root &&
       a.offset_bits < b.offset_bits + b.width_bits &&
       b.offset_bits < a.offset_bits + a.width_bits;
-    // A scalar integer primary is the deliberately narrow local-computation
-    // case. Floating/HFA, wide/tuple, or unprojectable declared contracts stay
-    // explicit rather than inferring an aggregate from register capacity.
-    const scalarPrimary =
+    // A single established integer/FP/vector primary permits an ABI-scratch
+    // interpretation outside its classified storage, never an invented tuple.
+    const establishedPrimary =
       primaryRegisters.length === 1 &&
       [...returns.values()].every(
         (projection) =>
           projection.results.length === 1 &&
-          projection.results[0]!.type.kind === 'integer' &&
+          projection.results[0]!.type.kind === resultType?.kind &&
           bitWidth(projection.results[0]!.type) <= primaryRegisters[0]!.width_bits,
       ) &&
       resultEvidence.every(
         (register) =>
           register.root === primaryRegisters[0]!.root &&
+          register.offset_bits >= primaryRegisters[0]!.offset_bits &&
           register.offset_bits + register.width_bits <=
             primaryRegisters[0]!.offset_bits + primaryRegisters[0]!.width_bits,
       ) &&
       (evidence.function_returns?.types ?? []).every(
-        (type) => type.kind === 'integer' && bitWidth(type) <= primaryRegisters[0]!.width_bits,
+        (type) =>
+          type.kind === resultType?.kind && bitWidth(type) <= primaryRegisters[0]!.width_bits,
       );
     const clobbers = new Map<string, string>(),
       resultCells = new Set<string>();
@@ -593,6 +612,32 @@ export function reconstruct(
       }
       return result;
     };
+    const voidPrimaryRegisters = [
+      ...primaryRegisters,
+      ...evidence.abi
+        .classifyCall({
+          returns: { kind: 'float', bits: 64 },
+          parameters: [],
+          variadic: false,
+          fixed_parameter_count: 0,
+        })
+        .returns.flatMap((location) =>
+          location.kind === 'register'
+            ? [{ ...location.register, width_bits: location.width_bits }]
+            : [],
+        ),
+    ];
+    // Missing FP typing is not evidence for void: even an integer-typed write
+    // to the low FP carrier must remain explicit until its result is resolved.
+    const voidPrimary =
+      permitsVoidSourceSignature(input, sourcePlan.presentation, returns, tails.size > 0) &&
+      [...returns.values()].every((projection) =>
+        projection.outputs.every(
+          (binding) =>
+            !voidPrimaryRegisters.some((register) => overlaps(register, binding.register)) ||
+            scratch(binding.register.root, binding.value) !== null,
+        ),
+      );
     for (const [id, projection] of returns) {
       if (projection.kind !== 'inferred' || !projection.outputs.length || declaredContract)
         continue;
@@ -612,8 +657,9 @@ export function reconstruct(
             entry: found.entry,
           });
         else if (
-          scalarPrimary &&
-          !primaryRegisters.some((register) => overlaps(register, binding.register))
+          voidPrimary ||
+          (establishedPrimary &&
+            !primaryRegisters.some((register) => overlaps(register, binding.register)))
         )
           exitScratch.push({
             register: binding.register,
@@ -629,7 +675,7 @@ export function reconstruct(
         !localValidation.presentation(
           'exit_scratch',
           id,
-          'possible-return slices not established as results; unprojected call clobbers/entry values, or undemanded slices outside an established scalar primary; not liveness roots',
+          'possible-return slices not established as results; unprojected call clobbers/entry values, undemanded slices outside an established primary, or a signature-approved void-like exit without result evidence; not liveness roots',
           [id, ...new Set(exitScratch.flatMap((slice) => slice.sources))].slice(0, 64),
           exitScratch
             .map(
@@ -643,7 +689,7 @@ export function reconstruct(
       localValidation.requireAbi(
         'exit_scratch',
         [id],
-        'Moving these exit slices out of line assumes ABI conformance: callers read only the established return storage, and other caller-saved slices hold no additional result. No result-use evidence gathered; callers not scanned. Exact slice values and sources remain in the exit metadata and checked view; this is not proof of non-consumption.',
+        `Moving these exit slices out of line assumes ABI conformance: ${voidPrimary ? 'the signature layer agrees to a void-like interface with no written primary or positive result-use evidence, and callers consume no result' : 'callers read only the established return storage, and other caller-saved slices hold no additional result'}. No result-use evidence gathered for the moved slices; callers not scanned. Exact slice values and sources remain in the exit metadata and checked view; this is not proof of non-consumption.`,
       );
       returns.set(id, { ...projection, outputs, exit_scratch: exitScratch });
     }
@@ -1135,6 +1181,10 @@ export function reconstruct(
   return {
     ...program,
     returns: signatureReturns ?? program.returns,
-    source: { ...program.source, ...signatureTypes },
+    source: {
+      ...program.source,
+      ...signatureTypes,
+      ...projectSourceFloating(program, input, context),
+    },
   };
 }

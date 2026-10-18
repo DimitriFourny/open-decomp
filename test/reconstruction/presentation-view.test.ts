@@ -6,9 +6,11 @@ import {
   type RegisterDescriptor,
 } from '../../src/core/index.js';
 import { darwinArm64Abi } from '../../src/abi/darwin-arm64/index.js';
+import { sysvAMD64Abi } from '../../src/abi/sysv-amd64/index.js';
+import { windowsX64Abi } from '../../src/abi/windows-x64/index.js';
 import { constructSSA } from '../../src/analysis/ssa/index.js';
 import { recoverTypes } from '../../src/analysis/types/index.js';
-import { integer, type SSAForm } from '../../src/ir/index.js';
+import { bitWidth, integer, type DataType, type SSAForm } from '../../src/ir/index.js';
 import { structureControlFlow } from '../../src/presentation/index.js';
 import { reconstruct, type Reconstruction } from '../../src/reconstruction/index.js';
 import type { InferredCallee, SourceEvidence } from '../../src/reconstruction/source-model.js';
@@ -261,8 +263,34 @@ test('multi-register result evidence refuses the computed-slice assumption', () 
   assert.ok(![...source.returns.values()][0]!.exit_scratch?.some((item) => item.computed));
 });
 
-test('without an established primary result computed exit slices stay inline', () => {
-  const source = computedExit({}, false).view('source');
+test('signature-approved void exits move computed nonprimary slices out of line', () => {
+  const fixture = computedExit({}, false);
+  const source = fixture.view('source');
+  const projection = [...source.returns.values()][0]!;
+  assert.equal(source.source?.return_type, null);
+  assert.equal(projection.results.length, 0);
+  assert.equal(projection.outputs.length, 0);
+  assert.ok(projection.exit_scratch?.some((slice) => slice.computed));
+  assert.ok(
+    source.local_validation_session?.abiConformance.some(
+      (site) => site.rule === 'exit_scratch' && site.explanation.includes('void-like'),
+    ),
+  );
+  for (const language of ['c-like', 'python-like'] as const) {
+    const { emission } = emit(fixture.ir, fixture.extra, language);
+    assert.doesNotMatch(emission.text, /physical_return|also at exit:.* = value\d/);
+    assert.match(emission.text, language === 'c-like' ? /\bvoid\b/ : /-> void:/);
+    const inputs = new Map(
+      emittedFormals(emission).map((formal) => [formal.statement_id, 0x1000n]),
+    );
+    assert.equal(execute(emission, inputs).exit, 'fault');
+    const memory = new Map(Array.from({ length: 8 }, (_, index) => [0x1000n + BigInt(index), 0]));
+    assert.deepEqual(execute(emission, inputs, memory).values, []);
+  }
+});
+
+test('void-like exits with caller demand keep their explicit overlay', () => {
+  const source = computedExit({ function_return_demands: [x(1)] }, false).view('source');
   assert.ok(
     [...source.returns.values()][0]!.outputs.some((item) => item.register.root === x(1).root),
   );
@@ -286,5 +314,174 @@ test('wide integer or homogeneous floating result evidence retains other compute
     const projection = [...computedExit({ function_returns }).view('source').returns.values()][0]!;
     assert.ok(projection.outputs.some((item) => item.register.root === x(1).root));
     assert.ok(!projection.exit_scratch?.some((item) => item.computed));
+  }
+});
+
+function registerExit(
+  abi: SourceEvidence['abi'],
+  type: DataType | null,
+  evidence: Partial<SourceEvidence> = {},
+  writtenPrimary = false,
+  explicit = true,
+) {
+  const b = builder(`register-exit-${abi.id}-${type?.kind ?? 'void'}`),
+    block = b.block('entry');
+  const floating = abi.unknown_call_clobbers.registers.find(
+    (register) => register.root === (abi.id === 'darwin-arm64' ? 'arm64:v0' : 'x86_64:zmm0'),
+  )!;
+  const secondary = abi.unknown_call_clobbers.registers.find(
+    (register) => register.root === (abi.id === 'darwin-arm64' ? 'arm64:v1' : 'x86_64:zmm1'),
+  )!;
+  const primary = abi.classifyCall({
+    returns: { kind: 'pointer' },
+    parameters: [],
+    variadic: false,
+    fixed_parameter_count: 0,
+  }).returns[0]!;
+  assert.equal(primary.kind, 'register');
+  if (primary.kind !== 'register') throw new Error('register primary required');
+  const result = type ? block.constant(type, 7n) : undefined;
+  if (result && type?.kind === 'integer') block.writeRegister(primary.register, result);
+  else if (result || writtenPrimary)
+    block.writeRegister(
+      {
+        ...floating,
+        id: `${floating.root}:0:${type ? bitWidth(type) : 64}`,
+        width_bits: type ? bitWidth(type) : 64,
+        write_rule: 'preserve_other_bits',
+      },
+      result ?? block.constant(u64, 7n),
+    );
+  if (type?.kind !== 'vector')
+    block.writeRegister(
+      {
+        ...floating,
+        id: `${floating.root}:64:64`,
+        offset_bits: 64,
+        width_bits: 64,
+        write_rule: 'preserve_other_bits',
+      },
+      block.constant(u64, 19n),
+    );
+  block.writeRegister(secondary, block.constant(integer(secondary.width_bits), 23n));
+  if (abi.id !== 'darwin-arm64') {
+    const rdx = abi.unknown_call_clobbers.registers.find(
+      (register) => register.root === 'x86_64:rdx',
+    )!;
+    block.writeRegister(rdx, block.constant(u64, 29n));
+  }
+  block.return(result && explicit ? [result] : []);
+  const ir = constructSSA(b.finish(block, type && explicit ? [type] : [])).value as SSAForm;
+  const source: SourceEvidence = { abi, callees: [], addresses: [], ...evidence };
+  const structured = structureControlFlow(ir, createOperationContext()).value!;
+  return {
+    ir,
+    source,
+    floating,
+    view: (view: 'source' | 'checked') =>
+      reconstruct({ function: structured, source }, createOperationContext(), view),
+  };
+}
+
+for (const target of [abi, sysvAMD64Abi, windowsX64Abi]) {
+  for (const type of [
+    { kind: 'float', bits: 32 },
+    { kind: 'float', bits: 64 },
+    { kind: 'vector', element: integer(32), lanes: 4 },
+  ] satisfies DataType[]) {
+    test(`${target.id} ${type.kind}${bitWidth(type)} primary moves high lanes and undemanded vectors out of line`, () => {
+      const fixture = registerExit(target, type);
+      const projection = [...fixture.view('source').returns.values()][0]!;
+      assert.equal(projection.outputs.length, 0);
+      // Microsoft x64 has no secondary vector/pair return bank: a full XMM0
+      // result already covers all possible vector return storage.
+      const hasOverlay = target.id !== 'windows-x64' || type.kind === 'float';
+      assert.equal(projection.exit_scratch?.some((slice) => slice.computed) ?? false, hasOverlay);
+      assert.equal(
+        [...fixture.view('checked').returns.values()][0]!.outputs.length > 0,
+        hasOverlay,
+      );
+      for (const language of ['c-like', 'python-like'] as const) {
+        const { emission } = emit(fixture.ir, { source: fixture.source }, language);
+        assert.doesNotMatch(emission.text, /physical_return/);
+        assert.deepEqual(execute(emission).values, [7n]);
+      }
+    });
+  }
+
+  test(`${target.id} untyped written FP primary refuses a void-like interface`, () => {
+    const fixture = registerExit(target, null, {}, true);
+    const projection = [...fixture.view('source').returns.values()][0]!;
+    assert.equal(projection.results.length, 0);
+    assert.ok(
+      projection.outputs.some((binding) => binding.register.root === fixture.floating.root),
+    );
+  });
+
+  test(`${target.id} high lanes without a written primary permit a void-like exit`, () => {
+    const fixture = registerExit(target, null);
+    const projection = [...fixture.view('source').returns.values()][0]!;
+    assert.equal(projection.results.length, 0);
+    assert.equal(projection.outputs.length, 0);
+    assert.ok(projection.exit_scratch?.some((slice) => slice.computed));
+    for (const language of ['c-like', 'python-like'] as const) {
+      const { emission } = emit(fixture.ir, { source: fixture.source }, language);
+      assert.doesNotMatch(emission.text, /physical_return/);
+      assert.deepEqual(execute(emission).values, []);
+    }
+  });
+
+  test(`${target.id} positive high-lane demand refuses FP overlay elision`, () => {
+    const fixture = registerExit(target, { kind: 'float', bits: 64 });
+    const high = { ...fixture.floating, offset_bits: 64, width_bits: 64 };
+    const demanded = registerExit(
+      target,
+      { kind: 'float', bits: 64 },
+      {
+        function_return_demands: [high],
+      },
+    );
+    const projection = [...demanded.view('source').returns.values()][0]!;
+    assert.ok(
+      projection.outputs.some(
+        (binding) => binding.register.root === high.root && binding.register.offset_bits === 64,
+      ),
+    );
+  });
+}
+
+test('System V RDX joins RAX inline only with positive pair evidence', () => {
+  const target = sysvAMD64Abi;
+  const rdx = target.unknown_call_clobbers.registers.find(
+    (register) => register.root === 'x86_64:rdx',
+  )!;
+  for (const demanded of [false, true]) {
+    const fixture = registerExit(target, u64, demanded ? { function_return_demands: [rdx] } : {});
+    const projection = [...fixture.view('source').returns.values()][0]!;
+    assert.equal(
+      projection.outputs.some((binding) => binding.register.root === rdx.root),
+      demanded,
+    );
+    assert.equal(
+      projection.exit_scratch?.some((slice) => slice.register.root === rdx.root) ?? false,
+      !demanded,
+    );
+  }
+  const rax = target.unknown_call_clobbers.registers.find(
+    (register) => register.root === 'x86_64:rax',
+  )!;
+  const pair = registerExit(
+    target,
+    u64,
+    { function_returns: { registers: [rax, rdx], types: [u64, u64] } },
+    false,
+    false,
+  );
+  const projection = [...pair.view('source').returns.values()][0]!;
+  assert.equal(projection.results.length, 2);
+  assert.ok(!projection.exit_scratch?.some((slice) => slice.computed));
+  for (const language of ['c-like', 'python-like'] as const) {
+    const { emission } = emit(pair.ir, { source: pair.source }, language);
+    assert.deepEqual(execute(emission).values, [7n, 29n]);
   }
 });

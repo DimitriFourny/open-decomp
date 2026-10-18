@@ -5,6 +5,231 @@ import type { BoundaryProjection, Reconstruction } from './model.js';
 import type { SourceFormalType, SourcePresentation } from './source-model.js';
 import { validateBitvectorCandidate } from './local-validation.js';
 
+/** Agree to a void-like interface only in the absence of any positive result
+ * evidence. The caller still records the ABI assumption before hiding slices. */
+export function permitsVoidSourceSignature(
+  input: EmissionInput,
+  source: SourcePresentation,
+  returns: ReadonlyMap<string, BoundaryProjection>,
+  hasTail: boolean,
+): boolean {
+  return (
+    !hasTail &&
+    returns.size > 0 &&
+    source.return_type === null &&
+    !source.return_types?.length &&
+    !source.return_pointer &&
+    !source.return_source_type &&
+    !input.source?.function_return_demands?.length &&
+    !input.source?.function_returns?.registers.length &&
+    !input.source?.function_returns?.types.length &&
+    !input.types?.signatures.some((signature) => signature.subject_id === input.function.id) &&
+    [...returns.values()].every(
+      (boundary) => boundary.kind === 'inferred' && boundary.results.length === 0,
+    )
+  );
+}
+
+/** Native FP spelling requires typed IEEE evidence. Integer carriers qualify
+ * only as closed whole-bit transports: an integer consumer keeps the entire
+ * carrier component explicit, rather than silently adding numeric conversions. */
+export function projectSourceFloating(
+  program: Reconstruction,
+  input: EmissionInput,
+  context: OperationContext,
+): Pick<SourcePresentation, 'float_values' | 'return_float'> {
+  const validation = program.local_validation_session;
+  if (
+    program.view !== 'source' ||
+    !program.source ||
+    !input.source ||
+    !validation ||
+    program.signature ||
+    input.types?.signatures.some((signature) => signature.subject_id === program.function.id) ||
+    input.types?.conflicts.some((conflict) => conflict.subject_id === program.function.id)
+  )
+    return {};
+  const conflicts = new Set(input.types?.conflicts.map((item) => item.subject_id));
+  const conflicting = (value: Value): boolean => {
+    if (
+      [value.id, ...(program.source?.value_origins?.get(value.id) ?? [])].some((id) =>
+        conflicts.has(id),
+      )
+    )
+      return true;
+    const projected = program.source?.value_types?.get(value.id);
+    if (
+      !projected ||
+      !input.types?.associations.some(
+        (association) =>
+          projected.association_ids.includes(association.id) && association.source !== 'analysis',
+      )
+    )
+      return false;
+    const declared = input.types.types.find((type) => type.id === projected.type_id)?.definition;
+    return declared?.kind !== 'float' || declared.bits !== bitWidth(value.type);
+  };
+  const incoming = new Map<string, Value[]>();
+  for (const copies of program.transfers.values())
+    for (const copy of copies) {
+      const row = incoming.get(copy.destination.id) ?? [];
+      row.push(copy.source);
+      incoming.set(copy.destination.id, row);
+    }
+  const parents = (value: Value): readonly Value[] => {
+    const expression = program.expressions.get(value.id);
+    if (expression?.kind === 'cast' && expression.op === 'bitcast') return [expression.value];
+    if (expression?.kind === 'select') return [expression.when_true, expression.when_false];
+    return incoming.get(value.id) ?? [];
+  };
+  const floating = new Map<string, 32 | 64>();
+  const carriers = new Set<string>();
+  for (const value of program.values.values()) {
+    context.checkpoint(1);
+    if (!program.live.has(value.id) || conflicting(value)) continue;
+    const bits = bitWidth(value.type);
+    if (bits !== 32 && bits !== 64) continue;
+    if (value.type.kind === 'float') {
+      floating.set(value.id, bits);
+      continue;
+    }
+    if (value.type.kind !== 'integer') continue;
+    const pending = [value],
+      seen = new Set<string>();
+    let valid = true,
+      evidence = false;
+    while (pending.length && valid) {
+      context.checkpoint(1);
+      const current = pending.pop()!;
+      if (seen.has(current.id)) continue;
+      seen.add(current.id);
+      if (seen.size > 64 || bitWidth(current.type) !== bits || conflicting(current)) {
+        valid = false;
+        break;
+      }
+      if (current.type.kind === 'float') {
+        evidence = true;
+        continue;
+      }
+      // Literal bits can join an established FP transport, but cannot establish
+      // its interpretation alone. Rendering retains their exact bit pattern.
+      if (program.expressions.get(current.id)?.kind === 'constant') continue;
+      const sources = parents(current);
+      if (!sources.length) valid = false;
+      else pending.push(...sources);
+    }
+    if (valid && evidence) {
+      floating.set(value.id, bits);
+      carriers.add(value.id);
+    }
+  }
+  const invalid = new Set<string>();
+  const neighbors = new Map<string, Set<string>>();
+  const connect = (a: string, b: string): void => {
+    const row = neighbors.get(a) ?? new Set<string>();
+    row.add(b);
+    neighbors.set(a, row);
+  };
+  for (const id of carriers) {
+    context.checkpoint(1);
+    for (const parent of parents(program.values.get(id)!)) {
+      if (!floating.has(parent.id) && program.expressions.get(parent.id)?.kind !== 'constant')
+        invalid.add(id);
+      if (carriers.has(parent.id)) {
+        connect(id, parent.id);
+        connect(parent.id, id);
+      }
+    }
+  }
+  for (const [id, expression] of program.expressions) {
+    context.checkpoint(1);
+    if (!program.live.has(id)) continue;
+    for (const operand of expressionOperands(expression)) {
+      if (!carriers.has(operand.id)) continue;
+      const transport =
+        (expression.kind === 'cast' && expression.op === 'bitcast') ||
+        (expression.kind === 'select' && operand.id !== expression.condition.id);
+      if (!transport || floating.get(id) !== floating.get(operand.id)) invalid.add(operand.id);
+    }
+  }
+  const direct = (value: Value): void => {
+    context.checkpoint(1);
+    if (carriers.has(value.id)) invalid.add(value.id);
+  };
+  for (const boundary of [
+    ...program.calls.values(),
+    ...program.returns.values(),
+    ...[...program.tails.values()].map((tail) => tail.boundary),
+  ]) {
+    for (const value of [...boundary.arguments, ...boundary.results]) direct(value);
+    for (const binding of [...boundary.inputs, ...boundary.outputs]) direct(binding.value);
+  }
+  for (const bindings of [...program.physical_inputs.values(), ...program.physical_exits.values()])
+    for (const binding of bindings) direct(binding.value);
+  for (const copies of program.transfers.values())
+    for (const copy of copies) if (!floating.has(copy.destination.id)) direct(copy.source);
+  for (const block of program.blocks.values()) {
+    const control = block.control;
+    if (control.kind === 'if') direct(control.condition);
+    if (control.kind === 'switch') direct(control.value);
+    if (control.kind === 'indirect') direct(control.target);
+    for (const node of block.statements) {
+      context.checkpoint(1);
+      if (!program.retained.has(node.id)) continue;
+      if (node.kind === 'load' || node.kind === 'store') direct(node.address);
+      if (node.kind === 'store' || node.kind === 'write_register') direct(node.value);
+    }
+  }
+  const rejected = [...invalid];
+  for (let i = 0; i < rejected.length; i++)
+    for (const neighbor of neighbors.get(rejected[i]!) ?? [])
+      if (!invalid.has(neighbor)) {
+        invalid.add(neighbor);
+        rejected.push(neighbor);
+      }
+  for (const id of invalid) floating.delete(id);
+  const returned = program.source.return_type;
+  const primary =
+    returned?.kind === 'float'
+      ? input.source.abi.classifyCall({
+          returns: returned,
+          parameters: [],
+          variadic: false,
+          fixed_parameter_count: 0,
+        }).returns
+      : [];
+  const returnFloat =
+    returned?.kind === 'float' &&
+    primary.length === 1 &&
+    primary[0]!.kind === 'register' &&
+    program.returns.size > 0 &&
+    [...program.returns.values()].every(
+      (boundary) =>
+        boundary.results.length === 1 &&
+        boundary.results[0]!.type.kind === 'float' &&
+        floating.get(boundary.results[0]!.id) === returned.bits,
+    )
+      ? returned.bits
+      : undefined;
+  if (
+    !floating.size ||
+    !validation.presentation(
+      'fp_source_types',
+      program.function.id,
+      'typed IEEE FP32/FP64 values and closed, same-width bitcast/phi/select carriers with no integer consumers; FP primary return classified by the target ABI',
+      [...floating.keys()].slice(0, 64),
+      `${floating.size} source values retain their exact IEEE bit patterns; arithmetic, environment guards, memory accesses and NaN payload construction remain explicit`,
+    )
+  )
+    return {};
+  validation.requireAbi(
+    'fp_source_types',
+    [program.function.id],
+    'Source float/double denote the target IEEE binary32/binary64 representation in the established ABI FP carriers; whole-bit transport is not a numeric integer/FP conversion. Existing FP-environment requirements still apply.',
+  );
+  return { float_values: floating, ...(returnFloat ? { return_float: returnFloat } : {}) };
+}
+
 /** Infer a presentation interface from observed uses, retaining every machine
  * value. Narrow carriers are interpreted only under the native C ABI. */
 export function projectSourceSignature(

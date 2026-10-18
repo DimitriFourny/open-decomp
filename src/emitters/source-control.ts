@@ -797,6 +797,10 @@ export function planLayout(
   }
 
   // 2. Each labeled edge into a tail ends in an owned copy of the tail instead.
+  // A jump and the copied continuation it owns are removed together if the
+  // jump's home becomes unreachable. Otherwise its orphan return would remain
+  // after another terminal block, despite having no incoming edge.
+  const expansions = new Map<Region, BlockRegion>();
   const duplicate = (region: Region, follow: string | null, nesting: readonly Nest[]): Region => {
     context.checkpoint(1);
     if (region.kind === 'sequence')
@@ -822,10 +826,12 @@ export function planLayout(
       budget > 0 &&
       isTail(transfer.target) &&
       transferAction(transfer, nested, destination, language, true) === 'goto';
-    if (control.kind === 'jump')
-      return labeled(control.transfer, follow, nesting)
-        ? sequence([region, clone(control.transfer.target, control.transfer)])
-        : region;
+    if (control.kind === 'jump') {
+      if (!labeled(control.transfer, follow, nesting)) return region;
+      const expanded = sequence([region, clone(control.transfer.target, control.transfer)]);
+      expansions.set(expanded, region);
+      return expanded;
+    }
     const nested: readonly Nest[] =
       control.kind === 'switch' && language === 'c-like'
         ? [...nesting, { kind: 'switch' }]
@@ -861,8 +867,13 @@ export function planLayout(
     if (!drop.size) break;
     const prune = (region: Region): Region | null => {
       context.checkpoint(1);
+      const owner = expansions.get(region);
+      if (owner && drop.has(owner.id)) return null;
       if (region.kind === 'block') {
-        if (drop.has(region.id) && !clones.has(region)) return null;
+        // Clones contain only jumps/returns, so have no owned arms to rebuild.
+        // Keep their identity for subsequent pruning rounds and label planning.
+        if (clones.has(region)) return region;
+        if (drop.has(region.id)) return null;
         return {
           ...region,
           control: mapArms(region.control, (item) =>
@@ -876,7 +887,10 @@ export function planLayout(
         const next = prune(child);
         if (next) children.push(next);
       }
-      return children.length ? sequence(children) : null;
+      if (!children.length) return null;
+      const next = sequence(children);
+      if (owner) expansions.set(next, owner);
+      return next;
     };
     presented = prune(presented) ?? presented;
     for (const id of drop) hidden.add(id);
@@ -1111,6 +1125,9 @@ export function planLoopForms(
       return form ? { ...region, body: inner, form } : { ...region, body: inner };
     }
     const control = region.control;
+    // Tail-copy identity is significant to label planning; only controls with
+    // owned arms require rebuilding when shaping nested loops.
+    if (control.kind !== 'if' && control.kind !== 'switch') return region;
     // An owned arm body is entered only through its arm, after its test.
     return {
       ...region,

@@ -91,6 +91,8 @@ export interface SourceEvidence {
 export interface SourceLocal {
   readonly id: string;
   readonly type: DataType;
+  /** Source-only stable location name; not an authored variable identity. */
+  readonly stack_offset?: bigint;
 }
 /** An entry-backed view shares original stack bytes across every region. Its
  * bounds describe observed affine accesses, not a proven dynamic allocation. */
@@ -141,6 +143,9 @@ export interface SourcePresentation {
   readonly return_source_type?: string;
   readonly formal_types?: ReadonlyMap<string, SourceFormalType>;
   readonly return_scalar?: { readonly bits: number; readonly signed: boolean };
+  /** IEEE values and closed whole-bit carriers approved for native FP spelling. */
+  readonly float_values?: ReadonlyMap<string, 32 | 64>;
+  readonly return_float?: 32 | 64;
   readonly field_subjects?: ReadonlyMap<string, readonly string[]>;
   /** Localized preconditions and residual sites; never a blanket CFG assumption. */
   readonly requirements?: readonly Requirement[];

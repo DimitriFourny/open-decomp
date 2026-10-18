@@ -388,6 +388,8 @@ export class Renderer {
   }
 
   private valueType(value: Value): string {
+    const floating = this.sourceView && this.program.source?.float_values?.get(value.id);
+    if (floating) return floating === 32 ? 'float' : 'double';
     const formal = this.sourceView && this.program.source?.formal_types?.get(value.id);
     if (formal)
       return formal.kind === 'integer'
@@ -408,6 +410,21 @@ export class Renderer {
         ? 'bool'
         : `uint${type.bits}_t`
       : machineType(type);
+  }
+
+  private expressionType(value: Value): DataType {
+    const bits = this.sourceView && this.program.source?.float_values?.get(value.id);
+    return bits ? { kind: 'float', bits } : value.type;
+  }
+
+  private floatingValue(value: Value, bits: 32 | 64): Printed {
+    if (value.type.kind === 'float' || this.program.source?.float_values?.get(value.id) === bits)
+      return this.printed(value);
+    const expression = this.program.expressions.get(value.id);
+    return this.expression(
+      expression?.kind === 'constant' ? expression : { kind: 'cast', op: 'bitcast', value },
+      { kind: 'float', bits },
+    );
   }
 
   private printerCache?: SourcePrinter;
@@ -476,6 +493,7 @@ export class Renderer {
     if (!this.program.source) return printed;
     if (!this.sourceView)
       return this.printer.primary(this.checkedInterpretation(value, printed.text, id));
+    if (this.program.source.float_values?.has(value.id)) return printed;
     id ??=
       this.sourceValueTypes.get(value.id) ??
       this.program.source.value_types?.get(value.id)?.type_id;
@@ -625,6 +643,14 @@ export class Renderer {
   private expression(expression: Expression, type: DataType): Printed {
     if (
       this.sourceView &&
+      type.kind === 'float' &&
+      expression.kind === 'cast' &&
+      expression.op === 'bitcast' &&
+      this.program.source?.float_values?.get(expression.value.id) === type.bits
+    )
+      return this.printed(expression.value);
+    if (
+      this.sourceView &&
       expression.kind === 'compare' &&
       (expression.op === 'eq' || expression.op === 'ne')
     ) {
@@ -657,7 +683,14 @@ export class Renderer {
         );
       }
     }
-    return expressionText(expression, type, this.writer, this.printed, {
+    const operand =
+      this.sourceView && type.kind === 'float' && expression.kind === 'select'
+        ? (value: Value) =>
+            value.id === expression.condition.id
+              ? this.printed(value)
+              : this.floatingValue(value, type.bits)
+        : this.printed;
+    return expressionText(expression, type, this.writer, operand, {
       view: this.sourceView ? 'source' : 'checked',
       ...(this.program.source
         ? {
@@ -725,6 +758,8 @@ export class Renderer {
   /** `destination = source` for an SSA copy; an inline source keeps its
    * defining expression available to pointer-arithmetic presentation. */
   private copied(destination: Value, source: Value): string {
+    const floating = this.sourceView && this.program.source?.float_values?.get(destination.id);
+    if (floating) return this.floatingValue(source, floating).text;
     if (this.sourceView) source = this.uncast(source, ['bitcast']);
     if (
       this.sourceView &&
@@ -890,7 +925,7 @@ export class Renderer {
     if (this.expanding.size >= 128 || ++this.expansionWork > this.context.budget.ir_nodes * 64)
       this.writer.fail('Reconstructed expression expansion exceeds its budget');
     this.expanding.add(value.id);
-    const printed = this.expression(expression, value.type);
+    const printed = this.expression(expression, this.expressionType(value));
     this.expanding.delete(value.id);
     this.writer.guard(Buffer.byteLength(printed.text));
     return printed;
@@ -1237,6 +1272,19 @@ export class Renderer {
     );
   }
 
+  /** Exact boundary arguments, without descriptor fields the boundary never uses. */
+  private effectContract(clobbers: CallClobbers): string | null {
+    const key = (register: RegisterDescriptor): string =>
+      `${register.root}:${register.offset_bits}:${register.width_bits}`;
+    const contract = JSON.stringify({
+      memory: clobbers.memory,
+      registers: this.writer.list(clobbers.registers, key),
+      flags: this.writer.list(clobbers.flags, key),
+    });
+    // The public local-validation reason has this bound. Never truncate facts.
+    return contract.length <= 8192 ? contract : null;
+  }
+
   private values(values: readonly Value[]): string {
     return this.call(
       'explicit_values',
@@ -1579,7 +1627,9 @@ export class Renderer {
           local.id,
           this.names.get(local.id) ??
             this.sourceRoleNames.get(local.id) ??
-            `local${this.sourceLocal++}`,
+            (local.stack_offset !== undefined
+              ? `local_${(-local.stack_offset).toString(16)}`
+              : `local${this.sourceLocal++}`),
         )
       );
     if (this.sourceView) return this.sourceStorage(node);
@@ -1653,6 +1703,20 @@ export class Renderer {
       )
     )
       return this.sourceCall(node, depth, false);
+    if (this.sourceView) {
+      const contract = this.effectContract(node.clobbers);
+      if (
+        contract === null ||
+        !this.localValidation.presentation(
+          'call_effects',
+          node.id,
+          'the visible call carries its own ordered memory/fault effects; its unchanged physical clobber contract is retained in this record, not a second effect statement',
+          [node.effect_in.id, node.effect_out.id],
+          contract,
+        )
+      )
+        this.writer.statement(depth, this.clobbers(node.clobbers));
+    }
     const open = projection.argument_list_complete === false || projection.kind === 'physical';
     if (open)
       args.push(
@@ -1749,7 +1813,7 @@ export class Renderer {
         return '';
       return `${this.local(node.result)} = ${this.assignedText(
         node.result,
-        this.expression(expression, node.result.type),
+        this.expression(expression, this.expressionType(node.result)),
         expression,
       )}`;
     }
@@ -1915,6 +1979,19 @@ export class Renderer {
           );
         } else {
           const args: string[] = [];
+          const contract =
+            this.sourceView && node.kind === 'unknown_effect'
+              ? this.effectContract(node.clobbers)
+              : null;
+          const compact =
+            contract !== null &&
+            this.localValidation.presentation(
+              'compact_unknown_effect',
+              node.id,
+              'one ordered opaque statement retains the original reason, memory contract, physical input snapshot and requested outputs; the unchanged register/flag clobber contract is retained in this record',
+              [node.effect_in.id, node.effect_out.id],
+              contract,
+            );
           if (node.kind === 'call') {
             let target =
               node.target.kind === 'direct'
@@ -1928,7 +2005,10 @@ export class Renderer {
               );
             args.push(target, this.values(projection?.arguments ?? node.arguments));
           } else args.push(this.writer.quote(node.reason));
-          args.push(this.registers(inputs), this.clobbers(node.clobbers));
+          args.push(
+            this.registers(inputs),
+            compact ? this.writer.quote(node.clobbers.memory) : this.clobbers(node.clobbers),
+          );
           if (node.kind === 'call')
             args.push(
               this.writer.sequence(
@@ -1941,10 +2021,18 @@ export class Renderer {
             ),
           );
           operation = this.call(
-            source ? 'source_call' : node.kind === 'call' ? 'physical_call' : 'opaque_effect',
-            source
-              ? 'Proven source call with explicit implicit-ABI inputs and/or additional observable clobbers. Arguments: source target, source arguments, implicit physical inputs, boundary contract, source result storage types, additional physical output keys. Apply the established compatible ABI; return source results then requested physical outputs. Statement order preserves effects.'
-              : 'Ordered unresolved machine boundary; not a pure call, trap, or no-op. Read inputs before writing outputs. Return tuple: explicit results (calls only), then requested physical output slices. Missing outputs remain unknown; unmentioned clobbers still occur. Statement order carries memory/fault effects; no effect-token variables are needed. Empty explicit arguments do not imply source arity.',
+            compact
+              ? '__unknown_effect'
+              : source
+                ? 'source_call'
+                : node.kind === 'call'
+                  ? 'physical_call'
+                  : 'opaque_effect',
+            compact
+              ? 'Ordered opaque instruction effect, never a pure call or no-op. Arguments: original reason, physical input snapshot, memory contract, requested physical output keys. Exact register/flag clobbers are in the compact_unknown_effect presentation record for the mapped statement. Read inputs before clobbering outputs; unrequested clobbers still occur. Preserve ordering and faults relative to every load, store, call and fence.'
+              : source
+                ? 'Proven source call with explicit implicit-ABI inputs and/or additional observable clobbers. Arguments: source target, source arguments, implicit physical inputs, boundary contract, source result storage types, additional physical output keys. Apply the established compatible ABI; return source results then requested physical outputs. Statement order preserves effects.'
+                : 'Ordered unresolved machine boundary; not a pure call, trap, or no-op. Read inputs before writing outputs. Return tuple: explicit results (calls only), then requested physical output slices. Missing outputs remain unknown; unmentioned clobbers still occur. Statement order carries memory/fault effects; no effect-token variables are needed. Empty explicit arguments do not imply source arity.',
             args,
           );
         }
@@ -2175,7 +2263,9 @@ export class Renderer {
           this.writer.statement(
             depth,
             this.writer.declaration(
-              this.dataType(candidate.source.type),
+              this.sourceView && this.program.source?.float_values?.has(candidate.source.id)
+                ? this.valueType(candidate.source)
+                : this.dataType(candidate.source.type),
               candidate.temporary,
               ` = ${this.value(candidate.source)}`,
             ),
@@ -2633,7 +2723,7 @@ export class Renderer {
       this.localValidation.presentation(
         'single_use_inlining',
         subject,
-        'single-use integer expressions expand at dominated SSA uses; nonvolatile loads expand only at unconditional same-block uses with no intervening effects except nested dependent loads, preserving fault/evaluation order',
+        'single-use integer expressions expand at dominated SSA uses; nonvolatile loads expand only at unconditional same-block uses with no intervening effects except nested dependent loads; initialized private-local reads may cross unrelated effects but never a write to that local',
         [...candidates.values()].map(({ node }) => node.id),
       )
     ) {
@@ -3404,6 +3494,8 @@ export class Renderer {
         : 'physical_result';
     const scalar = this.sourceView && this.program.source?.return_scalar;
     if (scalar) returnType = `${scalar.signed ? 'int' : 'uint'}${scalar.bits}_t`;
+    const floating = this.sourceView && this.program.source?.return_float;
+    if (floating) returnType = floating === 32 ? 'float' : 'double';
     this.returnSpelling = returnType;
     if (this.sourceView && this.language === 'c-like') {
       const typeIds: string[] = [];
@@ -3497,7 +3589,9 @@ export class Renderer {
           local.id,
           this.names.get(local.id) ??
             this.sourceRoleNames.get(local.id) ??
-            `local${this.sourceLocal++}`,
+            (local.stack_offset !== undefined
+              ? `local_${(-local.stack_offset).toString(16)}`
+              : `local${this.sourceLocal++}`),
         ),
         start = w.offset;
       w.statement(1, w.declaration(this.dataType(local.type), name));

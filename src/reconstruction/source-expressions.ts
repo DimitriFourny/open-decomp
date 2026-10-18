@@ -12,6 +12,7 @@ import {
 } from '../ir/index.js';
 import { identityOperand } from './expressions.js';
 import { LocalValidationSession, validateBitvectorCandidate } from './local-validation.js';
+import { recombineBitSlices } from './source-bit-slices.js';
 
 export interface SourceExpressionDemand {
   /** Conservative value closure, extended for newly introduced definitions. */
@@ -75,6 +76,7 @@ export function normalizeSourceExpressions(
   context: OperationContext,
   validation = new LocalValidationSession(context),
   selection?: SourceExpressionDemand,
+  sourceCells = true,
 ): { changed(id: string): void; run(): void } {
   // Dependencies include every inspected definition, not just direct operands:
   // identity chains, scales, storage views and constant-folding inputs can all
@@ -84,6 +86,12 @@ export function normalizeSourceExpressions(
   const known = new Set(queue),
     queued = new Set(queue),
     users = new Map<string, Set<string>>();
+  const packingShifts = new Set<string>();
+  // Masked insert lowering is a full-width presentation. Keep its exact slice
+  // structure available to later extracts: distributing an extract over the
+  // lowered mask would otherwise introduce `unknown & 0` dependencies in a
+  // slice that originally came entirely from the inserted value.
+  const packedSources = new Map<string, Expression>();
   let current = '';
   const enqueue = (id: string): void => {
     if (!queued.has(id)) {
@@ -234,6 +242,24 @@ export function normalizeSourceExpressions(
         return resolved;
       });
       let replacement: Expression = expression;
+      let cellRewrite = false;
+      if (
+        sourceCells &&
+        (expression.kind === 'concat' ||
+          (expression.kind === 'integer' && ['or', 'xor'].includes(expression.op)))
+      ) {
+        for (const operand of expressionOperands(expression)) {
+          const definition = observe(operand.id);
+          if (
+            definition?.kind === 'integer' &&
+            ['mul', 'shl'].includes(definition.op) &&
+            !packingShifts.has(operand.id)
+          ) {
+            packingShifts.add(operand.id);
+            changed(operand.id);
+          }
+        }
+      }
       if (expression.kind === 'cast' && value.type.kind === 'integer') {
         if (
           ['truncate', 'zero_extend', 'sign_extend'].includes(expression.op) &&
@@ -245,7 +271,22 @@ export function normalizeSourceExpressions(
       }
       if (expression.kind === 'integer' && value.type.kind === 'integer') {
         const block = owner.get(id)!;
-        if (expression.op === 'shl') {
+        if (expression.op === 'mul' && packingShifts.has(id)) {
+          const coefficient = constant(expression.right);
+          if (
+            coefficient !== null &&
+            coefficient > 1n &&
+            (coefficient & (coefficient - 1n)) === 0n
+          ) {
+            replacement = {
+              kind: 'integer',
+              op: 'shl',
+              left: expression.left,
+              right: factor(value, BigInt(coefficient.toString(2).length - 1), block),
+            };
+            cellRewrite = true;
+          }
+        } else if (expression.op === 'shl' && !packingShifts.has(id)) {
           const count = constant(expression.right);
           if (count !== null)
             replacement = {
@@ -276,7 +317,8 @@ export function normalizeSourceExpressions(
         }
       }
       if (expression.kind === 'extract') {
-        const source = observe(expression.value.id),
+        const observed = observe(expression.value.id),
+          source = packedSources.get(expression.value.id) ?? observed,
           width = bitWidth(value.type);
         if (expression.offset === 0 && sameType(value.type, expression.value.type))
           replacement = { kind: 'cast', op: 'bitcast', value: expression.value };
@@ -327,7 +369,8 @@ export function normalizeSourceExpressions(
             offset += bitWidth(part.type);
           }
         }
-      } else if (expression.kind === 'concat' && expression.values.length) {
+      }
+      if (!sourceCells && expression.kind === 'concat' && expression.values.length) {
         let offset = 0,
           base: Value | null = null,
           complete = true;
@@ -368,6 +411,21 @@ export function normalizeSourceExpressions(
           replacement = { kind: 'compare', op: 'eq', left: expression.left, right: compared };
         }
       }
+      const recombined = sourceCells
+        ? recombineBitSlices(
+            value,
+            expression,
+            observe,
+            create,
+            owner.get(id)!,
+            context,
+            packingShifts,
+          )
+        : null;
+      if (recombined) {
+        replacement = recombined;
+        cellRewrite = true;
+      }
       const operands = expressionOperands(replacement);
       context.checkpoint(operands.length);
       if (
@@ -397,6 +455,22 @@ export function normalizeSourceExpressions(
           validation.rejectedRewrites.add(id);
           continue;
         }
+        if (
+          cellRewrite &&
+          !validation.presentation(
+            'register_cell_recombination',
+            id,
+            'bounded integer DAG wiring preserves every bit and ordered opaque dependencies; contiguous slices, zero extension, masked inserts and power-of-two packing shifts only',
+            expressionOperands(original).map((operand) => operand.id),
+          )
+        )
+          continue;
+        if (
+          cellRewrite &&
+          (expression.kind === 'concat' || expression.kind === 'insert') &&
+          replacement.kind === 'integer'
+        )
+          packedSources.set(id, expression);
         expressions.set(id, replacement);
         invalidate(id);
         const oldAlias = identityOperand(value.type, original);
@@ -408,5 +482,14 @@ export function normalizeSourceExpressions(
     current = '';
   };
   run();
-  return { changed, run };
+  return {
+    changed(id: string): void {
+      // Internal rewrites are equivalent. An external replacement invalidates
+      // retained structure on that value and on every view that inspected it.
+      packedSources.delete(id);
+      for (const user of users.get(id) ?? []) packedSources.delete(user);
+      changed(id);
+    },
+    run,
+  };
 }

@@ -252,14 +252,16 @@ export function planSourceInlining(
     const target = destination(node);
     if (!target) continue;
     const { at, nested } = target;
+    const local = program.source.locals.get(node.id);
     if (at.block !== block.id || at.position <= position || at.conditional || at.transfer) continue;
     let ordered = true;
     for (let p = position + 1; p < at.position; p++) {
       const between = block.statements[p]!;
       if (
         (program.retained.has(between.id) &&
-          between.kind !== 'assign' &&
-          !nested.has(between.id)) ||
+          (local
+            ? between.kind === 'store' && program.source.locals.get(between.id)?.id === local.id
+            : between.kind !== 'assign' && !nested.has(between.id))) ||
         program.source?.definitions
           ?.get(between.id)
           ?.some((definition) => !result.has(definition.result.id))

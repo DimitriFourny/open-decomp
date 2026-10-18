@@ -185,6 +185,34 @@ participate in use/liveness accounting. `single_use_inlining` records one
 function-level presentation inference, and original load/definition identities
 map to their consuming expression.
 
+Source-only `private_stack_promotion` gives exact, initialized, nonvolatile
+negative entry-SP slots stable location names (`local_38` means offset -0x38),
+unless a proven role supplies a better name. Mixed-width overlaps, outgoing
+argument slots, unknown effects and escaping frame addresses stay explicit.
+External-pointer stores are disjoint from an activation's nonescaping private
+frame only under the recorded `frame_private_to_activation` / `abi_conformance`
+requirement; the original alias facts remain in checked output. Open-arity
+calls do not block fresh slots accessed only after those calls, but any slot
+access from which an open call is reachable remains possible argument storage.
+Loop-invariant entry stores may forward through loops. Initialized private-local
+reads may inline across unrelated effects, never across a write to the same
+local. Byte-path validation remains independent, including its explicit
+loop/path bounds; exhausted presentation capacity retains the explicit form.
+
+Source-view `call_effects` records a visible call's unchanged memory, register
+and flag clobber contract rather than printing a redundant `boundary(...)`
+marker. Separate unknown instructions are never folded into neighboring calls:
+`compact_unknown_effect` prints one ordered `__unknown_effect(reason,
+physical_inputs(...), memory_contract, output_keys)` statement. Its mapped
+presentation record retains the exact physical clobber contract as JSON in
+`reason`; its explicit inputs and requested outputs keep their original values.
+Neither rewrite claims purity or permits motion across memory accesses, calls
+or fences. Unsupported FP-environment effects remain opaque unless the existing
+requirement projection independently applies; memory fences remain explicit.
+At the presentation-record bound the full `boundary(...)` contract remains
+visible, and unknown instructions retain `opaque_effect(...)`. Checked rendering
+is unchanged.
+
 After inlining, both source dialects may combine an initial single-entry chain
 of expression-only loop tests. Short-circuit conditions preserve load order and
 all tests leave to the same lexical continuation without exit copies. Assignment,
@@ -193,6 +221,13 @@ conditions. Stages needing temporaries, exit copies, effects or shared entries
 remain explicit; unrelated early returns stay inside the body. `loop_form`
 records the conditions and existing control/move validation remains mandatory.
 Checked rendering is unchanged.
+
+Return-tail copies remain owned by the edge that enters them. When all incoming
+edges use copies and a tail's original home is removed, its copied continuation
+is removed with it; no orphan return remains after a terminal statement.
+Independently reachable labeled blocks are not truncated. The existing
+`return_tail_duplication` record and control validation cover this source-only
+layout change, preserving original tail identities through loop shaping.
 
 Focused emitted-output regressions exercise nested loop/switch exits, edge-specific cyclic copies, guarded effects and faults, split-register joins and synthetic source-definition scope in both dialects and both source/machine modes. The four independent source-derived fixtures cover 544 observations; this is bounded regression evidence, not a whole-program equivalence proof.
 
@@ -212,9 +247,15 @@ Comments name only actual uncoalesced declarations or bounded pure expressions
 over them; otherwise they describe entry, call-clobber, or unmaterialized
 computation origins. Call-clobber-only slices share a compact unspecified-register
 summary. Dead values never acquire invented identifiers for comments.
-Locally computed slices qualify only outside an established scalar
-integer primary result, without gathered caller demand, multi-register/HFA
-evidence, or a conflicting/unprojectable declared return contract. Positive
+Locally computed slices qualify outside an established single-register integer,
+FP or vector primary result, without gathered caller demand, multi-register/HFA
+evidence, or a conflicting/unprojectable declared return contract. Undemanded
+x86 RDX slices are not presumed to form a pair with RAX; positive pair/wide-result
+evidence keeps them inline. With no result-use evidence, no written integer/FP
+primary storage, and agreement from source-signature inference (no declared
+result, projected result or tail interface), computed nonprimary slices may
+instead accompany a void-like `return;`. This is an explicit ABI assumption,
+not a recovered authored void prototype. Positive
 consumption evidence from already prepared native units keeps slices inline;
 callers are not exhaustively scanned. The inference explicitly records
 “no result-use evidence gathered; callers not scanned” and requires
@@ -222,6 +263,18 @@ callers are not exhaustively scanned. The inference explicitly records
 `unavailable_semantics` diagnostic remains. These slices cease to be source
 liveness roots, but potentially faulting loads and other ordered effects remain;
 checked output retains the full overlay.
+
+Source-only `frame_save` uses the ABI's preserved register slices (including
+Windows x64 XMM6–XMM15 low 128 bits), not architecture-specific register lists.
+One nonvolatile entry-value store must dominate every same-slot reload; every
+return/tail exit must restore exactly those bits, including ordered concatenated
+reload slices. Overlaps, escaping addresses and outgoing argument storage refuse
+the rewrite. Proven saves take precedence over scalar-local promotion, so leaf
+push/pop and frame-pointer saves do not create unknown-valued source locals.
+Each applied slot records `frame_save` and requires `abi_conformance`; bounded
+inference exhaustion retains the explicit form. Checked-view memory facts stay
+unchanged. Entry-SP return-address bytes are never save slots or promoted locals;
+observed return-address reads remain external entry storage.
 
 Source pointer null tests use the declared pointer directly under an explicit
 zero-null-address ABI requirement. Scalar dereferences consult actual declarations
@@ -246,6 +299,27 @@ Missing cells, differing whole values, mismatched offsets and exhausted
 presentation-record capacity retain the split form. The
 `register_cell_recombination` presentation record documents this exact bitvector
 identity without an ABI assumption; checked output does not apply it.
+
+The same source-only rule also follows straight-line integer bit wiring through
+identity casts, extracts, extensions, concatenations, inserts, constant shifts,
+power-of-two multiplies, and nonconflicting masked AND/OR/XOR lanes. Corresponding
+slices rejoin their original whole value; preserved outside bits plus one changed
+contiguous slice become a masked insert. Proven zero/sign upper lanes become
+extensions, including a zero-extended 64-bit value in a 128-bit pair carrier.
+Packing multiplications print as shifts. No formal or return width is changed by
+this rule. The structural proof retains the ordered opaque SSA dependencies
+(including unknown/undefined producers); unrelated or overlapping bits cannot
+be mistaken for a whole value. Analysis is bounded to 128-bit integers, 128
+visited definitions and depth 24 per candidate. Unsupported wiring and exhausted
+presentation-record capacity retain the explicit form. The independent local
+bitvector checker may veto a candidate; its 64-bit symbolic limit is unchanged.
+Masked lowering retains the exact pre-lowering concat/insert view for subsequent
+slice normalization. An extract contained in one established slice therefore
+does not acquire dependencies on unrelated unknown upper bits through a newly
+introduced `unknown & 0` mask. External replacements invalidate retained views
+on the replaced subject and on views that observed it; full-width expressions
+still preserve their ordered opaque dependencies.
+Checked-view normalization keeps its original rules and text.
 
 Source-only unsigned range analysis combines edge guards, definedness and parallel phi transfers before removing proven singleton register-cell plumbing. It widens unresolved loops and preserves unsupported signed guards, underflow paths and unknown definitions. The emitted-output induction smoke covers 294 observations, including zero trips, maximal counts, early exits, wrong guards and additional phi inputs; this is not a proof for arbitrary loops.
 
@@ -295,6 +369,21 @@ Each applied rule records a bounded presentation inference and an
 `abi_conformance` requirement; absent caller evidence is not an exhaustive caller
 scan. Signed return constants use that context (`-1`, not `0xffffffff`).
 Checked-view signatures and expressions do not use these projections.
+
+`fp_source_types` uses typed IEEE FP32/FP64 evidence to spell inferred FP formals
+and ABI-classified primary results as `float`/`double`. Integer-typed locals may
+share that spelling only in closed same-width bitcast/phi/select transport
+components whose nonliteral incoming paths are established FP values and whose
+consumers never interpret the carrier as an integer. Literal joins retain exact
+FP bit-pattern constructors and cannot establish FP interpretation alone.
+A store, integer operation, unresolved
+boundary use, conflicting type or unknown incoming value keeps that component
+explicit. Redundant bitcasts between approved FP spellings disappear; actual
+integer/FP reinterpretations, FP arithmetic helpers, exact NaN payload constants
+and environment guards remain explicit. One bounded presentation inference and
+`abi_conformance` requirement record the native IEEE representation assumption;
+failure to record it keeps all original spellings. Supplied signatures are not
+overridden, and checked-view types and bitcasts are unchanged.
 
 Bounded native parameter summaries refine the caller's existing memory shapes without rerunning its ABI/stack analysis. Compatible partial fields accumulate; overlapping alternatives, unknown size/alignment, dynamic indices, aliases and escapes remain explicit. Exact full-width copies and split entry cells retain one original pointer identity, while distinct incoming pointer bases remain distinct phi views. Callback fields retain the actual target and prepared whole argument carriers, not a guessed prototype. Source-built caller regressions cover alias/non-alias storage, strides, union conflicts and callback effects in both dialects.
 
