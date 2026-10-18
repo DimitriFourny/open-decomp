@@ -4,6 +4,7 @@ import { bitWidth, expressionOperands, type Value } from '../ir/index.js';
 import type { BoundaryProjection, Reconstruction } from './model.js';
 import type { SourceFormalType, SourcePresentation } from './source-model.js';
 import { validateBitvectorCandidate } from './local-validation.js';
+import { sourceRequirementPredicates } from './source-requirements.js';
 
 /** Agree to a void-like interface only in the absence of any positive result
  * evidence. The caller still records the ABI assumption before hiding slices. */
@@ -236,7 +237,7 @@ export function projectSourceSignature(
   program: Reconstruction,
   input: EmissionInput,
   context: OperationContext,
-): Pick<SourcePresentation, 'formal_types' | 'return_scalar'> & {
+): Pick<SourcePresentation, 'formal_types' | 'local_types' | 'return_scalar'> & {
   readonly returns?: ReadonlyMap<string, BoundaryProjection>;
 } {
   const formalTypes = new Map<string, SourceFormalType>();
@@ -271,17 +272,56 @@ export function projectSourceSignature(
     if (expression?.kind === 'cast' && expression.op === 'bitcast') return [expression.value];
     return incoming.get(value.id) ?? [];
   };
-  // Pointer lineage follows only unchanged whole bits, constant byte steps and
-  // edge copies. A load through a scalar derived by masking/multiplication does
-  // not establish a pointer formal.
+  // Promoted frame-private slots carry every stored value to each load of the
+  // slot, like an edge copy, so O0 argument spills do not hide formal uses.
+  const slotStores = new Map<string, Value[]>(),
+    slotLoads = new Map<string, Value[]>();
+  for (const block of program.blocks.values())
+    for (const node of block.statements) {
+      context.checkpoint(1);
+      const slot = program.source.locals.get(node.id)?.id;
+      if (!slot || !program.retained.has(node.id)) continue;
+      if (node.kind === 'store')
+        slotStores.set(slot, [...(slotStores.get(slot) ?? []), node.value]);
+      else if (node.kind === 'load')
+        slotLoads.set(slot, [...(slotLoads.get(slot) ?? []), node.result]);
+    }
+  const spilled = new Map<string, readonly Value[]>(),
+    reloaded = new Map<string, Value[]>();
+  for (const [slot, loads] of slotLoads) {
+    const stores = slotStores.get(slot) ?? [];
+    for (const load of loads) spilled.set(load.id, stores);
+    for (const value of stores)
+      reloaded.set(value.id, [...(reloaded.get(value.id) ?? []), ...loads]);
+  }
+  // An index term is a scaled or extended (narrower-than-address) addend.
+  const indexTerm = (value: Value): boolean => {
+    const expression = expressions.get(value.id);
+    return (
+      (expression?.kind === 'cast' &&
+        (expression.op === 'zero_extend' || expression.op === 'sign_extend')) ||
+      (expression?.kind === 'integer' &&
+        (expression.op === 'shl' || expression.op === 'mul') &&
+        constant(expression.right) !== undefined) ||
+      (expression?.kind === 'integer' &&
+        expression.op === 'mul' &&
+        constant(expression.left) !== undefined)
+    );
+  };
+  // Pointer lineage follows only unchanged whole bits, constant byte steps,
+  // index terms, edge copies and promoted slots. A load through a scalar
+  // derived by masking/multiplication does not establish a pointer formal.
   const pointerParents = (value: Value): readonly Value[] => {
     const expression = expressions.get(value.id);
     if (expression?.kind === 'integer' && ['add', 'sub'].includes(expression.op)) {
       if (constant(expression.right) !== undefined) return [expression.left];
       if (expression.op === 'add' && constant(expression.left) !== undefined)
         return [expression.right];
+      if (indexTerm(expression.right) && !indexTerm(expression.left)) return [expression.left];
+      if (expression.op === 'add' && indexTerm(expression.left) && !indexTerm(expression.right))
+        return [expression.right];
     }
-    return transport(value);
+    return [...transport(value), ...(spilled.get(value.id) ?? [])];
   };
   const parameterRoots = (value: Value, wholePointers = true): Set<string> => {
     const roots = new Set<string>(),
@@ -301,13 +341,14 @@ export function projectSourceSignature(
             ? pointerParents(current)
             : expression
               ? expressionOperands(expression)
-              : (incoming.get(current.id) ?? [])),
+              : [...(incoming.get(current.id) ?? []), ...(spilled.get(current.id) ?? [])]),
         );
       }
     }
     return roots;
   };
-  const accesses = new Map<string, Set<number>>();
+  // Element kinds reached through each formal's pointer lineage, with their sites.
+  const accesses = new Map<string, { elements: Set<string>; sites: string[] }>();
   const written = new Set<string>(),
     escaped = new Set<string>();
   let writingCall = false;
@@ -316,10 +357,6 @@ export function projectSourceSignature(
     for (const node of block.statements) {
       context.checkpoint(1);
       if (node.kind === 'unknown_effect') mayWrite = true;
-      if (node.kind === 'store') {
-        for (const root of parameterRoots(node.address, false)) written.add(root);
-        for (const root of parameterRoots(node.value, false)) escaped.add(root);
-      }
       if (node.kind === 'call' && node.clobbers.memory === 'unknown_read_write') {
         writingCall = true;
         const boundary = program.calls.get(node.id);
@@ -331,12 +368,27 @@ export function projectSourceSignature(
         for (const argument of arguments_)
           for (const root of parameterRoots(argument, false)) written.add(root);
       }
-      if (node.kind !== 'load' && node.kind !== 'store') continue;
+      // Hidden stack traffic and promoted slots are not memory uses of a formal.
+      if (
+        (node.kind !== 'load' && node.kind !== 'store') ||
+        !program.retained.has(node.id) ||
+        program.source.locals.has(node.id)
+      )
+        continue;
+      if (node.kind === 'store') {
+        for (const root of parameterRoots(node.address, false)) written.add(root);
+        for (const root of parameterRoots(node.value, false)) escaped.add(root);
+      }
       const value = node.kind === 'load' ? node.result : node.value;
+      const element =
+        value.type.kind === 'integer' || value.type.kind === 'float'
+          ? `${value.type.kind}:${bitWidth(value.type)}`
+          : 'other';
       for (const root of parameterRoots(node.address)) {
-        const widths = accesses.get(root) ?? new Set<number>();
-        widths.add(value.type.kind === 'integer' ? bitWidth(value.type) : 0);
-        accesses.set(root, widths);
+        const row = accesses.get(root) ?? { elements: new Set<string>(), sites: [] };
+        row.elements.add(element);
+        row.sites.push(node.id);
+        accesses.set(root, row);
       }
     }
   if (writingCall) for (const root of escaped) written.add(root);
@@ -351,28 +403,92 @@ export function projectSourceSignature(
       users.set(operand.id, row);
     }
   }
+  // Whole-value observers. Edge copies and promoted-slot stores instead pass
+  // their value on to the copy destination or the slot's reloads.
   const direct = new Set<string>();
+  const copied = new Map<string, Value[]>();
   for (const copies of program.transfers.values())
-    for (const copy of copies) direct.add(copy.source.id);
-  for (const boundary of [...program.calls.values(), ...program.returns.values()]) {
+    for (const copy of copies)
+      copied.set(copy.source.id, [...(copied.get(copy.source.id) ?? []), copy.destination]);
+  for (const boundary of [
+    ...program.calls.values(),
+    ...program.returns.values(),
+    ...[...program.tails.values()].map((tail) => tail.boundary),
+  ]) {
     for (const value of [...boundary.arguments, ...boundary.results]) direct.add(value.id);
     for (const binding of [...boundary.inputs, ...boundary.outputs]) direct.add(binding.value.id);
   }
+  for (const bindings of [...program.physical_inputs.values(), ...program.physical_exits.values()])
+    for (const binding of bindings) direct.add(binding.value.id);
+  const predicates = sourceRequirementPredicates(program.source.requirements);
+  const entries = new Map<string, number>(),
+    failures: string[] = [];
+  for (const block of program.blocks.values()) {
+    const control = block.control;
+    const arms =
+      control.kind === 'jump'
+        ? [control]
+        : control.kind === 'if'
+          ? [control.when_true, control.when_false]
+          : control.kind === 'switch'
+            ? [...control.cases.map((item) => item.arm), control.otherwise]
+            : [];
+    for (const arm of arms)
+      entries.set(arm.transfer.target, (entries.get(arm.transfer.target) ?? 0) + 1);
+    const requirement = control.kind === 'if' ? predicates.get(control.id) : undefined;
+    if (control.kind === 'if' && requirement)
+      failures.push(
+        (requirement.site.supported_predicate_value ? control.when_false : control.when_true)
+          .transfer.target,
+      );
+  }
+  const assumedUnreachable = new Set(failures.filter((id) => entries.get(id) === 1));
   for (const block of program.blocks.values()) {
     if (block.control.kind === 'if') direct.add(block.control.condition.id);
     if (block.control.kind === 'switch') direct.add(block.control.value.id);
-    if (block.control.kind === 'indirect') {
-      direct.add(block.control.target.id);
-      mayWrite = true;
-    }
-    if (block.control.kind === 'unknown') mayWrite = true;
+    if (block.control.kind === 'indirect') direct.add(block.control.target.id);
+    if (block.control.kind === 'indirect' || block.control.kind === 'unknown') mayWrite = true;
+    // An unresolved exit may observe every register cell; cells it does not
+    // rebind still hold their entry bits, so no formal may drop upper bits.
+    // Exits reachable only under a failed recorded requirement are excluded
+    // by that requirement's assumption.
+    const tail = program.tails.get(block.control.id)?.boundary;
+    if (
+      (block.control.kind === 'indirect' || block.control.kind === 'unknown') &&
+      (!tail || tail.kind === 'physical' || tail.argument_list_complete === false) &&
+      !assumedUnreachable.has(block.id)
+    )
+      for (const value of program.parameters) direct.add(value.id);
     for (const node of block.statements) {
-      if (node.kind === 'load' || node.kind === 'store') direct.add(node.address.id);
-      if (node.kind === 'store' || node.kind === 'write_register') direct.add(node.value.id);
+      if (node.kind === 'call') {
+        // Physical or open-arity interfaces may read any register input.
+        const boundary = program.calls.get(node.id);
+        if (!boundary || boundary.kind === 'physical' || boundary.argument_list_complete === false)
+          for (const binding of node.register_inputs) direct.add(binding.value.id);
+      }
+      if (!program.retained.has(node.id)) continue;
+      if ((node.kind === 'load' || node.kind === 'store') && !program.source.locals.has(node.id))
+        direct.add(node.address.id);
+      if (
+        (node.kind === 'store' && !program.source.locals.has(node.id)) ||
+        node.kind === 'write_register'
+      )
+        direct.add(node.value.id);
       if (node.kind === 'unknown_effect')
         for (const binding of node.register_inputs) direct.add(binding.value.id);
     }
   }
+  const signedConsumer = (slice: Value): boolean =>
+    (users.get(slice.id) ?? []).some((consumer) => {
+      const operation = expressions.get(consumer.id);
+      return (
+        (operation?.kind === 'compare' && operation.op.startsWith('s')) ||
+        (operation?.kind === 'cast' && operation.op === 'sign_extend') ||
+        (operation?.kind === 'integer' &&
+          ['sdiv', 'srem', 'ashr'].includes(operation.op) &&
+          (operation.op !== 'ashr' || operation.left.id === slice.id))
+      );
+    });
   for (const parameter of program.parameters) {
     context.checkpoint(1);
     if (parameter.type.kind !== 'integer' || conflicting(parameter)) continue;
@@ -386,10 +502,14 @@ export function projectSourceSignature(
       )
     )
       continue;
-    const widths = accesses.get(parameter.id);
-    const pointee = widths?.size === 1 ? widths.values().next().value : undefined;
+    const origins = program.source.value_origins?.get(parameter.id) ?? [];
+    const access = accesses.get(parameter.id);
+    const [element] = access?.elements.size === 1 ? access.elements : [];
+    const [kind, bits] = element?.split(':') ?? [];
+    const pointee = Number(bits);
     if (
-      (pointee === 8 || pointee === 16 || pointee === 32 || pointee === 64) &&
+      ((kind === 'integer' && [8, 16, 32, 64].includes(pointee)) ||
+        (kind === 'float' && [32, 64].includes(pointee))) &&
       bitWidth(parameter.type) === input.source.abi.layout.pointer_bits
     ) {
       const readOnly = !mayWrite && !written.has(parameter.id);
@@ -397,13 +517,14 @@ export function projectSourceSignature(
         validation.presentation(
           'formal_pointer',
           parameter.id,
-          `whole-value pointer lineage reaches only ${pointee}-bit integer accesses; ${readOnly ? 'read-only formal: no writes through it or escape to a potentially writing call, and no unknown effects' : 'write-capable formal: write, call escape or unknown effects prevent const qualification'}`,
-          program.source.value_origins?.get(parameter.id),
+          `whole-value pointer lineage (copies, promoted slots, constant byte steps, index terms) reaches only ${pointee}-bit ${kind} accesses; ${readOnly ? 'read-only formal: no writes through it or escape to a potentially writing call, and no unknown effects' : 'write-capable formal: write, call escape or unknown effects prevent const qualification'}`,
+          [...origins, ...access!.sites.slice(0, 16)],
         )
       ) {
         formalTypes.set(parameter.id, {
           kind: 'pointer',
           bits: bitWidth(parameter.type),
+          pointee: kind === 'float' ? 'float' : 'integer',
           pointee_bits: pointee,
           const: readOnly,
         });
@@ -415,13 +536,15 @@ export function projectSourceSignature(
       }
       continue;
     }
-    // All live uses of a full carrier must first discard its upper bits. Signed
-    // consumers of the unchanged low word establish its interpretation, not
-    // arbitrary signed operations elsewhere in the function.
+    // Every live use, through copies, promoted slots and bitcasts, must read
+    // only the low slice: a truncation, an extract inside it or a mask whose
+    // set bits lie in it. Only signed consumers of an unchanged low slice of
+    // the presented width establish a signed interpretation.
     const pending = [parameter],
-      seen = new Set<string>();
+      seen = new Set<string>(),
+      sites: string[] = [],
+      signedSlices = new Set<number>();
     let valid = true,
-      signed = false,
       width = 0;
     while (pending.length && valid) {
       const value = pending.pop()!;
@@ -431,53 +554,135 @@ export function projectSourceSignature(
         valid = false;
         break;
       }
+      pending.push(...(copied.get(value.id) ?? []), ...(reloaded.get(value.id) ?? []));
       for (const user of users.get(value.id) ?? []) {
         context.checkpoint(1);
         const expression = expressions.get(user.id)!;
+        const mask =
+          expression.kind === 'integer' && expression.op === 'and'
+            ? (constant(expression.right) ?? constant(expression.left))
+            : undefined;
         if (expression.kind === 'cast' && expression.op === 'bitcast') pending.push(user);
         else if (
-          (expression.kind === 'extract' && expression.offset === 0) ||
+          expression.kind === 'extract' ||
           (expression.kind === 'cast' && expression.op === 'truncate')
         ) {
-          const bits = bitWidth(user.type);
-          width = Math.max(width, bits);
-          signed ||= (users.get(user.id) ?? []).some((consumer) => {
-            const operation = expressions.get(consumer.id);
-            return (
-              (operation?.kind === 'compare' && operation.op.startsWith('s')) ||
-              (operation?.kind === 'cast' && operation.op === 'sign_extend') ||
-              (operation?.kind === 'integer' &&
-                ['sdiv', 'srem', 'ashr'].includes(operation.op) &&
-                (operation.op !== 'ashr' || operation.left.id === user.id))
-            );
-          });
+          const bits = bitWidth(user.type),
+            offset = expression.kind === 'extract' ? expression.offset : 0;
+          width = Math.max(width, offset + bits);
+          if (offset === 0 && signedConsumer(user)) signedSlices.add(bits);
+          sites.push(user.id);
+        } else if (mask !== undefined && mask <= 0xffffffffn) {
+          width = Math.max(width, mask.toString(2).length);
+          sites.push(user.id);
         } else {
           valid = false;
           break;
         }
       }
     }
+    const presented = width <= 8 ? 8 : width <= 16 ? 16 : 32;
+    const signed = signedSlices.has(presented);
     if (
       valid &&
-      signed &&
-      width === 32 &&
-      bitWidth(parameter.type) > width &&
+      width > 0 &&
+      width <= 32 &&
+      bitWidth(parameter.type) > presented &&
       validation.presentation(
-        'formal_low_word',
+        'formal_low_slice',
         parameter.id,
-        'every live use first extracts the low 32 bits; an unchanged low word has a signed comparison, extension, division, remainder or arithmetic shift',
-        program.source.value_origins?.get(parameter.id),
+        `every live use, through copies, promoted slots and bitcasts, reads only the low ${presented} bits (truncation, an extract inside them or a mask within them); ${signed ? 'an unchanged low slice of that width has a signed comparison, extension, division, remainder or arithmetic shift' : 'no signed consumer of that slice: unsigned interpretation'}`,
+        [...origins, ...sites.slice(0, 16)],
       )
     ) {
-      formalTypes.set(parameter.id, { kind: 'integer', bits: width, signed: true });
+      formalTypes.set(parameter.id, { kind: 'integer', bits: presented, signed });
       validation.requireAbi(
-        'formal_low_word',
+        'formal_low_slice',
         [program.function.id],
-        'Only the low argument word is consumed; native C ABI upper argument carrier bits are not part of the presented int32_t parameter.',
+        'Only the low argument bits are consumed; native C ABI upper argument carrier bits are not part of the presented narrow parameter.',
       );
     }
   }
-  const result = { formal_types: formalTypes };
+  // A promoted slot whose every stored value is the address lineage of one
+  // pointer formal kind (the formal, a reload of such a slot, or a constant
+  // whole-element step of one) takes that kind; reloads share it. Any other
+  // store keeps the integer slot. Optimistic start, then a shrinking fixpoint.
+  const reloadSlot = new Map<string, string>();
+  for (const [slot, loads] of slotLoads) for (const load of loads) reloadSlot.set(load.id, slot);
+  const sameKind = (left: SourceFormalType, right: SourceFormalType): boolean =>
+    left.kind === 'pointer' &&
+    right.kind === 'pointer' &&
+    left.pointee === right.pointee &&
+    left.pointee_bits === right.pointee_bits;
+  const pointerKind = (
+    value: Value,
+    typed: ReadonlyMap<string, SourceFormalType>,
+    depth = 0,
+  ): SourceFormalType | undefined => {
+    context.checkpoint(1);
+    if (depth > 16) return undefined;
+    const formal = formalTypes.get(value.id);
+    if (formal?.kind === 'pointer') return formal;
+    const slot = reloadSlot.get(value.id);
+    if (slot) return typed.get(slot);
+    const expression = expressions.get(value.id);
+    if (expression?.kind === 'cast' && expression.op === 'bitcast')
+      return bitWidth(expression.value.type) === bitWidth(value.type)
+        ? pointerKind(expression.value, typed, depth + 1)
+        : undefined;
+    if (expression?.kind !== 'integer' || (expression.op !== 'add' && expression.op !== 'sub'))
+      return undefined;
+    const [base, step] =
+      constant(expression.right) !== undefined
+        ? [expression.left, constant(expression.right)!]
+        : expression.op === 'add' && constant(expression.left) !== undefined
+          ? [expression.right, constant(expression.left)!]
+          : [undefined, 0n];
+    const kind = base && pointerKind(base, typed, depth + 1);
+    return kind?.kind === 'pointer' &&
+      BigInt.asIntN(bitWidth(value.type), step) % BigInt(kind.pointee_bits / 8) === 0n
+      ? kind
+      : undefined;
+  };
+  const slotTypes = new Map<string, SourceFormalType>();
+  for (const [slot, stores] of slotStores) {
+    const kinds = stores.map((value) => pointerKind(value, slotTypes));
+    const kind = kinds.find((item) => item !== undefined);
+    if (kind?.kind === 'pointer' && stores.every((value) => bitWidth(value.type) === kind.bits))
+      slotTypes.set(slot, kind);
+  }
+  for (let changed = slotTypes.size > 0; changed;) {
+    changed = false;
+    for (const [slot, kind] of slotTypes) {
+      const kinds = (slotStores.get(slot) ?? []).map((value) => pointerKind(value, slotTypes));
+      if (kinds.every((item) => item && sameKind(item, kind))) {
+        const readOnly = kinds.every((item) => item?.kind === 'pointer' && item.const);
+        if (kind.kind === 'pointer' && kind.const !== readOnly) {
+          slotTypes.set(slot, { ...kind, const: readOnly });
+          changed = true;
+        }
+        continue;
+      }
+      slotTypes.delete(slot);
+      changed = true;
+    }
+  }
+  const localTypes = new Map<string, SourceFormalType>();
+  for (const [slot, kind] of slotTypes) {
+    const loads = slotLoads.get(slot) ?? [];
+    if (
+      !validation.presentation(
+        'slot_pointer_type',
+        slot,
+        'every value stored to this promoted frame-private slot is a pointer formal of one element kind, a reload of such a slot, or a whole-element constant step of one; reloads share the type and address bits are unchanged',
+        [...(slotStores.get(slot) ?? []), ...loads].map((value) => value.id).slice(0, 32),
+      )
+    )
+      continue;
+    localTypes.set(slot, kind);
+    for (const load of loads) formalTypes.set(load.id, kind);
+  }
+  const result = { formal_types: formalTypes, local_types: localTypes };
   const suppliedReturn = input.types?.types.some(
     (record) =>
       record.id === program.source?.return_source_type &&

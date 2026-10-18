@@ -542,9 +542,13 @@ export function reconstruct(
         ? [{ ...location.register, width_bits: location.width_bits }]
         : [],
     );
+    // A primary-result rejection retracts native written-result storage as evidence.
+    const observedReturns = sourcePlan.presentation.observed_result_rejected
+      ? undefined
+      : evidence.function_returns;
     const resultEvidence = [
       ...(evidence.function_return_demands ?? []),
-      ...(evidence.function_returns?.registers ?? []),
+      ...(observedReturns?.registers ?? []),
     ];
     const declaredContract = input.types?.signatures.some(
       (signature) => signature.subject_id === input.function.id,
@@ -570,7 +574,7 @@ export function reconstruct(
           register.offset_bits + register.width_bits <=
             primaryRegisters[0]!.offset_bits + primaryRegisters[0]!.width_bits,
       ) &&
-      (evidence.function_returns?.types ?? []).every(
+      (observedReturns?.types ?? []).every(
         (type) =>
           type.kind === resultType?.kind && bitWidth(type) <= primaryRegisters[0]!.width_bits,
       );

@@ -253,6 +253,31 @@ Optional `emission.requirements` localize assumptions, unresolved values/effects
 
 Source-only `fp_native_operations` prints scalar IEEE arithmetic/comparisons and compatible conversions under the FP requirement plus the target IEEE representation, no-excess-precision and disabled-contraction (`-ffp-contract=off`) contract. Backwards consumer tracing retains helpers where arithmetic payloads escape through integer operations, memory, calls or physical boundaries. Float-to-integer conversions, fused operations, payload-sensitive operations, Python binary32 arithmetic and Python division retain explicit helpers; their rounding, NaN or exceptional behavior is not silently changed. Finite floating literals retain exact target bits. FP/integer copies preserve representation bitcasts, never numeric assignment conversions. Exhausted presentation records retain the explicit form.
 
+Source-only `condition_flags` folds compare flags and their condition-code
+consumers into native relations (`src/reconstruction/source-conditions.ts`).
+NZCV/EFLAGS bit insertion and extraction, condition-code logic, conditional
+compare (CCMP/CCMN) selects and cset/csel/setcc/cmov selects of zero-extended
+one-bit arms are traced to their compares. Each flag is a function of a few
+outcomes of its operands: equal, unsigned no-borrow, signed less (N != V) and
+the wrapped sign N for integers (ADDS/CMN with a constant k other than 0 and the
+signed minimum is SUBS with -k; with a register addend Z/N describe the wrapped
+sum and C is `sum < addend`); less/equal/greater/unordered for IEEE compares.
+The condition is tabulated over every feasible outcome (constant operands
+remove only impossible rows) and every opaque one-bit leaf, then rebuilt by a
+Shannon decomposition into predicates joined by `&&`/`||` (Python `and`/`or`);
+a decomposition is accepted only when it reproduces every row. N alone prints as
+the sign of the wrapped difference; V/OF alone and PF keep their exact flag
+helper; anything else keeps the explicit form. FP predicates obey native C/Python
+NaN rules (`!=` true, other relations false): complements print as `!(a < b)`,
+`isunordered(a, b)` (C99 `<math.h>`, a documented Python-like helper) or the
+self-comparison `x != x`. Derived FP compares print natively only when every
+compare they derive from is a site of the recorded `fp_environment`
+requirement. One-bit `not`/`and`/`or` print as logical operators. Checked output
+does not apply the rule; `test/reconstruction/condition-flags-source.test.ts`
+executes both dialects against a host oracle for every ARM64 and x86-64
+condition code, CCMP/CCMN chains and FP ordered/unordered compares with NaN
+inputs.
+
 Source-only `exit_scratch` presentation keeps exact exit slices and provenance
 in reconstruction facts while summarizing register names once at the function
 header. Exact values and entry/call/computation origins remain in exit metadata
@@ -335,22 +360,36 @@ its presentation validation record, and checked rendering is unchanged.
 
 Pure expression reconstruction recomposes contiguous register-cell slices before source-width distribution, preserving full-width carries. Source normalization recovers constant shifted-add multiplication and scaled addresses without duplicating effects or expanding shared expression DAGs. Dynamic shift masks and unknown dependencies remain explicit. Independent emitted-output checks cover 240 observations across 16 fixtures.
 
-Source-view register-cell recombination also transports a whole integer phi when
-its contiguous cells cover one complete architectural root and every predecessor
-supplies the corresponding slices of the same whole value on that edge. Original
-SSA cells and transfers remain immutable; source aliases extract slices from the
-new whole phi, preserving parallel copies and full-width arithmetic carries.
-Missing cells, differing whole values, mismatched offsets and exhausted
-presentation-record capacity retain the split form. The
-`register_cell_recombination` presentation record documents this exact bitvector
-identity without an ABI assumption; checked output does not apply it.
+Source-view register-cell recombination also transports a whole integer phi
+(loop-carried or join) when its cells are read and written together. All cells of
+the architectural root must be phis of the block. General-purpose cells join only
+as far as some register read concatenates them with the cell below. A web of phi
+cells carried unchanged between blocks counts as one variable, so the joined low
+run may be narrower than the root; cells above it and cells read only as separate
+slices keep their own phis. Every incoming edge must write the joined cells
+jointly. Accepted edges are: corresponding slices of one value; low slices of v
+with upper cells that slice `sign_extend(v)`/`zero_extend(v)`; low slices with
+literal-zero upper cells, i.e. a 32-bit or narrower write that zero-extends; all
+literal constants; or the unchanged cells of another recombined phi, which is
+resolved as a fixpoint. Other register banks keep the complete-root rule with
+identical whole values. Original SSA cells and transfers remain immutable;
+source aliases extract slices from the new whole phi, preserving parallel copies
+and full-width arithmetic carries. Independently written cells (for example a
+partial write that preserves the other half), missing cells, differing whole
+values, mismatched offsets and exhausted presentation-record capacity retain the
+split form. The `register_cell_recombination` presentation record documents this
+exact bitvector identity without an ABI assumption; checked output does not
+apply it. `test/reconstruction/source-loop-cells.test.ts` executes both dialects
+against independent oracles for a 32-bit-immediate-entered 64-bit loop variable,
+CRC-style byte/24-bit lanes and an independently written-halves refusal.
 
 The same source-only rule also follows straight-line integer bit wiring through
 identity casts, extracts, extensions, concatenations, inserts, constant shifts,
 power-of-two multiplies, and nonconflicting masked AND/OR/XOR lanes. Corresponding
 slices rejoin their original whole value; preserved outside bits plus one changed
 contiguous slice become a masked insert. Proven zero/sign upper lanes become
-extensions, including a zero-extended 64-bit value in a 128-bit pair carrier.
+extensions, including a zero-extended 64-bit value in a 128-bit pair carrier and a
+contiguous interior slice such as the high 64 bits of a 128-bit product.
 Packing multiplications print as shifts. No formal or return width is changed by
 this rule. The structural proof retains the ordered opaque SSA dependencies
 (including unknown/undefined producers); unrelated or overlapping bits cannot
@@ -464,6 +503,12 @@ insertion, addition carry and signed subtraction overflow have C inline implemen
 128-bit intermediates use the compiler's native integer extension. Signed
 minimum/-1 remains undefined at every width, not a defined widened quotient.
 Original helper names and contracts stay in metadata.
+Only the helper definitions, `#include` and `#define` lines that the finished
+function text references (directly or through another helper) precede it, in a
+fixed order; the text is scanned outside comments and string literals after
+rendering, so unused or speculative expressions never add one. The FP environment
+requirement appears as one comment line citing its id; its full explanation is in
+the `requirements` metadata, and checked rendering keeps the full text.
 `c_bitcast` uses same-width `memcpy` helpers for integer/IEEE32/IEEE64
 reinterpretation under an explicit native-representation ABI requirement.
 `c_integer_storage` uses ordinary C scalar storage for nonstandard-width integer
@@ -474,16 +519,34 @@ effects remain genuine semantic helpers, not fabricated declarations or no-ops.
 Checked rendering is unchanged.
 
 The source-only signature projection keeps those machine values unchanged.
-`formal_pointer` follows whole-value copies, constant byte steps and phi edges to
-observed integer accesses of one consistent 8/16/32/64-bit width; byte accesses
-use `uint8_t*`, never invented character types. Mixed-width accesses remain explicit.
+`formal_pointer` follows whole-value copies, phi edges, promoted frame-private
+slots (every stored value reaches each reload), constant byte steps and index
+terms (a constant-scaled or extended addend) to the retained accesses through a
+formal. One consistent 8/16/32/64-bit integer or 32/64-bit IEEE element kind
+yields `uintN_t*` / `float*` / `double*`; byte accesses use `uint8_t*`, never
+invented character types. Mixed widths or kinds remain explicit.
 It adds C `const` only without writes through that formal, escape to a potentially
 writing call, or unknown effects; unrelated stores and known read-only calls do
 not remove the qualifier. Python annotations use `pointer[T]`; the presentation
 record retains the read-only/write-capable formal observation in both dialects.
-`formal_low_word` requires every live carrier use to discard the upper bits first
-and an unchanged low word to participate in a signed comparison, division,
-extension, remainder or arithmetic shift. `return_low_word`
+C `typed_index` prints `p[i]` / `p[k]` for an access through a declared scalar
+pointer of exactly the accessed width whose addend is the index scaled by the
+element size (unscaled for bytes) or a constant multiple of it.
+`slot_pointer_type` gives a promoted frame-private slot, and its reloads, the
+type of a pointer formal when every value stored to the slot is such a formal,
+a reload of a slot of the same element kind, or a whole-element constant step of
+one (an optimistic start shrunk to a fixpoint). Any other store keeps the integer
+slot. C then assigns, dereferences and subscripts the slot as that pointer and
+reads its address bits through `uintptr_t` only in integer contexts.
+`formal_low_slice` narrows a formal to 8/16/32 bits when every live use, through
+copies, promoted slots and bitcasts, reads only that low slice (truncation, an
+extract inside it or a constant mask within it). Calls, returns, stores,
+addresses, conditions, physical or open-arity register inputs and unresolved
+exits (outside a recorded requirement's failure arm) observe the whole carrier
+and refuse. The formal is signed only when an unchanged low slice of the
+presented width participates in a signed comparison, division, extension,
+remainder or arithmetic shift; a Python caller passes the annotated value.
+`return_low_word`
 requires all returns to be low-word values or explicit extensions, with no
 gathered caller demand for high bits; constants can join but cannot alone prove a
 narrow carrier. Byte differences (both operands proved in `[0,255]`), explicit
@@ -516,6 +579,30 @@ guards; their independent presentation gates apply separately. One bounded
 presentation inference and `abi_conformance` requirement record the native IEEE representation assumption;
 failure to record it keeps all original spellings. Supplied signatures are not
 overridden, and checked-view types and bitcasts are unchanged.
+
+`primary_result` chooses between the ABI integer and FP primary result registers
+of an undeclared function whose returns carry no explicit IR values. A register
+qualifies only when it is defined on every exit path: an unknown entry value of a
+non-argument register, an unprojected call clobber, an unknown-effect output or
+an address into the returning frame disqualifies it. The integer register must
+be written on some exit (an unchanged argument register may join); the FP
+register needs typed IEEE FP32/FP64 writes on some exit, with literal bits or a
+typed argument allowed elsewhere. A load from an exact private stack slot whose
+every direct store holds typed FP bits (or literal bits) counts as a typed write.
+When both qualify, positive caller demand decides; then the register written last
+on every path into every exit wins: a definition whose block is dominated by the
+other's definition (or follows it in the same block) is later, and merges compare
+per incoming edge. A counter updated after an FP temporary therefore stays the
+integer result. Only for mixed or unclear ordering does a native written-result
+interface naming exactly one of them decide.
+Otherwise the explicit `physical_return` form remains. With neither qualifying,
+no register result is inferred and the existing void-like/explicit exit handling
+applies. Chosen results record a bounded presentation inference and an
+`abi_conformance` requirement; the rejected register keeps its exact value in
+exit metadata (moved out of line only under `exit_scratch`) and in the checked
+view. Native written-result storage that the rule rejects stops counting as
+result evidence for exit overlays. Vector-typed FP carriers, supplied signatures
+and checked views keep the existing projection.
 
 Bounded native parameter summaries refine the caller's existing memory shapes without rerunning its ABI/stack analysis. Compatible partial fields accumulate; overlapping alternatives, unknown size/alignment, dynamic indices, aliases and escapes remain explicit. Exact full-width copies and split entry cells retain one original pointer identity, while distinct incoming pointer bases remain distinct phi views. Callback fields retain the actual target and prepared whole argument carriers, not a guessed prototype. Source-built caller regressions cover alias/non-alias storage, strides, union conflicts and callback effects in both dialects.
 

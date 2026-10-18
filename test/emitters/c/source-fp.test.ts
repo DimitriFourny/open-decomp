@@ -202,7 +202,7 @@ test('repeated guard epochs retain call effects and ignore MXCSR status-only wri
       const f = fixture(abi, 64, 'mul', false, 3, false, call);
       const { emission } = emit(f.ir, { source: f.source }, language);
       assert.doesNotMatch(emission.text, /requirement_predicate\(/);
-      assert.equal((emission.text.match(/Assume nearest-even/g) ?? []).length, 1);
+      assert.equal((emission.text.match(/Requirement requirement_/g) ?? []).length, 1);
       const sites = emission
         .requirements!.find((item) => item.kind === 'fp_environment')!
         .sites.filter((site) => site.predicate_value_id);
@@ -325,7 +325,7 @@ test('exact emitted native FP C executes under the disabled-contraction contract
           binary = join(directory, 'native');
         writeFileSync(
           path,
-          `#include <stdint.h>\n#include <math.h>\n${output.emission.text}\nint main(void) { ${checks.join('\n')} return 0; }\n`,
+          `#include <stdint.h>\n#include <math.h>\n#include <string.h>\n${output.emission.text}\nint main(void) { ${checks.join('\n')} return 0; }\n`,
         );
         execFileSync('clang', ['-std=c11', '-O2', '-ffp-contract=off', path, '-o', binary]);
         execFileSync(binary);

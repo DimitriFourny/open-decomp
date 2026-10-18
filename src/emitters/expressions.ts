@@ -369,6 +369,10 @@ export interface Printed {
 export const PRIMARY = 16;
 export const UNARY = 14;
 export const CONDITIONAL = 3;
+/** Logical connectives: C `&&`/`||`; Python `not` (below comparisons), `and`, `or`. */
+const LOGICAL_AND = 5,
+  LOGICAL_OR = 4,
+  PYTHON_NOT = 6;
 const C_PRECEDENCE: Readonly<Record<string, number>> = {
   '*': 13,
   '/': 13,
@@ -457,6 +461,35 @@ export class SourcePrinter {
       text: `${operand(left, false)} ${op} ${operand(right, true)}`,
       precedence,
       ctype,
+    };
+  }
+
+  /** Logical negation; exact for a one-bit value in any printed representation
+   * whose zero is the zero bit pattern. */
+  not(value: Printed): Printed {
+    return this.python
+      ? {
+          text: `not ${this.group(value, PRIMARY)}`,
+          precedence: PYTHON_NOT,
+          ctype: { bits: 1, signed: false },
+        }
+      : { text: `!${this.group(value, UNARY)}`, precedence: UNARY, ctype: INT };
+  }
+
+  /** Conjunction/disjunction of one-bit values. Pure operands make evaluation
+   * order unobservable and each connective associative; C groups `&&` inside
+   * `||` (-Wparentheses). */
+  logical(op: 'and' | 'or', left: Printed, right: Printed): Printed {
+    const precedence = op === 'and' ? LOGICAL_AND : LOGICAL_OR;
+    const operand = (value: Printed): string =>
+      this.group(
+        value,
+        !this.python && op === 'or' && value.precedence === LOGICAL_AND ? UNARY : precedence,
+      );
+    return {
+      text: `${operand(left)} ${this.python ? op : op === 'and' ? '&&' : '||'} ${operand(right)}`,
+      precedence,
+      ctype: this.python ? { bits: 1, signed: false } : INT,
     };
   }
 
@@ -652,6 +685,25 @@ export function expressionText(
           bits: 1,
           signed: false,
         });
+      // A value is unordered with itself exactly when it is a NaN: the quiet
+      // self-comparison. Otherwise C99 <math.h> isunordered (exactly 0 or 1),
+      // also a documented Python-like helper.
+      if (expression.left.id === expression.right.id)
+        return printer.binary(
+          expression.op === 'unordered' ? '!=' : '==',
+          name(expression.left),
+          name(expression.left),
+          { bits: 1, signed: false },
+        );
+      writer.helper(
+        'isunordered',
+        'True (1) iff either IEEE operand is a NaN, otherwise 0; quiet, no exception or environment effect.',
+      );
+      const unordered = printer.primary(
+        `isunordered(${writer.join([name(expression.left).text, name(expression.right).text])})`,
+        { bits: 1, signed: false },
+      );
+      return expression.op === 'unordered' ? unordered : printer.not(unordered);
     }
     if (expression.kind === 'float' && (!python || (width === 64 && expression.op !== 'div'))) {
       const operators: Record<string, string> = { add: '+', sub: '-', mul: '*', div: '/' };
@@ -710,6 +762,16 @@ export function expressionText(
     case 'address':
       return options.source.address(expression.address);
     case 'integer': {
+      if (
+        width === 1 &&
+        type.kind === 'integer' &&
+        (expression.op === 'and' || expression.op === 'or')
+      ) {
+        const left = operand(expression.left),
+          right = operand(expression.right);
+        if (!python || (!left.ctype?.signed && !right.ctype?.signed))
+          return printer.logical(expression.op, left, right);
+      }
       if (expression.op === 'and' || expression.op === 'or' || expression.op === 'xor') {
         const bitwise = (value: Value): Printed => {
           const constant = options.constant?.(value);
@@ -819,6 +881,8 @@ export function expressionText(
     case 'integer_unary': {
       if (expression.op !== 'neg' && expression.op !== 'not') return helper();
       let value = operand(expression.value);
+      if (expression.op === 'not' && width === 1 && type.kind === 'integer')
+        return printer.not(value);
       const symbol = expression.op === 'neg' ? '-' : '~';
       if (python)
         return printer.reduce(width, {

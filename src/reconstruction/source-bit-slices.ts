@@ -248,16 +248,17 @@ export function recombineBitSlices(
     candidate = { kind: 'constant', bits: constant };
   }
   const first = bits[0];
-  if (
-    !candidate &&
-    typeof first === 'object' &&
-    first.value.id !== result.id &&
-    first.offset === 0
-  ) {
+  if (!candidate && typeof first === 'object' && first.value.id !== result.id) {
+    // One contiguous slice of a single value (at any offset), then zero or
+    // sign-replicated upper lanes.
     let used = 0;
     while (used < bits.length) {
       const lane = bits[used]!;
-      if (typeof lane !== 'object' || lane.value.id !== first.value.id || lane.offset !== used)
+      if (
+        typeof lane !== 'object' ||
+        lane.value.id !== first.value.id ||
+        lane.offset !== first.offset + used
+      )
         break;
       used++;
     }

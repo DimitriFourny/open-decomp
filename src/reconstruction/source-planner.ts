@@ -35,6 +35,7 @@ import { sourceStackArgumentParts } from './source-stack-arguments.js';
 import { planSourceRequirements } from './source-requirements.js';
 import { possibleAbiReturnStorage } from '../analysis/calls/return-storage.js';
 import { LocalValidationSession } from './local-validation.js';
+import { selectSourcePrimaryResult, type SourcePrimaryResult } from './source-results.js';
 
 /** Source ABI abstraction: architectural snapshots are retained in the input,
  * not treated as extra source arguments or memory-fault observables. */
@@ -738,6 +739,84 @@ export function planSource(
               : 'non-argument entry register',
       });
   }
+  const integerReturn = layout.returns[0],
+    floatingReturn = floatLayout.returns[0];
+  let primaryResult: SourcePrimaryResult | null =
+    view === 'source' &&
+    !functionSignature &&
+    integerReturn?.kind === 'register' &&
+    floatingReturn?.kind === 'register' &&
+    [...blocks.values()].every(
+      (block) => block.control.kind !== 'return' || block.control.values.length === 0,
+    )
+      ? selectSourcePrimaryResult({
+          blocks,
+          entry,
+          expressions,
+          sources: storageSources,
+          typed: typedSlices,
+          parameters: parameterRegisters,
+          callResults,
+          stack: input.types?.calls?.stack,
+          integer: integerReturn,
+          floating: floatingReturn,
+          argumentRoots: new Set(candidates.map((register) => register.root)),
+          demands: evidence.function_return_demands ?? [],
+          observed: evidence.function_returns?.registers ?? [],
+          context,
+        })
+      : null;
+  const exitIds = [...blocks.values()].flatMap((block) =>
+    block.control.kind === 'return' ? [block.control.id] : [],
+  );
+  const primaryScope =
+    'primary result register defined on every exit path: unknown entry values, unprojected call clobbers and returning-frame addresses disqualify; FP needs typed IEEE writes (literal bits or a typed argument may join); when both qualify: caller demand, then the register written last on every exit path, then a native written-result interface naming exactly one';
+  if (
+    primaryResult?.kind === 'float' ||
+    (primaryResult?.kind === 'integer' && primaryResult.reason)
+  ) {
+    const floating = primaryResult.kind === 'float';
+    if (
+      validation.presentation(
+        'primary_result',
+        input.function.id,
+        primaryScope,
+        exitIds,
+        primaryResult.kind === 'float'
+          ? `${primaryResult.location.register.root} ${primaryResult.type.kind}${bitWidth(primaryResult.type)} selected; ${primaryResult.rejected}`
+          : `integer result register selected; ${primaryResult.reason}`,
+      )
+    )
+      validation.requireAbi(
+        'primary_result',
+        exitIds,
+        `Present the ABI ${floating ? 'floating-point' : 'integer'} return register as the single result; callers read no ${floating ? 'integer' : 'floating-point'} result register. The rejected register keeps its exact exit value in the exit metadata and checked view.`,
+      );
+    else primaryResult = { kind: 'explicit', written: true, reason: 'presentation record bound' };
+  } else if (
+    (primaryResult?.kind === 'explicit' || primaryResult?.kind === 'none') &&
+    primaryResult.written
+  )
+    validation.presentation(
+      'primary_result',
+      input.function.id,
+      primaryScope,
+      exitIds,
+      primaryResult.reason,
+    );
+  // Native written-result storage is not result evidence once this rule
+  // rejects it: it records which registers were written, not which one is read.
+  const floatingRoot =
+    floatingReturn?.kind === 'register' ? floatingReturn.register.root : undefined;
+  const observedRejected =
+    primaryResult?.kind === 'explicit' ||
+    (evidence.function_returns?.registers ?? []).some((register) =>
+      primaryResult?.kind === 'float'
+        ? register.root !== floatingRoot
+        : primaryResult?.kind === 'integer' &&
+          primaryResult.reason !== undefined &&
+          register.root === floatingRoot,
+    );
   let returnType: DataType | null = null;
   const possibleReturnStorage = possibleAbiReturnStorage(abi);
   for (const block of blocks.values())
@@ -758,7 +837,12 @@ export function planSource(
             ]
           : [];
       }
-      if (!functionSignature && !returned.length && evidence.function_returns?.registers.length) {
+      if (
+        !functionSignature &&
+        !returned.length &&
+        !observedRejected &&
+        evidence.function_returns?.registers.length
+      ) {
         const observed = evidence.function_returns;
         const results = observed.registers.map((register, index) =>
           bind(
@@ -771,7 +855,16 @@ export function planSource(
         );
         if (results.every((value) => value !== null)) returned = results as Value[];
       }
-      if (!functionSignature && !returned.length) {
+      if (!functionSignature && !returned.length && primaryResult?.kind === 'float') {
+        const value = bind(
+          `${control.id}:fp-result`,
+          block.register_exit,
+          [primaryResult.location],
+          primaryResult.type,
+          block.id,
+        );
+        if (value) returned = [value];
+      } else if (!functionSignature && !returned.length && !primaryResult) {
         const floating = floatLayout.returns.flatMap((location) => {
           if (location.kind !== 'register') return [];
           const type = registerTypes(
@@ -807,7 +900,12 @@ export function planSource(
         });
         if (floating.length === 1) returned = floating;
       }
-      if (!functionSignature && !returned.length && layout.returns.length) {
+      if (
+        !functionSignature &&
+        !returned.length &&
+        layout.returns.length &&
+        (!primaryResult || primaryResult.kind === 'integer')
+      ) {
         const location = layout.returns[0]!;
         if (location.kind === 'register') {
           const cells = block.register_exit.filter(
@@ -860,7 +958,9 @@ export function planSource(
       // Without a supplied prototype, an unclassified changed ABI return cell
       // is still observable machine storage. Preserve it as an uncertain entry
       // overlay, not as another inferred source/aggregate result.
-      const knownReturnStorage = [...(evidence.function_returns?.registers ?? [])];
+      const knownReturnStorage = observedRejected
+        ? []
+        : [...(evidence.function_returns?.registers ?? [])];
       for (const value of returned) {
         const primary =
           value.type.kind === 'float' || value.type.kind === 'vector' ? floatLayout : layout;
@@ -1014,6 +1114,7 @@ export function planSource(
     return_type: returnType,
     ...(returnTypes ? { return_types: returnTypes } : {}),
     ...(returnPointer === undefined ? {} : { return_pointer: returnPointer }),
+    ...(observedRejected ? { observed_result_rejected: true as const } : {}),
     requirements: planSourceRequirements(
       input,
       blocks,

@@ -5,10 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createOperationContext, type AbiSignature } from '../../../src/core/index.js';
-import { declareCScalarSupport } from '../../../src/emitters/source-c-support.js';
+import { cScalarSupport } from '../../../src/emitters/source-c-support.js';
 import { SourcePrinter } from '../../../src/emitters/expressions.js';
 import { Writer } from '../../../src/emitters/writer.js';
-import { integer, type Expression, type IntegerOp, type Value } from '../../../src/ir/index.js';
+import { integer, type IntegerOp } from '../../../src/ir/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { windowsX64Abi } from '../../../src/abi/windows-x64/index.js';
@@ -21,7 +21,6 @@ import { builder, image, register } from '../../ir/support.js';
 import { emit, emittedFormals, execute } from './support.js';
 
 test('exact emitted C scalar helpers preserve widths, signed division and full shift counts', () => {
-  const writer = new Writer(createOperationContext(), 2, false);
   const operations: IntegerOp[] = [
     'udiv',
     'urem',
@@ -33,37 +32,6 @@ test('exact emitted C scalar helpers preserve widths, signed division and full s
     'lshr',
     'ashr',
   ];
-  const values = new Map<string, Value>();
-  const expressions = new Map<string, Expression>();
-  for (const bits of [8, 16, 32, 64, 128]) {
-    const value: Value = { id: `word${bits}`, type: integer(bits) };
-    values.set(value.id, value);
-    for (const op of operations)
-      expressions.set(`${op}${bits}`, { kind: 'integer', op, left: value, right: value });
-  }
-  expressions.set('insert', {
-    kind: 'insert',
-    base: values.get('word128')!,
-    value: values.get('word32')!,
-    offset: 32,
-  });
-  expressions.set('overflow', {
-    kind: 'flag',
-    op: 'sub',
-    flag: 'overflow',
-    left: values.get('word128')!,
-    right: values.get('word128')!,
-    carry: { id: 'carry', type: integer(1) },
-  });
-  expressions.set('carry', {
-    kind: 'flag',
-    op: 'add',
-    flag: 'carry',
-    left: values.get('word128')!,
-    right: values.get('word128')!,
-    carry: { id: 'carry', type: integer(1) },
-  });
-  declareCScalarSupport({ values, expressions }, writer);
   const checks: string[] = [];
   const literal = (n: bigint) =>
     `(((uint128_t)0x${(n >> 64n).toString(16)}ULL << 64) | 0x${(n & ((1n << 64n) - 1n)).toString(16)}ULL)`;
@@ -147,13 +115,15 @@ test('exact emitted C scalar helpers preserve widths, signed division and full s
             `if (flag_add_carry(${width}, ${literal(a)}, ${literal(b)}, ${carry}) != ${Number(a + b + carry > maximum)}) return 253;`,
           );
   }
+  const body = checks.join('\n'),
+    prelude = cScalarSupport(body);
   const directory = mkdtempSync(join(tmpdir(), 'open-decomp-c-support-'));
   try {
     const path = join(directory, 'support.c'),
       binary = join(directory, 'support');
     writeFileSync(
       path,
-      `#include <stdint.h>\n${writer.text()}\nint main(void) {\n${checks.join('\n')}\nreturn 0;\n}\n`,
+      `#include <stdint.h>\n${prelude.join('\n')}\nint main(void) {\n${body}\nreturn 0;\n}\n`,
     );
     execFileSync('clang', ['-std=c11', '-Wall', '-Werror', path, '-o', binary]);
     execFileSync(binary);
@@ -163,13 +133,38 @@ test('exact emitted C scalar helpers preserve widths, signed division and full s
   assert.equal(checks.length, 1548);
 });
 
+test('C scalar support emits only helpers the text references, with their dependencies', () => {
+  assert.deepEqual(cScalarSupport('uint64_t f(uint64_t a) { return a + 1; }'), []);
+  assert.deepEqual(
+    cScalarSupport(
+      '/* flag_sub_overflow(8, a, b) bool */ puts("bv_shl(8, a, b) __od_bitcast_f32_u32");',
+    ),
+    [],
+  );
+  assert.deepEqual(cScalarSupport('while (true) { }'), ['#include <stdbool.h>']);
+  const shifts = cScalarSupport('x = bv_shl(32, a, b); y = vector_bv_shl("x", a, b);');
+  assert.deepEqual(
+    shifts.map((line) => line.replace(/\{.*$/, '').trim()),
+    [
+      '#define uint128_t __uint128_t',
+      '#define __od_uint_32_t uint32_t',
+      'static inline uint128_t __od_bv_shl(unsigned width, uint128_t a, uint128_t b)',
+      '#define bv_shl(width, a, b) ((__od_uint_##width##_t)__od_bv_shl(width, a, b))',
+    ],
+  );
+  const division = cScalarSupport('x = bv_sdiv(16, a, b); y = flag_add_carry(8, a, b, 0);');
+  assert.ok(division.includes('#define int128_t __int128_t'));
+  assert.ok(division.some((line) => line.startsWith('static inline uint8_t flag_add_carry')));
+  assert.ok(!division.some((line) => line.includes('flag_sub_overflow')));
+  const cast = cScalarSupport('x = __od_bitcast_u64_f64(y);');
+  assert.deepEqual(
+    cast.map((line) => line.replace(/\{.*$/, '').trim()),
+    ['#include <string.h>', 'static inline uint64_t __od_bitcast_u64_f64(double value)'],
+  );
+});
+
 test('C bitcasts preserve IEEE payloads and odd-width conversions preserve exact signed bits', () => {
   const writer = new Writer(createOperationContext(), 2, false);
-  const values = new Map<string, Value>([
-    ['wide', { id: 'wide', type: integer(128) }],
-    ['float', { id: 'float', type: { kind: 'float', bits: 32 } }],
-  ]);
-  declareCScalarSupport({ values, expressions: new Map() }, writer);
   const printer = new SourcePrinter(writer, true);
   const checks: string[] = [];
   const literal = (n: bigint) =>
@@ -207,13 +202,14 @@ test('C bitcasts preserve IEEE payloads and odd-width conversions preserve exact
         `if (__od_bitcast_u${bits}_f${bits}(__od_bitcast_f${bits}_u${bits}((uint${bits}_t)${literal(payload)})) != (uint${bits}_t)${literal(payload)}) return 2;`,
       );
   }
+  const body = checks.join('\n');
   const directory = mkdtempSync(join(tmpdir(), 'open-decomp-c-bits-'));
   try {
     const path = join(directory, 'bits.c'),
       binary = join(directory, 'bits');
     writeFileSync(
       path,
-      `#include <stdint.h>\n${writer.text()}\nint main(void) { uint128_t input;\n${checks.join('\n')}\nreturn 0;\n}\n`,
+      `#include <stdint.h>\n${cScalarSupport(body).join('\n')}\nint main(void) { uint128_t input;\n${body}\nreturn 0;\n}\n`,
     );
     execFileSync('clang', ['-std=c11', '-Wall', '-Werror', path, '-o', binary]);
     execFileSync(binary);

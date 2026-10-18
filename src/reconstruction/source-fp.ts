@@ -252,10 +252,26 @@ export function sourceFpPresentation(
       )
     )
       continue;
-    if (!program.live.has(id) || !sites.has(id)) continue;
+    if (!program.live.has(id)) continue;
+    // A condition fold derives new relations of the same compared operands; it
+    // is covered exactly when every compare it was derived from is a site.
+    const origins = program.source.value_origins?.get(id) ?? [];
+    const derived =
+      expression.kind === 'float_compare' &&
+      origins.length > 0 &&
+      origins.every((origin) => {
+        const source = program.expressions.get(origin);
+        return (
+          sites.has(origin) &&
+          source?.kind === 'float_compare' &&
+          ((source.left.id === expression.left.id && source.right.id === expression.right.id) ||
+            (source.left.id === expression.right.id && source.right.id === expression.left.id))
+        );
+      });
+    if (!sites.has(id) && !derived) continue;
     if (
       (expression.kind === 'float_compare' &&
-        ['eq', 'ne', 'lt', 'le', 'gt', 'ge'].includes(expression.op)) ||
+        ['eq', 'ne', 'lt', 'le', 'gt', 'ge', 'ordered', 'unordered'].includes(expression.op)) ||
       (!sensitive.has(id) &&
         ((expression.kind === 'float' && ['add', 'sub', 'mul', 'div'].includes(expression.op)) ||
           (expression.kind === 'cast' &&

@@ -133,6 +133,8 @@ export type SourceFormalType =
   | {
       readonly kind: 'pointer';
       readonly bits: number;
+      /** Element kind of every observed access through the formal. */
+      readonly pointee: 'integer' | 'float';
       readonly pointee_bits: number;
       readonly const: boolean;
     };
@@ -149,11 +151,17 @@ export interface SourcePresentation {
   readonly return_pointer?: 'char' | 'byte';
   readonly value_types?: ReadonlyMap<string, SourceTypeView>;
   readonly return_source_type?: string;
+  /** Inferred formal spellings; reloads of a typed promoted slot share its type. */
   readonly formal_types?: ReadonlyMap<string, SourceFormalType>;
+  /** Promoted slot (local id) spellings proven by `slot_pointer_type`. */
+  readonly local_types?: ReadonlyMap<string, SourceFormalType>;
   readonly return_scalar?: { readonly bits: number; readonly signed: boolean };
   /** IEEE values and closed whole-bit carriers approved for native FP spelling. */
   readonly float_values?: ReadonlyMap<string, 32 | 64>;
   readonly return_float?: 32 | 64;
+  /** Source view only: the primary-result rule rejected the native written-result
+   * storage, which then no longer counts as result evidence for exit overlays. */
+  readonly observed_result_rejected?: true;
   readonly field_subjects?: ReadonlyMap<string, readonly string[]>;
   /** Localized preconditions and residual sites; never a blanket CFG assumption. */
   readonly requirements?: readonly Requirement[];

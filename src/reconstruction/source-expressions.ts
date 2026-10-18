@@ -13,6 +13,7 @@ import {
 import { identityOperand } from './expressions.js';
 import { LocalValidationSession, validateBitvectorCandidate } from './local-validation.js';
 import { recombineBitSlices } from './source-bit-slices.js';
+import { foldSourceCondition } from './source-conditions.js';
 
 export interface SourceExpressionDemand {
   /** Conservative value closure, extended for newly introduced definitions. */
@@ -411,17 +412,24 @@ export function normalizeSourceExpressions(
           replacement = { kind: 'compare', op: 'eq', left: expression.left, right: compared };
         }
       }
-      const recombined = sourceCells
-        ? recombineBitSlices(
-            value,
-            expression,
-            observe,
-            create,
-            owner.get(id)!,
-            context,
-            packingShifts,
-          )
+      // Source view: compare flags and their condition-code consumers become
+      // direct relational predicates; exact by outcome enumeration.
+      const condition = sourceCells
+        ? foldSourceCondition(value, expression, observe, resolve, create, owner.get(id)!, context)
         : null;
+      if (condition) replacement = condition;
+      const recombined =
+        sourceCells && !condition
+          ? recombineBitSlices(
+              value,
+              expression,
+              observe,
+              create,
+              owner.get(id)!,
+              context,
+              packingShifts,
+            )
+          : null;
       if (recombined) {
         replacement = recombined;
         cellRewrite = true;
@@ -456,7 +464,9 @@ export function normalizeSourceExpressions(
             (replacement === expression ||
               replacement.kind === 'extract' ||
               (replacement.kind === 'cast' && replacement.op === 'bitcast')));
-        if (!wiring || !validation.allowance.exhausted) {
+        // A condition fold is proved by its own exhaustive outcome table; the
+        // bitvector checker models neither ordered compares nor selects.
+        if (!condition && (!wiring || !validation.allowance.exhausted)) {
           if (validation.skipExhaustedBitvector(id)) continue;
           const checked = validation.check('bitvector', id, 'source expression rewrite', () =>
             validateBitvectorCandidate(
@@ -472,6 +482,16 @@ export function normalizeSourceExpressions(
             continue;
           }
         }
+        if (
+          condition &&
+          !validation.presentation(
+            'condition_flags',
+            id,
+            'compare flags and their condition-code consumers (NZCV/EFLAGS bits, conditional compares, cset/csel/setcc/cmov selects, FP compare flags) as native relational predicates joined by && and ||; exact over every feasible equal/unsigned/signed/wrapped-sign outcome and IEEE less/equal/greater/unordered outcome; a condition depending on the wrapped sign or overflow alone keeps its flag helper',
+            expressionOperands(original).map((operand) => operand.id),
+          )
+        )
+          continue;
         if (
           cellRewrite &&
           !validation.presentation(

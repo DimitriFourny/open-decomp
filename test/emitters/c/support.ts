@@ -110,7 +110,8 @@ function helperType(call: Extract<Expr, { kind: 'call' }>): CType {
   if (call.name === 'float') return { kind: 'float', bits: 64 };
   if (/^fp_(?:add|sub|mul|div|neg|abs|sqrt)$/.test(call.name) && typeof literal === 'bigint')
     return { kind: 'float', bits: Number(literal) };
-  if (/^(?:fp_(?:eq|ne|lt|le|gt|ge|ordered|unordered)|flag_)/.test(call.name)) return INT;
+  if (/^(?:fp_(?:eq|ne|lt|le|gt|ge|ordered|unordered)|flag_|isunordered$)/.test(call.name))
+    return INT;
   if (/^(?:bv_|fp_|wrap$|extract_bits$|insert_bits$|concat_low_first$)/.test(call.name))
     return typeof literal === 'bigint' ? unsignedType(Number(literal)) : MATH;
   const view = call.args[1];
@@ -930,13 +931,18 @@ class Parser {
     this.take(end);
   }
 
-  private expression(minimum = 0): Expr {
-    // Python `not` binds looser than comparisons; same semantics as C `!`.
-    if (this.python && minimum === 0 && this.peek() === 'not') {
+  /** A conjunction operand: Python `not` binds looser than comparisons and
+   * tighter than `and`/`or`; same semantics as C `!`. */
+  private conjunct(): Expr {
+    if (this.python && this.peek() === 'not') {
       this.take('not');
-      return { kind: 'unary', op: '!', value: this.expression(1) };
+      return { kind: 'unary', op: '!', value: this.conjunct() };
     }
-    let left = this.atom();
+    return this.expression(1);
+  }
+
+  private expression(minimum = 0): Expr {
+    let left = minimum === 0 ? this.conjunct() : this.atom();
     // Each dialect parses with its own grammar: Python's bitwise operators bind
     // tighter than comparisons, C's looser.
     const precedence: Record<string, number> = this.python
@@ -981,13 +987,19 @@ class Parser {
       left = { kind: 'binary', op, left, right };
     }
     if (minimum > 0) return left;
-    while (this.peek() === (this.python ? 'and' : '&&')) {
+    const conjunction = (first: Expr): Expr => {
+      let result = first;
+      while (this.peek() === (this.python ? 'and' : '&&')) {
+        this.take();
+        result = { kind: 'binary', op: '&&', left: result, right: this.conjunct() };
+      }
+      return result;
+    };
+    left = conjunction(left);
+    // `||` binds tighter than the conditional operator in both dialects.
+    while (this.peek() === (this.python ? 'or' : '||')) {
       this.take();
-      left = { kind: 'binary', op: '&&', left, right: this.expression(1) };
-    }
-    if (this.peek() === (this.python ? 'or' : '||')) {
-      this.take();
-      left = { kind: 'binary', op: '||', left, right: this.expression() };
+      left = { kind: 'binary', op: '||', left, right: conjunction(this.conjunct()) };
     }
     if (this.peek() === '?') {
       this.take('?');
@@ -2120,6 +2132,20 @@ export function execute(
           )
             ? supported
             : null;
+        }
+        // C99 <math.h> / documented Python-like helper: 1 iff either is a NaN.
+        if (expression.name === 'isunordered') {
+          assert.equal(expression.args.length, 2);
+          const operands = expression.args.map((arg) => {
+            const bits = evaluate(arg),
+              type = typeOf(arg);
+            assert.equal(type.kind, 'float');
+            return bits === null || type.kind !== 'float'
+              ? null
+              : decodeFloat(number(bits), type.bits);
+          });
+          if (operands.includes(null)) return null;
+          return BigInt(operands.some((operand) => Number.isNaN(operand)));
         }
         {
           const args = argumentsOf(expression.args, expression.name);

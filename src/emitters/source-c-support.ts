@@ -1,124 +1,87 @@
-import { bitWidth, type Expression } from '../ir/index.js';
-import type { Reconstruction } from '../reconstruction/model.js';
-import type { Writer } from './writer.js';
+import type { Expression } from '../ir/index.js';
 import { integerStorageBits } from './expressions.js';
 
-/** Implement only helpers with exact ordinary C bit-vector semantics. Unknown
- * values, machine effects and FP-environment operations deliberately stay opaque. */
-export function declareCScalarSupport(
-  program: Pick<Reconstruction, 'values' | 'expressions' | 'source'>,
-  writer: Writer,
-): void {
-  writer.line(0, '#include <stdbool.h>');
-  const operations = new Set<Extract<Expression, { kind: 'integer' }>['op']>();
+type IntegerOperation = Extract<Expression, { kind: 'integer' }>['op'];
+
+/** Comments and literals can name a helper without calling it. */
+const NON_CODE = /\/\*[\s\S]*?\*\/|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g;
+const REFERENCE =
+  /\b(?:(bv_[a-z]+|insert_bits|flag_sub_overflow|flag_add_carry)\((?:\s*(\d+))?|(__od_bitcast_(?:f32_u32|u32_f32|f64_u64|u64_f64)|data_address|u?int128_t|bool|true|false|isunordered)\b)/g;
+
+const BITCASTS = [
+  ['f32_u32', 'float', 'uint32_t'],
+  ['u32_f32', 'uint32_t', 'float'],
+  ['f64_u64', 'double', 'uint64_t'],
+  ['u64_f64', 'uint64_t', 'double'],
+] as const;
+
+/** Prelude lines that the emitted C text actually references: exact ordinary C
+ * bit-vector helpers plus the `#include`/`#define` lines they (transitively) and
+ * the text itself need. Unknown values, machine effects and FP-environment
+ * operations deliberately stay opaque. Order is fixed, never first-use. */
+export function cScalarSupport(text: string): string[] {
+  const operations = new Set<IntegerOperation>();
   const widths = new Set<number>();
-  let wide = false;
-  let floating = false;
-  let inserts = false,
-    integerInserts = true;
-  let subtractionOverflow = false,
-    boundedSubtraction = true;
-  let additionCarry = false,
-    boundedAddition = true;
-  for (const value of program.values.values()) {
-    writer.context.checkpoint(1);
-    if (bitWidth(value.type) === 128) wide = true;
-    if (value.type.kind === 'float' && (value.type.bits === 32 || value.type.bits === 64))
-      floating = true;
+  const called = new Set<string>();
+  const used = new Set<string>();
+  for (const match of text.replace(NON_CODE, ' ').matchAll(REFERENCE)) {
+    const [, call, width, token] = match;
+    if (token) {
+      used.add(token);
+      continue;
+    }
+    const bits = width === undefined ? undefined : Number(width);
+    if (bits !== undefined && (bits < 1 || bits > 128)) continue;
+    if (call!.startsWith('bv_')) {
+      const operation = call!.slice(3) as IntegerOperation;
+      if (!Object.hasOwn(bodies, operation)) continue;
+      operations.add(operation);
+    } else called.add(call!);
+    if (bits !== undefined && (call!.startsWith('bv_') || call === 'insert_bits')) widths.add(bits);
   }
-  for (const expression of program.expressions.values()) {
-    writer.context.checkpoint(1);
-    if (expression.kind === 'insert') {
-      inserts = true;
-      if (
-        expression.base.type.kind !== 'integer' ||
-        expression.value.type.kind !== 'integer' ||
-        bitWidth(expression.base.type) > 128
-      )
-        integerInserts = false;
-      else widths.add(bitWidth(expression.base.type));
-    }
-    if (expression.kind === 'flag' && expression.op === 'sub' && expression.flag === 'overflow') {
-      subtractionOverflow = true;
-      if (bitWidth(expression.left.type) > 128) boundedSubtraction = false;
-    }
-    if (expression.kind === 'flag' && expression.op === 'add' && expression.flag === 'carry') {
-      additionCarry = true;
-      if (bitWidth(expression.left.type) > 128) boundedAddition = false;
-    }
-    if (expression.kind !== 'integer' || bitWidth(expression.left.type) > 128) continue;
-    if (bodies[expression.op]) {
-      operations.add(expression.op);
-      widths.add(bitWidth(expression.left.type));
-    }
-  }
-  if (
-    wide ||
-    operations.size ||
-    (inserts && integerInserts) ||
-    (subtractionOverflow && boundedSubtraction) ||
-    (additionCarry && boundedAddition)
-  ) {
-    writer.line(0, '#define uint128_t __uint128_t');
-    writer.line(0, '#define int128_t __int128_t');
-  }
-  for (const width of widths)
-    writer.line(0, `#define __od_uint_${width}_t uint${integerStorageBits(width)}_t`);
-  for (const operation of operations) {
-    writer.line(
-      0,
+  const bitcasts = BITCASTS.filter(([name]) => used.has(`__od_bitcast_${name}`));
+  const signedDivision = operations.has('sdiv') || operations.has('srem');
+  const wide = used.has('uint128_t') || operations.size > 0 || called.size > 0;
+  const lines: string[] = [];
+  if (used.has('bool') || used.has('true') || used.has('false')) lines.push('#include <stdbool.h>');
+  if (used.has('isunordered')) lines.push('#include <math.h>');
+  if (bitcasts.length) lines.push('#include <string.h>');
+  if (wide) lines.push('#define uint128_t __uint128_t');
+  if (used.has('int128_t') || signedDivision) lines.push('#define int128_t __int128_t');
+  for (const width of [...widths].sort((a, b) => a - b))
+    lines.push(`#define __od_uint_${width}_t uint${integerStorageBits(width)}_t`);
+  for (const operation of Object.keys(bodies) as IntegerOperation[]) {
+    if (!operations.has(operation)) continue;
+    lines.push(
       `static inline uint128_t __od_bv_${operation}(unsigned width, uint128_t a, uint128_t b) { ${bodies[operation]} }`,
-    );
-    writer.line(
-      0,
       `#define bv_${operation}(width, a, b) ((__od_uint_##width##_t)__od_bv_${operation}(width, a, b))`,
     );
   }
-  if (inserts && integerInserts) {
-    writer.line(
-      0,
+  if (called.has('insert_bits'))
+    lines.push(
       'static inline uint128_t __od_insert_bits(unsigned width, uint128_t base, unsigned value_width, uint128_t value, unsigned offset) { uint128_t mask = ~(uint128_t)0 >> (128 - value_width); return ((base & ~(mask << offset)) | ((value & mask) << offset)) & (~(uint128_t)0 >> (128 - width)); }',
-    );
-    writer.line(
-      0,
       '#define insert_bits(width, base, value_width, value, offset) ((__od_uint_##width##_t)__od_insert_bits(width, base, value_width, value, offset))',
     );
-  }
-  if (subtractionOverflow && boundedSubtraction)
-    writer.line(
-      0,
+  if (called.has('flag_sub_overflow'))
+    lines.push(
       'static inline uint8_t flag_sub_overflow(unsigned width, uint128_t a, uint128_t b, uint8_t borrow) { return (uint8_t)(((a ^ b) & (a ^ (a - b - borrow))) >> (width - 1)) & 1; }',
     );
-  if (additionCarry && boundedAddition)
-    writer.line(
-      0,
+  if (called.has('flag_add_carry'))
+    lines.push(
       'static inline uint8_t flag_add_carry(unsigned width, uint128_t a, uint128_t b, uint8_t carry) { uint128_t room = (~(uint128_t)0 >> (128 - width)) - b; return a > room || (carry && a == room); }',
     );
-  if (floating) {
-    writer.line(0, '#include <string.h>');
-    for (const [bits, type] of [
-      [32, 'float'],
-      [64, 'double'],
-    ] as const) {
-      writer.line(
-        0,
-        `static inline ${type} __od_bitcast_f${bits}_u${bits}(uint${bits}_t value) { ${type} result; _Static_assert(sizeof(result) == sizeof(value), "matching IEEE storage"); memcpy(&result, &value, sizeof(result)); return result; }`,
-      );
-      writer.line(
-        0,
-        `static inline uint${bits}_t __od_bitcast_u${bits}_f${bits}(${type} value) { uint${bits}_t result; _Static_assert(sizeof(result) == sizeof(value), "matching IEEE storage"); memcpy(&result, &value, sizeof(result)); return result; }`,
-      );
-    }
-  }
-  if (program.source?.addresses.some((address) => address.object)) {
-    writer.line(
-      0,
+  for (const [name, result, parameter] of bitcasts)
+    lines.push(
+      `static inline ${result} __od_bitcast_${name}(${parameter} value) { ${result} result; _Static_assert(sizeof(result) == sizeof(value), "matching IEEE storage"); memcpy(&result, &value, sizeof(result)); return result; }`,
+    );
+  if (used.has('data_address'))
+    lines.push(
       'static inline uintptr_t data_address(const char *name, uintptr_t base, uintptr_t offset, ...) { (void)name; return base + offset; }',
     );
-  }
+  return lines;
 }
 
-const bodies: Partial<Record<Extract<Expression, { kind: 'integer' }>['op'], string>> = {
+const bodies: Partial<Record<IntegerOperation, string>> = {
   udiv: '(void)width; return a / b;',
   urem: '(void)width; return a % b;',
   sdiv: 'uint128_t sign = (uint128_t)1 << (width - 1); int128_t x = (int128_t)((a ^ sign) - sign), y = (int128_t)((b ^ sign) - sign); uint128_t mask = ~(uint128_t)0 >> (128 - width); if (a == sign && b == mask) __builtin_unreachable(); return (uint128_t)(x / y) & mask;',

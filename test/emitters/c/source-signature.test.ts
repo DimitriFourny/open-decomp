@@ -2,19 +2,21 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
+import { recoverTypes } from '../../../src/analysis/types/index.js';
 import { integer, type SSAForm } from '../../../src/ir/index.js';
 import { createOperationContext } from '../../../src/core/index.js';
 import { structureControlFlow } from '../../../src/presentation/index.js';
 import { reconstruct } from '../../../src/reconstruction/index.js';
 import { LocalValidationSession } from '../../../src/reconstruction/local-validation.js';
 import { projectSourceSignature } from '../../../src/reconstruction/source-signature.js';
-import { builder, image, register } from '../../ir/support.js';
+import { builder, image, register, slice } from '../../ir/support.js';
 import { emit, emittedFormals, execute } from './support.js';
 
 const i8 = integer(8),
   i32 = integer(32),
   i64 = integer(64);
 const rdi = register('rdi', 64, 0, 'replace_root', 'x86_64:rdi');
+const rsi = register('rsi', 64, 0, 'replace_root', 'x86_64:rsi');
 const rax = register('rax', 64, 0, 'replace_root', 'x86_64:rax');
 function difference(
   store: boolean | 'unrelated' = false,
@@ -158,7 +160,7 @@ for (const language of ['c-like', 'python-like'] as const) {
       const ir = constructSSA(b.finish(block, [i64])).value as SSAForm;
       const output = emit(ir, { source }, language).emission;
       assert.equal(
-        output.local_validation?.some((record) => record.rule === 'formal_low_word') ?? false,
+        output.local_validation?.some((record) => record.rule === 'formal_low_slice') ?? false,
         !highUse,
       );
       const formal = emittedFormals(output)[0]!;
@@ -264,6 +266,241 @@ for (const language of ['c-like', 'python-like'] as const) {
       );
       assert.deepEqual(observed.values, [(1n << BigInt(bits)) - 1n]);
       assert.deepEqual(observed.events, mixed ? ['load', 'load'] : ['load']);
+    }
+  });
+  test(`${language} only IEEE accesses type a floating element pointer`, () => {
+    for (const mixed of [false, true]) {
+      const b = builder(`signature-float-pointer-${mixed}`),
+        block = b.block('entry');
+      const pointer = block.readRegister(rdi);
+      const loaded = block.load(
+        { kind: 'float', bits: 64 },
+        block.int('add', pointer, block.constant(i64, 8n)),
+      );
+      const bits = block.cast('bitcast', i64, loaded);
+      block.return([mixed ? block.int('add', bits, block.load(integer(64), pointer)) : bits]);
+      const output = emit(
+        constructSSA(b.finish(block, [i64])).value as SSAForm,
+        { source },
+        language,
+      ).emission;
+      assert.equal(
+        output.local_validation?.some((record) => record.rule === 'formal_pointer') ?? false,
+        !mixed,
+      );
+      assert.equal(
+        new RegExp(language === 'c-like' ? 'const double\\*' : 'pointer\\[double\\]').test(
+          output.text,
+        ),
+        !mixed,
+      );
+    }
+  });
+  test(`${language} indexed and displaced accesses type an element pointer; mixed elements keep the integer`, () => {
+    for (const mixed of [false, true]) {
+      const b = builder(`signature-indexed-${mixed}`),
+        block = b.block('entry');
+      const pointer = block.readRegister(rdi);
+      const index = block.cast(
+        'zero_extend',
+        i64,
+        block.cast('truncate', i32, block.readRegister(rsi)),
+      );
+      const element = block.load(
+        i32,
+        block.int('add', pointer, block.int('shl', index, block.constant(i64, 2n))),
+      );
+      const displaced = block.load(i32, block.int('add', pointer, block.constant(i64, 8n)));
+      let sum = block.int('add', element, displaced);
+      if (mixed)
+        sum = block.int(
+          'add',
+          sum,
+          block.cast(
+            'zero_extend',
+            i32,
+            block.load(i8, block.int('add', pointer, block.constant(i64, 1n))),
+          ),
+        );
+      block.return([block.cast('zero_extend', i64, sum)]);
+      const output = emit(
+        constructSSA(b.finish(block, [i64])).value as SSAForm,
+        { source },
+        language,
+      ).emission;
+      assert.equal(
+        output.local_validation?.some((record) => record.rule === 'formal_pointer') ?? false,
+        !mixed,
+      );
+      assert.ok(output.local_validation?.some((record) => record.rule === 'formal_low_slice'));
+      assert.match(
+        output.text,
+        language === 'c-like'
+          ? mixed
+            ? /\(uint64_t \w+, uint32_t \w+\)/
+            : /\(const uint32_t\* \w+, uint32_t \w+\)/
+          : mixed
+            ? /\(\w+: uint64_t, \w+: uint32_t\)/
+            : /\(\w+: pointer\[uint32_t\], \w+: uint32_t\)/,
+      );
+      if (language === 'c-like' && !mixed) {
+        assert.match(output.text, /\w+\[\w+\]/);
+        assert.match(output.text, /\w+\[2\]/);
+        assert.ok(output.local_validation?.some((record) => record.rule === 'typed_index'));
+      }
+      const [base, offset] = emittedFormals(output);
+      const memory = new Map(
+        Array.from({ length: 16 }, (_, index) => [0x2000n + BigInt(index), 0x11 * index] as const),
+      );
+      // C argument passing converts the carrier to the declared formal; a
+      // Python annotation does not, so its ABI-conforming caller passes the
+      // presented low word itself.
+      const carrier = 0xffffffff00000001n;
+      const observed = execute(
+        output,
+        new Map([
+          ...base!.semantic_ids.map((id) => [id, 0x2000n] as const),
+          ...offset!.semantic_ids.map(
+            (id) => [id, language === 'c-like' ? carrier : BigInt.asUintN(32, carrier)] as const,
+          ),
+        ]),
+        memory,
+      );
+      const word = (address: number): bigint =>
+        BigInt(memory.get(BigInt(address))!) |
+        (BigInt(memory.get(BigInt(address + 1))!) << 8n) |
+        (BigInt(memory.get(BigInt(address + 2))!) << 16n) |
+        (BigInt(memory.get(BigInt(address + 3))!) << 24n);
+      const expected = BigInt.asUintN(
+        32,
+        word(0x2004) + word(0x2008) + (mixed ? BigInt(memory.get(0x2001n)!) : 0n),
+      );
+      assert.deepEqual(observed.values, [expected]);
+      assert.deepEqual(observed.memory, memory);
+    }
+  });
+  test(`${language} unsigned low slices narrow formals; a whole-value call argument refuses`, () => {
+    for (const escape of [false, true]) {
+      const b = builder(`signature-low-slice-${escape}`),
+        block = b.block('entry');
+      const carrier = block.readRegister(rdi);
+      const masked = block.int('and', carrier, block.constant(i64, 0xffffn));
+      const middle = block.cast('zero_extend', i64, block.extract(carrier, 8, 8));
+      if (escape)
+        block.call(
+          { kind: 'direct', address: { image_id: image, space: 'va', value: 0x4000n } },
+          [carrier],
+          [],
+          { registers: [], flags: [], memory: 'none' },
+          [`evidence_${'d'.repeat(64)}`],
+        );
+      block.return([block.int('or', block.int('shl', masked, block.constant(i64, 40n)), middle)]);
+      const output = emit(
+        constructSSA(b.finish(block, [i64])).value as SSAForm,
+        { source },
+        language,
+      ).emission;
+      assert.equal(
+        output.local_validation?.some((record) => record.rule === 'formal_low_slice') ?? false,
+        !escape,
+      );
+      assert.match(
+        output.text,
+        new RegExp(
+          language === 'c-like'
+            ? `\\(${escape ? 'uint64_t' : 'uint16_t'} \\w+\\)`
+            : `\\(\\w+: ${escape ? 'uint64_t' : 'uint16_t'}\\)`,
+        ),
+      );
+      if (escape) continue;
+      const [formal] = emittedFormals(output);
+      const bits = 0xdeadbeefcafe1234n;
+      const observed = execute(
+        output,
+        new Map(
+          formal!.semantic_ids.map((id) => [
+            id,
+            language === 'c-like' ? bits : BigInt.asUintN(16, bits),
+          ]),
+        ),
+      );
+      assert.deepEqual(observed.values, [(0x1234n << 40n) | 0x12n]);
+    }
+  });
+  test(`${language} formal uses and slot pointer types propagate through promoted frame slots`, () => {
+    for (const conflict of [false, true]) {
+      const abi = sysvAMD64Abi;
+      const b = builder(`signature-spilled-formals-${conflict}`),
+        entry = b.block('entry'),
+        head = b.block('head'),
+        body = b.block('body'),
+        exit = b.block('exit');
+      const slot = (block: typeof entry, offset: bigint) =>
+        block.int('sub', block.readRegister(abi.stack_pointer), block.constant(i64, offset));
+      entry.store(slot(entry, 8n), entry.readRegister(rdi));
+      entry.store(slot(entry, 16n), entry.readRegister(rsi));
+      entry.store(slot(entry, 24n), entry.constant(i64, 0n));
+      entry.jump(head);
+      const count = head.cast('truncate', i32, head.load(i64, slot(head, 16n)));
+      head.branch(
+        head.compare('eq', count, head.constant(i32, 0n)),
+        head.edge(exit),
+        head.edge(body),
+      );
+      const cursor = body.load(i64, slot(body, 8n));
+      const byte = body.cast('zero_extend', i64, body.load(i8, cursor));
+      body.store(slot(body, 24n), body.int('add', body.load(i64, slot(body, 24n)), byte));
+      // A non-pointer step stored into the slot keeps its integer declaration.
+      body.store(
+        slot(body, 8n),
+        body.int(conflict ? 'xor' : 'add', cursor, body.constant(i64, 1n)),
+      );
+      const remaining = body.cast('truncate', i32, body.load(i64, slot(body, 16n)));
+      body.store(
+        slot(body, 16n),
+        body.cast('zero_extend', i64, body.int('sub', remaining, body.constant(i32, 1n))),
+      );
+      body.jump(head);
+      exit.return([exit.load(i64, slot(exit, 24n))]);
+      const ir = constructSSA(b.finish(entry, [i64])).value as SSAForm;
+      const types = recoverTypes(ir, abi, createOperationContext(), {
+        image_id: image,
+        slice_id: slice,
+        revision: 0,
+      });
+      const output = emit(ir, { types, source }, language).emission;
+      const rules = output.local_validation?.map((record) => record.rule) ?? [];
+      assert.ok(rules.includes('private_stack_promotion'));
+      assert.ok(rules.includes('formal_pointer'));
+      assert.ok(rules.includes('formal_low_slice'));
+      assert.equal(rules.includes('slot_pointer_type'), !conflict);
+      assert.match(
+        output.text,
+        language === 'c-like'
+          ? /\(const uint8_t\* \w+, uint32_t \w+\)/
+          : /\(\w+: pointer\[uint8_t\], \w+: uint32_t\)/,
+      );
+      if (language === 'c-like') {
+        assert.equal(/^ {2}const uint8_t\* \w+;$/m.test(output.text), !conflict);
+        assert.equal(/^ {2}\w+ = \(uintptr_t\)\w+;$/m.test(output.text), conflict);
+      }
+      const [pointer, count_] = emittedFormals(output);
+      const memory = new Map([
+        [0x3000n, 5],
+        [0x3001n, 7],
+        [0x3002n, 250],
+        [0x3003n, 99],
+      ]);
+      const observed = execute(
+        output,
+        new Map([
+          ...pointer!.semantic_ids.map((id) => [id, 0x3000n] as const),
+          ...count_!.semantic_ids.map((id) => [id, 0x5555555500000003n] as const),
+        ]),
+        memory,
+      );
+      assert.deepEqual(observed.values, [conflict ? 17n : 262n]);
+      assert.deepEqual(observed.memory, memory);
     }
   });
   test(`${language} narrow results omit undemanded high slices under the ABI requirement`, () => {

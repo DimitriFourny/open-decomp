@@ -270,6 +270,43 @@ export class Writer {
     if (code) this.codeLines++;
   }
 
+  /** Insert whole depth-0 lines at an existing line boundary of the emitted text.
+   * A prelude can then depend on the final body; recorded mappings at or after
+   * the boundary move with it, and the displacement is returned for callers that
+   * keep offsets of their own. */
+  insertLines(offset: number, lines: readonly string[]): number {
+    this.context.checkpoint(lines.length);
+    if (!lines.length) return 0;
+    let index = 0,
+      at = 0;
+    while (at < offset && index < this.parts.length) at += this.parts[index++]!.length;
+    if (at !== offset) throw new RangeError('Insertion offset is not a line boundary');
+    const inserted = lines.map((text) => `${text}\n`);
+    let delta = 0,
+      bytes = 0;
+    for (const line of inserted) {
+      bytes += Buffer.byteLength(line);
+      delta += line.length;
+      this.guard(this.bytes + this.metadataBytes + bytes);
+    }
+    for (let item = 0; item < this.mappings.length; item++) {
+      this.context.checkpoint(0);
+      const mapping = this.mappings[item]!;
+      if (mapping.start >= offset)
+        this.mappings[item] = {
+          ...mapping,
+          start: mapping.start + delta,
+          end: mapping.end + delta,
+        };
+      else if (mapping.end > offset) throw new RangeError('Insertion offset splits a mapping');
+    }
+    this.parts.splice(index, 0, ...inserted);
+    this.bytes += bytes;
+    this.offset += delta;
+    this.codeLines += lines.length;
+    return delta;
+  }
+
   helper(name: string, explanation: string): string {
     if (!this.helperNames.has(name)) {
       if (this.helpers.length >= 1000) this.fail('Pseudocode helper limit exceeded');

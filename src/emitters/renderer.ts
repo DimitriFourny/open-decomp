@@ -31,7 +31,7 @@ import type { SuppliedTypeRecord } from '../analysis/types/index.js';
 import { reconstruct } from '../reconstruction/index.js';
 import type { BoundaryProjection, Reconstruction } from '../reconstruction/model.js';
 import { validateReconstruction, validateRenderedTransfers } from '../reconstruction/validate.js';
-import type { SourceAddress } from '../reconstruction/source-model.js';
+import type { SourceAddress, SourceFormalType } from '../reconstruction/source-model.js';
 import { sourceDataValues } from '../reconstruction/source-data.js';
 import {
   sourceFpPresentation,
@@ -39,7 +39,7 @@ import {
   type SourceFpPresentation,
 } from '../reconstruction/source-fp.js';
 import { indexedDataAccesses, type IndexedDataAccess } from './source-tables.js';
-import { declareCScalarSupport } from './source-c-support.js';
+import { cScalarSupport } from './source-c-support.js';
 import { cSourceName } from '../metadata/symbols/c-names.js';
 import { catalog, type CatalogEntry } from '../metadata/library-contracts/catalog.js';
 import { planSourceNames, sourceIdentifierStem } from '../reconstruction/source-names.js';
@@ -465,14 +465,57 @@ export class Renderer {
       )
         return this.sourceType(source);
     }
-    if (formal)
-      return formal.kind === 'integer'
-        ? `${formal.signed ? 'int' : 'uint'}${formal.bits}_t`
-        : this.language === 'c-like'
-          ? `${formal.const ? 'const ' : ''}uint${formal.pointee_bits}_t*`
-          : `pointer[uint${formal.pointee_bits}_t]`;
+    if (formal) return this.formalSpelling(formal);
     if (source) return this.sourceType(source);
     return this.dataType(value.type);
+  }
+
+  /** Source spelling of an inferred formal or typed promoted-slot type. */
+  private formalSpelling(formal: SourceFormalType): string {
+    if (formal.kind === 'integer') return `${formal.signed ? 'int' : 'uint'}${formal.bits}_t`;
+    const element =
+      formal.pointee === 'float'
+        ? formal.pointee_bits === 32
+          ? 'float'
+          : 'double'
+        : `uint${formal.pointee_bits}_t`;
+    return this.language === 'c-like'
+      ? `${formal.const ? 'const ' : ''}${element}*`
+      : `pointer[${element}]`;
+  }
+
+  /** Proven pointer type of the promoted slot a load/store node accesses. */
+  private slotType(node: string): SourceFormalType | undefined {
+    const local = this.sourceView ? this.program.source?.locals.get(node) : undefined;
+    return local && this.program.source?.local_types?.get(local.id);
+  }
+
+  /** C pointer spelling of a value proven to be of a typed slot's pointer kind:
+   * a declared pointer, a typed-slot reload or a whole-element constant step. */
+  private pointerText(value: Value, formal: SourceFormalType, depth = 0): string | null {
+    if (formal.kind !== 'pointer' || depth > 16) return null;
+    value = this.uncast(value, ['bitcast']);
+    const load = this.inlined.get(value.id)?.node;
+    if (load?.kind === 'load' && this.slotType(load.id)) return this.storage(load);
+    if (!this.inline.has(value.id))
+      return this.declaredSpelling(value).replace(/^const /, '') ===
+        this.formalSpelling(formal).replace(/^const /, '')
+        ? this.local(value)
+        : null;
+    const expression = this.program.expressions.get(value.id);
+    if (expression?.kind !== 'integer' || (expression.op !== 'add' && expression.op !== 'sub'))
+      return null;
+    const right = this.constantOf(expression.right),
+      left = expression.op === 'add' ? this.constantOf(expression.left) : undefined;
+    const [base, bytes] = right !== undefined ? [expression.left, right] : [expression.right, left];
+    if (bytes === undefined || value.type.kind !== 'integer') return null;
+    const text = this.pointerText(base, formal, depth + 1);
+    const displacement =
+      BigInt.asIntN(value.type.bits, bytes) * (expression.op === 'sub' ? -1n : 1n);
+    const size = BigInt(formal.pointee_bits / 8);
+    if (text === null || displacement % size !== 0n) return null;
+    const count = displacement / size;
+    return count === 0n ? text : `${text} ${count < 0n ? '-' : '+'} ${count < 0n ? -count : count}`;
   }
 
   private dataType(type: DataType): string {
@@ -763,10 +806,17 @@ export class Renderer {
           : this.constantOf(expression.left) === 0n
             ? expression.right
             : undefined;
+      const slotLoad = pointer && this.inlined.get(pointer.id)?.node;
+      const name = !pointer
+        ? null
+        : slotLoad?.kind === 'load' && this.slotType(slotLoad.id)
+          ? this.storage(slotLoad)
+          : !this.inline.has(pointer.id) && this.declaredPointer(pointer)
+            ? this.local(pointer)
+            : null;
       if (
         pointer &&
-        !this.inline.has(pointer.id) &&
-        this.declaredPointer(pointer) &&
+        name !== null &&
         this.localValidation.presentation(
           'pointer_null_test',
           pointer.id,
@@ -780,7 +830,7 @@ export class Renderer {
         );
         return this.printer.binary(
           expression.op === 'eq' ? '==' : '!=',
-          this.printer.primary(this.local(pointer)),
+          this.printer.primary(name),
           this.printer.literal(0n, 64),
           { bits: 1, signed: false },
         );
@@ -957,6 +1007,15 @@ export class Renderer {
         this.writer.fail('Reconstructed expression expansion exceeds its budget');
       this.expanding.add(value.id);
       const storage = this.storage(load);
+      if (this.language === 'c-like' && this.slotType(load.id)) {
+        // A typed pointer slot read in integer context yields its address bits.
+        this.expanding.delete(value.id);
+        return {
+          text: `(uintptr_t)${storage}`,
+          precedence: UNARY,
+          ctype: { bits: bitWidth(value.type), signed: false },
+        };
+      }
       const id =
         this.sourceValueTypes.get(load.address.id) ??
         this.program.source?.value_types?.get(load.address.id)?.type_id;
@@ -999,8 +1058,15 @@ export class Renderer {
           declared &&
           value.type.kind === 'integer' &&
           declared.bits !== value.type.bits
-        )
-          return this.printer.cast(value.type.bits, false, this.printer.primary(name, declared));
+        ) {
+          const narrow = this.printer.primary(name, declared);
+          const wide = this.printer.cast(value.type.bits, false, narrow);
+          // A narrower unsigned declaration zero-extends: consumers that keep
+          // only its low bits may read the declared variable itself.
+          return declared.bits < value.type.bits && !declared.signed
+            ? { ...wide, widened: narrow }
+            : wide;
+        }
         if (declared?.signed)
           return this.printer.cast(declared.bits, false, this.printer.primary(name, declared));
         if (declared) return this.printer.primary(name, declared);
@@ -1157,11 +1223,17 @@ export class Renderer {
     }
     const origins = this.program.origins.get(origin.id) ?? [];
     const seen = new Set<string>();
+    // Every contributor maps the same span. The caller's subject ids belong to
+    // that span, so publish them once (with the primary origin) rather than
+    // repeating them in each contributor's mapping; each contributor keeps its
+    // own semantic ids and instruction/range provenance.
+    let shared = ids;
     for (const contributor of [origin, ...origins]) {
       this.context.checkpoint(1);
       if (seen.has(contributor.id)) continue;
       seen.add(contributor.id);
-      this.mapped(contributor, start, [...ids, ...this.semanticIds(contributor)], [], end);
+      this.mapped(contributor, start, [...shared, ...this.semanticIds(contributor)], [], end);
+      shared = [];
       if (this.statements.has(contributor.id)) this.mappedStatements.add(contributor.id);
       if (this.controls.has(contributor.id)) this.mappedControls.add(contributor.id);
     }
@@ -1541,6 +1613,65 @@ export class Renderer {
 
   private partialLayout(id: string): readonly ObservedMember[] | null {
     return this.sourceView && this.language === 'c-like' ? this.sourceStructs.layout(id) : null;
+  }
+
+  /** `p[i]` for an inline address `p + term` through a declared scalar pointer
+   * of exactly the accessed width: the term is the index scaled by the element
+   * size (unscaled for bytes), or a constant multiple of that size. */
+  private typedIndex(address: Value, bits: number): string | null {
+    const expression = this.program.expressions.get(address.id);
+    if (
+      expression?.kind !== 'integer' ||
+      expression.op !== 'add' ||
+      address.type.kind !== 'integer'
+    )
+      return null;
+    const size = BigInt(bits / 8);
+    for (const [base, term] of [
+      [expression.left, expression.right],
+      [expression.right, expression.left],
+    ] as const) {
+      const pointer = this.scalarPointerBase(base, bits);
+      if (pointer === null) continue;
+      const displacement = this.constantOf(term);
+      if (displacement !== undefined) {
+        const signed = BigInt.asIntN(address.type.bits, displacement);
+        if (signed % size !== 0n) continue;
+        return `${pointer}[${signed / size}]`;
+      }
+      let index: Value | undefined = size === 1n ? term : undefined;
+      const scaled = this.inline.has(term.id) ? this.program.expressions.get(term.id) : undefined;
+      if (!index && scaled?.kind === 'integer') {
+        const right = this.constantOf(scaled.right),
+          left = this.constantOf(scaled.left);
+        if (scaled.op === 'shl' && right !== undefined && right < 64n && 1n << right === size)
+          index = scaled.left;
+        else if (scaled.op === 'mul' && right === size) index = scaled.left;
+        else if (scaled.op === 'mul' && left === size) index = scaled.right;
+      }
+      if (!index || this.declaredSpelling(index).endsWith('*')) continue;
+      const printed = this.printed(index);
+      return `${pointer}[${(printed.widened ?? printed).text}]`;
+    }
+    return null;
+  }
+
+  /** Name of a declared scalar pointer of exactly `bits` element width: a
+   * printed variable, or an inline reload of a typed promoted slot. */
+  private scalarPointerBase(value: Value, bits: number): string | null {
+    const load = this.inlined.get(value.id)?.node;
+    if (load?.kind === 'load' && this.slotType(load.id)) {
+      const slot = this.slotType(load.id)!;
+      return this.language === 'c-like' &&
+        slot.kind === 'pointer' &&
+        slot.pointee === 'integer' &&
+        slot.pointee_bits === bits
+        ? this.storage(load)
+        : null;
+    }
+    return !this.inline.has(value.id) && this.declaredPointer(value)?.bits === bits
+      ? this.local(value)
+      : null;
   }
 
   /** `p->f_<offset>` for an access at `p + offset` through a declared pointer to
@@ -1958,10 +2089,10 @@ export class Renderer {
         !access.volatile &&
         access.alignment === 1;
     const pointerAddress = this.uncast(node.address, ['bitcast']);
-    if (this.language === 'c-like' && plain && !this.inline.has(pointerAddress.id)) {
-      const pointee = this.declaredPointer(pointerAddress);
+    if (this.language === 'c-like' && plain) {
+      const pointer = this.scalarPointerBase(pointerAddress, bitWidth(type));
       if (
-        pointee?.bits === bitWidth(type) &&
+        pointer !== null &&
         this.permitUnaligned(node) &&
         this.localValidation.presentation(
           'typed_dereference',
@@ -1969,7 +2100,20 @@ export class Renderer {
           'declared scalar pointer of exactly the accessed width at displacement 0',
         )
       )
-        return `*${this.local(pointerAddress)}`;
+        return `*${pointer}`;
+    }
+    if (this.language === 'c-like' && plain && this.inline.has(pointerAddress.id)) {
+      const indexed = this.typedIndex(pointerAddress, bitWidth(type));
+      if (
+        indexed &&
+        this.permitUnaligned(node) &&
+        this.localValidation.presentation(
+          'typed_index',
+          this.input.function.id,
+          'declared scalar pointer of exactly the accessed width plus an index scaled by, or a constant displacement that is a multiple of, the element size; C subscript scaling yields the same address bits',
+        )
+      )
+        return indexed;
     }
     if (this.language === 'c-like' && plain) {
       const member = this.memberAccess(node.address, bitWidth(type));
@@ -2236,6 +2380,17 @@ export class Renderer {
       )}`;
     }
     storage ??= this.storage(node);
+    const typed = this.language === 'c-like' ? this.slotType(node.id) : undefined;
+    if (typed && this.program.live.has(node.result.id)) {
+      const spelling = this.declaredSpelling(node.result);
+      return `${this.local(node.result)} = ${
+        spelling.replace(/^const /, '') === this.formalSpelling(typed).replace(/^const /, '')
+          ? storage
+          : spelling.endsWith('*')
+            ? `(${spelling})${storage}`
+            : `(uintptr_t)${storage}`
+      }`;
+    }
     return this.program.live.has(node.result.id)
       ? `${this.local(node.result)} = ${
           this.sourceInterpretation(node.result, {
@@ -2318,7 +2473,14 @@ export class Renderer {
           if (node.kind === 'store') {
             // Storing converts to the lvalue's own width (a local is declared
             // unsigned; a dereference has exactly the stored width).
-            text = `${storage} = ${this.converted(this.printed(node.value), bitWidth(node.value.type))}`;
+            const typed = this.language === 'c-like' ? this.slotType(node.id) : undefined;
+            const pointer = typed && this.pointerText(node.value, typed);
+            text = `${storage} = ${
+              pointer ??
+              (typed
+                ? `(${this.formalSpelling(typed)})(uintptr_t)${this.printer.group(this.printed(node.value), UNARY)}`
+                : this.converted(this.printed(node.value), bitWidth(node.value.type)))
+            }`;
           } else text = this.assignmentText(node, storage);
           break;
         }
@@ -3006,6 +3168,7 @@ export class Renderer {
     condition: Printed,
     compare: Extract<Expression, { kind: 'compare' }> | undefined,
     compared: Value,
+    inverted?: Value,
   ): void {
     const c = this.language === 'c-like';
     const negate = (printed: Printed, flip?: Extract<Expression, { kind: 'compare' }>): string =>
@@ -3014,8 +3177,13 @@ export class Renderer {
         : c
           ? `!${this.printer.group(printed, UNARY)}`
           : `not ${this.printer.group(printed, PRIMARY)}`;
+    // The complement of an inline logical negation is its operand.
     const test = (positive: boolean): string =>
-      positive ? condition.text : negate(condition, compare);
+      positive
+        ? condition.text
+        : inverted
+          ? this.printed(inverted).text
+          : negate(condition, compare);
     const form = this.loopTests.get(control.id);
     if (form?.kind === 'while' && form.chain) {
       const stage = form.chain.find((item) => item.test === control.id)!;
@@ -3573,6 +3741,12 @@ export class Renderer {
             requirement ? this.printer.primary(condition) : this.printed(control.condition),
             requirement || expression?.kind !== 'compare' ? undefined : expression,
             conditionValue,
+            !requirement &&
+              expression?.kind === 'integer_unary' &&
+              expression.op === 'not' &&
+              bitWidth(conditionValue.type) === 1
+              ? expression.value
+              : undefined,
           );
           break;
         }
@@ -3889,7 +4063,7 @@ export class Renderer {
         const start = w.offset;
         w.comment(
           0,
-          `Requirement ${requirement.id} (${requirement.status}): ${this.fpPresentation.guards.size ? SOURCE_FP_ENVIRONMENT : requirement.explanation}`,
+          `Requirement ${requirement.id} (${requirement.status}): ${this.sourceView ? 'assumes nearest-even rounding and masked FP traps; full text in requirements metadata.' : requirement.explanation}`,
         );
         for (const site of requirement.sites) {
           const origin = this.origins.get(site.subject_ids[0]!);
@@ -3986,7 +4160,8 @@ export class Renderer {
     const floating = this.sourceView && this.program.source?.return_float;
     if (floating) returnType = floating === 32 ? 'float' : 'double';
     this.returnSpelling = returnType;
-    if (this.sourceView && this.language === 'c-like') declareCScalarSupport(this.program, w);
+    // The scalar-support prelude is chosen from the finished text and inserted here.
+    const supportAt = this.sourceView && this.language === 'c-like' ? w.offset : undefined;
     if (this.sourceView && this.language === 'c-like') {
       const typeIds: string[] = [];
       const resultType =
@@ -4095,7 +4270,11 @@ export class Renderer {
               : `local${this.sourceLocal++}`),
         ),
         start = w.offset;
-      w.statement(1, w.declaration(this.dataType(local.type), name));
+      const typed = this.slotType(node);
+      w.statement(
+        1,
+        w.declaration(typed ? this.formalSpelling(typed) : this.dataType(local.type), name),
+      );
       this.mapped(this.dataOrigin(node), start, [node]);
     }
     for (const value of this.program.values.values()) {
@@ -4121,6 +4300,14 @@ export class Renderer {
     if (this.language === 'c-like') w.line(0, '}');
     // Hidden subjects retain annotations without resurrecting dead declarations.
     for (const subject of this.notes.keys()) this.emitNotes(subject, 0);
+    if (supportAt !== undefined) {
+      const delta = w.insertLines(supportAt, cScalarSupport(w.text().slice(supportAt)));
+      this.headerStart += delta;
+      this.headerEnd += delta;
+      for (const [id, site] of this.inferenceSites)
+        if (site.start >= supportAt)
+          this.inferenceSites.set(id, { start: site.start + delta, end: site.end + delta });
+    }
     for (const item of this.input.function.coverage) {
       this.context.checkpoint(1 + item.statement_ids.length);
       if (!this.program.blocks.has(item.block_id) || !this.mappedControls.has(item.terminator_id))
