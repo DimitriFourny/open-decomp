@@ -15,9 +15,9 @@ Comparison results (all in `docs/PERFORMANCE.md`): blind readability preferred G
 
 ## Raw evidence (local, not versioned; ignored in .gitignore)
 
-`investigation-evidence-2026-10-17/` (runs 1–10, run10 private scoring), `incremental-*-2026-10-17/`, `~/Documents/open-decomp-quality-prospective-2026-10-17/`, `~/Documents/open-decomp-perf-2026-10-17-final/`. The "held-out" lane is now a frozen _published_ suite (source and JSON hash indexes are tracked; gold/results archives are external); a fresh held-out claim needs a new sealed set outside the repo.
+`investigation-evidence-2026-10-17/` (runs 1–10, run10 private scoring), `incremental-*-2026-10-17/`, `quality-rounds/round6-2026-10-18/` and `quality-heldout-inputs-2026-10-17/` (all under `.local/`; the former prospective and perf-final roots outside the repo were removed). The "held-out" lane is now a frozen _published_ suite (source and JSON hash indexes are tracked; gold/results archives are external); a fresh held-out claim needs a new sealed set outside the repo.
 
-The 15 formerly tracked benchmark archives are preserved under `~/Documents/open-decomp-evidence-archives/<original repo-relative path>`. Run `node --import tsx scripts/bench/fetch-evidence.ts` to populate `${OPEN_DECOMP_EVIDENCE_DIR:-.local/evidence}` from that durable local store (`--from DIR`, `--url-base URL` and `--only NAME` are supported). `scripts/bench/evidence-assets.json` pins sizes/SHA256; no public mirror is configured. Provision the baseline before `bun run check` so the SQLite interfaces integration test runs rather than explicitly skipping. See `docs/PERFORMANCE.md`.
+The 15 formerly tracked benchmark archives live in the canonical, gitignored store `${OPEN_DECOMP_EVIDENCE_DIR:-.local/evidence}/<original repo-relative path>`; back it up yourself. `node --import tsx scripts/bench/fetch-evidence.ts` populates the store from another copy: exactly one of `--from DIR` or `--url-base URL` is required (`--only NAME` selects one archive). `scripts/bench/evidence-assets.json` pins sizes/SHA256; no public mirror is configured. Provision the baseline before `bun run check` so the SQLite interfaces integration test runs rather than explicitly skipping. See `docs/PERFORMANCE.md`.
 
 ## Architecture review — prioritized fix plan
 

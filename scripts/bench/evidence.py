@@ -30,7 +30,7 @@ def evidence_path(repo_relative_path: str) -> Path:
         except FileNotFoundError as error:
             raise FileNotFoundError(
                 f'Missing evidence archive: {path}. Run: node --import tsx scripts/bench/fetch-evidence.ts '
-                f'--only {path.name} (optionally --from DIR or --url-base URL).'
+                f'--only {path.name} (with exactly one of --from DIR or --url-base URL).'
             ) from error
         _VERIFIED.add(path)
     return path

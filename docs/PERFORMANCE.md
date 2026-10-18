@@ -1,15 +1,16 @@
 # Performance and resource evidence
 
+Roots recorded under `~/Documents/` before round 6 no longer exist; archived evidence is in `.local/evidence/` per `scripts/bench/evidence-assets.json`. Historical sections below keep their recorded paths.
+
 ## Evidence archive setup
 
-The 15 retained `.tar.gz` bundles are external assets, not git content. `scripts/bench/evidence-assets.json` pins every original repo-relative path, byte size and SHA256. The durable local copy is `~/Documents/open-decomp-evidence-archives/`, preserving those paths. The working store is `$OPEN_DECOMP_EVIDENCE_DIR`, or `<repo>/.local/evidence` when unset. No public download location is currently configured.
+The 15 retained `.tar.gz` bundles are external assets, not git content. `scripts/bench/evidence-assets.json` pins every original repo-relative path, byte size and SHA256. The canonical store is `$OPEN_DECOMP_EVIDENCE_DIR`, or `<repo>/.local/evidence` when unset, preserving those paths; `.local/` is gitignored, so back the store up yourself. `fetch-evidence.ts` populates it from another copy of the archives; exactly one of `--from DIR` or `--url-base URL` is required. No public download location is currently configured.
 
 ```sh
-node --import tsx scripts/bench/fetch-evidence.ts
-# Equivalent explicit source:
-node --import tsx scripts/bench/fetch-evidence.ts --from "$HOME/Documents/open-decomp-evidence-archives"
+# Populate the store from another copy of the archives (e.g. your own backup), preserving repo-relative paths:
+node --import tsx scripts/bench/fetch-evidence.ts --from "$EVIDENCE_BACKUP"
 # Fetch one bundle by basename (the original repo-relative path also works):
-node --import tsx scripts/bench/fetch-evidence.ts --only baseline-2026-10-17.tar.gz
+node --import tsx scripts/bench/fetch-evidence.ts --from "$EVIDENCE_BACKUP" --only baseline-2026-10-17.tar.gz
 # If a mirror is published, it must preserve the manifest's repo-relative paths:
 node --import tsx scripts/bench/fetch-evidence.ts --url-base "$EVIDENCE_URL_BASE"
 ```
@@ -210,7 +211,7 @@ Separate causes:
 Recorded reproduction commands. The committed `scripts/bench/selected-contract.json` (the default `--contract`) selects the reviewed binaries and functions; `--inputs` (or `$OPEN_DECOMP_BENCH_INPUTS`) names a directory holding `corpus-arm64` and `sqlite3-arm64`, for example `inputs/` extracted from `$EVIDENCE/scripts/bench/quality-evidence/baseline-2026-10-17.tar.gz` (`--binary` defaults to `sqlite3-arm64`; the ten-function selection belongs to it):
 
 ```sh
-node --import tsx scripts/bench/fetch-evidence.ts --only baseline-2026-10-17.tar.gz
+node --import tsx scripts/bench/fetch-evidence.ts --from "$EVIDENCE_BACKUP" --only baseline-2026-10-17.tar.gz
 mkdir -p .local/performance/selected-inputs
 tar -xzf "${OPEN_DECOMP_EVIDENCE_DIR:-.local/evidence}/scripts/bench/quality-evidence/baseline-2026-10-17.tar.gz" -C .local/performance/selected-inputs inputs
 INPUTS="$PWD/.local/performance/selected-inputs/inputs"
@@ -244,7 +245,7 @@ Budget repair outcome (count-only diagnose, same contract): `fixture_check` 1,02
 The durable baseline archive `$EVIDENCE/scripts/bench/quality-evidence/baseline-2026-10-17.tar.gz` contains 968 individually hashed files: reviewed binaries, fixture source/license/build records, matching SQLite source, Homebrew recipe/receipt/SBOM, disassembly/manual findings, original raw responses and matched C. It excludes dependency checkouts, virtualenvs, installed tools and project databases. Archive SHA256: `9716b960dcbc94b02a49552ef195d9b2b51d54ef08bf1347a7dd1009f5cd0269`. Preparation was exercised independently and validated all 968 files:
 
 ```sh
-node --import tsx scripts/bench/fetch-evidence.ts --only baseline-2026-10-17.tar.gz
+node --import tsx scripts/bench/fetch-evidence.ts --from "$EVIDENCE_BACKUP" --only baseline-2026-10-17.tar.gz
 python3 scripts/bench/quality.py prepare --destination .local/performance/quality-reviewed
 ```
 
@@ -253,15 +254,15 @@ Use Python 3.12+, a built production CLI, Ghidra 12.1.4 with a working host-nati
 ```sh
 python3 scripts/bench/quality.py run \
   --inputs .local/performance/quality-reviewed \
-  --output "$HOME/Documents/open-decomp-quality/smoke" \
-  --ghidra-bridge "$HOME/Documents/open-decomp-quality-bridge" \
+  --output "$HOME/open-decomp-stage/smoke" \
+  --ghidra-bridge .local/quality-bridge \
   --ghidra "$GHIDRA_HOME" \
   --java-home "$JAVA_HOME" \
   --input corpus-arm64 --function fixture_arithmetic --function fixture_direct \
   --cold-runs 1 --warm-runs 1
 ```
 
-Outputs must use a new durable non-hidden directory outside `/tmp`: the exercised Ghidra stack rejects dot-prefixed project paths. Omitting selection/repetition flags records all 26 functions, three fresh projects per input/tool and ten repeated calls per function. `--profile default` and `--profile raised` remain separate populations. Requests are serialized under `.local/performance/quality.measurement.lock`; coordinate host use before making performance claims.
+Outputs must use a new durable directory outside `/tmp`. The exercised Ghidra stack rejects dot-prefixed project paths, and the Ghidra-recording commands (`quality.py run`, `quality-matrix.py run`, `quality-heldout.py run`, `quality-context.py`, `quality-persistent.py`, `investigation.py`) enforce this on the resolved `--output`, so they cannot write beneath `.local/`. Record such runs into a non-hidden staging directory such as `$HOME/open-decomp-stage/<name>`, then `mv "$HOME/open-decomp-stage/<name>" .local/quality-rounds/<round>/<name>` and `rmdir "$HOME/open-decomp-stage"` once it is empty; every other step (input builds, angr, oracle, evaluation, packets, reviews) writes directly under `.local/quality-rounds/<round>/`. Omitting selection/repetition flags records all 26 functions, three fresh projects per input/tool and ten repeated calls per function. `--profile default` and `--profile raised` remain separate populations. Requests are serialized under `.local/performance/quality.measurement.lock`; coordinate host use before making performance claims.
 
 Both tools use the same Python stdlib newline-JSON-RPC client, identical binary/symbol/address access and no injected source/types/annotations. The harness records raw requests/responses, schemas, tool/component identities, first/repeated samples, cache and semantic states, emitted artifacts and hashes. Large analysis artifacts are read across bounded resource pages and size/SHA256 checked. No analyzed binary executes. Client latency includes transport and raw logging; the selected bridge still creates a new `DecompInterface` per call, so these records are not persistent-interface engine-speed evidence.
 
@@ -274,13 +275,13 @@ The exercised two-function smoke exited zero with eight matched C outputs, succe
 Reviewed inputs: `$EVIDENCE/scripts/bench/quality-matrix-inputs.tar.gz`, SHA256 `96863c3783347be3fe75279401c3f4bd9808d29e9f16daed845f4cc96fe5e250`, with 118 member hashes in `quality-matrix-inputs.json`. The unmodified zlib archive is `$EVIDENCE/scripts/bench/quality-matrix-zlib-1.3.1.tar.gz`, SHA256 `9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23`; upstream notices are retained.
 
 ```sh
-node --import tsx scripts/bench/fetch-evidence.ts --only quality-matrix-inputs.tar.gz
+node --import tsx scripts/bench/fetch-evidence.ts --from "$EVIDENCE_BACKUP" --only quality-matrix-inputs.tar.gz
 python3 scripts/bench/quality-matrix.py prepare --destination .local/performance/quality-matrix-reviewed
 python3 scripts/bench/quality-matrix.py run \
   --inputs .local/performance/quality-matrix-reviewed \
-  --output "$HOME/Documents/open-decomp-quality-matrix-results" \
+  --output "$HOME/open-decomp-stage/matrix-results" \
   --entry dist/src/cli/entry.js \
-  --bridge "$HOME/Documents/open-decomp-quality-bridge" \
+  --bridge .local/quality-bridge \
   --ghidra "$GHIDRA_HOME" \
   --java-home "$JAVA_HOME"
 ```
@@ -321,23 +322,23 @@ These are text-availability observations, not correctness, usable-coverage or re
 
 ```sh
 python3 scripts/bench/quality-heldout.py build \
-  --output "$HOME/Documents/open-decomp-heldout-new-inputs"
+  --output .local/quality-rounds/heldout-new-inputs
 python3 scripts/bench/quality-heldout.py run \
-  --inputs "$HOME/Documents/open-decomp-heldout-new-inputs" \
-  --output "$HOME/Documents/open-decomp-heldout-new-results" \
+  --inputs .local/quality-rounds/heldout-new-inputs \
+  --output "$HOME/open-decomp-stage/heldout-new-results" \
   --entry dist/src/cli/entry.js \
-  --bridge "$HOME/Documents/open-decomp-quality-bridge" \
+  --bridge .local/quality-bridge \
   --ghidra "$GHIDRA_HOME" \
   --java-home "$JAVA_HOME"
 ```
 
-Use the pinned bridge setup and a new durable output directory outside the system temporary directory; the shared measurement lock rejects overlapping harness runs. Commands, tool identities, raw requests/responses, full artifacts, source text and failures are retained in the external store (fetch using the command above); JSON indexes remain under `scripts/bench/`:
+Use the pinned bridge setup and a new durable output directory (stage Ghidra-recording runs outside `.local/` and move them under `.local/quality-rounds/` as described above); the shared measurement lock rejects overlapping harness runs. Commands, tool identities, raw requests/responses, full artifacts, source text and failures are retained in the external store (fetch using the command above); JSON indexes remain under `scripts/bench/`:
 
 - `$EVIDENCE/scripts/bench/quality-heldout-inputs-2026-10-17.tar.gz`: 119,901 bytes; SHA256 `e6acbf080ee0b6203e99aa2ecec2aea4d475fa635fc7666737fcdb41ecf4d362`.
 - `$EVIDENCE/scripts/bench/quality-heldout-results-2026-10-17.tar.gz`: 45,648,755 bytes; SHA256 `5f1f3f063a3298b89b1ce6b5e97280119d8f8dd2693aca6ca8cf52d79cbe5872`.
 - `quality-heldout-results-2026-10-17.json`: scope, checkpoint, invocation, observations and member hashes.
 
-Intermediate objects, project databases and duplicate streams are omitted; complete run objects remain in `comparison.json`. Uncompressed originals are in `~/Documents/open-decomp-quality-heldout-{inputs,results}-2026-10-17/`. Independent source gold, actual executable-output subset checks and blind readability reviews are separate lanes. This recording does not establish the parity gate.
+Intermediate objects, project databases and duplicate streams are omitted; complete run objects remain in `comparison.json`. The uncompressed inputs are extracted from the inputs archive into `.local/quality-heldout-inputs-2026-10-17/`; the uncompressed results originals were removed with the earlier `~/Documents/open-decomp-*` roots. Independent source gold, actual executable-output subset checks and blind readability reviews are separate lanes. This recording does not establish the parity gate.
 
 ## Prospective rerun of all frozen cells (2026-10-17, commit `901602b`)
 
@@ -462,7 +463,7 @@ No angr types header was added. angr's scalar types are standard C, and `uint128
 
 The 16 `heldout_roll` counterexamples load `uint8_t` bytes as signed `char` and sign-extend them (for example, the all-`0xff` case). The 4 timeouts are emitted inner loops with no counter increment. Before the PE rule was narrowed to bare `long`, angr scored 36 cells, 1322/1322, with 32 PE plain-`long` rejections. Twelve of those 32 PE texts contained only `long long`: six now pass, four are `heldout_roll` counterexamples, and two use SSE intrinsics and do not compile.
 
-Round-5 commands, with `R=<new round root>` and `IN=~/Documents/open-decomp-quality-heldout-inputs-2026-10-17`:
+Round-5 commands, with `R=<new round root under .local/quality-rounds/>` and `IN=.local/quality-heldout-inputs-2026-10-17`. The Ghidra-recording `quality-heldout.py run` cannot write beneath `.local/`: use `--output "$HOME/open-decomp-stage/heldout"`, then `mv` it to `"$R/heldout"` and `rmdir "$HOME/open-decomp-stage"` (see the staging procedure above):
 
 ```sh
 python3 scripts/bench/quality-heldout-oracle.py --output "$R/gold"
@@ -530,7 +531,7 @@ The x86-64 `heldout_weighted` source view now returns `double` with the multiply
 
 ## Source view round 6, three-tool frozen-suite rerun (2026-10-18, commit `e1c8830`)
 
-Root: `~/Documents/open-decomp-quality-round6-2026-10-18/`. Before this run, every earlier `~/Documents/open-decomp-*` root was found deleted outside this workflow, including the round 2–5 roots, the heldout inputs and `open-decomp-evidence-archives`. The run reconstructed what it needed (`records/round5-baseline-reconstruction.json`):
+Root: `.local/quality-rounds/round6-2026-10-18/`. The earlier `~/Documents/open-decomp-*` roots were removed when artifacts moved to `.local/`; the run reconstructed what it needed (`records/round5-baseline-reconstruction.json`):
 
 - **Inputs:** extracted from the hash-verified `.local/evidence/` archive.
 - **Round-5 OD and Ghidra baseline:** rebuilt from commit `61aa5e9`. The rebuilt texts match the round-5 reviewers' recorded hashes.

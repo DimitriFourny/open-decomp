@@ -12,7 +12,7 @@ import {
 } from './evidence.js';
 
 const usage =
-  'Usage: node --import tsx scripts/bench/fetch-evidence.ts [--from DIR | --url-base URL] [--only NAME]';
+  'Usage: node --import tsx scripts/bench/fetch-evidence.ts (--from DIR | --url-base URL) [--only NAME]';
 
 async function download(base: string, asset: EvidenceAsset, destination: string): Promise<void> {
   const url = new URL(asset.path, base.endsWith('/') ? base : `${base}/`);
@@ -59,21 +59,24 @@ async function main(): Promise<void> {
     assert.ok(!flags.has(flag), `Duplicate ${flag}. ${usage}`);
     flags.set(flag, value);
   }
-  assert.ok(!(flags.has('--from') && flags.has('--url-base')), usage);
+  assert.ok(flags.has('--from') !== flags.has('--url-base'), usage);
   const only = flags.get('--only');
   const assets = evidenceManifest.assets.filter(
     (asset) => only === undefined || asset.path === only || basename(asset.path) === only,
   );
   assert.ok(assets.length > 0, `Unknown evidence asset: ${only}`);
   if (only !== undefined) assert.equal(assets.length, 1, `Ambiguous evidence asset: ${only}`);
-  const source = flags.get('--from') ?? join(homedir(), 'Documents/open-decomp-evidence-archives');
-  const sourceRoot = resolve(
-    source === '~'
-      ? homedir()
-      : source.startsWith('~/')
-        ? join(homedir(), source.slice(2))
-        : source,
-  );
+  const source = flags.get('--from');
+  const sourceRoot =
+    source === undefined
+      ? undefined
+      : resolve(
+          source === '~'
+            ? homedir()
+            : source.startsWith('~/')
+              ? join(homedir(), source.slice(2))
+              : source,
+        );
   const store = evidenceStore();
   await mkdir(store, { recursive: true });
   const staging = await mkdtemp(join(store, '.fetch-'));
@@ -87,7 +90,10 @@ async function main(): Promise<void> {
         const temporary = join(staging, basename(asset.path));
         const urlBase = flags.get('--url-base');
         if (urlBase !== undefined) await download(urlBase, asset, temporary);
-        else await copyFile(join(sourceRoot, asset.path), temporary);
+        else {
+          assert.ok(sourceRoot !== undefined, usage);
+          await copyFile(join(sourceRoot, asset.path), temporary);
+        }
         verifyEvidenceAsset(temporary, asset);
         await mkdir(dirname(destination), { recursive: true });
         await rename(temporary, destination);

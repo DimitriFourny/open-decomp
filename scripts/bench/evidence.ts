@@ -32,7 +32,7 @@ export function evidenceStore(): string {
 export class MissingEvidenceError extends Error {
   constructor(asset: EvidenceAsset, path: string) {
     super(
-      `Missing evidence archive: ${path}. Run: node --import tsx scripts/bench/fetch-evidence.ts --only ${basename(asset.path)} (optionally --from DIR or --url-base URL).`,
+      `Missing evidence archive: ${path}. Run: node --import tsx scripts/bench/fetch-evidence.ts --only ${basename(asset.path)} (with exactly one of --from DIR or --url-base URL).`,
     );
     this.name = 'MissingEvidenceError';
   }
