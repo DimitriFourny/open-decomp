@@ -226,8 +226,8 @@ test(
       for (const [index, [count, left, right]] of mixedCases.entries())
         for (const poison of [0xa5, 0x5a]) {
           const memory = new Map<bigint, number>();
-          // Writable caller-frame backing has arbitrary incoming contents.
-          // Saved registers must be stored before restoration loads consume it.
+          // Writable caller-frame backing has arbitrary incoming contents; no
+          // source result may depend on it.
           for (let offset = -256; offset < 0; offset++)
             memory.set(entrySp + BigInt(offset), poison);
           const observed = execute(
@@ -260,9 +260,14 @@ test(
               ],
             },
           ]);
-          const firstStore = observed.events.indexOf('store'),
-            firstLoad = observed.events.indexOf('load');
-          assert.ok(firstStore >= 0 && (firstLoad < 0 || firstStore < firstLoad));
+          // The frame record and callee-saved FP registers are ABI saves: an
+          // FP-guard failure arm is unexecuted under its recorded requirement
+          // and passes no frame address, so no frame traffic remains in source.
+          assert.deepEqual(
+            observed.events.filter((event) => event === 'load' || event === 'store'),
+            [],
+          );
+          assert.doesNotMatch(mixedEmission.text, /entry_sp/);
         }
     }
   },

@@ -197,6 +197,7 @@ export function reconstruct(
         sourcePlan.entryStack,
         localValidation,
         view,
+        sourcePlan.presentation.requirements,
       )
     : null;
   const cellTransfers =

@@ -17,6 +17,9 @@ export type StorageEvent =
       readonly bytes: number;
       readonly candidate: string | 'local';
       readonly endian?: 'little' | 'big';
+      /** Byte significance of the load's least significant byte within the
+       * candidate: a narrower part of a wider forwarded value. */
+      readonly shift?: number;
     }
   | { readonly kind: 'barrier'; readonly subject: string };
 
@@ -85,7 +88,8 @@ export function validateStorageTrace(
       if (
         expected === undefined ||
         candidate === undefined ||
-        expected !== `${candidate}:${event.endian === 'big' ? event.bytes - 1 - i : i}`
+        expected !==
+          `${candidate}:${(event.endian === 'big' ? event.bytes - 1 - i : i) + (event.shift ?? 0)}`
       )
         return {
           ...record,
@@ -114,6 +118,7 @@ export function validateStackPromotion(
   expressions: ReadonlyMap<string, Expression>,
   allowance: ValidationAllowance,
   disjointStores?: ReadonlySet<string>,
+  shifts?: ReadonlyMap<string, number>,
 ): LocalValidationRecord {
   const base = {
     kind: 'stack-promotion' as const,
@@ -182,6 +187,7 @@ export function validateStackPromotion(
           bytes: Math.ceil(bitWidth(node.result.type) / 8),
           endian: node.access.endian,
           candidate: forwarded ? identity(forwarded.get(node.id)!) : 'local',
+          ...(shifts?.has(node.id) ? { shift: shifts.get(node.id)! } : {}),
         });
     }
     const next = successors.get(current.id) ?? [];

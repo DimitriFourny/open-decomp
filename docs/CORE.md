@@ -249,6 +249,18 @@ remain explicit; unrelated early returns stay inside the body. `loop_form`
 records the conditions and existing control/move validation remains mandatory.
 Checked rendering is unchanged.
 
+A single-test loop (`while`, `for` or C `do`/`while`) may print its exit edge's
+copies right after the loop when that edge is the only one from inside the loop
+to its continuation; outer-loop exit flags are tested before them, and a
+do/while's repeat copies (moved before its test) must not be read by them
+(`loop_exit_copies`). The bottom test is found through nested lexical
+sequences. `loop_test_restatement` also restates an unsigned range test
+`x < 2^c` (or `x <= 2^c - 1`, or a negation) after a repeat copy `x = x >> c`
+(logical or arithmetic, `0 < c < width`) as `x ==/!= 0`. Restatements are exact
+derivations over the IR; while the shared allowance remains, the bit-vector
+checker re-proves them and may veto. Python-like keeps `while True` for bottom
+tests.
+
 Return-tail copies remain owned by the edge that enters them. When all incoming
 edges use copies and a tail's original home is removed, its copied continuation
 is removed with it; no orphan return remains after a terminal statement.
@@ -440,6 +452,17 @@ same-width `x & x`, `x | x`, `x & ones`, `ones & x`, `x | 0`, `x + 0`, `x - 0`,
 strictly narrower zero extension to the zero extension of the original operand
 (its sign bit is zero), each behind the bitvector veto. `x ^ x`, `x - x`, `x * 0`
 and `x & 0` are never rewritten: they would drop an unknown/undefined operand.
+Source-only `shift_idiom` (`source-shifts.ts`, recorded presentation, no
+bitvector check because the checker models neither rotates nor selects) rewrites
+bitfield-move lowering back to shifts for a constant rotate count `0<k<w`:
+`ror(x,k) & (ones>>k)` is `x>>k`, `ror(x,k) & (ones<<(w-k))` is `x<<(w-k)` (`rol`
+by the complementary count); `lshr(x,k)` OR-ed with the top bit of `x` (an
+`extract` at `w-1` or `x < 0`) selected into exactly the vacated top `k` bits is
+the arithmetic shift `ashr(x,k)`; a bit field lying wholly in the non-wrapped or
+the wrapped part of a rotation is that field of the rotated operand, and a
+masked field whose mask bits all lie in the non-wrapped part is the same field of
+`x>>k`. Every mask must match exactly (one bit more or fewer keeps the rotate),
+so a true rotate stays a rotate and its helper is still emitted.
 The printer applies the width- and signedness-exact rules below only when its
 recorder accepts a presentation record, so checked text never changes:
 `zero_high_join` (constant-zero concat parts are omitted; one remaining lowest

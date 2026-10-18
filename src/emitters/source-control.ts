@@ -122,6 +122,8 @@ export class VariableLiveness {
     limit = 4096,
     private readonly inlined: ReadonlyMap<string, InlineSite> = new Map(),
     private readonly alternateIndices: ReadonlyMap<string, Value> = new Map(),
+    /** Values printed as an operand of their reader, never as a variable. */
+    omitted: ReadonlySet<string> = new Set(),
   ) {
     const source = program.source;
     for (const value of program.values.values()) {
@@ -130,6 +132,7 @@ export class VariableLiveness {
         !program.live.has(value.id) ||
         program.inline.has(value.id) ||
         inlined.has(value.id) ||
+        omitted.has(value.id) ||
         source?.stack_addresses.has(value.id)
       )
         continue;
@@ -1133,6 +1136,8 @@ export function planLayout(
 export interface LoopFacts {
   /** Representative variable ids written by the printed copies of a transfer. */
   readonly writes: (transfer: ParallelTransfer) => readonly string[];
+  /** Representative variable ids read by the printed copies of a transfer. */
+  readonly copyReads: (transfer: ParallelTransfer) => readonly string[];
   /** The block prints nothing before its control. */
   readonly silent: (block: BlockRegion) => boolean;
   /** The test is an ordinary printed condition (no requirement predicate). */
@@ -1211,17 +1216,32 @@ export function planLoopForms(
       enters[0]!.destination.header === loop.header
         ? enters[0]!.transfer
         : undefined;
-    // The loop syntax performs exactly this edge: a copy-free lexical break.
-    const exit = (arm: ControlArm): boolean =>
+    // The loop syntax performs exactly this edge as its lexical break. Its
+    // copies (when `copies`) print right after the loop, so no other edge from
+    // inside the loop may reach the continuation.
+    const exit = (arm: ControlArm, copies = false): boolean =>
       !arm.body &&
       arm.transfer.target === follow &&
-      facts.writes(arm.transfer).length === 0 &&
       (incoming.get(follow) ?? []).some(
         (occurrence) =>
           occurrence.transfer === arm.transfer &&
           occurrenceAction(occurrence, language) === 'break',
-      );
+      ) &&
+      (facts.writes(arm.transfer).length === 0 ||
+        (copies &&
+          (incoming.get(follow) ?? []).every(
+            (occurrence) => occurrence.transfer === arm.transfer || !inside.has(occurrence.block),
+          )));
     const regions = loop.body.kind === 'sequence' ? loop.body.regions : [loop.body];
+    // Nested sequences print as one lexical list.
+    const edge = (at: 'first' | 'last'): Region | undefined => {
+      let region: Region | undefined = loop.body;
+      while (region?.kind === 'sequence') {
+        context.checkpoint(1);
+        region = at === 'first' ? region.regions[0] : region.regions.at(-1);
+      }
+      return region;
+    };
     // Follow only the initial straight-line chain. A stage has one lexical
     // entry and copy-free break/stay edges; later definitions
     // never move ahead of the tests which guard them.
@@ -1254,7 +1274,7 @@ export function planLoopForms(
     }
     if (chain.length > 1)
       return { kind: 'while', test: chain[0]!.test, enter: chain[0]!.enter, chain };
-    const head = regions[0];
+    const head = edge('first');
     if (
       head?.kind === 'block' &&
       head.id === loop.header &&
@@ -1263,8 +1283,8 @@ export function planLoopForms(
       facts.silent(head)
     ) {
       const control = head.control,
-        stayTrue = !exit(control.when_true),
-        stayFalse = !exit(control.when_false);
+        stayTrue = !exit(control.when_true, true),
+        stayFalse = !exit(control.when_false, true);
       if (stayTrue !== stayFalse) {
         // The body's lexical end is the only repeat edge: it becomes the step.
         const repeats = entries.filter((occurrence) => inside.has(occurrence.block));
@@ -1287,7 +1307,7 @@ export function planLoopForms(
         return { kind: 'while', test: control.id, enter: stayTrue };
       }
     }
-    const last = regions.at(-1);
+    const last = edge('last');
     if (
       language !== 'c-like' ||
       last?.kind !== 'block' ||
@@ -1303,7 +1323,7 @@ export function planLoopForms(
         again.body ||
         again.transfer.mode !== 'continue' ||
         again.transfer.target !== loop.header ||
-        !exit(leave)
+        !exit(leave, true)
       )
         continue;
       // `continue` in a do-while reaches the test, so the repeat edge must be
@@ -1317,10 +1337,13 @@ export function planLoopForms(
         )
       )
         return undefined;
-      // Repeat copies move before the test: they must be dead on exit and the
-      // test must not observe them (or be restated over their results).
+      // Repeat copies move before the test: they must be dead on exit, neither
+      // the test nor the exit copies may observe them (the test may be restated
+      // over their results).
       const written = facts.writes(again.transfer);
       if (facts.live(leave.transfer.target, written)) return undefined;
+      const exitReads = new Set(facts.copyReads(leave.transfer));
+      if (written.some((id) => exitReads.has(id))) return undefined;
       const reads = new Set(facts.reads(control));
       if (written.some((id) => reads.has(id)) && !facts.rebase(control, again.transfer))
         return undefined;

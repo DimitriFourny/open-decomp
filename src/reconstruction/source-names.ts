@@ -4,7 +4,7 @@ import { bitWidth, expressionOperands, type Value } from '../ir/index.js';
 import type { ParallelTransfer, Region } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
 
-type Role = 'address' | 'callback' | 'count' | 'index' | 'accumulator' | 'shift_count';
+type Role = 'address' | 'callback' | 'count' | 'index' | 'accumulator' | 'shift_count' | 'limit';
 const roleBits: Record<Role, number> = {
   address: 1,
   callback: 2,
@@ -12,6 +12,7 @@ const roleBits: Record<Role, number> = {
   index: 8,
   accumulator: 16,
   shift_count: 32,
+  limit: 64,
 };
 const roleNames = new Map<number, Role>(
   (Object.keys(roleBits) as Role[]).map((role): [number, Role] => [roleBits[role], role]),
@@ -24,12 +25,15 @@ const reservedRuntimePrefix =
   /^(?:__|bv_|fp_|cast_|vector_|flag_|memory_|unknown_|physical_|source_|type_|transfer_|requirement_)/;
 
 /** Presentation-only suggestions: no source intent, type, identity or expression
- * is inferred from an identifier. Conflicting independent roles stay neutral. */
+ * is inferred from an identifier. Conflicting independent roles stay neutral.
+ * `refined` (the source view) additionally recognizes loop-carried phi webs and
+ * promoted-slot recurrences; the checked view keeps the direct-copy rule only. */
 export function planSourceNames(
   program: Reconstruction,
   supplied: ReadonlyMap<string, string | null>,
   types: TypeRecoveryResult | undefined,
   context: OperationContext,
+  refined: boolean,
 ): ReadonlyMap<string, string | null> {
   if (!program.source) return new Map();
   const parameters = new Set(program.parameters.map((value) => value.id));
@@ -200,13 +204,13 @@ export function planSourceNames(
       pending.push({ region: region.body, active: [...active, region.header] });
     }
   }
-  const depends = (root: Value, target: string): boolean => {
+  const dependsOn = (root: Value, targets: ReadonlySet<string>): boolean => {
     const todo = [root],
       seen = new Set<string>();
     while (todo.length) {
       context.checkpoint(1);
       const value = todo.pop()!;
-      if (value.id === target) return true;
+      if (targets.has(value.id)) return true;
       if (seen.has(value.id)) continue;
       seen.add(value.id);
       const expression = program.expressions.get(value.id);
@@ -241,50 +245,269 @@ export function planSourceNames(
     }
     loopTests.set(header, tests);
   }
-  for (const [transfer, copies] of program.transfers) {
-    const members = loops.get(transfer.target),
-      source = sources.get(transfer);
-    if (!members || !source || !members.has(source)) continue;
-    for (const copy of copies) {
-      context.checkpoint(1);
-      const destination = canonical(copy.destination, true),
-        updated = canonical(copy.source, true);
-      const expression = program.expressions.get(updated.id);
-      if (
-        expression?.kind !== 'integer' ||
-        !['add', 'sub'].includes(expression.op) ||
-        (roles.get(destination.id) ?? 0) & roleBits.address
-      )
-        continue;
-      const left = canonical(expression.left, true),
-        right = canonical(expression.right, true);
-      const selfLeft = left.id === destination.id,
-        selfRight = right.id === destination.id;
-      if (!selfLeft && !(selfRight && expression.op === 'add')) continue;
-      const other = selfLeft ? right : left,
-        constant = program.expressions.get(other.id);
-      const tests = loopTests.get(transfer.target)!;
-      const bounds = [...(tests.get(destination.id) ?? []), ...(tests.get(updated.id) ?? [])];
-      if (constant?.kind === 'constant') {
-        if (constant.bits !== 1n || bounds.length === 0) continue;
-        if (expression.op === 'sub') {
-          mark(destination, 'count');
-          mark(updated, 'count');
-          decreasing.add(destination.id);
-          decreasing.add(updated.id);
-        } else {
-          mark(destination, 'index');
-          mark(updated, 'index');
-          const bound = bounds.find(
-            (candidate) => program.expressions.get(candidate.id)?.kind !== 'constant',
-          );
-          if (bound) mark(bound, 'count');
+  if (refined) {
+    // Loop-carried variables. A variable is either a phi web (header phi plus the
+    // merge phis/selects that feed its back edge) or a promoted stack slot (all of
+    // its loads, whose stores in the loop are the updates). Roles come only from
+    // the shape of the update: constant step, or an associative integer/IEEE
+    // operation whose other operand is not itself a function of the variable.
+    const incoming = new Map<string, Value[]>(),
+      definedIn = new Map<string, string>();
+    for (const [transfer, copies] of program.transfers)
+      for (const copy of copies) {
+        context.checkpoint(1);
+        const destination = canonical(copy.destination, true);
+        const row = incoming.get(destination.id) ?? [];
+        row.push(canonical(copy.source, true));
+        incoming.set(destination.id, row);
+        definedIn.set(destination.id, transfer.target);
+      }
+    for (const block of program.blocks.values())
+      for (const node of block.statements) {
+        if (node.kind === 'assign' || node.kind === 'load')
+          definedIn.set(canonical(node.result, true).id, block.id);
+        else if (node.kind === 'call')
+          for (const result of node.results) definedIn.set(canonical(result, true).id, block.id);
+      }
+    const slotLoads = new Map<string, Value[]>(),
+      slotStores = new Map<string, { block: string; value: Value }[]>();
+    for (const block of program.blocks.values())
+      for (const node of block.statements) {
+        const local = program.source.locals.get(node.id);
+        if (!local || !program.retained.has(node.id)) continue;
+        if (node.kind === 'load') {
+          const row = slotLoads.get(local.id) ?? [];
+          row.push(canonical(node.result, true));
+          slotLoads.set(local.id, row);
+        } else if (node.kind === 'store') {
+          const row = slotStores.get(local.id) ?? [];
+          row.push({ block: block.id, value: canonical(node.value, true) });
+          slotStores.set(local.id, row);
         }
-      } else if (!depends(other, destination.id)) {
-        mark(destination, 'accumulator');
-        mark(updated, 'accumulator');
-        const element = loaded.get(canonical(other, true).id);
-        if (element) generic.set(element.id, 'element');
+      }
+    const slotOf = new Map<string, string>();
+    for (const [id, loads] of slotLoads) for (const load of loads) slotOf.set(load.id, id);
+    /** True when `root` is the same on every iteration of the loop with `members`:
+     * parameters, values defined outside it, pure expressions of such values and
+     * reloads of slots the loop never stores to. */
+    const invariant = (root: Value, members: ReadonlySet<string>): boolean => {
+      const todo = [root],
+        seen = new Set<string>();
+      while (todo.length) {
+        context.checkpoint(1);
+        const value = todo.pop()!;
+        if (seen.has(value.id)) continue;
+        seen.add(value.id);
+        const slot = slotOf.get(value.id);
+        if (slot !== undefined) {
+          if ((slotStores.get(slot) ?? []).some((store) => members.has(store.block))) return false;
+          continue;
+        }
+        const block = definedIn.get(value.id);
+        if (block === undefined || !members.has(block)) continue;
+        const expression = program.expressions.get(value.id);
+        if (!expression || incoming.has(value.id)) return false;
+        todo.push(...expressionOperands(expression));
+      }
+      return true;
+    };
+    type Update =
+      | { kind: 'step'; step: bigint }
+      | { kind: 'fold'; other: Value; chain: readonly Value[] }
+      | { kind: 'opaque' };
+    const foldOps: Record<string, true> = { add: true, mul: true, and: true, or: true, xor: true };
+    /** Classifies `update` as a recurrence on the `web` members, or opaque. An
+     * unrolled fold is a chain `t1 = web ⊕ a; t2 = t1 ⊕ b; update = t2 ⊕ c` of one
+     * associative operation family whose other operands do not depend on the web;
+     * every link of the chain is a running value of the same fold. */
+    const classify = (update: Value, web: ReadonlySet<string>): Update => {
+      const chain: Value[] = [];
+      let current = update,
+        family: string | undefined;
+      for (;;) {
+        context.checkpoint(1);
+        const expression = program.expressions.get(current.id);
+        if (expression?.kind !== 'integer' && expression?.kind !== 'float')
+          return { kind: 'opaque' };
+        const left = canonical(expression.left, true),
+          right = canonical(expression.right, true);
+        const selfLeft = web.has(left.id),
+          selfRight = web.has(right.id);
+        if (selfLeft && selfRight) return { kind: 'opaque' };
+        if (expression.op === 'sub' ? !selfLeft && !dependsOn(left, web) : !foldOps[expression.op])
+          return { kind: 'opaque' };
+        const kind = `${expression.kind}:${expression.op === 'sub' ? 'add' : expression.op}`;
+        if (family !== undefined && family !== kind) return { kind: 'opaque' };
+        family = kind;
+        chain.push(current);
+        if (!selfLeft && !selfRight) {
+          // Step into the operand carrying the recurrence; the other must be free of it.
+          const inLeft = dependsOn(left, web),
+            inRight = dependsOn(right, web);
+          if (inLeft === inRight || (expression.op === 'sub' && !inLeft)) return { kind: 'opaque' };
+          current = inLeft ? left : right;
+          continue;
+        }
+        if (expression.op === 'sub' && !selfLeft) return { kind: 'opaque' };
+        const other = selfLeft ? right : left,
+          constant = program.expressions.get(other.id);
+        if (constant?.kind === 'constant') {
+          if (
+            chain.length > 1 ||
+            expression.kind !== 'integer' ||
+            (expression.op !== 'add' && expression.op !== 'sub')
+          )
+            return { kind: 'opaque' };
+          const width = bitWidth(update.type);
+          const step = BigInt.asIntN(
+            width,
+            expression.op === 'sub' ? -constant.bits : constant.bits,
+          );
+          return step === 0n ? { kind: 'opaque' } : { kind: 'step', step };
+        }
+        return dependsOn(other, web) ? { kind: 'opaque' } : { kind: 'fold', other, chain };
+      }
+    };
+    const pendingBounds: { bound: Value; role: Role }[] = [];
+    const analyze = (header: string, seed: ReadonlySet<string>, starts: readonly Value[]): void => {
+      const members = loops.get(header)!;
+      const web = new Set(seed),
+        leaves: Value[] = [],
+        seen = new Set<string>(),
+        todo = [...starts];
+      while (todo.length) {
+        context.checkpoint(1);
+        const value = todo.pop()!;
+        if (seen.has(value.id)) continue;
+        seen.add(value.id);
+        if (web.has(value.id)) continue;
+        const sources = incoming.get(value.id),
+          expression = program.expressions.get(value.id);
+        if (sources) {
+          web.add(value.id);
+          todo.push(...sources);
+        } else if (expression?.kind === 'select') {
+          web.add(value.id);
+          todo.push(canonical(expression.when_true, true), canonical(expression.when_false, true));
+        } else if (expression?.kind !== 'constant') leaves.push(value);
+      }
+      const updates = leaves.map((leaf) => classify(leaf, web));
+      if (!updates.length || updates.some((update) => update.kind === 'opaque')) return;
+      for (const id of web)
+        if ((roles.get(id) ?? 0) & (roleBits.address | roleBits.callback)) return;
+      const steps = updates.flatMap((update) => (update.kind === 'step' ? [update.step] : []));
+      let role: Role,
+        step = 0n;
+      if (steps.length === updates.length) {
+        if (steps.some((value) => value > 0n !== steps[0]! > 0n)) return;
+        step = steps[0]!;
+        role = step > 0n ? 'index' : 'count';
+      } else role = 'accumulator';
+      const scope = [
+        ...web,
+        ...leaves.map((leaf) => leaf.id),
+        ...updates.flatMap((update) =>
+          update.kind === 'fold' ? update.chain.map((v) => v.id) : [],
+        ),
+      ];
+      const bounds: Value[] = [];
+      const tests = loopTests.get(header)!;
+      for (const id of scope) bounds.push(...(tests.get(id) ?? []));
+      // A step other than one with no loop test is as likely a pointer-sized stride
+      // as an index, so only a unit step stands without a test.
+      if (role !== 'accumulator' && !bounds.length && step !== 1n && step !== -1n) return;
+      if (role === 'index') {
+        const bound = bounds.find(
+          (candidate) =>
+            program.expressions.get(candidate.id)?.kind !== 'constant' &&
+            invariant(candidate, members),
+        );
+        if (bound) pendingBounds.push({ bound, role: step === 1n ? 'count' : 'limit' });
+      }
+      for (const id of scope) {
+        const value = program.values.get(id);
+        if (value) mark(value, role);
+        if (role === 'count') decreasing.add(id);
+      }
+      if (role === 'accumulator')
+        for (const update of updates)
+          if (update.kind === 'fold') {
+            const element = loaded.get(canonical(update.other, true).id);
+            if (element) generic.set(element.id, 'element');
+          }
+    };
+    const headers = new Map<string, { header: string; head: Value; starts: Value[] }>();
+    for (const [transfer, copies] of program.transfers) {
+      const members = loops.get(transfer.target),
+        source = sources.get(transfer);
+      if (!members || !source || !members.has(source)) continue;
+      for (const copy of copies) {
+        const head = canonical(copy.destination, true),
+          key = `${transfer.target}\0${head.id}`;
+        const row = headers.get(key) ?? { header: transfer.target, head, starts: [] };
+        row.starts.push(canonical(copy.source, true));
+        headers.set(key, row);
+      }
+    }
+    for (const { header, head, starts } of headers.values())
+      analyze(header, new Set([head.id]), starts);
+    for (const [header, members] of loops)
+      for (const [slot, stores] of slotStores) {
+        const inside = stores.filter((store) => members.has(store.block));
+        if (!inside.length) continue;
+        analyze(
+          header,
+          new Set((slotLoads.get(slot) ?? []).map((load) => load.id)),
+          inside.map((store) => store.value),
+        );
+      }
+    for (const { bound, role } of pendingBounds) if (!roles.get(bound.id)) mark(bound, role);
+  } else {
+    for (const [transfer, copies] of program.transfers) {
+      const members = loops.get(transfer.target),
+        source = sources.get(transfer);
+      if (!members || !source || !members.has(source)) continue;
+      for (const copy of copies) {
+        context.checkpoint(1);
+        const destination = canonical(copy.destination, true),
+          updated = canonical(copy.source, true);
+        const expression = program.expressions.get(updated.id);
+        if (
+          expression?.kind !== 'integer' ||
+          !['add', 'sub'].includes(expression.op) ||
+          (roles.get(destination.id) ?? 0) & roleBits.address
+        )
+          continue;
+        const left = canonical(expression.left, true),
+          right = canonical(expression.right, true);
+        const selfLeft = left.id === destination.id,
+          selfRight = right.id === destination.id;
+        if (!selfLeft && !(selfRight && expression.op === 'add')) continue;
+        const other = selfLeft ? right : left,
+          constant = program.expressions.get(other.id);
+        const tests = loopTests.get(transfer.target)!;
+        const bounds = [...(tests.get(destination.id) ?? []), ...(tests.get(updated.id) ?? [])];
+        if (constant?.kind === 'constant') {
+          if (constant.bits !== 1n || bounds.length === 0) continue;
+          if (expression.op === 'sub') {
+            mark(destination, 'count');
+            mark(updated, 'count');
+            decreasing.add(destination.id);
+            decreasing.add(updated.id);
+          } else {
+            mark(destination, 'index');
+            mark(updated, 'index');
+            const bound = bounds.find(
+              (candidate) => program.expressions.get(candidate.id)?.kind !== 'constant',
+            );
+            if (bound) mark(bound, 'count');
+          }
+        } else if (!dependsOn(other, new Set([destination.id]))) {
+          mark(destination, 'accumulator');
+          mark(updated, 'accumulator');
+          const element = loaded.get(canonical(other, true).id);
+          if (element) generic.set(element.id, 'element');
+        }
       }
     }
   }

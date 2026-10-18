@@ -322,6 +322,58 @@ const scenarios: readonly Scenario[] = [
     },
     expected: (a) => lowBits(a, 8),
   },
+  {
+    name: 'rotate masked to its shifted bits is a shift',
+    build: (entry, a) =>
+      entry.int(
+        'and',
+        entry.int('ror', a, entry.constant(i64, 1n)),
+        entry.constant(i64, 0x7fffffffffffffffn),
+      ),
+    expected: (a) => a >> 1n,
+    absent: { c: /bv_ror|__od_bv/, python: /bv_ror/ },
+    present: { c: />> 1\b/, python: />> 1\b/ },
+    rule: 'shift_idiom',
+  },
+  {
+    name: 'rotate masked to its wrapped bits is a left shift',
+    build: (entry, a) =>
+      entry.int(
+        'and',
+        entry.int('ror', a, entry.constant(i64, 48n)),
+        entry.constant(i64, 0xffffffffffff0000n),
+      ),
+    expected: (a) => lowBits(a << 16n, 64),
+    absent: { c: /bv_ror|__od_bv/, python: /bv_ror/ },
+    rule: 'shift_idiom',
+  },
+  {
+    name: 'logical shift with the replicated sign bit is an arithmetic shift',
+    build: (entry, a) =>
+      entry.int(
+        'or',
+        entry.int(
+          'and',
+          entry.select(entry.extract(a, 63, 1), entry.constant(i64, -1n), entry.constant(i64, 0n)),
+          entry.constant(i64, 0x8000000000000000n),
+        ),
+        entry.int(
+          'and',
+          entry.int('ror', a, entry.constant(i64, 1n)),
+          entry.constant(i64, 0x7fffffffffffffffn),
+        ),
+      ),
+    expected: (a) => lowBits(signed(a, 64) >> 1n, 64),
+    absent: { c: /bv_ror|__od_bv|\? 0xffff/, python: /bv_ror|if arg0 >> 0x3f/ },
+    present: { c: /\(int64_t\)arg0 >> 1/, python: /int64\(arg0\) >> 1/ },
+    rule: 'shift_idiom',
+  },
+  {
+    name: 'a real rotate stays a rotate',
+    build: (entry, a) => entry.int('ror', a, entry.constant(i64, 1n)),
+    expected: (a) => lowBits((a >> 1n) | (a << 63n), 64),
+    present: { c: /bv_ror\(64, arg0, 1\)/, python: /bv_ror\(64, arg0, 1\)/ },
+  },
 ];
 
 const edge = [
@@ -458,6 +510,7 @@ const presentationRules = [
   'extension_fold',
   'complement_xor',
   'negative_addend',
+  'shift_idiom',
 ];
 const recorded = (emission: EmissionResult['emission']) =>
   (emission.local_validation ?? []).flatMap((record) =>

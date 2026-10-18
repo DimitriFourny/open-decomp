@@ -22,6 +22,21 @@ export interface InlineSite {
   readonly propagated?: boolean;
 }
 
+export type InlineCall = Extract<Instruction, { kind: 'call' }>;
+/** A call whose single result is read by the very next printed statement or
+ * the return: printed once, as that reader's operand, at its original position. */
+export interface InlineCallSite {
+  readonly node: InlineCall;
+  readonly result: Value;
+  /** The statement/control that prints the call as an operand. */
+  readonly anchor: string;
+}
+export interface InliningPlan {
+  readonly sites: Map<string, InlineSite>;
+  /** Keyed by the call's result value id. */
+  readonly calls: Map<string, InlineCallSite>;
+}
+
 /** Conversions whose result depends on the dynamic FP environment (rounding,
  * flush/denormal modes); bitcasts, negation and absolute value only move bits. */
 const ENVIRONMENT_CASTS: Partial<Record<CastOp, true>> = {
@@ -61,7 +76,9 @@ export function planSourceInlining(
   /** The variable a multi-use pure definition merely re-presents, if any. */
   plainCopy: (destination: Value, expression: Expression) => Value | undefined = () => undefined,
   omitted: ReadonlySet<string> = new Set(),
-): Map<string, InlineSite> {
+  /** Presentation-level admission of a call (its printed result type must be the result variable's). */
+  admitCall: (node: InlineCall, result: Value) => boolean = () => false,
+): InliningPlan {
   type Use = {
     block: string;
     anchor: string;
@@ -221,7 +238,7 @@ export function planSourceInlining(
     for (const transfer of transfers)
       for (const copy of program.transfers.get(transfer) ?? [])
         use(copy.source, { ...at, transfer: true, conditional: control.kind !== 'jump' });
-    if (!complete) return new Map();
+    if (!complete) return { sites: new Map(), calls: new Map() };
   }
   const result = new Map<string, InlineSite>();
   const scalar = (value: Value): boolean =>
@@ -266,7 +283,12 @@ export function planSourceInlining(
     if (environment === null) continue;
     if (row.count !== 1) {
       // A plain copy of a printed variable: each reader prints the variable.
-      const source = plainCopy(node.result, expression);
+      let source = plainCopy(node.result, expression);
+      // Through inline identity copies, to the printed variable they re-present.
+      for (let depth = 0; source && program.inline.has(source.id) && depth < 8; depth++) {
+        const inner = program.expressions.get(source.id);
+        source = inner && plainCopy(source, inner);
+      }
       if (
         !source ||
         program.inline.has(source.id) ||
@@ -287,8 +309,10 @@ export function planSourceInlining(
     result.delete(id);
     shared.delete(id);
   }
-  const destination = (node: InlineInstruction): { at: Use; nested: Set<string> } | null => {
-    let at = uses.get(node.result.id)!.first;
+  /** The final reading statement/control of a value first read at `first`, through
+   * nested inlined definitions; null when they cycle or nest too deeply. */
+  const resolve = (first: Use): { at: Use; nested: Set<string> } | null => {
+    let at = first;
     const nested = new Set<string>();
     for (let depth = 0; depth < 128; depth++) {
       const consumer = anchors.get(at.anchor);
@@ -300,6 +324,7 @@ export function planSourceInlining(
     }
     return null;
   };
+  const destination = (node: InlineInstruction) => resolve(uses.get(node.result.id)!.first);
   // FP-environment readers: no call, unknown effect or register write on any
   // path from the definition to its (final) use that does not re-execute it.
   const writes = (node: Instruction): boolean =>
@@ -402,12 +427,129 @@ export function planSourceInlining(
   // Resolve all mapping anchors to the final consuming statement/control.
   for (const [id, site] of result) {
     const target = destination(site.node);
-    if (!target) return new Map();
+    if (!target) return { sites: new Map(), calls: new Map() };
     result.set(id, {
       ...site,
       anchor: target.at.anchor,
       ...(shared.has(id) ? { propagated: true } : {}),
     });
   }
-  return result;
+  const calls = new Map<string, InlineCallSite>();
+  const environment = new Set(sensitive.map(({ node }) => node.result.id));
+  const printsStatement = (node: Instruction): boolean =>
+    program.retained.has(node.id) && !('result' in node && result.has(node.result.id));
+  const printsDefinition = (anchor: string): boolean =>
+    program.source?.definitions?.get(anchor)?.some((item) => !result.has(item.result.id)) ?? false;
+  // Blocks entered by exactly one control transfer (and not as the function entry).
+  const entries = new Map<string, number>();
+  for (const block of program.blocks.values())
+    for (const transfer of block.control.kind === 'jump'
+      ? [block.control.transfer]
+      : controlArms(block.control).map((arm) => arm.transfer))
+      entries.set(transfer.target, (entries.get(transfer.target) ?? 0) + 1);
+  entries.set(program.function.entry, (entries.get(program.function.entry) ?? 0) + 1);
+  for (const block of program.blocks.values()) {
+    if (omitted.has(block.id)) continue;
+    for (let position = 0; position < block.statements.length; position++) {
+      context.checkpoint(1);
+      const node = block.statements[position]!;
+      const projection = node.kind === 'call' ? program.calls.get(node.id) : undefined;
+      if (node.kind !== 'call' || !projection || !program.retained.has(node.id)) continue;
+      const live = projection.results.filter((value) => program.live.has(value.id));
+      const [value] = live;
+      const row = value && uses.get(value.id);
+      if (
+        live.length !== 1 ||
+        !value ||
+        !row ||
+        row.count !== 1 ||
+        !scalar(value) ||
+        preserve(value) ||
+        program.inline.has(value.id) ||
+        !row.first ||
+        row.first.transfer ||
+        row.first.alternative ||
+        row.first.conditional ||
+        // Live clobbers that are not results print as separate statements.
+        projection.outputs.some(
+          (binding) =>
+            program.live.has(binding.value.id) &&
+            !projection.results.some((returned) => returned.id === binding.value.id) &&
+            !program.expressions.has(binding.value.id),
+        )
+      )
+        continue;
+      const target = resolve(row.first);
+      const reader = target && program.blocks.get(target.at.block);
+      if (
+        !target ||
+        !reader ||
+        target.at.conditional ||
+        target.at.transfer ||
+        omitted.has(reader.id)
+      )
+        continue;
+      const { at } = target;
+      const consumer = reader.statements[at.position];
+      // Nothing may print between the call and its reader, which may lead the
+      // single-entry blocks that follow the call's through plain jumps; the
+      // reader must print the call exactly once as an operand evaluated after it.
+      let adjacent = !printsDefinition(node.id),
+        cursor = block,
+        from = position + 1;
+      for (let hops = 0; adjacent; hops++) {
+        const end = cursor.id === reader.id ? at.position : cursor.statements.length;
+        if (end < from) adjacent = false;
+        for (let between = from; adjacent && between < end; between++) {
+          const other = cursor.statements[between]!;
+          adjacent = !printsStatement(other) && !printsDefinition(other.id);
+        }
+        if (cursor.id === reader.id) break;
+        const control = cursor.control;
+        const next =
+          control.kind === 'jump' && !program.transfers.get(control.transfer)?.length
+            ? program.blocks.get(control.transfer.target)
+            : undefined;
+        adjacent =
+          adjacent &&
+          !!next &&
+          hops < 8 &&
+          !omitted.has(next.id) &&
+          entries.get(next.id) === 1 &&
+          !printsDefinition(control.id) &&
+          !printsDefinition(next.id);
+        if (next) cursor = next;
+        from = 0;
+      }
+      if (!adjacent) continue;
+      if (consumer) {
+        if (
+          !printsStatement(consumer) ||
+          consumer.id !== at.anchor ||
+          (consumer.kind !== 'assign' && consumer.kind !== 'store' && consumer.kind !== 'call') ||
+          (consumer.kind === 'call' &&
+            consumer.target.kind === 'indirect' &&
+            consumer.target.value.id === value.id)
+        )
+          continue;
+      } else if (
+        at.position !== reader.statements.length ||
+        reader.control.kind !== 'return' ||
+        reader.control.id !== at.anchor ||
+        printsDefinition(reader.control.id)
+      )
+        continue;
+      // C leaves operand order open: no other memory read, call or environment
+      // read may be an unsequenced operand of the same reader.
+      let ordered = true;
+      for (const [id, site] of result)
+        if (site.anchor === at.anchor && (site.node.kind === 'load' || environment.has(id))) {
+          ordered = false;
+          break;
+        }
+      if (ordered && admitCall(node, value))
+        calls.set(value.id, { node, result: value, anchor: at.anchor });
+    }
+  }
+  return { sites: result, calls };
 }

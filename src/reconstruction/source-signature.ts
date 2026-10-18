@@ -439,7 +439,18 @@ export function projectSourceSignature(
   // Element kinds reached through each formal's pointer lineage, with their sites.
   const accesses = new Map<string, { elements: Set<string>; sites: string[] }>();
   const written = new Set<string>(),
-    escaped = new Set<string>();
+    escaped = new Set<string>(),
+    // Values a preserved register carried into an open-arity call; no native
+    // C ABI passes an argument there, so they never make the callee a writer.
+    preservedInputRoots = new Set<string>();
+  // The stack pointer, link register and callee-saved registers are never
+  // argument carriers of a native call.
+  const abi = input.source.abi,
+    nonArgumentRoots = new Set([
+      abi.stack_pointer.root,
+      ...(abi.link_register ? [abi.link_register.root] : []),
+      ...abi.preserved.map((register) => register.root),
+    ]);
   let writingCall = false;
   let mayWrite = false;
   for (const block of program.blocks.values())
@@ -453,7 +464,12 @@ export function projectSourceSignature(
           ? [...boundary.arguments, ...boundary.inputs.map((binding) => binding.value)]
           : [...node.arguments, ...node.register_inputs.map((binding) => binding.value)];
         if (boundary?.argument_list_complete === false)
-          arguments_.push(...node.register_inputs.map((binding) => binding.value));
+          for (const binding of node.register_inputs) {
+            if (nonArgumentRoots.has(binding.register.root)) {
+              for (const root of parameterRoots(binding.value, false))
+                preservedInputRoots.add(root);
+            } else arguments_.push(binding.value);
+          }
         for (const argument of arguments_)
           for (const root of parameterRoots(argument, false)) written.add(root);
       }
@@ -621,6 +637,12 @@ export function projectSourceSignature(
           [program.function.id],
           'Present an observed scalar-address argument as a native C pointer with unchanged target address bits.',
         );
+        if (readOnly && preservedInputRoots.has(parameter.id))
+          validation.requireAbi(
+            'formal_pointer',
+            [program.function.id],
+            'A call with an open argument list receives its arguments only in argument registers and stack slots; the stack pointer, link register and callee-saved registers carry no arguments, so a formal held there across the call is not passed to it.',
+          );
       }
       continue;
     }

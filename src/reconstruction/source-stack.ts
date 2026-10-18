@@ -14,8 +14,10 @@ import {
 import type { BlockRegion, ParallelTransfer } from '../presentation/index.js';
 import type { BoundaryProjection } from './model.js';
 import type { FrameSaves, SourceLocal, SourceStackStorage } from './source-model.js';
+import type { Requirement } from '../core/inference.js';
 import { LocalValidationSession } from './local-validation.js';
 import { validateStackPromotion } from './local-storage-validation.js';
+import { sourceRequirementPredicates } from './source-requirements.js';
 
 type MemoryNode = Extract<Instruction, { kind: 'load' | 'store' }>;
 /** Exact private slots only. Escapes and overlapping access intervals retain one
@@ -33,6 +35,7 @@ export function planSourceStack(
   entryStack: () => Value,
   validation = new LocalValidationSession(context),
   view: PresentationView = 'checked',
+  requirements?: readonly Requirement[],
 ) {
   const addresses = new Map<string, bigint>(),
     facts = input.types?.calls?.stack;
@@ -175,10 +178,13 @@ export function planSourceStack(
   const abi = input.source!.abi;
   const preservedRoot = (root: string): boolean =>
     abi.preserved.some((register) => register.root === root);
+  // Condition flags are never argument or result storage under any supported
+  // ABI; flags computed from frame arithmetic do not hand a callee an address.
   const argumentTainted = (bindings: readonly RegisterBinding[]): boolean =>
     bindings.some(
       (binding) =>
         binding.register.root !== abi.stack_pointer.root &&
+        binding.register.bank !== 'flags' &&
         !preservedRoot(binding.register.root) &&
         tainted.has(binding.value.id),
     );
@@ -220,6 +226,28 @@ export function planSourceStack(
   const callNodes: Extract<Instruction, { kind: 'call' }>[] = [];
   const accesses: { node: MemoryNode; block: string; offset: bigint; end: bigint; key: string }[] =
     [];
+  // Source view: as in the source signature, an FP-environment guard's failure
+  // arm is not executed under its recorded fp_environment requirement, and its
+  // unknown exit ends modeled execution. Its unknown effect is no frame escape.
+  const fpFailureArms = new Set<string>();
+  if (view === 'source') {
+    const predicates = sourceRequirementPredicates(requirements),
+      entries = new Map<string, number>();
+    for (const { transfer } of transfers)
+      entries.set(transfer.target, (entries.get(transfer.target) ?? 0) + 1);
+    for (const block of blocks.values()) {
+      context.checkpoint(1);
+      const control = block.control,
+        predicate = control.kind === 'if' ? predicates.get(control.id) : undefined;
+      if (control.kind !== 'if' || predicate?.requirement.kind !== 'fp_environment') continue;
+      const failure = (
+        predicate.site.supported_predicate_value ? control.when_false : control.when_true
+      ).transfer.target;
+      if (entries.get(failure) === 1 && blocks.get(failure)?.control.kind === 'unknown')
+        fpFailureArms.add(failure);
+    }
+  }
+  const guardEffects = new Set<string>();
   for (const block of blocks.values()) {
     for (const node of block.statements) {
       context.checkpoint(1);
@@ -239,7 +267,11 @@ export function planSourceStack(
           calls.get(node.id)!.arguments.some((value) => tainted.has(value.id)))
       )
         escaped = true;
-      if (node.kind === 'unknown_effect') escaped = saveEscaped = true;
+      if (node.kind === 'unknown_effect') {
+        escaped = true;
+        if (fpFailureArms.has(block.id)) guardEffects.add(block.id);
+        else saveEscaped = true;
+      }
       if (node.kind !== 'load' && node.kind !== 'store') continue;
       const offset = addresses.get(node.address.id),
         width = bitWidth(node.kind === 'load' ? node.result.type : node.value.type);
@@ -264,6 +296,16 @@ export function planSourceStack(
     if (block.control.kind === 'indirect' && argumentTainted(block.register_exit))
       saveEscaped = true;
   }
+  for (const id of saveEscaped ? [] : guardEffects)
+    if (
+      !validation.presentation(
+        'fp_guard_frame',
+        id,
+        'FP-environment guard failure arm, unexecuted under its recorded fp_environment requirement and ending in an unknown exit; its unknown effect is not a frame address escape',
+        [id],
+      )
+    )
+      saveEscaped = true;
   // Established ABI stack locations are outgoing argument storage at a call,
   // even when their entry-SP offsets are negative. They are not private spills.
   const outgoingRanges = (input.types?.calls?.calls ?? []).flatMap((call) =>
@@ -293,6 +335,72 @@ export function planSourceStack(
   const aliased =
     facts?.frame.aliased === true ||
     memory.some((node) => node.kind === 'store' && !addresses.has(node.address.id));
+  // Source view: on an ABI whose call pushes the return address, the bytes at
+  // the callee-entry SP are by definition that return address. The last store
+  // before the call (only pure assignments between) writing exactly those bytes
+  // with a code address, originating from the call's own instruction, is the
+  // call's push. When no other access touches those bytes and no frame address
+  // escapes, only the callee's return consumes it: call mechanics, not a
+  // source local. The checked view retains every store.
+  const returnAddressPushes = new Set<string>();
+  if (view === 'source' && !saveEscaped && abi.stack_return_address_bytes > 0n) {
+    const pushes: (typeof accesses)[number][] = [];
+    const byStore = new Map(accesses.map((access) => [access.node.id, access]));
+    for (const block of blocks.values())
+      for (let index = 0; index < block.statements.length; index++) {
+        context.checkpoint(1);
+        const call = block.statements[index]!;
+        if (call.kind !== 'call') continue;
+        let previous = index - 1;
+        while (previous >= 0 && block.statements[previous]!.kind === 'assign') previous--;
+        const push = previous >= 0 ? byStore.get(block.statements[previous]!.id) : undefined,
+          stack = call.register_inputs.find(
+            (binding) =>
+              binding.register.root === abi.stack_pointer.root &&
+              binding.register.width_bits === abi.stack_pointer.width_bits,
+          ),
+          value = push?.node.kind === 'store' ? expressions.get(push.node.value.id) : undefined;
+        if (
+          !push ||
+          push.node.kind !== 'store' ||
+          push.node.access.volatile ||
+          !stack ||
+          addresses.get(stack.value.id) !== push.offset ||
+          push.end - push.offset !== abi.stack_return_address_bytes ||
+          value?.kind !== 'address' ||
+          !push.node.provenance.instruction_ids.length ||
+          push.node.provenance.instruction_ids.some(
+            (id) => !call.provenance.instruction_ids.includes(id),
+          )
+        )
+          continue;
+        pushes.push(push);
+      }
+    const pushIds = new Set(pushes.map((push) => push.node.id));
+    for (const push of pushes) {
+      context.checkpoint(accesses.length);
+      if (
+        accesses.some(
+          (access) =>
+            !pushIds.has(access.node.id) && access.offset < push.end && access.end > push.offset,
+        ) ||
+        !validation.presentation(
+          'call_return_address',
+          push.node.id,
+          `call instruction's own push of its fall-through address at callee-entry SP ${push.offset}; no other frame access overlaps; no frame address escapes`,
+          [push.node.id],
+        )
+      )
+        continue;
+      returnAddressPushes.add(push.node.id);
+    }
+    if (returnAddressPushes.size)
+      validation.requireAbi(
+        'call_return_address',
+        [...returnAddressPushes].slice(0, 64),
+        'Hiding a call’s return-address push assumes ABI conformance: the callee consumes the pushed fall-through address only to return and it is not argument storage. Each store remains in the checked view and the original mappings.',
+      );
+  }
   // An open argument list describes an unbounded caller-SP-relative area.
   // Do not infer its end from observed registers or written bytes. A slot used
   // only after the last such call, however, cannot supply that call's arguments.
@@ -333,17 +441,25 @@ export function planSourceStack(
             .map((node) => node.id),
         )
       : undefined;
-  const eligible = new Set<string>();
+  const eligible = new Set<string>(),
+    // Source view: narrower loads wholly inside a promoted integer slot, keyed
+    // by that slot; each reads its endian-determined bits of the slot value.
+    slotParts = new Map<string, typeof accesses>(),
+    partSlot = new Map<string, string>();
   if (view === 'source' ? !saveEscaped : !escaped && !unknownCallStorage && !aliased)
     for (const [key, group] of groups) {
       const first = group[0]!;
       context.checkpoint(accesses.length);
+      const overlapping = accesses.filter(
+        (access) => access.key !== key && access.offset < first.end && access.end > first.offset,
+      );
       if (
+        returnAddressPushes.has(first.node.id) ||
         first.offset >= 0n ||
         first.end > 0n ||
         group.some((access) => access.node.access.volatile) ||
         (view === 'source' &&
-          group.some(
+          [...group, ...overlapping].some(
             (access) =>
               openCallSuccessors.has(access.block) ||
               blocks.get(access.block)!.statements.indexOf(access.node) <
@@ -353,8 +469,20 @@ export function planSourceStack(
       )
         continue;
       if (
-        accesses.some(
-          (access) => access.key !== key && access.offset < first.end && access.end > first.offset,
+        overlapping.length &&
+        !(
+          view === 'source' &&
+          (first.node.kind === 'load' ? first.node.result.type : first.node.value.type).kind ===
+            'integer' &&
+          overlapping.every(
+            (part) =>
+              part.node.kind === 'load' &&
+              part.node.result.type.kind === 'integer' &&
+              !part.node.access.volatile &&
+              part.node.access.endian === first.node.access.endian &&
+              part.offset >= first.offset &&
+              part.end <= first.end,
+          )
         )
       )
         continue;
@@ -370,6 +498,10 @@ export function planSourceStack(
       )
         continue;
       eligible.add(key);
+      if (overlapping.length) {
+        slotParts.set(key, overlapping);
+        for (const part of overlapping) partSlot.set(part.node.id, key);
+      }
     }
   // Source view: frame-private save/restore of an entry register. A slot is a
   // save when (i) its only store writes the entry value of a preserved register
@@ -685,9 +817,10 @@ export function planSourceStack(
       for (const node of block.statements) {
         context.checkpoint(1);
         const access = byNode.get(node.id);
-        if (!access || !eligible.has(access.key)) continue;
-        if (access.node.kind === 'load') before.set(node.id, state.get(access.key));
-        else state.set(access.key, access.node.value);
+        const key = access && (partSlot.get(node.id) ?? access.key);
+        if (!access || !key || !eligible.has(key)) continue;
+        if (access.node.kind === 'load') before.set(node.id, state.get(key));
+        else state.set(key, access.node.value);
       }
       const old = outgoing.get(block.id);
       if (
@@ -702,7 +835,7 @@ export function planSourceStack(
       }
     }
   }
-  const hidden = new Set<string>([...saveStores, ...saveReloads]),
+  const hidden = new Set<string>([...saveStores, ...saveReloads, ...returnAddressPushes]),
     privateLoads = new Set<string>(),
     locals = new Map<string, SourceLocal>();
   const saves: FrameSaves = { stores: saveStores, reloads: saveReloads, bytes: saveBytes };
@@ -748,28 +881,43 @@ export function planSourceStack(
     }
   for (const key of eligible) {
     const group = groups.get(key)!,
-      loads = group.filter((access) => access.node.kind === 'load');
+      parts = slotParts.get(key) ?? [],
+      members = parts.length ? [...group, ...parts] : group,
+      loads = members.filter((access) => access.node.kind === 'load');
     if (loads.some((access) => before.get(access.node.id) === undefined)) continue;
     const forwarded =
       loads.every((access) => before.get(access.node.id) !== null) &&
       (acyclic ||
-        group.every((access) => access.block === group[0]!.block) ||
+        members.every((access) => access.block === group[0]!.block) ||
         (view === 'source' &&
           !predecessors.get(input.function.entry)?.length &&
-          group.every(
+          members.every(
             (access) => access.node.kind !== 'store' || access.block === input.function.entry,
           )));
-    const subjects = [group[0]!.node.id];
+    // A part reads bits of the reaching whole-slot value; no scalar local
+    // spelling exists for a part of an unforwarded slot.
+    if (parts.length && !forwarded) continue;
+    const first = group[0]!;
+    // Byte significance of each part's low byte within the slot value.
+    const shifts = new Map(
+      parts.map((part) => [
+        part.node.id,
+        Number(
+          part.node.access.endian === 'big' ? first.end - part.end : part.offset - first.offset,
+        ),
+      ]),
+    );
+    const subjects = [first.node.id];
     const checked = validation.check(
       'stack-promotion',
       `stack:${key}`,
       'private stack promotion',
       () => {
-        const members = new Set<string>(),
+        const ids = new Set<string>(),
           proposed = new Map<string, Value>();
-        for (const access of group) {
+        for (const access of members) {
           validation.allowance.charge();
-          members.add(access.node.id);
+          ids.add(access.node.id);
           if (subjects.length < 64 && access.node.id !== subjects[0]) subjects.push(access.node.id);
           if (forwarded && access.node.kind === 'load')
             proposed.set(access.node.id, before.get(access.node.id)!);
@@ -780,11 +928,12 @@ export function planSourceStack(
           blocks,
           transfers,
           addresses,
-          members,
+          ids,
           forwarded ? proposed : null,
           expressions,
           validation.allowance,
           disjointStores,
+          shifts,
         );
       },
       subjects,
@@ -792,12 +941,19 @@ export function planSourceStack(
     if (checked.status === 'rejected') continue;
     if (
       view === 'source' &&
-      !validation.presentation(
-        'private_stack_promotion',
-        `stack:${key}`,
-        'exact nonvolatile nonoverlapping negative entry-SP slot; no frame address escapes; definitely initialized reads; no established outgoing argument overlap or access preceding an open-arity call',
-        subjects,
-      )
+      !(parts.length
+        ? validation.presentation(
+            'wide_slot_parts',
+            `stack:${key}`,
+            'exact nonvolatile negative entry-SP integer slot written only by whole-slot stores; every other overlapping access is a narrower integer load wholly inside it, forwarded as its endian-determined bit range of the reaching slot value; no frame address escapes; definitely initialized reads; no established outgoing argument overlap or access preceding an open-arity call',
+            subjects,
+          )
+        : validation.presentation(
+            'private_stack_promotion',
+            `stack:${key}`,
+            'exact nonvolatile nonoverlapping negative entry-SP slot; no frame address escapes; definitely initialized reads; no established outgoing argument overlap or access preceding an open-arity call',
+            subjects,
+          ))
     )
       continue;
     if (view === 'source' && (disjointStores?.size || callNodes.length))
@@ -807,21 +963,22 @@ export function planSourceStack(
         'Nonescaping frame-private storage belongs to this activation: pointers supplied by callers, globals, external loads and call results cannot alias it. Callees observe only declared argument storage; open-arity calls precede every access to this promoted slot. Original memory effects and alias facts remain in the checked view.',
       );
     if (forwarded) {
-      for (const access of group) {
+      for (const access of members) {
         hidden.add(access.node.id);
-        if (access.node.kind === 'load')
-          alias(access.node.result, {
-            kind: 'cast',
-            op: 'bitcast',
-            value: before.get(access.node.id)!,
-          });
+        if (access.node.kind !== 'load') continue;
+        const shift = shifts.get(access.node.id);
+        alias(
+          access.node.result,
+          shift === undefined
+            ? { kind: 'cast', op: 'bitcast', value: before.get(access.node.id)! }
+            : { kind: 'extract', value: before.get(access.node.id)!, offset: shift * 8 },
+        );
       }
     } else {
-      const first = group[0]!.node;
       const local: SourceLocal = {
         id: `entity_${fingerprint(['source-local', input.function.id, key])}`,
-        type: first.kind === 'load' ? first.result.type : first.value.type,
-        ...(view === 'source' ? { stack_offset: group[0]!.offset } : {}),
+        type: first.node.kind === 'load' ? first.node.result.type : first.node.value.type,
+        ...(view === 'source' ? { stack_offset: first.offset } : {}),
       };
       for (const access of group) {
         locals.set(access.node.id, local);

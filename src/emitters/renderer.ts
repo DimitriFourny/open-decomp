@@ -95,7 +95,12 @@ import {
   type LoopFacts,
   type TransferAction,
 } from './source-control.js';
-import { planSourceInlining, type InlineSite } from './source-inlining.js';
+import {
+  planSourceInlining,
+  type InlineCall,
+  type InlineCallSite,
+  type InlineSite,
+} from './source-inlining.js';
 import { SourceStructs, type ObservedMember } from './source-structs.js';
 
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
@@ -123,6 +128,9 @@ const NEGATED_PREDICATE: Readonly<Record<IntegerPredicate, IntegerPredicate>> = 
   sle: 'sgt',
   sgt: 'sle',
 };
+
+/** A held single-use call was not printed at its reader: render again without call inlining. */
+export class CallInliningRetry extends Error {}
 
 /** Only syntax lives here: both dialects consume the same reconstructed program. */
 export class Renderer {
@@ -168,10 +176,19 @@ export class Renderer {
   private readonly inline: Set<string>;
   private readonly inlined = new Map<string, InlineSite>();
   private readonly inlineSites = new Map<string, InlineSite[]>();
+  /** Calls printed as an operand of their single reader, by result value id. */
+  private readonly inlinedCalls = new Map<string, InlineCallSite>();
+  /** Code lines printed when the latest inlined call was held. */
+  private heldLines = 0;
+  private readonly inlinedCallSites = new Map<string, InlineCallSite[]>();
+  /** Printed text of an inlined call between its original position and its reader. */
+  private readonly pendingCalls = new Map<string, string>();
   private liveness: VariableLiveness | null = null;
   /** Do-while tests restated over the values written by their repeat copies. */
   private readonly rebased = new Map<string, Extract<Expression, { kind: 'compare' }>>();
   private readonly synthetic = new Map<string, Expression>();
+  /** Exit edges of loop tests whose copies print after their loop, by test id. */
+  private readonly loopExitCopies = new Map<string, ParallelTransfer>();
   /** Tests of enclosing `if`s merged into the next printed `if` (nestedIf). */
   private conjunct: readonly ConditionTerm[] | undefined;
   /** Edge copies printed in a `for` header (by destination variable), not at their edge. */
@@ -212,6 +229,7 @@ export class Renderer {
     private readonly context: OperationContext,
     private readonly language: 'c-like' | 'python-like',
     private readonly version: string,
+    private readonly inlineCalls = true,
   ) {
     this.writer = new Writer(context, options.indent, options.include_evidence, language);
     this.program = reconstruct(input, context, options.view === 'checked' ? 'checked' : 'source');
@@ -289,7 +307,13 @@ export class Renderer {
         else if (spelling !== name.source_name) this.linkageNames.set(name.entity_id, null);
       }
     }
-    this.sourceRoleNames = planSourceNames(this.program, this.names, input.types, context);
+    this.sourceRoleNames = planSourceNames(
+      this.program,
+      this.names,
+      input.types,
+      context,
+      this.sourceView,
+    );
     for (const note of input.annotations ?? []) {
       context.checkpoint(1);
       if (note.status === 'retracted' || note.value.kind !== 'note') continue;
@@ -435,7 +459,36 @@ export class Renderer {
     return name;
   }
 
+  private classRoles: {
+    readonly for: ReadonlyMap<string, Value>;
+    readonly names: Map<string, string | null>;
+  } | null = null;
+
+  /** Role-derived name of the printed variable `value` represents. Every member
+   * of a coalesced phi class must agree; disagreeing or conflicting members leave
+   * the variable neutral. Undefined when no member has a role name. */
+  private classRoleName(value: Value): string | null | undefined {
+    if (!this.sourceView) return this.sourceRoleNames.get(value.id);
+    if (this.classRoles?.for !== this.variables) {
+      const names = new Map<string, string | null>();
+      for (const [id, representative] of this.variables) {
+        this.context.checkpoint(1);
+        const name = this.sourceRoleNames.get(id);
+        if (name === undefined) continue;
+        const known = names.get(representative.id);
+        names.set(representative.id, known === undefined || known === name ? name : null);
+      }
+      this.classRoles = { for: this.variables, names };
+    }
+    const own = this.sourceRoleNames.get(value.id),
+      members = this.classRoles.names.get(value.id);
+    if (members === undefined) return own;
+    return own === undefined || own === members ? members : null;
+  }
+
   private local(value: Value): string {
+    const pending = this.pendingCalls.get(value.id);
+    if (pending !== undefined) return pending;
     const representative = this.variables.get(value.id);
     if (representative && representative.id !== value.id) {
       // One printed variable for a coalesced phi class; every member keeps its row.
@@ -453,7 +506,7 @@ export class Renderer {
           this.sourceIdentifier(
             value.id,
             this.names.get(value.id) ??
-              this.sourceRoleNames.get(value.id) ??
+              this.classRoleName(value) ??
               `value${this.sourceTemporary++}`,
           ))
       : this.identifier(value.id, 'v');
@@ -1309,6 +1362,18 @@ export class Renderer {
         this.map(site.node, start, [], end);
         this.mapMemory(site.node, start, end);
       }
+    }
+    for (const site of this.inlinedCallSites.get(origin.id) ?? []) {
+      const proof = this.sourceEvidence.get(site.node.id);
+      this.map(site.node, start, [], end);
+      this.mapped(
+        site.node,
+        start,
+        proof ? [...proof.ids] : [],
+        [...site.node.contract_evidence, ...(proof?.evidence ?? [])],
+        end,
+      );
+      this.mapMemory(site.node, start, end);
     }
   }
 
@@ -2416,6 +2481,8 @@ export class Renderer {
     node: Extract<Instruction, { kind: 'call' }>,
     depth: number,
     literalsAllowed = true,
+    /** Print only the call expression, for an inlined single-use result. */
+    operand = false,
   ): string {
     const projection = this.program.calls.get(node.id)!;
     const literals: string[] = [];
@@ -2459,7 +2526,7 @@ export class Renderer {
         literals,
       )
     )
-      return this.sourceCall(node, depth, false);
+      return this.sourceCall(node, depth, false, operand);
     if (this.sourceView) {
       const contract = this.effectContract(node.clobbers);
       if (
@@ -2506,6 +2573,7 @@ export class Renderer {
         `last ${variadic} argument${variadic === 1 ? '' : 's'} observed in Darwin variadic outgoing stack slots (a lower bound; the source arity stays open)${projection.kind === 'physical' ? '; the register arguments before them are an observed, possibly incomplete prefix' : ''}`,
       );
     const operation = `${target}(${this.writer.join(args)})`;
+    if (operand) return operation;
     const results = projection.results.filter((value) => this.program.live.has(value.id));
     const result = results.length === 1 ? results[0] : undefined;
     if (
@@ -2517,6 +2585,43 @@ export class Renderer {
     return results.length
       ? `${results.length === 1 ? this.local(results[0]!) : `(${this.writer.join(results.map((value) => this.local(value)))})`} = ${operation}`
       : operation;
+  }
+
+  /** An inlined call has no assignment to convert it: its printed result type
+   * (the declared return type, or the result's own) must be its variable's. */
+  private admitInlinedCall(node: InlineCall, result: Value): boolean {
+    const projection = this.program.calls.get(node.id);
+    const declared = projection?.signature?.signature;
+    return (
+      this.inlineCalls &&
+      projection?.results.length === 1 &&
+      !(
+        this.nativeIntegerStorage &&
+        result.type.kind === 'integer' &&
+        integerStorageBits(result.type.bits) !== result.type.bits
+      ) &&
+      (!declared || this.sourceType(declared.return_type) === this.valueType(result))
+    );
+  }
+
+  /** Print an inlined call's expression now (its notes, comments and clobber
+   * statements keep the call's position) and hold it for its reader. */
+  private holdCall(node: InlineCall, site: InlineCallSite, depth: number): void {
+    this.emitNotes(node.id, depth);
+    const text = this.sourceCall(node, depth, true, true);
+    this.settleCalls(text);
+    this.pendingCalls.set(site.result.id, text);
+    this.heldLines = this.writer.codeLines;
+  }
+
+  /** Every held call is printed exactly once in the text of the reader that
+   * consumes it, with no other code between; anything else would drop, repeat
+   * or reorder the call. The emission is then retried without call inlining. */
+  private settleCalls(text: string): void {
+    for (const [id, call] of this.pendingCalls) {
+      if (text.split(call).length !== 2) throw new CallInliningRetry();
+      this.pendingCalls.delete(id);
+    }
   }
 
   /** C: `((R (*)(T0, T1, ...))target)`; Python-like: `function_pointer(target, "R (*)(...)")`.
@@ -3362,6 +3467,14 @@ export class Renderer {
     }
   }
 
+  /** A loop test's exit edge. Copy-free, the loop syntax performs it; its
+   * copies print right after the loop instead (planLoopForms proved no other
+   * edge from inside the loop reaches the continuation). */
+  private loopExit(transfer: ParallelTransfer, depth: number, control: Control): void {
+    if (this.printedCopies(transfer).length) this.loopExitCopies.set(control.id, transfer);
+    else this.transfer(transfer, depth, control);
+  }
+
   /** Source-view `if`. Loop tests print as their loop's syntax. Otherwise an
    * arm printing nothing is dropped (testing the inverse when it is the true
    * arm), and an arm that cannot fall through ends the `if` so its sibling
@@ -3434,7 +3547,7 @@ export class Renderer {
             ? `while (${test(form.enter)}) {`
             : `while ${test(form.enter)}:`,
       );
-      this.transfer(exit.transfer, depth, control);
+      this.loopExit(exit.transfer, depth, control);
       this.arm(enter, depth, control);
       return;
     }
@@ -3443,7 +3556,7 @@ export class Renderer {
       const again = form.enter ? control.when_true : control.when_false,
         leave = form.enter ? control.when_false : control.when_true;
       this.transfer(again.transfer, depth, control);
-      this.transfer(leave.transfer, depth, control);
+      this.loopExit(leave.transfer, depth, control);
       return;
     }
     if (form?.kind === 'do_while') {
@@ -3451,7 +3564,7 @@ export class Renderer {
         leave = form.repeat ? control.when_false : control.when_true;
       // The repeat copies run before the test; planning proved this unobservable.
       this.transfer(again.transfer, depth, control);
-      this.transfer(leave.transfer, depth, control);
+      this.loopExit(leave.transfer, depth, control);
       const restated = this.rebased.get(control.id);
       const text = restated
         ? form.repeat
@@ -3702,7 +3815,7 @@ export class Renderer {
     const indices = new Map([...this.indexedData].map(([id, table]) => [id, table.index]));
     const typeId = (value: Value): string | undefined =>
       this.sourceValueTypes.get(value.id) ?? program.source?.value_types?.get(value.id)?.type_id;
-    const candidates = planSourceInlining(
+    const plan = planSourceInlining(
       program,
       this.context,
       (value) => this.names.has(value.id),
@@ -3734,7 +3847,10 @@ export class Renderer {
           : undefined;
       },
       this.fpPresentation.omitted,
+      (node, result) => this.admitInlinedCall(node, result),
     );
+    const candidates = plan.sites;
+    let calls = plan.calls;
     const propagated = [...candidates.values()].filter((site) => site.propagated);
     if (
       propagated.length &&
@@ -3744,8 +3860,10 @@ export class Renderer {
         'a plain copy of a printed variable with the same presented type is read as that variable at every use; phi coalescing and liveness treat each read as a read of the source, so its storage is never reassigned in between',
         propagated.map(({ node }) => node.id),
       )
-    )
+    ) {
+      calls = new Map();
       for (const site of propagated) candidates.delete(site.node.result.id);
+    }
     if (
       candidates.size &&
       this.localValidation.presentation(
@@ -3762,8 +3880,30 @@ export class Renderer {
         nodes.push(site);
         this.inlineSites.set(site.anchor, nodes);
       }
-    }
-    const liveness = new VariableLiveness(program, this.context, 4096, this.inlined, indices);
+    } else if (candidates.size) calls = new Map();
+    if (
+      calls.size &&
+      this.localValidation.presentation(
+        'single_use_call_inlining',
+        subject,
+        'a call with exactly one live result, read once and unconditionally by the next printed statement of its block or by its return, is printed as an operand of that reader at its original position: no statement prints between them, the reader has no other memory read, call or FP-environment read operand, non-result clobbers print nothing, and the result is printed with the declared result type',
+        [...calls.values()].map(({ node }) => node.id),
+      )
+    )
+      for (const [id, site] of calls) {
+        this.inlinedCalls.set(id, site);
+        const nodes = this.inlinedCallSites.get(site.anchor) ?? [];
+        nodes.push(site);
+        this.inlinedCallSites.set(site.anchor, nodes);
+      }
+    const liveness = new VariableLiveness(
+      program,
+      this.context,
+      4096,
+      this.inlined,
+      indices,
+      new Set(this.inlinedCalls.keys()),
+    );
     this.liveness = liveness;
     const formals = new Set(program.parameters.map((value) => value.id));
     // Widening copies may share unsigned storage. Interference is checked
@@ -3788,6 +3928,7 @@ export class Renderer {
           destination.type.kind !== 'integer' ||
           source.type.bits >= destination.type.bits ||
           formals.has(source.id) ||
+          this.inlinedCalls.has(source.id) ||
           this.valueType(source) !== this.dataType(source.type) ||
           this.valueType(destination) !== this.dataType(destination.type)
         )
@@ -3905,6 +4046,10 @@ export class Renderer {
       this.language,
       {
         writes: (transfer) => this.printedCopies(transfer).map((copy) => key(copy.destination)),
+        copyReads: (transfer) =>
+          this.printedCopies(transfer).flatMap((copy) =>
+            liveness.leaves(copy.source).map((index) => key(liveness.values[index]!)),
+          ),
         silent,
         plain: (control) => !this.requirementPredicates.has(control.id),
         reads: (control) =>
@@ -3923,7 +4068,8 @@ export class Renderer {
       this.context,
     );
     const tests: string[] = [],
-      fors: string[] = [];
+      fors: string[] = [],
+      exits: string[] = [];
     const forms = (region: Region): void => {
       if (region.kind === 'sequence') region.regions.forEach(forms);
       else if (region.kind === 'loop') {
@@ -3934,6 +4080,13 @@ export class Renderer {
               : [region.form.test]),
           );
         if (region.form?.kind === 'for') fors.push(region.form.test);
+        const control = region.form && this.controls.get(region.form.test);
+        const leave =
+          region.form &&
+          control &&
+          formArm(region.form, control).find((item) => item.action === 'break');
+        if (region.form && leave && this.printedCopies(leave.arm.transfer).length)
+          exits.push(region.form.test);
         forms(region.body);
       } else for (const arm of controlArms(region.control)) if (arm.body) forms(arm.body);
     };
@@ -3952,6 +4105,13 @@ export class Renderer {
           subject,
           'a while/do-while prints as for (init; test; step) when its single entry and single repeat edges only initialize and step (x = x ± c) induction variables nothing else in the loop writes, and its test reads one; a bottom test must hold on entry',
           fors,
+        )) &&
+      (!exits.length ||
+        this.localValidation.presentation(
+          'loop_exit_copies',
+          subject,
+          "a single-test loop's exit edge prints its copies right after the loop: it is the only edge from inside the loop to the continuation, and outer-loop exit flags are tested before them; a do-while's repeat copies (moved before its test) are not read by them",
+          exits,
         ))
         ? shaped
         : body;
@@ -4015,9 +4175,12 @@ export class Renderer {
   }
 
   /** Restate a do-while test over the variable its repeat copy just wrote: for
-   * a copy `x <- x + c` and test `(x or zext x) ==/!= K`, test `x ==/!= K + c`.
-   * Used only when the bit-vector checker proves the restated test, over the
-   * copy's source value, equal to the original test. */
+   * a copy `x <- x + c` and test `(x or zext x) ==/!= K`, test `x ==/!= K + c`;
+   * for a copy `x <- x >> c` (logical or arithmetic, 0 < c < width) and an
+   * unsigned range test `x < 2^c` (or `x <= 2^c - 1`, or their negations), test
+   * `x ==/!= 0`. The derivation is exact over the IR; while the shared
+   * allowance remains, the bit-vector checker independently re-proves the
+   * restated test (over the copy's source value) and may veto it. */
   private restateTest(
     control: Extract<Control, { kind: 'if' }>,
     repeat: ParallelTransfer,
@@ -4035,11 +4198,25 @@ export class Renderer {
       tested = compare.value;
       compare = program.expressions.get(tested.id);
     }
-    if (compare?.kind !== 'compare' || (compare.op !== 'eq' && compare.op !== 'ne')) return false;
+    if (compare?.kind !== 'compare') return false;
     const right = constant(compare.right),
       bound = right ?? constant(compare.left);
     let leaf = right === undefined ? compare.right : compare.left;
     if (bound === undefined) return false;
+    // The predicate with the variable on its left.
+    const op =
+      right !== undefined
+        ? compare.op
+        : compare.op === 'ult'
+          ? 'ugt'
+          : compare.op === 'ule'
+            ? 'uge'
+            : compare.op === 'ugt'
+              ? 'ult'
+              : compare.op === 'uge'
+                ? 'ule'
+                : compare.op;
+    if (!['eq', 'ne', 'ult', 'ule', 'ugt', 'uge'].includes(op)) return false;
     for (let i = 0; i < 16 && this.inline.has(leaf.id); i++) {
       const cast = program.expressions.get(leaf.id);
       if (cast?.kind !== 'cast' || (cast.op !== 'zero_extend' && cast.op !== 'bitcast'))
@@ -4054,68 +4231,100 @@ export class Renderer {
       copy = copies.find((item) => key(item.destination) === key(leaf));
     if (!copy || copy.destination.type.kind !== 'integer' || copy.destination.type.bits !== width)
       return false;
-    const offset = (value: Value, depth: number): bigint | null => {
-      if (value.id === leaf.id) return 0n;
-      const expression = program.expressions.get(value.id);
-      if (depth > 8 || !expression || value.type.kind !== 'integer' || value.type.bits < width)
-        return null;
+    let restatedOp: 'eq' | 'ne', bits: bigint, scope: string;
+    if (op === 'eq' || op === 'ne') {
+      const offset = (value: Value, depth: number): bigint | null => {
+        if (value.id === leaf.id) return 0n;
+        const expression = program.expressions.get(value.id);
+        if (depth > 8 || !expression || value.type.kind !== 'integer' || value.type.bits < width)
+          return null;
+        if (
+          expression.kind === 'cast' &&
+          ['bitcast', 'zero_extend', 'sign_extend', 'truncate'].includes(expression.op)
+        )
+          return offset(expression.value, depth + 1);
+        if (expression.kind === 'extract' && expression.offset === 0)
+          return offset(expression.value, depth + 1);
+        if (expression.kind !== 'integer' || (expression.op !== 'add' && expression.op !== 'sub'))
+          return null;
+        const step = constant(expression.right);
+        if (step !== undefined) {
+          const base = offset(expression.left, depth + 1);
+          return base === null ? null : expression.op === 'add' ? base + step : base - step;
+        }
+        const first = constant(expression.left);
+        if (first === undefined || expression.op !== 'add') return null;
+        const base = offset(expression.right, depth + 1);
+        return base === null ? null : base + first;
+      };
+      const shift = offset(copy.source, 0);
+      if (shift === null) return false;
+      restatedOp = op;
+      bits = BigInt.asUintN(width, bound + shift);
+      scope = `test of x ==/!= ${bound} restated after the repeat copy x <- x ${shift < 0n ? '-' : '+'} ${shift < 0n ? -shift : shift} (mod 2^${width}) as x ==/!= ${bits}`;
+    } else {
+      const uncast = (value: Value): Value => {
+        for (let i = 0; i < 16; i++) {
+          const cast = program.expressions.get(value.id);
+          if (cast?.kind !== 'cast' || cast.op !== 'bitcast') break;
+          value = cast.value;
+        }
+        return value;
+      };
+      const source = uncast(copy.source),
+        shifted = program.expressions.get(source.id),
+        count = shifted?.kind === 'integer' ? constant(shifted.right) : undefined;
       if (
-        expression.kind === 'cast' &&
-        ['bitcast', 'zero_extend', 'sign_extend', 'truncate'].includes(expression.op)
+        shifted?.kind !== 'integer' ||
+        (shifted.op !== 'lshr' && shifted.op !== 'ashr') ||
+        source.type.kind !== 'integer' ||
+        source.type.bits !== width ||
+        uncast(shifted.left).id !== leaf.id ||
+        count === undefined ||
+        count <= 0n ||
+        count >= BigInt(width)
       )
-        return offset(expression.value, depth + 1);
-      if (expression.kind === 'extract' && expression.offset === 0)
-        return offset(expression.value, depth + 1);
-      if (expression.kind !== 'integer' || (expression.op !== 'add' && expression.op !== 'sub'))
-        return null;
-      const step = constant(expression.right);
-      if (step !== undefined) {
-        const base = offset(expression.left, depth + 1);
-        return base === null ? null : expression.op === 'add' ? base + step : base - step;
-      }
-      const first = constant(expression.left);
-      if (first === undefined || expression.op !== 'add') return null;
-      const base = offset(expression.right, depth + 1);
-      return base === null ? null : base + first;
-    };
-    const shift = offset(copy.source, 0);
-    if (shift === null) return false;
-    if (this.localValidation.skipExhaustedBitvector(tested.id)) return false;
+        return false;
+      // x >> c == 0 iff x <u 2^c (an arithmetic shift too: 2^c <= 2^(width-1)).
+      const limit = 1n << count,
+        below = op === 'ult' || op === 'ule';
+      if (bound !== (op === 'ult' || op === 'uge' ? limit : limit - 1n)) return false;
+      restatedOp = below ? 'eq' : 'ne';
+      bits = 0n;
+      scope = `unsigned test x ${below ? '<' : '>='} 2^${count} restated after the repeat copy x <- x >> ${count} (${shifted.op}, width ${width}) as x ${below ? '==' : '!='} 0`;
+    }
     const restated: Value = { id: `${control.id}#restated_bound`, type: copy.destination.type };
-    const bits = BigInt.asUintN(width, bound + shift),
-      original = compare,
+    const original = compare,
       subject = tested;
     const expressions = new Map(program.expressions);
     expressions.set(restated.id, { kind: 'constant', bits });
-    const record = this.localValidation.check(
-      'bitvector',
-      subject.id,
-      'do-while test restated over its repeat copy result; not whole-function equivalence',
-      () =>
-        validateBitvectorCandidate(
-          subject,
-          original,
-          { kind: 'compare', op: original.op, left: copy.source, right: restated },
-          expressions,
-          this.localValidation.allowance,
-        ),
-    );
-    // The derivation above is exact modular arithmetic; the bit-vector check is an
-    // independent second proof when its shared allowance remains, and may veto.
+    const record = this.localValidation.allowance.exhausted
+      ? undefined
+      : this.localValidation.check(
+          'bitvector',
+          subject.id,
+          'do-while test restated over its repeat copy result; not whole-function equivalence',
+          () =>
+            validateBitvectorCandidate(
+              subject,
+              original,
+              { kind: 'compare', op: restatedOp, left: copy.source, right: restated },
+              expressions,
+              this.localValidation.allowance,
+            ),
+        );
     if (
-      record.status === 'rejected' ||
-      !this.localValidation.presentation(
-        'loop_test_restatement',
-        control.id,
-        `test of x ==/!= ${bound} restated after the repeat copy x <- x ${shift < 0n ? '-' : '+'} ${shift < 0n ? -shift : shift} (mod 2^${width}) as x ==/!= ${bits}`,
-        [tested.id, copy.destination.id],
-      )
+      record?.status === 'rejected' ||
+      !this.localValidation.presentation('loop_test_restatement', control.id, scope, [
+        tested.id,
+        copy.destination.id,
+      ])
     )
       return false;
     this.synthetic.set(restated.id, { kind: 'constant', bits });
     this.rebased.set(control.id, {
       kind: 'compare',
-      op: compare.op,
+      op: restatedOp,
       left: copy.destination,
       right: restated,
     });
@@ -4431,6 +4640,12 @@ export class Renderer {
         this.writer.statement(depth + 1, 'pass');
       if (c && form?.kind !== 'do_while') this.writer.line(depth, '}');
       this.propagateLoopExit(region.header, depth);
+      // Flagged exits to outer loops left above; only this loop's test reaches here.
+      const exit = form && this.loopExitCopies.get(form.test);
+      if (form && exit) {
+        this.loopExitCopies.delete(form.test);
+        this.transfer(exit, depth, this.controls.get(form.test)!);
+      }
     } else {
       this.emitNotes(region.id, depth);
       const start = this.writer.offset;
@@ -4445,20 +4660,42 @@ export class Renderer {
       this.sourceDefinitions(region.id, depth);
       for (const node of region.statements) {
         this.context.checkpoint(1);
-        if (
+        const held =
+          node.kind === 'call' && this.program.retained.has(node.id)
+            ? this.program.calls
+                .get(node.id)
+                ?.results.map((value) => this.inlinedCalls.get(value.id))
+                .find((site) => site)
+            : undefined;
+        if (held) this.holdCall(held.node, held, depth);
+        else if (
           this.program.retained.has(node.id) &&
           !('result' in node && this.inlined.has(node.result.id))
         )
-          this.instruction(node, depth);
+          this.reader(() => this.instruction(node, depth));
         this.sourceDefinitions(node.id, depth);
       }
       this.sourceDefinitions(region.control.id, depth);
-      this.control(region.control, region, depth);
+      // A plain jump carries a held call on to the block it enters.
+      if (region.control.kind === 'jump') this.control(region.control, region, depth);
+      else this.reader(() => this.control(region.control, region, depth));
       this.map(region, start, [
         region.effect_parameter.id,
         ...region.parameters.map((value) => value.id),
       ]);
     }
+  }
+
+  /** Print the statement or control that reads the held inlined calls. */
+  private reader(print: () => void): void {
+    const start = this.writer.offset,
+      held = [...this.pendingCalls.keys()].map((id) => this.inlinedCalls.get(id)!);
+    if (held.length && this.writer.codeLines !== this.heldLines) throw new CallInliningRetry();
+    print();
+    if (!held.length) return;
+    this.settleCalls(this.writer.text().slice(start));
+    for (const site of held)
+      this.inferenceSites.set(site.node.id, { start, end: this.writer.offset });
   }
 
   render(): EmissionResult {
@@ -4740,6 +4977,7 @@ export class Renderer {
       if (
         !this.program.live.has(value.id) ||
         this.inline.has(value.id) ||
+        this.inlinedCalls.has(value.id) ||
         formals.has(value.id) ||
         this.program.source?.stack_addresses.has(value.id)
       )
@@ -4755,6 +4993,7 @@ export class Renderer {
       this.emitNotes(value.id, 1);
     }
     this.region(this.body, 1);
+    if (this.pendingCalls.size) throw new CallInliningRetry();
     if (this.language === 'c-like') w.line(0, '}');
     // Hidden subjects retain annotations without resurrecting dead declarations.
     for (const subject of this.notes.keys()) this.emitNotes(subject, 0);
@@ -4875,5 +5114,22 @@ export class Renderer {
       },
       identifiers: [...this.identifiers.values()],
     };
+  }
+}
+
+/** Render with single-use call inlining; if a held call does not reach its
+ * reader as laid out, render again with every call printed as a statement. */
+export function renderSource(
+  input: EmissionInput,
+  options: ConstructorParameters<typeof Renderer>[1],
+  context: OperationContext,
+  language: 'c-like' | 'python-like',
+  version: string,
+): EmissionResult {
+  try {
+    return new Renderer(input, options, context, language, version).render();
+  } catch (error) {
+    if (!(error instanceof CallInliningRetry)) throw error;
+    return new Renderer(input, options, context, language, version, false).render();
   }
 }

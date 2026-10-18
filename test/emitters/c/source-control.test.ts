@@ -273,6 +273,191 @@ for (const language of ['c-like', 'python-like'] as const)
       }
     });
 
+    test('a bottom test after an inner branch is a do/while; x >> c range tests restate to x != 0', () => {
+      for (const [op, bound, restated] of [
+        ['lshr', 1n, true],
+        ['ashr', 1n, true],
+        ['lshr', 2n, false],
+      ] as const) {
+        const b = program(`source-control-shift-${op}-${bound}`),
+          entry = b.block('entry', [i32]),
+          head = b.block('head', [i32, i32]),
+          odd = b.block('odd'),
+          even = b.block('even'),
+          latch = b.block('latch', [i32]),
+          exit = b.block('exit', [i32]);
+        const n = entry.parameters[0]!;
+        entry.jump(head, [n, entry.constant(i32, 0n)]);
+        const [x, acc] = head.parameters as [Value, Value];
+        head.branch(
+          head.compare('ne', head.int('and', x, head.constant(i32, 1n)), head.constant(i32, 0n)),
+          head.edge(odd),
+          head.edge(even),
+        );
+        odd.store(odd.constant(i64, 0x1000n), x);
+        odd.jump(latch, [odd.int('add', acc, odd.constant(i32, 3n))]);
+        even.jump(latch, [even.int('add', acc, even.constant(i32, 1n))]);
+        const sum = latch.parameters[0]!;
+        // Exit once x <= bound (unsigned); otherwise repeat with x >> 1.
+        latch.branch(
+          latch.compare('ule', x, latch.constant(i32, bound)),
+          latch.edge(exit, [sum]),
+          latch.edge(head, [latch.int(op, x, latch.constant(i32, 1n)), sum]),
+        );
+        exit.return(exit.parameters);
+        const output = emit(b.finish(entry, [i32]), language);
+        const text = output.emission.text;
+        if (c && restated) {
+          assert.match(text, /\n {2}do \{\n[^]*\n {2}\} while \(\(?\w+ != 0(x0)?\)?\);\n/);
+          assert.doesNotMatch(text, /while \(true\)|\bbreak\b/);
+        } else assert.match(text, c ? /while \(true\) \{/ : /while True:/);
+        assert.equal(rules(output).includes('loop_test_restatement'), c && restated);
+        for (const start of [0n, 1n, 2n, 6n, 13n]) {
+          let value = start,
+            expected = 0n;
+          for (;;) {
+            expected += value & 1n ? 3n : 1n;
+            if (value <= bound) break;
+            value >>= 1n;
+          }
+          const observed = execute(output.emission, new Map([[n.id, start]]), memory());
+          assert.deepEqual(observed.values, [expected], `${op}/${bound}/${start}`);
+        }
+      }
+    });
+
+    test('a loop exit edge with copies prints them after the loop only when it is the sole exit', () => {
+      for (const second of [false, true]) {
+        const b = program(`source-control-exit-copies-${second}`),
+          entry = b.block('entry', [i32, i64]),
+          loop = b.block('loop', [i64, i32, i64]),
+          more = b.block('more'),
+          exit = b.block('exit', [i32]);
+        const [count, base] = entry.parameters as [Value, Value];
+        entry.jump(loop, [base, count, entry.constant(i64, 0n)]);
+        const [pointer, remaining, acc] = loop.parameters as [Value, Value, Value];
+        const word = loop.load(i32, pointer);
+        const next = loop.int('add', acc, loop.cast('zero_extend', i64, word));
+        // `second`: a zero word leaves the loop early, a second edge to its continuation.
+        if (second)
+          loop.branch(
+            loop.compare('eq', word, loop.constant(i32, 0n)),
+            loop.edge(exit, [loop.constant(i32, 7n)]),
+            loop.edge(more),
+          );
+        else loop.jump(more);
+        more.branch(
+          more.compare('ne', remaining, more.constant(i32, 1n)),
+          more.edge(loop, [
+            more.int('add', pointer, more.constant(i64, 4n)),
+            more.int('sub', remaining, more.constant(i32, 1n)),
+            next,
+          ]),
+          more.edge(exit, [more.cast('truncate', i32, next)]),
+        );
+        exit.return(exit.parameters);
+        const output = emit(b.finish(entry, [i32]), language);
+        const text = output.emission.text;
+        assert.equal(rules(output).includes('loop_exit_copies'), c && !second);
+        if (c && !second) {
+          // The exit copy runs once, after the loop's test fails.
+          assert.match(text, /\n {2}\} while \(\(?\w+ != 0(x0)?\)?\);\n {2}\w+ = .+;\n {2}return /);
+          assert.doesNotMatch(text, /while \(true\)|\bbreak\b/);
+        } else assert.match(text, c ? /while \(true\) \{/ : /while True:/);
+        for (const words of [[5], [5, 7, 11], [5, 0, 11]]) {
+          const expected =
+            second && words.includes(0) ? 7n : BigInt(words.reduce((a, b) => a + b, 0));
+          const observed = execute(
+            output.emission,
+            new Map([
+              [count.id, BigInt(words.length)],
+              [base.id, 0x1000n],
+            ]),
+            memory(words),
+          );
+          assert.deepEqual(observed.values, [expected], `${second}/${words.join(',')}`);
+        }
+      }
+    });
+
+    test('a top-tested loop prints its exit copies after the loop', () => {
+      const b = program('source-control-while-exit-copies'),
+        entry = b.block('entry', [i32]),
+        head = b.block('head', [i32, i64]),
+        body = b.block('body'),
+        exit = b.block('exit', [i32]);
+      const limit = entry.parameters[0]!;
+      entry.jump(head, [entry.constant(i32, 0n), entry.constant(i64, 0n)]);
+      const [index, sum] = head.parameters as [Value, Value];
+      head.branch(
+        head.compare('ne', index, limit),
+        head.edge(body),
+        head.edge(exit, [head.cast('truncate', i32, sum)]),
+      );
+      body.store(body.constant(i64, 0x1000n), index);
+      body.jump(head, [
+        body.int('add', index, body.constant(i32, 1n)),
+        body.int('add', sum, body.cast('zero_extend', i64, index)),
+      ]);
+      exit.return(exit.parameters);
+      const output = emit(b.finish(entry, [i32]), language);
+      const text = output.emission.text;
+      assert.match(
+        text,
+        c
+          ? /\n {2}while \(.+ != .+\) \{\n[^]*\n {2}\}\n {2}\w+ = .+;\n {2}return /
+          : /\n {2}while .+ != .+:\n[^]*\n {2}\w+ = .+\n {2}return /,
+      );
+      assert.doesNotMatch(text, /while \(true\)|while True|\bbreak\b|\bcontinue\b|\bgoto\b/);
+      assert.ok(rules(output).includes('loop_exit_copies'));
+      for (const n of [0n, 1n, 4n]) {
+        const observed = execute(output.emission, new Map([[limit.id, n]]), memory());
+        assert.deepEqual(observed.values, [(n * (n - 1n)) / 2n]);
+      }
+    });
+
+    test('a do/while is refused when an exit copy reads a repeat copy moved before the test', () => {
+      const b = program('source-control-exit-reads-repeat'),
+        entry = b.block('entry', [i32, i64]),
+        loop = b.block('loop', [i64, i32, i32]),
+        exit = b.block('exit', [i32]);
+      const [count, base] = entry.parameters as [Value, Value];
+      entry.jump(loop, [base, count, entry.constant(i32, 0n)]);
+      const [pointer, remaining, acc] = loop.parameters as [Value, Value, Value];
+      const next = loop.int('add', acc, loop.load(i32, pointer));
+      // The exit copy reads the counter phi, which the repeat edge decrements.
+      loop.branch(
+        loop.compare(
+          'ne',
+          loop.int('and', next, loop.constant(i32, 0xffn)),
+          loop.constant(i32, 0n),
+        ),
+        loop.edge(loop, [
+          loop.int('add', pointer, loop.constant(i64, 4n)),
+          loop.int('sub', remaining, loop.constant(i32, 1n)),
+          next,
+        ]),
+        loop.edge(exit, [loop.int('add', remaining, next)]),
+      );
+      exit.return(exit.parameters);
+      const output = emit(b.finish(entry, [i32]), language);
+      assert.match(output.emission.text, c ? /while \(true\) \{/ : /while True:/);
+      assert.doesNotMatch(output.emission.text, /\bdo \{/);
+      // Memory words are single bytes.
+      for (const words of [[0], [1, 0xff], [3, 5, 0xf8]]) {
+        const total = words.reduce((a, b) => a + b, 0);
+        const observed = execute(
+          output.emission,
+          new Map([
+            [count.id, 10n],
+            [base.id, 0x1000n],
+          ]),
+          memory(words),
+        );
+        assert.deepEqual(observed.values, [BigInt(10 - words.length + 1 + total)]);
+      }
+    });
+
     test('a labeled edge into a shared return ends in a copy of the return', () => {
       // The inner loop leaves both loops: a goto in the checked view. A
       // transfer to the outer header is the inner loop's exact lexical exit.

@@ -65,7 +65,9 @@ export interface SequenceRegion {
   readonly regions: readonly Region[];
 }
 /** Source-view syntax of a loop, chosen after reconstruction (never by the
- * structurer). Absent means generic `while (true)` with explicit transfers. */
+ * structurer). Absent means generic `while (true)` with explicit transfers.
+ * A single-test form's exit edge may carry copies only when it is the sole
+ * edge from inside the loop to its continuation; they print after the loop. */
 export type LoopForm =
   /** Header block has no printed statements; its `if` is the loop test and the
    * exit arm is the loop's lexical break. `enter` is the arm value staying inside. */

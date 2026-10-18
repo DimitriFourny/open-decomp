@@ -1,8 +1,8 @@
 import type { Emitter, OperationContext } from '../../core/index.js';
 import type { EmissionInput, EmissionResult } from '../model.js';
-import { Renderer } from '../renderer.js';
+import { renderSource } from '../renderer.js';
 
-export const C_EMITTER_VERSION = 'reconstructed-c-32';
+export const C_EMITTER_VERSION = 'reconstructed-c-33';
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
 
 /** C-like high-level pseudocode, not a compilable source translation.
@@ -29,5 +29,5 @@ export function emitC(
   options: Options,
   context: OperationContext,
 ): EmissionResult {
-  return new Renderer(input, options, context, 'c-like', C_EMITTER_VERSION).render();
+  return renderSource(input, options, context, 'c-like', C_EMITTER_VERSION);
 }

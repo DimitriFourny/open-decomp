@@ -14,6 +14,7 @@ import { identityOperand, integerIdentity } from './expressions.js';
 import { LocalValidationSession, validateBitvectorCandidate } from './local-validation.js';
 import { recombineBitSlices } from './source-bit-slices.js';
 import { foldSourceCondition } from './source-conditions.js';
+import { foldShiftIdiom, shiftIdiomScope } from './source-shifts.js';
 
 export interface SourceExpressionDemand {
   /** Conservative value closure, extended for newly introduced definitions. */
@@ -434,6 +435,13 @@ export function normalizeSourceExpressions(
         replacement = recombined;
         cellRewrite = true;
       }
+      // Source view: a masked constant rotation is a plain shift and a logical
+      // shift joined with the replicated sign bit is an arithmetic shift.
+      const shiftIdiom =
+        sourceCells && !condition && !recombined && replacement === expression
+          ? foldShiftIdiom(value, expression, observe, resolve, constant, create, owner.get(id)!)
+          : null;
+      if (shiftIdiom) replacement = shiftIdiom;
       // Source view only: exact same-type identities (x&x, x|x, ones&x and the
       // constant neutral elements) leave the operand itself.
       let identity = false;
@@ -496,7 +504,9 @@ export function normalizeSourceExpressions(
               (replacement.kind === 'cast' && replacement.op === 'bitcast')));
         // A condition fold is proved by its own exhaustive outcome table; the
         // bitvector checker models neither ordered compares nor selects.
-        if (!condition && (!wiring || !validation.allowance.exhausted)) {
+        // A shift idiom is proved by its own side conditions on the exact mask
+        // and count; the bitvector checker does not model rotates or selects.
+        if (!condition && !shiftIdiom && (!wiring || !validation.allowance.exhausted)) {
           if (validation.skipExhaustedBitvector(id)) continue;
           const checked = validation.check('bitvector', id, 'source expression rewrite', () =>
             validateBitvectorCandidate(
@@ -518,6 +528,16 @@ export function normalizeSourceExpressions(
             'condition_flags',
             id,
             'compare flags and their condition-code consumers (NZCV/EFLAGS bits, conditional compares, cset/csel/setcc/cmov selects, FP compare flags) as native relational predicates joined by && and ||; exact over every feasible equal/unsigned/signed/wrapped-sign outcome and IEEE less/equal/greater/unordered outcome; a condition depending on the wrapped sign or overflow alone keeps its flag helper',
+            expressionOperands(original).map((operand) => operand.id),
+          )
+        )
+          continue;
+        if (
+          shiftIdiom &&
+          !validation.presentation(
+            'shift_idiom',
+            id,
+            shiftIdiomScope,
             expressionOperands(original).map((operand) => operand.id),
           )
         )
