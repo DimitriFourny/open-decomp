@@ -46,7 +46,12 @@ import { indexedDataAccesses, type IndexedDataAccess } from './source-tables.js'
 import { cScalarSupport } from './source-c-support.js';
 import { cSourceName } from '../metadata/symbols/c-names.js';
 import { catalog, type CatalogEntry } from '../metadata/library-contracts/catalog.js';
-import { planSourceNames, sourceIdentifierStem } from '../reconstruction/source-names.js';
+import {
+  planSourceNames,
+  sourceGenericStems,
+  sourceIdentifierStem,
+  sourceRoleStems,
+} from '../reconstruction/source-names.js';
 import {
   abiConformanceRequirements,
   sourceRequirementPredicates,
@@ -217,6 +222,10 @@ export class Renderer {
   private indexedData: ReadonlyMap<string, IndexedDataAccess> = new Map();
   private readonly sourceValueTypes = new Map<string, string>();
   private readonly sourceRoleNames: ReadonlyMap<string, string | null>;
+  /** Loop header phis: each is its own loop-carried variable (see planSourceNames). */
+  private readonly sourceCarried: ReadonlySet<string>;
+  /** Initial value -> the loop header phi it enters (see planSourceNames). */
+  private readonly sourceInitial: ReadonlyMap<string, string>;
   private readonly requirementPredicates: ReadonlyMap<string, SourceRequirementPredicate>;
   private readonly fpPresentation: SourceFpPresentation;
   private sourceTemporary = 0;
@@ -307,13 +316,10 @@ export class Renderer {
         else if (spelling !== name.source_name) this.linkageNames.set(name.entity_id, null);
       }
     }
-    this.sourceRoleNames = planSourceNames(
-      this.program,
-      this.names,
-      input.types,
-      context,
-      this.sourceView,
-    );
+    const plan = planSourceNames(this.program, this.names, input.types, context, this.sourceView);
+    this.sourceRoleNames = plan.names;
+    this.sourceCarried = plan.carried;
+    this.sourceInitial = plan.initial;
     for (const note of input.annotations ?? []) {
       context.checkpoint(1);
       if (note.status === 'retracted' || note.value.kind !== 'note') continue;
@@ -464,26 +470,92 @@ export class Renderer {
     readonly names: Map<string, string | null>;
   } | null = null;
 
-  /** Role-derived name of the printed variable `value` represents. Every member
-   * of a coalesced phi class must agree; disagreeing or conflicting members leave
-   * the variable neutral. Undefined when no member has a role name. */
+  /** Role-derived name of the printed variable `value` represents. A coalesced
+   * phi class takes a role name only when exactly one role names its members and
+   * every other member is that same variable: not a loop header phi (each is a
+   * loop-carried variable needing its own proof), and either the initial value
+   * of a header phi of the class that has the role, a merge of only class
+   * members and constants, or a conversion of a member; generic if named at
+   * all. A class that also holds any other value is not that role and stays
+   * neutral. Without a role, every named member must agree. Undefined when no
+   * member has a name. */
   private classRoleName(value: Value): string | null | undefined {
     if (!this.sourceView) return this.sourceRoleNames.get(value.id);
     if (this.classRoles?.for !== this.variables) {
-      const names = new Map<string, string | null>();
+      const names = new Map<string, string | null>(),
+        classes = new Map<string, string[]>();
       for (const [id, representative] of this.variables) {
-        this.context.checkpoint(1);
-        const name = this.sourceRoleNames.get(id);
-        if (name === undefined) continue;
-        const known = names.get(representative.id);
-        names.set(representative.id, known === undefined || known === name ? name : null);
+        const row = classes.get(representative.id) ?? [];
+        row.push(id);
+        classes.set(representative.id, row);
+      }
+      const merged = new Map<string, Value[]>();
+      for (const copies of this.program.transfers.values())
+        for (const copy of copies) {
+          const row = merged.get(copy.destination.id) ?? [];
+          row.push(copy.source);
+          merged.set(copy.destination.id, row);
+        }
+      /** Operand of a value-preserving conversion. */
+      const converted = (value: Value): Value | undefined => {
+        const expression = this.program.expressions.get(value.id);
+        return (expression?.kind === 'cast' &&
+          ['bitcast', 'truncate', 'zero_extend', 'sign_extend'].includes(expression.op)) ||
+          (expression?.kind === 'extract' && expression.offset === 0)
+          ? expression.value
+          : undefined;
+      };
+      /** True when `input` is a constant or, through conversions, a member of the
+       * class `representative` names. */
+      const same = (input: Value, representative: string): boolean => {
+        const seen = new Set<string>();
+        for (let value: Value | undefined = input; value && !seen.has(value.id);) {
+          this.context.checkpoint(1);
+          seen.add(value.id);
+          if (
+            this.variables.get(value.id)?.id === representative ||
+            this.program.expressions.get(value.id)?.kind === 'constant'
+          )
+            return true;
+          value = converted(value);
+        }
+        return false;
+      };
+      for (const [representative, members] of classes) {
+        this.context.checkpoint(members.length);
+        const own = members.map((id) => this.sourceRoleNames.get(id));
+        const roles = new Set(own.filter((name) => name && sourceRoleStems.has(name)));
+        if (roles.size > 1 || own.includes(null)) names.set(representative, null);
+        else if (roles.size === 1) {
+          const role = [...roles][0]!;
+          const variable = members.every((id, index) => {
+            const name = own[index];
+            if (name === role) return true;
+            if ((name && !sourceGenericStems.has(name)) || this.sourceCarried.has(id)) return false;
+            const head = this.sourceInitial.get(id);
+            if (
+              head !== undefined &&
+              this.variables.get(head)?.id === representative &&
+              this.sourceRoleNames.get(head) === role
+            )
+              return true;
+            const sources = merged.get(id),
+              operand = converted(this.program.values.get(id)!);
+            return sources
+              ? sources.every((source) => same(source, representative))
+              : operand !== undefined && same(operand, representative);
+          });
+          names.set(representative, variable ? role : null);
+        } else {
+          const named = new Set(own.filter((name) => name !== undefined));
+          if (named.size) names.set(representative, named.size === 1 ? [...named][0]! : null);
+        }
       }
       this.classRoles = { for: this.variables, names };
     }
-    const own = this.sourceRoleNames.get(value.id),
-      members = this.classRoles.names.get(value.id);
-    if (members === undefined) return own;
-    return own === undefined || own === members ? members : null;
+    return this.classRoles.names.has(value.id)
+      ? this.classRoles.names.get(value.id)
+      : this.sourceRoleNames.get(value.id);
   }
 
   private local(value: Value): string {
@@ -4805,11 +4877,18 @@ export class Renderer {
       if (!this.names.has(value.id) && source?.name) this.names.set(value.id, source.name);
       if (!this.names.has(value.id) && register && !this.program.source)
         this.names.set(value.id, this.registerName(register));
+      // A role-named formal that is also a coalesced class needs every member to
+      // be that role (classRoleName); its supplied or recovered names stand.
+      const own = this.sourceRoleNames.get(value.id);
+      const proven =
+        own && sourceRoleStems.has(own) && this.variables.has(value.id)
+          ? this.classRoleName(value)
+          : own;
       const name = this.program.source
         ? this.sourceIdentifier(
             value.id,
             this.sourceRoleNames.has(value.id)
-              ? (this.sourceRoleNames.get(value.id) ?? `arg${i}`)
+              ? (proven ?? `arg${i}`)
               : (this.program.source.parameter_names.get(value.id) ?? source?.name ?? `arg${i}`),
           )
         : this.identifier(value.id, source ? 'arg' : register ? 'reg' : 'arg');

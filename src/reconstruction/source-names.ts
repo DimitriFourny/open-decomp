@@ -17,12 +17,35 @@ const roleBits: Record<Role, number> = {
 const roleNames = new Map<number, Role>(
   (Object.keys(roleBits) as Role[]).map((role): [number, Role] => [roleBits[role], role]),
 );
+/** Every identifier stem a role can print as, and the generic stems a value
+ * takes from its definition alone; a role outranks a generic name. */
+export const sourceRoleStems: ReadonlySet<string> = new Set([
+  ...Object.keys(roleBits),
+  'remaining',
+]);
+export const sourceGenericStems: ReadonlySet<string> = new Set([
+  'condition',
+  'call_result',
+  'element',
+  'result',
+]);
 const reservedWord =
   /^(?:auto|break|case|char|const|continue|default|do|double|else|enum|extern|float|for|goto|if|inline|int|long|register|restrict|return|short|signed|sizeof|static|struct|switch|typedef|union|unsigned|void|volatile|while|_Alignas|_Alignof|_Atomic|_Bool|_Complex|_Generic|_Imaginary|_Noreturn|_Static_assert|_Thread_local|False|None|True|and|as|assert|async|await|class|def|del|elif|except|finally|from|global|import|in|is|lambda|nonlocal|not|or|pass|raise|try|with|yield|bool|memory|label|pointer|address_of|field_view|stack_slot|stack_storage|data_address|read_memory|write_memory|uint\d+|int\d+|uint\d+_t|int\d+_t|bits\d+_t|ieee\d+_t)$/;
 const reservedRuntimeName =
   /^(?:entry_sp|stack_frame|true|false|NULL|U?INT\d+_(?:MAX|MIN|C)|extract_bits|insert_bits|concat_low_first|signed_value|wrap|read_register|write_register|image_address|boundary|explicit_values)$/;
 const reservedRuntimePrefix =
   /^(?:__|bv_|fp_|cast_|vector_|flag_|memory_|unknown_|physical_|source_|type_|transfer_|requirement_)/;
+
+export interface SourceNamePlan {
+  /** Preferred name per value or local; null where independent roles conflict. */
+  readonly names: ReadonlyMap<string, string | null>;
+  /** Source view: every loop header phi. A header phi is a loop-carried variable
+   * of its own; it shares a role only when its own loop analysis proves it. */
+  readonly carried: ReadonlySet<string>;
+  /** Source view: value copied into a loop header phi on entry to its loop ->
+   * that header phi. Printed as the same variable, it is the initial value. */
+  readonly initial: ReadonlyMap<string, string>;
+}
 
 /** Presentation-only suggestions: no source intent, type, identity or expression
  * is inferred from an identifier. Conflicting independent roles stay neutral.
@@ -34,8 +57,10 @@ export function planSourceNames(
   types: TypeRecoveryResult | undefined,
   context: OperationContext,
   refined: boolean,
-): ReadonlyMap<string, string | null> {
-  if (!program.source) return new Map();
+): SourceNamePlan {
+  const carried = new Set<string>(),
+    initial = new Map<string, string>();
+  if (!program.source) return { names: new Map(), carried, initial };
   const parameters = new Set(program.parameters.map((value) => value.id));
   const links = new Map<string, { value: Value; sameWidth: boolean }[]>();
   const storageLinks = new Map<string, string[]>();
@@ -78,13 +103,15 @@ export function planSourceNames(
     }
     return value;
   };
-  const mark = (value: Value, role: Role): void => {
+  /** `spread` hands the role to every copy and cast linked to `value`. Loop roles
+   * in the source view never spread: a copy of a counter is not the counter. */
+  const mark = (value: Value, role: Role, spread = true): void => {
     const expression = program.expressions.get(value.id);
     if (expression?.kind === 'constant' || expression?.kind === 'address') return;
     const before = roles.get(value.id) ?? 0;
     if (before & roleBits[role]) return;
     roles.set(value.id, before | roleBits[role]);
-    queue.push({ value, role });
+    if (spread) queue.push({ value, role });
   };
   let cursor = 0;
   const propagate = (): void => {
@@ -123,7 +150,8 @@ export function planSourceNames(
       mark(count, 'shift_count');
     }
   }
-  const sources = new Map<ParallelTransfer, string>();
+  const sources = new Map<ParallelTransfer, string>(),
+    successors = new Map<string, string[]>();
   for (const block of program.blocks.values()) {
     const control = block.control;
     const transfers =
@@ -135,6 +163,10 @@ export function planSourceNames(
             ? [...control.cases.map((item) => item.arm.transfer), control.otherwise.transfer]
             : [];
     for (const transfer of transfers) sources.set(transfer, block.id);
+    successors.set(
+      block.id,
+      transfers.map((transfer) => transfer.target),
+    );
     for (const node of block.statements) {
       context.checkpoint(1);
       if (!program.retained.has(node.id)) continue;
@@ -245,6 +277,8 @@ export function planSourceNames(
     }
     loopTests.set(header, tests);
   }
+  /** Name of each promoted slot from its loop analyses; null when they disagree. */
+  const slotNames = new Map<string, string | null>();
   if (refined) {
     // Loop-carried variables. A variable is either a phi web (header phi plus the
     // merge phis/selects that feed its back edge) or a promoted stack slot (all of
@@ -368,16 +402,91 @@ export function planSourceNames(
         return dependsOn(other, web) ? { kind: 'opaque' } : { kind: 'fold', other, chain };
       }
     };
+    /** Values an address is computed from: every operand, through any arithmetic,
+     * of a retained load or store address. */
+    const subscripts = new Set<string>();
+    for (const block of program.blocks.values())
+      for (const node of block.statements) {
+        if ((node.kind !== 'load' && node.kind !== 'store') || !program.retained.has(node.id))
+          continue;
+        const todo = [node.address];
+        while (todo.length) {
+          context.checkpoint(1);
+          const value = todo.pop()!;
+          if (subscripts.has(value.id)) continue;
+          subscripts.add(value.id);
+          const expression = program.expressions.get(value.id);
+          if (expression) todo.push(...expressionOperands(expression));
+        }
+      }
+    /** True when every path from `header` back to it inside the loop passes
+     * through one of `blocks`. */
+    const everyIteration = (header: string, blocks: ReadonlySet<string>): boolean => {
+      const members = loops.get(header)!,
+        todo = [header],
+        seen = new Set<string>();
+      while (todo.length) {
+        context.checkpoint(1);
+        const id = todo.pop()!;
+        if (seen.has(id) || blocks.has(id)) continue;
+        seen.add(id);
+        for (const next of successors.get(id) ?? []) {
+          if (next === header) return false;
+          if (members.has(next)) todo.push(next);
+        }
+      }
+      return true;
+    };
     const pendingBounds: { bound: Value; role: Role }[] = [];
-    const analyze = (header: string, seed: ReadonlySet<string>, starts: readonly Value[]): void => {
+    /** `id` and every same-width cast or extract linked to it: a reinterpretation
+     * prints the same value under another type; it is not a copy. */
+    const reinterpretations = (id: string): string[] => {
+      const width = bitWidth(program.values.get(id)!.type),
+        found = [id],
+        seen = new Set(found);
+      for (let at = 0; at < found.length; at++)
+        for (const next of storageLinks.get(found[at]!) ?? []) {
+          context.checkpoint(1);
+          if (seen.has(next) || bitWidth(program.values.get(next)!.type) !== width) continue;
+          seen.add(next);
+          found.push(next);
+        }
+      return found;
+    };
+    /** Classifies one loop-carried variable. A phi web is `seed` = the header phi
+     * with its back-edge values `starts` and entry values `entries`; a promoted
+     * slot is `seed` = its loads and `slot` = its local, whose stores in the loop
+     * are `starts`. Definitions:
+     * - index / count: every update is the same nonzero constant step and runs on
+     *   every iteration (no path from the header to a back edge leaves the
+     *   variable unchanged); a decreasing count prints as `remaining`. The
+     *   invariant bound of an index is its count (unit step) or limit, and a
+     *   parameter a unit countdown starts from is the count.
+     * - accumulator: every update is one associative operation with an operand
+     *   free of the variable, possibly guarded, and no running value is part of an
+     *   address or compared with a varying bound in a loop test.
+     * A path resetting the variable to a constant, an opaque update, or an
+     * address/callback use leaves it neutral. Only the variable itself (its phi
+     * web and the update values its back edges carry, with their same-width
+     * reinterpretations, or the slot) is named: the intermediate running values
+     * of an unrolled chain and copies stay neutral. */
+    const analyze = (
+      header: string,
+      seed: ReadonlySet<string>,
+      starts: readonly Value[],
+      slot?: string,
+      entries: readonly Value[] = [],
+    ): void => {
       const members = loops.get(header)!;
       const web = new Set(seed),
         leaves: Value[] = [],
         seen = new Set<string>(),
         todo = [...starts];
+      let unchanged = false;
       while (todo.length) {
         context.checkpoint(1);
         const value = todo.pop()!;
+        if (seed.has(value.id)) unchanged = true;
         if (seen.has(value.id)) continue;
         seen.add(value.id);
         if (web.has(value.id)) continue;
@@ -389,33 +498,54 @@ export function planSourceNames(
         } else if (expression?.kind === 'select') {
           web.add(value.id);
           todo.push(canonical(expression.when_true, true), canonical(expression.when_false, true));
-        } else if (expression?.kind !== 'constant') leaves.push(value);
+        } else if (expression?.kind === 'constant') return;
+        else leaves.push(value);
+      }
+      if (slot !== undefined) {
+        const stores = (slotStores.get(slot) ?? []).filter((store) => members.has(store.block));
+        if (!everyIteration(header, new Set(stores.map((store) => store.block)))) unchanged = true;
       }
       const updates = leaves.map((leaf) => classify(leaf, web));
       if (!updates.length || updates.some((update) => update.kind === 'opaque')) return;
       for (const id of web)
         if ((roles.get(id) ?? 0) & (roleBits.address | roleBits.callback)) return;
       const steps = updates.flatMap((update) => (update.kind === 'step' ? [update.step] : []));
-      let role: Role,
-        step = 0n;
-      if (steps.length === updates.length) {
-        if (steps.some((value) => value > 0n !== steps[0]! > 0n)) return;
-        step = steps[0]!;
-        role = step > 0n ? 'index' : 'count';
-      } else role = 'accumulator';
-      const scope = [
+      const running = [
         ...web,
         ...leaves.map((leaf) => leaf.id),
         ...updates.flatMap((update) =>
-          update.kind === 'fold' ? update.chain.map((v) => v.id) : [],
+          update.kind === 'fold' ? update.chain.map((value) => value.id) : [],
         ),
       ];
       const bounds: Value[] = [];
       const tests = loopTests.get(header)!;
-      for (const id of scope) bounds.push(...(tests.get(id) ?? []));
-      // A step other than one with no loop test is as likely a pointer-sized stride
-      // as an index, so only a unit step stands without a test.
-      if (role !== 'accumulator' && !bounds.length && step !== 1n && step !== -1n) return;
+      for (const id of running) bounds.push(...(tests.get(id) ?? []));
+      let role: Role,
+        step = 0n;
+      if (steps.length === updates.length) {
+        if (unchanged || steps.some((value) => value !== steps[0])) return;
+        step = steps[0]!;
+        role = step > 0n ? 'index' : 'count';
+        // A step other than one with no loop test is as likely a pointer-sized
+        // stride as an index, so only a unit step stands without a test.
+        if (!bounds.length && step !== 1n && step !== -1n) return;
+        // Stepping down from zero counts negated iterations, not what remains.
+        if (
+          role === 'count' &&
+          entries.some((entry) => {
+            const expression = program.expressions.get(entry.id);
+            return expression?.kind === 'constant' && expression.bits === 0n;
+          })
+        )
+          return;
+      } else {
+        role = 'accumulator';
+        if (
+          running.some((id) => subscripts.has(id)) ||
+          bounds.some((bound) => program.expressions.get(bound.id)?.kind !== 'constant')
+        )
+          return;
+      }
       if (role === 'index') {
         const bound = bounds.find(
           (candidate) =>
@@ -423,34 +553,62 @@ export function planSourceNames(
             invariant(candidate, members),
         );
         if (bound) pendingBounds.push({ bound, role: step === 1n ? 'count' : 'limit' });
-      }
-      for (const id of scope) {
-        const value = program.values.get(id);
-        if (value) mark(value, role);
-        if (role === 'count') decreasing.add(id);
-      }
+      } else if (step === -1n)
+        // A parameter a unit countdown starts from is the number of iterations.
+        for (const entry of entries)
+          if (parameters.has(entry.id)) pendingBounds.push({ bound: entry, role: 'count' });
+      if (slot !== undefined) {
+        const name = role === 'count' ? 'remaining' : role,
+          previous = slotNames.get(slot);
+        slotNames.set(slot, previous === undefined || previous === name ? name : null);
+      } else
+        for (const id of [...web, ...leaves.map((leaf) => leaf.id)])
+          for (const same of reinterpretations(id)) {
+            const value = program.values.get(same);
+            if (value) mark(value, role, false);
+            if (role === 'count') decreasing.add(same);
+          }
       if (role === 'accumulator')
         for (const update of updates)
           if (update.kind === 'fold') {
-            const element = loaded.get(canonical(update.other, true).id);
-            if (element) generic.set(element.id, 'element');
+            // A reload of a promoted slot is another variable, not an element.
+            const operand = canonical(update.other, true),
+              element = loaded.get(operand.id);
+            if (element && !slotOf.has(operand.id)) generic.set(element.id, 'element');
           }
     };
-    const headers = new Map<string, { header: string; head: Value; starts: Value[] }>();
+    const headers = new Map<
+      string,
+      { header: string; head: Value; starts: Value[]; entries: Value[]; initials: Value[] }
+    >();
     for (const [transfer, copies] of program.transfers) {
       const members = loops.get(transfer.target),
         source = sources.get(transfer);
-      if (!members || !source || !members.has(source)) continue;
+      if (!members || !source) continue;
       for (const copy of copies) {
         const head = canonical(copy.destination, true),
           key = `${transfer.target}\0${head.id}`;
-        const row = headers.get(key) ?? { header: transfer.target, head, starts: [] };
-        row.starts.push(canonical(copy.source, true));
+        const row = headers.get(key) ?? {
+          header: transfer.target,
+          head,
+          starts: [],
+          entries: [],
+          initials: [],
+        };
+        if (members.has(source)) row.starts.push(canonical(copy.source, true));
+        else {
+          row.entries.push(canonical(copy.source, true));
+          row.initials.push(copy.source);
+        }
         headers.set(key, row);
       }
     }
-    for (const { header, head, starts } of headers.values())
-      analyze(header, new Set([head.id]), starts);
+    for (const { header, head, starts, entries, initials } of headers.values()) {
+      if (!starts.length) continue;
+      carried.add(head.id);
+      for (const value of initials) initial.set(value.id, head.id);
+      analyze(header, new Set([head.id]), starts, undefined, entries);
+    }
     for (const [header, members] of loops)
       for (const [slot, stores] of slotStores) {
         const inside = stores.filter((store) => members.has(store.block));
@@ -459,9 +617,10 @@ export function planSourceNames(
           header,
           new Set((slotLoads.get(slot) ?? []).map((load) => load.id)),
           inside.map((store) => store.value),
+          slot,
         );
       }
-    for (const { bound, role } of pendingBounds) if (!roles.get(bound.id)) mark(bound, role);
+    for (const { bound, role } of pendingBounds) if (!roles.get(bound.id)) mark(bound, role, false);
   } else {
     for (const [transfer, copies] of program.transfers) {
       const members = loops.get(transfer.target),
@@ -651,8 +810,23 @@ export function planSourceNames(
         id,
         conflictingLocals.has(id) || names.size !== 1 ? null : names.values().next().value!,
       );
+  // A promoted slot is named by its own loop analysis. Reloads materialized as
+  // temporaries are copies and keep their own neutral or generic names; a role a
+  // reload carries from its uses must agree with the slot's.
+  for (const [id, name] of slotNames)
+    if (!supplied.has(id))
+      preferred.set(
+        id,
+        name === null ||
+          conflictingLocals.has(id) ||
+          [...(localNames.get(id) ?? [])].some(
+            (other) => sourceRoleStems.has(other) && other !== name,
+          )
+          ? null
+          : name,
+      );
   for (const id of conflictingLocals) if (!supplied.has(id)) preferred.set(id, null);
-  return preferred;
+  return { names: preferred, carried, initial };
 }
 
 /** One allocator namespace serves source identifiers in both dialects. Helpers
