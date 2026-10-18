@@ -1,5 +1,23 @@
 # Performance and resource evidence
 
+## Evidence archive setup
+
+The 15 retained `.tar.gz` bundles are external assets, not git content. `scripts/bench/evidence-assets.json` pins every original repo-relative path, byte size and SHA256. The durable local copy is `~/Documents/open-decomp-evidence-archives/`, preserving those paths. The working store is `$OPEN_DECOMP_EVIDENCE_DIR`, or `<repo>/.local/evidence` when unset. No public download location is currently configured.
+
+```sh
+node --import tsx scripts/bench/fetch-evidence.ts
+# Equivalent explicit source:
+node --import tsx scripts/bench/fetch-evidence.ts --from "$HOME/Documents/open-decomp-evidence-archives"
+# Fetch one bundle by basename (the original repo-relative path also works):
+node --import tsx scripts/bench/fetch-evidence.ts --only baseline-2026-10-17.tar.gz
+# If a mirror is published, it must preserve the manifest's repo-relative paths:
+node --import tsx scripts/bench/fetch-evidence.ts --url-base "$EVIDENCE_URL_BASE"
+```
+
+Fetch verifies size/SHA256 before publishing each asset; existing store files are checked too. TypeScript `evidencePath()` and Python `evidence_path()` resolve the same manifest and verify each asset once per process. Missing archives report the fetch command; corruption is an error, not a test skip. The SQLite interfaces integration test explicitly skips only when required host tools or its baseline archive are absent; provision the baseline to exercise it.
+
+Below, `$EVIDENCE` means `${OPEN_DECOMP_EVIDENCE_DIR:-.local/evidence}` when running from the repository root. Archive basenames in historical JSON remain provenance identifiers; their bytes now live beneath this store, while JSON hash/member records remain tracked.
+
 ## Status and method
 
 These historical macOS measurements were captured after Node 24.22.0 strict checking, **695/695 tests**, compilation and **24 compiled MCP release scenarios**. They are a recorded baseline, not measurements of later revisions. **macOS arm64 / Node 24.22.0 is the verified execution host.** Linux/WSL using Linux Node is intended but has no host performance/qualification claim. Native Windows execution is outside the product requirement. Windows PE x64 is a statically analyzed target in the macOS measurements, not the measurement host.
@@ -189,9 +207,13 @@ Separate causes:
 - Native summaries repeat that global work. `sqlite3_complete` performs two entire-image traversals for only 306 body-plus-callee instructions. `changes64`, `total_changes64`, `errcode` and `limit` each perform three traversals for their body and two required native targets.
 - Raising a later query does not repair historically truncated discovery ranges, although it still pays for whole-image traversal. Finishing seeded discovery remains distinct from semantic coverage.
 
-Recorded reproduction commands. The committed `scripts/bench/selected-contract.json` (the default `--contract`) selects the reviewed binaries and functions; `--inputs` (or `$OPEN_DECOMP_BENCH_INPUTS`) names a directory holding `corpus-arm64` and `sqlite3-arm64`, for example `inputs/` extracted from `scripts/bench/quality-evidence/baseline-2026-10-17.tar.gz` (`--binary` defaults to `sqlite3-arm64`; the ten-function selection belongs to it):
+Recorded reproduction commands. The committed `scripts/bench/selected-contract.json` (the default `--contract`) selects the reviewed binaries and functions; `--inputs` (or `$OPEN_DECOMP_BENCH_INPUTS`) names a directory holding `corpus-arm64` and `sqlite3-arm64`, for example `inputs/` extracted from `$EVIDENCE/scripts/bench/quality-evidence/baseline-2026-10-17.tar.gz` (`--binary` defaults to `sqlite3-arm64`; the ten-function selection belongs to it):
 
 ```sh
+node --import tsx scripts/bench/fetch-evidence.ts --only baseline-2026-10-17.tar.gz
+mkdir -p .local/performance/selected-inputs
+tar -xzf "${OPEN_DECOMP_EVIDENCE_DIR:-.local/evidence}/scripts/bench/quality-evidence/baseline-2026-10-17.tar.gz" -C .local/performance/selected-inputs inputs
+INPUTS="$PWD/.local/performance/selected-inputs/inputs"
 node --import tsx scripts/bench/selected-work.ts --mode public --inputs "$INPUTS"
 node --import tsx scripts/bench/selected-work.ts --mode diagnose --inputs "$INPUTS"
 node --import tsx scripts/bench/selected-work.ts --mode diagnose --inputs "$INPUTS" --import-instructions 1000000 --instructions 1000000
@@ -219,9 +241,10 @@ Budget repair outcome (count-only diagnose, same contract): `fixture_check` 1,02
 
 `scripts/bench/quality.py` retains the original 16 native-corpus and ten SQLite 3.54.0 Mach-O ARM64 selections. `quality-inputs.json` pins hashes, selected addresses, compiler/source/license provenance, tool versions, budgets, semantic states and matched raw-response/output artifacts. Source and independently inspected instructions remain the oracle; Ghidra is a comparator, not truth.
 
-The durable baseline archive `scripts/bench/quality-evidence/baseline-2026-10-17.tar.gz` contains 968 individually hashed files: reviewed binaries, fixture source/license/build records, matching SQLite source, Homebrew recipe/receipt/SBOM, disassembly/manual findings, original raw responses and matched C. It excludes dependency checkouts, virtualenvs, installed tools and project databases. Archive SHA256: `9716b960dcbc94b02a49552ef195d9b2b51d54ef08bf1347a7dd1009f5cd0269`. Preparation was exercised independently and validated all 968 files:
+The durable baseline archive `$EVIDENCE/scripts/bench/quality-evidence/baseline-2026-10-17.tar.gz` contains 968 individually hashed files: reviewed binaries, fixture source/license/build records, matching SQLite source, Homebrew recipe/receipt/SBOM, disassembly/manual findings, original raw responses and matched C. It excludes dependency checkouts, virtualenvs, installed tools and project databases. Archive SHA256: `9716b960dcbc94b02a49552ef195d9b2b51d54ef08bf1347a7dd1009f5cd0269`. Preparation was exercised independently and validated all 968 files:
 
 ```sh
+node --import tsx scripts/bench/fetch-evidence.ts --only baseline-2026-10-17.tar.gz
 python3 scripts/bench/quality.py prepare --destination .local/performance/quality-reviewed
 ```
 
@@ -248,9 +271,10 @@ The exercised two-function smoke exited zero with eight matched C outputs, succe
 
 `quality-matrix-build.py` builds 24 inputs: Mach-O ARM64, PE x86-64 and ELF x86-64; independently built Apple clang 21.0.0 and Homebrew LLVM clang 23.1.3; `-O0`/`-O2`; symbol-bearing/truly stripped. These compilers share Clang lineage. The twelve selected functions cover multi-exit loops, real switch jump tables, aliases, aggregates, callbacks, variadic/mixed FP and an unchanged zlib 1.3.1 Adler-32/CRC-32 checksum workload—not full compression-library coverage. Exact flags, source/licenses, tools, disassembly and addresses are retained. All builds succeeded; stripping removed selected static names while preserving paired text-section hashes.
 
-Reviewed inputs: `quality-matrix-inputs.tar.gz`, SHA256 `96863c3783347be3fe75279401c3f4bd9808d29e9f16daed845f4cc96fe5e250`, with 118 member hashes in `quality-matrix-inputs.json`. The unmodified zlib archive is `quality-matrix-zlib-1.3.1.tar.gz`, SHA256 `9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23`; upstream notices are retained.
+Reviewed inputs: `$EVIDENCE/scripts/bench/quality-matrix-inputs.tar.gz`, SHA256 `96863c3783347be3fe75279401c3f4bd9808d29e9f16daed845f4cc96fe5e250`, with 118 member hashes in `quality-matrix-inputs.json`. The unmodified zlib archive is `$EVIDENCE/scripts/bench/quality-matrix-zlib-1.3.1.tar.gz`, SHA256 `9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23`; upstream notices are retained.
 
 ```sh
+node --import tsx scripts/bench/fetch-evidence.ts --only quality-matrix-inputs.tar.gz
 python3 scripts/bench/quality-matrix.py prepare --destination .local/performance/quality-matrix-reviewed
 python3 scripts/bench/quality-matrix.py run \
   --inputs .local/performance/quality-matrix-reviewed \
@@ -276,7 +300,7 @@ The full default recording completed 24 input cells, 48 input/tool cells and 288
 
 All ten Open Decomp request errors were `adler32_z` work limits. Exact-address discovery gaps and all Ghidra selected-address-not-in-function errors remain present; these describe the pinned import/discovery/bridge configuration, not universal engine coverage. The harness verified 116 full Open Decomp artifacts by size/SHA256; no Ghidra text was truncated and no reconstruction-invariant rejection was reported. Ghidra semantic coverage is unavailable through the bridge.
 
-Durable raw results: `quality-matrix-results-2026-10-17.tar.gz`, SHA256 `701d79f537170bf715dfde4dd13b088f8c1ada44b5dcd8fa83a7bd518b14dec2`; its adjacent JSON indexes 3,248 retained members, the invocation and evaluated checkpoint. Numbered requests/responses, live schemas, emitted C, complete artifacts and matched results are retained; project databases and duplicate streams are omitted. This completes broader recording, not the parity gate. Behavioral correctness, held-out review and normalized performance remain separate; concurrent source-only smokes exclude performance conclusions.
+Durable raw results: `$EVIDENCE/scripts/bench/quality-matrix-results-2026-10-17.tar.gz`, SHA256 `701d79f537170bf715dfde4dd13b088f8c1ada44b5dcd8fa83a7bd518b14dec2`; the tracked sibling JSON indexes 3,248 retained members, the invocation and evaluated checkpoint. Numbered requests/responses, live schemas, emitted C, complete artifacts and matched results are retained; project databases and duplicate streams are omitted. This completes broader recording, not the parity gate. Behavioral correctness, held-out review and normalized performance remain separate; concurrent source-only smokes exclude performance conclusions.
 
 ## Frozen published-suite equal-access evaluation (formerly "held-out")
 
@@ -307,10 +331,10 @@ python3 scripts/bench/quality-heldout.py run \
   --java-home "$JAVA_HOME"
 ```
 
-Use the pinned bridge setup and a new durable output directory outside the system temporary directory; the shared measurement lock rejects overlapping harness runs. Commands, tool identities, raw requests/responses, full artifacts, source text and failures are retained under `scripts/bench/`:
+Use the pinned bridge setup and a new durable output directory outside the system temporary directory; the shared measurement lock rejects overlapping harness runs. Commands, tool identities, raw requests/responses, full artifacts, source text and failures are retained in the external store (fetch using the command above); JSON indexes remain under `scripts/bench/`:
 
-- `quality-heldout-inputs-2026-10-17.tar.gz`: 119,901 bytes; SHA256 `e6acbf080ee0b6203e99aa2ecec2aea4d475fa635fc7666737fcdb41ecf4d362`.
-- `quality-heldout-results-2026-10-17.tar.gz`: 45,648,755 bytes; SHA256 `5f1f3f063a3298b89b1ce6b5e97280119d8f8dd2693aca6ca8cf52d79cbe5872`.
+- `$EVIDENCE/scripts/bench/quality-heldout-inputs-2026-10-17.tar.gz`: 119,901 bytes; SHA256 `e6acbf080ee0b6203e99aa2ecec2aea4d475fa635fc7666737fcdb41ecf4d362`.
+- `$EVIDENCE/scripts/bench/quality-heldout-results-2026-10-17.tar.gz`: 45,648,755 bytes; SHA256 `5f1f3f063a3298b89b1ce6b5e97280119d8f8dd2693aca6ca8cf52d79cbe5872`.
 - `quality-heldout-results-2026-10-17.json`: scope, checkpoint, invocation, observations and member hashes.
 
 Intermediate objects, project databases and duplicate streams are omitted; complete run objects remain in `comparison.json`. Uncompressed originals are in `~/Documents/open-decomp-quality-heldout-{inputs,results}-2026-10-17/`. Independent source gold, actual executable-output subset checks and blind readability reviews are separate lanes. This recording does not establish the parity gate.
@@ -407,4 +431,4 @@ Counterevidence is retained: Ghidra already shows mode constants, shared pointer
 
 The focused consumers additionally exercised four hypothesis/assertion/retraction context scopes and complete 256-selector native-cache replay, including absent-subject invalidation and real ledgerless re-lifting. Only separately compiled trusted oracle code executes; analyzed images never execute. The recording used historical pipeline8/reconstruction21/emitter21 labels. The later pipeline9/stack5/types6/reconstruction22 identity and final compiled evaluation are distinct; no normalized timing, held-out, general parity or superiority claim follows.
 
-Retained before-fix archive: `scripts/bench/quality-context-prefx-2026-10-17.tar.gz`, SHA256 `ee8355e8971621648ae8a6b12d418bcf2e401270a2c35b22ec7e892eac8dcde7`. After-fix archive: `quality-context-afterfix-2026-10-17.tar.gz`, SHA256 `2e6cd9f4430748eb5913bac09433810b988e226a8cfded48db4171c9b695bcec`. Both digests were independently checked by the coordinator. Adjacent JSON files retain all findings, commands, source checkpoints, proof/text bindings and member hashes. Replay uses `scripts/bench/quality-context.py` and the exact archived analyzed image, never an independently rebuilt replacement or the trusted-oracle executable.
+Retained before-fix archive: `$EVIDENCE/scripts/bench/quality-context-prefx-2026-10-17.tar.gz`, SHA256 `ee8355e8971621648ae8a6b12d418bcf2e401270a2c35b22ec7e892eac8dcde7`. After-fix archive: `$EVIDENCE/scripts/bench/quality-context-afterfix-2026-10-17.tar.gz`, SHA256 `2e6cd9f4430748eb5913bac09433810b988e226a8cfded48db4171c9b695bcec`. Both digests were independently checked by the coordinator. The tracked sibling JSON files retain all findings, commands, source checkpoints, proof/text bindings and member hashes. Replay uses `scripts/bench/quality-context.py` and the exact archived analyzed image, never an independently rebuilt replacement or the trusted-oracle executable.

@@ -13,8 +13,10 @@ import type {
 
 // Usage: node --import tsx scripts/bench/selected-work.ts --mode diagnose|public
 //   --inputs DIR [--contract selected-contract.json] [--import-instructions 1000000]
-//   (DIR holds corpus-arm64 and sqlite3-arm64, e.g. extracted from
-//   quality-evidence/baseline-2026-10-17.tar.gz; $OPEN_DECOMP_BENCH_INPUTS also works)
+//   (DIR holds corpus-arm64 and sqlite3-arm64; $OPEN_DECOMP_BENCH_INPUTS also works)
+//   Fetch: node --import tsx scripts/bench/fetch-evidence.ts --only baseline-2026-10-17.tar.gz
+//   Extract inputs/ from ${OPEN_DECOMP_EVIDENCE_DIR:-.local/evidence}/scripts/bench/
+//   quality-evidence/baseline-2026-10-17.tar.gz (see docs/PERFORMANCE.md).
 //   [--instructions 10000] [--function sqlite3_complete] [--binary corpus-arm64]
 //   [--work 1000000] (count-only observation ceiling; public defaults stay unchanged)
 //   [--work-sites true|all|PHASE] (expensive checkpoint-site census, never timing)

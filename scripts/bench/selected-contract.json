@@ -3,7 +3,7 @@
   "provenance": {
     "origin": "contract.json of quality-evidence/baseline-2026-10-17.tar.gz",
     "origin_sha256": "3af51740d4faece5bf5b867a083faf3d4d2326ffef5854edc07b450f2989bb97",
-    "note": "Machine-local root/repo/ghidra/java_home/measurement_lock paths removed; binary paths are file names resolved against the --inputs directory (extract inputs/ from the baseline archive: tar -xzf scripts/bench/quality-evidence/baseline-2026-10-17.tar.gz inputs). Function selections and run counts are unchanged."
+    "note": "Machine-local root/repo/ghidra/java_home/measurement_lock paths removed; binary paths are file names resolved against the --inputs directory. Fetch with node --import tsx scripts/bench/fetch-evidence.ts --only baseline-2026-10-17.tar.gz, then extract inputs/ with tar -xzf \"${OPEN_DECOMP_EVIDENCE_DIR:-.local/evidence}/scripts/bench/quality-evidence/baseline-2026-10-17.tar.gz\" inputs. Function selections and run counts are unchanged."
   },
   "binaries": [
     {

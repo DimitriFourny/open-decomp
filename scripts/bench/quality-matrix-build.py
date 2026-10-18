@@ -15,9 +15,9 @@ import sys
 
 sys.dont_write_bytecode = True
 import quality
+from evidence import evidence_path
 
 HERE = Path(__file__).resolve().parent
-ARCHIVE = HERE / 'quality-matrix-zlib-1.3.1.tar.gz'
 ZLIB_SHA256 = '9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23'
 FUNCTIONS = [
     ('matrix_multi_exit', 'loop with break, continue and early return'),
@@ -57,11 +57,12 @@ def identify(path):
 def build(args):
     args.output = args.output.resolve()
     quality.require(not args.output.exists(), 'Choose a new build output directory')
-    quality.require(quality.digest(ARCHIVE) == ZLIB_SHA256, 'Reviewed zlib archive hash mismatch')
+    archive_path = evidence_path('scripts/bench/quality-matrix-zlib-1.3.1.tar.gz')
+    quality.require(quality.digest(archive_path) == ZLIB_SHA256, 'Reviewed zlib archive hash mismatch')
     args.output.mkdir(parents=True)
     source = args.output / 'source'
     source.mkdir()
-    with tarfile.open(ARCHIVE) as archive:
+    with tarfile.open(archive_path) as archive:
         # Only source dependencies and original license are extracted. No build script is executed.
         needed = ['adler32.c', 'crc32.c', 'crc32.h', 'zutil.h', 'zlib.h', 'zconf.h', 'LICENSE']
         for name in needed:

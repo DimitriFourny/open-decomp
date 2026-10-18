@@ -232,6 +232,7 @@ These commands require the source repository and development dependencies. They 
 
 ```sh
 bun install --frozen-lockfile
+node --import tsx scripts/bench/fetch-evidence.ts --only baseline-2026-10-17.tar.gz
 bun run check
 node dist/scripts/release-acceptance.js
 bun run smoke:mcp
@@ -253,6 +254,8 @@ Optional paths restrict both stages to those files or directories; without paths
 `.prettierrc.json` uses two-space indentation, single quotes, semicolons, trailing commas and a 100-column print width. Both stages respect `.gitignore` and `.prettierignore`, excluding the Bun lockfile, vendored code, license snapshots, fixture corpora and hash-bound fixture generation recipes. Prettier-aware editors use the same local dependency and configuration; run the formatting command to apply the method-spacing rule too.
 
 `bun run check` gates the whole tree: typecheck, `format:check` (type-aware `typescript-eslint` recommended rules including `no-floating-promises`, then Prettier), `test:unit`, `test:integration` and build. `bun run lint` runs ESLint alone; `bun run test` runs both test suites. Integration tests spawn clang, python3, the source CLI or MCP servers, extract tarballs or use real timers; they skip with an explicit reason when `/usr/bin/clang` or `python3` is unavailable. The list of integration files is in `scripts/test.ts`; any other `*.test.ts` is a unit test.
+
+Retained benchmark archives are not in git. `scripts/bench/evidence-assets.json` pins their sizes and SHA256 hashes. The fetch command above copies from the durable local store `~/Documents/open-decomp-evidence-archives/` into `<repo>/.local/evidence/`, preserving original repo-relative paths. Use `--from DIR` for another copy or `--url-base URL` for a published mirror, `--only NAME` for one archive, and `$OPEN_DECOMP_EVIDENCE_DIR` to override the destination/resolver store. No public mirror is currently configured. The SQLite interfaces regression explicitly skips with the fetch command when its baseline is absent; fetch it before `check` to run that test. Corrupt evidence fails rather than skips. See [evidence archive setup](PERFORMANCE.md#evidence-archive-setup).
 
 `tsconfig.build.json` compiles `src`, vendored a64js and only the drivers that run from `dist` (`smoke`, `mcp-smoke`, `release-acceptance`, and the `pipeline`, `resources` and `incremental-controlled` benchmarks); other scripts and tests run from source with `node --import tsx`.
 

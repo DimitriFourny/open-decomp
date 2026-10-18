@@ -8,6 +8,9 @@ coverage/
 *.open-decomp/
 __pycache__/
 
+# Pinned evidence archives live in OPEN_DECOMP_EVIDENCE_DIR, not git.
+scripts/bench/**/*.tar.gz
+
 # Raw local evidence retained on disk (multi-GB), referenced from docs/CONTINUE; never versioned or reformatted.
 /incremental-controlled-functional-2026-10-17/
 /incremental-controlled-functional-fine-2026-10-17/

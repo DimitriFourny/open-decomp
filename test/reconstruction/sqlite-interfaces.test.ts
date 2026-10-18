@@ -4,7 +4,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
-import { nativeOracleSkip } from '../support/host-tools.js';
+import { evidenceArchiveSkip, nativeOracleSkip } from '../support/host-tools.js';
+import { evidencePath } from '../../scripts/bench/evidence.js';
 import { openBinary, type BinarySession, type ToolResult } from '../../src/api/index.js';
 import {
   contentHash,
@@ -16,6 +17,8 @@ import {
 } from '../../src/core/index.js';
 import { MachOLoader } from '../../src/loaders/macho/index.js';
 import { emittedFormals, execute, type SourceCallOracle } from '../emitters/c/support.js';
+
+const baselineArchive = 'scripts/bench/quality-evidence/baseline-2026-10-17.tar.gz';
 
 const dbAddress = 0x1000n,
   mutexAddress = 0x2000n,
@@ -138,7 +141,7 @@ async function decompiled(
 // independent return/memory/logging/callback oracle, not a second IR evaluation.
 test(
   'actual SQLite interfaces preserve safety/logging/mutex inputs and full-width results under defaults',
-  { skip: nativeOracleSkip(), timeout: 180000 },
+  { skip: nativeOracleSkip() || evidenceArchiveSkip(baselineArchive), timeout: 180000 },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), 'open-decomp-sqlite-interfaces-regression-'));
     const sessions: BinarySession[] = [];
@@ -150,7 +153,7 @@ test(
       '/usr/bin/tar',
       [
         '-xzf',
-        resolve('scripts/bench/quality-evidence/baseline-2026-10-17.tar.gz'),
+        evidencePath(baselineArchive),
         '-C',
         root,
         'inputs/sqlite3-arm64',

@@ -17,6 +17,7 @@ import sys
 import tarfile
 import time
 import traceback
+from evidence import evidence_path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -310,7 +311,7 @@ async def run_one(args, manifest, item, iteration, tool):
 
 
 def prepare(args, manifest):
-    archive = HERE / manifest['baseline']['archive']
+    archive = evidence_path(f"scripts/bench/{manifest['baseline']['archive']}")
     require(digest(archive) == manifest['baseline']['sha256'], 'Baseline archive hash mismatch')
     args.destination.mkdir(parents=True, exist_ok=False)
     with tarfile.open(archive) as bundle:
