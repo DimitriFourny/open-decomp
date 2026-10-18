@@ -33,8 +33,15 @@ import type { BoundaryProjection, Reconstruction } from '../reconstruction/model
 import { validateReconstruction, validateRenderedTransfers } from '../reconstruction/validate.js';
 import type { SourceAddress } from '../reconstruction/source-model.js';
 import { sourceDataValues } from '../reconstruction/source-data.js';
+import {
+  sourceFpPresentation,
+  SOURCE_FP_ENVIRONMENT,
+  type SourceFpPresentation,
+} from '../reconstruction/source-fp.js';
 import { indexedDataAccesses, type IndexedDataAccess } from './source-tables.js';
+import { declareCScalarSupport } from './source-c-support.js';
 import { cSourceName } from '../metadata/symbols/c-names.js';
+import { catalog, type CatalogEntry } from '../metadata/library-contracts/catalog.js';
 import { planSourceNames, sourceIdentifierStem } from '../reconstruction/source-names.js';
 import {
   abiConformanceRequirements,
@@ -59,6 +66,7 @@ import {
   UNARY,
   expressionText,
   machineType,
+  integerStorageBits,
   usualArithmetic,
   type IntegerCType,
   type Printed,
@@ -73,22 +81,21 @@ import {
   formArm,
   planLayout,
   planLoopForms,
+  planLoopExits,
+  visitTransfers,
+  firstBlock,
+  type LoopExitRoute,
   transferAction,
   type LoopFacts,
   type TransferAction,
 } from './source-control.js';
 import { planSourceInlining, type InlineSite } from './source-inlining.js';
+import { SourceStructs, type ObservedMember } from './source-structs.js';
 
-/** One observed scalar member of a declared partial structure. */
-interface StructMember {
-  readonly offset: bigint;
-  readonly bits: number;
-  readonly signed: boolean;
-}
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
 type Nest =
   | { readonly kind: 'loop'; readonly header: string; readonly follow: string | null }
-  | { readonly kind: 'switch' };
+  | { readonly kind: 'switch'; readonly id: string };
 /** Exact complement of each integer predicate (no NaN case for integers). */
 const NEGATED_PREDICATE: Readonly<Record<IntegerPredicate, IntegerPredicate>> = {
   eq: 'ne',
@@ -129,12 +136,19 @@ export class Renderer {
   // printed layout; the checked view prints `input.function.body` unchanged.
   private body: Region;
   private readonly sourceView: boolean;
+  private readonly nativeIntegerStorage: boolean;
   private readonly actions = new Map<ParallelTransfer, TransferAction>();
   /** Loop-test arms whose action the loop syntax itself performs. */
   private readonly consumed = new Set<ParallelTransfer>();
   private readonly fallthrough = new Set<ParallelTransfer>();
   private readonly loopTests = new Map<string, LoopForm>();
   private clones: ReadonlySet<BlockRegion> = new Set();
+  private loopExits: ReadonlyMap<ParallelTransfer, LoopExitRoute> = new Map();
+  private normalizeLoopTargets = false;
+  private readonly exitFlags = new Map<string, string>();
+  private readonly exitGuards = new Map<string, Set<string>>();
+  private readonly emittedExitGuards = new Map<string, Set<string>>();
+  private readonly initializedExitFlags = new Set<string>();
   /** Coalesced phi copies: value id -> representative printed variable. */
   private variables: ReadonlyMap<string, Value> = new Map();
   private readonly inline: Set<string>;
@@ -152,6 +166,9 @@ export class Renderer {
     { readonly init: ParallelTransfer; readonly step: ParallelTransfer }
   >();
   private readonly typeRecords = new Map<string, SuppliedTypeRecord | null>();
+  private readonly libraryDeclarations = new Map<string, CatalogEntry>();
+  private readonly callParameterSpellings = new Map<string, string>();
+  private readonly sourceStructs: SourceStructs;
   private readonly sourceEvidence = new Map<string, { ids: Set<string>; evidence: Set<string> }>();
   private readonly expanding = new Set<string>();
   private temporary = 0;
@@ -168,6 +185,7 @@ export class Renderer {
   private readonly sourceValueTypes = new Map<string, string>();
   private readonly sourceRoleNames: ReadonlyMap<string, string | null>;
   private readonly requirementPredicates: ReadonlyMap<string, SourceRequirementPredicate>;
+  private readonly fpPresentation: SourceFpPresentation;
   private sourceTemporary = 0;
   private sourceLocal = 0;
   /** C spellings of native linkage names; null marks conflicting spellings. */
@@ -187,6 +205,44 @@ export class Renderer {
     this.requirementPredicates = sourceRequirementPredicates(this.program.source?.requirements);
     this.localValidation =
       this.program.local_validation_session ?? new LocalValidationSession(context);
+    let oddWidth = false;
+    for (const value of this.program.values.values()) {
+      context.checkpoint(1);
+      if (
+        value.type.kind === 'integer' &&
+        value.type.bits > 1 &&
+        value.type.bits < 128 &&
+        integerStorageBits(value.type.bits) !== value.type.bits
+      )
+        oddWidth = true;
+    }
+    for (const block of this.program.blocks.values()) {
+      for (const node of block.statements) {
+        context.checkpoint(1);
+        const type =
+          node.kind === 'load' ? node.result.type : node.kind === 'store' ? node.value.type : null;
+        if (type?.kind === 'integer' && integerStorageBits(type.bits) !== type.bits)
+          oddWidth = false;
+      }
+    }
+    this.nativeIntegerStorage =
+      this.sourceView &&
+      language === 'c-like' &&
+      oddWidth &&
+      this.localValidation.presentation(
+        'c_integer_storage',
+        input.function.id,
+        'nonstandard-width integer locals use the next ordinary C storage width; conversions retain exact low-bit masks and signed interpretation, with one evaluation of each operand',
+      );
+    this.fpPresentation = sourceFpPresentation(this.program, context);
+    this.body = this.fpPresentation.body;
+    this.sourceStructs = new SourceStructs(
+      this.typeRecords,
+      this.localValidation,
+      input.function.id,
+      context,
+      this.sourceView ? input.types?.shapes : undefined,
+    );
     this.sourceDataValue = sourceDataValues(
       this.program.expressions,
       this.program.source?.addresses ?? [],
@@ -229,6 +285,12 @@ export class Renderer {
       context.checkpoint(1);
       this.typeRecords.set(record.id, this.typeRecords.has(record.id) ? null : record);
     }
+    if (this.sourceView && language === 'c-like')
+      for (const proof of input.types?.evidence ?? []) {
+        context.checkpoint(1);
+        if (proof.origin.kind === 'library' && Object.hasOwn(catalog, proof.origin.contract))
+          this.libraryDeclarations.set(proof.id, catalog[proof.origin.contract]!);
+      }
     for (const signature of input.types?.signatures ?? []) {
       context.checkpoint(1 + signature.signature.parameters.length + signature.evidence_ids.length);
       const row = this.sourceEvidence.get(signature.subject_id) ?? {
@@ -261,6 +323,7 @@ export class Renderer {
       if (projection.results.length === 1)
         this.sourceValueTypes.set(projection.results[0]!.id, declaration.return_type);
     }
+    if (this.sourceView) this.stridedPointerTypes();
     for (const block of this.program.blocks.values()) {
       context.checkpoint(1);
       this.origins.set(block.id, block);
@@ -286,13 +349,6 @@ export class Renderer {
     if (this.sourceView) this.planSourceControl();
     this.findLabels(this.body, [], 0);
     validateReconstruction(this.program, context);
-    validateRenderedTransfers(
-      { ...input.function, body: this.body },
-      this.gotos,
-      language,
-      context,
-      this.fallthrough,
-    );
   }
 
   private invalid(message: string): never {
@@ -391,15 +447,30 @@ export class Renderer {
     const floating = this.sourceView && this.program.source?.float_values?.get(value.id);
     if (floating) return floating === 32 ? 'float' : 'double';
     const formal = this.sourceView && this.program.source?.formal_types?.get(value.id);
+    const source =
+      this.sourceValueTypes.get(value.id) ??
+      this.program.source?.value_types?.get(value.id)?.type_id;
+    if (formal && formal.kind === 'pointer' && source) {
+      const pointer = this.typeRecords.get(source)?.definition;
+      const members = pointer?.kind === 'pointer' ? this.partialLayout(pointer.to) : null;
+      if (
+        members?.some(
+          (member) => member.bits !== formal.pointee_bits || member.count !== undefined,
+        ) &&
+        this.localValidation.presentation(
+          'observed_struct_formal',
+          value.id,
+          'complete observed member widths and strides take precedence over a scalar-only formal access path',
+        )
+      )
+        return this.sourceType(source);
+    }
     if (formal)
       return formal.kind === 'integer'
         ? `${formal.signed ? 'int' : 'uint'}${formal.bits}_t`
         : this.language === 'c-like'
           ? `${formal.const ? 'const ' : ''}uint${formal.pointee_bits}_t*`
           : `pointer[uint${formal.pointee_bits}_t]`;
-    const source =
-      this.sourceValueTypes.get(value.id) ??
-      this.program.source?.value_types?.get(value.id)?.type_id;
     if (source) return this.sourceType(source);
     return this.dataType(value.type);
   }
@@ -408,7 +479,7 @@ export class Renderer {
     return this.program.source && type.kind === 'integer'
       ? type.bits === 1
         ? 'bool'
-        : `uint${type.bits}_t`
+        : `uint${this.nativeIntegerStorage ? integerStorageBits(type.bits) : type.bits}_t`
       : machineType(type);
   }
 
@@ -429,7 +500,7 @@ export class Renderer {
 
   private printerCache?: SourcePrinter;
   private get printer(): SourcePrinter {
-    return (this.printerCache ??= new SourcePrinter(this.writer));
+    return (this.printerCache ??= new SourcePrinter(this.writer, this.nativeIntegerStorage));
   }
   /** Exact declared spelling of each formal/local, recorded where declared. */
   private readonly declaredTypes = new Map<string, string>();
@@ -651,6 +722,38 @@ export class Renderer {
       return this.printed(expression.value);
     if (
       this.sourceView &&
+      this.language === 'c-like' &&
+      expression.kind === 'cast' &&
+      expression.op === 'bitcast' &&
+      (type.kind === 'integer' || type.kind === 'float') &&
+      (expression.value.type.kind === 'integer' || expression.value.type.kind === 'float') &&
+      type.kind !== expression.value.type.kind &&
+      (type.bits === 32 || type.bits === 64) &&
+      type.bits === expression.value.type.bits &&
+      this.localValidation.presentation(
+        'c_bitcast',
+        expression.value.id,
+        'equal-width integer/IEEE storage copied with memcpy, preserving every bit without aliasing or numeric conversion',
+      )
+    ) {
+      this.localValidation.requireAbi(
+        'c_bitcast',
+        [expression.value.id],
+        'Native C float/double and integer storage use the target IEEE binary32/binary64 representation and matching byte order.',
+      );
+      const target = `${type.kind === 'float' ? 'f' : 'u'}${type.bits}`;
+      const source = `${expression.value.type.kind === 'float' ? 'f' : 'u'}${type.bits}`;
+      return this.printer.primary(
+        this.call(
+          `__od_bitcast_${target}_${source}`,
+          'Copy the exact same-width IEEE/integer object representation; preserve NaN payloads and signed zero.',
+          [this.value(expression.value)],
+        ),
+        type.kind === 'integer' ? { bits: type.bits, signed: false } : null,
+      );
+    }
+    if (
+      this.sourceView &&
       expression.kind === 'compare' &&
       (expression.op === 'eq' || expression.op === 'ne')
     ) {
@@ -700,6 +803,9 @@ export class Renderer {
           }
         : {}),
       constant: this.constantOf,
+      nativeIntegerStorage: this.nativeIntegerStorage,
+      nativeFp: this.fpPresentation.expressions.has(expression),
+      floatLiterals: this.fpPresentation.expressions.has(expression),
     });
   }
 
@@ -760,7 +866,12 @@ export class Renderer {
   private copied(destination: Value, source: Value): string {
     const floating = this.sourceView && this.program.source?.float_values?.get(destination.id);
     if (floating) return this.floatingValue(source, floating).text;
-    if (this.sourceView) source = this.uncast(source, ['bitcast']);
+    if (this.sourceView) {
+      const uncast = this.uncast(source, ['bitcast']);
+      // A storage copy may erase same-kind aliases, never an IEEE/integer
+      // reinterpretation: C assignment would otherwise numerically convert.
+      if (this.expressionType(uncast).kind === this.expressionType(source).kind) source = uncast;
+    }
     if (
       this.sourceView &&
       !this.inline.has(source.id) &&
@@ -881,6 +992,13 @@ export class Renderer {
           value.type.kind === 'integer' &&
           representative.type.kind === 'integer' &&
           representative.type.bits > value.type.bits
+        )
+          return this.printer.cast(value.type.bits, false, this.printer.primary(name, declared));
+        if (
+          this.nativeIntegerStorage &&
+          declared &&
+          value.type.kind === 'integer' &&
+          declared.bits !== value.type.bits
         )
           return this.printer.cast(value.type.bits, false, this.printer.primary(name, declared));
         if (declared?.signed)
@@ -1093,6 +1211,19 @@ export class Renderer {
       );
     }
     if (item?.name) {
+      if (
+        this.sourceView &&
+        this.language === 'c-like' &&
+        address.space === 'va' &&
+        this.localValidation.presentation(
+          'symbolic_address',
+          this.input.function.id,
+          'an exact named image VA without an established C object/function type stays an address constant, not an invented extern declaration',
+          undefined,
+          `${this.addressKey(address)}: ${this.writer.quote(item.name)}`,
+        )
+      )
+        return `((uintptr_t)0x${address.value.toString(16)}) /* ${this.writer.quote(item.name)} */`;
       const name = this.sourceNames.get(key) ?? this.sourceIdentifier(key, item.name);
       this.sourceNames.set(key, name);
       return this.language === 'c-like' ? `((uintptr_t)&${name})` : `address_of(${name})`;
@@ -1292,10 +1423,21 @@ export class Renderer {
       this.writer.list(values, this.value),
     );
   }
+  private readonly sourceArrays = new Map<string, string>();
+  private readonly sourceOpaqueTypes = new Map<string, string>();
+
+  private opaqueType(id: string): string {
+    let name = this.sourceOpaqueTypes.get(id);
+    if (!name) {
+      name = this.sourceIdentifier(id, `opaque_${this.sourceOpaqueTypes.size + 1}`);
+      this.sourceOpaqueTypes.set(id, name);
+    }
+    return name;
+  }
 
   private sourceType(id: string, depth = 0): string {
     this.context.checkpoint(1);
-    if (depth > 32) return this.identifier(id, 'type');
+    if (depth > 32) return this.sourceView ? this.opaqueType(id) : this.identifier(id, 'type');
     const record = this.typeRecords.get(id);
     if (
       !record ||
@@ -1303,102 +1445,102 @@ export class Renderer {
         record.status !== 'asserted' &&
         !(record.source === 'analysis' && record.status === 'candidate'))
     )
-      return this.identifier(id, 'type');
+      return this.sourceView ? this.opaqueType(id) : this.identifier(id, 'type');
     const type = record.definition;
     switch (type.kind) {
       case 'void':
         return 'void';
       case 'integer':
-        return `${type.signed ? 'int' : 'uint'}${type.bits}_t`;
+        return `${type.signed ? 'int' : 'uint'}${this.nativeIntegerStorage ? integerStorageBits(type.bits) : type.bits}_t`;
       case 'float':
-        return `ieee${type.bits}_t`;
+        return this.sourceView && (type.bits === 32 || type.bits === 64)
+          ? type.bits === 32
+            ? 'float'
+            : 'double'
+          : `ieee${type.bits}_t`;
       case 'pointer':
         return this.language === 'c-like'
           ? `${this.sourceType(type.to, depth + 1)}*`
           : `pointer[${this.sourceType(type.to, depth + 1)}]`;
       case 'array':
+        if (this.sourceView && this.language === 'c-like') {
+          let name = this.sourceArrays.get(id);
+          if (!name) {
+            name = this.sourceIdentifier(id, `array_${this.sourceArrays.size + 1}`);
+            this.sourceArrays.set(id, name);
+          }
+          return name;
+        }
         return `array<${this.sourceType(type.element, depth + 1)}, ${type.count === null ? '?' : type.count}>`;
       case 'vector':
         return `vector<${this.sourceType(type.element, depth + 1)}, ${type.lanes}>`;
       case 'structure': {
         const scalar = this.naturalScalar(id);
-        return scalar ? this.sourceType(scalar, depth + 1) : this.identifier(id, 'type');
+        return scalar
+          ? this.sourceType(scalar, depth + 1)
+          : this.sourceView
+            ? this.sourceStructs.name(id)
+            : this.identifier(id, 'type');
       }
       case 'unknown':
-        return this.identifier(id, 'type');
+        return this.sourceView ? this.opaqueType(id) : this.identifier(id, 'type');
     }
   }
 
-  /** Source view: an analysis-only partial structure whose single observed
-   * member is one scalar at offset 0 is presented as that scalar, so a pointer
-   * to it reads as a natural `uintN_t *`. The structure record is unchanged. */
-  private naturalScalar(id: string): string | null {
-    if (!this.sourceView) return null;
-    const record = this.typeRecords.get(id);
-    const type = record?.definition;
-    if (record?.source !== 'analysis' || type?.kind !== 'structure' || type.fields.length !== 1)
-      return null;
-    const field = type.fields[0]!,
-      scalar = this.typeRecords.get(field.type_id)?.definition;
-    if (
-      field.offset !== 0n ||
-      scalar?.kind !== 'integer' ||
-      scalar.bits % 8 !== 0 ||
-      (type.size !== null && type.size * 8n !== BigInt(scalar.bits))
-    )
-      return null;
-    return this.localValidation.presentation(
-      'natural_scalar_pointee',
-      this.input.function.id,
-      'analysis-only partial structure with one observed scalar member at offset 0',
-    )
-      ? field.type_id
-      : null;
-  }
-
-  private readonly layouts = new Map<string, readonly StructMember[] | null>();
-  /** Source view: an analysis-only partial structure whose observed scalar
-   * members each sit at their natural C alignment, without overlap, so a C
-   * declaration with explicit byte gaps places every member at its exact
-   * offset. Anything else stays an opaque tag. */
-  private partialLayout(id: string): readonly StructMember[] | null {
-    if (!this.sourceView || this.language !== 'c-like') return null;
-    const cached = this.layouts.get(id);
-    if (cached !== undefined) return cached;
-    const record = this.typeRecords.get(id),
-      type = record?.definition;
-    let members: StructMember[] | null = null;
-    if (
-      record?.source === 'analysis' &&
-      type?.kind === 'structure' &&
-      type.fields.length > 0 &&
-      type.fields.length <= 64 &&
-      !this.naturalScalar(id)
-    ) {
-      members = [];
-      let end = 0n;
-      for (const field of [...type.fields].sort((a, b) =>
-        a.offset < b.offset ? -1 : a.offset > b.offset ? 1 : 0,
-      )) {
-        this.context.checkpoint(1);
-        const scalar = this.typeRecords.get(field.type_id)?.definition;
-        if (scalar?.kind !== 'integer' || scalar.bits % 8 !== 0 || scalar.bits > 64) {
-          members = null;
-          break;
-        }
-        const size = BigInt(scalar.bits / 8);
-        // A displacement beyond a plausible object (e.g. an absolute address
-        // added to a zero base) is not declared as a member.
-        if (field.offset < end || field.offset % size !== 0n || field.offset + size > 0x10000n) {
-          members = null;
-          break;
-        }
-        members.push({ offset: field.offset, bits: scalar.bits, signed: scalar.signed });
-        end = field.offset + size;
+  /** A whole machine address stepped by a proven record stride retains its
+   * pointer view; assignment still converts the exact modular address bits. */
+  private stridedPointerTypes(): void {
+    for (const [id, expression] of this.program.expressions) {
+      this.context.checkpoint(1);
+      if (
+        expression.kind !== 'integer' ||
+        expression.op !== 'add' ||
+        this.sourceValueTypes.has(id) ||
+        this.program.source?.value_types?.has(id)
+      )
+        continue;
+      for (const [base, step] of [
+        [expression.left, expression.right],
+        [expression.right, expression.left],
+      ] as const) {
+        const typeId =
+          this.sourceValueTypes.get(base.id) ??
+          this.program.source?.value_types?.get(base.id)?.type_id;
+        const pointer = typeId && this.typeRecords.get(typeId)?.definition;
+        if (!pointer || pointer.kind !== 'pointer' || pointer.bits !== 64) continue;
+        const stride = this.sourceStructs.strides.get(pointer.to);
+        if (!stride || !this.partialLayout(pointer.to)) continue;
+        const scaled = this.program.expressions.get(step.id);
+        if (scaled?.kind !== 'integer') continue;
+        const amount = this.constantOf(scaled.right);
+        if (
+          amount === undefined ||
+          !(
+            (scaled.op === 'mul' && amount === stride) ||
+            (scaled.op === 'shl' && amount < 16n && 1n << amount === stride)
+          )
+        )
+          continue;
+        if (
+          this.localValidation.presentation(
+            'strided_struct_pointer',
+            this.input.function.id,
+            'whole address plus an index scaled by the observed member period; exact target address bits retained',
+            [id, base.id],
+          )
+        )
+          this.sourceValueTypes.set(id, typeId!);
+        break;
       }
     }
-    this.layouts.set(id, members);
-    return members;
+  }
+
+  private naturalScalar(id: string): string | null {
+    return this.sourceView ? this.sourceStructs.scalar(id) : null;
+  }
+
+  private partialLayout(id: string): readonly ObservedMember[] | null {
+    return this.sourceView && this.language === 'c-like' ? this.sourceStructs.layout(id) : null;
   }
 
   /** `p->f_<offset>` for an access at `p + offset` through a declared pointer to
@@ -1406,25 +1548,73 @@ export class Renderer {
   private memberAccess(address: Value, bits: number): string | null {
     let base = address,
       offset = 0n;
-    if (this.inline.has(address.id)) {
-      const expression = this.program.expressions.get(address.id);
+    let index: Value | undefined,
+      stride = 0n;
+    for (let depth = 0; this.inline.has(base.id) && depth < 16; depth++) {
+      const expression = this.program.expressions.get(base.id);
+      if (
+        (expression?.kind === 'cast' &&
+          (expression.op === 'bitcast' ||
+            expression.op === 'truncate' ||
+            expression.op === 'zero_extend')) ||
+        (expression?.kind === 'extract' && expression.offset === 0)
+      ) {
+        if (bitWidth(base.type) !== bitWidth(expression.value.type)) return null;
+        base = expression.value;
+        continue;
+      }
       if (expression?.kind !== 'integer' || expression.op !== 'add') return null;
       const left = this.constantOf(expression.left),
         right = this.constantOf(expression.right);
-      if (right !== undefined) [base, offset] = [expression.left, right];
-      else if (left !== undefined) [base, offset] = [expression.right, left];
-      else return null;
-      if (this.inline.has(base.id) || base.type.kind !== 'integer') return null;
-      offset = BigInt.asIntN(base.type.bits, offset);
+      if (right !== undefined) {
+        base = expression.left;
+        offset += right;
+      } else if (left !== undefined) {
+        base = expression.right;
+        offset += left;
+      } else {
+        if (index) return null;
+        for (const [candidate, other] of [
+          [expression.left, expression.right],
+          [expression.right, expression.left],
+        ] as const) {
+          const scaled = this.program.expressions.get(candidate.id);
+          if (!this.inline.has(candidate.id) || scaled?.kind !== 'integer') continue;
+          const amount = this.constantOf(scaled.right);
+          if (amount === undefined) continue;
+          if (scaled.op === 'mul' && amount > 0n) stride = amount;
+          else if (scaled.op === 'shl' && amount < 16n) stride = 1n << amount;
+          else continue;
+          index = scaled.left;
+          base = other;
+          break;
+        }
+        if (!index) return null;
+      }
     }
+    if (this.inline.has(base.id) || base.type.kind !== 'integer') return null;
+    offset = BigInt.asIntN(base.type.bits, offset);
     const id =
       this.sourceValueTypes.get(base.id) ?? this.program.source?.value_types?.get(base.id)?.type_id;
     const pointer = id ? this.typeRecords.get(id)?.definition : undefined;
     if (pointer?.kind !== 'pointer' || this.declaredSpelling(base) !== this.sourceType(id!))
       return null;
-    const member = this.partialLayout(pointer.to)?.find(
-      (item) => item.offset === offset && item.bits === bits,
-    );
+    const members = this.partialLayout(pointer.to);
+    const elementStride = this.sourceStructs.strides.get(pointer.to);
+    const indexedStruct = !!index && stride === elementStride;
+    const member = members?.find((item) => {
+      if (item.bits !== bits || this.typeRecords.get(item.typeId)?.definition.kind !== 'integer')
+        return false;
+      if (item.count === undefined) return (!index || indexedStruct) && item.offset === offset;
+      const displacement = offset - item.offset,
+        size = BigInt(item.bits / 8);
+      return (
+        displacement >= 0n &&
+        displacement % size === 0n &&
+        (item.count === null || displacement / size < item.count) &&
+        (!index || stride === size)
+      );
+    });
     if (
       !member ||
       !this.localValidation.presentation(
@@ -1434,33 +1624,125 @@ export class Renderer {
       )
     )
       return null;
-    return `${this.local(base)}->f_${offset.toString(16)}`;
+    let access = indexedStruct
+      ? `${this.local(base)}[${this.value(index!)}].f_${member.offset.toString(16)}`
+      : `${this.local(base)}->f_${member.offset.toString(16)}`;
+    if (member.count !== undefined) {
+      const displacement = (offset - member.offset) / BigInt(member.bits / 8);
+      const subscript = index
+        ? `(${this.value(index)})${displacement ? ` + ${displacement}` : ''}`
+        : String(displacement);
+      access += `[${subscript}]`;
+    }
+    return access;
   }
 
-  /** C declarations of the partial structures the function's locals point to,
-   * printed before the function so member accesses compile. */
+  /** Walk the entire used type closure, including nested pointer members. */
   private structDeclarations(typeIds: Iterable<string>): void {
-    const seen = new Set<string>();
-    for (const id of typeIds) {
+    const seen = new Set<string>(),
+      emitted = new Set<string>();
+    const pending = [...typeIds, ...this.sourceOpaqueTypes.keys()],
+      structures: string[] = [];
+    for (let index = 0; index < pending.length; index++) {
       this.context.checkpoint(1);
-      const pointer = this.typeRecords.get(id)?.definition;
-      if (pointer?.kind !== 'pointer' || seen.has(pointer.to)) continue;
-      seen.add(pointer.to);
-      const members = this.partialLayout(pointer.to);
+      const id = pending[index]!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const record = this.typeRecords.get(id),
+        type = record?.definition;
+      if (
+        !record ||
+        type?.kind === 'unknown' ||
+        (record.status !== 'established' &&
+          record.status !== 'asserted' &&
+          !(record.source === 'analysis' && record.status === 'candidate'))
+      ) {
+        this.opaqueType(id);
+        continue;
+      }
+      if (type?.kind === 'pointer') pending.push(type.to);
+      else if (type?.kind === 'array' || type?.kind === 'vector') pending.push(type.element);
+      else if (type?.kind === 'structure') {
+        const scalar = this.naturalScalar(id);
+        if (scalar) {
+          pending.push(scalar);
+          continue;
+        }
+        const name = this.sourceStructs.name(id);
+        if (emitted.has(name)) continue;
+        emitted.add(name);
+        structures.push(id);
+        for (const field of type.fields) pending.push(field.type_id);
+      }
+    }
+    for (const id of structures) {
+      const name = this.sourceStructs.name(id);
+      this.writer.line(0, `typedef struct ${name} ${name};`);
+    }
+    for (const name of this.sourceOpaqueTypes.values())
+      this.writer.line(0, `typedef struct ${name} ${name};`);
+    const declaredArrays = new Set<string>();
+    const declareArray = (id: string): void => {
+      if (declaredArrays.has(id)) return;
+      const type = this.typeRecords.get(id)?.definition;
+      if (type?.kind !== 'array') return;
+      declaredArrays.add(id);
+      const element = this.typeRecords.get(type.element)?.definition;
+      if (
+        !element ||
+        element.kind === 'unknown' ||
+        this.sourceOpaqueTypes.has(type.element) ||
+        (element.kind === 'structure' && !this.naturalScalar(type.element))
+      ) {
+        const name = this.sourceType(id);
+        this.writer.comment(0, 'array element size is not established; opaque view');
+        this.writer.line(0, `typedef struct ${name} ${name};`);
+        return;
+      }
+      declareArray(type.element);
+      this.writer.line(
+        0,
+        `typedef ${this.sourceType(type.element)} ${this.sourceType(id)}[${type.count ?? ''}];`,
+      );
+    };
+    for (const id of pending) declareArray(id);
+    for (const id of structures) {
+      const members = this.partialLayout(id);
       if (!members) continue;
-      const name = this.identifier(pointer.to, 'type'),
+      const name = this.sourceStructs.name(id),
         parts: string[] = [];
-      let end = 0n;
+      let end = 0n,
+        packed = false;
       for (const member of members) {
         if (member.offset > end)
           parts.push(`uint8_t gap_${end.toString(16)}[${member.offset - end}];`);
-        parts.push(
-          `${member.signed ? 'int' : 'uint'}${member.bits}_t f_${member.offset.toString(16)};`,
-        );
-        end = member.offset + BigInt(member.bits / 8);
+        const definition = this.typeRecords.get(member.typeId)?.definition;
+        const spelling =
+          definition?.kind === 'float'
+            ? definition.bits === 32
+              ? 'float'
+              : 'double'
+            : definition?.kind === 'integer' && definition.bits === 128
+              ? definition.signed
+                ? '__int128_t'
+                : '__uint128_t'
+              : this.sourceType(member.typeId);
+        const array = member.count === undefined ? '' : `[${member.count ?? ''}]`;
+        parts.push(`${spelling} f_${member.offset.toString(16)}${array};`);
+        packed ||= member.offset % BigInt(member.bits / 8) !== 0n;
+        end = member.offset + member.size;
       }
-      this.writer.comment(0, `${name}: partial layout of observed members only; true size unknown`);
-      this.writer.line(0, `typedef struct ${name} { ${parts.join(' ')} } ${name};`);
+      const stride = this.sourceStructs.strides.get(id);
+      if (stride) {
+        if (stride > end) parts.push(`uint8_t gap_${end.toString(16)}[${stride - end}];`);
+        packed ||= members.some((member) => stride % BigInt(member.bits / 8) !== 0n);
+        this.writer.comment(0, `observed access stride ${stride}; not an allocation extent`);
+      }
+      this.writer.comment(0, 'observed members only; size unknown');
+      this.writer.line(
+        0,
+        `struct ${name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
+      );
     }
   }
 
@@ -1484,6 +1766,121 @@ export class Renderer {
     );
     this.unalignedRecorded = true;
     return true;
+  }
+
+  /** C character identity comes from the installed contract's evidence, never
+   * from a guessed callee name or an arbitrary 8-bit pointee. */
+  private callParameterType(projection: BoundaryProjection, index: number): string {
+    const association = projection.signature!;
+    const parameter = association.signature.parameters[index]!;
+    const fallback = this.sourceType(parameter.type_id);
+    if (!this.sourceView || this.language !== 'c-like' || association.source !== 'library')
+      return fallback;
+    const cached = this.callParameterSpellings.get(parameter.id);
+    if (cached !== undefined) return cached;
+    this.callParameterSpellings.set(parameter.id, fallback);
+    const pointer = this.typeRecords.get(parameter.type_id);
+    const character =
+      pointer?.definition.kind === 'pointer'
+        ? this.typeRecords.get(pointer.definition.to)
+        : undefined;
+    if (
+      pointer?.source !== 'library' ||
+      character?.source !== 'library' ||
+      character.definition.kind !== 'integer' ||
+      character.definition.bits !== 8
+    )
+      return fallback;
+    let spelling: string | undefined;
+    for (const id of association.evidence_ids) {
+      this.context.checkpoint(1);
+      const declaration = this.libraryDeclarations.get(id);
+      if (!declaration) continue;
+      const type = declaration.parameters[index]?.[1];
+      if (!type || typeof type === 'string' || type.kind !== 'pointer' || type.to !== 'char')
+        return fallback;
+      const accesses = declaration.memory?.filter((item) => item.argument === index) ?? [];
+      const next =
+        accesses.length && accesses.every((item) => item.access === 'read')
+          ? 'const char*'
+          : 'char*';
+      if (spelling !== undefined && spelling !== next) return fallback;
+      spelling = next;
+    }
+    if (
+      !spelling ||
+      !this.localValidation.presentation(
+        'library_string_parameter',
+        parameter.id,
+        'library-contract C character pointer; const only for a declared read-only argument footprint',
+        [association.id, parameter.type_id],
+      )
+    )
+      return fallback;
+    this.callParameterSpellings.set(parameter.id, spelling);
+    return spelling;
+  }
+
+  /** Call-site declarations describe the recovered interface, not an authored prototype. */
+  private declareSourceCallees(): void {
+    if (!this.sourceView || this.language !== 'c-like') return;
+    const declarations = new Map<string, { text: string; node: Instruction } | null>();
+    for (const [id, projection] of this.program.calls) {
+      const node = this.statements.get(id);
+      if (node?.kind !== 'call' || node.target.kind !== 'direct') continue;
+      const name = this.sourceCallee(node);
+      if (name === this.identifiers.get(this.input.function.id)?.identifier) continue;
+      const signature = projection.signature?.signature;
+      if (projection.results.length > 1) continue;
+      const result = signature
+        ? this.sourceType(signature.return_type)
+        : projection.results.length === 1
+          ? this.valueType(projection.results[0]!)
+          : projection.kind !== 'physical'
+            ? 'void'
+            : null;
+      if (!result) continue;
+      const parameters = signature
+        ? signature.parameters.map((_, index) => this.callParameterType(projection, index))
+        : projection.arguments.map((value) => this.valueType(value));
+      const open = signature
+        ? signature.variadic
+        : projection.argument_list_complete === false || projection.kind === 'physical';
+      if (signature?.variadic && parameters.length === 0) continue;
+      if (open) parameters.push(parameters.length ? '...' : 'uintptr_t');
+      const text = `extern ${result} ${name}(${parameters.length ? this.writer.join(parameters) : 'void'});`;
+      const previous = declarations.get(name);
+      declarations.set(
+        name,
+        previous === null || (previous && previous.text !== text) ? null : { text, node },
+      );
+    }
+    for (const declaration of declarations.values()) {
+      if (!declaration) continue;
+      const { text, node } = declaration;
+      const signature = this.program.calls.get(node.id)!.signature;
+      if (
+        !this.localValidation.presentation(
+          'call_declaration',
+          node.id,
+          signature
+            ? 'C declaration from the recovered source signature'
+            : 'unknown prototype: C declaration of the observed call interface only; open arguments retain their explicit remainder marker',
+        )
+      )
+        continue;
+      if (!signature) {
+        this.localValidation.requireAbi(
+          'call_declaration',
+          [node.id],
+          'The declaration describes the observed native call interface under the target ABI, not a proven authored prototype; unresolved trailing arguments remain explicit.',
+        );
+        this.writer.comment(0, 'unknown prototype; observed call interface only');
+      }
+      const start = this.writer.offset;
+      this.writer.line(0, text);
+      this.mapped(node, start, [], signature?.evidence_ids ?? []);
+    }
   }
 
   private declareDataTables(): void {
@@ -1677,13 +2074,25 @@ export class Renderer {
     const args = projection.arguments.map((value, index) => {
       this.context.checkpoint(1);
       const parameter = projection.signature?.signature.parameters[index];
-      const pointer =
-        parameter && this.typeRecords.get(parameter.type_id)?.definition.kind === 'pointer';
-      const literal = pointer || !literalsAllowed ? undefined : this.sourceLiteral(value);
+      const parameterType = parameter && this.typeRecords.get(parameter.type_id)?.definition;
+      const pointer = parameterType?.kind === 'pointer';
+      const pointee = pointer ? this.typeRecords.get(parameterType.to)?.definition : undefined;
+      const bytePointer =
+        pointee?.kind === 'void' || (pointee?.kind === 'integer' && pointee.bits === 8);
+      const literal =
+        !literalsAllowed || (pointer && !bytePointer) ? undefined : this.sourceLiteral(value);
       if (literal !== undefined) literals.push(value.id);
-      const text = pointer ? this.sourceAddressValue(value, true) : (literal ?? this.value(value));
-      if (pointer && this.language === 'c-like')
-        return `((${this.sourceType(parameter.type_id)})(uintptr_t)(${text}))`;
+      const text = pointer
+        ? (literal ?? this.sourceAddressValue(value, !this.sourceView))
+        : (literal ?? this.value(value));
+      if (pointer && this.language === 'c-like') {
+        const spelling = this.callParameterType(projection, index);
+        if (literal !== undefined)
+          return /^(?:const )?(?:char|void)\s*\*$/.test(spelling)
+            ? literal
+            : `(${spelling})${literal}`;
+        return `((${spelling})(uintptr_t)(${text}))`;
+      }
       const type = parameter && this.typeRecords.get(parameter.type_id)?.definition;
       if (type?.kind === 'integer' && type.signed && this.language === 'python-like')
         return this.call(
@@ -1750,6 +2159,13 @@ export class Renderer {
       );
     const operation = `${target}(${this.writer.join(args)})`;
     const results = projection.results.filter((value) => this.program.live.has(value.id));
+    const result = results.length === 1 ? results[0] : undefined;
+    if (
+      this.nativeIntegerStorage &&
+      result?.type.kind === 'integer' &&
+      integerStorageBits(result.type.bits) !== result.type.bits
+    )
+      return `${this.local(result)} = ${this.printer.cast(result.type.bits, false, this.printer.primary(operation, { bits: integerStorageBits(result.type.bits), signed: false })).text}`;
     return results.length
       ? `${results.length === 1 ? this.local(results[0]!) : `(${this.writer.join(results.map((value) => this.local(value)))})`} = ${operation}`
       : operation;
@@ -1773,12 +2189,14 @@ export class Renderer {
         : projection.results.length === 0 && projection.kind !== 'physical'
           ? 'void'
           : 'unknown_result';
-    const parameters = projection.arguments.map((value, index) => {
-      this.context.checkpoint(1);
-      const parameter = declared?.parameters[index];
-      return parameter ? this.sourceType(parameter.type_id) : this.valueType(value);
-    });
-    if (open) parameters.push('...');
+    const parameters = declared
+      ? declared.parameters.map((_, index) => this.callParameterType(projection, index))
+      : projection.arguments.map((value) => {
+          this.context.checkpoint(1);
+          return this.valueType(value);
+        });
+    if (declared ? declared.variadic : open)
+      parameters.push(parameters.length ? '...' : 'uintptr_t');
     const signature = `${result} (*)(${parameters.length ? this.writer.join(parameters) : 'void'})`;
     if (this.language === 'python-like')
       return this.call(
@@ -2128,7 +2546,7 @@ export class Renderer {
       if (!this.program.blocks.has(item.target))
         this.invalid('Transfer target has no structured block');
       const action =
-        performed ??
+        (this.loopExits.has(item) ? 'loop-exit' : performed) ??
         transferAction(
           item,
           nested,
@@ -2136,6 +2554,7 @@ export class Renderer {
           this.language,
           this.sourceView,
           !!this.program.source,
+          this.normalizeLoopTargets,
         );
       // A duplicated tail prints its transfers again; each copy must agree.
       const previous = this.actions.get(item);
@@ -2166,7 +2585,8 @@ export class Renderer {
       arm(control.when_false, nesting);
     }
     if (control.kind === 'switch') {
-      const nested: readonly Nest[] = [...nesting, { kind: 'switch' }];
+      const nested: readonly Nest[] =
+        this.language === 'c-like' ? [...nesting, { kind: 'switch', id: control.id }] : nesting;
       for (const item of control.cases) {
         this.context.checkpoint(1);
         arm(item.arm, nested);
@@ -2353,6 +2773,13 @@ export class Renderer {
     }
     const action = this.actions.get(transfer);
     if (!action) this.invalid('Rendered transfer has no lexical action');
+    if (action === 'loop-exit') {
+      const route = this.loopExits.get(transfer)!;
+      this.writer.statement(depth, `${this.exitFlags.get(route.loop)!} = 1`);
+      this.writer.statement(depth, 'break');
+      this.emittedEdges.set(transfer, { kind: 'loop-exit', ...route });
+      return;
+    }
     this.emittedEdges.set(
       transfer,
       action === 'goto' ? { kind: 'goto', target: transfer.target } : { kind: action },
@@ -2533,7 +2960,9 @@ export class Renderer {
   private terminates(arm: ControlArm): boolean {
     if (arm.body) return this.regionTerminates(arm.body);
     const action = this.actions.get(arm.transfer);
-    return action === 'goto' || action === 'break' || action === 'continue';
+    return (
+      action === 'goto' || action === 'break' || action === 'continue' || action === 'loop-exit'
+    );
   }
 
   private regionTerminates(region: Region): boolean {
@@ -2552,7 +2981,9 @@ export class Renderer {
         return true;
       case 'jump': {
         const action = this.actions.get(control.transfer);
-        return action === 'goto' || action === 'break' || action === 'continue';
+        return (
+          action === 'goto' || action === 'break' || action === 'continue' || action === 'loop-exit'
+        );
       }
       case 'if':
         return (
@@ -2832,14 +3263,35 @@ export class Renderer {
       },
       (transfer) => this.printedCopies(transfer).length,
       this.context,
+      (block) =>
+        !hasDefinitions(block.id) &&
+        !hasDefinitions(block.control.id) &&
+        block.statements.every((node) => !hasDefinitions(node.id)) &&
+        block.statements.filter((node) => program.retained.has(node.id)).length <= 4 &&
+        block.statements.every(
+          (node) =>
+            !program.retained.has(node.id) ||
+            node.kind === 'assign' ||
+            node.kind === 'load' ||
+            node.kind === 'store',
+        ) &&
+        (block.control.kind !== 'return' ||
+          (program.returns.get(block.control.id)?.outputs.length ?? 9) <= 8),
     );
     let body = this.body;
     if (
+      (!layout.ordered.length ||
+        this.localValidation.presentation(
+          'loop_exit_layout',
+          subject,
+          'acyclic sibling regions follow exact CFG dependencies, excluding natural header backedges; successors whose external incoming edges all belong to one owned region move to the smallest such region, after any containing loop; fixed-point placement preserves every statement, edge copy and dynamic effect order, while cyclic dependencies retain labels',
+          layout.ordered,
+        )) &&
       (!layout.duplicated.length ||
         this.localValidation.presentation(
           'return_tail_duplication',
           subject,
-          'a labeled edge into a block printing only its return (or bounded edge copies and such a block) ends in a copy of that block; copies map to the same original identities',
+          'a labeled edge into an acyclic return tail of at most four blocks, each with at most four assignments/loads/stores and four edge copies, ends in an owned copy; effects execute once on the same path in the same order, and copies retain original identities',
           [...new Set(layout.duplicated.map((item) => item.tail))],
         )) &&
       (!layout.relocated.length ||
@@ -2913,6 +3365,58 @@ export class Renderer {
       this.hoisted.clear();
       this.forLoops.clear();
     }
+    const normalized: string[] = [];
+    visitTransfers(this.body, this.language, this.context, (occurrence) => {
+      const target = occurrence.destination ? firstBlock(occurrence.destination) : null;
+      if (
+        transferAction(occurrence.transfer, occurrence.nesting, target, this.language, true) !==
+        transferAction(
+          occurrence.transfer,
+          occurrence.nesting,
+          target,
+          this.language,
+          true,
+          true,
+          false,
+        )
+      )
+        normalized.push(occurrence.control.id);
+    });
+    this.normalizeLoopTargets =
+      !normalized.length ||
+      this.localValidation.presentation(
+        'loop_transfer_target',
+        subject,
+        'break and continue select the nearest enclosing loop by exact lexical successor/header identity, not the structurer annotation; a C switch never captures a loop break',
+        [...new Set(normalized)],
+      );
+    const routes = planLoopExits(this.body, this.language, this.context);
+    if (
+      routes.size &&
+      this.localValidation.presentation(
+        'multi_level_loop_exit',
+        subject,
+        'an edge to an enclosing loop continuation sets one boolean for that loop and breaks; guards immediately after each intervening loop/switch propagate the exit before any following effects; the flag is initialized before each entry to its target loop',
+        [...new Set([...routes.values()].flatMap((route) => route.through))],
+      )
+    ) {
+      this.loopExits = routes;
+      for (const route of routes.values()) {
+        if (!this.exitFlags.has(route.loop)) {
+          let name: string;
+          do {
+            name = `loop_exit_${this.temporary++}`;
+          } while (this.usedSourceNames.has(name));
+          this.usedSourceNames.add(name);
+          this.exitFlags.set(route.loop, name);
+        }
+        for (const scope of route.through.slice(0, -1)) {
+          const targets = this.exitGuards.get(scope) ?? new Set<string>();
+          targets.add(route.loop);
+          this.exitGuards.set(scope, targets);
+        }
+      }
+    }
   }
 
   /** Restate a do-while test over the variable its repeat copy just wrote: for
@@ -2981,6 +3485,7 @@ export class Renderer {
     };
     const shift = offset(copy.source, 0);
     if (shift === null) return false;
+    if (this.localValidation.skipExhaustedBitvector(tested.id)) return false;
     const restated: Value = { id: `${control.id}#restated_bound`, type: copy.destination.type };
     const bits = BigInt.asUintN(width, bound + shift),
       original = compare,
@@ -3020,42 +3525,6 @@ export class Renderer {
       right: restated,
     });
     return true;
-  }
-
-  /** Comments must not allocate identifiers for dead SSA values. Expand only a
-   * small pure tree whose leaves are real, uncoalesced declarations; coalesced
-   * storage may already contain a later value at this exit. */
-  private exitValue(value: Value): string | null {
-    let remaining = 8;
-    const render = (current: Value): Printed | null => {
-      if (--remaining < 0) return null;
-      if (
-        !this.inline.has(current.id) &&
-        this.declaredTypes.has(current.id) &&
-        !this.variables.has(current.id)
-      )
-        return this.printed(current);
-      const expression = this.program.expressions.get(current.id);
-      if (
-        !expression ||
-        !['constant', 'integer', 'compare', 'cast', 'extract'].includes(expression.kind)
-      )
-        return null;
-      const operands = new Map<string, Printed>();
-      for (const operand of expressionOperands(expression)) {
-        const printed = render(operand);
-        if (!printed) return null;
-        operands.set(operand.id, printed);
-      }
-      return expressionText(
-        expression,
-        current.type,
-        this.writer,
-        (operand) => operands.get(operand.id)!,
-        { view: 'source' },
-      );
-    };
-    return render(value)?.text ?? null;
   }
 
   private control(control: Control, block: BlockRegion, depth: number): void {
@@ -3150,40 +3619,12 @@ export class Renderer {
           this.writer.line(depth + 1, '}');
           this.writer.line(depth, '}');
         }
+        this.propagateLoopExit(control.id, depth);
         break;
       case 'return': {
         const projection = this.program.returns.get(control.id);
         for (const value of control.values) ids.push(value.id);
         for (const binding of block.register_exit) ids.push(binding.value.id);
-        const scratch = projection?.exit_scratch ?? [];
-        if (scratch.length) {
-          const clobbers = scratch.filter((slice) => !slice.computed && !slice.entry);
-          if (clobbers.length)
-            this.writer.comment(
-              depth,
-              `exit ${[...new Set(clobbers.map(({ register }) => register.root.slice(register.root.lastIndexOf(':') + 1)))].join(', ')}: unspecified (clobbered by calls)`,
-            );
-          const slices = scratch
-            .filter((slice) => slice.computed || slice.entry)
-            .map((slice) => {
-              const { register, value } = slice;
-              const root = register.root.slice(register.root.lastIndexOf(':') + 1);
-              const printable = this.exitValue(value);
-              const description =
-                printable ??
-                (slice.entry
-                  ? slice.sources.length
-                    ? 'entry value or clobbered by calls'
-                    : 'entry value'
-                  : 'computed, not materialized');
-              return `${root}[${register.offset_bits}:${register.width_bits}] = ${description}`;
-            });
-          if (slices.length)
-            this.writer.comment(
-              depth,
-              `also at exit: ${slices.join(', ')} (not established as a result)`,
-            );
-        }
         if (projection && projection.kind !== 'physical' && projection.outputs.length === 0) {
           const values = this.writer.list(projection.results, (value) => {
             const scalar = this.sourceView && this.program.source?.return_scalar;
@@ -3332,6 +3773,19 @@ export class Renderer {
     }
   }
 
+  private propagateLoopExit(scope: string, depth: number): void {
+    for (const loop of this.exitGuards.get(scope) ?? []) {
+      const flag = this.exitFlags.get(loop)!;
+      const c = this.language === 'c-like';
+      this.writer.line(depth, c ? `if (${flag}) {` : `if ${flag}:`);
+      this.writer.statement(depth + 1, 'break');
+      if (c) this.writer.line(depth, '}');
+      const emitted = this.emittedExitGuards.get(scope) ?? new Set<string>();
+      emitted.add(loop);
+      this.emittedExitGuards.set(scope, emitted);
+    }
+  }
+
   private region(region: Region, depth: number): void {
     this.context.checkpoint(1);
     if (region.kind === 'sequence') {
@@ -3339,6 +3793,11 @@ export class Renderer {
     } else if (region.kind === 'loop') {
       const form = region.form,
         c = this.language === 'c-like';
+      const flag = this.exitFlags.get(region.header);
+      if (flag) {
+        this.writer.statement(depth, this.writer.declaration('uint8_t', flag, ' = 0'));
+        this.initializedExitFlags.add(region.header);
+      }
       // A while/for test prints its own header line from inside the body (its
       // block's control); a do-while test prints the closing `} while (...)` line.
       // A bottom-tested for prints its header here; its test was proven on entry.
@@ -3370,6 +3829,7 @@ export class Renderer {
       )
         this.writer.statement(depth + 1, 'pass');
       if (c && form?.kind !== 'do_while') this.writer.line(depth, '}');
+      this.propagateLoopExit(region.header, depth);
     } else {
       this.emitNotes(region.id, depth);
       const start = this.writer.offset;
@@ -3412,13 +3872,42 @@ export class Renderer {
         ? `${this.language === 'c-like' ? 'C-like' : 'Python-like'} pseudocode; ${this.program.source.inferred ? 'inferred ABI interface' : 'recovered source interface'}.`
         : `${this.language === 'c-like' ? 'C-like' : 'Python-like'} reconstruction; explicit widths and ordered memory, not original source.`,
     );
-    for (const requirement of this.program.source?.requirements ?? []) {
-      this.context.checkpoint(1);
-      if (requirement.kind === 'fp_environment')
+    if (this.sourceView) {
+      const scratch = new Set<string>();
+      for (const boundary of this.program.returns.values())
+        for (const { register } of boundary.exit_scratch ?? [])
+          scratch.add(register.root.slice(register.root.lastIndexOf(':') + 1));
+      if (scratch.size)
         w.comment(
           0,
-          `Requirement ${requirement.id} (${requirement.status}): ${requirement.explanation}`,
+          `ABI scratch at return: ${[...scratch].join(', ')}; exact slices and values retained in exit metadata, not additional results.`,
         );
+    }
+    for (const requirement of this.program.source?.requirements ?? []) {
+      this.context.checkpoint(1);
+      if (requirement.kind === 'fp_environment') {
+        const start = w.offset;
+        w.comment(
+          0,
+          `Requirement ${requirement.id} (${requirement.status}): ${this.fpPresentation.guards.size ? SOURCE_FP_ENVIRONMENT : requirement.explanation}`,
+        );
+        for (const site of requirement.sites) {
+          const origin = this.origins.get(site.subject_ids[0]!);
+          if (origin && this.fpPresentation.guards.has(origin.id)) {
+            this.map(origin, start, site.subject_ids);
+            const control = this.controls.get(origin.id);
+            if (control?.kind === 'if') {
+              const failure = site.supported_predicate_value
+                ? control.when_false
+                : control.when_true;
+              const block = this.program.blocks.get(failure.transfer.target)!;
+              this.map(block, start);
+              this.map(block.control, start);
+              for (const node of block.statements) this.map(node, start);
+            }
+          }
+        }
+      }
     }
     if (this.sourceView) {
       const renamed: string[] = [];
@@ -3497,10 +3986,21 @@ export class Renderer {
     const floating = this.sourceView && this.program.source?.return_float;
     if (floating) returnType = floating === 32 ? 'float' : 'double';
     this.returnSpelling = returnType;
+    if (this.sourceView && this.language === 'c-like') declareCScalarSupport(this.program, w);
     if (this.sourceView && this.language === 'c-like') {
       const typeIds: string[] = [];
+      const resultType =
+        signature?.signature.return_type ?? this.program.source?.return_source_type;
+      if (resultType) typeIds.push(resultType);
       for (const parameter of signature?.signature.parameters ?? [])
         typeIds.push(parameter.type_id);
+      for (const projection of this.program.calls.values()) {
+        this.context.checkpoint(1);
+        if (!projection.signature) continue;
+        typeIds.push(projection.signature.signature.return_type);
+        for (const parameter of projection.signature.signature.parameters)
+          typeIds.push(parameter.type_id);
+      }
       for (const value of this.program.values.values()) {
         this.context.checkpoint(1);
         const id =
@@ -3511,6 +4011,7 @@ export class Renderer {
       this.structDeclarations(typeIds);
     }
     this.declareDataTables();
+    this.declareSourceCallees();
     this.headerStart = w.offset;
     if (this.program.source && parameters.length <= 4) {
       const declarations = parameters.map((parameter) =>
@@ -3628,11 +4129,21 @@ export class Renderer {
         if (!this.mappedStatements.has(id))
           this.invalid('Reconstructed coverage contains an unmapped statement');
     }
+    validateRenderedTransfers(
+      { ...this.input.function, body: this.body },
+      this.gotos,
+      this.language,
+      this.context,
+      this.fallthrough,
+      this.emittedEdges,
+      { initialized: this.initializedExitFlags, guards: this.emittedExitGuards },
+    );
     validateEmittedControl(
       { ...this.input.function, body: this.body },
       this.emittedEdges,
       this.language,
       this.localValidation,
+      { initialized: this.initializedExitFlags, guards: this.emittedExitGuards },
     );
     for (const record of this.localValidation.records)
       if (record.kind === 'control' && record.status === 'rejected')
@@ -3648,7 +4159,13 @@ export class Renderer {
         (id) => this.origins.get(id),
         this.context,
       ),
-    ).map((record) => w.requirement(record));
+    ).map((record) =>
+      w.requirement(
+        this.fpPresentation.guards.size && record.kind === 'fp_environment'
+          ? { ...record, explanation: SOURCE_FP_ENVIRONMENT }
+          : record,
+      ),
+    );
     const inferences = collectInferences(
       this.input,
       this.program,

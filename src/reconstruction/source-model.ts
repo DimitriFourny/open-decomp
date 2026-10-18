@@ -1,5 +1,6 @@
 import type {
   AbiProfile,
+  AbiSignature,
   Address,
   Diagnostic,
   Evidence,
@@ -23,9 +24,10 @@ export interface InferredCallee {
   /** Basis on which a source view may close an open (`argument_list_complete:
    * false`) observed argument list. `callee_reads`: the fully analyzed,
    * nonrecursive callee reads no register outside `parameters`, no incoming stack
-   * and no escaping incoming-stack address; the caller must still prove that it
-   * prepares no possible stack argument. */
-  readonly argument_list_closure?: 'callee_reads';
+   * and no escaping incoming-stack address. Caller-private writes do not reopen
+   * a callee-proven register-only argument list. `library_contract` additionally
+   * relies on an established imported ABI contract, directly or through native tails. */
+  readonly argument_list_closure?: 'callee_reads' | 'library_contract';
   /** Observed incoming slots in callee-entry SP coordinates, not a full arity. */
   readonly stack_parameters?: readonly {
     readonly offset: bigint;
@@ -50,6 +52,8 @@ export interface SourceAddress {
   readonly name?: string;
   /** Evidence-backed C spelling of a native symbol; asserted names stay verbatim. */
   readonly source_name?: string;
+  /** Exact immutable image bytes, free of relocation slots and possible local writes. */
+  readonly constant_bytes?: readonly number[];
   /** Only immutable, terminated strings with exact image/address provenance. */
   readonly string?: string;
   readonly string_byte_length?: bigint;
@@ -71,12 +75,16 @@ export interface SourceAddress {
 export interface SourceEvidence {
   readonly abi: AbiProfile;
   readonly callees: readonly InferredCallee[];
+  /** Proven-context/import-tail refinements and their propagation, source only. */
+  readonly source_callees?: readonly InferredCallee[];
   readonly addresses: readonly SourceAddress[];
   /** Explicit optional-dependency limitations; never substitutes a zero interface. */
   readonly diagnostics?: readonly Diagnostic[];
   readonly evidence?: readonly Evidence[];
   /** Proven complete actual counts for contextual variadic calls. */
   readonly call_argument_counts?: ReadonlyMap<string, number>;
+  /** Source-only actual types from a proven immutable printf-family format. */
+  readonly call_argument_signatures?: ReadonlyMap<string, AbiSignature>;
   /** Bounded native parameter-associated shape constraints over original values. */
   readonly memory_transfers?: readonly MemoryShapeTransfer[];
   /** Positive caller consumption gathered from available native units. This is

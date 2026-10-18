@@ -442,18 +442,35 @@ export function normalizeSourceExpressions(
       }
       // Revisit this value for multi-step reductions as well as its readers.
       if (replacement !== expression || operandsChanged) {
-        const checked = validation.check('bitvector', id, 'source expression rewrite', () =>
-          validateBitvectorCandidate(
-            value,
-            original,
-            replacement,
-            expressions,
-            validation.allowance,
-          ),
-        );
-        if (checked.status === 'rejected') {
-          validation.rejectedRewrites.add(id);
-          continue;
+        // The wiring rule has already proved every bit and ordered opaque
+        // dependency structurally. Shared BDD exhaustion must not undo that
+        // proof; retain the independent veto while it still has an allowance.
+        // Source view: exact wiring is not a speculative candidate either:
+        // same-type identity operand resolution, and slice/extension reselection
+        // that relocates existing bits without arithmetic. Nonstructural rewrites
+        // (arithmetic, narrowing, folding) keep the conservative exhausted
+        // fallback; checked sessions keep their original per-candidate records.
+        const wiring =
+          recombined !== null ||
+          (sourceCells &&
+            (replacement === expression ||
+              replacement.kind === 'extract' ||
+              (replacement.kind === 'cast' && replacement.op === 'bitcast')));
+        if (!wiring || !validation.allowance.exhausted) {
+          if (validation.skipExhaustedBitvector(id)) continue;
+          const checked = validation.check('bitvector', id, 'source expression rewrite', () =>
+            validateBitvectorCandidate(
+              value,
+              original,
+              replacement,
+              expressions,
+              validation.allowance,
+            ),
+          );
+          if (checked.status === 'rejected') {
+            validation.rejectedRewrites.add(id);
+            continue;
+          }
         }
         if (
           cellRewrite &&

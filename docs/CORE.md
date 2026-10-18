@@ -166,7 +166,15 @@ The emission wire form is compact and canonical. `emission.ids` (entity identiti
 
 `src/reconstruction/` and the shared renderer produce both dialects from one source projection. The native pipeline supplies source evidence: physical register slices become ABI arguments/results, private stack spills become forwarded values or scalar locals, and unchanged phi/clobber plumbing disappears before rendering. Inferred interfaces are labeled and never promoted into established source signatures. Escapes, overlaps and uninitialized paths retain shared storage; unknown calls and live non-result clobbers remain explicit. Pure synthetic definitions are bounded and materialized at their original SSA definition sites. C-like casts and Python-like width helpers preserve integer storage; floating/vector helpers retain exact payload semantics. Source-level behavior observes ABI-visible values and ordered external effects, not scratch-register snapshots at every fault. Internal callers without native source evidence retain machine-boundary rendering. Names/notes are escaped, and final-dialect UTF-16 mappings resolve synthesized values to original catalogued subjects.
 
-Structured loop exits retain exact CFG destinations. Only an exit targeting the loop's lexical successor renders as `break`; other exits retain explicit labels/gotos. The source-backed SQLite 3.54.0 `strnicmp` regression evaluates both emitted dialects over 30 boundary cases without executing analyzed code.
+Structured loop exits retain exact CFG destinations. Source layout orders acyclic sibling regions by their CFG dependencies (`loop_exit_layout`), placing shared continuations after their predecessors without moving instructions across a dynamic edge. Transfers to the nearest loop's header/successor use `continue`/`break` regardless of an obsolete outer-loop annotation. Small acyclic return tails (at most four blocks, four assignments/loads/stores and four copies per block) may be copied onto an exiting edge; each path executes its original effects exactly once and in order. Otherwise an exit to an enclosing loop's exact successor may use one boolean and immediate propagation guards after intervening loops/switches (`multi_level_loop_exit`). Control validation checks the complete scope chain, flag initialization and emitted guards. Entries bypassing initialization and irreducible sibling cycles keep explicit gotos. Exhausted presentation capacity keeps the original layout; checked output is unchanged. The source-backed SQLite 3.54.0 `strnicmp` regression evaluates both emitted dialects over 30 boundary cases without executing analyzed code.
+
+Natural-loop header backedges do not constrain sibling order. Projection-exposed
+successors whose external incoming edges all belong to one owned region move
+to the smallest such region, immediately after any containing loop. Fixed-point
+placement exposes further joins; bounded ownership depth keeps complex regions
+explicit. `loop_transfer_target` records
+nearest-loop target normalization separately, and exhausted record capacity
+retains the original labeled edge.
 
 Source presentation coalesces noninterfering unsigned widening copies with phi
 storage, retaining the original narrow definition/read conversions and choosing
@@ -237,21 +245,27 @@ Optional `emission.local_validation` records distinguish verified local fragment
 
 Optional `emission.inferences` explain parameters, type alternatives, signed operations, partial fields, data identities, calls and local rewrites. Each record retains original subjects, decoded instruction IDs, evidence, binary ranges and nonempty UTF-16 spans in the final output. Exact operation-site mappings distinguish an access from its declaration. Synthetic source values resolve to original subjects; annotations retain asserted, hypothetical, conflicting and retracted status rather than becoming established facts. Instruction provenance and raw disassembly remain accessible separately from pseudocode.
 
+A type inference record carries every `association_ids` member whose assertion details (type, status, source, offsets, width, kind and display state) are exactly equal; its subjects, evidence, instruction/range references and output spans are the union of those members' individual records, so no subject or proof is dropped. Records are split before any wire bound is exceeded. Set-valued inference `evidence_refs`/`instruction_refs`/`range_refs` are in ascending table-index order; identical sets share one immutable array within a render.
+
 Parameter roles distinguish observed source inputs, physical-register inputs and explicit entry-storage environment inputs; an entry-SP formal is not evidence of authored arity. Interpretation widths describe reconstructed IR, not necessarily a decoder operand or source declaration. Call constants expose exact unsigned bit patterns with explicit widths, without inventing signedness. Partial fields retain unknown bounds and observed callback targets; local checks retain their bounded scope and counterexamples. Metadata uses the same operation/output budget and cancellation as rendering, and omits evidence IDs when evidence was not requested. Five focused regressions and 12 public both-dialect observations cover these boundaries; they do not establish whole-function equivalence.
 
-Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level FP-environment explanation names every affected guard/operation without hoisting, sharing or erasing predicates across state epochs. Native summaries propagate requirement codes instead of free-form assumption strings. The original conservative effects and known portions of the body remain intact.
+Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level `fp_environment` explanation names every affected guard/operation and its original state epoch. Source-only `fp_environment_guard` presentation selects the supported edge of an exact lifter guard when its state is an unchanged entry value or call clobber, there are no explicit environment writes, and the unsupported arm is exclusively owned. This is conditional on the recorded requirement at **each** epoch, not proof that calls preserve FP state. Omitted guard/failure provenance maps to the top requirement comment; checked guards and ordered effects remain intact. Computed, loaded, known unsupported, or opaque-written control state retains explicit guards.
+
+Source-only `fp_native_operations` prints scalar IEEE arithmetic/comparisons and compatible conversions under the FP requirement plus the target IEEE representation, no-excess-precision and disabled-contraction (`-ffp-contract=off`) contract. Backwards consumer tracing retains helpers where arithmetic payloads escape through integer operations, memory, calls or physical boundaries. Float-to-integer conversions, fused operations, payload-sensitive operations, Python binary32 arithmetic and Python division retain explicit helpers; their rounding, NaN or exceptional behavior is not silently changed. Finite floating literals retain exact target bits. FP/integer copies preserve representation bitcasts, never numeric assignment conversions. Exhausted presentation records retain the explicit form.
 
 Source-only `exit_scratch` presentation keeps exact exit slices and provenance
-in reconstruction facts while moving unestablished results into exit comments.
-Comments name only actual uncoalesced declarations or bounded pure expressions
-over them; otherwise they describe entry, call-clobber, or unmaterialized
-computation origins. Call-clobber-only slices share a compact unspecified-register
-summary. Dead values never acquire invented identifiers for comments.
+in reconstruction facts while summarizing register names once at the function
+header. Exact values and entry/call/computation origins remain in exit metadata
+instead of repeated exit-state dumps; dead values never acquire invented names.
 Locally computed slices qualify outside an established single-register integer,
 FP or vector primary result, without gathered caller demand, multi-register/HFA
 evidence, or a conflicting/unprojectable declared return contract. Undemanded
 x86 RDX slices are not presumed to form a pair with RAX; positive pair/wide-result
-evidence keeps them inline. With no result-use evidence, no written integer/FP
+evidence keeps them inline.
+High slices above an established narrow integer result in the same ABI carrier
+also qualify when no positive evidence demands them: the C ABI leaves those
+bits unspecified even when they are not zero. Their exact values remain metadata.
+With no result-use evidence, no written integer/FP
 primary storage, and agreement from source-signature inference (no declared
 result, projected result or tail interface), computed nonprimary slices may
 instead accompany a void-like `return;`. This is an explicit ABI assumption,
@@ -263,6 +277,37 @@ callers are not exhaustively scanned. The inference explicitly records
 `unavailable_semantics` diagnostic remains. These slices cease to be source
 liveness roots, but potentially faulting loads and other ordered effects remain;
 checked output retains the full overlay.
+
+Source-only `arity_closure` records its per-call basis before stack promotion.
+Complete native machine call/stack summaries close register-only, nonrecursive
+callees even when optional debug/type metadata is unavailable; those metadata
+diagnostics remain visible. Machine coverage gaps, work/refinement limits and
+incomplete dependencies propagate separately and prevent closure. A closed
+callee cannot read additional caller spills, so those private slots are eligible
+for ordinary validated promotion and an unused `entry_sp` disappears. Unknown
+indirect calls, escaping incoming-stack addresses and variadic native callees
+remain open; written stack extent is never interpreted as an argument count.
+Proven invocation constants and identity aliases remain actual ABI inputs before
+the source-only prefix-gap check. Substitution therefore cannot manufacture a
+missing leading argument. These refinements use the existing work budget and
+leave the original checked summary unchanged.
+Discovery-established tails to uniquely resolved imported callable entries may
+use complete nonvariadic register-only library contracts. Their interfaces
+propagate through the same bounded native dependency worklist as source-only
+overlays, never replacing checked interfaces. Conflicting targets/contracts,
+unknown indirect branches, stack/aggregate library layouts and variadic tails
+retain the explicit form; a loader slot is not mistaken for a callable address.
+
+Repeated callable-entry/import observations may use one complete signature only
+when every established contract agrees. For established printf-family contracts,
+an exact immutable terminated format literal supplies promoted actual types,
+including `*` width/precision arguments. Register and stack actuals must bind to
+original caller storage; unavailable bytes never become synthetic loads.
+Positional formats, unsupported extensions, wide conversions, long double,
+malformed directives and excessive actual lists keep the explicit call.
+Library/format closure records `arity_closure` plus `abi_conformance`; refusal at
+the presentation-record bound preserves the open form. Checked text and original
+call/stack/type facts retain their conservative interfaces.
 
 Source-only `frame_save` uses the ABI's preserved register slices (including
 Windows x64 XMM6–XMM15 low 128 bits), not architecture-specific register lists.
@@ -286,7 +331,7 @@ its presentation validation record, and checked rendering is unchanged.
 
 `requirement_predicate(requirement_id, site_id, state_epoch, original_pure_predicate, supported_predicate_result)` first preserves the original predicate's known result. Only an unknown result may be resolved by an explicit matching acknowledgment; a known unsupported state cannot be acknowledged away. ARM supported state is true, x86 supported state false. Unknown calls invalidate earlier epoch acknowledgments. Three focused regressions and 26 deterministic source/helper observations cover both dialects, store/call ordering, wrong epochs, known unsupported state and ARM/x86 polarity. General exceptional FP environments and status fidelity remain unmodeled.
 
-`test/cli/source-quality.test.ts` exercises the real CLI, BinarySession API and SDK stdio MCP against a newly built trusted source fixture, with no supplied source/debug/types/prototypes or raised budgets. Both dialects undergo independent emitted-text evaluation against native source returns, memory writes, branch outcomes and call arguments/order: 36 emissions and 474 behavioral comparisons cover stack10, finite FP, SQLite string comparison, memory, loops and effects. Six additional checks leave unacknowledged FP environments unknown. Only the isolated, locally source-built oracle executes natively; retained SQLite and arbitrary analyzed targets never execute. The native oracle is explicitly macOS ARM64; unsupported hosts skip it. FP and unresolved call interfaces retain their actual partial states.
+`test/cli/source-quality.test.ts` exercises the real CLI, BinarySession API and SDK stdio MCP against a newly built trusted source fixture, with no supplied source/debug/types/prototypes or raised budgets. Both dialects undergo independent emitted-text evaluation against native source returns, memory writes, branch outcomes and call arguments/order: 36 emissions and 474 behavioral comparisons cover stack10, finite FP, SQLite string comparison, memory, loops and effects. The FP source view states one `fp_environment` assumption covering every guard site; six checked-view results fetched through the same surfaces keep those guards, leave unacknowledged FP environments unknown and match native results when acknowledged. Only the isolated, locally source-built oracle executes natively; retained SQLite and arbitrary analyzed targets never execute. The native oracle is explicitly macOS ARM64; unsupported hosts skip it. FP and unresolved call interfaces retain their actual partial states.
 
 Pure expression reconstruction recomposes contiguous register-cell slices before source-width distribution, preserving full-width carries. Source normalization recovers constant shifted-add multiplication and scaled addresses without duplicating effects or expanding shared expression DAGs. Dynamic shift masks and unknown dependencies remain explicit. Independent emitted-output checks cover 240 observations across 16 fixtures.
 
@@ -313,6 +358,14 @@ be mistaken for a whole value. Analysis is bounded to 128-bit integers, 128
 visited definitions and depth 24 per candidate. Unsupported wiring and exhausted
 presentation-record capacity retain the explicit form. The independent local
 bitvector checker may veto a candidate; its 64-bit symbolic limit is unchanged.
+Known-zero concat/insert lanes become zero extensions; neutral OR operands and
+zero shift counts disappear, and shifted literal zeros become constants. A
+numerically zero lane carrying an unknown/undefined dependency is not a literal
+zero and cannot be discarded. These bit-wiring identities carry a structural
+presentation proof even after the optional BDD allowance is exhausted; the
+independent BDD veto still runs while its allowance remains. Nonstructural
+candidates retain the exhausted-proof fallback and record-capacity limits do
+not change.
 Masked lowering retains the exact pre-lowering concat/insert view for subsequent
 slice normalization. An extract contained in one established slice therefore
 does not acquire dependencies on unrelated unknown upper bits through a newly
@@ -329,6 +382,18 @@ Scalar/vector ABI projection tracks typed low lanes independently of integer ban
 
 Source-data recovery distinguishes exact storage identities from literal presentation. Globals, pools and tables retain their own base, byte offset, proven extent, mutability and evidence. Immutable bounded ASCII/UTF-8 strings may acquire character-pointer presentation; writable, conflicting, unterminated, relocated-slot and unsupported-encoding storage remains symbolic. Section ownership does not establish one source array, and memory addresses are never rebased onto a neighboring literal. Public Mach-O executable/dylib and PE outputs return the exact fixture literal in both dialects; table regressions retain ordered reads, writes and one-past faults.
 
+Source-only `constant_pool_literal` replaces exact-width, aligned, nonvolatile
+scalar reads when their constant address names available bytes in one read-only,
+file-backed image section and mapping. Overlapping relocations, mutable storage,
+ambiguous bounds, possible local writes, calls and exhausted presentation capacity
+retain the load. Each applied record includes the image/address, exact bytes and
+load endianness; the original ordered load remains in checked view and metadata.
+Integer results use integer literals. Independently recorded `fp_literal` spelling
+uses round-tripping finite IEEE decimals (shortest binary32 decimals with a C `f`
+suffix; exact binary64-valued decimals in Python); negative zero is preserved.
+Nonfinite constants keep explicit payload-preserving bit patterns. Literal
+spelling itself does not require a default FP arithmetic environment.
+
 Source-only `indexed_data_load` prints mapped constant-base scalar loads as named
 array views. Native (including local) symbols use their C spelling; otherwise a
 neutral `data_<VA>` identifies the exact base. Interior symbol displacements
@@ -343,6 +408,70 @@ presentation record and target unaligned-access requirement preserve provenance;
 checked view does not apply the rewrite.
 
 Source type views interpret unchanged machine storage only when complete, compatible associations support them. Signed operation constraints alone do not declare signed inputs; hypotheses and conflicting layouts do not establish source declarations. Narrow fragments never discard observable high carrier bits. Typed pointer arithmetic and cyclic transfers retain exact target bits; field/array views preserve original access ordering, aliasing, faults and provenance without inventing object bounds or element counts. Dedicated C/Python regressions cover signed fields, unknown-count arrays, full-width pointer returns and typed phi swaps; public Mach-O/PE memory and loop cases retain their results and ordered accesses.
+
+Synthetic source structure views use deterministic `struct_N` names, unified by
+observed member types and offsets within the function. Their C typedefs expose
+`f_<hex offset>` members and explicit byte gaps, with `observed members only;
+size unknown` annotations. `observed_struct_layout` records nonoverlap and exact
+width checks and a target-layout ABI requirement; overlapping, unsupported or
+budget-exhausted layouts stay opaque. Nested pointer types retain their complete
+declaration closure. Proven scalar array strides produce array members without
+invented counts, and a common observed record stride may size a repeating access
+view, never an allocation extent. `partial_struct_member` keeps the original
+access offset, width and ordering; `strided_struct_pointer` retains exact address
+bits across typed temporaries. A single offset-zero integer, float or pointer
+member (including a proven-stride scalar array) uses `natural_scalar_pointee`.
+Checked output and the recovered type/shape facts are unchanged.
+
+Presentation validation is function-scoped: identical rule/scope/reason premises
+aggregate their original subjects into records of at most 64 references, splitting
+only when that existing wire bound requires another record. Every subject still
+maps to its rewrite inference; distinct reasons (including exact effect contracts)
+remain separate. Admission is atomic and the 256-record cap is unchanged.
+ABI assumptions likewise group identical rule/explanation premises in bounded
+anchor chunks, and requirement spans include every mapped anchor, not just the
+first. Source-only verified bitvector results with identical rule/scope/reason
+premises use the same bounded batching, after every original proof executes.
+Counterexamples, rejected and unverified checks remain individual records;
+neither the proof-work allowance nor the record cap increases. Checked sessions
+retain their original machine-validation records and rendering.
+Once the shared source proof-work allowance is exhausted, further speculative
+bitvector candidates retain their original forms without another doomed check.
+One function-level unverified summary counts these unattempted candidates; the
+limitation remains visible rather than consuming one record per skipped rewrite.
+Exact source wiring is not speculative and still applies: same-type identity
+operand resolution, offset-zero/same-width bitcasts and extracts reselected from a
+contained slice, extension or extract relocate existing bits without arithmetic.
+Arithmetic, narrowing and folding candidates keep the retained-original fallback.
+
+The source C renderer emits declarations for direct calls from recovered source
+signatures (including library variadic tails), or labels a consistent observed
+interface `unknown prototype`. Conflicting call-site interfaces and exhausted
+`call_declaration` records retain the explicit fallback. Declarations never
+close an unknown argument remainder or manufacture an authored prototype.
+`library_string_parameter` obtains C `char*` identity from the evidence-backed
+library contract, not a guessed symbol name or arbitrary byte pointer. A
+read-only parameter footprint permits `const char*`. Proven immutable string
+literals pass directly to character/void pointers, and use one pointer cast
+only for incompatible byte-pointer types; no pointer-to-integer round trip is
+inserted. Failed literal proof or exhausted presentation capacity retains the
+original image-backed address.
+Named image addresses without an established C object/function type retain their
+exact VA and display name under `symbolic_address`; the renderer does not invent
+a global's source type just to declare its symbol.
+Exact scalar division, remainder, rotation, full-count shifts, integer slice
+insertion, addition carry and signed subtraction overflow have C inline implementations;
+128-bit intermediates use the compiler's native integer extension. Signed
+minimum/-1 remains undefined at every width, not a defined widened quotient.
+Original helper names and contracts stay in metadata.
+`c_bitcast` uses same-width `memcpy` helpers for integer/IEEE32/IEEE64
+reinterpretation under an explicit native-representation ABI requirement.
+`c_integer_storage` uses ordinary C scalar storage for nonstandard-width integer
+locals while keeping explicit masks/sign interpretation and single operand
+evaluation; nonstandard-width memory accesses keep their original spelling.
+Unknown values, physical state, exceptional memory views and unsupported machine
+effects remain genuine semantic helpers, not fabricated declarations or no-ops.
+Checked rendering is unchanged.
 
 The source-only signature projection keeps those machine values unchanged.
 `formal_pointer` follows whole-value copies, constant byte steps and phi edges to
@@ -361,9 +490,10 @@ narrow carrier. Byte differences (both operands proved in `[0,255]`), explicit
 sign extension, signed division/remainder/arithmetic shift, or selection of the
 same operands compared by a signed predicate establish signed result interpretation;
 otherwise it stays unsigned.
-Separate high slices of that same primary result register may be omitted only
-when exactly zero (checked by the bounded bitvector validator when not literal);
-other computed or demanded high slices retain their explicit return overlay.
+Separate high slices of that same primary result register may be omitted above
+an established narrow integer result when there is no positive demand for them;
+the recorded ABI/result-use requirement covers nonzero scratch high bits as well.
+Demanded or otherwise unproven slices retain their explicit return overlay.
 Independent supplied declarations and conflicts block these inferred replacements.
 Each applied rule records a bounded presentation inference and an
 `abi_conformance` requirement; absent caller evidence is not an exhaustive caller
@@ -374,14 +504,16 @@ Checked-view signatures and expressions do not use these projections.
 and ABI-classified primary results as `float`/`double`. Integer-typed locals may
 share that spelling only in closed same-width bitcast/phi/select transport
 components whose nonliteral incoming paths are established FP values and whose
-consumers never interpret the carrier as an integer. Literal joins retain exact
-FP bit-pattern constructors and cannot establish FP interpretation alone.
+consumers never interpret the carrier as an integer. Literal joins cannot
+establish FP interpretation alone; independently approved finite `fp_literal`
+spelling preserves exact bits, while nonfinite payloads retain bit-pattern constructors.
 A store, integer operation, unresolved
 boundary use, conflicting type or unknown incoming value keeps that component
 explicit. Redundant bitcasts between approved FP spellings disappear; actual
-integer/FP reinterpretations, FP arithmetic helpers, exact NaN payload constants
-and environment guards remain explicit. One bounded presentation inference and
-`abi_conformance` requirement record the native IEEE representation assumption;
+integer/FP reinterpretations and exact NaN payload constants remain explicit.
+This type projection alone does not rewrite arithmetic helpers or environment
+guards; their independent presentation gates apply separately. One bounded
+presentation inference and `abi_conformance` requirement record the native IEEE representation assumption;
 failure to record it keeps all original spellings. Supplied signatures are not
 overridden, and checked-view types and bitcasts are unchanged.
 

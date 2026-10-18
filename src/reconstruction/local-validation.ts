@@ -42,6 +42,10 @@ export class ValidationAllowance {
     private readonly limit = Math.min(8000, Math.floor((context.remainingWork?.() ?? 8000) / 64)),
   ) {}
 
+  get exhausted(): boolean {
+    return this.work >= this.limit;
+  }
+
   charge(): void {
     if (this.work >= this.limit) {
       this.context.checkpoint(0);
@@ -333,8 +337,44 @@ export class LocalValidationSession {
   /** Identical outcomes (e.g. each step of a multi-step rewrite of one subject)
    * state one fact, so they are published once. */
   readonly #recorded = new Set<string>();
-  constructor(context: OperationContext) {
+  /** A session owns one function. Identical verified premises can describe
+   * many subjects without consuming one validation record per occurrence. */
+  private readonly verifiedGroups = new Map<
+    string,
+    { readonly subjects: Set<string>; readonly chunks: string[][] }
+  >();
+  private readonly abiGroups = new Map<
+    string,
+    { readonly subjects: Set<string>; readonly chunks: string[][] }
+  >();
+  constructor(
+    context: OperationContext,
+    private readonly aggregateBitvectors = false,
+    private readonly functionSubject?: string,
+  ) {
     this.allowance = new ValidationAllowance(context);
+  }
+
+  private skippedBitvectors = 0;
+  private skippedRecord: number | undefined;
+
+  /** Source-only candidate admission: after shared work runs out, retain the
+   * original form instead of repeatedly attempting a guaranteed-failing proof. */
+  skipExhaustedBitvector(subject: string): boolean {
+    if (!this.aggregateBitvectors || !this.allowance.exhausted) return false;
+    this.allowance.context.checkpoint(0);
+    this.skippedBitvectors++;
+    // Index256 is the existing terminal limitation-record slot, not extra proof
+    // capacity. If present, preserve its record-bound limitation in the summary.
+    this.skippedRecord ??= Math.min(this.records.length, 256);
+    this.records[this.skippedRecord] = {
+      kind: 'bitvector',
+      subject: this.functionSubject ?? subject,
+      status: 'unverified',
+      scope: 'source bitvector candidates not attempted; original forms retained',
+      reason: `${this.skippedRecord === 256 ? 'local validation record bound exceeded; ' : ''}${this.skippedBitvectors} later candidates were not attempted because the local validation allowance was exhausted`,
+    };
+    return true;
   }
 
   check(
@@ -362,7 +402,20 @@ export class LocalValidationSession {
       return record;
     }
     const checked = bounded({ kind, subject, scope }, action);
-    const record = subjectIds ? { ...checked, subject_ids: subjectIds.slice(0, 64) } : checked;
+    let record = subjectIds ? { ...checked, subject_ids: subjectIds.slice(0, 64) } : checked;
+    if (
+      this.aggregateBitvectors &&
+      kind === 'bitvector' &&
+      record.status === 'verified' &&
+      record.counterexample === undefined
+    ) {
+      if (this.recordVerified(record, subjectIds ?? record.subject_ids)) return record;
+      record = {
+        ...record,
+        status: 'unverified',
+        reason: 'local validation record bound exceeded',
+      };
+    }
     const key = JSON.stringify([
       record.kind,
       record.subject,
@@ -389,28 +442,86 @@ export class LocalValidationSession {
     subjectIds?: readonly string[],
     reason?: string,
   ): boolean {
-    const record = this.check(
-      'presentation',
+    if (
+      this.recordVerified(
+        {
+          kind: 'presentation',
+          rule,
+          subject,
+          scope,
+          status: 'verified',
+          ...(reason ? { reason } : {}),
+        },
+        subjectIds,
+      )
+    )
+      return true;
+    this.check('presentation', subject, scope, () => ({
+      kind: 'presentation',
+      rule,
       subject,
       scope,
-      () => ({
-        kind: 'presentation',
-        rule,
-        subject,
-        scope,
-        status: 'verified',
-        ...(reason ? { reason } : {}),
-      }),
-      subjectIds,
-    );
-    return record.status === 'verified';
+      status: 'unverified',
+      reason: 'local validation record bound exceeded',
+    }));
+    return false;
+  }
+
+  /** Batch only established premises; proof execution and every unsuccessful
+   * result remain independent of this metadata storage decision. */
+  private recordVerified(record: LocalValidationRecord, subjectIds?: readonly string[]): boolean {
+    this.allowance.context.checkpoint(1 + (subjectIds?.length ?? 0));
+    // Reasons can carry exact effect contracts. Different contracts must never
+    // share a record even when their rule and prose scope coincide.
+    const key = JSON.stringify([
+      record.kind,
+      record.rule ?? null,
+      record.scope,
+      record.reason ?? null,
+    ]);
+    const previous = this.verifiedGroups.get(key);
+    const subjects = new Set([record.subject, ...(subjectIds ?? [])]);
+    const missing = [...subjects].filter((id) => !previous?.subjects.has(id));
+    if (!missing.length) return true;
+    const last = previous?.chunks.at(-1);
+    const available = last ? 64 - last.length : 0;
+    const required = Math.ceil(Math.max(0, missing.length - available) / 64);
+    // Admission is atomic: never authorize only a prefix of a rewrite's refs.
+    if (this.records.length + required > 256 && required > 0) return false;
+    const group = previous ?? { subjects: new Set<string>(), chunks: [] };
+    this.verifiedGroups.set(key, group);
+    let chunk = last;
+    for (const id of missing) {
+      if (!chunk || chunk.length === 64) {
+        chunk = [];
+        group.chunks.push(chunk);
+        this.records.push({ ...record, subject_ids: chunk });
+      }
+      chunk.push(id);
+      group.subjects.add(id);
+    }
+    return true;
   }
 
   /** ABI-conformance assumptions of applied rewrites, published as requirements. */
   readonly abiConformance: AbiConformanceSite[] = [];
   requireAbi(rule: string, anchorIds: readonly string[], explanation: string): void {
     this.allowance.context.checkpoint(anchorIds.length);
-    if (anchorIds.length) this.abiConformance.push({ rule, anchor_ids: anchorIds, explanation });
+    const key = JSON.stringify([rule, explanation]);
+    const group = this.abiGroups.get(key) ?? { subjects: new Set<string>(), chunks: [] };
+    if (!anchorIds.length) return;
+    this.abiGroups.set(key, group);
+    let chunk = group.chunks.at(-1);
+    for (const id of anchorIds) {
+      if (group.subjects.has(id)) continue;
+      if (!chunk || chunk.length === 64) {
+        chunk = [];
+        group.chunks.push(chunk);
+        this.abiConformance.push({ rule, anchor_ids: chunk, explanation });
+      }
+      chunk.push(id);
+      group.subjects.add(id);
+    }
   }
 }
 export function validateBitvectorCandidate(

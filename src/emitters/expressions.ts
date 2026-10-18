@@ -2,6 +2,8 @@ import type { Address } from '../core/index.js';
 import { bitWidth, sameType, type DataType, type Expression, type Value } from '../ir/index.js';
 import type { Writer } from './writer.js';
 
+const floatLiteralStorage = new DataView(new ArrayBuffer(8));
+
 /** These are machine storage types, never inferred C source types. */
 export function machineType(type: DataType): string {
   switch (type.kind) {
@@ -12,6 +14,21 @@ export function machineType(type: DataType): string {
     case 'vector':
       return `vector_${type.element.kind === 'float' ? 'f' : 'i'}${type.element.bits}x${type.lanes}_t`;
   }
+}
+
+/** Ordinary C storage for an exact-width bit-vector; reductions are separate. */
+export function integerStorageBits(bits: number): number {
+  return bits <= 8
+    ? 8
+    : bits <= 16
+      ? 16
+      : bits <= 32
+        ? 32
+        : bits <= 64
+          ? 64
+          : bits <= 128
+            ? 128
+            : bits;
 }
 
 const integerOperators: Partial<Record<Extract<Expression, { kind: 'integer' }>['op'], string>> = {
@@ -404,7 +421,10 @@ export function usualArithmetic(left: IntegerCType, right: IntegerCType): Intege
 
 /** Source-view syntax shared by expression and memory printing. */
 export class SourcePrinter {
-  constructor(private readonly writer: Writer) {}
+  constructor(
+    private readonly writer: Writer,
+    private readonly nativeWidths = false,
+  ) {}
 
   get python(): boolean {
     return this.writer.language === 'python-like';
@@ -460,6 +480,23 @@ export class SourcePrinter {
         this.literal(1n, 1),
         this.python ? { bits: 1, signed: false } : usualArithmetic(value.ctype ?? INT, INT),
       );
+    const storage = integerStorageBits(bits);
+    if (!this.python && this.nativeWidths && bits !== storage && bits <= 128) {
+      const narrowed = this.binary(
+        '&',
+        this.cast(storage, false, value),
+        this.literal((1n << BigInt(bits)) - 1n, storage),
+        usualArithmetic({ bits: storage, signed: false }, { bits: storage, signed: false }),
+      );
+      if (!signed) return narrowed;
+      const sign = this.literal(1n << BigInt(bits - 1), storage);
+      const flipped = this.binary('^', narrowed, sign, narrowed.ctype);
+      return this.cast(
+        storage,
+        true,
+        this.binary('-', flipped, sign, { bits: storage, signed: false }),
+      );
+    }
     const ctype = { bits, signed };
     const inverse =
       !this.python && !signed && value.ctype?.bits === bits && value.ctype.signed
@@ -547,6 +584,10 @@ export interface ExpressionOptions {
   readonly view: 'source' | 'checked';
   /** Proven constant value of an operand, when it prints as a literal. */
   readonly constant?: (value: Value) => bigint | undefined;
+  readonly nativeIntegerStorage?: boolean;
+  /** Approved scalar operation under the recorded FP environment requirement. */
+  readonly nativeFp?: boolean;
+  readonly floatLiterals?: boolean;
 }
 
 /** Reconstruction chooses substitutions; formatting preserves width semantics.
@@ -574,7 +615,7 @@ export function expressionText(
       ctype: null,
     };
   }
-  const printer = new SourcePrinter(writer),
+  const printer = new SourcePrinter(writer, options.nativeIntegerStorage),
     python = printer.python,
     width = bitWidth(type);
   const helper = (): Printed => ({
@@ -595,8 +636,75 @@ export function expressionText(
   };
   const range = (value: Printed, bits: number): IntegerCType =>
     value.ctype ?? { bits, signed: false };
+  if (options.nativeFp) {
+    if (expression.kind === 'float_compare') {
+      const operators: Record<string, string> = {
+        eq: '==',
+        ne: '!=',
+        lt: '<',
+        le: '<=',
+        gt: '>',
+        ge: '>=',
+      };
+      const op = operators[expression.op];
+      if (op)
+        return printer.binary(op, name(expression.left), name(expression.right), {
+          bits: 1,
+          signed: false,
+        });
+    }
+    if (expression.kind === 'float' && (!python || (width === 64 && expression.op !== 'div'))) {
+      const operators: Record<string, string> = { add: '+', sub: '-', mul: '*', div: '/' };
+      const op = operators[expression.op];
+      if (op) return printer.binary(op, name(expression.left), name(expression.right), null);
+    }
+    if (
+      expression.kind === 'cast' &&
+      type.kind === 'float' &&
+      (!python || (width === 64 && expression.op !== 'float_convert')) &&
+      (expression.op === 'float_convert' ||
+        [8, 16, 32, 64, 128].includes(bitWidth(expression.value.type)))
+    ) {
+      const value =
+        expression.op === 'signed_to_float'
+          ? printer.cast(bitWidth(expression.value.type), true, name(expression.value))
+          : expression.op === 'unsigned_to_float'
+            ? printer.cast(bitWidth(expression.value.type), false, name(expression.value))
+            : name(expression.value);
+      if (python) return printer.primary(`float(${value.text})`);
+      return {
+        text: `(${width === 32 ? 'float' : 'double'})${printer.group(value, UNARY)}`,
+        precedence: UNARY,
+        ctype: null,
+      };
+    }
+  }
   switch (expression.kind) {
     case 'constant':
+      if (options.floatLiterals && type.kind === 'float' && (width === 64 || width === 32)) {
+        const bytes = floatLiteralStorage;
+        if (width === 32) bytes.setUint32(0, Number(BigInt.asUintN(32, expression.bits)), true);
+        else bytes.setBigUint64(0, BigInt.asUintN(64, expression.bits), true);
+        const value = width === 32 ? bytes.getFloat32(0, true) : bytes.getFloat64(0, true);
+        if (Number.isFinite(value)) {
+          let text = Object.is(value, -0) ? '-0.0' : String(value);
+          if (!python && width === 32 && value !== 0)
+            for (let precision = 1; precision <= 9; precision++) {
+              const candidate = Number(value.toPrecision(precision));
+              if (Object.is(Math.fround(candidate), value)) {
+                text = String(candidate);
+                break;
+              }
+            }
+          if (!/[.eE]/.test(text)) text += '.0';
+          if (!python && width === 32) text += 'f';
+          return {
+            text,
+            precedence: value < 0 || Object.is(value, -0) ? UNARY : PRIMARY,
+            ctype: null,
+          };
+        }
+      }
       if (type.kind !== 'integer') return helper();
       return printer.literal(BigInt.asUintN(width, expression.bits), width);
     case 'address':

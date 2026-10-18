@@ -18,6 +18,11 @@ import { structureControlFlow } from '../../src/presentation/index.js';
 import { reconstruct } from '../../src/reconstruction/index.js';
 import type { Reconstruction } from '../../src/reconstruction/model.js';
 import type { SourcePresentation } from '../../src/reconstruction/source-model.js';
+import { LocalValidationSession } from '../../src/reconstruction/local-validation.js';
+import {
+  abiConformanceRequirements,
+  sourceRequirementProofs,
+} from '../../src/reconstruction/source-requirements.js';
 import { image, provenance, slice } from '../ir/support.js';
 
 function fixture() {
@@ -373,4 +378,98 @@ test('inference metadata bounds and cancellation fail explicitly instead of drop
       ),
     { code: 'cancelled' },
   );
+});
+
+test('aggregated presentation subjects all remain traceable through inference references', () => {
+  const f = fixture(),
+    context = createOperationContext();
+  const session = new LocalValidationSession(context),
+    owner = f.writer(context, true);
+  session.presentation('observed_view', f.value.id, 'same view', [f.fieldId]);
+  session.presentation('observed_view', f.display.id, 'same view', [f.input.function.id]);
+  assert.equal(session.records.length, 1);
+  const records = collectInferences(f.input, f.program, session.records, owner, context, f.sites);
+  const rewrite = records.find(
+    (record) => record.details.kind === 'rewrite' && record.details.rule === 'observed_view',
+  );
+  assert.ok(rewrite);
+  const subjects = new Set(rewrite.subject_refs.map((ref) => owner.ids.items[ref]));
+  for (const id of [f.value.id, f.fieldId, f.input.function.id]) assert.ok(subjects.has(id));
+  assert.equal(inferenceSchema.safeParse(rewrite).success, true);
+});
+
+test('aggregated ABI sites map later anchors even when their first anchor is not emitted', () => {
+  const f = fixture(),
+    context = createOperationContext();
+  const session = new LocalValidationSession(context),
+    owner = f.writer(context, true);
+  const load = [...f.program.blocks.values()]
+    .flatMap((block) => block.statements)
+    .find((node) => node.kind === 'load')!;
+  session.requireAbi('observed_view', [f.input.function.id], 'target view');
+  session.requireAbi('observed_view', [load.id], 'target view');
+  const requirements = abiConformanceRequirements(
+    f.input.function.id,
+    session.abiConformance,
+    (id) => (id === load.id ? load : id === f.input.function.id ? f.input.function : undefined),
+    context,
+  );
+  const projected = sourceRequirementProofs(
+    f.program,
+    owner.mappings,
+    { ids: owner.ids.items, ranges: owner.ranges.items },
+    context,
+    requirements,
+  );
+  assert.equal(projected.length, 1);
+  assert.deepEqual(projected[0]!.output_spans, [{ start: 40, end: 60 }]);
+  assert.ok(projected[0]!.subject_ids.includes(load.id));
+});
+
+test('identical type assertions share one record without losing any member fact', () => {
+  const f = fixture();
+  const types = f.input.types;
+  const asserted = types.associations.find((item) => item.status === 'asserted')!;
+  const sibling = {
+    ...asserted,
+    id: entityIdentity(slice, 'inference-regression', 'field-asserted'),
+    subject_id: f.fieldId,
+    evidence_ids: [`evidence_${'e'.repeat(64)}`],
+  };
+  const run = (associations: TypeRecoveryResult['associations']) => {
+    const context = createOperationContext(),
+      owner = f.writer(context, true);
+    const input = { ...f.input, types: { ...types, associations } };
+    return collectInferences(input, f.program, [], owner, context, f.sites)
+      .filter(
+        (record) => record.details.kind === 'type' && record.details.type_status === 'asserted',
+      )
+      .map((record) => ({
+        associations: record.details.kind === 'type' ? record.details.association_ids : [],
+        subjects: new Set(record.subject_refs.map((ref) => owner.ids.items[ref])),
+        proofs: new Set(record.evidence_refs.map((ref) => owner.proofs.items[ref])),
+        instructions: new Set(record.instruction_refs.map((ref) => owner.ids.items[ref])),
+        spans: new Set(record.output_spans.map((span) => `${span.start}:${span.end}`)),
+        record,
+      }));
+  };
+  const grouped = run([...types.associations, sibling]);
+  assert.equal(grouped.length, 1);
+  const [record] = grouped;
+  assert.deepEqual(record!.associations, [asserted.id, sibling.id]);
+  assert.equal(inferenceSchema.safeParse(record!.record).success, true);
+  // The grouped record is exactly the union of the separate per-association records.
+  const separate = [run([asserted]), run([sibling])].map((records) => {
+    assert.equal(records.length, 1);
+    return records[0]!;
+  });
+  for (const key of ['subjects', 'proofs', 'instructions', 'spans'] as const)
+    assert.deepEqual(
+      [...record![key]].sort(),
+      [...new Set(separate.flatMap((item) => [...item[key]]))].sort(),
+      key,
+    );
+  // A differing displayed/status/source field never joins the cohort.
+  const distinct = run([...types.associations, { ...sibling, source: 'debug' as const }]);
+  assert.equal(distinct.length, 2);
 });

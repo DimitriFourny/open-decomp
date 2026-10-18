@@ -8,7 +8,12 @@ import { LocalValidationSession, validateControlTarget } from './local-validatio
 
 export type EmittedEdge =
   | { readonly kind: 'goto'; readonly target: string }
+  | { readonly kind: 'loop-exit'; readonly loop: string; readonly through: readonly string[] }
   | { readonly kind: 'fallthrough' | 'break' | 'continue' };
+export interface EmittedLoopExits {
+  readonly initialized: ReadonlySet<string>;
+  readonly guards: ReadonlyMap<string, ReadonlySet<string>>;
+}
 /** Consume recorded emitted actions, not the structurer's suggested transfer
  * modes. Derive lexical destinations from the rendered region layout. */
 export function validateEmittedControl(
@@ -16,9 +21,10 @@ export function validateEmittedControl(
   emitted: ReadonlyMap<ParallelTransfer, EmittedEdge>,
   language: 'c-like' | 'python-like',
   validation: LocalValidationSession,
+  exits?: EmittedLoopExits,
 ): void {
   /** `test`: a do-while's test control, the only site whose `continue` repeats. */
-  type Scope = { loop: string | null; after: string | null; test?: string };
+  type Scope = { loop: string | null; after: string | null; test?: string; id: string };
   let work = 0;
   const entry = (region: Region, fallback: string | null): string | null => {
     while (region.kind === 'sequence') {
@@ -51,6 +57,18 @@ export function validateEmittedControl(
       if (action.kind === 'continue') {
         const scope = [...scopes].reverse().find((item) => item.loop !== null);
         actual = scope && (scope.test === undefined || scope.test === subject) ? scope.loop : null;
+      }
+      if (action.kind === 'loop-exit') {
+        const outer = scopes.findIndex((scope) => scope.loop === action.loop);
+        const through = outer < 0 ? [] : scopes.slice(outer).reverse();
+        actual =
+          through.length > 1 &&
+          through.length === action.through.length &&
+          through.every((scope, index) => scope.id === action.through[index]) &&
+          exits?.initialized.has(action.loop) &&
+          through.slice(0, -1).every((scope) => exits.guards.get(scope.id)?.has(action.loop))
+            ? scopes[outer]!.after
+            : null;
       }
       return validateControlTarget(subject, transfer.target, actual);
     });
@@ -93,7 +111,12 @@ export function validateEmittedControl(
       const test = region.form?.kind === 'do_while' ? region.form.test : undefined;
       walk(region.body, test === undefined ? region.header : null, [
         ...scopes,
-        { loop: region.header, after: follow, ...(test === undefined ? {} : { test }) },
+        {
+          loop: region.header,
+          id: region.header,
+          after: follow,
+          ...(test === undefined ? {} : { test }),
+        },
       ]);
     } else {
       const control = region.control;
@@ -103,7 +126,10 @@ export function validateEmittedControl(
         arm(control.when_false, follow, scopes, control.id);
       }
       if (control.kind === 'switch') {
-        const nested = language === 'c-like' ? [...scopes, { loop: null, after: follow }] : scopes;
+        const nested =
+          language === 'c-like'
+            ? [...scopes, { loop: null, id: control.id, after: follow }]
+            : scopes;
         for (const item of control.cases) arm(item.arm, follow, nested, control.id);
         arm(control.otherwise, follow, nested, control.id);
       }

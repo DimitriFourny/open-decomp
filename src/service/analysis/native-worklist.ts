@@ -12,6 +12,8 @@ import { nativeContextKey, type NativeContext } from './native-context.js';
 
 export type NativeInterface = Omit<InferredCallee, 'call_id' | 'evidence_ids'> & {
   readonly parameter_shapes?: readonly NativeParameterShape[];
+  /** Context/import-tail refinements never replace the original checked interface. */
+  readonly source_interface?: Omit<NativeInterface, 'source_interface'>;
   /** Actual written result storage. Consumption alone is not a write/extension
    * guarantee and therefore never seeds a recursive dependency's contract. */
   readonly written_result?: {
@@ -41,12 +43,15 @@ export interface NativeSummaryUnit extends NativeSummaryCapacity {
   readonly evidence_ids: readonly string[];
   readonly reasons: readonly string[];
   readonly budget_truncated: boolean;
+  /** Complete machine call/stack semantics, independently of optional debug/type metadata. */
+  readonly arity_complete?: boolean;
 }
 export interface NativeSummary {
   readonly observed: NativeInterface;
   readonly evidence_ids: readonly string[];
   readonly reasons: readonly string[];
   readonly complete: boolean;
+  readonly arity_complete?: boolean;
 }
 export interface NativeWorklistResult<U extends NativeSummaryUnit> {
   readonly units: ReadonlyMap<string, U>;
@@ -326,7 +331,15 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
   // Limit/reason propagation is itself a bounded fixed point. SCCs with no open
   // dependencies are closed; recursion alone is not an unavailable-semantics gap.
   const reasons = new Map<string, Set<string>>();
+  const arityComplete = new Map<string, boolean>();
   for (const [id, unit] of units) {
+    arityComplete.set(
+      id,
+      (unit.arity_complete ?? unit.reasons.length === 0) &&
+        !unit.budget_truncated &&
+        !fallbackReasons.has(id) &&
+        !refinementLimits.has(id),
+    );
     reasons.set(
       id,
       new Set([
@@ -350,6 +363,10 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
       const key =
         contextKeys.get(nativeContextKey(dependency.target.id, dependency.assumptions)) ??
         dependency.target.id;
+      if (arityComplete.get(id) && !arityComplete.get(key)) {
+        arityComplete.set(id, false);
+        changed = true;
+      }
       const inherited =
         reasons.get(key) ??
         new Set(failures.get(key) ?? ['native dependency interface unavailable']);
@@ -377,6 +394,9 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
       ...summary,
       reasons: limits,
       complete: limits.length === 0 && summary.observed.parameter_state !== 'ambiguous',
+      arity_complete:
+        arityComplete.get(id) === true &&
+        (summary.observed.source_interface ?? summary.observed).parameter_state !== 'ambiguous',
     });
   }
   for (const [id, limits] of failures)

@@ -8,7 +8,7 @@ import type { LocalValidationRecord } from '../reconstruction/local-validation.j
 import { sourceConstantValues, sourceDataValues } from '../reconstruction/source-data.js';
 import type { SourceAddress } from '../reconstruction/source-model.js';
 import type { EmissionInput } from './model.js';
-import type { Writer } from './writer.js';
+import { ReferenceUnions, type Writer } from './writer.js';
 
 type Mapping = Emission['mappings'][number];
 type Details = Inference['details'];
@@ -202,6 +202,12 @@ export function collectInferences(
     return rows;
   };
   const result: Inference[] = [];
+  const references = new ReferenceUnions(context);
+  interface Member {
+    readonly subjects: readonly string[];
+    readonly evidence: readonly string[];
+    readonly affectedSubjects: readonly string[];
+  }
   const add = (
     subjects: readonly string[],
     status: InferenceStatus,
@@ -209,67 +215,103 @@ export function collectInferences(
     details: Details,
     evidence: readonly string[] = [],
     affectedSubjects: readonly string[] = subjects,
+    members: readonly Member[] = [{ subjects, evidence, affectedSubjects }],
   ): void => {
     context.checkpoint(1);
-    const links = new Set<Mapping>();
     const subjectIds = new Set<string>();
-    for (const id of subjects) for (const subject of originals(id)) subjectIds.add(subject);
-    for (const id of affectedSubjects) for (const mapping of linksFor(id)) links.add(mapping);
-    if (!links.size || !subjectIds.size) return;
-    if (result.length >= 10000) writer.fail('Inference record limit exceeded');
-    // Provenance lists are interned once per immutable origin array; records
-    // union table indexes, never re-keyed identity or range strings.
-    const instructions = new Set<number>();
-    const proofs = new Set<number>(writer.evidence ? evidence.map((id) => writer.proof(id)) : []);
-    const ranges = new Set<number>();
+    const instructionUnion = references.begin(),
+      proofUnion = references.begin(),
+      rangeUnion = references.begin();
     const spans = new Map<string, { start: number; end: number }>();
-    const provenance = (origin: Origin): void => {
-      for (const ref of writer.idRefs(origin.provenance.instruction_ids)) instructions.add(ref);
-      if (writer.evidence)
-        for (const id of origin.provenance.evidence_ids) proofs.add(writer.proof(id));
-      for (const ref of writer.rangeRefs(origin.provenance.ranges)) ranges.add(ref);
-    };
-    for (const id of subjectIds) {
-      context.checkpoint(1);
-      const origin = original.get(id);
-      if (origin) provenance(origin);
-      for (const contributor of program.origins.get(id) ?? []) provenance(contributor);
+    for (const member of members) {
+      const memberSubjects = new Set<string>();
+      for (const id of member.subjects)
+        for (const subject of originals(id)) memberSubjects.add(subject);
+      const links =
+        member.affectedSubjects.length === 1
+          ? linksFor(member.affectedSubjects[0]!)
+          : [...new Set(member.affectedSubjects.flatMap(linksFor))];
+      if (!links.length || !memberSubjects.size) continue;
+      if (writer.evidence) proofUnion.add(writer.proofRefs(member.evidence));
+      let hasInstructions = false,
+        hasRanges = false,
+        hasSites = false;
+      const provenance = (origin: Origin): void => {
+        hasInstructions ||= origin.provenance.instruction_ids.length > 0;
+        hasRanges ||= origin.provenance.ranges.length > 0;
+        instructionUnion.add(writer.idRefs(origin.provenance.instruction_ids));
+        if (writer.evidence) proofUnion.add(writer.proofRefs(origin.provenance.evidence_ids));
+        rangeUnion.add(writer.rangeRefs(origin.provenance.ranges));
+      };
+      for (const id of memberSubjects) {
+        context.checkpoint(1);
+        subjectIds.add(id);
+        const origin = original.get(id);
+        if (origin) provenance(origin);
+        for (const contributor of program.origins.get(id) ?? []) provenance(contributor);
+      }
+      for (const subject of member.affectedSubjects) {
+        const site = sites?.get(subject);
+        if (site && site.end > site.start) {
+          hasSites = true;
+          spans.set(`${site.start}:${site.end}`, site);
+        }
+      }
+      for (const mapping of links) {
+        context.checkpoint(1);
+        if (!hasSites)
+          spans.set(`${mapping.start}:${mapping.end}`, { start: mapping.start, end: mapping.end });
+        // Fallback is per member, not per group: a field without an IR origin
+        // keeps its mapping provenance even beside a value with its own origin.
+        if (!hasInstructions) instructionUnion.add(mapping.instruction_refs);
+        if (writer.evidence) proofUnion.add(mapping.evidence_refs);
+        if (!hasRanges) rangeUnion.add(mapping.range_refs);
+      }
     }
-    const hasInstructions = instructions.size > 0;
-    const hasRanges = ranges.size > 0;
-    for (const subject of affectedSubjects) {
-      const site = sites?.get(subject);
-      if (site && site.end > site.start) spans.set(`${site.start}:${site.end}`, site);
-    }
-    const hasSites = spans.size > 0;
-    for (const mapping of links) {
-      context.checkpoint(1);
-      if (!hasSites)
-        spans.set(`${mapping.start}:${mapping.end}`, { start: mapping.start, end: mapping.end });
-      // Some declaration/field subjects have no own IR origin. Their exact use
-      // mapping is the provenance, not a guessed defining instruction.
-      if (!hasInstructions) for (const ref of mapping.instruction_refs) instructions.add(ref);
-      if (writer.evidence) for (const ref of mapping.evidence_refs) proofs.add(ref);
-      if (!hasRanges) for (const ref of mapping.range_refs) ranges.add(ref);
-    }
+    if (!subjectIds.size) return;
+    if (result.length >= 10000) writer.fail('Inference record limit exceeded');
+    const instructions = instructionUnion.finish(),
+      proofs = proofUnion.finish(),
+      ranges = rangeUnion.finish();
     if (
       subjectIds.size > 10000 ||
-      instructions.size > 10000 ||
-      ranges.size > 10000 ||
-      proofs.size > 1000 ||
+      instructions.length > 10000 ||
+      ranges.length > 10000 ||
+      proofs.length > 1000 ||
       spans.size > 1000
-    )
+    ) {
+      // Partition a large type cohort without weakening any wire bound. Every
+      // attempted union above is charged, including when its cohort must split.
+      if (details.kind === 'type' && members.length > 1) {
+        const middle = Math.floor(members.length / 2);
+        for (const [start, end] of [
+          [0, middle],
+          [middle, members.length],
+        ] as const)
+          add(
+            [],
+            status,
+            explanation,
+            { ...details, association_ids: details.association_ids.slice(start, end) },
+            [],
+            [],
+            members.slice(start, end),
+          );
+        return;
+      }
       writer.fail('Inference reference limit exceeded');
-    // Each union touches at least its result; charge that real work in bulk.
-    context.checkpoint(subjectIds.size + instructions.size + proofs.size + ranges.size);
+    }
+    // Reference unions charge their word visits and materialize each immutable
+    // result once. Only the subject list is newly copied for every record.
+    context.checkpoint(subjectIds.size);
     const record: Inference = {
       id: `inference:${result.length}`,
       status,
       explanation,
       subject_refs: [...subjectIds].map((id) => writer.id(id)),
-      evidence_refs: [...proofs],
-      instruction_refs: [...instructions],
-      range_refs: [...ranges],
+      evidence_refs: proofs,
+      instruction_refs: instructions,
+      range_refs: ranges,
       output_spans: [...spans.values()],
       details,
     };
@@ -380,28 +422,62 @@ export function collectInferences(
     context.checkpoint(1);
     definitions.set(record.id, definitions.has(record.id) ? null : record.definition);
   }
+  // A type assertion applies independently to each subject. The schema already
+  // carries all association identities; batch only identical assertion details,
+  // retaining each member's provenance and visible sites in the union.
+  interface TypeGroup {
+    readonly details: Extract<Details, { kind: 'type' }>;
+    readonly associationIds: string[];
+    readonly members: Member[];
+  }
+  const typeGroups: TypeGroup[] = [],
+    activeTypeGroups = new Map<string, TypeGroup>();
   for (const association of input.types?.associations ?? []) {
     context.checkpoint(1);
+    if (!originals(association.subject_id).length || !linksFor(association.subject_id).length)
+      continue;
     const definition = definitions.get(association.type_id);
+    const associationIds: string[] = [];
+    const details: Extract<Details, { kind: 'type' }> = {
+      kind: 'type',
+      association_ids: associationIds,
+      type_id: association.type_id,
+      type_status: association.status,
+      source: association.source,
+      value_offset_bits: association.value_offset_bits,
+      type_kind: definition?.kind ?? null,
+      signed: definition?.kind === 'integer' ? definition.signed : null,
+      pointee_id: definition?.kind === 'pointer' ? definition.to : null,
+      machine_offset_bits: association.machine_offset_bits,
+      width_bits: association.width_bits,
+      displayed: displayedAssociations.has(association.id),
+    };
+    const key = JSON.stringify(details);
+    let group = activeTypeGroups.get(key);
+    if (!group || group.members.length === 10000) {
+      // Keep finite cohorts; a group that reaches reference bounds is split by
+      // add(), never truncated or widened into a different assertion.
+      group = { details, associationIds, members: [] };
+      typeGroups.push(group);
+      activeTypeGroups.set(key, group);
+    }
+    group.associationIds.push(association.id);
+    group.members.push({
+      subjects: [association.subject_id],
+      evidence: association.evidence_ids,
+      affectedSubjects: [association.subject_id],
+    });
+  }
+  for (const group of typeGroups) {
+    const details = group.details;
     add(
-      [association.subject_id],
-      confidence(association.status),
-      `Source type association from ${association.source}; ${association.status === 'hypothesis' ? 'an alternative, not an established fact' : 'confidence is retained independently of display'}.`,
-      {
-        kind: 'type',
-        association_ids: [association.id],
-        type_id: association.type_id,
-        type_status: association.status,
-        source: association.source,
-        value_offset_bits: association.value_offset_bits,
-        type_kind: definition?.kind ?? null,
-        signed: definition?.kind === 'integer' ? definition.signed : null,
-        pointee_id: definition?.kind === 'pointer' ? definition.to : null,
-        machine_offset_bits: association.machine_offset_bits,
-        width_bits: association.width_bits,
-        displayed: displayedAssociations.has(association.id),
-      },
-      association.evidence_ids,
+      [],
+      confidence(details.type_status),
+      `Source type association from ${details.source}; ${details.type_status === 'hypothesis' ? 'an alternative, not an established fact' : 'confidence is retained independently of display'}.`,
+      details,
+      [],
+      [],
+      group.members,
     );
   }
   for (const [node, view] of program.memory) {

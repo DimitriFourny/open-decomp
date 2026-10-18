@@ -70,6 +70,65 @@ class InternTable<T> {
 const rangeKey = (range: AddressRange): string =>
   `${range.start.image_id}:${range.start.space}:${range.start.value}:${range.size}`;
 
+/** Set-valued inference references, canonicalized within one immutable render.
+ * Sparse words avoid repeatedly visiting a large common proof set. Published
+ * arrays are shared only after an exact word-key match, never a lossy hash. */
+export class ReferenceUnions {
+  private readonly inputs = new WeakMap<readonly number[], ReadonlyMap<number, number>>();
+  private readonly outputs = new Map<string, readonly number[]>();
+  constructor(private readonly context: OperationContext) {}
+
+  begin() {
+    const words = new Map<number, number>(),
+      seen = new Set<readonly number[]>();
+    return {
+      add: (refs: readonly number[]): void => {
+        this.context.checkpoint(0);
+        if (seen.has(refs)) return;
+        seen.add(refs);
+        let input = this.inputs.get(refs);
+        if (!input) {
+          const encoded = new Map<number, number>();
+          for (const ref of refs) {
+            this.context.checkpoint(1);
+            const word = Math.floor(ref / 32);
+            encoded.set(word, (encoded.get(word) ?? 0) | (1 << (ref % 32)));
+          }
+          input = encoded;
+          this.inputs.set(refs, input);
+        }
+        for (const [word, bits] of input) {
+          this.context.checkpoint(1);
+          words.set(word, (words.get(word) ?? 0) | bits);
+        }
+      },
+      finish: (): readonly number[] => {
+        const ordered = [...words].sort(([a], [b]) => {
+          this.context.checkpoint(1);
+          return a - b;
+        });
+        this.context.checkpoint(ordered.length);
+        const key = ordered.map(([word, bits]) => `${word}:${bits}`).join(',');
+        const cached = this.outputs.get(key);
+        if (cached) return cached;
+        const result: number[] = [];
+        for (const [word, mask] of ordered) {
+          let bits = mask;
+          while (bits !== 0) {
+            this.context.checkpoint(1);
+            const lowest = bits & -bits;
+            result.push(word * 32 + 31 - Math.clz32(lowest));
+            bits ^= lowest;
+          }
+        }
+        Object.freeze(result);
+        this.outputs.set(key, result);
+        return result;
+      },
+    };
+  }
+}
+
 /** UTF-16 offsets and UTF-8 resource accounting deliberately use different units.
  * Temporary lists/strings are bounded before joining; no silent truncation. */
 export class Writer {
@@ -84,6 +143,7 @@ export class Writer {
   private readonly idUnions = new WeakMap<readonly string[], readonly number[]>();
   private readonly proofUnions = new WeakMap<readonly string[], readonly number[]>();
   private readonly idLists = new WeakMap<readonly string[], readonly number[]>();
+  private readonly proofLists = new WeakMap<readonly string[], readonly number[]>();
   private readonly rangeLists = new WeakMap<readonly AddressRange[], readonly number[]>();
   private bytes = 0;
   private metadataBytes = 0;
@@ -275,7 +335,7 @@ export class Writer {
 
   /** Intern a proof list in order, without changing its multiplicity. */
   proofRefs(ids: readonly string[]): readonly number[] {
-    return this.refs(this.proofs, undefined, ids, (id) => id);
+    return this.refs(this.proofs, this.proofLists, ids, (id) => id);
   }
 
   /** Intern a range list in order, without changing its multiplicity. */

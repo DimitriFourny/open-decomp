@@ -15,7 +15,7 @@ import { emit, emittedFormals, execute } from '../emitters/c/support.js';
 const u64 = integer(64),
   u32 = integer(32);
 const targets = [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi];
-function prepare(input: RegisterIR, abi: AbiProfile) {
+function prepare(input: RegisterIR, abi: AbiProfile, closure = false) {
   const ir = constructSSA(input).value as SSAForm;
   const types = recoverTypes(ir, abi, createOperationContext(), {
     image_id: image,
@@ -24,7 +24,31 @@ function prepare(input: RegisterIR, abi: AbiProfile) {
   });
   const structured = structureControlFlow(ir, createOperationContext());
   assert.ok(structured.value);
-  const extra = { types, source: { abi, callees: [], addresses: [] } };
+  const extra = {
+    types,
+    source: {
+      abi,
+      callees: closure
+        ? ir.blocks.flatMap((block) =>
+            block.instructions.flatMap((node) =>
+              node.kind === 'call'
+                ? [
+                    {
+                      call_id: node.id,
+                      parameters: [],
+                      returns: [],
+                      argument_list_complete: false,
+                      argument_list_closure: 'callee_reads' as const,
+                      evidence_ids: [],
+                    },
+                  ]
+                : [],
+            ),
+          )
+        : [],
+      addresses: [],
+    },
+  };
   return {
     ir,
     extra,
@@ -114,6 +138,52 @@ for (const abi of targets) {
       block.return([block.load(u64, slot)]);
       const fixture = prepare(b.finish(block, [u64]), abi);
       assert.equal(rules(fixture.view('source')).includes('private_stack_promotion'), !before);
+    }
+  });
+
+  test(`${abi.id}: closed native reads release pre-call private slots without dropping effects`, () => {
+    const b = builder(`closed-call-private-${abi.id}`),
+      block = b.block('entry');
+    const slot = block.int('sub', block.readRegister(abi.stack_pointer), block.constant(u64, 32n));
+    block.writeRegister(abi.stack_pointer, slot);
+    block.store(slot, block.constant(u64, 77n));
+    block.call(
+      { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+      [],
+      [],
+      { registers: [], flags: [], memory: 'unknown_read_write' },
+      [newIdentity('evidence')],
+    );
+    block.return([block.load(u64, slot)]);
+    const fixture = prepare(b.finish(block, [u64]), abi, true);
+    assert.ok(rules(fixture.view('source')).includes('arity_closure'));
+    assert.ok(rules(fixture.view('source')).includes('private_stack_promotion'));
+    assert.ok(!rules(fixture.view('checked')).includes('arity_closure'));
+    for (const language of ['c-like', 'python-like'] as const) {
+      const output = emit(fixture.ir, fixture.extra, language).emission;
+      assert.doesNotMatch(output.text, /entry_sp|unknown_argument_remainder/);
+      let calls = 0;
+      const observed = execute(
+        output,
+        new Map(),
+        new Map(),
+        0n,
+        new Map(),
+        new Map(),
+        new Map([
+          [
+            'sub_2000',
+            (args, context) => {
+              calls++;
+              assert.deepEqual(args, []);
+              assert.equal(context.arguments_complete, true);
+              return [];
+            },
+          ],
+        ]),
+      );
+      assert.equal(calls, 1);
+      assert.deepEqual(observed.values, [77n]);
     }
   });
 

@@ -4,6 +4,7 @@ import {
   type AbiLocation,
   type AbiSignature,
   type AbiType,
+  type CanonicalValue,
   type OperationContext,
   type PresentationView,
   type RegisterDescriptor,
@@ -33,6 +34,7 @@ import {
 import { sourceStackArgumentParts } from './source-stack-arguments.js';
 import { planSourceRequirements } from './source-requirements.js';
 import { possibleAbiReturnStorage } from '../analysis/calls/return-storage.js';
+import { LocalValidationSession } from './local-validation.js';
 
 /** Source ABI abstraction: architectural snapshots are retained in the input,
  * not treated as extra source arguments or memory-fault observables. */
@@ -44,6 +46,7 @@ export function planSource(
   owner: Map<string, string>,
   context: OperationContext,
   view: PresentationView = 'checked',
+  validation = new LocalValidationSession(context),
 ) {
   const evidence = input.source!,
     abi = evidence.abi,
@@ -324,6 +327,8 @@ export function planSource(
     return { arguments: arguments_, missing: false };
   };
   const inferred = new Map(evidence.callees.map((callee) => [callee.call_id, callee]));
+  if (view === 'source')
+    for (const callee of evidence.source_callees ?? []) inferred.set(callee.call_id, callee);
   const facts = new Map(input.types?.calls?.calls.map((fact) => [fact.node_id, fact]) ?? []);
   const conflicts = new Set(input.types?.conflicts.map((conflict) => conflict.subject_id) ?? []);
   const signatureFor = (subject: string) => {
@@ -377,8 +382,21 @@ export function planSource(
         fact?.status === 'established'
           ? fact.contracts.filter((contract) => contract.status === 'established')
           : [];
+      const repeatedContract =
+        view === 'source' &&
+        contracts.length > 1 &&
+        contracts.every(
+          (contract) =>
+            fingerprint(contract.contract.signature as unknown as CanonicalValue) ===
+            fingerprint(contracts[0]!.contract.signature as unknown as CanonicalValue),
+        );
+      const formatSignature =
+        view === 'source' ? evidence.call_argument_signatures?.get(node.id) : undefined;
       const declaration =
-        contracts.length === 1 ? contracts[0]!.contract.signature : declared?.declaration;
+        formatSignature ??
+        (contracts.length === 1 || repeatedContract
+          ? contracts[0]!.contract.signature
+          : declared?.declaration);
       if (declaration && fact?.status !== 'conflicting' && node.results.length === 0) {
         const countOverride = evidence.call_argument_counts?.get(node.id);
         const layout = abi.classifyCall({
@@ -398,15 +416,24 @@ export function planSource(
           let valid = true;
           for (const parameter of layout.parameters) {
             const type = machineType(declaration.parameters![parameter.index]!);
+            const location = parameter.locations.length === 1 ? parameter.locations[0] : undefined;
             const value =
               type &&
-              bind(
-                `${node.id}:arg:${parameter.index}`,
-                node.register_inputs,
-                parameter.locations,
-                type,
-                block.id,
-              );
+              (formatSignature && location?.kind === 'stack' && location.value_offset_bits === 0
+                ? bindStack(
+                    `${node.id}:arg:${parameter.index}`,
+                    node.id,
+                    location.offset,
+                    type,
+                    block.id,
+                  )
+                : bind(
+                    `${node.id}:arg:${parameter.index}`,
+                    node.register_inputs,
+                    parameter.locations,
+                    type,
+                    block.id,
+                  ));
             if (!value) {
               valid = false;
               break;
@@ -415,6 +442,15 @@ export function planSource(
           }
           if (node.arguments.some((value) => !args.some((argument) => argument.id === value.id)))
             valid = false;
+          if (valid && (formatSignature || repeatedContract))
+            valid = validation.presentation(
+              'arity_closure',
+              node.id,
+              formatSignature
+                ? 'library_format: established printf-family contract and exact immutable terminated format literal determine every promoted actual type; each ABI location is bound to original caller storage'
+                : 'library_contract: all established callable-entry/import observations agree on the complete ABI signature; each actual is bound to original caller storage',
+              [node.id],
+            );
           const type = machineType(declaration.returns),
             returned =
               !valid || declaration.returns.kind === 'void'
@@ -431,6 +467,12 @@ export function planSource(
                     ].filter((value): value is Value => value !== null)
                   : [];
           if (declaration.returns.kind !== 'void' && returned.length !== 1) valid = false;
+          if (valid && (formatSignature || repeatedContract))
+            validation.requireAbi(
+              'arity_closure',
+              [node.id],
+              'Library closure assumes the established contract and ABI-conforming arguments, including variadic default promotions when format-derived. Conflicting contracts, unsupported formats and unavailable argument storage remain explicit.',
+            );
           if (valid) {
             const signatures =
               input.types?.signatures.filter(
@@ -469,12 +511,12 @@ export function planSource(
           )
           .filter((value): value is Value => value !== null);
         // Source view: a complete-callee-reads basis closes the observed list;
-        // planSourceStack withdraws it if the caller writes possible stack arguments.
+        // planSourceStack validates it before classifying caller-private storage.
         const closed =
           view === 'source' &&
           !missing &&
           callee.parameter_state !== 'ambiguous' &&
-          callee.argument_list_closure === 'callee_reads' &&
+          callee.argument_list_closure !== undefined &&
           !callee.variadic_stack;
         projection = {
           kind: callee.parameter_state === 'ambiguous' || missing ? 'physical' : 'inferred',
@@ -520,7 +562,7 @@ export function planSource(
           view === 'source' &&
           !args.missing &&
           callee.parameter_state !== 'ambiguous' &&
-          callee.argument_list_closure === 'callee_reads' &&
+          callee.argument_list_closure !== undefined &&
           !callee.variadic_stack,
         results: [],
         inputs: [],

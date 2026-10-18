@@ -75,7 +75,7 @@ for (const scenario of [
     const validation = new LocalValidationSession(context);
     if (scenario === 'record-bound')
       for (let index = 0; index < 256; index++)
-        validation.presentation('fixture', String(index), 'record capacity');
+        validation.presentation('fixture', String(index), `record capacity ${index}`);
     const result = recombineSourceCells(
       blocks,
       [

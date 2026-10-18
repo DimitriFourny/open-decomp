@@ -274,8 +274,8 @@ for (const language of ['c-like', 'python-like'] as const)
     });
 
     test('a labeled edge into a shared return ends in a copy of the return', () => {
-      // The inner loop leaves both loops: a goto in the checked view. (Its
-      // continue of the outer loop stays a goto: C has no labeled continue.)
+      // The inner loop leaves both loops: a goto in the checked view. A
+      // transfer to the outer header is the inner loop's exact lexical exit.
       const b = program('source-control-tails'),
         entry = b.block('entry', [i32]),
         outer = b.block('outer', [i32]),
@@ -307,8 +307,8 @@ for (const language of ['c-like', 'python-like'] as const)
       const input = b.finish(entry, [i32]);
       const source = emit(input, language),
         checked = emit(input, language, 'checked');
-      const gotos = (text: string): number => text.match(/\bgoto\b/g)?.length ?? 0;
-      assert.equal(gotos(source.emission.text), gotos(checked.emission.text) - 1);
+      assert.doesNotMatch(source.emission.text, /\bgoto\b/);
+      assert.match(checked.emission.text, /\bgoto\b/);
       assert.ok(rules(source).includes('return_tail_duplication'));
       // Each printed return maps back to the one original return identity.
       const terminator = input.blocks.find((block) => block.id === done.id)!.terminator.id;
@@ -329,6 +329,260 @@ for (const language of ['c-like', 'python-like'] as const)
           const observed = execute(output.emission, new Map([[limit.id, input]]), memory());
           assert.deepEqual(observed.values, [value], `${input}`);
           assert.equal(observed.memory.get(0x1000n), stored);
+        }
+    });
+
+    test('shared loop latches follow their predecessors instead of preceding labeled tests', () => {
+      const b = program('source-loop-latch-order'),
+        entry = b.block('entry', [i32]),
+        head = b.block('head'),
+        choose = b.block('choose'),
+        adjust = b.block('adjust'),
+        test = b.block('test'),
+        left = b.block('left'),
+        right = b.block('right'),
+        latch = b.block('latch'),
+        done = b.block('done');
+      const count = entry.parameters[0]!;
+      entry.store(entry.constant(i64, 0x1000n), count);
+      entry.jump(head);
+      const remaining = head.load(i32, head.constant(i64, 0x1000n));
+      head.branch(
+        head.compare('eq', remaining, head.constant(i32, 0n)),
+        head.edge(done),
+        head.edge(choose),
+      );
+      choose.branch(
+        choose.compare('eq', remaining, choose.constant(i32, 2n)),
+        choose.edge(test),
+        choose.edge(adjust),
+      );
+      adjust.store(adjust.constant(i64, 0x1004n), remaining);
+      adjust.jump(test);
+      test.branch(
+        test.compare('ugt', remaining, test.constant(i32, 1n)),
+        test.edge(left),
+        test.edge(right),
+      );
+      left.store(left.constant(i64, 0x1008n), left.constant(i32, 11n));
+      left.jump(latch);
+      right.store(right.constant(i64, 0x1008n), right.constant(i32, 22n));
+      right.jump(latch);
+      latch.store(
+        latch.constant(i64, 0x1000n),
+        latch.int('sub', remaining, latch.constant(i32, 1n)),
+      );
+      latch.jump(head);
+      done.return([done.load(i32, done.constant(i64, 0x1008n))]);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      assert.doesNotMatch(source.emission.text, /\bgoto\b/);
+      assert.ok(rules(source).includes('loop_exit_layout'));
+      for (const initial of [0n, 1n, 2n, 5n]) {
+        const args = new Map([[count.id, initial]]);
+        const actual = execute(source.emission, args, memory());
+        const expected = execute(checked.emission, args, memory());
+        assert.deepEqual(actual.values, expected.values);
+        assert.deepEqual(actual.memory, expected.memory);
+        assert.deepEqual(actual.events, expected.events);
+      }
+    });
+
+    test('jointly owned loop entries and continuations reach a layout fixed point', () => {
+      const b = program('source-owned-loop-continuations'),
+        entry = b.block('entry', [i32]),
+        choose = b.block('choose'),
+        large = b.block('large', [i32, i32]),
+        after = b.block('after', [i32, i32]),
+        small = b.block('small', [i32, i32]),
+        done = b.block('done', [i32]);
+      const count = entry.parameters[0]!;
+      entry.branch(
+        entry.compare('eq', count, entry.constant(i32, 0n)),
+        entry.edge(done, [entry.constant(i32, 0n)]),
+        entry.edge(choose),
+      );
+      choose.branch(
+        choose.compare('ugt', count, choose.constant(i32, 3n)),
+        choose.edge(large, [count, choose.constant(i32, 0n)]),
+        choose.edge(small, [count, choose.constant(i32, 0n)]),
+      );
+      const [left, total] = large.parameters as [Value, Value];
+      large.store(large.constant(i64, 0x1000n), left);
+      const next = large.int('sub', left, large.constant(i32, 1n)),
+        sum = large.int('add', total, left);
+      large.branch(
+        large.compare('ugt', next, large.constant(i32, 3n)),
+        large.edge(large, [next, sum]),
+        large.edge(after, [next, sum]),
+      );
+      const [remaining, partial] = after.parameters as [Value, Value];
+      after.branch(
+        after.compare('eq', remaining, after.constant(i32, 0n)),
+        after.edge(done, [partial]),
+        after.edge(small, [remaining, partial]),
+      );
+      const [last, previous] = small.parameters as [Value, Value];
+      small.store(small.constant(i64, 0x1004n), last);
+      const final = small.int('add', previous, last),
+        decremented = small.int('sub', last, small.constant(i32, 1n));
+      small.branch(
+        small.compare('eq', decremented, small.constant(i32, 0n)),
+        small.edge(done, [final]),
+        small.edge(small, [decremented, final]),
+      );
+      done.return(done.parameters);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      assert.doesNotMatch(source.emission.text, /\bgoto\b/);
+      assert.ok(rules(source).includes('loop_exit_layout'));
+      for (const initial of [0n, 1n, 3n, 4n, 7n]) {
+        const args = new Map([[count.id, initial]]);
+        const actual = execute(source.emission, args, memory());
+        const expected = execute(checked.emission, args, memory());
+        assert.deepEqual(actual.values, [(initial * (initial + 1n)) / 2n]);
+        assert.deepEqual(actual.values, expected.values);
+        assert.deepEqual(actual.memory, expected.memory);
+        assert.deepEqual(actual.events, expected.events);
+        assert.equal(actual.events.length, Number(initial));
+      }
+    });
+
+    test('nested exits duplicate only small tails, otherwise propagate one exit flag', () => {
+      for (const stores of [1, 6]) {
+        const b = program(`source-nested-exit-${stores}`),
+          entry = b.block('entry', [i32]),
+          outer = b.block('outer', [i32]),
+          inner = b.block('inner', [i32]),
+          step = b.block('step'),
+          done = b.block('done', [i32]);
+        const stop = entry.parameters[0]!;
+        entry.jump(outer, [entry.constant(i32, 0n)]);
+        const row = outer.parameters[0]!;
+        outer.branch(
+          outer.compare('eq', row, outer.constant(i32, 3n)),
+          outer.edge(done, [row]),
+          outer.edge(inner, [outer.constant(i32, 0n)]),
+        );
+        const column = inner.parameters[0]!;
+        inner.store(inner.constant(i64, 0x1000n), row);
+        inner.branch(inner.compare('eq', row, stop), inner.edge(done, [column]), inner.edge(step));
+        step.branch(
+          step.compare('eq', column, step.constant(i32, 1n)),
+          step.edge(outer, [step.int('add', row, step.constant(i32, 1n))]),
+          step.edge(inner, [step.int('add', column, step.constant(i32, 1n))]),
+        );
+        for (let index = 0; index < stores; index++)
+          done.store(done.constant(i64, 0x1004n + BigInt(index * 4)), done.parameters[0]!);
+        done.return(done.parameters);
+        const input = b.finish(entry, [i32]),
+          source = emit(input, language),
+          checked = emit(input, language, 'checked');
+        assert.doesNotMatch(source.emission.text, /\bgoto\b/);
+        assert.ok(
+          rules(source).includes(
+            stores === 1 ? 'return_tail_duplication' : 'multi_level_loop_exit',
+          ),
+        );
+        assert.equal(source.emission.text.includes('loop_exit_'), stores > 4);
+        for (const value of [0n, 1n, 2n, 9n]) {
+          const args = new Map([[stop.id, value]]);
+          const expected = execute(checked.emission, args, memory());
+          const actual = execute(source.emission, args, memory());
+          assert.deepEqual(actual.values, expected.values);
+          assert.deepEqual(actual.events, expected.events);
+          assert.deepEqual(actual.memory, expected.memory);
+          assert.equal(actual.events.length, (value < 3n ? Number(value) * 2 + 1 : 6) + stores);
+        }
+        for (const output of [source, checked]) {
+          const onlyLoopStore = new Map(
+            Array.from({ length: 4 }, (_, index) => [0x1000n + BigInt(index), 0] as const),
+          );
+          const fault = execute(output.emission, new Map([[stop.id, 0n]]), onlyLoopStore);
+          assert.equal(fault.exit, 'fault');
+          assert.deepEqual(fault.events, ['store', 'store']);
+          assert.equal(fault.memory.size, 4);
+        }
+      }
+    });
+
+    test('switch-in-loop exits propagate before the following ordered effects', () => {
+      const b = program('source-switch-loop-exit'),
+        entry = b.block('entry', [i32]),
+        head = b.block('head', [i32]),
+        step = b.block('step'),
+        done = b.block('done', [i32]);
+      const count = entry.parameters[0]!;
+      entry.jump(head, [count]);
+      const remaining = head.parameters[0]!;
+      head.terminate({
+        kind: 'switch',
+        value: remaining,
+        cases: [
+          { bits: 0n, edge: head.edge(done, [head.constant(i32, 77n)]) },
+          { bits: 2n, edge: head.edge(done, [head.constant(i32, 88n)]) },
+        ],
+        otherwise: head.edge(step),
+      });
+      step.store(step.constant(i64, 0x1000n), remaining);
+      step.jump(head, [step.int('sub', remaining, step.constant(i32, 1n))]);
+      for (let index = 0; index < 6; index++)
+        done.store(done.constant(i64, 0x1004n + BigInt(index * 4)), done.parameters[0]!);
+      done.return(done.parameters);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      assert.doesNotMatch(source.emission.text, /\bgoto\b/);
+      assert.equal(rules(source).includes('multi_level_loop_exit'), c);
+      for (const initial of [0n, 1n, 2n, 4n]) {
+        const args = new Map([[count.id, initial]]);
+        const actual = execute(source.emission, args, memory());
+        const expected = execute(checked.emission, args, memory());
+        assert.deepEqual(actual.values, expected.values);
+        assert.deepEqual(actual.memory, expected.memory);
+        assert.deepEqual(actual.events, expected.events);
+      }
+    });
+
+    test('two-entry cyclic regions retain real labeled transfers', () => {
+      const b = program('source-irreducible'),
+        entry = b.block('entry', [integer(1), i32]),
+        left = b.block('left', [i32]),
+        right = b.block('right', [i32]),
+        done = b.block('done', [i32]);
+      const [choose, count] = entry.parameters as [Value, Value];
+      entry.branch(choose, entry.edge(left, [count]), entry.edge(right, [count]));
+      for (const [block, next, marker] of [
+        [left, right, 11n],
+        [right, left, 22n],
+      ] as const) {
+        block.store(block.constant(i64, 0x1000n), block.constant(i32, marker));
+        const remaining = block.int('sub', block.parameters[0]!, block.constant(i32, 1n));
+        block.branch(
+          block.compare('eq', remaining, block.constant(i32, 0n)),
+          block.edge(done, [block.constant(i32, marker)]),
+          block.edge(next, [remaining]),
+        );
+      }
+      done.return(done.parameters);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      assert.match(source.emission.text, /\bgoto\b/);
+      assert.ok(!rules(source).includes('multi_level_loop_exit'));
+      for (const start of [0n, 1n])
+        for (const length of [1n, 2n, 5n]) {
+          const args = new Map([
+            [choose.id, start],
+            [count.id, length],
+          ]);
+          const actual = execute(source.emission, args, memory());
+          const expected = execute(checked.emission, args, memory());
+          assert.deepEqual(actual.values, expected.values);
+          assert.deepEqual(actual.events, expected.events);
+          assert.deepEqual(actual.memory, expected.memory);
         }
     });
 
@@ -372,7 +626,9 @@ for (const language of ['c-like', 'python-like'] as const)
         source = emit(input, language),
         checked = emit(input, language, 'checked');
       assert.ok(rules(source).includes('return_tail_duplication'));
-      assert.equal(source.emission.text.match(/\breturn\b/g)?.length, 3, source.emission.text);
+      // The bounded overflow continuation stays after the loop; each early
+      // return has its own reachable edge, with no orphan continuation.
+      assert.equal(source.emission.text.match(/\breturn\b/g)?.length, 4, source.emission.text);
       assert.doesNotMatch(source.emission.text, /\breturn[^\n]*\n\s*return\b|\bgoto\b/);
       for (const [n, sentinel, words, value, loads] of [
         [0, 99, [], 0, 0],

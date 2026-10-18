@@ -138,6 +138,40 @@ test('native dependency worklist visits required closure once and refines a recu
   assert.deepEqual(result.remaining, { instructions: 0, blocks: 0, nodes: 8 });
 });
 
+test('machine arity completeness propagates independently of optional metadata gaps', () => {
+  for (const semanticComplete of [false, true]) {
+    const result = nativeDependencyWorklist({
+      roots: [a],
+      context: createOperationContext(),
+      capacity: { instructions: 6, blocks: 3, nodes: 20 },
+      max_functions: 64,
+      max_refinements: 64,
+      load(target) {
+        const unit = units.get(target.id)!;
+        return target.id === c.id
+          ? {
+              ...unit,
+              reasons: ['optional source metadata unavailable'],
+              arity_complete: semanticComplete,
+            }
+          : unit;
+      },
+      initialize,
+      observe,
+      equal,
+    });
+    for (const target of [a, b, c]) {
+      assert.equal(result.summaries.get(target.id)?.complete, false);
+      assert.equal(result.summaries.get(target.id)?.arity_complete, semanticComplete);
+      assert.ok(
+        result.summaries
+          .get(target.id)
+          ?.reasons.some((reason) => reason.includes('optional source metadata unavailable')),
+      );
+    }
+  }
+});
+
 test('native dependency limits preserve observed prefix and name actual unresolved leaf capacity', () => {
   const result = nativeDependencyWorklist({
     roots: [a],
@@ -159,6 +193,7 @@ test('native dependency limits preserve observed prefix and name actual unresolv
     /c: native dependency instructions\/blocks capacity exhausted/,
   );
   assert.equal(result.summaries.get(a.id)?.complete, false);
+  assert.equal(result.summaries.get(a.id)?.arity_complete, false);
 });
 
 test('native recursion reuses an already analyzed selected body without spending its graph capacity again', () => {

@@ -301,6 +301,7 @@ function checkBehavior(
   p: SourceQualityFixture,
   scenario: Scenario,
   emission: WireEmission,
+  checked?: WireEmission,
 ): number {
   const parameters: readonly EmittedFormal[] = emittedFormals(emission);
   const formals: readonly EmittedFormal[] = parameters.filter(
@@ -398,12 +399,46 @@ function checkBehavior(
       assert.deepEqual(observed.source_calls, [], description);
       if (scenario !== 'memory') assert.deepEqual(observed.memory, before, description);
     }
-    if (scenario === 'float' && row.index === 0)
+    if (scenario === 'float' && row.index === 0) {
+      // Source view states the FPCR premise once as an explicit assumption
+      // covering every original guard site; the checked view retains those
+      // guards, so an unacknowledged environment there must remain unknown.
+      const environments =
+        emission.requirements?.filter((item) => item.kind === 'fp_environment') ?? [];
+      assert.equal(environments.length, 1, 'Unsupported FP environment is never silently assumed');
+      assert.equal(environments[0]!.status, 'assumption');
+      const guards = environments[0]!.sites.filter((site) => site.predicate_value_id).length;
+      assert.ok(guards > 0, emission.text);
+      assert.ok(checked, 'Float checks require the checked view from the same public surface');
+      assert.equal(checked.language, emission.language);
+      assert.equal(checked.text.match(/requirement_predicate\(/g)?.length, guards, checked.text);
+      const checkedFormals = emittedFormals(checked).filter((formal) => formal.name !== 'entry_sp');
+      assert.equal(checkedFormals.length, values.length, checked.text);
+      const checkedInputs = new Map(
+        checkedFormals.map((mapping, index) => [mapping.statement_id, values[index]!]),
+      );
       assert.equal(
-        execute(emission, inputs, new Map(before)).exit,
+        execute(checked, checkedInputs, new Map(before)).exit,
         'unknown',
         'Unsupported/unacknowledged FP environment must remain unknown',
       );
+      const acknowledged = execute(
+        checked,
+        checkedInputs,
+        new Map(before),
+        0n,
+        new Map(),
+        new Map(),
+        new Map(),
+        acknowledgeRequirements(checked),
+      );
+      assert.equal(acknowledged.exit, 'machine_return', description);
+      assert.deepEqual(
+        acknowledged.values.map((value) => BigInt.asUintN(row.value.length * 4, value)),
+        [BigInt(`0x${row.value}`)],
+        description,
+      );
+    }
   }
   return cases.length;
 }
@@ -415,12 +450,27 @@ async function checkResult(
   scenario: Scenario,
   dialect: Dialect,
   result: Result,
+  checked: Result | undefined,
 ): Promise<SourceQualityEvidence> {
   const response = join(p.root, `${consumer}-${name}-${dialect}.json`);
   await writeFile(response, JSON.stringify(result, null, 2));
   assert.ok('data' in result && result.data.delivery === 'inline', JSON.stringify(result));
   assert.equal(result.data.emission.language, dialect);
-  const cases = checkBehavior(p, scenario, result.data.emission);
+  if (checked) {
+    await writeFile(
+      join(p.root, `${consumer}-${name}-${dialect}.checked.json`),
+      JSON.stringify(checked, null, 2),
+    );
+    assert.ok('data' in checked && checked.data.delivery === 'inline', JSON.stringify(checked));
+  }
+  const cases = checkBehavior(
+    p,
+    scenario,
+    result.data.emission,
+    checked && 'data' in checked && checked.data.delivery === 'inline'
+      ? checked.data.emission
+      : undefined,
+  );
   return { consumer, function: name, dialect, cases, state: result.state, response };
 }
 
@@ -430,63 +480,62 @@ export async function exerciseSourceQuality(
   consumer: SourceQualityConsumer,
 ): Promise<SourceQualityEvidence[]> {
   const evidence: SourceQualityEvidence[] = [];
-  const retain = async (
-    name: string,
-    scenario: Scenario,
-    dialect: Dialect,
-    result: Result,
+  // Default (source) results for every function; FP functions additionally
+  // fetch the checked view through the same public surface.
+  const exercise = async (
+    decompile: (name: string, dialect: Dialect, view?: 'checked') => Promise<Result>,
   ): Promise<void> => {
-    evidence.push(await checkResult(p, consumer, name, scenario, dialect, result));
-    await writeFile(join(p.root, `${consumer}-evidence.json`), JSON.stringify(evidence, null, 2));
+    for (const { name, scenario } of functions)
+      for (const dialect of dialects) {
+        const result = await decompile(name, dialect);
+        const checked =
+          scenario === 'float' ? await decompile(name, dialect, 'checked') : undefined;
+        evidence.push(await checkResult(p, consumer, name, scenario, dialect, result, checked));
+        await writeFile(
+          join(p.root, `${consumer}-evidence.json`),
+          JSON.stringify(evidence, null, 2),
+        );
+      }
   };
   if (consumer === 'api') {
     const session = await openBinary(p.binary, { cachePath: join(p.root, 'api-cache') });
     try {
-      for (const { name, scenario } of functions)
-        for (const dialect of dialects)
-          await retain(
-            name,
-            scenario,
-            dialect,
-            await session.decompile({ name }, { emitter: dialect }),
-          );
+      await exercise((name, dialect, view) =>
+        session.decompile({ name }, { emitter: dialect, ...(view ? { view } : {}) }),
+      );
     } finally {
       await session.close();
     }
   } else if (consumer === 'cli') {
-    for (const { name, scenario } of functions)
-      for (const dialect of dialects) {
-        const args = [
-          '--import',
-          'tsx',
-          entry,
-          'decompile',
-          p.binary,
-          '--function',
-          name,
-          '--language',
-          dialect,
-          '--cache',
-          join(p.root, 'cli-cache'),
-          '--json',
-        ];
-        const child = spawnSync(process.execPath, args, {
-          cwd: repo,
-          encoding: 'utf8',
-          timeout: 90000,
-          maxBuffer: 32 * 1024 * 1024,
-        });
-        await writeFile(join(p.root, `cli-${name}-${dialect}.stderr.txt`), child.stderr);
-        await writeFile(join(p.root, `cli-${name}-${dialect}.stdout.json`), child.stdout);
-        assert.ok(child.status === 0 || child.status === 2, child.stderr);
-        const decoded = JSON.parse(child.stdout) as { result: unknown };
-        await retain(
-          name,
-          scenario,
-          dialect,
-          toolSchemas.function_decompile.output.parse(decoded.result),
-        );
-      }
+    await exercise(async (name, dialect, view) => {
+      const args = [
+        '--import',
+        'tsx',
+        entry,
+        'decompile',
+        p.binary,
+        '--function',
+        name,
+        '--language',
+        dialect,
+        ...(view ? ['--view', view] : []),
+        '--cache',
+        join(p.root, 'cli-cache'),
+        '--json',
+      ];
+      const child = spawnSync(process.execPath, args, {
+        cwd: repo,
+        encoding: 'utf8',
+        timeout: 90000,
+        maxBuffer: 32 * 1024 * 1024,
+      });
+      const stem = `cli-${name}-${dialect}${view ? `.${view}` : ''}`;
+      await writeFile(join(p.root, `${stem}.stderr.txt`), child.stderr);
+      await writeFile(join(p.root, `${stem}.stdout.json`), child.stdout);
+      assert.ok(child.status === 0 || child.status === 2, child.stderr);
+      const decoded = JSON.parse(child.stdout) as { result: unknown };
+      return toolSchemas.function_decompile.output.parse(decoded.result);
+    });
   } else {
     await withMcpClient(
       { serverEntry: entry, fixtures: p.root, nodeArgs: ['--import', 'tsx'] },
@@ -501,36 +550,41 @@ export async function exerciseSourceQuality(
           },
         });
         assert.ok('data' in opened && opened.data.image);
+        const image = opened.data.image.id;
         const scope = { project_id: opened.project_id!, revision: opened.revision! };
+        const ids = new Map<string, string>();
         try {
-          for (const { name, scenario } of functions) {
-            const found: ToolResult<'functions_find'> = await callMcpTool(
-              client,
-              'functions_find',
-              {
-                ...scope,
-                image_id: opened.data.image.id,
-                query: { text: name, match: 'exact', case_sensitive: true },
-              },
-            );
-            assert.ok('data' in found);
-            assert.equal(found.data.items.length, 1);
-            for (const dialect of dialects) {
-              let result = await callMcpTool(client, 'function_decompile', {
-                ...scope,
-                function_id: found.data.items[0]!.id,
-                options: { emitter: dialect },
-                wait: true,
-              });
-              if ('data' in result && result.data.delivery === 'artifact') {
-                const artifactId = result.data.artifact_id;
-                const artifact = result.artifacts.find((artifact) => artifact.id === artifactId);
-                assert.ok(artifact);
-                result = (await readAnalysis(client, artifact)).result;
-              }
-              await retain(name, scenario, dialect, result);
+          await exercise(async (name, dialect, view) => {
+            let id = ids.get(name);
+            if (!id) {
+              const found: ToolResult<'functions_find'> = await callMcpTool(
+                client,
+                'functions_find',
+                {
+                  ...scope,
+                  image_id: image,
+                  query: { text: name, match: 'exact', case_sensitive: true },
+                },
+              );
+              assert.ok('data' in found);
+              assert.equal(found.data.items.length, 1);
+              id = found.data.items[0]!.id;
+              ids.set(name, id);
             }
-          }
+            let result: Result = await callMcpTool(client, 'function_decompile', {
+              ...scope,
+              function_id: id,
+              options: { emitter: dialect, ...(view ? { view } : {}) },
+              wait: true,
+            });
+            if ('data' in result && result.data.delivery === 'artifact') {
+              const artifactId = result.data.artifact_id;
+              const artifact = result.artifacts.find((artifact) => artifact.id === artifactId);
+              assert.ok(artifact);
+              result = (await readAnalysis(client, artifact)).result;
+            }
+            return result;
+          });
         } finally {
           await callMcpTool(client, 'project_close', scope);
         }

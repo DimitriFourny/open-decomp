@@ -327,6 +327,7 @@ export function prepareNativeUnit(
   };
   let types: TypeRecoveryResult | null = null;
   const reasons: string[] = [...graph.coverage.reasons];
+  let optionalWorkComplete = true;
   try {
     types = recoverTypes(ir, abi, local, {
       image_id: image.id,
@@ -381,6 +382,7 @@ export function prepareNativeUnit(
     )
       throw error;
     context.checkpoint(0);
+    optionalWorkComplete = false;
     reasons.push(`native optional type/stack work limit (${workLimit})`);
     types = null;
   }
@@ -426,6 +428,11 @@ export function prepareNativeUnit(
     observed_calls,
     dependencies,
     reasons,
+    arity_complete:
+      optionalWorkComplete &&
+      !graph.coverage.reasons.length &&
+      analysis?.state === 'complete' &&
+      analysis.stack.state === 'complete',
     demand_index,
     interface_index,
   };

@@ -155,7 +155,10 @@ test('source view moves ABI-scratch exit clobbers out of line', () => {
   assert.ok(rules(source).includes('exit_scratch'));
   for (const language of ['c-like', 'python-like'] as const) {
     const { emission } = fixture.emit(language);
-    assert.match(emission.text, /exit x1, v0, v1, v2, v3: unspecified \(clobbered by calls\)/);
+    assert.match(
+      emission.text,
+      /ABI scratch at return: x1, v0, v1, v2, v3; exact slices and values retained in exit metadata/,
+    );
     assert.doesNotMatch(emission.text, /also at exit:.* = value\d/);
   }
 });
@@ -218,7 +221,7 @@ test('undemanded computed exit slices move out of line without dropping load eff
     const { emission } = emit(fixture.ir, fixture.extra, language);
     assert.match(
       emission.text,
-      /also at exit: x1\[0:64\] = computed, not materialized \(not established as a result\)/,
+      /ABI scratch at return: x1; exact slices and values retained in exit metadata/,
     );
     assert.doesNotMatch(emission.text, /also at exit:.* = value\d/);
     assert.doesNotMatch(emission.text, /return physical_return/);
@@ -232,13 +235,13 @@ test('undemanded computed exit slices move out of line without dropping load eff
   }
 });
 
-test('cheap exit expressions print without manufacturing a dead local', () => {
+test('exit expressions stay in metadata without manufacturing a dead local', () => {
   const fixture = computedExit({}, true, true);
   for (const language of ['c-like', 'python-like'] as const) {
     const { emission } = emit(fixture.ir, fixture.extra, language);
     assert.match(
       emission.text,
-      /also at exit: x1\[0:64\] = (?:0x)?8 \(not established as a result\)/,
+      /ABI scratch at return: x1; exact slices and values retained in exit metadata/,
     );
     const inputs = new Map(
       emittedFormals(emission).map((formal) => [formal.statement_id, 0x1000n]),
@@ -484,4 +487,105 @@ test('System V RDX joins RAX inline only with positive pair evidence', () => {
     const { emission } = emit(pair.ir, { source: pair.source }, language);
     assert.deepEqual(execute(emission).values, [7n, 29n]);
   }
+});
+
+test('x86 implicit division, multiplication, sign-extension and call RDX residue obey positive result evidence', () => {
+  const target = sysvAMD64Abi;
+  const rdx = target.unknown_call_clobbers.registers.find(
+    (register) => register.root === 'x86_64:rdx',
+  )!;
+  const rax = target.unknown_call_clobbers.registers.find(
+    (register) => register.root === 'x86_64:rax',
+  )!;
+  const rdi = target.unknown_call_clobbers.registers.find(
+    (register) => register.root === 'x86_64:rdi',
+  )!;
+  for (const operation of ['div', 'mul', 'cqo', 'call'] as const)
+    for (const demanded of [false, true]) {
+      const b = builder(`rdx-${operation}-${demanded}`),
+        block = b.block('entry');
+      const input = block.readRegister(rdi);
+      let primary = input;
+      if (operation === 'div') {
+        const divisor = block.constant(u64, 2n);
+        primary = block.int('udiv', input, divisor);
+        block.writeRegister(rdx, block.int('urem', input, divisor));
+      } else if (operation === 'mul') {
+        const product = block.int(
+          'mul',
+          block.cast('zero_extend', integer(128), input),
+          block.constant(integer(128), 7n),
+        );
+        primary = block.cast('truncate', u64, product);
+        block.writeRegister(
+          rdx,
+          block.cast(
+            'truncate',
+            u64,
+            block.int('lshr', product, block.constant(integer(128), 64n)),
+          ),
+        );
+      } else if (operation === 'cqo')
+        block.writeRegister(rdx, block.int('ashr', input, block.constant(u64, 63n)));
+      else
+        block.call(
+          { kind: 'direct', address: { image_id: image, space: 'va', value: 0x1234n } },
+          [],
+          [],
+          target.unknown_call_clobbers,
+        );
+      block.writeRegister(rax, primary);
+      block.return([primary]);
+      const ir = constructSSA(b.finish(block, [u64])).value as SSAForm;
+      const source: SourceEvidence = {
+        abi: target,
+        addresses: [],
+        callees: ir.blocks
+          .flatMap((item) => item.instructions)
+          .filter((node) => node.kind === 'call')
+          .map((node) => ({
+            call_id: node.id,
+            parameters: [],
+            returns: [],
+            argument_list_complete: true,
+            evidence_ids: [],
+          })),
+        ...(demanded ? { function_return_demands: [rdx] } : {}),
+      };
+      const context = createOperationContext();
+      const program = reconstruct(
+        { function: structureControlFlow(ir, context).value!, source },
+        context,
+        'source',
+      );
+      const projection = [...program.returns.values()][0]!;
+      assert.equal(
+        projection.outputs.some((binding) => binding.register.root === rdx.root),
+        demanded,
+      );
+      assert.equal(
+        projection.exit_scratch?.some((binding) => binding.register.root === rdx.root) ?? false,
+        !demanded,
+      );
+      for (const language of ['c-like', 'python-like'] as const) {
+        const { emission } = emit(ir, { source }, language);
+        const observed = execute(
+          emission,
+          new Map(
+            emittedFormals(emission).flatMap((formal) =>
+              formal.semantic_ids.map((id) => [id, 9n] as const),
+            ),
+          ),
+          new Map(),
+          0n,
+          new Map(),
+          new Map(),
+          new Map([['sub_1234', () => []]]),
+        );
+        assert.deepEqual(observed.values, [
+          operation === 'div' ? 4n : operation === 'mul' ? 63n : 9n,
+        ]);
+        assert.match(emit(ir, { source }, language, 'checked').emission.text, /physical_return\(/);
+      }
+    }
 });

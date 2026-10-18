@@ -28,6 +28,7 @@ import type {
 import { planSource } from './source-planner.js';
 import { planSourceStack } from './source-stack.js';
 import { planVariadicStackArguments } from './source-variadic.js';
+import { projectSourceConstants } from './source-data.js';
 import { recombineSourceCells } from './source-cells.js';
 import {
   normalizeSourceExpressions,
@@ -167,10 +168,21 @@ export function reconstruct(
   const entry = blocks.get(input.function.entry);
   const entryBindings = entry?.register_entry ?? [];
   const entryParameters = new Set(entry?.parameters.map((value) => value.id));
+  const localValidation = new LocalValidationSession(context, view === 'source', input.function.id);
+  const constantLoads =
+    view === 'source' && input.source
+      ? projectSourceConstants(
+          blocks,
+          expressions,
+          assignments,
+          input.source.addresses,
+          context,
+          localValidation,
+        )
+      : new Set<string>();
   const sourcePlan = input.source
-    ? planSource(input, blocks, values, expressions, owner, context, view)
+    ? planSource(input, blocks, values, expressions, owner, context, view, localValidation)
     : null;
-  const localValidation = new LocalValidationSession(context);
   const sourceStack = sourcePlan
     ? planSourceStack(
         input,
@@ -206,7 +218,7 @@ export function reconstruct(
         !localValidation.presentation(
           'arity_closure',
           id,
-          'complete tail-call argument list: the fully analyzed nonrecursive callee reads no register beyond the observed prefix, no incoming stack and no escaping incoming-stack address',
+          'complete tail-call argument list: complete native reads or an established library contract prove the observed register-only interface, with no incoming stack or escaping incoming-stack address',
           [id],
         )
       )
@@ -214,6 +226,17 @@ export function reconstruct(
           ...tail,
           boundary: { ...tail.boundary, argument_list_complete: false },
         });
+  if (sourcePlan && view === 'source')
+    for (const callee of input.source?.source_callees ?? [])
+      if (
+        callee.argument_list_closure === 'library_contract' &&
+        sourcePlan.tails.get(callee.call_id)?.boundary.argument_list_complete
+      )
+        localValidation.requireAbi(
+          'arity_closure',
+          [callee.call_id],
+          'Library-tail closure and its native propagation assume the established imported contract and ABI-conforming register arguments and results; unresolved or variadic targets retain their physical interface.',
+        );
   // Source view only: Darwin variadic outgoing stores become trailing arguments
   // of the one call that consumes them (store id -> call id).
   const variadicStores =
@@ -659,7 +682,15 @@ export function reconstruct(
         else if (
           voidPrimary ||
           (establishedPrimary &&
-            !primaryRegisters.some((register) => overlaps(register, binding.register)))
+            (!primaryRegisters.some((register) => overlaps(register, binding.register)) ||
+              (resultType?.kind === 'integer' &&
+                primaryRegisters.some(
+                  (register) =>
+                    register.root === binding.register.root &&
+                    binding.register.offset_bits >= register.offset_bits + bitWidth(resultType) &&
+                    binding.register.offset_bits + binding.register.width_bits <=
+                      register.offset_bits + register.width_bits,
+                ))))
         )
           exitScratch.push({
             register: binding.register,
@@ -675,7 +706,7 @@ export function reconstruct(
         !localValidation.presentation(
           'exit_scratch',
           id,
-          'possible-return slices not established as results; unprojected call clobbers/entry values, undemanded slices outside an established primary, or a signature-approved void-like exit without result evidence; not liveness roots',
+          'possible-return slices not established as results; unprojected call clobbers/entry values, undemanded slices outside an established primary or above its narrow integer width, or a signature-approved void-like exit without result evidence; not liveness roots',
           [id, ...new Set(exitScratch.flatMap((slice) => slice.sources))].slice(0, 64),
           exitScratch
             .map(
@@ -719,6 +750,7 @@ export function reconstruct(
       context.checkpoint(1);
       if (
         node.kind === 'assign' ||
+        constantLoads.has(node.id) ||
         sourceStack?.hidden.has(node.id) ||
         variadicStores.has(node.id) ||
         (node.kind === 'load' && sourceStack?.returnAddressLoads.has(node.result.id))

@@ -87,7 +87,11 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi])
         for (const language of ['c-like', 'python-like'] as const) {
           const { emission } = emit(f.ir, { source: f.source }, language);
           assert.match(emission.text, bits === 32 ? /\bfloat\b/ : /\bdouble\b/);
-          assert.equal(/return cast_bitcast/.test(emission.text), integerUse, emission.text);
+          assert.equal(
+            /return (?:cast_bitcast|__od_bitcast_)/.test(emission.text),
+            integerUse,
+            emission.text,
+          );
           const sign = 1n << BigInt(bits - 1);
           const nan = bits === 32 ? 0x7fa12345n : 0x7ff0123456789abcn;
           for (const input of [0n, sign, nan, sign | nan]) {
@@ -114,7 +118,7 @@ test('FP native spelling refuses exhausted records and conflicted FP values', ()
   const f = fixture(sysvAMD64Abi, 64);
   const context = createOperationContext(),
     validation = new LocalValidationSession(context);
-  for (let i = 0; i < 256; i++) validation.presentation('occupied', `fp-${i}`, 'occupied');
+  for (let i = 0; i < 256; i++) validation.presentation(`occupied-${i}`, `fp-${i}`, 'occupied');
   assert.deepEqual(
     projectSourceFloating(
       { ...f.program, local_validation_session: validation },
@@ -164,7 +168,10 @@ test('native FP phi copies keep the bit reinterpretation of integer memory reads
   for (const language of ['c-like', 'python-like'] as const) {
     const { emission } = emit(f.ir, { source: f.source }, language);
     assert.match(emission.text, /\bdouble\b/);
-    assert.match(emission.text, /cast_bitcast\("ieee64_t", "bits64_t",/);
+    assert.match(
+      emission.text,
+      language === 'c-like' ? /__od_bitcast_f64_u64\(/ : /cast_bitcast\("ieee64_t", "bits64_t",/,
+    );
     assert.doesNotMatch(emission.text, /return cast_bitcast/);
     for (const input of [0n, 0x8000000000000000n, 0x7ff0123456789abcn]) {
       const memory = new Map(

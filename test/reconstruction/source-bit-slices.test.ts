@@ -170,7 +170,7 @@ for (const scenario of [
     const context = createOperationContext(),
       validation = new LocalValidationSession(context);
     if (scenario === 'capacity')
-      for (let i = 0; i < 256; i++) validation.presentation('fixture', `${i}`, 'capacity');
+      for (let i = 0; i < 256; i++) validation.presentation('fixture', `${i}`, `capacity ${i}`);
     normalizeSourceExpressions(
       values,
       definitions,
@@ -184,7 +184,9 @@ for (const scenario of [
     const normalized = definitions.get(root.id)!;
     assert.equal(
       validation.records.some(
-        (record) => record.rule === 'register_cell_recombination' && record.subject === root.id,
+        (record) =>
+          record.rule === 'register_cell_recombination' &&
+          (record.subject === root.id || record.subject_ids?.includes(root.id)),
       ),
       applied,
     );

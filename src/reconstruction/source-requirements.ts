@@ -403,26 +403,32 @@ export function abiConformanceRequirements(
 ): readonly Requirement[] {
   const byRule = new Map<
     string,
-    { explanation: string; sites: RequirementSite[]; origins: Origin[] }
+    { rule: string; explanation: string; sites: RequirementSite[]; origins: Origin[] }
   >();
   for (const item of sites) {
     context.checkpoint(1 + item.anchor_ids.length);
     const origins = item.anchor_ids.flatMap((id) => origin(id) ?? []);
     if (!origins.length) continue;
-    const row = byRule.get(item.rule) ?? { explanation: item.explanation, sites: [], origins: [] };
+    const key = JSON.stringify([item.rule, item.explanation]);
+    const row = byRule.get(key) ?? {
+      rule: item.rule,
+      explanation: item.explanation,
+      sites: [],
+      origins: [],
+    };
     if (row.sites.length >= 1000) continue;
     row.sites.push({
-      id: `site_${fingerprint([functionId, 'abi_conformance', item.rule, ...item.anchor_ids])}`,
+      id: `site_${fingerprint([functionId, 'abi_conformance', item.rule, item.explanation, ...item.anchor_ids])}`,
       subject_ids: [...new Set(origins.map((entry) => entry.id))],
       evidence_ids: [...new Set(origins.flatMap((entry) => entry.provenance.evidence_ids))],
       instruction_ids: [...new Set(origins.flatMap((entry) => entry.provenance.instruction_ids))],
       state_epoch: item.rule,
     });
     row.origins.push(...origins);
-    byRule.set(item.rule, row);
+    byRule.set(key, row);
   }
-  return [...byRule].map(([rule, row]) => ({
-    id: `requirement_${fingerprint([functionId, 'abi_conformance', rule])}`,
+  return [...byRule.values()].map((row) => ({
+    id: `requirement_${fingerprint([functionId, 'abi_conformance', row.rule, row.explanation])}`,
     kind: 'abi_conformance' as const,
     status: 'assumption' as const,
     explanation: row.explanation,
@@ -446,7 +452,11 @@ export function sourceRequirementProofs(
   const requirements = [...(program.source?.requirements ?? []), ...additional];
   if (!requirements.length) return [];
   const anchors = new Set(
-    requirements.flatMap((record) => record.sites.map((site) => site.subject_ids[0]!)),
+    requirements.flatMap((record) =>
+      record.sites.flatMap((site) =>
+        record.kind === 'abi_conformance' ? site.subject_ids : [site.subject_ids[0]!],
+      ),
+    ),
   );
   const bySubject = new Map<string, (typeof mappings)[number][]>();
   // Reconstruction maps every original statement under its own origin ID,
@@ -476,7 +486,10 @@ export function sourceRequirementProofs(
     const rangeKey = (range: Requirement['ranges'][number]): string =>
       `${range.start.image_id}:${range.start.space}:${range.start.value}:${range.size}`;
     const sites = requirement.sites.filter((site) => {
-      const result = site.predicate_value_id === undefined ? site.subject_ids[1] : undefined;
+      const result =
+        requirement.kind !== 'abi_conformance' && site.predicate_value_id === undefined
+          ? site.subject_ids[1]
+          : undefined;
       if (
         result &&
         program.values.has(result) &&
@@ -485,21 +498,24 @@ export function sourceRequirementProofs(
       )
         return false;
       let emitted = false;
-      for (const mapping of bySubject.get(site.subject_ids[0]!) ?? []) {
-        context.checkpoint(1);
-        if (mapping.end <= mapping.start) continue;
-        if (!spans.has(`${mapping.start}:${mapping.end}`) && spans.size >= 1000)
-          throw new OperationError({
-            code: 'resource_limit',
-            severity: 'error',
-            message: 'Source requirement output span budget exceeded',
-            evidence_ids: site.evidence_ids,
-            entity_id: site.subject_ids[0],
-          });
-        emitted = true;
-        spans.set(`${mapping.start}:${mapping.end}`, { start: mapping.start, end: mapping.end });
-        for (const ref of mapping.range_refs) mappedRanges.add(rangeKey(tables.ranges[ref]!));
-      }
+      const subjectIds =
+        requirement.kind === 'abi_conformance' ? site.subject_ids : [site.subject_ids[0]!];
+      for (const subject of subjectIds)
+        for (const mapping of bySubject.get(subject) ?? []) {
+          context.checkpoint(1);
+          if (mapping.end <= mapping.start) continue;
+          if (!spans.has(`${mapping.start}:${mapping.end}`) && spans.size >= 1000)
+            throw new OperationError({
+              code: 'resource_limit',
+              severity: 'error',
+              message: 'Source requirement output span budget exceeded',
+              evidence_ids: site.evidence_ids,
+              entity_id: site.subject_ids[0],
+            });
+          emitted = true;
+          spans.set(`${mapping.start}:${mapping.end}`, { start: mapping.start, end: mapping.end });
+          for (const ref of mapping.range_refs) mappedRanges.add(rangeKey(tables.ranges[ref]!));
+        }
       return emitted;
     });
     if (!sites.length) continue;

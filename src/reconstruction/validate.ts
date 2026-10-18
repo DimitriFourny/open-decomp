@@ -8,6 +8,7 @@ import type {
 } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
 import { validateEmittedUses } from './validate-uses.js';
+import type { EmittedEdge, EmittedLoopExits } from './local-control-validation.js';
 
 function invalid(origin: Origin, message: string): never {
   throw new OperationError({
@@ -258,7 +259,7 @@ type Nest =
       /** do-while: only its test may `continue` (elsewhere it reaches the test). */
       readonly test?: string;
     }
-  | { readonly kind: 'switch'; readonly follow: string | null };
+  | { readonly kind: 'switch'; readonly id: string; readonly follow: string | null };
 
 /** Independently derive the executable edge represented by each chosen syntax.
  * This is a publication check, not another structuring/rewrite algorithm. In
@@ -270,6 +271,8 @@ export function validateRenderedTransfers(
   language: 'c-like' | 'python-like',
   context: OperationContext,
   fallthrough: ReadonlySet<ParallelTransfer> = new Set(),
+  emitted?: ReadonlyMap<ParallelTransfer, EmittedEdge>,
+  exits?: EmittedLoopExits,
 ): void {
   const entry = (region: Region, fallback: string | null): string | null => {
     for (;;) {
@@ -288,10 +291,13 @@ export function validateRenderedTransfers(
     origin: Origin,
   ): void => {
     context.checkpoint(1);
+    const action = emitted?.get(transfer);
+    const mode = action?.kind ?? transfer.mode;
     let actual = follow;
-    if (gotos.has(transfer)) actual = transfer.target;
-    else if (fallthrough.has(transfer)) actual = follow;
-    else if (transfer.mode === 'continue') {
+    if (action?.kind === 'goto' || (!action && gotos.has(transfer)))
+      actual = action?.kind === 'goto' ? action.target : transfer.target;
+    else if (mode === 'fallthrough' || (!action && fallthrough.has(transfer))) actual = follow;
+    else if (mode === 'continue') {
       actual = null;
       for (let i = nesting.length - 1; i >= 0; i--) {
         const scope = nesting[i]!;
@@ -300,11 +306,32 @@ export function validateRenderedTransfers(
           break;
         }
       }
-    } else if (transfer.mode === 'break') actual = nesting.at(-1)?.follow ?? null;
+    } else if (mode === 'break') actual = nesting.at(-1)?.follow ?? null;
+    else if (action?.kind === 'loop-exit') {
+      const outer = nesting.findIndex(
+        (scope) => scope.kind === 'loop' && scope.header === action.loop,
+      );
+      const through = outer < 0 ? [] : nesting.slice(outer).reverse();
+      actual =
+        through.length > 1 &&
+        through.length === action.through.length &&
+        through.every(
+          (scope, index) =>
+            (scope.kind === 'loop' ? scope.header : scope.id) === action.through[index],
+        ) &&
+        exits?.initialized.has(action.loop) &&
+        through
+          .slice(0, -1)
+          .every((scope) =>
+            exits.guards.get(scope.kind === 'loop' ? scope.header : scope.id)?.has(action.loop),
+          )
+          ? nesting[outer]!.follow
+          : null;
+    }
     if (actual !== transfer.target)
       invalid(
         origin,
-        `rendered ${transfer.mode} reaches ${actual ?? 'no block'} instead of CFG target ${transfer.target}`,
+        `rendered ${mode} reaches ${actual ?? 'no block'} instead of CFG target ${transfer.target}`,
       );
   };
   const arm = (
@@ -348,7 +375,7 @@ export function validateRenderedTransfers(
       arm(control.when_false, follow, nesting, control);
     } else if (control.kind === 'switch') {
       const scopes: readonly Nest[] =
-        language === 'c-like' ? [...nesting, { kind: 'switch', follow }] : nesting;
+        language === 'c-like' ? [...nesting, { kind: 'switch', id: control.id, follow }] : nesting;
       for (const item of control.cases) arm(item.arm, follow, scopes, control);
       arm(control.otherwise, follow, scopes, control);
     }

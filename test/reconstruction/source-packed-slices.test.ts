@@ -73,7 +73,9 @@ for (const kind of ['concat', 'insert'] as const)
       );
       assert.ok(
         validation.records.some(
-          (record) => record.rule === 'register_cell_recombination' && record.subject === packed.id,
+          (record) =>
+            record.rule === 'register_cell_recombination' &&
+            (record.subject === packed.id || record.subject_ids?.includes(packed.id)),
         ),
       );
       assert.ok(validation.records.every((record) => record.status !== 'rejected'));

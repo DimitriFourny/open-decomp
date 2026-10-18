@@ -225,6 +225,68 @@ function imageDataIndex(image: LoadedImage, context: OperationContext): ImageDat
   return indexed;
 }
 
+/** Exact scalar bytes from one immutable, file-backed section. Unlike string
+ * recovery this permits literal pools and does not interpret their contents. */
+export function recoverDataBytes(
+  image: LoadedImage,
+  address: Address,
+  byteLength: number,
+  context: OperationContext,
+): readonly number[] | undefined {
+  context.checkpoint(1);
+  if (address.image_id !== image.id || !Number.isSafeInteger(byteLength) || byteLength <= 0)
+    return undefined;
+  const translated = image.address_map.translate(address, 'va');
+  if (translated.kind !== 'mapped') return undefined;
+  const va = translated.address,
+    end = va.value + BigInt(byteLength);
+  const sections = image.sections.filter(
+    (section) =>
+      section.kind === 'section' &&
+      section.virtual_range.start.image_id === va.image_id &&
+      section.virtual_range.start.space === va.space &&
+      section.virtual_range.start.value < end &&
+      section.virtual_range.start.value + section.virtual_range.size > va.value,
+  );
+  if (sections.length !== 1) return undefined;
+  const section = sections[0]!;
+  if (
+    !section.permissions.includes('read') ||
+    section.permissions.includes('write') ||
+    !section.file_range ||
+    section.virtual_range.start.value > va.value ||
+    end > section.virtual_range.start.value + section.virtual_range.size ||
+    end > section.virtual_range.start.value + section.file_range.size ||
+    image.mappings.some(
+      (mapping) =>
+        (!mapping.permissions.includes('read') || mapping.permissions.includes('write')) &&
+        mapping.va < end &&
+        mapping.va + mapping.memory_size > va.value,
+    )
+  )
+    return undefined;
+  const indexed = imageDataIndex(image, context);
+  const reach =
+    va.value + 1n > indexed.relocation_bytes ? va.value + 1n - indexed.relocation_bytes : 0n;
+  for (let page = reach / STRING_WINDOW; page <= (end - 1n) / STRING_WINDOW; page++)
+    for (const relocation of indexed.relocations.get(pageKey(va, page)) ?? []) {
+      context.checkpoint(1);
+      if (relocation.start < end && relocation.end > va.value) return undefined;
+    }
+  const spans = [...image.address_map.spans(va, BigInt(byteLength))];
+  const span = spans[0];
+  if (
+    spans.length !== 1 ||
+    !span ||
+    span.kind !== 'mapped' ||
+    span.file_offset === null ||
+    span.range.size !== BigInt(byteLength)
+  )
+    return undefined;
+  context.checkpoint(byteLength);
+  return [...image.bytes.read(span.file_offset, byteLength)];
+}
+
 /** Recover an address's own storage identity before considering printable bytes.
  * Bounds are not extended to a neighbouring symbol, pool, mapping or section.
  * Relocation slots describe storage, not the bytes of their eventual targets.

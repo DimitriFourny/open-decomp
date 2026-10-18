@@ -266,7 +266,7 @@ for (const language of ['c-like', 'python-like'] as const) {
       assert.deepEqual(observed.events, mixed ? ['load', 'load'] : ['load']);
     }
   });
-  test(`${language} narrow results omit only undemanded zero-extension high slices`, () => {
+  test(`${language} narrow results omit undemanded high slices under the ABI requirement`, () => {
     for (const high of [0n, 1n]) {
       const b = builder(`signature-high-result-${high}`),
         block = b.block('entry');
@@ -285,7 +285,7 @@ for (const language of ['c-like', 'python-like'] as const) {
           { source: { ...source, ...(demand ? { function_return_demands: [rax] } : {}) } },
           language,
         ).emission;
-        const narrowed = high === 0n && !demand;
+        const narrowed = !demand;
         assert.equal(
           output.local_validation?.some((record) => record.rule === 'return_low_word') ?? false,
           narrowed,
@@ -311,7 +311,7 @@ test('signature projection refuses a rewrite when presentation records are exhau
   const input = { function: structured, source };
   const program = reconstruct(input, context, 'source');
   const validation = new LocalValidationSession(context);
-  for (let i = 0; i < 256; i++) validation.presentation('occupied', `site-${i}`, 'occupied');
+  for (let i = 0; i < 256; i++) validation.presentation(`occupied-${i}`, `site-${i}`, 'occupied');
   const projected = projectSourceSignature(
     { ...program, local_validation_session: validation },
     input,

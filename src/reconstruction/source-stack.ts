@@ -97,26 +97,50 @@ export function planSourceStack(
       (node): node is MemoryNode => node.kind === 'load' || node.kind === 'store',
     ),
   );
-  const memoryDependencies = new Map<string, Value[]>();
-  for (const load of memory)
-    if (load.kind === 'load') {
-      const offset = addresses.get(load.address.id);
-      if (offset === undefined) continue;
-      const end = offset + BigInt(Math.ceil(bitWidth(load.result.type) / 8)),
-        sources: Value[] = [];
-      for (const store of memory) {
-        context.checkpoint(1);
-        if (store.kind !== 'store') continue;
-        const start = addresses.get(store.address.id);
-        if (
-          start !== undefined &&
-          start < end &&
-          start + BigInt(Math.ceil(bitWidth(store.value.type) / 8)) > offset
-        )
-          sources.push(store.value);
-      }
-      memoryDependencies.set(load.result.id, sources);
+  // Index the bounded access widths, not every store against every load.
+  // Byte membership preserves partial overlaps and differently sized accesses.
+  const storesByByte = new Map<bigint, Extract<MemoryNode, { kind: 'store' }>[]>();
+  for (const node of memory) {
+    context.checkpoint(1);
+    if (node.kind !== 'store') continue;
+    const offset = addresses.get(node.address.id);
+    if (offset === undefined) continue;
+    const end = offset + BigInt(Math.ceil(bitWidth(node.value.type) / 8));
+    for (let byte = offset; byte < end; byte++) {
+      context.checkpoint(1);
+      const row = storesByByte.get(byte) ?? [];
+      row.push(node);
+      storesByByte.set(byte, row);
     }
+  }
+  const memoryDependencies = new Map<string, Value[]>(),
+    dependenciesByRange = new Map<string, Value[]>();
+  for (const load of memory) {
+    context.checkpoint(1);
+    if (load.kind !== 'load') continue;
+    const offset = addresses.get(load.address.id);
+    if (offset === undefined) continue;
+    const end = offset + BigInt(Math.ceil(bitWidth(load.result.type) / 8)),
+      key = `${offset}:${end}`;
+    let sources = dependenciesByRange.get(key);
+    if (!sources) {
+      const stores = new Set<Extract<MemoryNode, { kind: 'store' }>>();
+      for (let byte = offset; byte < end; byte++) {
+        context.checkpoint(1);
+        for (const store of storesByByte.get(byte) ?? []) {
+          context.checkpoint(1);
+          stores.add(store);
+        }
+      }
+      sources = [];
+      for (const store of stores) {
+        context.checkpoint(1);
+        sources.push(store.value);
+      }
+      dependenciesByRange.set(key, sources);
+    }
+    memoryDependencies.set(load.result.id, sources);
+  }
   changed = true;
   while (changed) {
     changed = false;
@@ -158,6 +182,41 @@ export function planSourceStack(
         !preservedRoot(binding.register.root) &&
         tainted.has(binding.value.id),
     );
+  // Validate closure before classifying outgoing storage: a fully analyzed
+  // register-only callee cannot observe private spills merely because the caller
+  // wrote them. Refused presentation records keep the conservative open area.
+  if (view === 'source')
+    for (const block of blocks.values())
+      for (const node of block.statements) {
+        if (node.kind !== 'call') continue;
+        const projection = calls.get(node.id)!;
+        const libraryClosure = input.source?.source_callees?.some(
+          (callee) =>
+            callee.call_id === node.id && callee.argument_list_closure === 'library_contract',
+        );
+        if (
+          projection.kind === 'inferred' &&
+          projection.argument_list_complete === true &&
+          !validation.presentation(
+            'arity_closure',
+            node.id,
+            libraryClosure
+              ? 'library_contract: complete native reads propagated through established import-tail contracts prove a register-only interface; caller frame writes cannot supply additional arguments'
+              : 'callee_reads: complete nonrecursive native summary reads only the observed register prefix, no incoming stack and no escaping incoming-stack address; caller frame writes cannot supply additional arguments',
+            [node.id],
+          )
+        )
+          calls.set(node.id, { ...projection, argument_list_complete: false });
+        if (libraryClosure && calls.get(node.id)!.argument_list_complete === true)
+          validation.requireAbi(
+            'arity_closure',
+            [node.id],
+            'Native closure through imported tail contracts assumes the established library interface and ABI-conforming arguments and results; incomplete dependencies and unresolved targets stay open.',
+          );
+      }
+  const openArguments = (projection: BoundaryProjection): boolean =>
+    projection.kind !== 'source' &&
+    !(view === 'source' && projection.argument_list_complete === true);
   const callNodes: Extract<Instruction, { kind: 'call' }>[] = [];
   const accesses: { node: MemoryNode; block: string; offset: bigint; end: bigint; key: string }[] =
     [];
@@ -169,11 +228,11 @@ export function planSourceStack(
         const projection = calls.get(node.id)!;
         if (
           projection.arguments.some((value) => tainted.has(value.id)) ||
-          (projection.kind !== 'source' && argumentTainted(node.register_inputs))
+          (openArguments(projection) && argumentTainted(node.register_inputs))
         )
           saveEscaped = true;
       }
-      if (node.kind === 'call' && calls.get(node.id)!.kind !== 'source') unknownCallStorage = true;
+      if (node.kind === 'call' && openArguments(calls.get(node.id)!)) unknownCallStorage = true;
       if (
         node.kind === 'call' &&
         (calls.get(node.id)!.kind === 'physical' ||
@@ -244,7 +303,7 @@ export function planSourceStack(
     for (const block of blocks.values())
       for (let position = 0; position < block.statements.length; position++) {
         const node = block.statements[position]!;
-        if (node.kind === 'call' && calls.get(node.id)!.kind !== 'source') {
+        if (node.kind === 'call' && openArguments(calls.get(node.id)!)) {
           openCallPositions.set(block.id, position);
           reachesOpenCall.add(block.id);
         }
@@ -327,14 +386,18 @@ export function planSourceStack(
       block.control.kind === 'return' ||
       (block.control.kind === 'indirect' && block.control.tail_call === true),
   );
-  const position = (block: string, node: MemoryNode): number =>
-    blocks.get(block)!.statements.indexOf(node);
+  const positions = new Map<string, number>();
+  for (const block of blocks.values())
+    for (let index = 0; index < block.statements.length; index++) {
+      context.checkpoint(1);
+      positions.set(block.statements[index]!.id, index);
+    }
   const dominates = (
     first: (typeof accesses)[number],
     second: (typeof accesses)[number],
   ): boolean => {
     if (first.block === second.block)
-      return position(first.block, first.node) < position(second.block, second.node);
+      return positions.get(first.node.id)! < positions.get(second.node.id)!;
     for (
       let id = blocks.get(second.block)!.dominator;
       id !== null;
@@ -525,30 +588,31 @@ export function planSourceStack(
   // Source view: a non-volatile frame load dominated by a store covering its
   // bytes cannot fault. If its result is dead, reconstruct() may drop it.
   const deadReloadCandidates = new Set<string>();
+  const byNode = new Map(accesses.map((access) => [access.node.id, access]));
   if (view === 'source')
     for (const load of accesses) {
       if (load.node.kind !== 'load' || load.node.access.volatile || saveReloads.has(load.node.id))
         continue;
-      context.checkpoint(accesses.length);
-      if (
-        accesses.some(
-          (store) =>
-            store.node.kind === 'store' &&
-            store.offset <= load.offset &&
-            store.end >= load.end &&
-            dominates(store, load),
-        )
-      )
-        deadReloadCandidates.add(load.node.id);
+      // A covering store must cover the first byte; filter only that bucket.
+      // Valid IR memory accesses are byte-width, so every indexed store is an access.
+      for (const node of storesByByte.get(load.offset) ?? []) {
+        context.checkpoint(1);
+        const store = byNode.get(node.id)!;
+        if (store.end >= load.end && dominates(store, load)) {
+          deadReloadCandidates.add(load.node.id);
+          break;
+        }
+      }
     }
   // Register observations establish a prefix, not the absence of further
   // stack arguments. Written bytes may also be saves or locals: retain the
   // uncertainty instead of inventing an argument count from their extent.
-  // Proven frame saves are not possible stack arguments.
+  // Proven frame saves are not possible stack arguments. A source-view closure
+  // validated above is callee-proven register-only and is not reopened.
   for (const node of callNodes) {
     context.checkpoint(1);
     const projection = calls.get(node.id)!;
-    if (projection.kind !== 'inferred') continue;
+    if (projection.kind !== 'inferred' || projection.argument_list_complete === true) continue;
     const snapshot = facts?.snapshots.get(node.id);
     let writtenStack = false;
     if (snapshot)
@@ -564,21 +628,8 @@ export function planSourceStack(
         (access) =>
           access.kind === 'store' && addresses.has(access.address.id) && !saveStores.has(access.id),
       );
-    // A source-view closure by complete callee reads (planner) also needs this
-    // caller to write no possible stack argument; it is recorded or withdrawn.
-    if (
-      writtenStack ||
-      (projection.argument_list_complete === true &&
-        !validation.presentation(
-          'arity_closure',
-          node.id,
-          'complete argument list: the fully analyzed nonrecursive callee reads no register beyond the observed prefix, no incoming stack and no escaping incoming-stack address; the caller writes no possible stack argument outside proven frame saves',
-          [node.id],
-        ))
-    )
-      calls.set(node.id, { ...projection, argument_list_complete: false });
+    if (writtenStack) calls.set(node.id, { ...projection, argument_list_complete: false });
   }
-  const byNode = new Map(accesses.map((access) => [access.node.id, access]));
   const predecessors = new Map<string, string[]>();
   for (const { transfer, block } of transfers) {
     const row = predecessors.get(transfer.target) ?? [];

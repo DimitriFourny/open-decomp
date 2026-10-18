@@ -11,10 +11,10 @@ import type {
 import type { Reconstruction } from '../reconstruction/model.js';
 import type { InlineSite } from './source-inlining.js';
 
-export type TransferAction = 'goto' | 'fallthrough' | 'break' | 'continue';
+export type TransferAction = 'goto' | 'fallthrough' | 'break' | 'continue' | 'loop-exit';
 type Nest =
   | { readonly kind: 'loop'; readonly header: string; readonly follow: string | null }
-  | { readonly kind: 'switch' };
+  | { readonly kind: 'switch'; readonly id: string };
 
 export function controlArms(control: Control): readonly ControlArm[] {
   return control.kind === 'if'
@@ -52,8 +52,20 @@ export function transferAction(
   language: 'c-like' | 'python-like',
   sourceView: boolean,
   sourceProgram = sourceView,
+  normalizeLoopTargets = sourceView,
 ): TransferAction {
   if (sourceView && transfer.target === destination) return 'fallthrough';
+  if (sourceView && normalizeLoopTargets) {
+    const loop = [...nesting].reverse().find((item) => item.kind === 'loop');
+    if (loop?.kind === 'loop') {
+      if (transfer.target === loop.header) return 'continue';
+      if (
+        transfer.target === loop.follow &&
+        (language === 'python-like' || nesting.at(-1)?.kind === 'loop')
+      )
+        return 'break';
+    }
+  }
   if (transfer.mode === 'next') return transfer.target === destination ? 'fallthrough' : 'goto';
   if (transfer.mode === 'goto')
     return sourceProgram && transfer.target === destination ? 'fallthrough' : 'goto';
@@ -538,7 +550,7 @@ export function visitTransfers(
       });
     const nested: readonly Nest[] =
       control.kind === 'switch' && language === 'c-like'
-        ? [...nesting, { kind: 'switch' }]
+        ? [...nesting, { kind: 'switch', id: control.id }]
         : nesting;
     for (const arm of controlArms(control)) {
       visit({
@@ -566,6 +578,48 @@ export function occurrenceAction(
     language,
     true,
   );
+}
+
+export interface LoopExitRoute {
+  readonly loop: string;
+  /** Breakable scopes, innermost first, ending at the target loop. */
+  readonly through: readonly string[];
+}
+
+/** A boolean is needed only when a real edge bypasses two or more breakable
+ * scopes to an enclosing loop's exact continuation. No arbitrary target, loop
+ * entry, or irreducible edge is rewritten. */
+export function planLoopExits(
+  body: Region,
+  language: 'c-like' | 'python-like',
+  context: OperationContext,
+): ReadonlyMap<ParallelTransfer, LoopExitRoute> {
+  const routes = new Map<ParallelTransfer, LoopExitRoute>();
+  const unsafeEntries = new Set<string>();
+  visitTransfers(body, language, context, (occurrence) => {
+    if (occurrenceAction(occurrence, language) !== 'goto') return;
+    const scopes = occurrence.nesting;
+    if (
+      !scopes.some((scope) => scope.kind === 'loop' && scope.header === occurrence.transfer.target)
+    )
+      unsafeEntries.add(occurrence.transfer.target);
+    for (let index = scopes.length - 1; index >= 0; index--) {
+      const scope = scopes[index]!;
+      if (scope.kind !== 'loop' || scope.follow !== occurrence.transfer.target) continue;
+      if (index < scopes.length - 1)
+        routes.set(occurrence.transfer, {
+          loop: scope.header,
+          through: scopes
+            .slice(index)
+            .reverse()
+            .map((item) => (item.kind === 'loop' ? item.header : item.id)),
+        });
+      break;
+    }
+  });
+  for (const [transfer, route] of routes)
+    if (unsafeEntries.has(route.loop)) routes.delete(transfer);
+  return routes;
 }
 
 function mapArms(control: Control, arm: (item: ControlArm) => ControlArm): Control {
@@ -603,6 +657,8 @@ export interface LayoutPlan {
   readonly clones: ReadonlySet<BlockRegion>;
   /** Duplicated tail occurrences: the copied block and the edge it now ends. */
   readonly duplicated: readonly { readonly transfer: ParallelTransfer; readonly tail: string }[];
+  /** Regions ordered by CFG dependencies or placed with all their incoming edges. */
+  readonly ordered: readonly string[];
   /** Terminal blocks moved to their only edge, or right after the only loop
    * entering them (`at`: the edge target or the loop header). */
   readonly relocated: readonly { readonly block: string; readonly at: string }[];
@@ -613,8 +669,8 @@ export interface LayoutPlan {
 /** Layout-only source-view rewrites. Every change keeps the original block and
  * transfer objects; the renderer re-derives lexical actions from the result
  * and the control validators check each emitted edge independently. `silent`
- * accepts blocks printing nothing but their control; a tail is a silent block
- * ending in a plain `return`, or in a bounded-copy jump to another tail. */
+ * accepts expression-only tails; `small` optionally accepts bounded statement
+ * tails. Every copied path runs the same statements once, then returns. */
 export function planLayout(
   body: Region,
   program: Reconstruction,
@@ -623,29 +679,204 @@ export function planLayout(
   /** Number of edge copies the transfer prints (after phi-copy coalescing). */
   copies: (transfer: ParallelTransfer) => number,
   context: OperationContext,
+  small: (block: BlockRegion) => boolean = silent,
 ): LayoutPlan {
   const clones = new Set<BlockRegion>();
   const duplicated: { transfer: ParallelTransfer; tail: string }[] = [];
   const relocated: { block: string; at: string }[] = [];
   const blocks = program.blocks;
-  const tails = new Map<string, boolean>();
-  const isTail = (id: string, depth = 0): boolean => {
+  const ordered: string[] = [];
+  const incomingEdges = new Map<string, { block: string; transfer: ParallelTransfer }[]>();
+  for (const block of blocks.values())
+    for (const transfer of controlTransfers(block.control)) {
+      const edges = incomingEdges.get(transfer.target) ?? [];
+      edges.push({ block: block.id, transfer });
+      incomingEdges.set(transfer.target, edges);
+    }
+  // Place a shared continuation in the smallest owned region containing all
+  // of its incoming edges. A loop's continuation goes after it, never inside.
+  const attach = (
+    region: Region,
+    transfers: readonly ParallelTransfer[],
+    target: Region,
+    depth = 0,
+  ): Region | null => {
+    context.checkpoint(1);
+    if (depth >= 32) return null;
+    const contained = new Set<ParallelTransfer>();
+    const collect = (child: Region): void => {
+      context.checkpoint(1);
+      if (child.kind === 'sequence') child.regions.forEach(collect);
+      else if (child.kind === 'loop') collect(child.body);
+      else {
+        for (const edge of controlTransfers(child.control)) contained.add(edge);
+        for (const arm of controlArms(child.control)) if (arm.body) collect(arm.body);
+      }
+    };
+    collect(region);
+    if (!transfers.every((transfer) => contained.has(transfer))) return null;
+    if (region.kind === 'loop') return sequence([region, target]);
+    if (region.kind === 'sequence') {
+      for (let index = 0; index < region.regions.length; index++) {
+        const changed = attach(region.regions[index]!, transfers, target, depth + 1);
+        if (changed)
+          return sequence(region.regions.map((child, i) => (i === index ? changed : child)));
+      }
+      return sequence([...region.regions, target]);
+    }
+    const transfer = transfers.length === 1 ? transfers[0] : undefined;
+    if (region.control.kind === 'jump' && region.control.transfer === transfer)
+      return sequence([region, target]);
+    let found = false;
+    const control = mapArms(region.control, (arm) => {
+      if (arm.transfer === transfer && !arm.body) {
+        found = true;
+        return { ...arm, body: target };
+      }
+      const changed = arm.body ? attach(arm.body, transfers, target, depth + 1) : null;
+      if (changed) {
+        found = true;
+        return { ...arm, body: changed };
+      }
+      return arm;
+    });
+    return found ? { ...region, control } : sequence([region, target]);
+  };
+  const shallow = (region: Region, depth = 0): boolean => {
+    context.checkpoint(1);
+    if (depth >= 16) return false;
+    if (region.kind === 'sequence')
+      return region.regions.every((child) => shallow(child, depth + 1));
+    if (region.kind === 'loop') return shallow(region.body, depth + 1);
+    return controlArms(region.control).every((arm) => !arm.body || shallow(arm.body, depth + 1));
+  };
+  // Structuring reduces successors first, which can leave shared continuations
+  // before their predecessors. Order whole owned regions, never instructions.
+  // Cyclic sibling dependencies are irreducible here and retain explicit edges.
+  const order = (region: Region, header: string | null = null): Region => {
+    context.checkpoint(1);
+    if (region.kind === 'loop') return { ...region, body: order(region.body, region.header) };
+    if (region.kind === 'block')
+      return {
+        ...region,
+        control: mapArms(region.control, (arm) =>
+          arm.body ? { ...arm, body: order(arm.body, header) } : arm,
+        ),
+      };
+    const children = region.regions.map((child) => order(child, header));
+    const owner = new Map<string, number>();
+    const targets: Set<string>[] = children.map(() => new Set());
+    const collect = (child: Region, index: number): void => {
+      context.checkpoint(1);
+      if (child.kind === 'sequence') child.regions.forEach((item) => collect(item, index));
+      else if (child.kind === 'loop') collect(child.body, index);
+      else {
+        owner.set(child.id, index);
+        for (const transfer of controlTransfers(child.control))
+          targets[index]!.add(transfer.target);
+        for (const arm of controlArms(child.control)) if (arm.body) collect(arm.body, index);
+      }
+    };
+    children.forEach(collect);
+    const outgoing = targets.map(
+      (ids, index) =>
+        new Set(
+          [...ids].flatMap((id) => {
+            // Header backedges are performed by the enclosing loop, not
+            // sibling dependencies. Other cycles remain irreducible.
+            const next = id === header ? undefined : owner.get(id);
+            return next === undefined || next === index ? [] : [next];
+          }),
+        ),
+    );
+    const incoming = children.map(() => 0);
+    for (const successors of outgoing) for (const next of successors) incoming[next]!++;
+    const ready = incoming.flatMap((count, index) => (count === 0 ? [index] : [])).reverse();
+    const indices: number[] = [];
+    // Prefer a newly ready continuation over an unrelated pending sibling.
+    // In particular, a loop's sole exit belongs immediately after that loop.
+    while (ready.length) {
+      const index = ready.pop()!;
+      indices.push(index);
+      for (const next of outgoing[index]!) {
+        context.checkpoint(1);
+        if (--incoming[next]! === 0) ready.push(next);
+      }
+    }
+    if (indices.length !== children.length || indices[0] !== 0) return sequence(children);
+    if (indices.some((index, position) => index !== position)) {
+      for (const child of children) {
+        const id = firstBlock(child);
+        if (id !== null) ordered.push(id);
+      }
+    }
+    const owned: (Region | null)[] = [...children];
+    // Work backwards, then revisit joins exposed by earlier ownership moves.
+    // Every successful round removes a sibling; cycles cannot be absorbed.
+    const candidates = [...indices].reverse();
+    let moved = true;
+    while (moved) {
+      moved = false;
+      for (const index of candidates) {
+        context.checkpoint(1);
+        const target = owned[index];
+        if (!target || index === 0 || !shallow(target)) continue;
+        const members = new Set(
+          [...owner].filter(([, value]) => value === index).map(([id]) => id),
+        );
+        const edges = [...members].flatMap((id) =>
+          (incomingEdges.get(id) ?? []).filter((edge) => !members.has(edge.block)),
+        );
+        if (!edges.length || edges.some((edge) => edge.transfer.target !== firstBlock(target)))
+          continue;
+        const edge = edges[0]!,
+          source = owner.get(edge.block);
+        if (
+          source === undefined ||
+          source === index ||
+          !owned[source] ||
+          edges.some((edge) => owner.get(edge.block) !== source)
+        )
+          continue;
+        const changed = attach(
+          owned[source]!,
+          edges.map((edge) => edge.transfer),
+          target,
+        );
+        if (!changed) continue;
+        owned[source] = changed;
+        owned[index] = null;
+        for (const id of members) owner.set(id, source);
+        ordered.push(edge.transfer.target);
+        moved = true;
+      }
+    }
+    return sequence(indices.flatMap((index) => (owned[index] ? [owned[index]!] : [])));
+  };
+  body = order(body);
+  const tails = new Map<string, number>();
+  const tailSize = (id: string, path = new Set<string>()): number => {
     const known = tails.get(id);
     if (known !== undefined) return known;
     const block = blocks.get(id);
-    let result = false;
-    if (block && id !== program.function.entry && depth < 4 && silent(block)) {
+    if (!block || id === program.function.entry || path.has(id) || path.size >= 4) return 0;
+    path.add(id);
+    let size = 0;
+    if (silent(block) || small(block)) {
       const control = block.control;
-      result =
-        control.kind === 'return' ||
-        (control.kind === 'jump' &&
-          control.transfer.target !== id &&
-          copies(control.transfer) <= 4 &&
-          isTail(control.transfer.target, depth + 1));
+      if (control.kind === 'return') size = 1;
+      else if (control.kind === 'jump' && copies(control.transfer) <= 4) {
+        const next = tailSize(control.transfer.target, path);
+        if (next > 0 && next < 4) size = next + 1;
+      }
     }
-    tails.set(id, result);
-    return result;
+    path.delete(id);
+    // A depth-limited search may fail only in this context. Cache successes,
+    // whose exact lengths remain valid from every incoming edge.
+    if (size > 0) tails.set(id, size);
+    return size;
   };
+  const isTail = (id: string): boolean => tailSize(id) > 0;
   // Each copy prints at most four edge copies and one return per level (depth <= 4).
   let budget = 128;
   const clone = (id: string, transfer: ParallelTransfer): Region => {
@@ -823,8 +1054,8 @@ export function planLayout(
       destination: string | null,
       nested: readonly Nest[],
     ): boolean =>
-      budget > 0 &&
-      isTail(transfer.target) &&
+      tailSize(transfer.target) > 0 &&
+      budget >= tailSize(transfer.target) &&
       transferAction(transfer, nested, destination, language, true) === 'goto';
     if (control.kind === 'jump') {
       if (!labeled(control.transfer, follow, nesting)) return region;
@@ -834,7 +1065,7 @@ export function planLayout(
     }
     const nested: readonly Nest[] =
       control.kind === 'switch' && language === 'c-like'
-        ? [...nesting, { kind: 'switch' }]
+        ? [...nesting, { kind: 'switch', id: control.id }]
         : nesting;
     return {
       ...region,
@@ -895,7 +1126,7 @@ export function planLayout(
     presented = prune(presented) ?? presented;
     for (const id of drop) hidden.add(id);
   }
-  return { body: presented, clones, duplicated, relocated, hidden: [...hidden] };
+  return { body: presented, clones, duplicated, relocated, ordered, hidden: [...hidden] };
 }
 
 /** Facts the loop-form planner needs from the printed program. */

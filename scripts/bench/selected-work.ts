@@ -21,6 +21,7 @@ import type {
 //   [--work 1000000] (count-only observation ceiling; public defaults stay unchanged)
 //   [--work-sites true|all|PHASE] (expensive checkpoint-site census, never timing)
 //   [--emitter c-like|python-like] (one dialect per fresh isolated public project)
+//   [--view source|checked] (same explicit presentation view in both modes)
 // Counts are diagnostic evidence, deliberately not latency/throughput benchmarks.
 const flags = new Map<string, string>();
 for (let i = 2; i < process.argv.length; i += 2) {
@@ -40,6 +41,7 @@ for (let i = 2; i < process.argv.length; i += 2) {
         '--work',
         '--work-sites',
         '--emitter',
+        '--view',
       ].includes(flag),
     'Expected a documented flag/value pair',
   );
@@ -50,6 +52,8 @@ const mode = flags.get('--mode') ?? 'diagnose';
 assert.ok(mode === 'diagnose' || mode === 'public');
 const emitter = flags.get('--emitter') ?? 'c-like';
 assert.ok(emitter === 'c-like' || emitter === 'python-like');
+const view = flags.get('--view') ?? 'source';
+assert.ok(view === 'source' || view === 'checked');
 const { contractPath, binaries } = await loadSelectedContract(flags);
 const selectedBinary = flags.get('--binary') ?? 'sqlite3-arm64';
 const target = binaries.find((entry) => entry.name === selectedBinary);
@@ -307,6 +311,7 @@ report({
   contract: contractPath,
   selected: selectedNames,
   emitter,
+  view,
   import_budget: budgetFor(importLimit),
   query_budget: budgetFor(instructionLimit),
   observation:
@@ -348,7 +353,7 @@ try {
         assert.ok(fn, `Missing reviewed function ${name}`);
         const result = await service.execute(
           'function_decompile',
-          { ...scope, function_id: fn.id, wait: true, options: { emitter } },
+          { ...scope, function_id: fn.id, wait: true, options: { emitter, view } },
           {
             onProgress(job) {
               events.push({ phase: job.progress.phase, state: job.state });
@@ -406,6 +411,8 @@ try {
     }
   } else {
     const { MachOLoader } = await import('../../src/loaders/macho/index.js');
+    const { elfLoader } = await import('../../src/loaders/elf/index.js');
+    const { peLoader } = await import('../../src/loaders/pe/index.js');
     const { SqliteProjectStore } = await import('../../src/project/store/index.js');
     const { prepareQueryImport } = await import('../../src/service/queries/prepare.js');
     const { executeDecompilation } = await import('../../src/service/analysis/index.js');
@@ -413,7 +420,13 @@ try {
     const input = await readFile(target.path);
     const bytes = new core.ImmutableBytes(input);
     const sha256 = core.contentHash(input);
-    const image = new MachOLoader().load(
+    const loader =
+      input[0] === 0x4d && input[1] === 0x5a
+        ? peLoader
+        : input[0] === 0x7f && input[1] === 0x45 && input[2] === 0x4c && input[3] === 0x46
+          ? elfLoader
+          : new MachOLoader();
+    const image = loader.load(
       { bytes, sha256, image_id: core.imageIdentity(sha256), slice_id: null },
       context(importLimit),
     );
@@ -469,7 +482,7 @@ try {
           revision: 2,
           function_id: fn.id,
           wait: true,
-          options: { emitter },
+          options: { emitter, view },
           budget: budgetFor(instructionLimit),
         });
         try {

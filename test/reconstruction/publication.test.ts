@@ -12,6 +12,13 @@ import {
 } from '../../src/reconstruction/validate.js';
 import { builder, provenance, register, slice } from '../ir/support.js';
 import { emit, execute } from '../emitters/c/support.js';
+import {
+  occurrenceAction,
+  planLoopExits,
+  visitTransfers,
+} from '../../src/emitters/source-control.js';
+import type { EmittedEdge } from '../../src/reconstruction/local-control-validation.js';
+import type { ParallelTransfer } from '../../src/presentation/index.js';
 
 const i32 = integer(32),
   i64 = integer(64);
@@ -76,6 +83,58 @@ test('publication rejects the old multi-exit break interpretation and preserves 
         expected,
       ]);
   }
+});
+
+test('publication rejects exit flags without initialization, scope guards or the exact scope chain', () => {
+  const b = new IRBuilder(
+    slice,
+    entityIdentity(slice, 'function', 'publication-exit-flag'),
+    provenance,
+    'ssa',
+  );
+  const entry = b.block('entry', [i32]),
+    loop = b.block('loop', [i32]),
+    step = b.block('step'),
+    done = b.block('done');
+  entry.jump(loop, entry.parameters);
+  loop.terminate({
+    kind: 'switch',
+    value: loop.parameters[0]!,
+    cases: [{ bits: 0n, edge: loop.edge(done) }],
+    otherwise: loop.edge(step),
+  });
+  step.jump(loop, [step.int('sub', loop.parameters[0]!, step.constant(i32, 1n))]);
+  done.return([]);
+  const fn = plan(b.finish(entry, [])).function;
+  const routes = planLoopExits(fn.body, 'c-like', context());
+  assert.equal(routes.size, 1);
+  const emitted = new Map<ParallelTransfer, EmittedEdge>();
+  visitTransfers(fn.body, 'c-like', context(), (occurrence) => {
+    const action = occurrenceAction(occurrence, 'c-like'),
+      route = routes.get(occurrence.transfer);
+    assert.notEqual(action, 'loop-exit');
+    emitted.set(
+      occurrence.transfer,
+      route
+        ? { kind: 'loop-exit', ...route }
+        : action === 'goto'
+          ? { kind: 'goto', target: occurrence.transfer.target }
+          : { kind: action as 'fallthrough' | 'break' | 'continue' },
+    );
+  });
+  const [transfer, route] = [...routes][0]!;
+  const initialized = new Set([route.loop]);
+  const guards = new Map(route.through.slice(0, -1).map((id) => [id, initialized]));
+  const validate = (init: ReadonlySet<string>, paths: ReadonlyMap<string, ReadonlySet<string>>) =>
+    validateRenderedTransfers(fn, new Set(), 'c-like', context(), new Set(), emitted, {
+      initialized: init,
+      guards: paths,
+    });
+  assert.doesNotThrow(() => validate(initialized, guards));
+  assert.throws(() => validate(new Set(), guards), invariant);
+  assert.throws(() => validate(initialized, new Map()), invariant);
+  emitted.set(transfer, { kind: 'loop-exit', ...route, through: [route.loop] });
+  assert.throws(() => validate(initialized, guards), invariant);
 });
 
 test('publication rejects missing synthesized definitions and edge-specific phi assignments', () => {

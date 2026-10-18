@@ -107,11 +107,12 @@ test(
     const oracles = new Map<string, SourceCallOracle>();
     // Checked view: observed native inputs never establish complete source arity.
     // Source view: every other callee here is fully analyzed and register-only, so
-    // it closes with a recorded arity_closure inference. Recursive groups, stack
-    // arguments and the FPCR-guarded FP leaf (unknown effect/exit) stay open.
+    // it closes with a recorded arity_closure inference, even when the caller also
+    // writes its own frame (fp_caller): a callee that reads no incoming stack cannot
+    // observe those bytes. Recursive groups and stack arguments stay open.
     let view: 'source' | 'checked' = 'source';
     let closures = 0;
-    const open = new Set(['recursive', 'mutual_a', 'mutual_b', 'stack_leaf', 'fp_leaf']);
+    const open = new Set(['recursive', 'mutual_a', 'mutual_b', 'stack_leaf']);
     const register = (
       name: string,
       arity: number,

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createOperationContext, entityIdentity, fingerprint } from '../../src/core/index.js';
-import { Writer } from '../../src/emitters/writer.js';
+import { ReferenceUnions, Writer } from '../../src/emitters/writer.js';
 import type { Origin } from '../../src/ir/index.js';
 import { image, slice } from '../ir/support.js';
 
@@ -86,4 +86,37 @@ test('prepared mapping references preserve ordered proof subjects and become imm
   const wrongOrigin = writer.references();
   wrongOrigin.add(ids[1]!);
   assert.throws(() => writer.map(origin, 0, wrongOrigin), TypeError);
+});
+
+test('inference reference unions share exact immutable sets across orders and sparse words', () => {
+  const controller = new AbortController();
+  let work = 0;
+  const base = createOperationContext({ signal: controller.signal });
+  const unions = new ReferenceUnions({
+    ...base,
+    checkpoint: (charge) => {
+      work += charge;
+      base.checkpoint(charge);
+    },
+  });
+  const a = Object.freeze([0, 31, 32, 999999, 31]),
+    b = Object.freeze([63, 65535, 32]);
+  const first = unions.begin();
+  first.add(a);
+  first.add(b);
+  const result = first.finish();
+  assert.deepEqual(result, [0, 31, 32, 63, 65535, 999999]);
+  assert.ok(Object.isFrozen(result));
+  const second = unions.begin();
+  second.add(b);
+  second.add(a);
+  const before = work;
+  second.add(a);
+  assert.equal(work, before, 'an already included immutable array is not scanned again');
+  assert.equal(second.finish(), result, 'equivalent sets share the materialized array');
+  const different = unions.begin();
+  different.add([0, 31, 32, 63, 65534, 999999]);
+  assert.notEqual(different.finish(), result);
+  controller.abort();
+  assert.throws(() => second.add(a), { code: 'cancelled' });
 });

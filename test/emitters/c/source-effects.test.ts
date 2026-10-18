@@ -40,7 +40,14 @@ for (const language of ['c-like', 'python-like'] as const) {
     const record = output.local_validation?.find((item) => item.rule === 'compact_unknown_effect');
     assert.equal(record?.status, 'verified');
     assert.deepEqual(JSON.parse(record!.reason!), contract);
-    assert.equal(record?.subject_ids?.length, 2);
+    const unknown = ir.blocks
+      .flatMap((block) => block.instructions)
+      .find((node) => node.kind === 'unknown_effect')!;
+    assert.ok(unknown.kind === 'unknown_effect');
+    assert.deepEqual(
+      new Set(record?.subject_ids),
+      new Set([unknown.id, unknown.effect_in.id, unknown.effect_out.id]),
+    );
     const checked = emit(ir, { source }, language, 'checked').emission;
     assert.match(checked.text, /opaque_effect\(/);
     assert.match(checked.text, /boundary\("unknown_read_write"/);
@@ -94,7 +101,14 @@ for (const language of ['c-like', 'python-like'] as const) {
   test(`${language} exhausted presentation capacity retains explicit unknown and call contracts`, () => {
     const b = builder(`bounded-effects-${language}`),
       block = b.block('entry');
-    for (let index = 0; index < 270; index++) block.unknown(`unsupported ${index}`, clobbers);
+    const registers = Array.from({ length: 9 }, (_, index) =>
+      register(`scratch${index}`, 64, 0, 'replace_root', `x86_64:scratch${index}`),
+    );
+    for (let index = 0; index < 270; index++)
+      block.unknown(`unsupported ${index}`, {
+        ...clobbers,
+        registers: registers.filter((_, bit) => ((index + 1) & (1 << bit)) !== 0),
+      });
     block.call(
       { kind: 'direct', address: { image_id: image, space: 'va', value: 0x4000n } },
       [],

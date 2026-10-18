@@ -36,7 +36,7 @@ export function recombineBitSlices(
     result.type.kind !== 'integer' ||
     bitWidth(result.type) > 128 ||
     !['concat', 'insert', 'integer'].includes(expression.kind) ||
-    (expression.kind === 'integer' && !['or', 'xor'].includes(expression.op))
+    (expression.kind === 'integer' && !['or', 'xor', 'shl'].includes(expression.op))
   )
     return null;
   const equal = (a: Lane, b: Lane): boolean =>
@@ -45,7 +45,10 @@ export function recombineBitSlices(
       typeof b === 'object' &&
       a.value.id === b.value.id &&
       a.offset === b.offset);
-  const trace = (root: Expression): { bits: Lane[]; leaves: string[] } | null => {
+  const trace = (
+    root: Expression,
+    rootValue = result,
+  ): { bits: Lane[]; leaves: string[] } | null => {
     let work = 0;
     const leaves: string[] = [],
       seen = new Set<string>(),
@@ -105,12 +108,32 @@ export function recombineBitSlices(
         }
       } else if (definition?.kind === 'integer') {
         const right = observe(definition.right.id);
+        let constant: bigint | null =
+          right?.kind === 'constant'
+            ? BigInt.asUintN(bitWidth(definition.right.type), right.bits)
+            : null;
+        if (constant === null && ['shl', 'lshr', 'mul'].includes(definition.op)) {
+          const before = leaves.length;
+          const lanes = get(definition.right);
+          if (
+            lanes &&
+            leaves.length === before &&
+            lanes.every((lane) => typeof lane === 'number')
+          ) {
+            let bits = 0n;
+            lanes.forEach((lane, index) => {
+              if (lane === 1) bits |= 1n << BigInt(index);
+            });
+            constant = bits;
+          } else {
+            while (leaves.length > before) seen.delete(leaves.pop()!);
+          }
+        }
         let count: bigint | null = null;
-        if (right?.kind === 'constant') {
-          const n = BigInt.asUintN(bitWidth(definition.right.type), right.bits);
-          if (definition.op === 'shl' || definition.op === 'lshr') count = n;
-          else if (definition.op === 'mul' && n > 0n && (n & (n - 1n)) === 0n)
-            count = BigInt(n.toString(2).length - 1);
+        if (constant !== null) {
+          if (definition.op === 'shl' || definition.op === 'lshr') count = constant;
+          else if (definition.op === 'mul' && constant > 0n && (constant & (constant - 1n)) === 0n)
+            count = BigInt(constant.toString(2).length - 1);
         }
         if (count !== null) {
           const source = get(definition.left);
@@ -155,7 +178,7 @@ export function recombineBitSlices(
       }
       return Array.from({ length: width }, (_, offset) => ({ value, offset }));
     };
-    const bits = visit(result, root);
+    const bits = visit(rootValue, root);
     return bits ? { bits, leaves } : null;
   };
   const original = trace(expression);
@@ -191,8 +214,46 @@ export function recombineBitSlices(
     });
   };
   let candidate: Expression | null = null;
+  // A zero operand is removable only when it has no opaque dependency. In
+  // particular, x & 0 is not interchangeable with a literal zero when x is
+  // unknown/undefined. Keep this test separate from lane reconstruction so an
+  // arbitrary (possibly noncontiguous) retained operand can stay intact.
+  if (expression.kind === 'integer') {
+    const rightDefinition = observe(expression.right.id);
+    const right = rightDefinition && trace(rightDefinition, expression.right);
+    if (
+      right &&
+      !right.leaves.length &&
+      right.bits.every((lane) => lane === 0) &&
+      sameType(result.type, expression.left.type)
+    )
+      candidate = { kind: 'cast', op: 'bitcast', value: expression.left };
+    if (!candidate && expression.op !== 'shl') {
+      const leftDefinition = observe(expression.left.id);
+      const left = leftDefinition && trace(leftDefinition, expression.left);
+      if (
+        left &&
+        !left.leaves.length &&
+        left.bits.every((lane) => lane === 0) &&
+        sameType(result.type, expression.right.type)
+      )
+        candidate = { kind: 'cast', op: 'bitcast', value: expression.right };
+    }
+  }
+  if (!candidate && bits.every((lane) => typeof lane === 'number')) {
+    let constant = 0n;
+    bits.forEach((lane, index) => {
+      if (lane === 1) constant |= 1n << BigInt(index);
+    });
+    candidate = { kind: 'constant', bits: constant };
+  }
   const first = bits[0];
-  if (typeof first === 'object' && first.value.id !== result.id && first.offset === 0) {
+  if (
+    !candidate &&
+    typeof first === 'object' &&
+    first.value.id !== result.id &&
+    first.offset === 0
+  ) {
     let used = 0;
     while (used < bits.length) {
       const lane = bits[used]!;

@@ -110,18 +110,50 @@ int main(void) {
         );
         assert.equal(observed.exit, 'machine_return');
         assert.deepEqual(observed.values, [expected[index]![0]!], `${emitter}: ${a}, ${b}`);
-        if (index === 0)
-          assert.equal(
-            execute(
-              emission,
-              new Map([
-                [formals[0]!.statement_id, bits(a)],
-                [formals[1]!.statement_id, bits(b)],
-              ]),
-            ).exit,
-            'unknown',
-            'FPCR is not silently assumed by default',
+        if (index === 0) {
+          // Source view states the FPCR premise once as an explicit requirement
+          // (not silently) covering every original guard site; the checked view
+          // keeps those guards, so an unacknowledged environment stays unknown.
+          const environments =
+            emission.requirements?.filter((item) => item.kind === 'fp_environment') ?? [];
+          assert.equal(environments.length, 1, 'FPCR is not silently assumed by default');
+          assert.equal(environments[0]!.status, 'assumption');
+          const guards = environments[0]!.sites.filter((site) => site.predicate_value_id).length;
+          assert.ok(guards > 0, emission.text);
+          const checked: ToolResult<'function_decompile'> = await session.decompile(
+            { name: '_fixture_float' },
+            { emitter, view: 'checked' },
           );
+          assert.ok('data' in checked && checked.data.delivery === 'inline');
+          const checkedEmission: WireEmission = checked.data.emission;
+          assert.equal(
+            checkedEmission.text.match(/requirement_predicate\(/g)?.length,
+            guards,
+            checkedEmission.text,
+          );
+          const checkedInputs = new Map(
+            emittedFormals(checkedEmission)
+              .filter((formal) => formal.name !== 'entry_sp')
+              .map((formal, argument) => [formal.statement_id, bits(argument ? b : a)] as const),
+          );
+          assert.equal(
+            execute(checkedEmission, checkedInputs).exit,
+            'unknown',
+            'FPCR is not silently assumed by the checked view',
+          );
+          const acknowledged = execute(
+            checkedEmission,
+            checkedInputs,
+            new Map(),
+            0n,
+            new Map(),
+            new Map(),
+            new Map(),
+            acknowledgeRequirements(checkedEmission),
+          );
+          assert.equal(acknowledged.exit, 'machine_return');
+          assert.deepEqual(acknowledged.values, [expected[index]![0]!]);
+        }
       }
       const consumer: ToolResult<'function_decompile'> = await session.decompile(
         { name: '_fixture_float_consumer' },

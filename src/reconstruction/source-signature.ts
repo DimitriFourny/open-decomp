@@ -218,7 +218,7 @@ export function projectSourceFloating(
       program.function.id,
       'typed IEEE FP32/FP64 values and closed, same-width bitcast/phi/select carriers with no integer consumers; FP primary return classified by the target ABI',
       [...floating.keys()].slice(0, 64),
-      `${floating.size} source values retain their exact IEEE bit patterns; arithmetic, environment guards, memory accesses and NaN payload construction remain explicit`,
+      `${floating.size} source values retain their exact IEEE bit patterns; this type projection does not change arithmetic or control, whose independent environment and payload gates govern native presentation`,
     )
   )
     return {};
@@ -504,6 +504,7 @@ export function projectSourceSignature(
     const expression = expressions.get(value.id);
     return (
       expression !== undefined &&
+      !validation.skipExhaustedBitvector(value.id) &&
       validation.check(
         'bitvector',
         value.id,

@@ -135,7 +135,7 @@ export function observeSelectedWork(observation: Observation): () => void {
         );
         replace(
           'const decodeReasons = new Set<string>()',
-          `${probe('pipeline_emit_end', '{}')} const decodeReasons = new Set<string>()`,
+          `${probe('pipeline_emit_end', '{ emission_fingerprint: fingerprint(emitted.emission), text_fingerprint: fingerprint(emitted.emission.text), inference_records: emitted.emission.inferences.length, inference_references: emitted.emission.inferences.reduce((count, record) => count + record.subject_refs.length + record.instruction_refs.length + record.evidence_refs.length + record.range_refs.length, 0) }')} const decodeReasons = new Set<string>()`,
         );
         replace(
           'const evidence = closeEvidence(',
@@ -151,16 +151,16 @@ export function observeSelectedWork(observation: Observation): () => void {
         );
       } else if (kind === 'renderer') {
         replace(
-          'this.program = reconstruct(input, context);',
-          `${probe('renderer_reconstruct_begin', '{}')} this.program = reconstruct(input, context); ${probe('renderer_reconstruct_end', '{ values: this.program.values.size, live: this.program.live.size, retained: this.program.retained.size, parameters: this.program.parameters.length, unknown_effects: [...this.program.blocks.values()].reduce((n, block) => n + block.statements.filter(node => node.kind === "unknown_effect").length, 0) }')}`,
+          "this.program = reconstruct(input, context, options.view === 'checked' ? 'checked' : 'source');",
+          `${probe('renderer_reconstruct_begin', '{}')} this.program = reconstruct(input, context, options.view === 'checked' ? 'checked' : 'source'); ${probe('renderer_reconstruct_end', '{ values: this.program.values.size, live: this.program.live.size, retained: this.program.retained.size, parameters: this.program.parameters.length, unknown_effects: [...this.program.blocks.values()].reduce((n, block) => n + block.statements.filter(node => node.kind === "unknown_effect").length, 0) }')}`,
         );
         replace(
           'validateReconstruction(this.program, context);',
           `${probe('renderer_validation_begin', '{}')} validateReconstruction(this.program, context);`,
         );
         replace(
-          'validateRenderedTransfers(input.function, this.gotos, language, context);',
-          `validateRenderedTransfers(input.function, this.gotos, language, context); ${probe('renderer_validation_end', '{}')}`,
+          '    validateEmittedControl(',
+          `    ${probe('renderer_validation_end', '{}')} validateEmittedControl(`,
         );
         replace(
           'const subjects = references.ids;',

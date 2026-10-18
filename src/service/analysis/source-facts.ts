@@ -15,7 +15,7 @@ import { fingerprint, OperationError, U64_LIMIT, type CanonicalValue } from '../
 import type { CallAnalysisResult, SuppliedCallContract } from '../../analysis/calls/index.js';
 import { observePreparedCallInterfaces } from '../../analysis/calls/observed.js';
 import { createCallResultDemandIndex } from '../../analysis/calls/result-demands.js';
-import { recoverDataAddress } from '../../analysis/strings/source-data.js';
+import { recoverDataAddress, recoverDataBytes } from '../../analysis/strings/source-data.js';
 import { sourceConstantValues } from '../../reconstruction/source-data.js';
 import { cSourceName } from '../../metadata/symbols/c-names.js';
 import { inspectRegister, type StackFact } from '../../analysis/stack/index.js';
@@ -78,6 +78,8 @@ import {
 import { needsSourceFpEnvironment } from '../../reconstruction/source-requirements.js';
 import { nativeContextKey } from './native-context.js';
 import { prepareNativeContext } from './native-context-prepare.js';
+import { formatArgumentSignatures } from './source-variadic.js';
+import { nativeLibraryTails } from './native-library-tails.js';
 
 interface SourceFactsInput {
   readonly scope: AnalysisScope;
@@ -181,10 +183,14 @@ function observeParameters(
   demandedReturns: readonly RegisterDescriptor[],
   assumedEntry = false,
   interfaceIndex?: NativeInterfaceIndex,
+  assumedParameters: readonly RegisterDescriptor[] = [],
 ): ObservedInterface {
   const candidates = parameterRegisters(abi),
     byRoot = new Map(candidates.map((register) => [register.root, register]));
   const observed = new Map<string, RegisterDescriptor>();
+  // Source-only invocation refinement: substituted constants/identity aliases
+  // remain actual ABI inputs and must not create a fictitious gap in the prefix.
+  for (const register of assumedParameters) observed.set(register.root, register);
   const definitions = new Map<string, Expression>();
   const values = new Map<string, Value>();
   const storageCopies: StorageCopy[] = [];
@@ -399,9 +405,9 @@ function observeParameters(
   // Complete by callee reads: nothing outside the observed register prefix can
   // be read, directly or through a callee/tail target whose own list is closed.
   // Recursive groups never close: their seeds are open and closure needs every
-  // dependency closed. Callers still require no possible caller stack argument.
+  // dependency closed. Complete reads, not caller-written extent, bound arity.
   const closedCallee = (callee: NativeInterface | undefined): boolean =>
-    callee?.argument_list_closure === 'callee_reads' &&
+    callee?.argument_list_closure !== undefined &&
     callee.parameter_state !== 'ambiguous' &&
     !callee.variadic_stack;
   const closure =
@@ -511,6 +517,45 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
     ),
   );
   const constant = sourceConstantValues(expressions, context, image.id);
+  const literalWidths = new Map<string, number>();
+  const writes: { address: bigint; size: bigint }[] = [];
+  let unknownWrite = false;
+  for (const block of input.ir.blocks)
+    for (const node of block.instructions) {
+      context.checkpoint(1);
+      if (
+        node.kind === 'call' ||
+        (node.kind === 'unknown_effect' &&
+          ((block.terminator.kind !== 'unknown' && block.terminator.kind !== 'trap') ||
+            block.instructions.some((item) => item.kind === 'load')))
+      )
+        unknownWrite = true;
+      if (node.kind === 'store') {
+        const address = constant(node.address);
+        if (address !== undefined)
+          writes.push({ address, size: BigInt(Math.ceil(bitWidth(node.value.type) / 8)) });
+        else unknownWrite = true;
+      }
+      if (
+        node.kind !== 'load' ||
+        node.access.volatile ||
+        (node.result.type.kind !== 'integer' && node.result.type.kind !== 'float')
+      )
+        continue;
+      const width = bitWidth(node.result.type),
+        bits = constant(node.address);
+      if (
+        width % 8 ||
+        bits === undefined ||
+        bits >= U64_LIMIT ||
+        bits % BigInt(node.access.alignment) !== 0n
+      )
+        continue;
+      const address: Address = { image_id: image.id, space: 'va', value: bits };
+      const key = addressKey(address);
+      candidates.set(key, address);
+      literalWidths.set(key, Math.max(literalWidths.get(key) ?? 0, width / 8));
+    }
   for (const block of input.ir.blocks)
     for (const node of block.instructions) {
       context.checkpoint(1);
@@ -619,6 +664,17 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
     const aliases = names.get(key),
       name = aliases?.size === 1 ? [...aliases][0] : undefined;
     const recovered = recoverDataAddress(image, address, context, symbols);
+    const byteLength = literalWidths.get(key);
+    const constantBytes =
+      !unknownWrite &&
+      byteLength !== undefined &&
+      !writes.some(
+        (write) =>
+          write.address < address.value + BigInt(byteLength) &&
+          write.address + write.size > address.value,
+      )
+        ? recoverDataBytes(image, address, byteLength, context)
+        : undefined;
     const spelling =
       recovered && (name ?? recovered.name)
         ? sourceNames.get(
@@ -628,6 +684,7 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
     if (recovered)
       result.push({
         ...recovered,
+        ...(constantBytes === undefined ? {} : { constant_bytes: constantBytes }),
         ...(name === undefined ? {} : { name }),
         ...(spelling === undefined ? {} : { source_name: spelling }),
       });
@@ -779,6 +836,60 @@ function observeNativeUnit(
     );
     observed = { ...observed, context_assumptions: unit.context_assumptions };
   }
+  if (unit.analysis && !unit.budget_truncated) {
+    const libraryTails = nativeLibraryTails(
+      unit.ir,
+      input.image,
+      input.functions,
+      input.references,
+      input.library,
+      input.components.abi,
+      context,
+    );
+    if (
+      unit.context_assumptions ||
+      libraryTails.length ||
+      [...interfaces.values()].some((callee) => callee.source_interface)
+    ) {
+      const sourceInterfaces = new Map(
+        [...interfaces].map(([id, callee]) => [id, callee.source_interface ?? callee]),
+      );
+      for (const tail of libraryTails)
+        sourceInterfaces.set(tail.call_id, {
+          ...tail,
+          written_result: { registers: tail.returns, types: tail.return_types ?? [] },
+        });
+      const sourceObserved = observeParameters(
+        unit.ir,
+        input.components.abi,
+        unit.analysis,
+        context,
+        sourceInterfaces,
+        seed,
+        demandedReturns,
+        unit.context_assumptions !== undefined,
+        unit.interface_index,
+        unit.context_assumptions
+          ? [
+              ...unit.context_assumptions.constants.map((item) => item.register),
+              ...unit.context_assumptions.aliases.flat(),
+            ]
+          : [],
+      );
+      if (sourceObserved.argument_list_closure)
+        observed = {
+          ...observed,
+          source_interface: {
+            ...mergeNativeInterface(sourceObserved, observed, input.components.abi, context),
+            argument_list_closure: [...sourceInterfaces.values()].some(
+              (callee) => callee.argument_list_closure === 'library_contract',
+            )
+              ? 'library_contract'
+              : 'callee_reads',
+          },
+        };
+    }
+  }
   if (unit.budget_truncated) {
     const { argument_list_closure: _closure, ...truncated } = observed;
     observed = {
@@ -831,6 +942,17 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   // local observation for its call and replaces it.
   const callees = new Map<string, InferredCallee>(
     observedCalls.map((call) => [call.call_id, call]),
+  );
+  const sourceCallees = new Map(
+    nativeLibraryTails(
+      input.ir,
+      image,
+      input.functions,
+      input.references,
+      input.library,
+      abi,
+      context,
+    ).map((callee) => [callee.call_id, callee]),
   );
   let dependencies = nativeDependencies(input, input.ir, context, undefined, false, demand_index);
   const targets = new Map<string, FunctionRecord>();
@@ -953,6 +1075,10 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         evidence_ids: selected.evidence_ids,
         reasons: input.coverage_reasons,
         budget_truncated: false,
+        arity_complete:
+          input.coverage_reasons.length === 0 &&
+          input.types.calls?.state === 'complete' &&
+          input.types.calls.stack.state === 'complete',
         demand_index,
         interface_index: createNativeInterfaceIndex(input.ir, abi, summaryContext),
         ...(scope.dependencies ? { dependency_readset: scope.dependencies.finish() } : {}),
@@ -1076,6 +1202,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         parameter_shapes,
         written_result: _written,
         argument_list_closure,
+        source_interface,
         ...interface_
       } = observed;
       const proofIds = [...(summary?.evidence_ids ?? dependency.target.evidence_ids)];
@@ -1115,11 +1242,19 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         target: dependency.target.entry,
         target_subject_id: dependency.target.id,
         ...interface_,
-        // Only a complete summary (no limits, failures or inherited open
-        // dependencies) keeps its complete-by-callee-reads basis.
-        ...(argument_list_closure && summary?.complete ? { argument_list_closure } : {}),
+        // Optional source metadata can remain partial (for example absent DWARF)
+        // while the bounded machine call/stack summary proves complete reads.
+        ...(argument_list_closure && summary?.arity_complete ? { argument_list_closure } : {}),
         evidence_ids: proofIds,
       });
+      if (source_interface && summary?.arity_complete)
+        sourceCallees.set(dependency.call_id, {
+          ...source_interface,
+          call_id: dependency.call_id,
+          target: dependency.target.entry,
+          target_subject_id: dependency.target.id,
+          evidence_ids: proofIds,
+        });
       summarized.add(dependency.call_id);
       for (const shape of parameter_shapes ?? []) evidence.push(...shape.evidence);
       if (summary?.reasons.length)
@@ -1258,6 +1393,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         parameter_shapes: _shapes,
         written_result: _written,
         argument_list_closure: _closure,
+        source_interface: _sourceInterface,
         ...interface_
       } = observed;
       callees.set(dependency.call_id, {
@@ -1287,15 +1423,24 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         scope.dependencies.replay(unit.dependency_readset);
     }
   }
+  const addresses = sourceAddresses(input);
   return {
     abi,
     callees: [...callees.values()],
+    source_callees: [...sourceCallees.values()],
     diagnostics,
     evidence,
-    addresses: sourceAddresses(input),
+    addresses,
     memory_transfers,
     function_return_demands: [...functionReturnDemands.values()],
     ...(function_returns === undefined ? {} : { function_returns }),
     call_argument_counts: actualArgumentCounts(input.types.calls, input.library, context),
+    call_argument_signatures: formatArgumentSignatures(
+      input.types.calls,
+      input.library,
+      addresses,
+      abi,
+      context,
+    ),
   };
 }
