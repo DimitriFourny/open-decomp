@@ -528,6 +528,52 @@ The x86-64 `heldout_weighted` source view now returns `double` with the multiply
 - `(value1 | ((uint64_t)0 << 32))`;
 - byte-offset `8 + (uintptr_t)arg1 + i * 8` accesses.
 
+## Source view round 6, three-tool frozen-suite rerun (2026-10-18, commit `e1c8830`)
+
+Root: `~/Documents/open-decomp-quality-round6-2026-10-18/`. Before this run, every earlier `~/Documents/open-decomp-*` root was found deleted outside this workflow, including the round 2–5 roots, the heldout inputs and `open-decomp-evidence-archives`. The run reconstructed what it needed (`records/round5-baseline-reconstruction.json`):
+
+- **Inputs:** extracted from the hash-verified `.local/evidence/` archive.
+- **Round-5 OD and Ghidra baseline:** rebuilt from commit `61aa5e9`. The rebuilt texts match the round-5 reviewers' recorded hashes.
+- **Round-5 angr baseline:** `/tmp/od-angr-smoke`.
+- **Unchanged tools:** Ghidra 70/70 and angr 120/120 texts are byte-identical to round 5.
+- **Gold:** `427f9357…`, 736/736.
+
+Four fresh reviewers took part (opus-worker A and sonnet-worker B per set). This round's instructions asked them to read every packet. They still reused scores for byte-identical repeated texts after confirming the match.
+
+| Lane                    | Open Decomp                                          | Ghidra                   | angr                   |
+| ----------------------- | ---------------------------------------------------- | ------------------------ | ---------------------- |
+| Exact executable subset | **50 cells, 1850/1850** (round 5: 46; no compile 20) | 36 cells, 1346/1346      | 42 cells, 1542/1542    |
+| Blind preference vs OD  | —                                                    | Ghidra 66, OD 36, tie 18 | angr 62, OD 82, tie 16 |
+
+Round 5's preferences were Ghidra 80, OD 29, tie 11, and angr 52, OD 72, tie 36. The four newly passing cells are Mach-O ARM64 O2 `heldout_weighted`; no OD cell regressed.
+
+| Dimension            | OD   | Ghidra | Gap r5 → r6   | OD (angr set) | angr |
+| -------------------- | ---- | ------ | ------------- | ------------- | ---- |
+| Algorithm            | 3.29 | 3.60   | 0.56 → 0.31   | 3.26          | 3.05 |
+| Control flow         | 2.98 | 3.42   | 0.44 → 0.44   | 3.08          | 2.69 |
+| Clutter              | 2.32 | 2.97   | 0.97 → 0.65   | 2.16          | 2.50 |
+| Style                | 2.50 | 2.83   | 0.63 → 0.33   | 2.35          | 2.38 |
+| Types/interfaces     | 3.12 | 2.47   | −0.43 → −0.65 | 2.73          | 2.42 |
+| Unresolved semantics | 3.49 | 3.79   | 0.45 → 0.30   | 3.42          | 2.99 |
+
+Results by function against Ghidra:
+
+| Function   | OD wins | Ghidra wins | Ties |
+| ---------- | ------: | ----------: | ---: |
+| `runs`     |      16 |           4 |    4 |
+| `saturate` |      16 |           8 |    0 |
+| `merge`    |       4 |          16 |    4 |
+| `roll`     |       0 |          16 |    8 |
+| `weighted` |       0 |          22 |    2 |
+
+The x86-64 `heldout_weighted` text is now a plain typed loop over `double*` with literals and `arg0[i + 1]`. What remains:
+
+- `while (true) … break` instead of a `do`/`while`;
+- NaN-exact `!(0.0 >= x)` instead of `0.0 < x`;
+- one `fp_eq` helper;
+- missing `const` on read-only FP pointers;
+- generic `valueN` names.
+
 ## Normalized four-lane performance (2026-10-17, commit `901602b`)
 
 Exclusive serialized slot (`.local/performance/quality.measurement.lock`), `dist/` aggregate `dd0ea263…` unchanged before/after, Node **v26.11.1** (not the historical 24.22.0 host), Ghidra 12.1.4, bridge `73ea1c8e…`. Protocol `scripts/bench/quality-persistent.py` unchanged: same MCP client for all four lanes (Open Decomp unobserved/observed, pinned Ghidra MCP bridge, persistent Ghidra `DecompInterface`), 11 equal requests in 156/156 matched cells, 3 fresh runs, 10 warm, 30 pings, balanced order. 1,716/1,716 observer/control pairs and 6/6 import controls equivalent. Raw evidence: `~/Documents/open-decomp-perf-2026-10-17-final/p25-normalized/comparison.json`.
