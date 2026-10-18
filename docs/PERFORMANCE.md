@@ -342,6 +342,18 @@ Same five frozen questions, binary, gold and rubric as runs 1–9; workflow adds
 
 All 12 fact atoms and 9/10 uncertainty atoms present on every side (the tenth qualified everywhere, as in run9); no unsupported claims. **Gate FAIL**: B now needs less manual repair for both reviewers, but carries more irrelevant bytes (both reviewers marked the `stack_slot`/`unaligned_uint64_t` helper contracts, call-clobber placeholder locals and native prologue/epilogue in the caller/callback cases). Packets A 5,445 / B 33,500 bytes; full wire A 47,822 / B 510,506 bytes.
 
+## Source view, frozen published suite rerun (2026-10-18, commit `16205c4`)
+
+Same frozen published suite and harness as the 2026-10-17 prospective rerun; Open Decomp output is now the default proof-carrying `source` view (`--view checked` keeps the explicit machine form). `dist/` aggregate `a9d8af0f…` (6,399 files) unchanged before/after; gold hash `427f9357…` reproduced (736/736). Root: `~/Documents/open-decomp-quality-round2-2026-10-18/`. Two new blank reviewers, all 60 available pairs.
+
+| Lane                     | 2026-10-17 (explicit view)         | 2026-10-18 (source view)                        | Ghidra              |
+| ------------------------ | ---------------------------------- | ----------------------------------------------- | ------------------- |
+| Availability (120 cells) | 80 texts, 36 complete / 44 partial | 80 texts, 36 / 44                               | 70 texts            |
+| Exact executable subset  | 0 cells                            | 4 cells, 156/156 cases (arity mismatch 34 → 30) | 36 cells, 1346/1346 |
+| Blind preference (120)   | Ghidra 120                         | Ghidra 116, tie 4                               | —                   |
+
+Mean ratings Open Decomp vs Ghidra (0–4): algorithm comprehension 2.67 vs 3.78; control flow 2.00 vs 3.43; clutter 0.57 vs 2.82; style 1.22 vs 2.65; types/interfaces 1.44 vs 2.52; unresolved semantics 2.50 vs 3.43. Clutter evidence quoted by reviewers is now dominated by unpromoted O0 frame slots (`*(uint32_t *)(entry_sp - 56) = …`), `boundary("unknown_read_write", …)` markers, sub-register byte/word recombination (`value8 | ((uint32_t)(uint24_t)(value8 >> 8) << 8)`), x86-64 frame saves, and physical-return overlays in functions without an established primary result.
+
 ## Normalized four-lane performance (2026-10-17, commit `901602b`)
 
 Exclusive serialized slot (`.local/performance/quality.measurement.lock`), `dist/` aggregate `dd0ea263…` unchanged before/after, Node **v26.11.1** (not the historical 24.22.0 host), Ghidra 12.1.4, bridge `73ea1c8e…`. Protocol `scripts/bench/quality-persistent.py` unchanged: same MCP client for all four lanes (Open Decomp unobserved/observed, pinned Ghidra MCP bridge, persistent Ghidra `DecompInterface`), 11 equal requests in 156/156 matched cells, 3 fresh runs, 10 warm, 30 pings, balanced order. 1,716/1,716 observer/control pairs and 6/6 import controls equivalent. Raw evidence: `~/Documents/open-decomp-perf-2026-10-17-final/p25-normalized/comparison.json`.
