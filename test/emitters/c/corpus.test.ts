@@ -229,7 +229,11 @@ test('source-level signed selections and loops preserve overflow and zero-trip b
                 : b!
               : words.slice(0, Number(b)).reduce((sum, word) => sum + word, 0n);
           assert.equal(observed.exit, 'machine_return');
-          assert.deepEqual(observed.values, [BigInt.asUintN(32, expected)]);
+          // Signed source results and unsigned machine words share these ABI bits.
+          assert.deepEqual(
+            observed.values.map((value) => BigInt.asUintN(32, value)),
+            [BigInt.asUintN(32, expected)],
+          );
         }
       }
     }

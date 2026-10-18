@@ -12,6 +12,7 @@ import { emitPythonLike } from '../../../src/emitters/python-like/index.js';
 import type { EmissionResult } from '../../../src/emitters/model.js';
 import { provenance, slice } from '../../ir/support.js';
 import { execute } from './support.js';
+import { DarwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
 
 const i32 = integer(32),
   i64 = integer(64);
@@ -28,11 +29,15 @@ const emit = (
   input: SSAForm,
   language: 'c-like' | 'python-like',
   view: 'source' | 'checked' = 'source',
+  source = false,
 ): EmissionResult => {
   const structured = structureControlFlow(input, createOperationContext());
   assert.ok(structured.value);
   return (language === 'python-like' ? emitPythonLike : emitC)(
-    { function: structured.value },
+    {
+      function: structured.value,
+      ...(source ? { source: { abi: new DarwinArm64Abi(), callees: [], addresses: [] } } : {}),
+    },
     { ...DEFAULT_ANALYSIS_OPTIONS, emitter: language, view },
     createOperationContext(),
   );
@@ -300,5 +305,84 @@ for (const language of ['c-like', 'python-like'] as const)
           assert.deepEqual(observed.values, [value], `${input}`);
           assert.equal(observed.memory.get(0x1000n), stored);
         }
+    });
+    test('unsigned widening copies share storage but signed extension stays explicit', () => {
+      for (const op of ['zero_extend', 'sign_extend'] as const) {
+        const b = program(`source-width-copy-${op}`),
+          entry = b.block('entry');
+        const byte = entry.load(integer(8), entry.constant(i64, 0x1000n));
+        const wide = entry.cast(op, i32, byte);
+        entry.store(entry.constant(i64, 0x1004n), wide);
+        entry.return([wide]);
+        const input = b.finish(entry, [i32]),
+          source = emit(input, language);
+        if (op === 'zero_extend') {
+          assert.equal(name(source, byte), name(source, wide), source.emission.text);
+          assert.ok(rules(source).includes('phi_copy_coalescing'));
+        } else assert.notEqual(name(source, byte), name(source, wide));
+        for (const value of [0, 127, 128, 255]) {
+          const observed = execute(source.emission, new Map(), memory([value]));
+          const expected =
+            op === 'zero_extend'
+              ? BigInt(value)
+              : BigInt.asUintN(32, BigInt.asIntN(8, BigInt(value)));
+          assert.deepEqual(observed.values, [expected]);
+          assert.equal(observed.events.length, 2);
+        }
+      }
+    });
+
+    test('multi-use values and exit copies retain explicit loop tests', () => {
+      for (const effect of [false, true]) {
+        const b = program(`source-chain-${effect}`);
+        const entry = b.block('entry', [i32]),
+          head = b.block('head', [i32]);
+        const second = b.block('second'),
+          body = b.block('body');
+        const exhausted = b.block('exhausted'),
+          done = b.block('done', [i32]);
+        const count = entry.parameters[0]!;
+        entry.jump(head, [count]);
+        const left = head.load(i32, head.constant(i64, 0x1000n));
+        if (effect) head.store(head.constant(i64, 0x1008n), left);
+        head.branch(
+          head.compare('eq', left, head.constant(i32, 0n)),
+          head.edge(done, [left]),
+          head.edge(second),
+        );
+        const right = second.load(i32, second.constant(i64, 0x1004n));
+        second.branch(
+          second.compare('ne', left, right),
+          second.edge(done, [left]),
+          second.edge(body),
+        );
+        const remaining = head.parameters[0]!;
+        body.branch(
+          body.compare('ule', remaining, body.constant(i32, 1n)),
+          body.edge(exhausted),
+          body.edge(head, [body.int('sub', remaining, body.constant(i32, 1n))]),
+        );
+        exhausted.return([exhausted.constant(i32, 99n)]);
+        done.return(done.parameters);
+        const input = b.finish(entry, [i32]),
+          source = emit(input, language, 'source', true),
+          checked = emit(input, language, 'checked', true);
+        assert.doesNotMatch(source.emission.text, /while \(.+ && .+\)/);
+        for (const [left, right, n, result, loads] of [
+          [0, 7, 2, 0, 1],
+          [5, 7, 2, 5, 2],
+          [5, 5, 2, 99, 4],
+        ]) {
+          for (const output of [source, checked]) {
+            const observed = execute(
+              output.emission,
+              new Map([[count.id, BigInt(n!)]]),
+              memory([left!, right!]),
+            );
+            assert.deepEqual(observed.values, [BigInt(result!)]);
+            assert.equal(observed.events.length, loads! + (effect ? (loads === 4 ? 2 : 1) : 0));
+          }
+        }
+      }
     });
   });

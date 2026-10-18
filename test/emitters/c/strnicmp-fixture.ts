@@ -4,6 +4,7 @@ import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { simplifySSA } from '../../../src/analysis/values/index.js';
 import { structureControlFlow } from '../../../src/presentation/index.js';
 import { reconstruct } from '../../../src/reconstruction/index.js';
+import { validateReconstruction } from '../../../src/reconstruction/validate.js';
 import { emitC } from '../../../src/emitters/c/index.js';
 import { emitPythonLike } from '../../../src/emitters/python-like/index.js';
 import { DarwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
@@ -80,7 +81,10 @@ export function strnicmpOracle(left: string | null, right: string | null, count:
   return 0n;
 }
 
-export function checkStrnicmp(): { cases: number; dialects: number; transfers: number } {
+export function checkStrnicmp(
+  view: 'source' | 'checked' = 'checked',
+  pointerBase = 0x2000n,
+): { cases: number; dialects: number; transfers: number } {
   const graph = fromWords(words),
     constructed = constructSSA(lift(graph).ir);
   assert.equal(constructed.state, 'complete');
@@ -99,7 +103,32 @@ export function checkStrnicmp(): { cases: number; dialects: number; transfers: n
   };
   // Both dialects receive the very same shared region/source facts. Reconstruction
   // must retain the distinct native zero-return and mismatch destinations.
-  const program = reconstruct(input, context());
+  const program = reconstruct(input, context(), view);
+  if (view === 'source') {
+    assert.ok(
+      program.local_validation?.some((record) => record.rule === 'register_cell_recombination'),
+    );
+    const merged = [...program.transfers].find(([transfer, copies]) =>
+      copies.some(
+        (copy) =>
+          !transfer.copies.some((original) => original.destination.id === copy.destination.id),
+      ),
+    );
+    assert.ok(merged, 'A whole phi replaces independently carried register slices');
+    const [transfer, copies] = merged;
+    const incomplete = new Map(program.transfers);
+    incomplete.set(
+      transfer,
+      copies.filter((copy) =>
+        transfer.copies.some((original) => original.destination.id === copy.destination.id),
+      ),
+    );
+    assert.throws(
+      () => validateReconstruction({ ...program, transfers: incomplete }, context()),
+      /live successor value has no edge-specific assignment/,
+      'Generated whole phis still require an assignment on every incoming edge',
+    );
+  }
   const mismatchAddress = 0x64n; // instruction provenance uses image-relative addresses
   const mismatch = [...program.blocks.values()].find((block) =>
     block.provenance.ranges.some((range) => range.start.value === mismatchAddress),
@@ -126,9 +155,22 @@ export function checkStrnicmp(): { cases: number; dialects: number; transfers: n
   for (const language of ['c-like', 'python-like'] as const) {
     const output = (language === 'c-like' ? emitC : emitPythonLike)(
       input,
-      { ...DEFAULT_ANALYSIS_OPTIONS, emitter: language },
+      { ...DEFAULT_ANALYSIS_OPTIONS, emitter: language, view },
       context(),
     );
+    if (view === 'source') {
+      for (const header of output.emission.text
+        .split('\n')
+        .filter((line) => line.trim().startsWith('while '))) {
+        assert.ok(
+          !header.includes(' = ') && !header.includes(',') && !header.includes('?'),
+          header,
+        );
+      }
+      assert.ok(
+        output.emission.local_validation?.some((record) => record.rule === 'single_use_inlining'),
+      );
+    }
     for (const [left, right, count] of strnicmpCases) {
       const memory = new Map<bigint, number>();
       const put = (base: bigint, text: string | null): bigint => {
@@ -138,7 +180,7 @@ export function checkStrnicmp(): { cases: number; dialects: number; transfers: n
         return base;
       };
       const roots = new Map([
-        ['arm64:x0', put(0x2000n, left)],
+        ['arm64:x0', put(pointerBase, left)],
         ['arm64:x1', put(0x3000n, right)],
         ['arm64:x2', BigInt.asUintN(32, BigInt(count))],
       ]);
@@ -156,10 +198,12 @@ export function checkStrnicmp(): { cases: number; dialects: number; transfers: n
       const observed = execute(output.emission, inputs, memory);
       const description = `${language}: ${JSON.stringify([left, right, count])}`;
       assert.equal(observed.exit, 'machine_return', description);
-      assert.deepEqual(
-        observed.values,
-        [BigInt.asUintN(32, strnicmpOracle(left, right, count))],
-        description,
+      const expected = strnicmpOracle(left, right, count);
+      assert.equal(observed.values.length, 1, description);
+      assert.ok(
+        observed.values[0] === BigInt.asUintN(32, expected) ||
+          (view === 'source' && observed.values[0] === expected),
+        `${description}: ${observed.values[0]} does not represent the exact 32-bit result ${expected}\n${output.emission.text}`,
       );
       assert.deepEqual(observed.memory, before, 'Comparison has no memory writes');
       assert.deepEqual(observed.calls, [], 'Comparison makes no calls');

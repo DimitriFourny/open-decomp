@@ -168,6 +168,32 @@ The emission wire form is compact and canonical. `emission.ids` (entity identiti
 
 Structured loop exits retain exact CFG destinations. Only an exit targeting the loop's lexical successor renders as `break`; other exits retain explicit labels/gotos. The source-backed SQLite 3.54.0 `strnicmp` regression evaluates both emitted dialects over 30 boundary cases without executing analyzed code.
 
+Source presentation coalesces noninterfering unsigned widening copies with phi
+storage, retaining the original narrow definition/read conversions and choosing
+the widest declaration. Signed extensions, incompatible declarations and live-range
+interference keep separate storage. The `phi_copy_coalescing` presentation record
+names the affected values; simultaneous edge copies still pass the existing move
+validator.
+
+Source presentation expands single-use integer computations at their dominated
+SSA uses, including pure synthesized pointer increments. Nonvolatile loads may
+expand only at unconditional same-block uses when no store, call, fence, unknown
+effect or independent load intervenes. Dependent nested loads retain their
+address/data evaluation order; independent faulting loads never become
+unsequenced C operands. Both explicit addresses and symbolic-table indices
+participate in use/liveness accounting. `single_use_inlining` records one
+function-level presentation inference, and original load/definition identities
+map to their consuming expression.
+
+After inlining, both source dialects may combine an initial single-entry chain
+of expression-only loop tests. Short-circuit conditions preserve load order and
+all tests leave to the same lexical continuation without exit copies. Assignment,
+comma and copy-smuggling conditional expressions are never introduced into loop
+conditions. Stages needing temporaries, exit copies, effects or shared entries
+remain explicit; unrelated early returns stay inside the body. `loop_form`
+records the conditions and existing control/move validation remains mandatory.
+Checked rendering is unchanged.
+
 Focused emitted-output regressions exercise nested loop/switch exits, edge-specific cyclic copies, guarded effects and faults, split-register joins and synthetic source-definition scope in both dialects and both source/machine modes. The four independent source-derived fixtures cover 544 observations; this is bounded regression evidence, not a whole-program equivalence proof.
 
 Publication validates reconstructed ownership, actual rendered transfer destinations, edge-specific copies, emitted definition order/dominance, definite local initialization, incoming-storage identity and result width/bank consistency. Failures reject publication with `unavailable_semantics`, original statement identity, instruction address when available and evidence IDs. Independent counterexamples cover multi-exit misdirection, omitted phi copies, missing/branch-local synthesized definitions, private-frame invention and wrong-bank returns. These bounded invariants are not an equivalence proof: operation completion, semantic coverage and any future translation-validation status remain distinct.
@@ -180,11 +206,34 @@ Parameter roles distinguish observed source inputs, physical-register inputs and
 
 Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level FP-environment explanation names every affected guard/operation without hoisting, sharing or erasing predicates across state epochs. Native summaries propagate requirement codes instead of free-form assumption strings. The original conservative effects and known portions of the body remain intact.
 
+Source-only `exit_scratch` presentation keeps exact exit slices and provenance
+in reconstruction facts while moving unestablished results into one comment per
+return. Locally computed slices qualify only outside an established scalar
+integer primary result, without gathered caller demand, multi-register/HFA
+evidence, or a conflicting/unprojectable declared return contract. Positive
+consumption evidence from already prepared native units keeps slices inline;
+callers are not exhaustively scanned. The inference explicitly records
+“no result-use evidence gathered; callers not scanned” and requires
+`abi_conformance`; it is an assumption, not proof of non-consumption. The existing
+`unavailable_semantics` diagnostic remains. These slices cease to be source
+liveness roots, but potentially faulting loads and other ordered effects remain;
+checked output retains the full overlay.
+
 `requirement_predicate(requirement_id, site_id, state_epoch, original_pure_predicate, supported_predicate_result)` first preserves the original predicate's known result. Only an unknown result may be resolved by an explicit matching acknowledgment; a known unsupported state cannot be acknowledged away. ARM supported state is true, x86 supported state false. Unknown calls invalidate earlier epoch acknowledgments. Three focused regressions and 26 deterministic source/helper observations cover both dialects, store/call ordering, wrong epochs, known unsupported state and ARM/x86 polarity. General exceptional FP environments and status fidelity remain unmodeled.
 
 `test/cli/source-quality.test.ts` exercises the real CLI, BinarySession API and SDK stdio MCP against a newly built trusted source fixture, with no supplied source/debug/types/prototypes or raised budgets. Both dialects undergo independent emitted-text evaluation against native source returns, memory writes, branch outcomes and call arguments/order: 36 emissions and 474 behavioral comparisons cover stack10, finite FP, SQLite string comparison, memory, loops and effects. Six additional checks leave unacknowledged FP environments unknown. Only the isolated, locally source-built oracle executes natively; retained SQLite and arbitrary analyzed targets never execute. The native oracle is explicitly macOS ARM64; unsupported hosts skip it. FP and unresolved call interfaces retain their actual partial states.
 
 Pure expression reconstruction recomposes contiguous register-cell slices before source-width distribution, preserving full-width carries. Source normalization recovers constant shifted-add multiplication and scaled addresses without duplicating effects or expanding shared expression DAGs. Dynamic shift masks and unknown dependencies remain explicit. Independent emitted-output checks cover 240 observations across 16 fixtures.
+
+Source-view register-cell recombination also transports a whole integer phi when
+its contiguous cells cover one complete architectural root and every predecessor
+supplies the corresponding slices of the same whole value on that edge. Original
+SSA cells and transfers remain immutable; source aliases extract slices from the
+new whole phi, preserving parallel copies and full-width arithmetic carries.
+Missing cells, differing whole values, mismatched offsets and exhausted
+presentation-record capacity retain the split form. The
+`register_cell_recombination` presentation record documents this exact bitvector
+identity without an ABI assumption; checked output does not apply it.
 
 Source-only unsigned range analysis combines edge guards, definedness and parallel phi transfers before removing proven singleton register-cell plumbing. It widens unresolved loops and preserves unsupported signed guards, underflow paths and unknown definitions. The emitted-output induction smoke covers 294 observations, including zero trips, maximal counts, early exits, wrong guards and additional phi inputs; this is not a proof for arbitrary loops.
 
@@ -194,7 +243,46 @@ Scalar/vector ABI projection tracks typed low lanes independently of integer ban
 
 Source-data recovery distinguishes exact storage identities from literal presentation. Globals, pools and tables retain their own base, byte offset, proven extent, mutability and evidence. Immutable bounded ASCII/UTF-8 strings may acquire character-pointer presentation; writable, conflicting, unterminated, relocated-slot and unsupported-encoding storage remains symbolic. Section ownership does not establish one source array, and memory addresses are never rebased onto a neighboring literal. Public Mach-O executable/dylib and PE outputs return the exact fixture literal in both dialects; table regressions retain ordered reads, writes and one-past faults.
 
+Source-only `indexed_data_load` prints mapped constant-base scalar loads as named
+array views. Native (including local) symbols use their C spelling; otherwise a
+neutral `data_<VA>` identifies the exact base. Interior symbol displacements
+remain explicit in element units. Access width determines the element type, and
+the index stride must be an integral multiple of that width; unsigned range bounds
+must exclude address wrap. Volatile, big-endian, mis-scaled and ambiguous accesses
+retain explicit memory syntax. C declarations are `extern` arrays of unknown
+bound (const only for immutable storage); Python-like `memory_view` declarations
+refer to the same image bytes without sequence bounds or negative-index rebasing.
+Known byte extents are annotations, never inferred from the index. The bounded
+presentation record and target unaligned-access requirement preserve provenance;
+checked view does not apply the rewrite.
+
 Source type views interpret unchanged machine storage only when complete, compatible associations support them. Signed operation constraints alone do not declare signed inputs; hypotheses and conflicting layouts do not establish source declarations. Narrow fragments never discard observable high carrier bits. Typed pointer arithmetic and cyclic transfers retain exact target bits; field/array views preserve original access ordering, aliasing, faults and provenance without inventing object bounds or element counts. Dedicated C/Python regressions cover signed fields, unknown-count arrays, full-width pointer returns and typed phi swaps; public Mach-O/PE memory and loop cases retain their results and ordered accesses.
+
+The source-only signature projection keeps those machine values unchanged.
+`formal_pointer` follows whole-value copies, constant byte steps and phi edges to
+observed integer accesses of one consistent 8/16/32/64-bit width; byte accesses
+use `uint8_t*`, never invented character types. Mixed-width accesses remain explicit.
+It adds C `const` only without writes through that formal, escape to a potentially
+writing call, or unknown effects; unrelated stores and known read-only calls do
+not remove the qualifier. Python annotations use `pointer[T]`; the presentation
+record retains the read-only/write-capable formal observation in both dialects.
+`formal_low_word` requires every live carrier use to discard the upper bits first
+and an unchanged low word to participate in a signed comparison, division,
+extension, remainder or arithmetic shift. `return_low_word`
+requires all returns to be low-word values or explicit extensions, with no
+gathered caller demand for high bits; constants can join but cannot alone prove a
+narrow carrier. Byte differences (both operands proved in `[0,255]`), explicit
+sign extension, signed division/remainder/arithmetic shift, or selection of the
+same operands compared by a signed predicate establish signed result interpretation;
+otherwise it stays unsigned.
+Separate high slices of that same primary result register may be omitted only
+when exactly zero (checked by the bounded bitvector validator when not literal);
+other computed or demanded high slices retain their explicit return overlay.
+Independent supplied declarations and conflicts block these inferred replacements.
+Each applied rule records a bounded presentation inference and an
+`abi_conformance` requirement; absent caller evidence is not an exhaustive caller
+scan. Signed return constants use that context (`-1`, not `0xffffffff`).
+Checked-view signatures and expressions do not use these projections.
 
 Bounded native parameter summaries refine the caller's existing memory shapes without rerunning its ABI/stack analysis. Compatible partial fields accumulate; overlapping alternatives, unknown size/alignment, dynamic indices, aliases and escapes remain explicit. Exact full-width copies and split entry cells retain one original pointer identity, while distinct incoming pointer bases remain distinct phi views. Callback fields retain the actual target and prepared whole argument carriers, not a guessed prototype. Source-built caller regressions cover alias/non-alias storage, strides, union conflicts and callback effects in both dialects.
 

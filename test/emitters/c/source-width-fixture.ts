@@ -267,9 +267,11 @@ export function checkSourceWidths(): { observations: number; fixtures: number } 
           inputs(ir, [BigInt.asUintN(32, a), BigInt.asUintN(32, b)]),
         );
         assert.equal(observed.exit, 'machine_return');
-        assert.deepEqual(observed.values, [
-          BigInt.asUintN(32, ir === divide ? a / b : a > b ? a : b),
-        ]);
+        // Signed source signatures still expose the same low-word ABI bits.
+        assert.deepEqual(
+          observed.values.map((value) => BigInt.asUintN(32, value)),
+          [BigInt.asUintN(32, ir === divide ? a / b : a > b ? a : b)],
+        );
         observations++;
       }
     }

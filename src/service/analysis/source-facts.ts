@@ -17,6 +17,7 @@ import { observePreparedCallInterfaces } from '../../analysis/calls/observed.js'
 import { createCallResultDemandIndex } from '../../analysis/calls/result-demands.js';
 import { recoverDataAddress } from '../../analysis/strings/source-data.js';
 import { sourceConstantValues } from '../../reconstruction/source-data.js';
+import { cSourceName } from '../../metadata/symbols/c-names.js';
 import { inspectRegister, type StackFact } from '../../analysis/stack/index.js';
 import {
   parameterMemoryShapes,
@@ -562,6 +563,7 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
       }
     }
   const names = new Map<string, Set<string>>();
+  const sourceNames = new Map<string, string>();
   const symbols = records(scope, revision, image.id, 'symbol').items.map((symbol) => {
     context.checkpoint(1);
     if (!symbol.address) return symbol;
@@ -600,6 +602,10 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
           ? undefined
           : (symbol.display_name ?? symbol.original_name);
     if (name) {
+      sourceNames.set(
+        `${addressKey(symbol.address)}:${name}`,
+        annotations.length ? name : cSourceName(image.target.format, name),
+      );
       const key = addressKey(symbol.address),
         values = names.get(key) ?? new Set<string>();
       values.add(name);
@@ -613,10 +619,17 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
     const aliases = names.get(key),
       name = aliases?.size === 1 ? [...aliases][0] : undefined;
     const recovered = recoverDataAddress(image, address, context, symbols);
+    const spelling =
+      recovered && (name ?? recovered.name)
+        ? sourceNames.get(
+            `${addressKey(recovered.object?.address ?? address)}:${name ?? recovered.name}`,
+          )
+        : undefined;
     if (recovered)
       result.push({
         ...recovered,
         ...(name === undefined ? {} : { name }),
+        ...(spelling === undefined ? {} : { source_name: spelling }),
       });
     else if (name !== undefined) result.push({ address, name });
   }
@@ -1044,6 +1057,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         fingerprint(left as unknown as CanonicalValue) ===
         fingerprint(right as unknown as CanonicalValue),
     });
+    partialUnits = result.units;
     for (const unit of result.units.values()) evidence.push(...unit.evidence);
     const interfaces = new Map<string, NativeInterface>();
     for (const dependency of dependencies) {
@@ -1255,6 +1269,24 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       });
     }
   }
+  // Positive result-use evidence only. Reuse units already prepared by native
+  // analysis; do not turn a presentation request into an incoming-caller scan.
+  const functionReturnDemands = new Map<string, RegisterDescriptor>();
+  for (const unit of new Set([...partialUnits.values(), ...cached.summaries.values()])) {
+    context.checkpoint(1);
+    for (const dependency of unit.dependencies) {
+      context.checkpoint(1);
+      if (dependency.target.id !== input.ir.id) continue;
+      for (const register of dependency.return_demand ?? []) {
+        functionReturnDemands.set(
+          `${register.root}:${register.offset_bits}:${register.width_bits}`,
+          register,
+        );
+      }
+      if (scope.dependencies && unit.dependency_readset)
+        scope.dependencies.replay(unit.dependency_readset);
+    }
+  }
   return {
     abi,
     callees: [...callees.values()],
@@ -1262,6 +1294,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     evidence,
     addresses: sourceAddresses(input),
     memory_transfers,
+    function_return_demands: [...functionReturnDemands.values()],
     ...(function_returns === undefined ? {} : { function_returns }),
     call_argument_counts: actualArgumentCounts(input.types.calls, input.library, context),
   };

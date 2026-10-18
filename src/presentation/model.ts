@@ -69,7 +69,17 @@ export interface SequenceRegion {
 export type LoopForm =
   /** Header block has no printed statements; its `if` is the loop test and the
    * exit arm is the loop's lexical break. `enter` is the arm value staying inside. */
-  | { readonly kind: 'while'; readonly test: EntityId; readonly enter: boolean }
+  | {
+      readonly kind: 'while';
+      readonly test: EntityId;
+      readonly enter: boolean;
+      /** Ordered header-to-break tests sharing one continuation. */
+      readonly chain?: readonly {
+        readonly block: EntityId;
+        readonly test: EntityId;
+        readonly enter: boolean;
+      }[];
+    }
   /** The lexically last block's `if` is the test; its repeat arm is the only
    * edge to the header and its copies run before the test. Only `test` may continue. */
   | {

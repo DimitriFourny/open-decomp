@@ -9,6 +9,7 @@ import type {
   Region,
 } from '../presentation/index.js';
 import type { Reconstruction } from '../reconstruction/model.js';
+import type { InlineSite } from './source-inlining.js';
 
 export type TransferAction = 'goto' | 'fallthrough' | 'break' | 'continue';
 type Nest =
@@ -76,8 +77,10 @@ export function formArm(
   form: LoopForm,
   control: Control,
 ): { readonly arm: ControlArm; readonly action: 'break' | 'continue' }[] {
-  if (control.kind !== 'if' || control.id !== form.test) return [];
-  const repeat = form.kind === 'do_while' ? form.repeat : form.enter;
+  const stage =
+    form.kind === 'while' ? form.chain?.find((item) => item.test === control.id) : undefined;
+  if (control.kind !== 'if' || (control.id !== form.test && !stage)) return [];
+  const repeat = stage?.enter ?? (form.kind === 'do_while' ? form.repeat : form.enter);
   const again = repeat ? control.when_true : control.when_false,
     leave = repeat ? control.when_false : control.when_true;
   if (form.kind === 'while' || (form.kind === 'for' && !form.bottom))
@@ -105,6 +108,8 @@ export class VariableLiveness {
     private readonly program: Reconstruction,
     private readonly context: OperationContext,
     limit = 4096,
+    private readonly inlined: ReadonlyMap<string, InlineSite> = new Map(),
+    private readonly alternateIndices: ReadonlyMap<string, Value> = new Map(),
   ) {
     const source = program.source;
     for (const value of program.values.values()) {
@@ -112,6 +117,7 @@ export class VariableLiveness {
       if (
         !program.live.has(value.id) ||
         program.inline.has(value.id) ||
+        inlined.has(value.id) ||
         source?.stack_addresses.has(value.id)
       )
         continue;
@@ -143,6 +149,13 @@ export class VariableLiveness {
       seen.add(current.id);
       if (this.program.source?.stack_addresses.has(current.id)) {
         if (stack?.kind === 'entry') pending.push(stack.base);
+        continue;
+      }
+      const inlined = this.inlined.get(current.id)?.node;
+      if (inlined?.kind === 'load') {
+        if (!this.program.source?.locals.has(inlined.id)) pending.push(inlined.address);
+        const index = this.alternateIndices.get(inlined.id);
+        if (index) pending.push(index);
         continue;
       }
       const index = this.index.get(current.id);
@@ -177,6 +190,7 @@ export class VariableLiveness {
     };
     const definitions = (anchor: string): void => {
       for (const definition of program.source?.definitions?.get(anchor) ?? []) {
+        if (this.inlined.has(definition.result.id)) continue;
         use([...expressionOperands(definition.expression)]);
         define([definition.result]);
       }
@@ -184,7 +198,10 @@ export class VariableLiveness {
     definitions(block.id);
     for (const node of block.statements) {
       this.context.checkpoint(1);
-      if (program.retained.has(node.id)) {
+      if (
+        program.retained.has(node.id) &&
+        !('result' in node && this.inlined.has(node.result.id))
+      ) {
         const reads: Value[] = [];
         if (node.kind === 'assign')
           reads.push(
@@ -194,6 +211,8 @@ export class VariableLiveness {
         else if (node.kind === 'load' || node.kind === 'store') {
           if (!program.source?.locals.has(node.id)) reads.push(node.address);
           if (node.kind === 'store') reads.push(node.value);
+          const index = this.alternateIndices.get(node.id);
+          if (index) reads.push(index);
         }
         if (node.kind === 'call') {
           const projection = program.calls.get(node.id);
@@ -326,22 +345,23 @@ export class VariableLiveness {
   }
 }
 
-/** Boissinot-style phi-copy coalescing: an edge copy's destination and its
- * variable source share one printed variable when no value of either class is
- * live where a value of the other is written (SSA live-range interference).
- * `compatible` must accept only values whose printed declarations and reads
- * are identical. Returns value id -> representative for coalesced classes. */
+/** Coalesce edge copies and value-preserving assignments using SSA live-range
+ * interference. `compatible` must establish interchangeable storage, including
+ * any original-width read/definition conversions supplied by the renderer.
+ * Assignment pairs hold equal values at their definition and may overlap there.
+ * Returns value id -> representative for accepted classes. */
 export function coalescePhiCopies(
   program: Reconstruction,
   liveness: VariableLiveness,
   compatible: (a: Value, b: Value) => boolean,
   context: OperationContext,
+  assignments: readonly { readonly destination: Value; readonly source: Value }[] = [],
 ): Map<string, Value> {
   const result = new Map<string, Value>();
   if (!liveness.complete) return result;
   const candidates = new Set<number>();
   const pairs: { destination: number; source: number }[] = [];
-  for (const copies of program.transfers.values())
+  for (const copies of [...program.transfers.values(), assignments])
     for (const copy of copies) {
       context.checkpoint(1);
       const destination = liveness.index.get(copy.destination.id),
@@ -366,6 +386,13 @@ export function coalescePhiCopies(
     interference.get(b)!.add(a);
   };
   const members = [...candidates];
+  const equalDefinitions = new Map<number, number>();
+  for (const copy of assignments) {
+    const destination = liveness.index.get(copy.destination.id),
+      source = liveness.index.get(copy.source.id);
+    if (destination !== undefined && source !== undefined)
+      equalDefinitions.set(destination, source);
+  }
   for (const block of program.blocks.values()) {
     context.checkpoint(1);
     const live = liveness.exit(block);
@@ -382,7 +409,9 @@ export function coalescePhiCopies(
         for (const other of event.ids) conflict(id, other);
         for (const other of members) {
           context.checkpoint(1);
-          if (liveness.has(live, other)) conflict(id, other);
+          // At this copy definition the source and destination hold the same
+          // value, even when a later read still uses the narrow source.
+          if (liveness.has(live, other) && equalDefinitions.get(id) !== other) conflict(id, other);
         }
       }
     }
@@ -432,14 +461,19 @@ export function coalescePhiCopies(
     classes.delete(b);
   }
   const formals = new Set(program.parameters.map((value) => value.id));
-  for (const [root, list] of classes) {
+  for (const list of classes.values()) {
     if (list.length < 2) continue;
-    // Formals keep their declared name; otherwise the earliest declared value names the class.
-    const values = list.map((id) => liveness.values[id]!);
+    // Formals keep their name; otherwise choose the earliest widest declaration.
+    const values = [...list].sort((a, b) => a - b).map((id) => liveness.values[id]!);
     const representative =
       values.find((value) => formals.has(value.id)) ??
-      liveness.values[Math.min(...list)] ??
-      liveness.values[root]!;
+      values.reduce((best, value) =>
+        best.type.kind === 'integer' &&
+        value.type.kind === 'integer' &&
+        value.type.bits > best.type.bits
+          ? value
+          : best,
+      );
     for (const value of values) result.set(value.id, representative);
   }
   return result;
@@ -686,7 +720,7 @@ export function planLayout(
         (id) =>
           id !== follow &&
           terminal(id) &&
-          !isTail(id) &&
+          (!isTail(id) || (predecessors.get(id)?.size ?? 0) > 1) &&
           !placed.has(id) &&
           [...(predecessors.get(id) ?? [])].every((previous) => owned.has(previous)),
       );
@@ -943,6 +977,38 @@ export function planLoopForms(
           occurrenceAction(occurrence, language) === 'break',
       );
     const regions = loop.body.kind === 'sequence' ? loop.body.regions : [loop.body];
+    // Follow only the initial straight-line chain. A stage has one lexical
+    // entry and copy-free break/stay edges; later definitions
+    // never move ahead of the tests which guard them.
+    const chain: { block: string; test: string; enter: boolean }[] = [];
+    let pending: readonly Region[] = regions;
+    while (pending.length) {
+      context.checkpoint(1);
+      const first = pending[0]!;
+      if (first.kind === 'sequence') {
+        pending = [...first.regions, ...pending.slice(1)];
+        continue;
+      }
+      if (
+        first.kind !== 'block' ||
+        first.control.kind !== 'if' ||
+        !facts.plain(first.control) ||
+        !facts.silent(first) ||
+        (!chain.length && first.id !== loop.header) ||
+        (chain.length > 0 && (incoming.get(first.id)?.length ?? 0) !== 1)
+      )
+        break;
+      const control = first.control;
+      const enter = exit(control.when_false) ? true : exit(control.when_true) ? false : undefined;
+      if (enter === undefined) break;
+      const stay = enter ? control.when_true : control.when_false;
+      if (facts.writes(stay.transfer).length) break;
+      chain.push({ block: first.id, test: control.id, enter });
+      pending = stay.body ? [stay.body, ...pending.slice(1)] : pending.slice(1);
+      if (pending.length && firstBlock(pending[0]!) !== stay.transfer.target) break;
+    }
+    if (chain.length > 1)
+      return { kind: 'while', test: chain[0]!.test, enter: chain[0]!.enter, chain };
     const head = regions[0];
     if (
       head?.kind === 'block' &&

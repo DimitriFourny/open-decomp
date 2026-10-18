@@ -48,6 +48,8 @@ export interface InferredCallee {
 export interface SourceAddress {
   readonly address: Address;
   readonly name?: string;
+  /** Evidence-backed C spelling of a native symbol; asserted names stay verbatim. */
+  readonly source_name?: string;
   /** Only immutable, terminated strings with exact image/address provenance. */
   readonly string?: string;
   readonly string_byte_length?: bigint;
@@ -77,6 +79,9 @@ export interface SourceEvidence {
   readonly call_argument_counts?: ReadonlyMap<string, number>;
   /** Bounded native parameter-associated shape constraints over original values. */
   readonly memory_transfers?: readonly MemoryShapeTransfer[];
+  /** Positive caller consumption gathered from available native units. This is
+   * not an exhaustive caller scan; absence is never proof of non-consumption. */
+  readonly function_return_demands?: readonly RegisterDescriptor[];
   /** Actual proven written result storage, not an inferred author aggregate. */
   readonly function_returns?: {
     readonly registers: readonly RegisterDescriptor[];
@@ -112,6 +117,16 @@ export interface FrameSaves {
   /** Saved bytes in entry-SP coordinates, excluded from possible stack arguments. */
   readonly bytes: ReadonlySet<bigint>;
 }
+/** Inferred source-only signature spelling, never a machine-storage mutation. */
+export type SourceFormalType =
+  | { readonly kind: 'integer'; readonly bits: number; readonly signed: boolean }
+  | {
+      readonly kind: 'pointer';
+      readonly bits: number;
+      readonly pointee_bits: number;
+      readonly const: boolean;
+    };
+
 /** Syntax-neutral source storage and interface information. All original SSA
  * identities and effects remain in the analyzed graph and source mappings. */
 export interface SourcePresentation {
@@ -124,6 +139,8 @@ export interface SourcePresentation {
   readonly return_pointer?: 'char' | 'byte';
   readonly value_types?: ReadonlyMap<string, SourceTypeView>;
   readonly return_source_type?: string;
+  readonly formal_types?: ReadonlyMap<string, SourceFormalType>;
+  readonly return_scalar?: { readonly bits: number; readonly signed: boolean };
   readonly field_subjects?: ReadonlyMap<string, readonly string[]>;
   /** Localized preconditions and residual sites; never a blanket CFG assumption. */
   readonly requirements?: readonly Requirement[];

@@ -407,7 +407,7 @@ test('dead pure computations do not invent a role for otherwise unclassified ari
   }
 });
 
-test('established field names reach loaded scalar locals without inventing a complete record layout', () => {
+test('established field identities reach inlined loads without inventing a complete record layout', () => {
   const b = builder('source-field-local-name'),
     entry = b.block('entry'),
     u64 = integer(64);
@@ -476,14 +476,18 @@ test('established field names reach loaded scalar locals without inventing a com
       { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } },
       language,
     );
-    assert.ok(
-      output.identifiers.some((identifier) => identifier.identifier === 'balance'),
-      'the supplied field name, not a guessed author variable name, describes this exact load',
+    const load = ir.blocks
+      .flatMap((block) => block.instructions)
+      .find((instruction) => instruction.kind === 'load')!;
+    const fieldAccess = expandEmission(output.emission).mappings.find(
+      (mapping) =>
+        mapping.statement_id === load.id && mapping.semantic_ids.includes('source-balance-field'),
     );
-    assert.ok(
-      expandEmission(output.emission).mappings.some((mapping) =>
-        mapping.semantic_ids.includes('source-balance-field'),
-      ),
+    assert.ok(fieldAccess, 'the inlined load retains the supplied field identity');
+    assert.match(
+      output.emission.text.slice(fieldAccess.start, fieldAccess.end),
+      /return/,
+      'the field maps to its consuming return expression, not an unused local',
     );
     const parameter = emittedFormals(output.emission)[0]!;
     for (const value of [0n, 0x8000000000000000n, 0xffffffffffffffffn]) {

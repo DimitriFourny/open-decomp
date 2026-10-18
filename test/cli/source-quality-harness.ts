@@ -378,7 +378,13 @@ function checkBehavior(
     );
     const description = `${scenario}[${row.index}] ${emission.language}`;
     assert.equal(observed.exit, 'machine_return', description);
-    assert.deepEqual(observed.values, [BigInt(`0x${row.value}`)], description);
+    // The native oracle prints each result at its declared ABI width (8/16 hex
+    // digits). Signed source presentation may use negative mathematical values.
+    assert.deepEqual(
+      observed.values.map((value) => BigInt.asUintN(row.value.length * 4, value)),
+      [BigInt(`0x${row.value}`)],
+      description,
+    );
     if (row.memory !== undefined)
       assert.equal(read64(observed.memory, pointer), BigInt(`0x${row.memory}`), description);
     if (scenario === 'effects') {

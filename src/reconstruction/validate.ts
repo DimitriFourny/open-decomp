@@ -106,7 +106,7 @@ export function validateReconstruction(program: Reconstruction, context: Operati
         context.checkpoint(1);
         if (!program.live.has(parameter.id) || program.inline.has(parameter.id)) continue;
         const original = transfer.copies.find((copy) => copy.destination.id === parameter.id);
-        if (!original || (original.source.id !== parameter.id && !destinations.has(parameter.id)))
+        if (!destinations.has(parameter.id) && original?.source.id !== parameter.id)
           invalid(block.control, 'a live successor value has no edge-specific assignment');
       }
     }

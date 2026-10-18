@@ -145,8 +145,8 @@ export function checkSourceExpressionDemand(): { outcomes: number; scenarios: nu
     }
   }
 
-  // An explicit scalar result does not classify another changed ABI return
-  // word. Keep that uncertain physical overlay without inventing an aggregate.
+  // Caller consumption keeps another changed ABI return word inline even
+  // beside an explicit scalar result, without inventing an aggregate.
   const overlayBuilder = builder('source-demand-uncertain-return-overlay'),
     overlayEntry = overlayBuilder.block('entry');
   const overlayArgument = overlayEntry.readRegister(rdi);
@@ -162,7 +162,11 @@ export function checkSourceExpressionDemand(): { outcomes: number; scenarios: nu
     ),
   );
   for (const language of ['c-like', 'python-like'] as const) {
-    const emission = emit(overlay.ir, { source }, language).emission;
+    const emission = emit(
+      overlay.ir,
+      { source: { ...source, function_return_demands: [rdx] } },
+      language,
+    ).emission;
     originalSubjects(overlay.ir, emission);
     for (const value of [0n, 1n, 0x8000000000000000n, 0xffffffffffffffffn]) {
       const observed = execute(emission, inputs(emission, overlay.program, value, 0n));

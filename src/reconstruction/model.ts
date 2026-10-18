@@ -19,18 +19,20 @@ export interface BoundaryProjection {
   readonly results: readonly Value[];
   readonly inputs: readonly { readonly register: RegisterDescriptor; readonly value: Value }[];
   readonly outputs: readonly { readonly register: RegisterDescriptor; readonly value: Value }[];
-  /** Source view only: changed possible-return slices whose exit value is an
-   * ABI-scratch call clobber or untouched entry bits on every path. They are not
-   * liveness roots and are rendered out of line; `sources` names each clobbering call. */
+  /** Source view only: possible-return slices not established as results.
+   * They are not liveness roots and are rendered out of line, but their exact
+   * values and provenance remain available here and in the checked view. */
   readonly exit_scratch?: readonly ExitScratchSlice[];
 }
 export interface ExitScratchSlice {
   readonly register: RegisterDescriptor;
   readonly value: Value;
-  /** Original call statements whose clobber may reach this exit slice. */
+  /** Reaching clobbering call statements, or the exact computed value identity. */
   readonly sources: readonly string[];
   /** True when the untouched entry value may also reach this exit slice. */
   readonly entry: boolean;
+  /** Locally computed value, moved under an explicit ABI/result-use assumption. */
+  readonly computed?: true;
 }
 /** Terminal call: results belong to the callee, not invented caller SSA cells. */
 export interface TailProjection {

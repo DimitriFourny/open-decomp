@@ -211,6 +211,7 @@ class Parser {
   /** C declarations in scope: formals, body locals and partial struct layouts. */
   readonly symbols = new Map<string, CType>();
   readonly structs = new Map<string, StructLayout>();
+  private readonly tables = new Map<string, { readonly address: bigint; readonly bits: number }>();
   returnType: CType = MATH;
   private readonly types = new WeakMap<Expr, CType>();
   private position = 0;
@@ -221,6 +222,22 @@ class Parser {
   private readonly loops: { start: number; breaks: number[]; continues?: number[] }[] = [];
   constructor(text: string) {
     this.python = /^def /m.test(text);
+    const declarations = this.python
+      ? /^(\w+) = memory_view\((0x[\da-f]+), "uint(\d+)_t", (?:True|False)\)$/gm
+      : /\/\* (\w+): image VA (0x[\da-f]+); byte extent (?:unknown|\d+) \*\/\nextern (?:const )?uint(\d+)_t \1\[\];/g;
+    for (const match of text.matchAll(declarations)) {
+      const name = match[1]!,
+        address = BigInt(match[2]!),
+        bits = Number(match[3]);
+      this.tables.set(name, { address, bits });
+      this.symbols.set(name, { kind: 'pointer', to: { kind: 'int', bits, signed: false } });
+      this.ops.push({
+        kind: 'assign',
+        names: [name],
+        tuple: false,
+        expression: { kind: 'literal', value: address, ctype: unsignedType(64) },
+      });
+    }
     if (this.python) {
       const lines = text.split('\n'),
         header = lines.findIndex((line) => line.startsWith('def '));
@@ -281,7 +298,18 @@ class Parser {
     }
     // Partial struct declarations precede the function; the body opens at the
     // first brace after them.
-    while (this.peek() === 'typedef' || this.peek() === 'struct') this.structDeclaration();
+    while (['typedef', 'struct', 'extern'].includes(this.peek())) {
+      if (this.peek() !== 'extern') this.structDeclaration();
+      else {
+        this.take('extern');
+        if (this.peek() === 'const') this.take('const');
+        assert.ok(this.bodyType(false));
+        assert.ok(this.tables.has(this.take()), 'External table needs an exact image VA binding');
+        this.take('[');
+        this.take(']');
+        this.take(';');
+      }
+    }
     const start = this.tokens.indexOf('{', this.position);
     assert.ok(start >= 0);
     this.headerEnd = offsets[start]!;
@@ -392,8 +420,9 @@ class Parser {
    * machine-width casts below give values numeric interpretation. */
   private bodyType(python: boolean, depth = 0): { scalar: string; pointers: number } | null {
     assert.ok(depth < 64, 'Source type annotation nesting limit');
-    const start = this.position,
-      token = this.take();
+    const start = this.position;
+    if (this.peek() === 'const') this.take('const');
+    const token = this.take();
     const scalar =
       /^(?:bits\d+_t|u?int\d+_t|uintptr_t|bool|char|void|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t|type_\d+)$/;
     let pointers = 0;
@@ -881,6 +910,14 @@ class Parser {
       left = { kind: 'binary', op, left, right };
     }
     if (minimum > 0) return left;
+    while (this.peek() === (this.python ? 'and' : '&&')) {
+      this.take();
+      left = { kind: 'binary', op: '&&', left, right: this.expression(1) };
+    }
+    if (this.peek() === (this.python ? 'or' : '||')) {
+      this.take();
+      left = { kind: 'binary', op: '||', left, right: this.expression() };
+    }
     if (this.peek() === '?') {
       this.take('?');
       const yes = this.expression();
@@ -911,6 +948,30 @@ class Parser {
         }
         this.take(')');
         expression = { kind: 'invoke', target: expression, args };
+      } else if (
+        this.python &&
+        this.peek() === '[' &&
+        expression.kind === 'ref' &&
+        this.tables.has(expression.name)
+      ) {
+        const table = this.tables.get(expression.name)!;
+        this.take('[');
+        const index = this.expression();
+        this.take(']');
+        expression = this.read(
+          {
+            kind: 'binary',
+            op: '+',
+            left: { kind: 'literal', value: table.address },
+            right: {
+              kind: 'binary',
+              op: '*',
+              left: index,
+              right: { kind: 'literal', value: BigInt(table.bits / 8) },
+            },
+          },
+          { kind: 'int', bits: table.bits, signed: false },
+        );
       } else if (!this.python && this.peek() === '[') {
         this.take('[');
         const index = this.expression();
@@ -991,7 +1052,7 @@ class Parser {
       case 'binary': {
         const left = this.typeOf(expression.left),
           right = this.typeOf(expression.right);
-        if (['==', '!=', '<', '<=', '>', '>='].includes(expression.op)) type = INT;
+        if (['==', '!=', '<', '<=', '>', '>=', '&&', '||'].includes(expression.op)) type = INT;
         else if (expression.op === '<<' || expression.op === '>>') type = promote(left);
         else if (expression.op === '-' && left.kind === 'pointer' && right.kind === 'pointer')
           type = { kind: 'int', bits: 64, signed: true };
@@ -1931,8 +1992,13 @@ export function execute(
         return result;
       }
       case 'binary': {
-        const a = evaluate(expression.left, math),
-          b = evaluate(expression.right, math);
+        const a = evaluate(expression.left, math);
+        if (a === null) return null;
+        if (expression.op === '&&' && number(a) === 0n) return 0n;
+        if (expression.op === '||' && number(a) !== 0n) return 1n;
+        const b = evaluate(expression.right, math);
+        if (expression.op === '&&' || expression.op === '||')
+          return b === null ? null : BigInt(number(b) !== 0n);
         if (a === null || b === null) return null;
         return binary(
           expression.op,

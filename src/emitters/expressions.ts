@@ -442,6 +442,17 @@ export class SourcePrinter {
 
   /** Explicit conversion: C cast, or the documented Python-like reduction helper. */
   cast(bits: number, signed: boolean, value: Printed): Printed {
+    if (value.ctype?.bits === bits && value.ctype.signed === signed) return value;
+    // Reinterpreting a signed word as unsigned and back is the identity; retain
+    // the original typed spelling rather than stacking inverse casts.
+    if (
+      !this.python &&
+      signed &&
+      value.ctype?.bits === bits &&
+      value.unreduced?.ctype?.bits === bits &&
+      value.unreduced.ctype.signed
+    )
+      return value.unreduced;
     if (bits === 1 && !signed)
       return this.binary(
         '&',
@@ -450,11 +461,16 @@ export class SourcePrinter {
         this.python ? { bits: 1, signed: false } : usualArithmetic(value.ctype ?? INT, INT),
       );
     const ctype = { bits, signed };
+    const inverse =
+      !this.python && !signed && value.ctype?.bits === bits && value.ctype.signed
+        ? { unreduced: value }
+        : {};
     if (!this.python)
       return {
         text: `(${signed ? 'int' : 'uint'}${bits}_t)${this.group(value, UNARY)}`,
         precedence: UNARY,
         ctype,
+        ...inverse,
       };
     const helper = `${signed ? 'int' : 'uint'}${bits}`;
     this.writer.helper(
@@ -463,7 +479,7 @@ export class SourcePrinter {
         ? `Interpret the low ${bits} bits as a signed two's-complement value; unknown/undefined propagates.`
         : `Reduce to an unsigned ${bits}-bit value; unknown/undefined propagates.`,
     );
-    return this.primary(`${helper}(${value.text})`, ctype);
+    return { ...this.primary(`${helper}(${value.text})`, ctype), ...inverse };
   }
 
   /** Reduce a value to exactly unsigned `bits` unless its type already is that. */
@@ -761,6 +777,12 @@ export function expressionText(
       if (expression.value.type.kind !== 'integer' || type.kind !== 'integer') return helper();
       const source = expression.value.type.bits;
       let value = operand(expression.value);
+      if (!expression.offset && value.ctype && !value.ctype.signed && value.ctype.bits <= width)
+        return value;
+      // A narrowed printed zero-extension still needs a wide C shift operand
+      // when extracting high bits; shifting a uint32_t by 32 is undefined.
+      if (!python && expression.offset >= promote(range(value, source)).bits)
+        value = printer.cast(source, false, value);
       if (expression.offset)
         value = printer.binary(
           '>>',

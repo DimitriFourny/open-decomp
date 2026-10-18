@@ -11,8 +11,9 @@ import { recoverTypes } from '../../src/analysis/types/index.js';
 import { integer, type SSAForm } from '../../src/ir/index.js';
 import { structureControlFlow } from '../../src/presentation/index.js';
 import { reconstruct, type Reconstruction } from '../../src/reconstruction/index.js';
-import type { InferredCallee } from '../../src/reconstruction/source-model.js';
+import type { InferredCallee, SourceEvidence } from '../../src/reconstruction/source-model.js';
 import { builder, image, slice } from '../ir/support.js';
+import { emit, emittedFormals, execute } from '../emitters/c/support.js';
 
 const u64 = integer(64),
   abi = darwinArm64Abi;
@@ -157,4 +158,102 @@ test('complete-by-callee-reads closes an inferred argument list only in the sour
   assert.equal(source.calls.get(fixture.call)?.argument_list_complete, true);
   assert.equal(source.calls.get(fixture.call)?.arguments.length, 1);
   assert.ok(rules(source).includes('arity_closure'));
+});
+
+function computedExit(evidence: Partial<SourceEvidence> = {}, primary = true) {
+  const b = builder('computed-exit'),
+    block = b.block('entry');
+  const loaded = block.load(u64, block.readRegister(x(2)));
+  block.writeRegister(x(1), block.int('add', loaded, block.constant(u64, 1n)));
+  if (primary) block.writeRegister(x(0), block.constant(u64, 7n));
+  block.return();
+  const ir = constructSSA(b.finish(block, [])).value as SSAForm;
+  const types = recoverTypes(ir, abi, createOperationContext(), {
+    image_id: image,
+    slice_id: slice,
+    revision: 0,
+  });
+  const source: SourceEvidence = { abi, callees: [], addresses: [], ...evidence };
+  const structured = structureControlFlow(ir, createOperationContext());
+  assert.ok(structured.value);
+  return {
+    ir,
+    extra: { types, source },
+    view: (view: 'source' | 'checked') =>
+      reconstruct({ function: structured.value!, types, source }, createOperationContext(), view),
+  };
+}
+
+test('undemanded computed exit slices move out of line without dropping load effects', () => {
+  const fixture = computedExit(),
+    source = fixture.view('source'),
+    checked = fixture.view('checked'),
+    projection = [...source.returns.values()][0]!;
+  const slice = projection.exit_scratch?.find((item) => item.register.root === x(1).root);
+  assert.ok(slice?.computed);
+  assert.deepEqual(slice.sources, [slice.value.id]);
+  assert.ok(!source.live.has(slice.value.id));
+  assert.ok(
+    [...checked.returns.values()][0]!.outputs.some((item) => item.register.root === x(1).root),
+  );
+  const load = fixture.ir.blocks[0]!.instructions.find((node) => node.kind === 'load')!;
+  assert.ok(source.retained.has(load.id), 'potentially faulting loads remain ordered effects');
+  assert.ok(source.diagnostics.some((item) => item.code === 'unavailable_semantics'));
+  assert.ok(
+    source.local_validation_session?.abiConformance.some((site) => site.rule === 'exit_scratch'),
+  );
+  for (const language of ['c-like', 'python-like'] as const) {
+    const { emission } = emit(fixture.ir, fixture.extra, language);
+    assert.match(emission.text, /also at exit: x1\[0:64\] = \w+ \(not established as a result\)/);
+    assert.doesNotMatch(emission.text, /return physical_return/);
+    // The out-of-line value does not rescue a faulting load from execution.
+    const inputs = new Map(
+      emittedFormals(emission).map((formal) => [formal.statement_id, 0x1000n]),
+    );
+    assert.equal(execute(emission, inputs).exit, 'fault');
+    const memory = new Map(Array.from({ length: 8 }, (_, index) => [0x1000n + BigInt(index), 0]));
+    assert.deepEqual(execute(emission, inputs, memory).values, [7n]);
+  }
+});
+
+test('positive caller demand retains computed exit slices inline', () => {
+  const source = computedExit({ function_return_demands: [x(1)] }).view('source');
+  const projection = [...source.returns.values()][0]!;
+  assert.ok(projection.outputs.some((item) => item.register.root === x(1).root));
+  assert.ok(!projection.exit_scratch?.some((item) => item.register.root === x(1).root));
+});
+
+test('multi-register result evidence refuses the computed-slice assumption', () => {
+  const source = computedExit({
+    function_returns: { registers: [x(0), x(1)], types: [u64, u64] },
+  }).view('source');
+  assert.ok(![...source.returns.values()][0]!.exit_scratch?.some((item) => item.computed));
+});
+
+test('without an established primary result computed exit slices stay inline', () => {
+  const source = computedExit({}, false).view('source');
+  assert.ok(
+    [...source.returns.values()][0]!.outputs.some((item) => item.register.root === x(1).root),
+  );
+});
+
+test('wide integer or homogeneous floating result evidence retains other computed slices', () => {
+  const floating = abi.unknown_call_clobbers.registers.filter(
+    (register) => register.root === 'arm64:v0' || register.root === 'arm64:v1',
+  );
+  assert.equal(floating.length, 2);
+  for (const function_returns of [
+    { registers: [x(0)], types: [integer(128)] },
+    {
+      registers: floating,
+      types: [
+        { kind: 'float', bits: 64 },
+        { kind: 'float', bits: 64 },
+      ],
+    },
+  ] satisfies NonNullable<SourceEvidence['function_returns']>[]) {
+    const projection = [...computedExit({ function_returns }).view('source').returns.values()][0]!;
+    assert.ok(projection.outputs.some((item) => item.register.root === x(1).root));
+    assert.ok(!projection.exit_scratch?.some((item) => item.computed));
+  }
 });

@@ -61,3 +61,28 @@ test('a repeated name in distinct parameter declarations is rejected rather than
     }),
   );
 });
+
+test('a const pointer formal does not hide a following signed C parameter type', () => {
+  const declarations = ['const uint8_t* address', 'int32_t count'];
+  const text = `int32_t sample(${declarations.join(', ')}) { return count >= 1 ? 1 : 0; }`;
+  const emission = {
+    text,
+    ids: ['address-value', 'count-value'],
+    mappings: declarations.map((declaration, index) => ({
+      start: text.indexOf(declaration),
+      end: text.indexOf(declaration) + declaration.length,
+      semantic_refs: [index],
+    })),
+  };
+  for (const count of [0n, 1n, 0x7fffffffn, 0x80000000n, 0xffffffffn])
+    assert.deepEqual(
+      execute(
+        emission,
+        new Map([
+          ['address-value', 0x2000n],
+          ['count-value', count],
+        ]),
+      ).values,
+      [BigInt(BigInt.asIntN(32, count) >= 1n)],
+    );
+});

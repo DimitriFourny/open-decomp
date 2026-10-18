@@ -28,6 +28,7 @@ import type {
 import { planSource } from './source-planner.js';
 import { planSourceStack } from './source-stack.js';
 import { planVariadicStackArguments } from './source-variadic.js';
+import { recombineSourceCells } from './source-cells.js';
 import {
   normalizeSourceExpressions,
   sourceExpressionDemand,
@@ -35,6 +36,7 @@ import {
 } from './source-expressions.js';
 import { normalizeSourceRanges } from './source-ranges.js';
 import { projectSourceTypes } from './source-types.js';
+import { projectSourceSignature } from './source-signature.js';
 import { LocalValidationSession } from './local-validation.js';
 export type * from './model.js';
 
@@ -181,6 +183,18 @@ export function reconstruct(
         view,
       )
     : null;
+  const cellTransfers =
+    sourcePlan && view === 'source'
+      ? recombineSourceCells(
+          blocks,
+          allTransfers,
+          expressions,
+          parameterSources,
+          sourcePlan,
+          localValidation,
+          context,
+        )
+      : new Map<ParallelTransfer, ParallelTransfer['copies']>();
   if (sourcePlan)
     for (const [id, tail] of sourcePlan.tails)
       if (
@@ -473,11 +487,51 @@ export function reconstruct(
         functionProjection = { ...projection, kind: 'physical', signature: null };
     }
   }
-  // Source view: an uncertain-overlay slice whose exit value is, on every path,
-  // a call clobber that is not part of that call's projected results, or the
-  // untouched entry value, is ABI scratch at return. It moves out of line with
-  // its source calls and is no liveness root. Locally computed slices stay.
+  // Source-only exit overlays are not result claims. Unprojected call clobbers
+  // and untouched entry values are ABI scratch; locally computed slices may
+  // also move out of line under an explicit, evidence-gated ABI assumption.
   if (sourcePlan && view === 'source') {
+    const evidence = input.source!,
+      primary = evidence.abi.classifyCall({
+        returns: { kind: 'pointer' },
+        parameters: [],
+        variadic: false,
+        fixed_parameter_count: 0,
+      }).returns;
+    const primaryRegisters = primary.flatMap((location) =>
+      location.kind === 'register' ? [location.register] : [],
+    );
+    const resultEvidence = [
+      ...(evidence.function_return_demands ?? []),
+      ...(evidence.function_returns?.registers ?? []),
+    ];
+    const declaredContract = input.types?.signatures.some(
+      (signature) => signature.subject_id === input.function.id,
+    );
+    const overlaps = (a: RegisterDescriptor, b: RegisterDescriptor): boolean =>
+      a.root === b.root &&
+      a.offset_bits < b.offset_bits + b.width_bits &&
+      b.offset_bits < a.offset_bits + a.width_bits;
+    // A scalar integer primary is the deliberately narrow local-computation
+    // case. Floating/HFA, wide/tuple, or unprojectable declared contracts stay
+    // explicit rather than inferring an aggregate from register capacity.
+    const scalarPrimary =
+      primaryRegisters.length === 1 &&
+      [...returns.values()].every(
+        (projection) =>
+          projection.results.length === 1 &&
+          projection.results[0]!.type.kind === 'integer' &&
+          bitWidth(projection.results[0]!.type) <= primaryRegisters[0]!.width_bits,
+      ) &&
+      resultEvidence.every(
+        (register) =>
+          register.root === primaryRegisters[0]!.root &&
+          register.offset_bits + register.width_bits <=
+            primaryRegisters[0]!.offset_bits + primaryRegisters[0]!.width_bits,
+      ) &&
+      (evidence.function_returns?.types ?? []).every(
+        (type) => type.kind === 'integer' && bitWidth(type) <= primaryRegisters[0]!.width_bits,
+      );
     const clobbers = new Map<string, string>(),
       resultCells = new Set<string>();
     for (const block of blocks.values())
@@ -540,10 +594,15 @@ export function reconstruct(
       return result;
     };
     for (const [id, projection] of returns) {
-      if (projection.kind !== 'inferred' || !projection.outputs.length) continue;
+      if (projection.kind !== 'inferred' || !projection.outputs.length || declaredContract)
+        continue;
       const outputs: BoundaryProjection['outputs'][number][] = [],
         exitScratch: ExitScratchSlice[] = [];
       for (const binding of projection.outputs) {
+        if (resultEvidence.some((register) => overlaps(register, binding.register))) {
+          outputs.push(binding);
+          continue;
+        }
         const found = scratch(binding.register.root, binding.value);
         if (found)
           exitScratch.push({
@@ -552,6 +611,17 @@ export function reconstruct(
             sources: [...found.sources],
             entry: found.entry,
           });
+        else if (
+          scalarPrimary &&
+          !primaryRegisters.some((register) => overlaps(register, binding.register))
+        )
+          exitScratch.push({
+            register: binding.register,
+            value: binding.value,
+            sources: [binding.value.id],
+            entry: false,
+            computed: true,
+          });
         else outputs.push(binding);
       }
       if (
@@ -559,12 +629,12 @@ export function reconstruct(
         !localValidation.presentation(
           'exit_scratch',
           id,
-          'possible-return slices whose exit value is only an unprojected call clobber or the entry value on every path; not liveness roots, not the proven written result storage',
+          'possible-return slices not established as results; unprojected call clobbers/entry values, or undemanded slices outside an established scalar primary; not liveness roots',
           [id, ...new Set(exitScratch.flatMap((slice) => slice.sources))].slice(0, 64),
           exitScratch
             .map(
-              ({ register, sources, entry }) =>
-                `${register.root}[${register.offset_bits}:${register.width_bits}] <- ${[...sources, ...(entry ? ['entry'] : [])].join(', ')}`,
+              ({ register, value, sources, entry, computed }) =>
+                `${register.root}[${register.offset_bits}:${register.width_bits}] = ${value.id} <- ${[...sources.slice(0, 2), ...(sources.length > 2 ? [`and ${sources.length - 2} more recorded sources`] : []), ...(entry ? ['entry'] : [])].join(', ')}${computed ? '; no result-use evidence gathered; callers not scanned' : ''}`,
             )
             .join('; '),
         )
@@ -573,7 +643,7 @@ export function reconstruct(
       localValidation.requireAbi(
         'exit_scratch',
         [id],
-        'Treating these exit slices as unspecified assumes ABI conformance: callers read only the return storage of this function, and caller-saved registers hold no additional result. Each slice and its clobbering calls remain in the inference metadata and the checked view.',
+        'Moving these exit slices out of line assumes ABI conformance: callers read only the established return storage, and other caller-saved slices hold no additional result. No result-use evidence gathered; callers not scanned. Exact slice values and sources remain in the exit metadata and checked view; this is not proof of non-consumption.',
       );
       returns.set(id, { ...projection, outputs, exit_scratch: exitScratch });
     }
@@ -655,7 +725,7 @@ export function reconstruct(
   // Incoming phi sources are demanded only when their destination is live.
   const incomingUses = new Map<string, { source: Value; block: string }[]>();
   for (const { transfer, block } of allTransfers)
-    for (const copy of transfer.copies) {
+    for (const copy of cellTransfers.get(transfer) ?? transfer.copies) {
       context.checkpoint(1);
       const list = incomingUses.get(copy.destination.id) ?? [];
       list.push({ source: copy.source, block: block.id });
@@ -763,7 +833,7 @@ export function reconstruct(
     readonly { readonly destination: Value; readonly source: Value }[]
   >();
   for (const { transfer, block } of allTransfers) {
-    const copies = transfer.copies.filter((copy) => {
+    const copies = (cellTransfers.get(transfer) ?? transfer.copies).filter((copy) => {
       context.checkpoint(1);
       return (
         live.has(copy.destination.id) &&
@@ -1015,7 +1085,7 @@ export function reconstruct(
           ...(view === 'source' ? { frame_saves: sourceStack.saves } : {}),
         }
       : undefined;
-  return {
+  const program: Reconstruction = {
     function: input.function,
     view,
     blocks,
@@ -1055,5 +1125,16 @@ export function reconstruct(
           },
         }
       : {}),
+  };
+  if (!program.source || view !== 'source') return program;
+  const { returns: signatureReturns, ...signatureTypes } = projectSourceSignature(
+    program,
+    input,
+    context,
+  );
+  return {
+    ...program,
+    returns: signatureReturns ?? program.returns,
+    source: { ...program.source, ...signatureTypes },
   };
 }
