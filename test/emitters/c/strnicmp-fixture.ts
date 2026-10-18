@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createOperationContext, DEFAULT_ANALYSIS_OPTIONS } from '../../../src/core/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { simplifySSA } from '../../../src/analysis/values/index.js';
+import { recoverTypes } from '../../../src/analysis/types/index.js';
 import { structureControlFlow } from '../../../src/presentation/index.js';
 import { reconstruct } from '../../../src/reconstruction/index.js';
 import { validateReconstruction } from '../../../src/reconstruction/validate.js';
@@ -10,6 +11,7 @@ import { emitPythonLike } from '../../../src/emitters/python-like/index.js';
 import { DarwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
 import { fromWords, lift } from '../../lifters/arm64/support.js';
 import { execute } from './support.js';
+import { image, slice } from '../../ir/support.js';
 
 /** SQLite 3.54.0, sqlite3.c:37261-37271 (public domain).
  * Source oracle:
@@ -99,6 +101,15 @@ export function checkStrnicmp(
   assert.ok(structured.value);
   const input = {
     function: structured.value,
+    ...(view === 'source'
+      ? {
+          types: recoverTypes(ir, new DarwinArm64Abi(), context(), {
+            image_id: image,
+            slice_id: slice,
+            revision: 0,
+          }),
+        }
+      : {}),
     source: { abi: new DarwinArm64Abi(), callees: [], addresses: [] },
   };
   // Both dialects receive the very same shared region/source facts. Reconstruction
@@ -170,6 +181,18 @@ export function checkStrnicmp(
       assert.ok(
         output.emission.local_validation?.some((record) => record.rule === 'single_use_inlining'),
       );
+      assert.ok(
+        output.emission.local_validation?.some((record) => record.rule === 'pointer_null_test'),
+      );
+      if (language === 'c-like') {
+        assert.ok(
+          output.emission.local_validation?.some((record) => record.rule === 'typed_dereference'),
+        );
+        assert.doesNotMatch(output.emission.text, /\(uintptr_t\)\w+ == 0/);
+        assert.doesNotMatch(output.emission.text, /\*\(uint8_t \*\)\(uintptr_t\)address/);
+        assert.equal((output.emission.text.match(/const uint8_t\*/g) ?? []).length, 2);
+        assert.doesNotMatch(output.emission.text, /^\s+uint8_t\* /m);
+      }
     }
     for (const [left, right, count] of strnicmpCases) {
       const memory = new Map<bigint, number>();

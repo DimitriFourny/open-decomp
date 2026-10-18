@@ -82,6 +82,8 @@ function framed(name: string, options: { reloadX19?: boolean; closure?: boolean 
   return {
     call: call.id,
     memory: memory.map((node) => node.id),
+    emit: (language: 'c-like' | 'python-like') =>
+      emit(ir, { types, source: input.source }, language),
     view: (view: 'source' | 'checked'): Reconstruction =>
       reconstruct(input, createOperationContext(), view),
   };
@@ -149,6 +151,11 @@ test('source view moves ABI-scratch exit clobbers out of line', () => {
   assert.deepEqual(slice.sources, [fixture.call]);
   assert.ok(!source.live.has(slice.value.id), 'scratch is no liveness root');
   assert.ok(rules(source).includes('exit_scratch'));
+  for (const language of ['c-like', 'python-like'] as const) {
+    const { emission } = fixture.emit(language);
+    assert.match(emission.text, /exit x1, v0, v1, v2, v3: unspecified \(clobbered by calls\)/);
+    assert.doesNotMatch(emission.text, /also at exit:.* = value\d/);
+  }
 });
 
 test('complete-by-callee-reads closes an inferred argument list only in the source view', () => {
@@ -160,11 +167,14 @@ test('complete-by-callee-reads closes an inferred argument list only in the sour
   assert.ok(rules(source).includes('arity_closure'));
 });
 
-function computedExit(evidence: Partial<SourceEvidence> = {}, primary = true) {
+function computedExit(evidence: Partial<SourceEvidence> = {}, primary = true, constant = false) {
   const b = builder('computed-exit'),
     block = b.block('entry');
   const loaded = block.load(u64, block.readRegister(x(2)));
-  block.writeRegister(x(1), block.int('add', loaded, block.constant(u64, 1n)));
+  block.writeRegister(
+    x(1),
+    constant ? block.constant(u64, 8n) : block.int('add', loaded, block.constant(u64, 1n)),
+  );
   if (primary) block.writeRegister(x(0), block.constant(u64, 7n));
   block.return();
   const ir = constructSSA(b.finish(block, [])).value as SSAForm;
@@ -204,9 +214,30 @@ test('undemanded computed exit slices move out of line without dropping load eff
   );
   for (const language of ['c-like', 'python-like'] as const) {
     const { emission } = emit(fixture.ir, fixture.extra, language);
-    assert.match(emission.text, /also at exit: x1\[0:64\] = \w+ \(not established as a result\)/);
+    assert.match(
+      emission.text,
+      /also at exit: x1\[0:64\] = computed, not materialized \(not established as a result\)/,
+    );
+    assert.doesNotMatch(emission.text, /also at exit:.* = value\d/);
     assert.doesNotMatch(emission.text, /return physical_return/);
     // The out-of-line value does not rescue a faulting load from execution.
+    const inputs = new Map(
+      emittedFormals(emission).map((formal) => [formal.statement_id, 0x1000n]),
+    );
+    assert.equal(execute(emission, inputs).exit, 'fault');
+    const memory = new Map(Array.from({ length: 8 }, (_, index) => [0x1000n + BigInt(index), 0]));
+    assert.deepEqual(execute(emission, inputs, memory).values, [7n]);
+  }
+});
+
+test('cheap exit expressions print without manufacturing a dead local', () => {
+  const fixture = computedExit({}, true, true);
+  for (const language of ['c-like', 'python-like'] as const) {
+    const { emission } = emit(fixture.ir, fixture.extra, language);
+    assert.match(
+      emission.text,
+      /also at exit: x1\[0:64\] = (?:0x)?8 \(not established as a result\)/,
+    );
     const inputs = new Map(
       emittedFormals(emission).map((formal) => [formal.statement_id, 0x1000n]),
     );

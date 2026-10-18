@@ -207,8 +207,12 @@ Parameter roles distinguish observed source inputs, physical-register inputs and
 Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level FP-environment explanation names every affected guard/operation without hoisting, sharing or erasing predicates across state epochs. Native summaries propagate requirement codes instead of free-form assumption strings. The original conservative effects and known portions of the body remain intact.
 
 Source-only `exit_scratch` presentation keeps exact exit slices and provenance
-in reconstruction facts while moving unestablished results into one comment per
-return. Locally computed slices qualify only outside an established scalar
+in reconstruction facts while moving unestablished results into exit comments.
+Comments name only actual uncoalesced declarations or bounded pure expressions
+over them; otherwise they describe entry, call-clobber, or unmaterialized
+computation origins. Call-clobber-only slices share a compact unspecified-register
+summary. Dead values never acquire invented identifiers for comments.
+Locally computed slices qualify only outside an established scalar
 integer primary result, without gathered caller demand, multi-register/HFA
 evidence, or a conflicting/unprojectable declared return contract. Positive
 consumption evidence from already prepared native units keeps slices inline;
@@ -218,6 +222,14 @@ callers are not exhaustively scanned. The inference explicitly records
 `unavailable_semantics` diagnostic remains. These slices cease to be source
 liveness roots, but potentially faulting loads and other ordered effects remain;
 checked output retains the full overlay.
+
+Source pointer null tests use the declared pointer directly under an explicit
+zero-null-address ABI requirement. Scalar dereferences consult actual declarations
+(including const formals and coalesced representatives), stripping only unchanged
+bitcasts. Whole pointer copies avoid integer round trips. Noninterfering parameter
+copies may reuse the formal itself after its last original-value use; interfering
+live ranges and incompatible declarations remain separate. Each rewrite retains
+its presentation validation record, and checked rendering is unchanged.
 
 `requirement_predicate(requirement_id, site_id, state_epoch, original_pure_predicate, supported_predicate_result)` first preserves the original predicate's known result. Only an unknown result may be resolved by an explicit matching acknowledgment; a known unsupported state cannot be acknowledged away. ARM supported state is true, x86 supported state false. Unknown calls invalidate earlier epoch acknowledgments. Three focused regressions and 26 deterministic source/helper observations cover both dialects, store/call ordering, wrong epochs, known unsupported state and ARM/x86 polarity. General exceptional FP environments and status fidelity remain unmodeled.
 

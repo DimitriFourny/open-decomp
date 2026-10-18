@@ -623,6 +623,40 @@ export class Renderer {
   };
 
   private expression(expression: Expression, type: DataType): Printed {
+    if (
+      this.sourceView &&
+      expression.kind === 'compare' &&
+      (expression.op === 'eq' || expression.op === 'ne')
+    ) {
+      const pointer =
+        this.constantOf(expression.right) === 0n
+          ? expression.left
+          : this.constantOf(expression.left) === 0n
+            ? expression.right
+            : undefined;
+      if (
+        pointer &&
+        !this.inline.has(pointer.id) &&
+        this.declaredPointer(pointer) &&
+        this.localValidation.presentation(
+          'pointer_null_test',
+          pointer.id,
+          'declared pointer compared for equality with zero target address bits',
+        )
+      ) {
+        this.localValidation.requireAbi(
+          'pointer_null_test',
+          [this.input.function.id],
+          'The target null pointer has zero address bits.',
+        );
+        return this.printer.binary(
+          expression.op === 'eq' ? '==' : '!=',
+          this.printer.primary(this.local(pointer)),
+          this.printer.literal(0n, 64),
+          { bits: 1, signed: false },
+        );
+      }
+    }
     return expressionText(expression, type, this.writer, this.printed, {
       view: this.sourceView ? 'source' : 'checked',
       ...(this.program.source
@@ -642,6 +676,16 @@ export class Renderer {
     return (
       this.declaredTypes.get((this.variables.get(value.id) ?? value).id) ?? this.valueType(value)
     );
+  }
+
+  /** Actual declarations, including coalesced formals, are authoritative. */
+  private declaredPointer(value: Value): { bits: number; signed: boolean } | null {
+    const spelling = this.declaredSpelling(value);
+    const match =
+      this.language === 'c-like'
+        ? /^(?:const )?(u?)int(8|16|32|64)_t\s*\*$/.exec(spelling)
+        : /^pointer\[(u?)int(8|16|32|64)_t\]$/.exec(spelling);
+    return match ? { bits: Number(match[2]), signed: !match[1] } : null;
   }
 
   /** A C context that converts to unsigned `bits` (assignment, return, store)
@@ -681,6 +725,27 @@ export class Renderer {
   /** `destination = source` for an SSA copy; an inline source keeps its
    * defining expression available to pointer-arithmetic presentation. */
   private copied(destination: Value, source: Value): string {
+    if (this.sourceView) source = this.uncast(source, ['bitcast']);
+    if (
+      this.sourceView &&
+      !this.inline.has(source.id) &&
+      this.declaredPointer(destination) &&
+      this.declaredPointer(source) &&
+      this.localValidation.presentation(
+        'pointer_copy',
+        destination.id,
+        'whole address copied between declared scalar pointers without an integer round trip',
+        [source.id],
+      )
+    ) {
+      const target = this.declaredSpelling(destination),
+        original = this.declaredSpelling(source);
+      return this.language === 'python-like' ||
+        target === original ||
+        target === `const ${original}`
+        ? this.local(source)
+        : `(${target})${this.local(source)}`;
+    }
     return this.assignedText(
       destination,
       this.printed(source),
@@ -1447,14 +1512,11 @@ export class Renderer {
         access.endian === 'little' &&
         !access.volatile &&
         access.alignment === 1;
-    if (this.language === 'c-like' && plain && !this.inline.has(node.address.id)) {
-      const id =
-        this.sourceValueTypes.get(node.address.id) ??
-        this.program.source?.value_types?.get(node.address.id)?.type_id;
-      const pointee = id ? this.scalarPointee(id) : null;
+    const pointerAddress = this.uncast(node.address, ['bitcast']);
+    if (this.language === 'c-like' && plain && !this.inline.has(pointerAddress.id)) {
+      const pointee = this.declaredPointer(pointerAddress);
       if (
         pointee?.bits === bitWidth(type) &&
-        this.declaredSpelling(node.address) === this.sourceType(id!) &&
         this.permitUnaligned(node) &&
         this.localValidation.presentation(
           'typed_dereference',
@@ -1462,7 +1524,7 @@ export class Renderer {
           'declared scalar pointer of exactly the accessed width at displacement 0',
         )
       )
-        return `*${this.local(node.address)}`;
+        return `*${this.local(pointerAddress)}`;
     }
     if (this.language === 'c-like' && plain) {
       const member = this.memberAccess(node.address, bitWidth(type));
@@ -2360,10 +2422,11 @@ export class Renderer {
     if (!this.variables.size) return copies;
     return copies.filter((copy) => {
       const destination = this.variables.get(copy.destination.id);
+      const source = this.uncast(copy.source, ['bitcast']);
       return !(
         destination &&
-        !this.inline.has(copy.source.id) &&
-        this.variables.get(copy.source.id) === destination
+        !this.inline.has(source.id) &&
+        this.variables.get(source.id) === destination
       );
     });
   }
@@ -2591,6 +2654,12 @@ export class Renderer {
     // at every other definition; narrow reads retain their original C type.
     const widening = new Map<string, Value>();
     const assignments: { destination: Value; source: Value }[] = [];
+    for (const copies of program.transfers.values())
+      for (const copy of copies) {
+        const source = this.uncast(copy.source, ['bitcast']);
+        if (source.id !== copy.source.id)
+          assignments.push({ destination: copy.destination, source });
+      }
     for (const block of program.blocks.values())
       for (const node of block.statements) {
         if (node.kind !== 'assign' || !program.retained.has(node.id)) continue;
@@ -2615,13 +2684,24 @@ export class Renderer {
     const variables = coalescePhiCopies(
       program,
       liveness,
-      (a, b) =>
-        !formals.has(a.id) &&
-        !formals.has(b.id) &&
-        storageType(a) === storageType(b) &&
-        typeId(widening.get(a.id) ?? a) === typeId(widening.get(b.id) ?? b) &&
-        this.valueType(widening.get(a.id) ?? a) === this.valueType(widening.get(b.id) ?? b) &&
-        (this.names.get(a.id) ?? null) === (this.names.get(b.id) ?? null),
+      (a, b) => {
+        if (!program.source && (formals.has(a.id) || formals.has(b.id))) return false;
+        const left = widening.get(a.id) ?? a,
+          right = widening.get(b.id) ?? b;
+        const pointerFormal = [left, right].find(
+          (value) => program.source?.formal_types?.get(value.id)?.kind === 'pointer',
+        );
+        const pointerCompatible =
+          pointerFormal &&
+          this.valueType(left).replace(/^const /, '') ===
+            this.valueType(right).replace(/^const /, '');
+        return (
+          storageType(a) === storageType(b) &&
+          (pointerCompatible ||
+            (typeId(left) === typeId(right) && this.valueType(left) === this.valueType(right))) &&
+          (this.names.get(a.id) ?? null) === (this.names.get(b.id) ?? null)
+        );
+      },
       this.context,
       assignments,
     );
@@ -2630,7 +2710,7 @@ export class Renderer {
       this.localValidation.presentation(
         'phi_copy_coalescing',
         subject,
-        'noninterfering edge copies and unsigned widening assignments share storage; a widening class uses its widest unsigned declaration and preserves original definition and read conversions',
+        'noninterfering edge copies (including formals after their last use) and unsigned widening assignments share storage; formals retain their declaration, otherwise a widening class uses its widest unsigned declaration and preserves original definition and read conversions',
         [...variables.keys()],
       )
     )
@@ -2852,6 +2932,42 @@ export class Renderer {
     return true;
   }
 
+  /** Comments must not allocate identifiers for dead SSA values. Expand only a
+   * small pure tree whose leaves are real, uncoalesced declarations; coalesced
+   * storage may already contain a later value at this exit. */
+  private exitValue(value: Value): string | null {
+    let remaining = 8;
+    const render = (current: Value): Printed | null => {
+      if (--remaining < 0) return null;
+      if (
+        !this.inline.has(current.id) &&
+        this.declaredTypes.has(current.id) &&
+        !this.variables.has(current.id)
+      )
+        return this.printed(current);
+      const expression = this.program.expressions.get(current.id);
+      if (
+        !expression ||
+        !['constant', 'integer', 'compare', 'cast', 'extract'].includes(expression.kind)
+      )
+        return null;
+      const operands = new Map<string, Printed>();
+      for (const operand of expressionOperands(expression)) {
+        const printed = render(operand);
+        if (!printed) return null;
+        operands.set(operand.id, printed);
+      }
+      return expressionText(
+        expression,
+        current.type,
+        this.writer,
+        (operand) => operands.get(operand.id)!,
+        { view: 'source' },
+      );
+    };
+    return render(value)?.text ?? null;
+  }
+
   private control(control: Control, block: BlockRegion, depth: number): void {
     this.emitNotes(control.id, depth);
     const start = this.writer.offset;
@@ -2951,16 +3067,32 @@ export class Renderer {
         for (const binding of block.register_exit) ids.push(binding.value.id);
         const scratch = projection?.exit_scratch ?? [];
         if (scratch.length) {
-          // Names identify exact recorded values without expanding dead
-          // computations (or making them liveness roots just for a comment).
-          const slices = scratch.map(({ register, value }) => {
-            const root = register.root.slice(register.root.lastIndexOf(':') + 1);
-            return `${root}[${register.offset_bits}:${register.width_bits}] = ${this.local(value)}`;
-          });
-          this.writer.comment(
-            depth,
-            `also at exit: ${slices.join(', ')} (not established as a result)`,
-          );
+          const clobbers = scratch.filter((slice) => !slice.computed && !slice.entry);
+          if (clobbers.length)
+            this.writer.comment(
+              depth,
+              `exit ${[...new Set(clobbers.map(({ register }) => register.root.slice(register.root.lastIndexOf(':') + 1)))].join(', ')}: unspecified (clobbered by calls)`,
+            );
+          const slices = scratch
+            .filter((slice) => slice.computed || slice.entry)
+            .map((slice) => {
+              const { register, value } = slice;
+              const root = register.root.slice(register.root.lastIndexOf(':') + 1);
+              const printable = this.exitValue(value);
+              const description =
+                printable ??
+                (slice.entry
+                  ? slice.sources.length
+                    ? 'entry value or clobbered by calls'
+                    : 'entry value'
+                  : 'computed, not materialized');
+              return `${root}[${register.offset_bits}:${register.width_bits}] = ${description}`;
+            });
+          if (slices.length)
+            this.writer.comment(
+              depth,
+              `also at exit: ${slices.join(', ')} (not established as a result)`,
+            );
         }
         if (projection && projection.kind !== 'physical' && projection.outputs.length === 0) {
           const values = this.writer.list(projection.results, (value) => {

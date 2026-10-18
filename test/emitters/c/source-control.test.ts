@@ -133,6 +133,31 @@ for (const language of ['c-like', 'python-like'] as const)
       }
     });
 
+    test('source parameter copies reuse only noninterfering formal storage', () => {
+      for (const keepOriginal of [false, true]) {
+        const b = program(`source-formal-copy-${keepOriginal}`),
+          entry = b.block('entry', [i64]),
+          loop = b.block('loop', [i64]),
+          exit = b.block('exit', [i64]);
+        const formal = entry.parameters[0]!,
+          counter = loop.parameters[0]!;
+        entry.jump(loop, [formal]);
+        const next = loop.int('sub', counter, loop.constant(i64, 1n));
+        loop.branch(
+          loop.compare('ne', next, loop.constant(i64, 0n)),
+          loop.edge(loop, [next]),
+          loop.edge(exit, [keepOriginal ? formal : next]),
+        );
+        exit.return(exit.parameters);
+        const output = emit(b.finish(entry, [i64]), language, 'source', true);
+        assert.equal(name(output, counter) === name(output, formal), !keepOriginal);
+        for (const initial of [1n, 2n, 5n])
+          assert.deepEqual(execute(output.emission, new Map([[formal.id, initial]])).values, [
+            keepOriginal ? initial : 0n,
+          ]);
+      }
+    });
+
     test('an unguarded bottom test stays do/while: its first test is not established', () => {
       const { input, count, base } = countedLoop(false);
       const source = emit(input, language);
