@@ -390,6 +390,38 @@ Same suite, harness and method; root `~/Documents/open-decomp-quality-round3-202
 
 Mean ratings Open Decomp vs Ghidra (0–4): algorithm comprehension 2.92 vs 3.77; control flow 2.16 vs 3.42; clutter **1.54** vs 2.98 (round 2: 0.57); style 1.78 vs 2.70; types/interfaces 1.89 vs 2.70; unresolved semantics 2.90 vs 3.50. Remaining low-score evidence: cross-loop `goto` labels, synthetic `type_N*` pointer types, `entry_sp` formals with residual frame slots, x86 `rdx`/MXCSR guard overlays and remaining `physical_return` tuples where no primary result is established.
 
+## Source view round 4, frozen published suite rerun (2026-10-18, commit `9f4fe66`)
+
+Same suite, inputs and gold (`427f9357…`, 736/736); all 70 Ghidra texts byte-identical to round 3; root `~/Documents/open-decomp-quality-round4-2026-10-18/` (`records/` holds commands, exit codes and comparisons). Evaluator fix (commit `1007153`): round-4 C begins with `static inline` helpers, and `quality-heldout-evaluate.py` used to bind the first definition. It now binds the target name (including the Mach-O `_name` form), else the unique non-`static` definition, else the first definition. Replaying round-3 inputs gave identical results (`records/neutrality-round3-replay.json`). As-is numbers are in `records/asis-first-definition-binding/`: 0 cells, 10 counterexamples, all caused by the binding. The 2026-10-17 prospective plan keeps its historical evaluator pin.
+
+**Comparability caveat:** both reviewers are Claude models (A opus-worker, B sonnet-worker); rounds 2–3 used GPT reviewers. Reviewer B read only the first ~130 lines plus tail sections of the longest vectorized outputs.
+
+| Lane                    | Round 3 (`2e97d92`)       | Round 4 (`9f4fe66`)                                                           | Ghidra              |
+| ----------------------- | ------------------------- | ----------------------------------------------------------------------------- | ------------------- |
+| Exact executable subset | 26 cells, 978/978         | **46 cells, 1706/1706** (no text 40, no compile 24, arity 6, machine-entry 4) | 36 cells, 1346/1346 |
+| Blind preference (120)  | Ghidra 116, Open Decomp 4 | Ghidra 110, Open Decomp 10 (all `heldout_saturate` O2, Mach-O ARM64 + ELF)    | —                   |
+
+Mean ratings Open Decomp vs Ghidra (0–4), round 3 in parentheses:
+
+| Dimension            | Open Decomp     | Ghidra |
+| -------------------- | --------------- | ------ |
+| Algorithm            | 2.73 (2.92)     | 3.75   |
+| Control flow         | **2.65** (2.16) | 3.27   |
+| Clutter              | 1.35 (1.54)     | 3.00   |
+| Style                | 1.77 (1.78)     | 2.81   |
+| Types/interfaces     | 1.78 (1.89)     | 3.00   |
+| Unresolved semantics | 3.07 (2.90)     | 3.86   |
+
+Low-score evidence still remaining:
+
+- unused `static inline` helper preludes;
+- `uint64_t`-typed formals;
+- loop indices split into `lo | hi << 32` halves;
+- flag reconstruction (`fp_unordered`, `~(…) & 1`);
+- `bit_pattern("ieee64_t", …)` for FP zero.
+
+On x86-64 `heldout_weighted`, the source view projects `rax` (`uint32_t` loop index) as the result and labels `zmm0` as scratch. The `double` result and its multiply–accumulate chain then disappear from the readable text; they stay in exit metadata.
+
 ## Normalized four-lane performance (2026-10-17, commit `901602b`)
 
 Exclusive serialized slot (`.local/performance/quality.measurement.lock`), `dist/` aggregate `dd0ea263…` unchanged before/after, Node **v26.11.1** (not the historical 24.22.0 host), Ghidra 12.1.4, bridge `73ea1c8e…`. Protocol `scripts/bench/quality-persistent.py` unchanged: same MCP client for all four lanes (Open Decomp unobserved/observed, pinned Ghidra MCP bridge, persistent Ghidra `DecompInterface`), 11 equal requests in 156/156 matched cells, 3 fresh runs, 10 warm, 30 pings, balanced order. 1,716/1,716 observer/control pairs and 6/6 import controls equivalent. Raw evidence: `~/Documents/open-decomp-perf-2026-10-17-final/p25-normalized/comparison.json`.
