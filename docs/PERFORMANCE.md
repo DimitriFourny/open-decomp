@@ -486,6 +486,48 @@ python3 scripts/bench/quality-heldout-review-results.py --packets "$R/review-ang
 
 Both packet sets show the same Open Decomp texts. Reviewers who have seen one set can recognize Open Decomp's style in the other, so each set should get its own fresh reviewers.
 
+## Source view round 5, three-tool frozen-suite rerun (2026-10-18, commit `61aa5e9`)
+
+Same suite, inputs and gold (`427f9357…`, 736/736). Root: `~/Documents/open-decomp-quality-round5-2026-10-18/`, with `records/` holding commands, exit codes, the `dist/` digest `604c4849…` (unchanged before/after) and the round-4 comparison. All 70 Ghidra texts and all 120 angr texts are byte-identical to round 4 and the angr smoke run. Every one of the 80 Open Decomp texts changed.
+
+There are two blind packet sets, each reviewed by two fresh reviewers (A opus-worker, B sonnet-worker; nobody reviewed both sets):
+
+- Open Decomp vs Ghidra: 60 pairs, unchanged procedure.
+- Open Decomp vs angr: 80 pairs.
+
+Reviewer B in both sets scored byte-identical repeated packets once and reused the scores; reviewer A read every packet.
+
+| Lane                    | Open Decomp                                  | Ghidra                   | angr                                                                              |
+| ----------------------- | -------------------------------------------- | ------------------------ | --------------------------------------------------------------------------------- |
+| Texts (120 cells)       | 80                                           | 70                       | 120                                                                               |
+| Exact executable subset | 46 cells, 1706/1706 (unchanged from round 4) | 36 cells, 1346/1346      | 42 cells, 1542/1542 (16 counterexamples, 4 timeouts, 38 no compile, 20 PE `long`) |
+| Blind preference vs OD  | —                                            | Ghidra 80, OD 29, tie 11 | angr 52, OD 72, tie 36                                                            |
+
+Round 4's preference was Ghidra 110, OD 10.
+
+Mean ratings (0–4):
+
+| Dimension            | OD (Ghidra set) | Ghidra | OD round 4 | Ghidra round 4 | OD (angr set) | angr |
+| -------------------- | --------------- | ------ | ---------- | -------------- | ------------- | ---- |
+| Algorithm            | 2.89            | 3.45   | 2.73       | 3.75           | 3.34          | 3.12 |
+| Control flow         | 2.82            | 3.26   | 2.65       | 3.27           | 3.12          | 2.77 |
+| Clutter              | 1.98            | 2.95   | 1.35       | 3.00           | 2.12          | 2.38 |
+| Style                | 2.08            | 2.72   | 1.77       | 2.81           | 2.39          | 2.40 |
+| Types/interfaces     | **2.75**        | 2.32   | 1.78       | 3.00           | 2.66          | 2.73 |
+| Unresolved semantics | 3.25            | 3.70   | 3.07       | 3.86           | 3.38          | 2.85 |
+
+Ghidra's identical texts moved by up to 0.68 between rounds (types 3.00 → 2.32). Within-set gaps are therefore the meaningful comparison; absolute means across rounds are not.
+
+Against Ghidra, OD now wins `heldout_runs` (19 of 24) and `heldout_saturate` (10 of 24, plus 10 ties). It loses `heldout_merge`, `heldout_roll` and `heldout_weighted` 24/24.
+
+The x86-64 `heldout_weighted` source view now returns `double` with the multiply–accumulate chain visible. Residual text in that output:
+
+- `uint64_t*` formals with `__od_bitcast_f64_u64` loads;
+- `bit_pattern("ieee64_t", …)` zeros;
+- one mixed `fp_add`;
+- `(value1 | ((uint64_t)0 << 32))`;
+- byte-offset `8 + (uintptr_t)arg1 + i * 8` accesses.
+
 ## Normalized four-lane performance (2026-10-17, commit `901602b`)
 
 Exclusive serialized slot (`.local/performance/quality.measurement.lock`), `dist/` aggregate `dd0ea263…` unchanged before/after, Node **v26.11.1** (not the historical 24.22.0 host), Ghidra 12.1.4, bridge `73ea1c8e…`. Protocol `scripts/bench/quality-persistent.py` unchanged: same MCP client for all four lanes (Open Decomp unobserved/observed, pinned Ghidra MCP bridge, persistent Ghidra `DecompInterface`), 11 equal requests in 156/156 matched cells, 3 fresh runs, 10 warm, 30 pings, balanced order. 1,716/1,716 observer/control pairs and 6/6 import controls equivalent. Raw evidence: `~/Documents/open-decomp-perf-2026-10-17-final/p25-normalized/comparison.json`.
