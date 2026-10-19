@@ -299,25 +299,23 @@ class Parser {
   constructor(text: string) {
     this.python = /^def /m.test(text);
     this.voidResult = /^void [A-Za-z_]\w*\(/m.test(text) || /^def .*-> void:/m.test(text);
+    // The VA comment is omitted where the printed `data_<hex>` name already states the address.
     const declarations = this.python
-      ? /^(\w+) = memory_view\((0x[\da-f]+), "uint(\d+)_t", (?:True|False)\)(?:  # .*)?$|^# (\w+): image VA (0x[\da-f]+), read-only; [^\n]*?uint(\d+)_t[^\n]*\n\4 = \(\n/gm
-      : /(?:\/\* (\w+): image VA (0x[\da-f]+); byte extent (?:unknown|\d+) \*\/\nextern (?:const )?uint(\d+)_t \1(?:\[\])?;|extern (?:const )?uint(\d+)_t (\w+)(?:\[\])?; \/\* VA (0x[\da-f]+)(?:, \d+ bytes)?(?:, [a-z ]+)? \*\/|\/\* (\w+): image VA (0x[\da-f]+), read-only; [^\n]* \*\/\nstatic const uint(\d+)_t \7\[\d*\] = \{)/g;
+      ? /^(?<name>\w+) = memory_view\((?<address>0x[\da-f]+), "uint(?<bits>\d+)_t", (?:True|False)\)(?:  # .*)?$|^# VA (?<tupleAddress>0x[\da-f]+), read-only; [^\n]*?uint(?<tupleBits>\d+)_t[^\n]*\n(?<tupleName>\w+) = \(\n/gm
+      : /extern (?:const )?uint(?<bits>\d+)_t (?<name>\w+)(?:\[\])?;(?: \/\* (?:VA (?<address>0x[\da-f]+))?[^*]*\*\/)?|\/\* VA (?<tableAddress>0x[\da-f]+), read-only; [^\n]* \*\/\nstatic const uint(?<tableBits>\d+)_t (?<tableName>\w+)\[\d*\] = \{/g;
     for (const match of text.matchAll(declarations)) {
-      // C: groups 1-3 and 4-6 are extern forms, 7-9 a table with contents.
-      // Python: groups 1-3 are memory_view, 4-6 a tuple of contents.
-      const groups = this.python
-        ? [match[1] ?? match[4], match[2] ?? match[5], match[3] ?? match[6]]
-        : [
-            match[1] ?? match[5] ?? match[7],
-            match[2] ?? match[6] ?? match[8],
-            match[3] ?? match[4] ?? match[9],
-          ];
-      const name = groups[0]!,
-        address = BigInt(groups[1]!),
-        bits = Number(groups[2]!);
+      const found = match.groups!;
+      // `tuple*`/`table*`: a read-only table printed with its contents.
+      const contents = found['tableName'] !== undefined || found['tupleName'] !== undefined;
+      const name = (found['name'] ?? found['tableName'] ?? found['tupleName'])!,
+        width = (found['bits'] ?? found['tableBits'] ?? found['tupleBits'])!,
+        stated = found['address'] ?? found['tableAddress'] ?? found['tupleAddress'];
+      const spelled = /^data_([\da-f]+)$/.exec(name)?.[1];
+      assert.ok(stated !== undefined || spelled !== undefined, `No address for ${name}`);
+      const address = BigInt(stated ?? `0x${spelled}`),
+        bits = Number(width);
       this.tables.set(name, { address, bits });
-      if (!this.python && match[7] === undefined && !match[0].includes('[];'))
-        this.scalars.add(name);
+      if (!this.python && !contents && !match[0].includes('[];')) this.scalars.add(name);
       this.symbols.set(name, { kind: 'pointer', to: { kind: 'int', bits, signed: false } });
       this.ops.push({
         kind: 'assign',

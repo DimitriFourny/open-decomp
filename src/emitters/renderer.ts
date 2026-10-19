@@ -2940,18 +2940,16 @@ export class Renderer {
       if (stride) {
         if (stride > end) parts.push(`uint8_t ${paddingName(end)}[${stride - end}];`);
         packed ||= members.some((member) => stride % BigInt(member.bits / 8) !== 0n);
-        lines.push(`/* observed access stride ${stride}; not an allocation extent */`);
+        lines.push(`/* access stride ${stride}, not size */`);
       }
       const image = this.sourceStructs.image(id);
       const runtime = this.typeRecords.get(id)?.source === 'runtime';
       lines.push(
         runtime
-          ? '/* Objective-C ivars used here, at their static offsets (class metadata); size unknown */'
-          : `/* members used here; size unknown; full layout in the types view${
-              image && image.functions > 1
-                ? `; merged from ${image.functions} functions${image.state === 'bounded' ? ' (flows partly explored)' : ''}`
-                : ''
-            }${image?.conflicts.length ? `; conflicts with ${image.conflicts.join(', ')}` : ''} */`,
+          ? '/* ObjC ivars at static class-metadata offsets; partial */'
+          : `/* partial${image && image.functions > 1 ? `; ${image.functions} fns` : ''}${
+              image?.conflicts.length ? `; conflicts with ${image.conflicts.join(', ')}` : ''
+            } */`,
         `struct ${name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
       );
     }
@@ -3190,16 +3188,15 @@ export class Renderer {
         )
       )
         continue;
-      if (!signature) {
+      if (!signature)
         this.localValidation.requireAbi(
           'call_declaration',
           [node.id],
           'The declaration describes the observed native call interface under the target ABI, not a proven authored prototype; unresolved trailing arguments remain explicit.',
         );
-        this.writer.comment(0, 'unknown prototype; observed call interface only');
-      }
       const start = this.writer.offset;
-      this.writer.line(0, text);
+      // An open argument list already prints `...`; a closed observed one is marked inferred.
+      this.writer.line(0, signature || text.includes('...') ? text : `${text} /* inferred */`);
       this.mapped(node, start, [], signature?.evidence_ids ?? []);
     }
   }
@@ -3269,18 +3266,25 @@ export class Renderer {
       const plain = (text: string): string => text.replace(/\*\//g, '* /');
       // Compact for readers: the library basename, plus the native name only when it is
       // not the printed name or its Mach-O `_`-prefixed form. Slot VA, binding records
-      // and the declaration's source stay in the mapped evidence.
+      // and the declaration's source stay in the mapped evidence. An image VA is stated only
+      // where the text does not already carry it (the printed name or a python memory_view).
       const native = global.import?.name;
+      const hex = global.address.value.toString(16);
       const where = global.import
         ? `import${native === name || native === `_${name}` ? '' : ` ${plain(native!)}`}${global.import.library === null ? '' : ` from ${plain(global.import.library.slice(global.import.library.lastIndexOf('/') + 1))}`}`
-        : `VA 0x${global.address.value.toString(16)}${global.object.byte_length === null ? '' : `, ${global.object.byte_length} bytes`}${global.object.kind === 'bytes' ? '' : `, ${global.object.kind.replace('_', ' ')}`}`;
+        : [
+            ...(python || name.split('_').includes(hex) ? [] : [`VA 0x${hex}`]),
+            ...(global.object.byte_length === null ? [] : [`${global.object.byte_length} bytes`]),
+            ...(global.object.kind === 'bytes' ? [] : [global.object.kind.replace('_', ' ')]),
+          ].join(', ');
+      const comment = where === '' ? '' : python ? `  # ${where}` : ` /* ${where} */`;
       if (python) {
         lines.push(
           `${
             global.import
               ? `${name} = import_view(${JSON.stringify(global.import.library ?? '')}, ${JSON.stringify(global.import.name)}, "${type}")`
-              : `${name} = memory_view(0x${global.address.value.toString(16)}, "${type}", ${global.object.mutable ? 'True' : 'False'})`
-          }  # ${where}`,
+              : `${name} = memory_view(0x${hex}, "${type}", ${global.object.mutable ? 'True' : 'False'})`
+          }${comment}`,
         );
         this.writer.helper(
           global.import ? 'import_view' : 'memory_view',
@@ -3291,8 +3295,8 @@ export class Renderer {
       } else
         lines.push(
           declared
-            ? `extern ${type}${declared.constant ? ' const' : ''} ${name}; /* ${where} */`
-            : `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'}; /* ${where} */`,
+            ? `extern ${type}${declared.constant ? ' const' : ''} ${name};${comment}`
+            : `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'};${comment}`,
         );
       const length = lines.slice(first).reduce((sum, line) => sum + line.length + 1, 0);
       spans.push({ object: global, start: offset, end: offset + length });
@@ -3378,19 +3382,18 @@ export class Renderer {
           'Immutable image bytes of the table at the declared VA, read from a file-backed read-only section with no relocation slot inside. Index units are the declared scalar width; the shown extent is the one the comment names.',
         );
       } else {
-        this.writer.comment(
-          0,
-          `${group.name}: image VA 0x${object.address.value.toString(16)}; byte extent unknown`,
-        );
+        const hex = object.address.value.toString(16);
+        const extent =
+          object.byte_length === null ? 'extent unknown' : `${object.byte_length} bytes`;
         if (this.language === 'c-like')
           this.writer.line(
             0,
-            `extern ${object.mutable ? '' : 'const '}uint${table.bits}_t ${group.name}[];`,
+            `extern ${object.mutable ? '' : 'const '}uint${table.bits}_t ${group.name}[]; /* VA 0x${hex}, ${extent} */`,
           );
         else
           this.writer.line(
             0,
-            `${group.name} = memory_view(0x${object.address.value.toString(16)}, "uint${table.bits}_t", ${object.mutable ? 'True' : 'False'})`,
+            `${group.name} = memory_view(0x${hex}, "uint${table.bits}_t", ${object.mutable ? 'True' : 'False'})  # ${extent}`,
           );
         this.writer.helper(
           this.language === 'c-like' ? group.name : 'memory_view',
@@ -3455,13 +3458,13 @@ export class Renderer {
         : total === undefined
           ? 'extent not established'
           : bySize !== undefined && total === bySize
-            ? 'bounded by the next symbol or section end'
+            ? 'next symbol bound'
             : 'accessed range';
     const rest = total === undefined ? undefined : total - shown;
     const more =
       rest === undefined ? 'further elements not shown' : rest > 0n ? `${rest} more` : undefined;
     const elements = `${total === undefined ? `first ${shown}` : `${total}`} ${this.language === 'c-like' ? '' : `uint${table.bits}_t `}elements`;
-    const note = `${name}: image VA 0x${hex}, read-only; ${elements} (${basis})`;
+    const note = `VA 0x${hex}, read-only; ${elements} (${basis})`;
     const per = Math.max(1, Math.floor(16 / width));
     const rows: string[] = [];
     for (let at = 0; at < values.length; at += per)
@@ -3847,12 +3850,6 @@ export class Renderer {
       )
     )
       target = this.functionPointer(node, projection, target, open);
-    const variadic = projection.variadic_stack_arguments ?? 0;
-    if (variadic)
-      this.writer.comment(
-        depth,
-        `last ${variadic} argument${variadic === 1 ? '' : 's'} observed in Darwin variadic outgoing stack slots (a lower bound; the source arity stays open)${projection.kind === 'physical' ? '; the register arguments before them are an observed, possibly incomplete prefix' : ''}`,
-      );
     let operation: string;
     if (send) {
       const { message, skip, arity } = send;
@@ -6985,7 +6982,7 @@ export class Renderer {
     w.comment(
       0,
       this.program.source
-        ? `${this.language === 'c-like' ? 'C-like' : 'Python-like'} pseudocode; ${this.program.source.inferred ? 'inferred ABI interface' : 'recovered source interface'}.`
+        ? `${this.language === 'c-like' ? 'C-like' : 'Python-like'}${this.program.source.inferred ? '' : ', source interface'}`
         : `${this.language === 'c-like' ? 'C-like' : 'Python-like'} reconstruction; explicit widths and ordered memory, not original source.`,
     );
     // Source view: the ABI scratch note is inserted after rendering, and only
@@ -7361,8 +7358,7 @@ export class Renderer {
     if (this.structureSlot) insert(this.structureSlot.at, this.structureLines());
     let support = supportAt;
     if (this.ellipsisUsed) {
-      const comment =
-        '`...` as a call argument: the argument list is open (arguments after those shown are not established); not zero arguments, not a purity claim.';
+      const comment = '...: more args possible';
       const delta = insert(scratchAt, [
         this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
       ]);
@@ -7379,7 +7375,7 @@ export class Renderer {
           [...this.program.returns.keys()].slice(0, 64),
         )
       ) {
-        const comment = `ABI scratch at return: ${[...scratch].join(', ')}; exact slices and values retained in exit metadata, not additional results.`;
+        const comment = `ABI scratch at return, not results: ${[...scratch].join(', ')}`;
         const delta = insert(scratchAt, [
           this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
         ]);

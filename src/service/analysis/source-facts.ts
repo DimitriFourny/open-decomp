@@ -1693,6 +1693,10 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
           message: `Native callee ${dependency.target.original_name ?? dependency.target.id} remains partial: ${summary.reasons.join('; ')}`,
           entity_id: dependency.target.id,
           evidence_ids: dependency.target.evidence_ids,
+          details: {
+            kind: 'callee_partial',
+            callee: dependency.target.original_name ?? dependency.target.id,
+          },
         });
     }
     if (selectedUnit)

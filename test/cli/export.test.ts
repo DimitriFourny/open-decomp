@@ -236,7 +236,7 @@ test(
     assert.ok(rows[0]!.file.endsWith('.py'));
     const text = await readFile(join(filtered, rows[0]!.file), 'utf8');
     assert.ok(text.startsWith('# fixture_arithmetic @ '));
-    assert.match(text, /python-like pseudocode/i);
+    assert.match(text.split('\n')[1]!, /^# python-like\b/i);
   },
 );
 

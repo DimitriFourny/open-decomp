@@ -13,9 +13,6 @@ export interface BoundaryProjection {
   readonly arguments: readonly Value[];
   /** False preserves a known prefix without claiming that trailing source arguments are absent. */
   readonly argument_list_complete?: boolean;
-  /** Source view only: this many trailing `arguments` are observed Darwin
-   * variadic outgoing stack stores; a lower bound, never a closed arity. */
-  readonly variadic_stack_arguments?: number;
   readonly results: readonly Value[];
   readonly inputs: readonly { readonly register: RegisterDescriptor; readonly value: Value }[];
   readonly outputs: readonly { readonly register: RegisterDescriptor; readonly value: Value }[];

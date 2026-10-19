@@ -1151,7 +1151,7 @@ export function reconstruct(
         memory.delete(node.id);
     }
   const diagnostics: Diagnostic[] = [];
-  const unavailable = (origin: Origin, message: string): void => {
+  const unavailable = (origin: Origin, message: string, details?: Diagnostic['details']): void => {
     context.checkpoint(1);
     diagnostics.push({
       code: 'unavailable_semantics',
@@ -1159,6 +1159,7 @@ export function reconstruct(
       message,
       entity_id: origin.id,
       evidence_ids: origin.provenance.evidence_ids,
+      ...(details === undefined ? {} : { details }),
     });
   };
   for (const block of blocks.values()) {
@@ -1180,21 +1181,20 @@ export function reconstruct(
           sourcePlan
             ? 'The source call interface is unresolved; unknown call effects remain explicit.'
             : 'The source call interface is unresolved; physical arguments and effects remain explicit.',
+          { kind: 'call_interface' },
         );
     }
     if (sourcePlan && block.control.kind === 'return') {
       const projection = returns.get(block.control.id);
-      const slices = [...(projection?.outputs ?? []), ...(projection?.exit_scratch ?? [])];
-      if (projection?.kind === 'inferred' && slices.length)
+      const storage = [...(projection?.outputs ?? []), ...(projection?.exit_scratch ?? [])].map(
+        ({ register }) => `${register.root}[${register.offset_bits}:${register.width_bits}]`,
+      );
+      if (projection?.kind === 'inferred' && storage.length)
         unavailable(
           block.control,
           'The source return list is unresolved; changed possible ABI return storage is preserved as an uncertain physical overlay, not inferred aggregate fields: ' +
-            slices
-              .map(
-                ({ register }) =>
-                  `${register.root}[${register.offset_bits}:${register.width_bits}]`,
-              )
-              .join(', '),
+            storage.join(', '),
+          { kind: 'return_storage', storage },
         );
     }
     if (block.control.kind === 'unknown' || block.control.kind === 'indirect')

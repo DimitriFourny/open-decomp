@@ -256,14 +256,38 @@ for (const fixture of [
       const cancelled = (await call('analysis_cancel', { ...scope, job_id: queued.job.id })).result;
       assert.ok('data' in cancelled);
       assert.equal(cancelled.data.outcome, 'already_finished');
-      const waited = (
-        await call('function_decompile', { ...scope, function_id: fn.id, wait: true })
-      ).result;
+      const waitedCall = await call('function_decompile', {
+        ...scope,
+        function_id: fn.id,
+        wait: true,
+      });
+      const waited = waitedCall.result;
       assert.ok('data' in waited);
       assert.equal(waited.data.cache, 'hit');
       assert.equal(waited.revision, revision);
       assert.deepEqual(waited.budget, DEFAULT_BUDGET);
       assert.equal(waited.artifacts[0]?.id, artifact.id);
+      const headerText = waitedCall.response.content.find((item) => item.type === 'text')!;
+      assert.ok(headerText.type === 'text');
+      const [head] = headerText.text.split('\n');
+      // Name @ address | state(reason) | short artifact handle; no entity ID, cache state or dialect.
+      assert.match(
+        head!,
+        /^\/\/ \S+ @ va:0x[0-9a-f]+ \| (complete|partial\(\w+\)) \| artifact_[0-9a-f]{12}$/,
+      );
+      assert.ok(!/cache|entity_/.test(head!), head);
+      const handle = head!.slice(head!.lastIndexOf(' ') + 1);
+      assert.ok(artifact.id.startsWith(handle));
+      // A short handle selects the same artifact; the investigation text is a projection, so the
+      // structured result carries the resolved full ID.
+      const viaHandle = await client.callTool({
+        name: 'function_get',
+        arguments: { ...scope, function_id: fn.id, view: 'investigation', artifact_id: handle },
+      });
+      assert.ok(!viaHandle.isError, JSON.stringify(viaHandle.content));
+      const investigated = toolSchemas.function_get.output.parse(viaHandle.structuredContent);
+      assert.ok('data' in investigated && investigated.data.view === 'investigation');
+      assert.equal(investigated.data.artifact_id, artifact.id);
       const limited = await call('function_decompile', {
         ...scope,
         function_id: fn.id,
