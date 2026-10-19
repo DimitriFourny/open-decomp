@@ -84,6 +84,22 @@ function entry(
             : APPLE;
   return { library, returns, parameters, source, ...extra };
 }
+const OBJC = 'https://github.com/apple-oss-distributions/objc4';
+/** libobjc runtime entry points (objc4 `runtime/objc-internal.h`, `NSObject.mm`);
+ * `id`, `Class` and `SEL` are pointer-width object references. */
+function objcEntry(
+  returns: TypeSpec,
+  parameters: CatalogEntry['parameters'],
+  extra: Omit<Partial<CatalogEntry>, 'library' | 'returns' | 'parameters'> = {},
+): CatalogEntry {
+  return entry('objc', returns, parameters, { source: OBJC, ...extra });
+}
+const OBJC_SET_PROPERTY: CatalogEntry['parameters'] = [
+  ['self', V],
+  ['selector', V],
+  ['value', V],
+  ['offset', 'long'],
+];
 
 /** Structured declarations only. These are conditional library contracts, not
  * proof of the loaded implementation or a promise of purity. Pointer qualifiers
@@ -412,12 +428,65 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
     ['set', V],
     ['unlimited', 'int'],
   ]),
-  objc_retain: entry('objc', V, [['object', V]], {
-    source: 'https://github.com/apple-oss-distributions/objc4',
+  objc_retain: objcEntry(V, [['object', V]], { returns_argument: 0 }),
+  objc_release: objcEntry('void', [['object', V]]),
+  objc_autorelease: objcEntry(V, [['object', V]], { returns_argument: 0 }),
+  objc_autoreleaseReturnValue: objcEntry(V, [['object', V]], { returns_argument: 0 }),
+  objc_retainAutorelease: objcEntry(V, [['object', V]], { returns_argument: 0 }),
+  objc_retainAutoreleaseReturnValue: objcEntry(V, [['object', V]], { returns_argument: 0 }),
+  objc_retainAutoreleasedReturnValue: objcEntry(V, [['object', V]], { returns_argument: 0 }),
+  objc_claimAutoreleasedReturnValue: objcEntry(V, [['object', V]], { returns_argument: 0 }),
+  objc_unsafeClaimAutoreleasedReturnValue: objcEntry(V, [['object', V]], {
+    returns_argument: 0,
   }),
-  objc_release: entry('objc', 'void', [['object', V]], {
-    source: 'https://github.com/apple-oss-distributions/objc4',
-  }),
+  objc_retainBlock: objcEntry(V, [['block', V]]),
+  objc_storeStrong: objcEntry('void', [
+    ['location', ptr(V)],
+    ['object', V],
+  ]),
+  objc_loadWeakRetained: objcEntry(V, [['location', ptr(V)]]),
+  objc_loadWeak: objcEntry(V, [['location', ptr(V)]]),
+  objc_storeWeak: objcEntry(V, [
+    ['location', ptr(V)],
+    ['object', V],
+  ]),
+  objc_initWeak: objcEntry(V, [
+    ['location', ptr(V)],
+    ['object', V],
+  ]),
+  objc_destroyWeak: objcEntry('void', [['location', ptr(V)]]),
+  objc_copyWeak: objcEntry('void', [
+    ['destination', ptr(V)],
+    ['source', ptr(V)],
+  ]),
+  objc_moveWeak: objcEntry('void', [
+    ['destination', ptr(V)],
+    ['source', ptr(V)],
+  ]),
+  objc_autoreleasePoolPush: objcEntry(V, []),
+  objc_autoreleasePoolPop: objcEntry('void', [['pool', V]]),
+  objc_alloc: objcEntry(V, [['cls', V]]),
+  objc_alloc_init: objcEntry(V, [['cls', V]]),
+  objc_opt_new: objcEntry(V, [['cls', V]]),
+  objc_opt_class: objcEntry(V, [['object', V]]),
+  objc_opt_self: objcEntry(V, [['object', V]]),
+  objc_opt_isKindOfClass: objcEntry('char', [
+    ['object', V],
+    ['cls', V],
+  ]),
+  objc_opt_respondsToSelector: objcEntry('char', [
+    ['object', V],
+    ['selector', V],
+  ]),
+  objc_getClass: objcEntry(V, [['name', C]], { memory: [footprint(0, 'read')] }),
+  objc_lookUpClass: objcEntry(V, [['name', C]], { memory: [footprint(0, 'read')] }),
+  objc_enumerationMutation: objcEntry('void', [['object', V]]),
+  objc_sync_enter: objcEntry('int', [['object', V]]),
+  objc_sync_exit: objcEntry('int', [['object', V]]),
+  objc_setProperty_atomic: objcEntry('void', OBJC_SET_PROPERTY),
+  objc_setProperty_nonatomic: objcEntry('void', OBJC_SET_PROPERTY),
+  objc_setProperty_atomic_copy: objcEntry('void', OBJC_SET_PROPERTY),
+  objc_setProperty_nonatomic_copy: objcEntry('void', OBJC_SET_PROPERTY),
   // Declarations are retained, but no C-call layout is asserted for Swift CC.
   swift_task_alloc: entry('swift-concurrency', V, [['size', 'size_t']], {
     source: 'https://github.com/swiftlang/swift/tree/main/include/swift/Runtime',

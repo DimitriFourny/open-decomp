@@ -1150,6 +1150,17 @@ export function prepareDiscoveryIndex(
         false,
         item.original_name,
       );
+  // A loader-established import stub is a callable root even when it is only
+  // reached by a tail branch; traversal must not absorb its body into the caller.
+  for (const item of image.imports)
+    if (item.callable_entry)
+      seed(
+        item.callable_entry,
+        'import callable entry',
+        item.evidence_ids,
+        true,
+        item.original_name,
+      );
   for (const hint of image.hints) {
     context.checkpoint(1);
     if (hint.kind === 'function')
