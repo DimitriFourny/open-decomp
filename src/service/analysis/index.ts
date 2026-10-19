@@ -11,6 +11,7 @@ import {
   type CacheIdentity,
   type CanonicalValue,
   type Diagnostic,
+  type LoadedImage,
   type OperationContext,
   type ProjectStore,
   type ResultMetadata,
@@ -59,6 +60,8 @@ import {
 import { pipelineComponents, pipelineVersions } from './versions.js';
 import { boundIR, requirePass } from './passes.js';
 import { recoverSourceEvidence } from './source-facts.js';
+import { imageTypeDump, recoverImageTypes, type ImageTypeDump } from './image-types.js';
+export type { ImageTypeDump } from './image-types.js';
 export { executeAnnotations } from './annotations.js';
 
 export interface AnalysisScope {
@@ -476,7 +479,7 @@ export async function executeDecompilation(
           }
         if (targets.size === 1) names.push(nativeName(control.id, [...targets][0]!));
       }
-      const source = recoverSourceEvidence({
+      const sourceInput = {
         scope,
         identity,
         revision: args.revision,
@@ -494,7 +497,9 @@ export async function executeDecompilation(
         native_types: nativeTypes,
         components,
         observable_register_masks,
-      });
+      };
+      const source = recoverSourceEvidence(sourceInput);
+      const localTypes = types;
       types = refineMemoryShapes(ir, types, fullContext, {
         slice_id: image.selected_slice_id,
         revision: args.revision,
@@ -505,6 +510,8 @@ export async function executeDecompilation(
         (item) => item.code === 'cancelled' || item.code === 'resource_limit',
       );
       if (refinementFailure) throw new OperationError(refinementFailure);
+      const imageTypes = recoverImageTypes(sourceInput, localTypes, types);
+      types = imageTypes.types;
       context.progress('emit', 6, 7);
       const emit = args.options.emitter === 'python-like' ? emitPythonLike : emitC;
       const emitted = emit(
@@ -538,6 +545,7 @@ export async function executeDecompilation(
         ...nameDiagnostics,
         ...emitted.diagnostics,
         ...(source.diagnostics ?? []),
+        ...imageTypes.diagnostics,
       ];
       const uniqueDiagnostics = boundDiagnostics([
         ...new Map(
@@ -730,5 +738,46 @@ export async function executeDecompilation(
       context.checkpoint(0);
       return { result, catalog: { ...catalog, evidence } };
     },
+  );
+}
+
+/** Whole-image merged structure types as C declarations (see imageTypeDump). */
+export function executeImageTypes(
+  scope: AnalysisScope,
+  revision: number,
+  image: LoadedImage,
+  max_bytes: number,
+): ImageTypeDump {
+  const { context } = scope;
+  const components = pipelineComponents(image.target);
+  const debug = recoverDebugInfo(image, context);
+  const library = recoverLibraryContracts({ image, abi: components.abi, revision }, context);
+  const { functions, references } = loadFunctionIndex(scope, revision, image);
+  return imageTypeDump(
+    {
+      scope,
+      image,
+      revision,
+      functions,
+      references,
+      debug,
+      library,
+      native_types: [
+        ...debug.types.map((type) => ({
+          ...type,
+          source: 'debug' as const,
+          status: 'established' as const,
+        })),
+        ...library.types.map((type) => ({
+          ...type,
+          source: 'library' as const,
+          status: 'established' as const,
+        })),
+      ],
+      components,
+      observable_register_masks: abiObservableRegisterMasks(components.abi, context),
+    },
+    context,
+    max_bytes,
   );
 }

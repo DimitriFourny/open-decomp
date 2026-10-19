@@ -47,12 +47,14 @@ import type {
   SourceAddress,
   SourceEvidence,
 } from '../../reconstruction/source-model.js';
+import type { TracedRead } from '../../project/cache/dependencies.js';
 import { records } from '../queries/scope.js';
 import type { AnalysisScope } from './index.js';
 import type { CallScope } from './calls.js';
 import {
   nativeDependencies,
   prepareNativeUnit,
+  type NativePreparationInput,
   type PreparedNativeUnit,
 } from './native-prepare.js';
 import {
@@ -60,6 +62,7 @@ import {
   nativeDependencyWorklist,
   type NativeInterface,
   type NativeSummary,
+  type NativeSummaryCapacity,
 } from './native-worklist.js';
 import {
   nativeCallInputs,
@@ -90,7 +93,7 @@ import { variadicRuleCalls, variadicRuleFacts } from './source-variadic.js';
 import { nativeLibraryTails } from './native-library-tails.js';
 import { objcSourceFacts } from './objc-messages.js';
 
-interface SourceFactsInput {
+export interface SourceFactsInput {
   readonly scope: AnalysisScope;
   readonly identity?: CacheIdentity;
   readonly revision: number;
@@ -881,21 +884,206 @@ function sourceAddresses(
   return result;
 }
 
-/** Cached preparation is local SSA/type evidence, never a completed transitive
- * interface. Dependency observations are solved afresh for the exact roots and
- * consumed return slices of this request. Unknown/truncated preparations are not
- * cached. Immutable image + revision + full component/target identity bind all
- * graph, declaration, annotation and dependency-resolution inputs. */
-const nativeSummaries = new WeakMap<
+/** Prepared callee units (local SSA/type evidence, never a completed transitive
+ * interface), shared by every request at the same immutable image revision and
+ * component/target/native-type identity — not by budget, capacity or root.
+ * Dependency observations are still solved afresh per request.
+ *
+ * Only preparations that hit no limit are kept. Every work limit inside preparation
+ * (`prepareNativeUnit`) is derived from the worklist allowance remaining when it is set:
+ * at least a quarter of it (SSA takes 3/4, optional type/stack work 1/4), with nested
+ * analyses bounded by what their enclosing limit has left. Limits only stop work. So a
+ * preparation that charged W without hitting one returns the same unit under any
+ * allowance of at least 4W + 3 (each limit then exceeds all work charged after it was
+ * set), or at least the allowance it actually ran with, and under any capacity it fits.
+ * Reuse then leaves exactly what preparing it would: the same work charge and the same
+ * dependency reads in the same order, so a request's result and later budgets never
+ * depend on what earlier requests in this process prepared. */
+interface PreparedUnitEntry {
+  /** Without `dependency_readset`, which is a snapshot of the preparing request. */
+  readonly unit: PreparedNativeUnit;
+  /** Work the preparation charged to its worklist context. */
+  readonly work: number;
+  /** Reads the preparation made; absent when it ran without a dependency collector. */
+  readonly trace?: readonly TracedRead[];
+  /** Smallest worklist allowance under which preparation provably returns this unit. */
+  readonly allowance: number;
+  readonly size: number;
+}
+const preparedUnits = new WeakMap<
   LoadedImage,
   {
     readonly identity: string;
     readonly functions: readonly FunctionRecord[];
     readonly references: readonly ReferenceRecord[];
-    readonly summaries: Map<string, PreparedNativeUnit>;
-    units: number;
+    /** Least recently used first. */
+    readonly entries: Map<string, PreparedUnitEntry>;
+    size: number;
   }
 >();
+/** Retained prepared size (instructions + IR nodes + evidence + traced reads) per
+ * image. Measured on SQLite at roughly 1 KiB of heap per unit, so ~256 MiB. */
+const MAX_PREPARED_UNIT_SIZE = 1 << 18;
+const preparedSize = (unit: PreparedNativeUnit): number =>
+  unit.instructions + unit.nodes + unit.evidence.length;
+const reusablePreparation = (unit: PreparedNativeUnit): boolean =>
+  !unit.budget_truncated && !unit.reasons.length && unit.analysis?.state === 'complete';
+
+function nativeSelectedNodes(ir: SSAForm): number {
+  return ir.blocks.reduce(
+    (count, block) => count + 3 + block.parameters.length + block.instructions.length,
+    0,
+  );
+}
+
+/** Dependency capacity left after the selected body; part of the cache identity. */
+function nativeCapacity(input: SourceFactsInput, context: OperationContext): NativeSummaryCapacity {
+  return {
+    nodes: context.budget.ir_nodes - nativeSelectedNodes(input.ir),
+    blocks: context.budget.blocks - input.ir.blocks.length,
+    instructions: context.budget.instructions - input.instruction_count,
+  };
+}
+
+/** Supported, unopposed library import contracts for native dependency bodies. */
+export function nativeLibraryContracts(
+  input: Pick<NativePreparationInput, 'image' | 'library'>,
+): SuppliedCallContract[] {
+  return input.library.contracts
+    .filter((contract) => contract.abi_state === 'supported' && !contract.conflicts_with.length)
+    .map((contract) => ({
+      id: contract.id,
+      target: { kind: 'import', image_id: input.image.id, import_id: contract.import_id },
+      signature: contract.abi_signature,
+      noreturn: contract.noreturn,
+      evidence_ids: contract.evidence_ids,
+    }));
+}
+
+type PreparedUnitCache = {
+  readonly identity: string;
+  readonly functions: readonly FunctionRecord[];
+  readonly references: readonly ReferenceRecord[];
+  readonly entries: Map<string, PreparedUnitEntry>;
+  size: number;
+};
+
+/** The process-wide prepared-unit cache of this image revision and component identity. */
+export function preparedUnitCache(input: NativePreparationInput): PreparedUnitCache {
+  const { components, image, revision } = input,
+    abi = components.abi;
+  const identity = fingerprint({
+    revision,
+    image: image.sha256,
+    slice: image.selected_slice_id,
+    target: image.target,
+    versions: pipelineVersions(image.target, 'c-like'),
+    lifter: `${components.lifter.name}/${components.lifter.version}`,
+    abi: `${abi.id}/${abi.version}`,
+    native_types: input.native_types,
+  } as unknown as CanonicalValue);
+  let prepared = preparedUnits.get(image);
+  if (
+    !prepared ||
+    prepared.identity !== identity ||
+    prepared.functions !== input.functions ||
+    prepared.references !== input.references
+  ) {
+    prepared = {
+      identity,
+      functions: input.functions,
+      references: input.references,
+      entries: new Map(),
+      size: 0,
+    };
+    preparedUnits.set(image, prepared);
+  }
+  return prepared;
+}
+
+/** Load one native body: reuse a prepared unit only where preparing it here would
+ * provably return it (charging its work and replaying its reads), else prepare it.
+ * `fits(work, reads)` states whether that charge fits every enclosing allowance. */
+export function nativeUnitLoader(
+  input: NativePreparationInput,
+  cache: PreparedUnitCache,
+  libraryContracts: readonly SuppliedCallContract[],
+  fits: (work: number, reads: number) => boolean,
+): (fn: FunctionRecord, boundedContext: OperationContext) => PreparedNativeUnit {
+  const { scope } = input,
+    abi = input.components.abi;
+  const reuse = (fn: FunctionRecord, boundedContext: OperationContext) => {
+    const entry = cache.entries.get(fn.id),
+      allowance = boundedContext.remainingWork?.();
+    if (
+      !entry ||
+      allowance === undefined ||
+      allowance < entry.allowance ||
+      entry.unit.instructions >= boundedContext.budget.instructions ||
+      entry.unit.blocks >= boundedContext.budget.blocks ||
+      entry.unit.required_nodes >= boundedContext.budget.ir_nodes ||
+      (scope.dependencies !== undefined && entry.trace === undefined)
+    )
+      return undefined;
+    const reads = scope.dependencies ? scope.dependencies.traceCharges(entry.trace!) : 0;
+    // Charges that fit every enclosing allowance cannot fail, so neither can the
+    // interleaved charges of a fresh preparation; otherwise prepare for real.
+    if (reads === undefined || !fits(entry.work, reads)) return undefined;
+    scope.dependencies?.replayTrace(entry.trace!);
+    boundedContext.checkpoint(entry.work);
+    cache.entries.delete(fn.id);
+    cache.entries.set(fn.id, entry);
+    scope.context.progress('native_summary_cache', 1, 1);
+    // The interface index builds lazily on first query and charges that query's
+    // clock; a fresh preparation hands out an unbuilt one, so must a reuse.
+    return entry.unit.ir && entry.unit.interface_index
+      ? {
+          ...entry.unit,
+          interface_index: createNativeInterfaceIndex(entry.unit.ir, abi, boundedContext),
+        }
+      : entry.unit;
+  };
+  const prepare = (fn: FunctionRecord, boundedContext: OperationContext) => {
+    const allowance = boundedContext.remainingWork?.();
+    let work = 0;
+    const measured: OperationContext = {
+      ...boundedContext,
+      checkpoint(amount) {
+        boundedContext.checkpoint(amount);
+        work += amount;
+      },
+    };
+    const run = () => prepareNativeUnit(input, fn, measured, libraryContracts);
+    const { value: unit, trace } = scope.dependencies
+      ? scope.dependencies.traced(run)
+      : { value: run(), trace: undefined };
+    if (allowance !== undefined && reusablePreparation(unit)) {
+      const prior = cache.entries.get(fn.id);
+      if (prior) {
+        cache.entries.delete(fn.id);
+        cache.size -= prior.size;
+      }
+      const entry: PreparedUnitEntry = {
+        unit,
+        work,
+        ...(trace ? { trace } : {}),
+        allowance: Math.min(allowance, 4 * work + 3, prior?.allowance ?? allowance),
+        size: preparedSize(unit) + (trace?.length ?? 0),
+      };
+      if (entry.size <= MAX_PREPARED_UNIT_SIZE) {
+        for (const [id, old] of cache.entries) {
+          if (cache.size + entry.size <= MAX_PREPARED_UNIT_SIZE) break;
+          cache.entries.delete(id);
+          cache.size -= old.size;
+        }
+        cache.entries.set(fn.id, entry);
+        cache.size += entry.size;
+      }
+    }
+    return unit;
+  };
+  return (fn, boundedContext) => reuse(fn, boundedContext) ?? prepare(fn, boundedContext);
+}
 
 function nativeShapeTransfers(
   unit: PreparedNativeUnit,
@@ -1145,24 +1333,20 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   let dependencies = nativeDependencies(input, input.ir, context, undefined, false, demand_index);
   const targets = new Map<string, FunctionRecord>();
   for (const dependency of dependencies) targets.set(dependency.target.id, dependency.target);
-  const selectedNodes = input.ir.blocks.reduce(
-    (count, block) => count + 3 + block.parameters.length + block.instructions.length,
-    0,
-  );
-  const capacity = {
-    nodes: context.budget.ir_nodes - selectedNodes,
-    blocks: context.budget.blocks - input.ir.blocks.length,
-    instructions: context.budget.instructions - input.instruction_count,
-  };
+  const selectedNodes = nativeSelectedNodes(input.ir);
+  const capacity = nativeCapacity(input, context);
   const summaryWorkLimit = Math.floor((context.remainingWork?.() ?? 0) / 2);
   let summaryWork = 0;
   const summaryContext: OperationContext = {
     ...context,
     budget: { ...context.budget, work: summaryWorkLimit },
     remainingWork: () => Math.max(0, summaryWorkLimit - summaryWork),
+    // Charging the parent checks cancellation/deadline before the charge, so the local
+    // limit needs a separate parent check only on the path that throws it; this keeps
+    // one parent call per charge instead of doubling at every nesting level.
     checkpoint(work) {
-      context.checkpoint(0);
-      if (summaryWork + work > summaryWorkLimit)
+      if (summaryWork + work > summaryWorkLimit) {
+        context.checkpoint(0);
         throw new OperationError({
           code: 'resource_limit',
           severity: 'warning',
@@ -1175,6 +1359,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
             consumed: Math.min(summaryWork + work, Number.MAX_SAFE_INTEGER),
           },
         });
+      }
       context.checkpoint(work);
       summaryWork += work;
     },
@@ -1188,8 +1373,8 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     budget: { ...summaryContext.budget, work: worklistWorkLimit },
     remainingWork: () => Math.max(0, worklistWorkLimit - worklistWork),
     checkpoint(work) {
-      summaryContext.checkpoint(0);
-      if (worklistWork + work > worklistWorkLimit)
+      if (worklistWork + work > worklistWorkLimit) {
+        summaryContext.checkpoint(0);
         throw new OperationError({
           code: 'resource_limit',
           severity: 'warning',
@@ -1202,50 +1387,25 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
             consumed: Math.min(worklistWork + work, Number.MAX_SAFE_INTEGER),
           },
         });
+      }
       summaryContext.checkpoint(work);
       worklistWork += work;
     },
   };
-  const libraryContracts: SuppliedCallContract[] = targets.size
-    ? input.library.contracts
-        .filter((contract) => contract.abi_state === 'supported' && !contract.conflicts_with.length)
-        .map((contract) => ({
-          id: contract.id,
-          target: { kind: 'import', image_id: image.id, import_id: contract.import_id },
-          signature: contract.abi_signature,
-          noreturn: contract.noreturn,
-          evidence_ids: contract.evidence_ids,
-        }))
-    : [];
-  const identity = fingerprint({
-    revision,
-    image: image.sha256,
-    slice: image.selected_slice_id,
-    target: image.target,
-    versions: pipelineVersions(image.target, 'c-like'),
-    lifter: `${components.lifter.name}/${components.lifter.version}`,
-    abi: `${abi.id}/${abi.version}`,
-    identity: input.identity ?? null,
-    budget: input.identity?.budget ?? context.budget,
-    capacity,
-    native_types: input.native_types,
-  } as unknown as CanonicalValue);
-  let cached = nativeSummaries.get(image);
-  if (
-    !cached ||
-    cached.identity !== identity ||
-    cached.functions !== input.functions ||
-    cached.references !== input.references
-  ) {
-    cached = {
-      identity,
-      functions: input.functions,
-      references: input.references,
-      summaries: new Map(),
-      units: 0,
-    };
-    nativeSummaries.set(image, cached);
-  }
+  const libraryContracts = targets.size ? nativeLibraryContracts(input) : [];
+  const cache = preparedUnitCache(input);
+  // Complete units of this request (the selected body first), in preparation order and
+  // bounded as before. They are the only prepared bodies this request may cite as
+  // result-use evidence, so that evidence never depends on other requests.
+  const requestUnits = new Map<string, PreparedNativeUnit>();
+  let requestUnitSize = 0;
+  const admit = (id: string, unit: PreparedNativeUnit): void => {
+    const size = preparedSize(unit);
+    if (!requestUnits.has(id) && requestUnits.size < 64 && requestUnitSize + size <= 8192) {
+      requestUnits.set(id, unit);
+      requestUnitSize += size;
+    }
+  };
   const selected = input.functions.find((fn) => fn.id === input.ir.id);
   const selectedUnit: PreparedNativeUnit | undefined = selected
     ? {
@@ -1277,15 +1437,17 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     input.required_nodes !== undefined &&
     input.types.state === 'complete' &&
     selectedUnit.analysis?.state === 'complete' &&
-    !selectedUnit.reasons.length &&
-    !cached.summaries.has(input.ir.id)
-  ) {
-    const units = selectedUnit.instructions + selectedUnit.nodes + selectedUnit.evidence.length;
-    if (cached.summaries.size < 64 && cached.units + units <= 8192) {
-      cached.summaries.set(input.ir.id, selectedUnit);
-      cached.units += units;
-    }
-  }
+    !selectedUnit.reasons.length
+  )
+    admit(input.ir.id, selectedUnit);
+  const loadUnit = nativeUnitLoader(
+    input,
+    cache,
+    libraryContracts,
+    (work, reads) =>
+      work <= (summaryContext.remainingWork?.() ?? 0) &&
+      work + reads <= (context.remainingWork?.() ?? 0),
+  );
   let memory_transfers: readonly MemoryShapeTransfer[] = [];
   let function_returns: SourceEvidence['function_returns'];
   let partialUnits: ReadonlyMap<string, PreparedNativeUnit> = new Map();
@@ -1325,42 +1487,9 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       },
       ...(selectedUnit ? { preloaded: new Map([[input.ir.id, selectedUnit]]) } : {}),
       load(fn, boundedContext) {
-        let unit = cached.summaries.get(fn.id);
-        if (
-          unit &&
-          (unit.instructions > boundedContext.budget.instructions ||
-            unit.blocks > boundedContext.budget.blocks ||
-            unit.required_nodes > boundedContext.budget.ir_nodes)
-        )
-          unit = undefined;
-        if (unit) {
-          boundedContext.checkpoint(1 + unit.dependencies.length + unit.evidence.length);
-          if (scope.dependencies && unit.dependency_readset)
-            scope.dependencies.replay(unit.dependency_readset);
-          else if (scope.dependencies) {
-            cached.summaries.delete(fn.id);
-            cached.units -= unit.instructions + unit.nodes + unit.evidence.length;
-            unit = undefined;
-          }
-        }
-        if (unit) {
-          context.progress('native_summary_cache', 1, 1);
-          return unit;
-        }
-        unit = prepareNativeUnit(input, fn, boundedContext, libraryContracts);
+        let unit = loadUnit(fn, boundedContext);
         if (scope.dependencies) unit = { ...unit, dependency_readset: scope.dependencies.finish() };
-        if (
-          !unit.budget_truncated &&
-          !unit.reasons.length &&
-          unit.analysis?.state === 'complete' &&
-          !cached.summaries.has(fn.id)
-        ) {
-          const units = unit.instructions + unit.nodes + unit.evidence.length;
-          if (cached.summaries.size < 64 && cached.units + units <= 8192) {
-            cached.summaries.set(fn.id, unit);
-            cached.units += units;
-          }
-        }
+        if (reusablePreparation(unit)) admit(fn.id, unit);
         return unit;
       },
       initialize: (unit, boundedContext, demand) =>
@@ -1601,7 +1730,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   // Positive result-use evidence only. Reuse units already prepared by native
   // analysis; do not turn a presentation request into an incoming-caller scan.
   const functionReturnDemands = new Map<string, RegisterDescriptor>();
-  for (const unit of new Set([...partialUnits.values(), ...cached.summaries.values()])) {
+  for (const unit of new Set([...partialUnits.values(), ...requestUnits.values()])) {
     context.checkpoint(1);
     for (const dependency of unit.dependencies) {
       context.checkpoint(1);

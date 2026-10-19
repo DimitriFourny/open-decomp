@@ -502,6 +502,7 @@ class Exporter {
   async writeIndexes(
     data: ExportData,
     summary: { functions: number; complete: number; partial: number; failed: number },
+    types: { readonly text: string; readonly complete: boolean },
   ): Promise<number> {
     const out = this.#options.out;
     let bytes = 0;
@@ -590,6 +591,8 @@ class Exporter {
         ]),
       ),
     ]);
+    const typesText = types.text.endsWith('\n') ? types.text.slice(0, -1) : types.text;
+    await write('types.h', [typesText]);
     const extension = this.#options.language === 'python-like' ? 'py' : 'c';
     await write('README.txt', [
       `Open Decomp export (${this.#options.language}) of ${escape(basename(this.#input))}: ${summary.functions} functions (${summary.complete} complete, ${summary.partial} partial, ${summary.failed} failed).`,
@@ -598,7 +601,8 @@ class Exporter {
       `functions/NAME@0xADDR.asm: only where pseudocode could not be produced; compact native disassembly and the reason in the header. state=partial files are real but incomplete pseudocode (reason in index.tsv).`,
       `Names use the C spelling of the native symbol (Mach-O leading underscore removed); stripped functions are sub_<hex address>. Every name is a symbol fact, never a guess.`,
       `strings.tsv: address, escaped text (cut at 400 chars, marked), referenced_by (functions in this export; at most 24 listed, then +N).`,
-      `imports.tsv: imported symbols with library, slot, stub address and called_by. exports.tsv: exported symbols and forwarders.`,
+      `imports.tsv: imported symbols with library, slot, stub address and called_by. exports.tsv: exported symbols and forwarders. ` +
+        `types.h: C declarations of the image-wide merged structure types; the pseudocode uses the same names (observed members only, sizes unknown)${types.complete ? '' : '; partial: not every function body was analyzed within the budget'}.`,
       `Grep examples: grep -rn "sqlite3_free" functions/ ; grep -l "partial" index.tsv ; awk -F'\\t' '$4=="failed"' index.tsv`,
       this.#options.name === undefined
         ? 'Whole binary: referenced_by and called_by cover every function.'
@@ -706,8 +710,21 @@ export async function exportBinary(
     await Promise.all(sessions.map((session) => worker(session)));
     if (failure) throw failure.error;
     signal.throwIfAborted();
-    let bytes = await exporter.writeIndexes(data, { functions: rows.length, ...counts }),
-      files = 5;
+    // Image-wide merged structure types: the names the pseudocode files use.
+    const types = await sessions[0]!.types({}, { signal });
+    signal.throwIfAborted();
+    let bytes = await exporter.writeIndexes(
+        data,
+        { functions: rows.length, ...counts },
+        {
+          text:
+            'data' in types && types.data.view === 'types'
+              ? types.data.text
+              : `/* Image types unavailable: ${types.state} */\n`,
+          complete: types.state === 'complete',
+        },
+      ),
+      files = 6;
     for (const row of rows) {
       bytes += row.fileBytes;
       files++;

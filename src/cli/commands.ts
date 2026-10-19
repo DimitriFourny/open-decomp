@@ -4,7 +4,7 @@ import { distinctDiagnostics, entityIdSchema, sliceIdSchema } from '../core/inde
 import type { ToolResult, WireDiagnostic, WireJob } from '../core/index.js';
 import { exportBinary } from './export.js';
 
-type Command = 'functions' | 'decompile' | 'export';
+type Command = 'functions' | 'decompile' | 'export' | 'types';
 interface Arguments {
   command: Command;
   binary: string;
@@ -22,7 +22,10 @@ type ParsedArguments = Arguments | { help: Command };
 type FunctionsResult = ToolResult<'functions_find'>;
 type FunctionRow = Extract<FunctionsResult, { data: unknown }>['data']['items'][number];
 type AnalysisResult =
-  FunctionsResult | ToolResult<'function_decompile'> | ToolResult<'project_open'>;
+  | FunctionsResult
+  | ToolResult<'function_decompile'>
+  | ToolResult<'project_open'>
+  | ToolResult<'binary_info'>;
 
 const usage = {
   functions: 'open-decomp functions BINARY [--name TEXT] [--json] [--cache PATH] [--slice ID]',
@@ -30,6 +33,7 @@ const usage = {
     'open-decomp decompile BINARY (--function NAME | --id ID | --address va:0x.../rva:0x.../file:0x...) [--language c-like|python-like] [--view source|checked] [--json] [--cache PATH] [--slice ID]',
   export:
     'open-decomp export BINARY --out DIR [--language c-like|python-like] [--jobs N] [--name SUBSTRING] [--cache PATH] [--slice ID]',
+  types: 'open-decomp types BINARY [--json] [--cache PATH] [--slice ID]',
 } as const;
 
 class UsageError extends Error {}
@@ -82,8 +86,13 @@ function row(item: FunctionRow): string {
 }
 function parse(args: readonly string[]): ParsedArguments {
   const command = args[0];
-  if (command !== 'functions' && command !== 'decompile' && command !== 'export')
-    throw new UsageError('Expected functions, decompile or export; see open-decomp --help');
+  if (
+    command !== 'functions' &&
+    command !== 'decompile' &&
+    command !== 'export' &&
+    command !== 'types'
+  )
+    throw new UsageError('Expected functions, decompile, export or types; see open-decomp --help');
   const separator = args.indexOf('--');
   if (args.slice(1, separator < 0 ? undefined : separator).includes('--help'))
     return { help: command };
@@ -96,7 +105,9 @@ function parse(args: readonly string[]): ParsedArguments {
       ? ['--name']
       : command === 'export'
         ? ['--name', '--out', '--language', '--jobs']
-        : ['--function', '--id', '--address', '--language', '--view']),
+        : command === 'decompile'
+          ? ['--function', '--id', '--address', '--language', '--view']
+          : []),
   ];
   let json = false,
     positionalOnly = false;
@@ -134,6 +145,7 @@ function parse(args: readonly string[]): ParsedArguments {
     if (!sliceIdSchema.safeParse(slice).success) throw new UsageError('--slice must be a slice ID');
     result.sliceId = slice;
   }
+  if (command === 'types') return result;
   if (command === 'functions' || command === 'export') {
     const name = values.get('--name');
     if (name !== undefined) {
@@ -199,7 +211,9 @@ function help(command: Command): void {
         ? 'List every matching function; --name performs a case-insensitive substring search.\nJSON result is {pages:[...]} with the original schema envelope for each page.'
         : command === 'export'
           ? 'Decompile every function in one process into a directory an agent can grep:\n  OUT/functions/NAME@0xADDR.c|.py  header comment + the pseudocode `decompile` prints\n  OUT/functions/NAME@0xADDR.asm    compact disassembly where decompilation failed (reason in header)\n  OUT/index.tsv  OUT/strings.tsv  OUT/imports.tsv  OUT/exports.tsv  OUT/README.txt\n--out DIR      Output directory (created; generated files are overwritten on re-run).\n--language     c-like (default) or python-like.\n--jobs N       Parallel workers (default min(4, CPUs/2)); extra workers analyze private copies of the project.\n--name TEXT    Only functions whose name contains TEXT (case-insensitive).\nPartial and failed functions are recorded in index.tsv and do not change the exit status.'
-          : 'Decompile one exact, unambiguous function name, entity ID or address.\nText stdout contains only pseudocode; JSON preserves the result envelope.'
+          : command === 'decompile'
+            ? 'Decompile one exact, unambiguous function name, entity ID or address.\nText stdout contains only pseudocode; JSON preserves the result envelope.'
+            : 'Print the image-wide merged structure types as C declarations (the names decompile uses).\nAnalyzes function bodies within the default budget; a partial result exits 2.'
     }\n\n--cache PATH  Override the sidecar cache root (default: BINARY.open-decomp).\n--slice ID    Select a binary slice.\n${command === 'export' ? '' : '--json        Write {project_path,reused,result} JSON to stdout.\n'}--help        Show this help.\nProgress, project reuse and diagnostics go to stderr. Work stays in the foreground.\nExit: ${command === 'export' ? '0 all files written (even if some functions are partial/failed); 1 error/cancelled' : '0 complete/empty; 2 semantic partial; 1 error/unsupported/cancelled'}; 130 SIGINT; 143 SIGTERM.\n`,
   );
 }
@@ -271,7 +285,12 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
     process.stderr.write(
       `error: ${terminal(error instanceof Error ? error.message : String(error))}\n`,
     );
-    if (args[0] === 'functions' || args[0] === 'decompile' || args[0] === 'export')
+    if (
+      args[0] === 'functions' ||
+      args[0] === 'decompile' ||
+      args[0] === 'export' ||
+      args[0] === 'types'
+    )
       process.stderr.write(`Usage: ${usage[args[0]]}\n`);
     process.exitCode = 1;
     return;
@@ -314,7 +333,17 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
     report(session.opened, 'open');
     if (parsed.command === 'functions')
       code = await functions(session, parsed, controller.signal, onProgress);
-    else if (parsed.command === 'export') {
+    else if (parsed.command === 'types') {
+      const result = await session.types({}, { signal: controller.signal, onProgress });
+      report(result, 'types');
+      code = exitCode(result);
+      if (parsed.json)
+        process.stdout.write(
+          `${JSON.stringify({ project_path: session.projectPath, reused: session.reused, result })}\n`,
+        );
+      else if ('data' in result && result.data.view === 'types')
+        process.stdout.write(result.data.text);
+    } else if (parsed.command === 'export') {
       const summary = await exportBinary(
         session,
         {

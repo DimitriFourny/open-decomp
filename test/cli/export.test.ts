@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -160,6 +160,15 @@ test(
     assert.ok(stateCounts.complete > 0);
     const readme = (await readFile(join(out, 'README.txt'), 'utf8')).trimEnd().split('\n');
     assert.ok(readme.length <= 10);
+    assert.ok(readme.some((line) => line.includes('types.h')));
+    // The merged image types header is valid C on its own.
+    const types = await readFile(join(out, 'types.h'), 'utf8');
+    assert.match(types, /^\/\* Open Decomp recovered image types/);
+    const header = spawnSync('/usr/bin/clang', ['-x', 'c', '-fsyntax-only', '-std=c11', '-'], {
+      input: types,
+      encoding: 'utf8',
+    });
+    assert.equal(header.status, 0, header.stderr);
     for (const name of ['strings.tsv', 'imports.tsv', 'exports.tsv'])
       assert.ok((await table(join(out, name))).header.length >= 3, name);
     const exports = await table(join(out, 'exports.tsv'));

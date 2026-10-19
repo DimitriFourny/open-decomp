@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { addressSchema, rangeSchema, type WireAddress, type HexU64 } from './primitives.js';
-import { addressCodec, rangeCodec } from './codecs.js';
+import { addressCodec, machineAddressSchema, machineRangeSchema, rangeCodec } from './codecs.js';
 import { formatHexU64, parseHexU64 } from './integers.js';
 
 export const U64_LIMIT = 1n << 64n;
@@ -44,8 +44,11 @@ export interface TranslationSpan {
 export function decodeAddress(wire: WireAddress): Address {
   return z.decode(addressCodec, wire);
 }
+/** Same validation and wire value as `z.encode(addressCodec, …)`, without re-running
+ * the codec's nested parses (evidence/metadata validation encodes every range). */
 export function encodeAddress(address: Address): WireAddress {
-  return addressSchema.parse(z.encode(addressCodec, address));
+  const valid = machineAddressSchema.parse(address);
+  return addressSchema.parse({ ...valid, value: formatHexU64(valid.value) });
 }
 export function decodeRange(wire: {
   readonly start: WireAddress;
@@ -54,7 +57,11 @@ export function decodeRange(wire: {
   return z.decode(rangeCodec, rangeSchema.parse(wire));
 }
 export function encodeRange(range: AddressRange): { start: WireAddress; size: HexU64 } {
-  return rangeSchema.parse(z.encode(rangeCodec, range));
+  const valid = machineRangeSchema.parse(range);
+  return rangeSchema.parse({
+    start: { ...valid.start, value: formatHexU64(valid.start.value) },
+    size: formatHexU64(valid.size),
+  });
 }
 export function decodeSigned(wire: {
   readonly negative: boolean;
