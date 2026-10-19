@@ -6,6 +6,8 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { nativeOracleSkip } from '../support/host-tools.js';
 import type { WireEmission } from '../../src/core/index.js';
+import { createOperationContext } from '../../src/core/index.js';
+import { executeImageTypes } from '../../src/service/analysis/index.js';
 import { project } from '../service/analysis/support.js';
 import { emittedFormals, execute, type SourceCallOracle } from '../emitters/c/support.js';
 
@@ -70,6 +72,22 @@ test(
     assert.equal(set.name, get.name);
     assert.equal(set.declaration, get.declaration);
     assert.deepEqual(set.members, ['f_0', 'f_8', 'f_10']);
+
+    // The whole-image header declares the same name with the same layout and
+    // is valid C on its own.
+    const dump = executeImageTypes(
+      { store: p.state.store, context: createOperationContext(), job_id: p.job('function_decompile') },
+      p.state.store.snapshot().revision,
+      p.image,
+      1 << 20,
+    );
+    assert.equal(dump.analyzed, dump.total);
+    assert.ok(dump.text.includes(set.declaration), dump.text);
+    const header = spawnSync('/usr/bin/clang', ['-x', 'c', '-fsyntax-only', '-std=c11', '-'], {
+      input: dump.text,
+      encoding: 'utf8',
+    });
+    assert.equal(header.status, 0, header.stderr);
 
     // views_wide reads 64 bits at +0, views_high 32 bits at +4: one object,
     // but incompatible overlapping views never share a name or a layout.
