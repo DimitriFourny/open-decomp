@@ -160,6 +160,8 @@ export interface AffineAddress {
   readonly base: string;
   readonly offset: bigint;
   readonly stride: bigint | null;
+  /** A same-loop counter `k` with address `base + offset + k * stride` exactly. */
+  readonly index?: string;
 }
 
 /** Exact incoming SSA copies only; dependencies of arithmetic are not aliases. */
@@ -184,6 +186,20 @@ export function memoryAddressSources(
       }
     }
   return sources;
+}
+
+/** Every block parameter with its owning block (loop-variable identity). */
+export function memoryLoopParameters(
+  input: SSAForm,
+  budget: AnalysisBudget,
+): ReadonlyMap<string, { readonly block: string; readonly value: Value }> {
+  const result = new Map<string, { block: string; value: Value }>();
+  for (const block of input.blocks)
+    for (const value of block.parameters) {
+      budget.charge();
+      result.set(value.id, { block: block.id, value });
+    }
+  return result;
 }
 
 /** Lossless constituent bits used when a source pointer spans entry SSA cells.
@@ -231,6 +247,8 @@ export function createAffineResolver(
   constant: (id: string) => bigint | undefined,
   budget: AnalysisBudget,
   sources?: ReadonlyMap<string, readonly Value[]>,
+  /** Block parameters with their owning block, for loop induction recovery. */
+  parameters?: ReadonlyMap<string, { readonly block: string; readonly value: Value }>,
 ): (value: Value) => AffineAddress {
   const cache = new Map<string, AffineAddress>();
   const concatenations = new Map<string, string>();
@@ -245,6 +263,191 @@ export function createAffineResolver(
       .join(',');
     if (!concatenations.has(key)) concatenations.set(key, id);
   }
+  const known = (id: string): bigint | undefined => {
+    const expression = definitions.get(id);
+    return constant(id) ?? (expression?.kind === 'constant' ? expression.bits : undefined);
+  };
+  type Incoming = { readonly constant: bigint } | { readonly value: Value };
+  interface LoopVariable {
+    readonly block: string;
+    readonly key: string;
+    readonly edges: readonly Incoming[];
+  }
+  interface Induction {
+    readonly initial: bigint;
+    readonly stride: bigint;
+    readonly step: bigint;
+    readonly loop: LoopVariable;
+  }
+  const concatKey = (expression: Extract<Expression, { kind: 'concat' }>): string =>
+    `concat:${expression.values.map((part) => `${part.id}:${bitWidth(part.type)}`).join(',')}`;
+  /** One loop variable held whole, or as exact register cells of one block. */
+  const variableKey = (value: Value): string => {
+    const expression = definitions.get(value.id);
+    return expression?.kind === 'concat' ? concatKey(expression) : value.id;
+  };
+  /** Whole 64-bit incoming values of a block parameter, or of a concatenation
+   * of same-block parameters whose cells arrive as constants or as exact
+   * extracts of one whole value on every edge. */
+  const loopVariable = (value: Value): LoopVariable | undefined => {
+    if (!parameters) return undefined;
+    const expression = definitions.get(value.id);
+    const incoming = (item: Value): Incoming => {
+      const bits = known(item.id);
+      return bits === undefined ? { value: item } : { constant: BigInt.asUintN(64, bits) };
+    };
+    if (!expression) {
+      const list = sources?.get(value.id),
+        block = parameters.get(value.id)?.block;
+      return list && block && list.length >= 2
+        ? { block, key: value.id, edges: list.map(incoming) }
+        : undefined;
+    }
+    if (expression.kind !== 'concat') return undefined;
+    const block = parameters.get(expression.values[0]?.id ?? '')?.block;
+    const parts = expression.values.map((part) =>
+      parameters.get(part.id)?.block === block ? sources?.get(part.id) : undefined,
+    );
+    const count = parts[0]?.length ?? 0;
+    if (!block || count < 2 || parts.some((list) => list?.length !== count)) return undefined;
+    const edges: Incoming[] = [];
+    for (let edge = 0; edge < count; edge++) {
+      budget.charge(parts.length);
+      let offset = 0,
+        bits: bigint | undefined = 0n,
+        whole: Value | undefined;
+      for (const [index, list] of parts.entries()) {
+        const item = list![edge]!,
+          width = bitWidth(expression.values[index]!.type);
+        const cell = known(item.id),
+          fragment = definitions.get(item.id);
+        if (bits !== undefined && cell !== undefined)
+          bits |= BigInt.asUintN(width, cell) << BigInt(offset);
+        else if (
+          fragment?.kind === 'extract' &&
+          fragment.offset === offset &&
+          bitWidth(fragment.value.type) === 64 &&
+          (index === 0 || whole?.id === fragment.value.id)
+        ) {
+          whole = fragment.value;
+          bits = undefined;
+        } else return undefined;
+        offset += width;
+      }
+      if (offset !== 64) return undefined;
+      edges.push(whole ? { value: whole } : { constant: bits! });
+    }
+    return { block, key: concatKey(expression), edges };
+  };
+  /** Signed step of one incoming value `variable ± c`. */
+  const delta = (item: Value, key: string): bigint | undefined => {
+    const next = definitions.get(item.id);
+    if (next?.kind !== 'integer' || (next.op !== 'add' && next.op !== 'sub')) return undefined;
+    const left = known(next.left.id),
+      right = known(next.right.id);
+    if (right !== undefined && variableKey(next.left) === key)
+      return (next.op === 'add' ? 1n : -1n) * BigInt.asIntN(64, right);
+    if (next.op === 'add' && left !== undefined && variableKey(next.right) === key)
+      return BigInt.asIntN(64, left);
+    return undefined;
+  };
+  /** Every entry edge carries one constant and every other incoming value is
+   * exactly the variable plus one constant step. */
+  const loopInduction = (value: Value): Induction | undefined => {
+    const loop = bitWidth(value.type) === 64 ? loopVariable(value) : undefined;
+    if (!loop) return undefined;
+    let initial: bigint | undefined, step: bigint | undefined;
+    for (const item of loop.edges) {
+      budget.charge();
+      if ('constant' in item) {
+        const start = BigInt.asIntN(64, item.constant);
+        if (initial !== undefined && initial !== start) return undefined;
+        initial = start;
+        continue;
+      }
+      const next = delta(item.value, loop.key);
+      if (next === undefined || (step !== undefined && step !== next)) return undefined;
+      step = next;
+    }
+    const stride = step === undefined ? 0n : step < 0n ? -step : step;
+    return initial !== undefined && step !== undefined && stride > 0n && stride <= 65536n
+      ? { initial, stride, step, loop }
+      : undefined;
+  };
+  const inductions = new Map<string, Induction | null>();
+  /** A loop induction variable, optionally used with a constant addend. */
+  const induction = (value: Value, depth = 0): Induction | undefined => {
+    budget.charge();
+    if (inductions.has(value.id)) return inductions.get(value.id) ?? undefined;
+    let result: Induction | null = null;
+    const expression = definitions.get(value.id);
+    if (
+      depth < 8 &&
+      expression?.kind === 'integer' &&
+      (expression.op === 'add' || expression.op === 'sub')
+    ) {
+      const left = known(expression.left.id),
+        right = known(expression.right.id);
+      const inner =
+        right !== undefined
+          ? induction(expression.left, depth + 1)
+          : left !== undefined && expression.op === 'add'
+            ? induction(expression.right, depth + 1)
+            : undefined;
+      const addend =
+        right !== undefined
+          ? (expression.op === 'add' ? 1n : -1n) * BigInt.asIntN(64, right)
+          : BigInt.asIntN(64, left ?? 0n);
+      if (inner) result = { ...inner, initial: BigInt.asIntN(64, inner.initial + addend) };
+    } else result = loopInduction(value) ?? null;
+    if (result && (result.initial < -65536n || result.initial > 65536n)) result = null;
+    inductions.set(value.id, result);
+    return result ?? undefined;
+  };
+  let loopCandidates: Map<string, Value[]> | undefined;
+  /** A same-loop counter `k` (0 on every entry, +1 on every repeat edge) moving
+   * in lockstep with a positive-step induction: the variable is exactly
+   * `initial + step * k` modulo 2^64 at every point both are defined. */
+  const counter = (variable: Induction): string | undefined => {
+    if (variable.step <= 0n || !parameters) return undefined;
+    if (!loopCandidates) {
+      loopCandidates = new Map();
+      for (const { block, value } of parameters.values())
+        if (bitWidth(value.type) === 64) {
+          budget.charge();
+          const list = loopCandidates.get(block) ?? [];
+          list.push(value);
+          loopCandidates.set(block, list);
+        }
+      for (const [id, expression] of definitions) {
+        budget.charge();
+        const block = parameters.get(
+          expression.kind === 'concat' ? (expression.values[0]?.id ?? '') : '',
+        )?.block;
+        if (!block || expression.kind !== 'concat') continue;
+        const list = loopCandidates.get(block) ?? [];
+        list.push({ id, type: { kind: 'integer', bits: 64 } });
+        loopCandidates.set(block, list);
+      }
+    }
+    for (const candidate of loopCandidates.get(variable.loop.block) ?? []) {
+      budget.charge();
+      const index = loopInduction(candidate);
+      if (
+        !index ||
+        index.loop.key === variable.loop.key ||
+        index.initial !== 0n ||
+        index.step !== 1n ||
+        index.loop.edges.length !== variable.loop.edges.length ||
+        index.loop.edges.some(
+          (edge, position) => 'constant' in edge !== 'constant' in variable.loop.edges[position]!,
+        )
+      )
+        continue;
+      return candidate.id;
+    }
+    return undefined;
+  };
   const affine = (value: Value, active = new Set<string>()): AffineAddress => {
     budget.charge();
     const cached = cache.get(value.id);
@@ -343,6 +546,23 @@ export function createAffineResolver(
             if (base.stride !== null) continue;
             result = { ...base, stride };
             break;
+          }
+        }
+        if (result === fallback) {
+          // A loop-carried byte offset `i = c; i += s` added to an invariant
+          // base addresses `base + c + k * s`: one constant element period.
+          const steps = [expression.right, expression.left].map((item) => induction(item));
+          for (const [index, step] of steps.entries()) {
+            if (!step || steps[1 - index]) continue;
+            const base = affine(index === 0 ? expression.left : expression.right, active);
+            if (base.stride !== null) continue;
+            const index_id = counter(step);
+            result = {
+              ...base,
+              offset: BigInt.asIntN(64, base.offset + step.initial),
+              stride: step.stride,
+              ...(index_id ? { index: index_id } : {}),
+            };
           }
         }
       }
@@ -518,6 +738,7 @@ export function refineMemoryShapes(
       },
       budget,
       memoryAddressSources(input, budget),
+      memoryLoopParameters(input, budget),
     );
     const records = [...existing.types],
       associations = [...existing.associations];

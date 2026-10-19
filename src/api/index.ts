@@ -238,6 +238,27 @@ export class BinarySession {
     );
   }
 
+  /** Image-wide merged structure types as C declarations (`binary_info` view
+   * `types`): `data.text` is a self-contained header; a partial result names
+   * the analyzed function count. */
+  async types(
+    options: { readonly budget?: ToolInput<'binary_info'>['budget'] } = {},
+    call: QueryCallOptions = {},
+  ): Promise<ToolResult<'binary_info'>> {
+    this.#requireOpen();
+    return this.service.execute(
+      'binary_info',
+      {
+        project_id: this.projectId,
+        revision: this.revision,
+        image_id: this.image.id,
+        view: 'types',
+        ...(options.budget === undefined ? {} : { budget: options.budget }),
+      },
+      call,
+    );
+  }
+
   async findSymbols(
     options: SymbolQuery = {},
     call: QueryCallOptions = {},
@@ -291,6 +312,12 @@ export class BinarySession {
       },
       call,
     );
+  }
+
+  /** The C declarations text of `types()`, or null when the request failed. */
+  async typeDeclarations(call: QueryCallOptions = {}): Promise<string | null> {
+    const result = await this.types({}, call);
+    return 'data' in result && result.data.view === 'types' ? result.data.text : null;
   }
 
   async decompile(

@@ -128,7 +128,7 @@ All objects reject extra keys. All operations except `project_open` identify a p
 
 - `project_open`: import via authorized input/project paths and optional selected slice ID, or resume via project path. Imports default to a durable `queued` result; `wait: true` requests the final image summary. Explicit import `mode: "resume"` repairs only an empty project or one unfinished image with matching bytes/slice. Ordinary resume never retries: unfinished projects return `partial` / `incomplete_index` with `data.image: null`, permitting saved-job inspection and close before repair.
 - `project_close`: revision plus running-job policy (`reject`, `wait`, `cancel`); returns persisted revision and closed status. The precondition checks the acknowledged snapshot. Waiting/cancelling may reveal a newer already-committed revision; successful close reports that reconciled revision, not stale cached metadata.
-- `binary_info`: image and selected `summary`, `headers`, `sections`, `mappings`, `entry_points`, `relocations`, `hints`, or `capabilities` view. Each non-summary view is independently paged. Omit `image_id` only when the requested snapshot contains exactly one image; absent/ambiguous images fail explicitly.
+- `binary_info`: image and selected `summary`, `headers`, `sections`, `mappings`, `entry_points`, `relocations`, `hints`, `capabilities` or `types` view. Each list view is independently paged; `types` returns `text` (C declarations of the merged image structure types), the analyzed/total function counts and the type count, `partial` (`budget`) when not every body was analyzed or the text was cut. Omit `image_id` only when the requested snapshot contains exactly one image; absent/ambiguous images fail explicitly.
 - `symbols_find`: image, symbol/import/export kinds, name query, optional exact address.
 - `strings_find`: image, query, encodings, candidate/referenced filter, optional location range.
 - `functions_find`: image, optional stable ID or `id_prefix`, query, address, boundary certainty and analysis status. Name queries (here and in `symbols_find`) match a native name or its C spelling: for Mach-O one leading underscore is removed (`cSourceName`, the rule library contracts already use); other formats compare names unchanged.
@@ -190,6 +190,8 @@ Discovery returns shared `FunctionGraph` records consumed directly by lifters; n
 ## Recovered types and navigation implementations
 
 `src/analysis/types/` consumes SSA plus explicit ABI, debug, library and annotation evidence without rewriting machine IR. Associations retain source status and exact machine/source bit ranges. Observed memory shapes preserve signed, machine-width-wrapped offsets, access widths, alias/escape uncertainty and dynamic strides; their observed extent is not an inferred object size. Declared type and field IDs are valid subjects; a function-anchored type annotation declares a type in scope rather than assigning the function a scalar machine type. Conflicting declarations remain alternatives. A supplied call declaration matches both the exact call node and contract ID, preserving source provenance without leaking a call-local assertion to another call. Retractions recompute from the requested snapshot instead of retaining prior conclusions.
+
+Image types (`src/analysis/types/image-types.ts`, `src/service/analysis/image-types.ts`) give structure types one image-wide identity. Each function contributes its local object views: memory shapes at displacement zero plus pointer values at exact flows — integer argument registers on entry and at direct calls, the result register at returns and direct calls, entry-SP-relative stack addresses. A bounded, deterministic exploration (12 neighbor bodies, 4 callers per flow, two pointee hops) loads the callees and callers of the selected function's flows through the shared native-unit cache. Views unify (Steensgaard-style; members holding unified pointees unify their pointees) only through flows the callee itself confirms by dereferencing, forwarding or returning the value, so a stale caller register joins nothing. Overlapping incompatible members refuse the union and stay separate classes with recorded conflicts. Classes are named after the lowest-address function owning a flow (`OpenFiles_arg0`, `X_ret`, `X_local_40`, pointees `X_arg0_f20`, private views `X_objN`). A class with an unexplored flow — exploration cut, absent callee body, or an image reference index that is not complete — is `bounded` and its name carries a 4-hex layout digest, so one name never denotes two layouts. The selected function declares the merged layout of every class it has a view of (a pointee class it never dereferences is declared by name only; its layout is in the image types): its own members keep their IDs and types; other members are added where they do not overlap, an unbounded indexed member before others keeps only its first element (indexed accesses stay explicit), and a member another view proves to hold an object pointer becomes that pointer. Single-view private layouts keep layout-digest names (`struct_3fa2c1`), shared by equal layouts. A loop-carried byte offset `c + k*s` beside a lockstep 0-based counter `k` (strength-reduced `a[k].f`) gives the access a constant element stride and the counter as its index, rendered `p->f_20[k].f_8`. `binary_info` view `types` (CLI `open-decomp types`, API `types()` / `typeDeclarations()`) analyzes every function body within the budget and prints all non-private classes as C declarations (`partial` when bodies remain).
 
 `src/project/annotations/` validates names, notes, type declarations and signatures against durable subjects or a trusted, project/revision-bound semantic catalog. A batch commits annotations, assertion evidence and an optional synchronous job-completion hook atomically; cancellation or a hook failure rolls everything back. The hook receives prepared proof bodies so the complete response can be validated before commit without reading an uncommitted future snapshot. Active entity-filtered views retain local alternatives and reachable type dependencies, not unrelated declarations from other functions. User/LLM assertions never become immutable type/signature facts. Retraction, removal and stale revisions remain distinct.
 
@@ -690,16 +692,44 @@ identity and declares nothing.
 Loader-bound import slots (Mach-O GOT/chained-fixup binds, ELF GLOB_DAT, PE IAT; not
 lazy-bound slots or stub entries) carry `SourceAddress.import`. In the source view a
 pointer-width read of such a slot is the imported symbol's address (`&sym`) and a
-read through it is the symbol itself (`sym`), declared as `import ___stderrp from
-<library>, slot 0x…` with the bind records as evidence. The declared type is the
-width of the accesses seen, never the symbol's real type; a function that writes the
+read through it is the symbol itself (`sym`), declared once with a compact comment
+(`import from <library basename>`) and the bind records as evidence. The declared type is
+the header-declared type when the library catalog knows the variable, otherwise the
+width of the accesses seen; a function that writes the
 slot keeps explicit memory accesses. Python-like declares them with `import_view`.
 
 Import stubs (Mach-O `__stubs`, ELF PLT entries, PE thunks) are recognized from
 their decoded body (address materialization, slot read, one indirect branch) plus an
 established branch through a single non-weak import slot. They are published under the
 import's name with `kind: "import_stub"`, boundary `established` and analysis
-`complete`; `--function <import name>` selects them.
+`complete`; `--function <import name>` selects them. Every Mach-O import with a
+loader-established stub entry is also a discovery root named after the import, so a
+tail branch into a stub is a tail call to the import, not stub code merged into its caller.
+
+Objective-C (Mach-O ARM64, static metadata only): method implementations are named
+`-[Class selector]` / `+[Class selector]` (category methods under their class; stripped
+images keep these names). `__objc_stubs` entries are published as `_objc_msgSend$sel`
+only when their selector slot lies in `__objc_selrefs` and their transfer reaches the
+bound `_objc_msgSend` import; `__cfstring` objects with a bound
+`___CFConstantStringClassReference` isa yield their decoded contents. In the source view:
+a call to a selector stub, or to `objc_msgSend` with an exact 64-bit `__objc_selrefs` load
+in x1, takes the selector's colon count as its keyword arity, argument classes from the
+image's single type encoding for that selector (integer/pointer otherwise; results narrower
+than 32 bits keep their observed storage), and closes its argument list
+(`objc_selector`, an `abi_conformance` requirement) only when the caller prepares no
+further argument register. It prints as `[recv kw:a kw2:b]` (Python-like
+`recv.kw_kw2_(a, b)`); a receiver read from a class reference (`__objc_classrefs` or a
+bound `_OBJC_CLASS_$_X` slot) prints as the class name, a selector-slot read as
+`@selector(x)`, a class-slot read as `[X class]`, a constant string as `@"…"`
+(`NSString("…")`). `objc_alloc`, `objc_alloc_init`, `objc_opt_new/class/self/
+isKindOfClass/respondsToSelector` print as the equivalent messages (`[[cls alloc] init]`).
+Tail transfers render `return [recv sel]` when their selector has a type encoding (or no
+keywords). Known Foundation variadic selectors (`stringWithFormat:` …) keep their explicit
+`unknown_argument_remainder()`. Unresolved selectors, `objc_msgSendSuper2` (shown with
+`@selector(...)`) and ARC calls (`objc_retain`/`objc_release`/`objc_storeStrong`/…,
+catalogued libobjc contracts) remain explicit calls; nothing is dropped. A function that is
+a method implementation is headed `-[Class sel](… self, … _cmd, …)` (Python-like
+`def Class.sel_(self, _cmd, …)`, `@classmethod` for class methods).
 
 Source type views interpret unchanged machine storage only when complete, compatible associations support them. Signed operation constraints alone do not declare signed inputs; hypotheses and conflicting layouts do not establish source declarations. Narrow fragments never discard observable high carrier bits. Typed pointer arithmetic and cyclic transfers retain exact target bits; field/array views preserve original access ordering, aliasing, faults and provenance without inventing object bounds or element counts. Dedicated C/Python regressions cover signed fields, unknown-count arrays, full-width pointer returns and typed phi swaps; public Mach-O/PE memory and loop cases retain their results and ordered accesses.
 

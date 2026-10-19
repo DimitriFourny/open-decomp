@@ -11,6 +11,7 @@ import {
   type CacheIdentity,
   type CanonicalValue,
   type Diagnostic,
+  type LoadedImage,
   type OperationContext,
   type ProjectStore,
   type ResultMetadata,
@@ -49,7 +50,7 @@ import {
 import { withMetadataOmissions } from '../../project/cache/limits.js';
 import { loadFunctionGraph, loadFunctionIndex, loadFunctionScope } from '../queries/scope.js';
 import { MAX_FRAME_BYTES } from '../../workers/protocol.js';
-import { callDeclarations, resolveCalls } from './calls.js';
+import { callDeclarations, nativeCallIndex, resolveCalls } from './calls.js';
 import {
   closeEvidence,
   emissionEvidenceReferences,
@@ -59,6 +60,8 @@ import {
 import { pipelineComponents, pipelineVersions } from './versions.js';
 import { boundIR, requirePass } from './passes.js';
 import { recoverSourceEvidence } from './source-facts.js';
+import { imageTypeDump, recoverImageTypes, type ImageTypeDump } from './image-types.js';
+export type { ImageTypeDump } from './image-types.js';
 export { executeAnnotations } from './annotations.js';
 
 export interface AnalysisScope {
@@ -454,7 +457,29 @@ export async function executeDecompilation(
         }
         names.push(candidates.explicit ? { entity_id, name } : nativeName(entity_id, name));
       }
-      const source = recoverSourceEvidence({
+      // A discovered tail transfer names its grounded target function (including
+      // an import stub root) exactly as a call to that target would be named.
+      const callIndex = nativeCallIndex(image, functions, references, context);
+      const tailReferences = callIndex.references_by_function.get(ir.id);
+      for (const block of ir.blocks) {
+        const control = block.terminator;
+        if (control.kind !== 'indirect' || !control.tail_call || named.has(control.id)) continue;
+        const targets = new Set<string>();
+        for (const instruction of control.provenance.instruction_ids)
+          for (const reference of tailReferences?.get(instruction) ?? []) {
+            context.checkpoint(1);
+            if (reference.kind !== 'tail_call' || reference.status !== 'established') continue;
+            if (!reference.to) continue;
+            for (const fn of callIndex.functions_by_address.get(
+              `${reference.to.image_id}:${reference.to.space}:${reference.to.value}`,
+            ) ?? []) {
+              const name = fn.display_name ?? fn.original_name;
+              if (name) targets.add(name);
+            }
+          }
+        if (targets.size === 1) names.push(nativeName(control.id, [...targets][0]!));
+      }
+      const sourceInput = {
         scope,
         identity,
         revision: args.revision,
@@ -472,7 +497,9 @@ export async function executeDecompilation(
         native_types: nativeTypes,
         components,
         observable_register_masks,
-      });
+      };
+      const source = recoverSourceEvidence(sourceInput);
+      const localTypes = types;
       types = refineMemoryShapes(ir, types, fullContext, {
         slice_id: image.selected_slice_id,
         revision: args.revision,
@@ -483,6 +510,8 @@ export async function executeDecompilation(
         (item) => item.code === 'cancelled' || item.code === 'resource_limit',
       );
       if (refinementFailure) throw new OperationError(refinementFailure);
+      const imageTypes = recoverImageTypes(sourceInput, localTypes, types);
+      types = imageTypes.types;
       context.progress('emit', 6, 7);
       const emit = args.options.emitter === 'python-like' ? emitPythonLike : emitC;
       const emitted = emit(
@@ -516,6 +545,7 @@ export async function executeDecompilation(
         ...nameDiagnostics,
         ...emitted.diagnostics,
         ...(source.diagnostics ?? []),
+        ...imageTypes.diagnostics,
       ];
       const uniqueDiagnostics = boundDiagnostics([
         ...new Map(
@@ -708,5 +738,46 @@ export async function executeDecompilation(
       context.checkpoint(0);
       return { result, catalog: { ...catalog, evidence } };
     },
+  );
+}
+
+/** Whole-image merged structure types as C declarations (see imageTypeDump). */
+export function executeImageTypes(
+  scope: AnalysisScope,
+  revision: number,
+  image: LoadedImage,
+  max_bytes: number,
+): ImageTypeDump {
+  const { context } = scope;
+  const components = pipelineComponents(image.target);
+  const debug = recoverDebugInfo(image, context);
+  const library = recoverLibraryContracts({ image, abi: components.abi, revision }, context);
+  const { functions, references } = loadFunctionIndex(scope, revision, image);
+  return imageTypeDump(
+    {
+      scope,
+      image,
+      revision,
+      functions,
+      references,
+      debug,
+      library,
+      native_types: [
+        ...debug.types.map((type) => ({
+          ...type,
+          source: 'debug' as const,
+          status: 'established' as const,
+        })),
+        ...library.types.map((type) => ({
+          ...type,
+          source: 'library' as const,
+          status: 'established' as const,
+        })),
+      ],
+      components,
+      observable_register_masks: abiObservableRegisterMasks(components.abi, context),
+    },
+    context,
+    max_bytes,
   );
 }

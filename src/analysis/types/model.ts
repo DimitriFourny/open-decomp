@@ -78,6 +78,9 @@ export interface ObservedField {
   /** Exact calls whose indirect target was read from this field. No prototype
    * or complete argument count is implied by observing a callable address. */
   readonly call_target_ids?: readonly string[];
+  /** Accesses whose address is exactly `base + offset + k * stride` for one
+   * same-loop counter value `k`; the element count remains unknown. */
+  readonly indices?: readonly { readonly node_id: string; readonly value_id: string }[];
 }
 export interface MemoryShape {
   readonly id: string;
@@ -127,4 +130,18 @@ export interface TypeRecoveryResult {
   readonly diagnostics: readonly Diagnostic[];
   /** Null if preparation exhausted its budget before physical ABI analysis. */
   readonly calls: CallAnalysisResult | null;
+  /** Image-wide identities of the structure types used here (see image types). */
+  readonly image_types?: readonly ImageTypeBinding[];
+}
+/** One structure type's image-wide identity: the same name denotes the same
+ * merged layout in every function's output. */
+export interface ImageTypeBinding {
+  readonly type_id: string;
+  readonly name: string;
+  /** Bounded: some pointer flows were not explored; the name carries a layout digest. */
+  readonly state: 'complete' | 'bounded';
+  /** Functions whose observed views were merged into this layout. */
+  readonly functions: number;
+  /** Names of connected layouts that overlap incompatibly and stay separate. */
+  readonly conflicts: readonly string[];
 }

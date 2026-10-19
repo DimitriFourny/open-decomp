@@ -122,9 +122,10 @@ export function prepareNativeContext(
     ...context,
     budget: { ...context.budget, work: limit },
     remainingWork: () => Math.max(0, limit - used),
+    // One parent call per charge; see the native-prepare sub-budgets.
     checkpoint(work) {
-      context.checkpoint(0);
-      if (used + work > limit)
+      if (used + work > limit) {
+        context.checkpoint(0);
         throw new OperationError({
           code: 'resource_limit',
           severity: 'warning',
@@ -132,6 +133,7 @@ export function prepareNativeContext(
           evidence_ids: baseline.evidence_ids,
           details: { kind: 'limit', resource: 'work', limit, consumed: used + work },
         });
+      }
       context.checkpoint(work);
       used += work;
     },

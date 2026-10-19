@@ -256,28 +256,35 @@ export function planSourceStack(
       for (const node of block.statements) {
         if (node.kind !== 'call') continue;
         const projection = calls.get(node.id)!;
-        const libraryClosure = input.source?.source_callees?.some(
-          (callee) =>
-            callee.call_id === node.id && callee.argument_list_closure === 'library_contract',
-        );
+        const closure = input.source?.source_callees?.find(
+          (callee) => callee.call_id === node.id,
+        )?.argument_list_closure;
         if (
           projection.kind === 'inferred' &&
           projection.argument_list_complete === true &&
           !validation.presentation(
             'arity_closure',
             node.id,
-            libraryClosure
+            closure === 'library_contract'
               ? 'library_contract: complete native reads propagated through established import-tail contracts prove a register-only interface; caller frame writes cannot supply additional arguments'
-              : 'callee_reads: complete nonrecursive native summary reads only the observed register prefix, no incoming stack and no escaping incoming-stack address; caller frame writes cannot supply additional arguments',
+              : closure === 'objc_selector'
+                ? 'objc_selector: the statically resolved selector fixes the keyword argument count; argument classes follow its unique image type encoding or integer/pointer class, and the caller prepares no further argument register'
+                : 'callee_reads: complete nonrecursive native summary reads only the observed register prefix, no incoming stack and no escaping incoming-stack address; caller frame writes cannot supply additional arguments',
             [node.id],
           )
         )
           calls.set(node.id, { ...projection, argument_list_complete: false });
-        if (libraryClosure && calls.get(node.id)!.argument_list_complete === true)
+        if (closure === 'library_contract' && calls.get(node.id)!.argument_list_complete === true)
           validation.requireAbi(
             'arity_closure',
             [node.id],
             'Native closure through imported tail contracts assumes the established library interface and ABI-conforming arguments and results; incomplete dependencies and unresolved targets stay open.',
+          );
+        if (closure === 'objc_selector' && calls.get(node.id)!.argument_list_complete === true)
+          validation.requireAbi(
+            'arity_closure',
+            [node.id],
+            'Objective-C selector closure assumes the receiver implements a non-variadic method for the selector with the assumed argument classes; known variadic selectors and unresolved selectors stay open.',
           );
       }
   const openArguments = (projection: BoundaryProjection): boolean =>

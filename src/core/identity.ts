@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, hash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import {
   digestSchema,
@@ -20,24 +20,54 @@ export type CanonicalValue =
   | { readonly [key: string]: CanonicalValue };
 /** Deterministic, type-tagged encoding: bigint 1 must not collide with the text "0x1". */
 export function canonicalIdentity(value: CanonicalValue): string {
-  if (value === null) return 'null';
-  if (typeof value === 'bigint') return `bigint:${value.toString(16)}`;
-  if (typeof value === 'number') {
-    if (!Number.isSafeInteger(value)) throw new TypeError('Identity numbers must be safe integers');
-    return `number:${value}`;
-  }
-  if (typeof value === 'string' || typeof value === 'boolean')
-    return `${typeof value}:${JSON.stringify(value)}`;
-  if (Array.isArray(value))
-    return `[${value.map((item: CanonicalValue) => canonicalIdentity(item)).join(',')}]`;
-  const object = value as { readonly [key: string]: CanonicalValue };
-  return `{${Object.keys(object)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalIdentity(object[key]!)}`)
-    .join(',')}}`;
+  let out = '';
+  // One appended string instead of per-level map/join arrays; identical text.
+  const write = (item: CanonicalValue): void => {
+    if (item === null) {
+      out += 'null';
+      return;
+    }
+    switch (typeof item) {
+      case 'bigint':
+        out += `bigint:${item.toString(16)}`;
+        return;
+      case 'number':
+        if (!Number.isSafeInteger(item))
+          throw new TypeError('Identity numbers must be safe integers');
+        out += `number:${item}`;
+        return;
+      case 'string':
+        out += `string:${JSON.stringify(item)}`;
+        return;
+      case 'boolean':
+        out += `boolean:${item}`;
+        return;
+    }
+    if (Array.isArray(item)) {
+      out += '[';
+      for (let index = 0; index < item.length; index++) {
+        if (index) out += ',';
+        // Holes encode as empty elements, as Array#join does.
+        if (index in item) write(item[index] as CanonicalValue);
+      }
+      out += ']';
+      return;
+    }
+    const object = item as { readonly [key: string]: CanonicalValue };
+    const keys = Object.keys(object).sort();
+    out += '{';
+    for (let index = 0; index < keys.length; index++) {
+      if (index) out += ',';
+      out += `${JSON.stringify(keys[index])}:`;
+      write(object[keys[index]!]!);
+    }
+    out += '}';
+  };
+  write(value);
+  return out;
 }
 export function fingerprint(value: CanonicalValue): string {
-  return createHash('sha256').update(canonicalIdentity(value)).digest('hex');
+  return hash('sha256', canonicalIdentity(value), 'hex');
 }
 export function contentHash(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');

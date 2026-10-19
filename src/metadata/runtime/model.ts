@@ -13,6 +13,10 @@ export type RuntimeKind =
   | 'objc_selector'
   | 'objc_class_reference'
   | 'objc_superclass_reference'
+  /** `__objc_stubs` entry: target is the stub, name its selector. */
+  | 'objc_selector_stub'
+  /** `__cfstring` constant object: name is its decoded contents, target its bytes. */
+  | 'objc_string'
   | 'swift_module'
   | 'swift_parent'
   | 'swift_class'

@@ -1,3 +1,4 @@
+import type { Section } from '../../core/index.js';
 import { RuntimeIssue, RuntimeReader } from './reader.js';
 
 export class ObjCRecovery {
@@ -11,6 +12,8 @@ export class ObjCRecovery {
     '__objc_classrefs',
     '__objc_superrefs',
   ]);
+  /** Non-pointer-array Objective-C sections with their own record layouts. */
+  static readonly auxiliary: ReadonlySet<string> = new Set(['__objc_stubs', '__cfstring']);
   readonly classes = new Map<bigint, { name: string; metaclass: boolean }>();
   readonly activeClasses = new Set<bigint>();
   readonly protocols = new Map<bigint, string>();
@@ -72,9 +75,10 @@ export class ObjCRecovery {
         }
         if (selector === null)
           throw new RuntimeIssue('malformed_image', 'Missing Objective-C method selector', entry);
+        const name = r.text(selector);
         r.add(
           declaration ? 'objc_method_declaration' : 'objc_method',
-          r.text(selector),
+          name,
           entry,
           BigInt(stride),
           {
@@ -85,6 +89,7 @@ export class ObjCRecovery {
             type: type === null ? null : r.text(type, false, true),
             encoding: 'objc',
             flags: BigInt(flags),
+            symbol: `${classMethod ? '+' : '-'}[${owner} ${name}]`,
           },
         );
       });
@@ -288,5 +293,135 @@ export class ObjCRecovery {
               else r.add('objc_selector', r.text(target), slot, 8n, { target });
             });
         });
+      else if (section.name === '__objc_stubs') r.attempt(() => this.selectorStubs(section));
+      else if (section.name === '__cfstring') r.attempt(() => this.constantStrings(section));
+  }
+
+  /** Xcode 14+ `__objc_stubs`: `adrp x1, selref@PAGE; ldr x1, [x1, selref@PAGEOFF]`,
+   * then either `adrp x16, _objc_msgSend@GOTPAGE; ldr x16, [x16, ...]; br x16`
+   * (BRK-padded to 32 bytes) or `b _objc_msgSend`. Only a stub whose selector
+   * slot lies in `__objc_selrefs` and whose transfer reaches the bound
+   * `_objc_msgSend` import is published; the first unrecognized word stops the
+   * section (its remaining stubs stay unnamed, reported as partial). */
+  selectorStubs(section: Section): void {
+    const r = this.r;
+    if (r.image.target.architecture !== 'arm64') return;
+    const start = section.virtual_range.start.value,
+      end = start + section.virtual_range.size;
+    r.file(start, section.virtual_range.size);
+    const page = (at: bigint, word: number, register: number): bigint | null => {
+      if ((word & 0x9f00001f) !== (0x90000000 | register)) return null;
+      const immediate = ((word >>> 5) & 0x7ffff) * 4 + ((word >>> 29) & 3);
+      const signed = immediate >= 0x100000 ? immediate - 0x200000 : immediate;
+      return (at & ~0xfffn) + BigInt(signed) * 0x1000n;
+    };
+    const load = (word: number, register: number): bigint | null =>
+      (word & 0xffc003ff) === (0xf9400000 | (register << 5) | register)
+        ? BigInt(((word >>> 10) & 0xfff) * 8)
+        : null;
+    const words = (at: bigint, count: number): number[] | null => {
+      if (at + BigInt(count * 4) > end) return null;
+      return Array.from({ length: count }, (_, index) => r.u32(at + BigInt(index * 4)));
+    };
+    let cursor = start;
+    while (cursor < end) {
+      r.context.checkpoint(1);
+      if ((r.u32(cursor) & 0xffe0001f) >>> 0 === 0xd4200000) {
+        cursor += 4n; // BRK padding between stubs
+        continue;
+      }
+      const head = words(cursor, 3);
+      const selectorPage = head && page(cursor, head[0]!, 1),
+        selectorOffset = head && load(head[1]!, 1);
+      if (!head || selectorPage === null || selectorOffset === null)
+        throw new RuntimeIssue('unavailable_semantics', 'Unrecognized Objective-C stub', cursor);
+      let size: bigint, sends: boolean;
+      if ((head[2]! & 0xfc000000) === 0x14000000) {
+        const delta = head[2]! & 0x3ffffff,
+          target = cursor + 8n + BigInt((delta >= 0x2000000 ? delta - 0x4000000 : delta) * 4);
+        size = 12n;
+        sends = r.importEntries.get(target) === '_objc_msgSend';
+      } else {
+        const tail = words(cursor + 8n, 3);
+        const slotPage = tail && page(cursor + 8n, tail[0]!, 16),
+          slotOffset = tail && load(tail[1]!, 16);
+        if (!tail || slotPage === null || slotOffset === null || tail[2] !== 0xd61f0200)
+          throw new RuntimeIssue('unavailable_semantics', 'Unrecognized Objective-C stub', cursor);
+        size = 20n;
+        sends = r.importSlots.get(slotPage + slotOffset) === '_objc_msgSend';
+      }
+      const stub = cursor;
+      cursor += size;
+      if (!sends)
+        throw new RuntimeIssue(
+          'unavailable_semantics',
+          'Objective-C stub does not reach the bound _objc_msgSend import',
+          stub,
+        );
+      r.attempt(() => {
+        const slot = selectorPage + selectorOffset;
+        if (r.section(slot, 8n).name !== '__objc_selrefs')
+          throw new RuntimeIssue(
+            'malformed_image',
+            'Objective-C stub selector is outside __objc_selrefs',
+            stub,
+          );
+        const selector = r.pointer(slot);
+        if (selector === null)
+          throw new RuntimeIssue('malformed_image', 'Objective-C stub selector is null', stub);
+        const name = r.text(selector);
+        r.add('objc_selector_stub', name, stub, size, {
+          target: stub,
+          target_role: 'code',
+          symbol: `_objc_msgSend$${name}`,
+        });
+      });
+    }
+  }
+
+  /** Compiler-emitted constant CFString/NSString objects: isa bound to
+   * `___CFConstantStringClassReference`, 8-bit (0x7c8, ASCII) or UTF-16
+   * (0x7d0) contents with an explicit length. No symbol is published. */
+  constantStrings(section: Section): void {
+    const r = this.r,
+      start = section.virtual_range.start.value,
+      size = section.virtual_range.size;
+    if (size % 32n)
+      throw new RuntimeIssue('malformed_image', 'Misaligned constant string section', start);
+    const count = r.count(size / 32n, start);
+    r.file(start, size);
+    for (let index = 0; index < count; index++)
+      r.attempt(() => {
+        const at = start + BigInt(index * 32);
+        if (r.importSlots.get(at) !== '___CFConstantStringClassReference')
+          throw new RuntimeIssue(
+            'unavailable_semantics',
+            'Constant string class reference is not established',
+            at,
+          );
+        const flags = r.u32(at + 8n),
+          data = r.pointer(at + 16n),
+          length = r.u64(at + 24n),
+          wide = flags === 0x7d0;
+        if ((flags !== 0x7c8 && !wide) || data === null)
+          throw new RuntimeIssue('unavailable_semantics', 'Unsupported constant string', at);
+        if (length > BigInt(r.limits.max_string_bytes)) return; // contents stay unpublished
+        const bytes = length * (wide ? 2n : 1n);
+        let text = '';
+        if (bytes) {
+          const raw = r.image.bytes.read(r.file(data, bytes), Number(bytes));
+          r.stringBytes += raw.length;
+          if (r.stringBytes > r.limits.max_total_string_bytes)
+            throw new RuntimeIssue('resource_limit', 'Runtime string byte budget reached', at);
+          if (!wide && raw.some((byte) => byte >= 0x80))
+            throw new RuntimeIssue('malformed_image', 'Non-ASCII 8-bit constant string', at);
+          try {
+            text = new TextDecoder(wide ? 'utf-16le' : 'ascii', { fatal: true }).decode(raw);
+          } catch {
+            throw new RuntimeIssue('malformed_image', 'Constant string is not valid UTF-16', at);
+          }
+        }
+        r.add('objc_string', text, at, 32n, { target: data, symbol: false });
+      });
   }
 }

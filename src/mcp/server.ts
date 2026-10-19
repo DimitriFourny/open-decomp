@@ -63,7 +63,7 @@ const descriptions: Record<ToolName, string> = {
   project_close:
     'Persist and release an open project without deleting analysis. Revision and running-job policy are explicit.',
   binary_info:
-    'Structured binary facts: summary, headers, sections, mappings, entry points, relocations, hints, capabilities. Omit image_id only when the snapshot has one image. Evidence is by ID; resolve with evidence_get.',
+    'Structured binary facts: summary, headers, sections, mappings, entry points, relocations, hints, capabilities. view:"types" returns C declarations of the image-wide merged structure types (the same names function_decompile uses; observed members only; analyzes function bodies within the budget, so it can be partial). Omit image_id only when the snapshot has one image. Evidence is by ID; resolve with evidence_get.',
   symbols_find:
     'Search symbols, imports and exports by name/address (compact rows; evidence IDs in structuredContent). A symbol name does not establish a source signature. A Mach-O name also matches its C spelling (one leading underscore removed).',
   strings_find:
@@ -389,6 +389,10 @@ export function createMcpServer(service: QueryService, policy: McpServerPolicy =
             code: 'result_too_large',
             hint: 'Result exceeds the 2 MiB MCP delivery bound. Request a smaller page/read or a published analysis artifact. A mutation may already be committed: inspect durable job status and the acknowledged revision, never replay automatically.',
           });
+        const types =
+          name === 'binary_info' && 'data' in result
+            ? (result as Extract<ToolResult<'binary_info'>, { data: unknown }>).data
+            : undefined;
         if (name === 'function_get')
           text =
             investigationText(result as ToolResult<'function_get'>) ??
@@ -400,6 +404,9 @@ export function createMcpServer(service: QueryService, policy: McpServerPolicy =
           text = symbolsListing(result as ToolResult<'symbols_find'>) ?? text;
         else if (name === 'strings_find')
           text = stringsListing(result as ToolResult<'strings_find'>) ?? text;
+        else if (types?.view === 'types')
+          // The C declarations are the answer; counts and state stay structured.
+          text = `/* ${types.types} type(s); ${types.functions.analyzed}/${types.functions.total} functions analyzed; state ${result.state} */\n${types.text}`;
         else if (navigationTools.has(name)) text = navigationText(result) ?? text;
         else if (name === 'function_decompile' && view !== undefined) text = view;
         else if (name === 'function_decompile' && 'job' in result)
