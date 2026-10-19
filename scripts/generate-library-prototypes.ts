@@ -41,6 +41,14 @@ interface Decl {
   readonly isStatic: boolean;
   readonly file: string;
 }
+/** An `extern` data declaration: the type as spelled, and whether the object itself is
+ * const-qualified (`const CFStringRef`, `char *const`). */
+interface Variable {
+  readonly name: string;
+  readonly type: string;
+  readonly constant: boolean;
+  readonly file: string;
+}
 interface Unit {
   readonly id: string;
   readonly compiler: string;
@@ -55,6 +63,7 @@ interface Unit {
 }
 interface Collected {
   readonly decls: Map<string, Decl>;
+  readonly variables: Map<string, Variable>;
   readonly typedefs: Map<string, { qual: string; anonymous: boolean; enumId?: string }>;
   readonly tags: Map<string, { complete: boolean; unused: boolean }>;
   readonly enums: Map<string, boolean>; // 'enum X' or typedef name -> has negative enumerator
@@ -95,6 +104,7 @@ function trackFile(node: unknown, state: { file: string }): void {
 function collect(unit: Unit, text: string): Collected {
   const out: Collected = {
     decls: new Map(),
+    variables: new Map(),
     typedefs: new Map(),
     tags: new Map(),
     enums: new Map(),
@@ -138,6 +148,17 @@ function collect(unit: Unit, text: string): Collected {
         );
         if (node.name) out.enums.set(`enum ${node.name}`, negative);
         out.enumById.set(node.id, negative);
+        break;
+      }
+      case 'VarDecl': {
+        if (node.isImplicit || !node.name || node.storageClass !== 'extern') break;
+        if (!unit.roots.some((root) => file.startsWith(root))) break;
+        const type = (node.type.qualType as string).replace(ATTRIBUTE, '').trim();
+        // Top-level const: after the last `*`, or on a non-pointer (typedef'd) type.
+        const star = type.lastIndexOf('*');
+        const constant = star < 0 ? /\bconst\b/.test(type) : /\bconst\b/.test(type.slice(star));
+        if (!out.variables.has(node.name))
+          out.variables.set(node.name, { name: node.name, type, constant, file });
         break;
       }
       case 'FunctionDecl': {
@@ -719,13 +740,22 @@ interface Row {
   readonly header: string;
   readonly signature: string;
 }
-const modules = new Map<LibraryKind, { rows: Map<string, Row>; provenance: string }>();
+interface VariableRow {
+  readonly name: string;
+  readonly type: string;
+  readonly constant: boolean;
+  readonly header: string;
+}
+const modules = new Map<
+  LibraryKind,
+  { rows: Map<string, Row>; variables: Map<string, VariableRow>; provenance: string }
+>();
 const skipped = new Map<string, number>();
 
 function moduleFor(library: LibraryKind, provenance: string) {
   let module = modules.get(library);
   if (!module) {
-    module = { rows: new Map(), provenance };
+    module = { rows: new Map(), variables: new Map(), provenance };
     modules.set(library, module);
   }
   return module;
@@ -856,6 +886,43 @@ function addUnit(
       if (process.env.PROTOTYPES_VERBOSE) console.log(`skip ${decl.name}: ${error.message}`);
     }
   }
+  for (const variable of data.variables.values()) {
+    const header = relative(
+      unit.roots.find((root) => variable.file.startsWith(root)) ?? '',
+      variable.file,
+    );
+    const library = classify(
+      {
+        name: variable.name,
+        returns: variable.type,
+        parameters: [],
+        variadic: false,
+        noreturn: false,
+        formatted: false,
+        isStatic: false,
+        file: variable.file,
+      },
+      header,
+    );
+    if (!library) continue;
+    const module = moduleFor(library, unit.provenance);
+    if (module.variables.has(variable.name)) continue;
+    try {
+      const spec = resolver.value(variable.type);
+      if (spec === 'void') throw new Unsupported('void variable');
+      module.variables.set(variable.name, {
+        name: variable.name,
+        type: encode(spec),
+        constant: variable.constant,
+        header,
+      });
+    } catch (error) {
+      if (!(error instanceof Unsupported)) throw error;
+      const key = `variable ${error.message.replace(/:.*$/, '')}`;
+      skipped.set(key, (skipped.get(key) ?? 0) + 1);
+      if (process.env.PROTOTYPES_VERBOSE) console.log(`skip ${variable.name}: ${error.message}`);
+    }
+  }
 }
 const resolvers: Resolver[] = [];
 
@@ -878,7 +945,7 @@ function runUnit(
     (decl, header) => (seen?.has(decl.name) ? null : classify(decl, header)),
     resolver,
   );
-  if (seen) for (const name of data.decls.keys()) seen.add(name);
+  if (seen) for (const name of [...data.decls.keys(), ...data.variables.keys()]) seen.add(name);
 }
 
 const crtNames = new Set([...importNames('libmsvcrt.a'), ...importNames('libucrt.a')]);
@@ -970,12 +1037,24 @@ function writeModule(library: LibraryKind): void {
   const rows = [...module.rows.values()].sort((a, b) =>
     a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
   );
+  const variables = [...module.variables.values()].sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+  );
   for (const row of rows) {
     let index = headers.indexOf(row.header);
     if (index < 0) index = headers.push(row.header) - 1;
     lines.push(`${row.name}|${row.returns}|${row.parameters}|${row.flags}|${index.toString(36)}`);
     for (const match of `${row.returns}${row.parameters}`.matchAll(/&([^;]+);/g))
       used.add(match[1]!);
+  }
+  // `=name|type|flags|header`: an extern data object (flag `c`: const-qualified).
+  for (const variable of variables) {
+    let index = headers.indexOf(variable.header);
+    if (index < 0) index = headers.push(variable.header) - 1;
+    lines.push(
+      `=${variable.name}|${variable.type}|${variable.constant ? 'c' : ''}|${index.toString(36)}`,
+    );
+    for (const match of variable.type.matchAll(/&([^;]+);/g)) used.add(match[1]!);
   }
   const handleLines = [...used].sort().map((name) => `&${name}=${allHandles.get(name)!}`);
   const body = [...handleLines, ...lines].join('\n');
@@ -989,7 +1068,9 @@ function writeModule(library: LibraryKind): void {
       `export const headers: readonly string[] = ${JSON.stringify(headers)};\n` +
       `export const data = \`${body}\n\`;\n`,
   );
-  console.log(`${library}: ${rows.length} functions, ${(body.length / 1024).toFixed(0)} KiB`);
+  console.log(
+    `${library}: ${rows.length} functions, ${variables.length} variables, ${(body.length / 1024).toFixed(0)} KiB`,
+  );
 }
 for (const library of modules.keys()) writeModule(library);
 console.log('skipped:', Object.fromEntries(skipped));

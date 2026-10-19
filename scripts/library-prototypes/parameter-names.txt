@@ -327,3 +327,4 @@ backtrace_symbols_fd: array size fd
 sysctl: name namelen oldp oldlenp newp newlen
 sysctlbyname: name oldp oldlenp newp newlen
 sysctlnametomib: name mibp sizep
+fdopen: fd mode

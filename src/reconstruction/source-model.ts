@@ -10,6 +10,7 @@ import type { DataType, Instruction, Value } from '../ir/index.js';
 import type { MemoryShapeTransfer } from '../analysis/types/memory-shapes.js';
 import type { Requirement } from '../core/inference.js';
 import type { NativeContext } from '../service/analysis/native-context.js';
+import type { TypeSpec } from '../metadata/library-contracts/spec.js';
 
 /** Observed native callee inputs, not a user-supplied or proven source prototype. */
 export interface InferredCallee {
@@ -83,6 +84,14 @@ export interface SourceAddress {
     readonly library: string | null;
     /** Import/bind records that evidence this slot's binding. */
     readonly evidence_ids: readonly string[];
+    /** The library header's declaration of the imported object (`__stderrp` is a
+     * `FILE *`): a nominal fact about the named library's declaration, never a
+     * size, an array extent or a layout. */
+    readonly variable?: {
+      readonly type: TypeSpec;
+      readonly constant: boolean;
+      readonly source: string;
+    };
   };
 }
 /** Facts supplied by the native analysis pipeline; never selected by host ABI. */
