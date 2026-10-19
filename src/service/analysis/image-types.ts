@@ -636,20 +636,20 @@ export function applyImageTypes(
     [...localTypes].map(([class_id, list]) => [class_id, list[0]!]),
   );
   const bindings: ImageTypeBinding[] = [];
-  const pendingClasses: { class_id: string; depth: number }[] = [];
-  const typeOf = (class_id: string, depth: number): string | null => {
+  const pendingClasses: string[] = [];
+  /** Pointer members name their pointee class; a class without a view in this
+   * function is declared by name only (its layout is in the image types). */
+  const typeOf = (class_id: string): string => {
     const existing = typeIds.get(class_id);
     if (existing) return existing;
-    if (depth > 3) return null;
     const id = entityIdentity(slice, 'image-type', [class_id]);
     typeIds.set(class_id, id);
-    pendingClasses.push({ class_id, depth });
+    pendingClasses.push(class_id);
     return id;
   };
   const memberType = (
     item: ImageTypeClass,
     field: ImageTypeField,
-    depth: number,
     proofIds: readonly string[],
     tailArray: boolean,
   ): string => {
@@ -658,9 +658,9 @@ export function applyImageTypes(
       const pointee = item.pointees.find(
         (candidate) => candidate.offset === field.offset && candidate.stride === field.stride,
       );
-      const target =
-        (pointee && typeOf(pointee.class_id, depth + 1)) ??
-        generated({ kind: 'unknown', size: null }, proofIds);
+      const target = pointee
+        ? typeOf(pointee.class_id)
+        : generated({ kind: 'unknown', size: null }, proofIds);
       element = generated({ kind: 'pointer', bits: 64, to: target }, proofIds);
     } else
       element = generated(
@@ -675,13 +675,12 @@ export function applyImageTypes(
   };
   const layout = (
     item: ImageTypeClass,
-    base: Extract<RecoveredType, { kind: 'structure' }> | undefined,
-    depth: number,
+    base: Extract<RecoveredType, { kind: 'structure' }>,
     proofIds: readonly string[],
   ): Extract<RecoveredType, { kind: 'structure' }> => {
     // A local integer member another view proves to hold an object pointer
     // takes that pointer type, so every function declares the same member.
-    const fields = (base?.fields ?? []).map((field) => {
+    const fields = base.fields.map((field) => {
       const definition = byId.get(field.type_id)?.definition;
       const merged = item.fields.find(
         (candidate) =>
@@ -691,7 +690,7 @@ export function applyImageTypes(
           candidate.kind === 'pointer',
       );
       return merged && definition?.kind === 'integer' && definition.bits === 64
-        ? { ...field, type_id: memberType(item, merged, depth, proofIds, false) }
+        ? { ...field, type_id: memberType(item, merged, proofIds, false) }
         : field;
     });
     const occupied = fields.map((field) => {
@@ -732,7 +731,7 @@ export function applyImageTypes(
         ]),
         name: `field_${field.offset.toString(16)}`,
         offset: field.offset,
-        type_id: memberType(item, field, depth, proofIds, field.offset === last && last > 0n),
+        type_id: memberType(item, field, proofIds, field.offset === last && last > 0n),
       });
     fields.sort((a, b) => (a.offset < b.offset ? -1 : a.offset > b.offset ? 1 : 0));
     return { kind: 'structure', size: null, alignment: null, fields };
@@ -750,26 +749,23 @@ export function applyImageTypes(
       const proofIds = [...new Set([...record.evidence_ids, proof(item)])].sort();
       const definition =
         record.definition.kind === 'structure'
-          ? layout(item, record.definition, 0, proofIds)
+          ? layout(item, record.definition, proofIds)
           : record.definition;
       records[at] = { ...record, definition, evidence_ids: proofIds };
       byId.set(type_id, records[at]!);
     }
-  for (let cursor = 0; cursor < pendingClasses.length; cursor++) {
-    const { class_id, depth } = pendingClasses[cursor]!;
-    const item = classes.get(class_id)!;
-    const proofIds = [proof(item)];
+  for (const class_id of pendingClasses) {
     const record: SuppliedTypeRecord = {
       id: typeIds.get(class_id)!,
-      definition: layout(item, undefined, depth, proofIds),
+      definition: { kind: 'structure', size: null, alignment: null, fields: [] },
       source: 'analysis',
       status: 'candidate',
-      evidence_ids: proofIds,
+      evidence_ids: [proof(classes.get(class_id)!)],
     };
     records.push(record);
     byId.set(record.id, record);
+    declared.push([class_id, record.id]);
   }
-  for (const { class_id } of pendingClasses) declared.push([class_id, typeIds.get(class_id)!]);
   for (const [class_id, type_id] of declared) {
     const item = classes.get(class_id)!;
     // A private single view keeps its layout-digest name, shared by equal layouts.
