@@ -96,6 +96,17 @@ test('generated header prototypes replace unknown call interfaces', () => {
   assert.equal(pointee.spelling, 'FILE');
 });
 
+test('every declared import of a large image gets its contract (no count cap)', () => {
+  const names = [...generatedNames('posix')].slice(0, 400);
+  assert.equal(names.length, 400);
+  const result = contracts(
+    darwin,
+    names.map((name) => binding(darwin, `_${name}`, SYSTEM)),
+  );
+  assert.equal(result.contracts.length, 400);
+  assert.ok(!result.diagnostics.some((item) => item.code === 'resource_limit'));
+});
+
 test('generated entries keep every pointed-to memory effect unknown', () => {
   const result = contracts(darwin, [
     binding(darwin, '_strlen', SYSTEM),

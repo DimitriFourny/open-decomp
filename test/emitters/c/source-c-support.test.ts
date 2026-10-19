@@ -350,7 +350,7 @@ for (const conflict of [false, true])
       emission.local_validation?.some((record) => record.rule === 'call_declaration'),
       !conflict,
     );
-    assert.match(emission.text, /unknown_argument_remainder/);
+    assert.match(emission.text, /sub_4000\(7, \.\.\.\)/);
     const observed = execute(
       emission,
       new Map(),

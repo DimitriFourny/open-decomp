@@ -125,14 +125,14 @@ for (const fixture of ['corpus-symbols.dll', 'libcorpus-elf-x86_64-symbols.so'])
       const text = p.payload(response.result).result.data.emission.text;
       // fixture_float reads two doubles: its guarded body closes the interface.
       assert.match(text, /extern double fixture_float\(double, double\);/);
-      assert.doesNotMatch(text, /fixture_float\([^;]*unknown_argument_remainder/);
+      assert.doesNotMatch(text, /fixture_float\([^;]*\.\.\./);
       // fixture_variadic reads its spilled register arguments through a
       // computed va_list address: no observed argument is dropped or closed.
       assert.match(
         text,
         fixture.endsWith('.dll')
-          ? /fixture_variadic\(3, [^,()]+, [^,()]+, [^,()]+, unknown_argument_remainder\(\)\)/
-          : /fixture_variadic\(3, unknown_argument_remainder\(\)\)/,
+          ? /fixture_variadic\(3, [^,()]+, [^,()]+, [^,()]+, \.\.\.\)/
+          : /fixture_variadic\(3, \.\.\.\)/,
       );
     },
   );
