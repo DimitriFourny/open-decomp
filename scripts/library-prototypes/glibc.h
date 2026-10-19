@@ -17,6 +17,21 @@ typedef unsigned long pthread_t;
 typedef struct _IO_FILE FILE;
 typedef __builtin_va_list va_list;
 
+/* Exported data objects. glibc declares these in <stdio.h>, <unistd.h>, <getopt.h>,
+ * <time.h> and <errno.h>; only the object's name and type are recorded. */
+extern FILE *stdin;
+extern FILE *stdout;
+extern FILE *stderr;
+extern char **environ;
+extern char *optarg;
+extern int optind;
+extern int opterr;
+extern int optopt;
+extern long timezone;
+extern int daylight;
+extern char *program_invocation_name;
+extern char *program_invocation_short_name;
+
 int *__errno_location(void);
 int *__h_errno_location(void);
 int __libc_start_main(int (*main)(int, char **, char **), int argc, char **argv,

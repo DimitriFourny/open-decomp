@@ -1,4 +1,4 @@
-import type { CatalogEntry, LibraryKind } from '../catalog.js';
+import type { CatalogEntry, CatalogVariable, LibraryKind } from '../catalog.js';
 import {
   ABI_TYPEDEFS,
   SCALAR_CODES,
@@ -28,6 +28,8 @@ import * as windowsWinsock from './data/windows-winsock.js';
  * - parameters are `name:type` separated by `,`;
  * - flags are `n` noreturn, `v` variadic, `f<i>` / `s<i>` printf / scanf format
  *   parameter index, `o<i>` open-flags parameter index.
+ * An extern data object is one line `=name|type|flags|header` (flag `c`: the object
+ * itself is const-qualified); it carries a type only, never a size or an array extent.
  * Only interface facts are stored. No entry has a memory footprint, so every
  * argument memory effect stays unknown unless a curated catalog entry says otherwise. */
 export interface GeneratedModule {
@@ -56,6 +58,7 @@ class Table {
   private readonly handles = new Map<string, string>();
   private readonly decoded = new Map<string, CatalogEntry | undefined>();
   private readonly types = new Map<string, TypeSpec>();
+  private readonly variableLines = new Map<string, string>();
   constructor(
     private readonly library: LibraryKind,
     private readonly module: GeneratedModule,
@@ -69,6 +72,9 @@ class Table {
         if (data.charCodeAt(start) === 38 /* & */) {
           const equals = data.indexOf('=', start);
           this.handles.set(data.slice(start + 1, equals), data.slice(equals + 1, end));
+        } else if (data.charCodeAt(start) === 61 /* = */) {
+          const bar = data.indexOf('|', start);
+          this.variableLines.set(data.slice(start + 1, bar), data.slice(bar + 1, end));
         } else {
           const bar = data.indexOf('|', start);
           this.lines.set(data.slice(start, bar), data.slice(bar + 1, end));
@@ -88,6 +94,18 @@ class Table {
     const entry = line === undefined ? undefined : this.decode(line);
     this.decoded.set(name, entry);
     return entry;
+  }
+
+  variable(name: string): CatalogVariable | undefined {
+    const line = this.variableLines.get(name);
+    if (line === undefined) return undefined;
+    const [type, flags, header] = line.split('|') as [string, string, string];
+    return {
+      library: this.library,
+      type: this.type(type),
+      constant: flags.includes('c'),
+      source: `${this.module.provenance} ${this.module.headers[Number.parseInt(header, 36)]}`,
+    };
   }
 
   private decode(line: string): CatalogEntry {
@@ -187,4 +205,15 @@ export function generatedDeclaration(library: LibraryKind, name: string): Catalo
 export function generatedNames(library: LibraryKind): readonly string[] {
   const module = MODULES[library];
   return module ? [...new Table(library, module).names()] : [];
+}
+
+/** The generated header declaration of the extern data object `name` in one library family. */
+export function generatedVariable(library: LibraryKind, name: string): CatalogVariable | undefined {
+  let table = tables.get(library);
+  if (table === undefined) {
+    const module = MODULES[library];
+    table = module ? new Table(library, module) : null;
+    tables.set(library, table);
+  }
+  return table?.variable(name);
 }

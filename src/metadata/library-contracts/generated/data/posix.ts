@@ -75,7 +75,7 @@ fchown|i|fd:i,owner:u,group:u||1
 fchownat|i|fd:i,path:^c,owner:u,group:u,flag:i||g
 fcntl|i|fd:i,cmd:i|v|c
 fcvt|*c|val:d,num_of_dec:i,pt_dec:*i,pt_sign:*i||0
-fdopen|*@FILE;|file_handle:i,format:^c||f
+fdopen|*@FILE;|fd:i,mode:^c||f
 fdopendir|*@DIR;|fd:i||5
 ffs|i|a1:i||k
 fileno|i|stream:*@FILE;||f
@@ -518,4 +518,11 @@ writev|y|fd:i,iov:^@struct iovec;,iovcnt:i||16
 y0|d|a1:d||w
 y1|d|a1:d||w
 yn|d|a1:i,a2:d||w
+=_libiconv_version|i||s
+=h_errno|i||i
+=optarg|*c||1
+=opterr|i||1
+=optind|i||1
+=optopt|i||1
+=signgam|i||w
 `;

@@ -3,6 +3,7 @@ import type { TypeRecoveryResult } from '../analysis/types/index.js';
 import { bitWidth, expressionOperands, type IntegerPredicate, type Value } from '../ir/index.js';
 import type { ParallelTransfer, Region } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
+import { libraryCallNames, type LibraryResultName } from './library-names.js';
 
 type Role =
   'address' | 'callback' | 'count' | 'index' | 'accumulator' | 'shift_count' | 'limit' | 'operand';
@@ -108,6 +109,13 @@ export function planSourceNames(
   const decreasing = new Set<string>();
   const generic = new Map<string, string>();
   const loaded = new Map<string, Value>();
+  /** Library-declared names: header parameter names of the values passed in those
+   * positions (`used`), curated result roles of library results (`defined`), and
+   * names of a single call result from its declared type or callee. */
+  const libraryCalls = libraryCallNames(types);
+  const usedSeeds: { value: Value; name: string }[] = [],
+    definedSeeds: { value: Value; name: string }[] = [],
+    callResultNames = new Map<string, LibraryResultName>();
   const link = (left: Value, right: Value, storage: boolean): void => {
     for (const [from, to] of [
       [left, right],
@@ -273,8 +281,21 @@ export function planSourceNames(
       }
       if (node.kind === 'call') {
         if (node.target.kind === 'indirect') mark(node.target.value, 'callback');
-        for (const result of program.calls.get(node.id)?.results ?? [])
-          generic.set(result.id, 'call_result');
+        const projection = program.calls.get(node.id),
+          library = libraryCalls.get(node.id);
+        for (const result of projection?.results ?? []) generic.set(result.id, 'call_result');
+        if (projection && library) {
+          projection.arguments.forEach((argument, index) => {
+            const name = library.parameters[index];
+            if (name !== undefined) usedSeeds.push({ value: canonical(argument, false), name });
+          });
+          const [result] = projection.results;
+          if (result && projection.results.length === 1 && library.result) {
+            callResultNames.set(result.id, library.result);
+            if (library.result.basis === 'role')
+              definedSeeds.push({ value: canonical(result, false), name: library.result.name });
+          }
+        }
       }
     }
     if (control.kind === 'indirect' && control.tail_call) mark(control.target, 'callback');
@@ -300,6 +321,42 @@ export function planSourceNames(
     if (!derivations.has(user) && (roles.get(operand.id) ?? 0) & roleBits.shift_count)
       mark(operand, 'operand');
   propagate();
+  /** A library-declared name reaches every same-width copy or conversion linked
+   * to its value, as a copy of a path is that path. Each value ends with the set
+   * of distinct names that reached it; more than one is a conflict. */
+  const spreadNames = (
+    seeds: readonly { value: Value; name: string }[],
+  ): Map<string, Set<string>> => {
+    const reached = new Map<string, Set<string>>();
+    for (const seed of seeds) {
+      const todo = [seed.value];
+      while (todo.length) {
+        context.checkpoint(1);
+        const value = todo.pop()!;
+        const row = reached.get(value.id) ?? new Set<string>();
+        if (row.has(seed.name)) continue;
+        row.add(seed.name);
+        reached.set(value.id, row);
+        for (const next of links.get(value.id) ?? []) if (next.sameWidth) todo.push(next.value);
+      }
+    }
+    return reached;
+  };
+  const definedNames = spreadNames(definedSeeds),
+    usedNames = spreadNames(usedSeeds);
+  /** Name a library interface gives a value: the curated role of the library
+   * result it is (or copies); else the declared type of the result it is; else
+   * the one header parameter name every library use of it agrees on; else the
+   * callee-specific result name. Conflicting evidence names nothing. */
+  const libraryName = (id: string): string | undefined => {
+    const defined = definedNames.get(id);
+    if (defined) return defined.size === 1 ? defined.values().next().value : undefined;
+    const result = callResultNames.get(id);
+    if (result?.basis === 'type') return result.name;
+    const used = usedNames.get(id);
+    if (used) return used.size === 1 ? used.values().next().value : undefined;
+    return result?.name;
+  };
 
   const loops = new Map<string, Set<string>>();
   const pending: { region: Region; active: readonly string[] }[] = [
@@ -924,6 +981,17 @@ export function planSourceNames(
     const bits = roles.get(value.id) ?? 0;
     if (bits && bits & (bits - 1)) {
       preferred.set(value.id, null);
+      continue;
+    }
+    // Only a pointer interpretation (`address`) is weaker than a library name;
+    // loop, shift and callee roles and element/condition definitions outrank it.
+    const kept = generic.get(value.id);
+    const library =
+      bits & ~roleBits.address || kept === 'element' || kept === 'condition'
+        ? undefined
+        : libraryName(value.id);
+    if (library !== undefined) {
+      preferred.set(value.id, library);
       continue;
     }
     const role = roleNames.get(bits);

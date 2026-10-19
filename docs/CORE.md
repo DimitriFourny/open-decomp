@@ -94,6 +94,17 @@ variadic tails from literal formats. Header `const` and `char` identity are prin
 extern prototypes (`FILE* fopen(const char*, const char*)`). Regenerate with
 `bun run prototypes`.
 
+Extern data: generated modules also carry `=name|type|flags|header` lines for header
+`extern` objects (`__stderrp`, `optind`, glibc `stderr`/`environ`, `kCF*` constants;
+`findVariable`, lazy like functions). The Mach-O/ELF import binding of such an object
+carries its declaration (`SourceAddress.import.variable`), and the C declaration prints
+its type (`extern FILE* __stderrp;`; Python-like `pointer[FILE]`) when every access in
+the function is one whole-width element at offset 0 and a pointer object is only read;
+loads then read as pointer values (`(uintptr_t)__stderrp` in integer context, bare as
+a `FILE*` argument). Weak or relocation-adjusted imports, arrays, aggregates and code
+pointers keep the access-derived type. Windows data imports and Darwin
+`__stack_chk_guard` (an array no public header declares) are not covered.
+
 ELF library contracts require explicit recognized ELF library attribution; a
 needed-library list or Darwin path is not symbol attribution. ELF DWARF recovery
 is explicitly unavailable (partial diagnostic, no recovered debug declarations),
@@ -214,6 +225,21 @@ member must have the same presented type and width, source name and role name,
 so a coalesced variable keeps a role name only when every member carries it. The
 pass is bounded work and gives up (keeping separate variables) when its graph
 exceeds its allowance.
+
+Library names (`library-names.ts`): a value passed to a library-declared parameter takes
+that header parameter name (leading underscores removed; `a1`, `arg`, `p`, `ptr`, ...
+skipped) when every library use of it, through same-width copies and conversions, agrees;
+conflicts stay neutral. A library result takes, in order, its curated role (`fopen` ->
+`stream`, `open` -> `fd`, `malloc` -> `buffer`, `strlen` -> `length`, `strerror` ->
+`message`, `__error` -> `errno_ptr`, `read`/`fwrite` -> `count`, ...), the declared result
+type (`FILE*` -> `stream`, `char*` -> `str`, named handles -> snake case), else
+`<callee>_result`. Loop/shift/callback roles, element/condition definitions, field names
+and supplied names outrank these; only the `address` pointer view is weaker.
+
+A block parameter that carries only a constant to a return, on an edge every printed
+occurrence of which is followed by its own copy of the return tail, prints as
+`return <constant>;` with the edge copy and the carrier dropped (`return_constant`
+validation record); an edge that still reaches the shared tail keeps its copy.
 
 Loop role names (`index`, `count`, `remaining`, `limit`, `accumulator`) never
 describe a parameter by what the loop later does to it. A coalesced variable's
