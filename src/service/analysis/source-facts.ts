@@ -563,6 +563,71 @@ function actualArgumentCounts(
   return counts;
 }
 
+/** Loader-bound import slots among the candidate addresses. A slot bound to
+ * conflicting symbols, a lazily bound slot or a stub entry is no data binding. */
+function importSlots(
+  input: SourceFactsInput,
+  candidates: ReadonlyMap<string, Address>,
+): ReadonlyMap<string, NonNullable<SourceAddress['import']>> {
+  const { image, scope, revision } = input,
+    context = scope.context;
+  const bound = new Map<string, LoadedImage['imports'][number][]>();
+  for (const item of image.imports) {
+    context.checkpoint(1);
+    if (!item.slot || item.delayed || item.callable_entry || item.original_name === null) continue;
+    const key = addressKey(item.slot);
+    if (!candidates.has(key) || item.slot.value % BigInt(image.target.address_bits / 8) !== 0n)
+      continue;
+    const list = bound.get(key);
+    if (list) list.push(item);
+    else bound.set(key, [item]);
+  }
+  const result = new Map<string, NonNullable<SourceAddress['import']>>();
+  for (const [key, items] of bound) {
+    context.checkpoint(1);
+    const entries: { item: (typeof items)[number]; name: string; source: string }[] = [];
+    let ambiguous = false;
+    for (const item of items) {
+      const annotations = scope.store
+        .readAnnotations(item.id, revision)
+        .filter(
+          (annotation) => annotation.value.kind === 'name' && annotation.status !== 'retracted',
+        );
+      const asserted = new Set(
+        annotations.flatMap((annotation) =>
+          annotation.status === 'asserted' && annotation.value.kind === 'name'
+            ? [annotation.value.value]
+            : [],
+        ),
+      );
+      if (asserted.size === 1) {
+        const name = [...asserted][0]!;
+        entries.push({ item, name, source: name });
+      } else if (annotations.length) ambiguous = true;
+      else {
+        const name = item.original_name!;
+        entries.push({ item, name, source: cSourceName(image.target.format, name) });
+      }
+    }
+    const first = entries[0];
+    if (
+      ambiguous ||
+      !first ||
+      entries.some((entry) => entry.name !== first.name || entry.source !== first.source)
+    )
+      continue;
+    const libraries = new Set(entries.map((entry) => entry.item.library));
+    result.set(key, {
+      id: first.item.id,
+      name: first.name,
+      source_name: first.source,
+      library: libraries.size === 1 ? first.item.library : null,
+      evidence_ids: [...new Set(entries.flatMap((entry) => entry.item.evidence_ids))],
+    });
+  }
+  return result;
+}
+
 function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
   const { image, scope, revision } = input,
     context = scope.context;
@@ -716,12 +781,36 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
     }
     return { ...symbol, original_name: name ?? null, display_name: null };
   });
+  const slotImports = importSlots(input, candidates);
   const result: SourceAddress[] = [];
   for (const [key, address] of candidates) {
     context.checkpoint(1);
     const aliases = names.get(key),
       name = aliases?.size === 1 ? [...aliases][0] : undefined;
     const recovered = recoverDataAddress(image, address, context, symbols);
+    const imported = slotImports.get(key);
+    if (imported) {
+      // Slot bytes are loader inputs, never the values later read: neither a
+      // string nor constant bytes may be recovered from them.
+      const { string: _s, string_byte_length: _l, string_encoding: _e, string_start: _t, ...slot } =
+        recovered ?? { address };
+      const object = recovered?.object;
+      result.push({
+        ...slot,
+        object: {
+          address,
+          byte_length: BigInt(image.target.address_bits / 8),
+          offset: 0n,
+          mutable: object?.mutable ?? true,
+          kind: 'bytes',
+          evidence_ids: [
+            ...new Set([...(object?.evidence_ids ?? []), ...imported.evidence_ids]),
+          ],
+        },
+        import: imported,
+      });
+      continue;
+    }
     const byteLength = literalWidths.get(key);
     const constantBytes =
       !unknownWrite &&
