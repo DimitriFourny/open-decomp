@@ -332,10 +332,10 @@ for (const indexed of [false, true, 'shared', 'array'] as const)
       output.emission.text,
       /members used here; size unknown; full layout in the types view/,
     );
-    assert.match(output.emission.text, /uint8_t f_4;/);
-    assert.match(output.emission.text, /uint32_t f_18(?:\[\])?;/);
-    assert.match(output.emission.text, indexed === true ? /\]\.f_18/ : /->f_18/);
-    if (indexed === 'array') assert.match(output.emission.text, /->f_18\[/);
+    assert.match(output.emission.text, /uint8_t field_0x4;/);
+    assert.match(output.emission.text, /uint32_t field_0x18(?:\[\])?;/);
+    assert.match(output.emission.text, indexed === true ? /\]\.field_0x18/ : /->field_0x18/);
+    if (indexed === 'array') assert.match(output.emission.text, /->field_0x18\[/);
     const compiled = spawnSync(
       'clang',
       ['-x', 'c', '-fsyntax-only', '-std=c11', '-include', 'stdint.h', '-include', 'stddef.h', '-'],
@@ -440,7 +440,7 @@ for (const mixed of [false, true])
     const text = output.emission.text;
     if (mixed) {
       assert.match(text, /members used here; size unknown; full layout in the types view/);
-      assert.match(text, /->f_8/);
+      assert.match(text, /->field_0x8/);
     } else {
       assert.doesNotMatch(text, /struct_[0-9a-f]+|->f_/);
       assert.match(text, /uint32_t\* \w+\)/);

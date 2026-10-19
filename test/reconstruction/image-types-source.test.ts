@@ -30,7 +30,7 @@ function formalStruct(text: string): { name: string; declaration: string; member
   return {
     name,
     declaration,
-    members: [...declaration.matchAll(/ (f_[0-9a-f]+)/g)].map((m) => m[1]!),
+    members: [...declaration.matchAll(/ (field_0x[0-9a-f]+)/g)].map((m) => m[1]!),
   };
 }
 
@@ -75,10 +75,10 @@ test(
     const set = formalStruct((await decompile('context_set')).text);
     const get = formalStruct((await decompile('context_get')).text);
     assert.equal(set.name, get.name);
-    assert.deepEqual(set.members, ['f_0']);
-    assert.deepEqual(get.members, ['f_8', 'f_10']);
-    assert.match(set.declaration, /gap_0\[|f_0;/);
-    assert.match(get.declaration, /gap_0\[8\]/);
+    assert.deepEqual(set.members, ['field_0x0']);
+    assert.deepEqual(get.members, ['field_0x8', 'field_0x10']);
+    assert.match(set.declaration, /pad_0x0\[|field_0x0;/);
+    assert.match(get.declaration, /pad_0x0\[8\]/);
 
     // The whole-image header declares the same name with the same layout and
     // is valid C on its own.
@@ -97,8 +97,8 @@ test(
     const merged = new RegExp(`^struct ${set.name} \\{.*\\};$`, 'm').exec(dump.text)?.[0];
     assert.ok(merged, dump.text);
     assert.deepEqual(
-      [...merged.matchAll(/ (f_[0-9a-f]+)/g)].map((m) => m[1]),
-      ['f_0', 'f_8', 'f_10'],
+      [...merged.matchAll(/ (field_0x[0-9a-f]+)/g)].map((m) => m[1]),
+      ['field_0x0', 'field_0x8', 'field_0x10'],
     );
     const header = spawnSync('/usr/bin/clang', ['-x', 'c', '-fsyntax-only', '-std=c11', '-'], {
       input: dump.text,
@@ -122,7 +122,7 @@ test(
     const [expected] = lines.slice(2);
     for (const emitter of ['c-like', 'python-like'] as const) {
       const emission = await decompile('release_all', emitter);
-      if (emitter === 'c-like') assert.match(emission.text, /->f_20\[\w+\]\.f_8\b/, emission.text);
+      if (emitter === 'c-like') assert.match(emission.text, /->field_0x20\[\w+\]\.field_0x8\b/, emission.text);
       const memory = new Map<bigint, number>();
       const db = 0x3000n,
         slots = 0x4000n,

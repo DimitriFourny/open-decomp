@@ -194,16 +194,7 @@ for (const language of ['c-like', 'python-like'] as const)
           }
     });
 
-for (const gate of [
-  'volatile',
-  'mutable',
-  'short',
-  'write',
-  'misaligned',
-  'conflict',
-  'unknownWrite',
-  'call',
-] as const)
+for (const gate of ['volatile', 'mutable', 'short', 'write', 'misaligned', 'conflict'] as const)
   test(`constant pool refusal: ${gate}`, () => {
     const f = fixture(64, 0x3ff8000000000000n, { [gate]: true });
     for (const language of ['c-like', 'python-like'] as const) {
@@ -211,17 +202,30 @@ for (const gate of [
       assert.ok(
         !emission.local_validation?.some((record) => record.rule === 'constant_pool_literal'),
       );
-      if (gate !== 'misaligned' && gate !== 'call')
+      if (gate !== 'misaligned')
         assert.deepEqual(
           execute(
             emission,
             new Map(emittedFormals(emission).map((formal) => [formal.statement_id, 0x2000n])),
             new Map(f.memory),
           ).values,
-          [gate === 'write' || gate === 'unknownWrite' ? 7n : 0x3ff8000000000000n],
+          [gate === 'write' ? 7n : 0x3ff8000000000000n],
         );
     }
   });
+
+for (const gate of ['unknownWrite', 'call'] as const)
+  for (const language of ['c-like', 'python-like'] as const)
+    test(`${language} read-only constants fold despite ${gate}`, () => {
+      // A call, or a store through an unknown address, cannot change bytes of a
+      // read-only mapping; only a store to a constant overlapping address could.
+      const f = fixture(64, 0x3ff8000000000000n, { [gate]: true });
+      const emission = emit(f.ir, { source: f.source }, language).emission;
+      assert.ok(
+        emission.local_validation?.some((record) => record.rule === 'constant_pool_literal'),
+      );
+      assert.doesNotMatch(emission.text, /data_address\("|read_memory\(|\*\(uint64_t \*\)0x2000/);
+    });
 
 test('nonfinite constant pools retain NaN payloads and refused presentation records keep the load', () => {
   for (const bits of [32, 64] as const) {
