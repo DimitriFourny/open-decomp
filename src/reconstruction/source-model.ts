@@ -10,6 +10,7 @@ import type { DataType, Instruction, Value } from '../ir/index.js';
 import type { MemoryShapeTransfer } from '../analysis/types/memory-shapes.js';
 import type { Requirement } from '../core/inference.js';
 import type { NativeContext } from '../service/analysis/native-context.js';
+import type { TypeSpec } from '../metadata/library-contracts/spec.js';
 
 /** Observed native callee inputs, not a user-supplied or proven source prototype. */
 export interface InferredCallee {
@@ -83,6 +84,14 @@ export interface SourceAddress {
     readonly library: string | null;
     /** Import/bind records that evidence this slot's binding. */
     readonly evidence_ids: readonly string[];
+    /** The library header's declaration of the imported object (`__stderrp` is a
+     * `FILE *`): a nominal fact about the named library's declaration, never a
+     * size, an array extent or a layout. */
+    readonly variable?: {
+      readonly type: TypeSpec;
+      readonly constant: boolean;
+      readonly source: string;
+    };
   };
 }
 /** Facts supplied by the native analysis pipeline; never selected by host ABI. */
@@ -95,9 +104,12 @@ export interface SourceEvidence {
   /** Explicit optional-dependency limitations; never substitutes a zero interface. */
   readonly diagnostics?: readonly Diagnostic[];
   readonly evidence?: readonly Evidence[];
-  /** Proven complete actual counts for contextual variadic calls. */
+  /** Proven complete actual counts for contextual variadic calls (`open`
+   * flags that take no mode on every possible value). */
   readonly call_argument_counts?: ReadonlyMap<string, number>;
-  /** Source-only actual types from a proven immutable printf-family format. */
+  /** Source-only actual types from an established variadic library rule over
+   * every possible rule-argument value: immutable printf-family format
+   * literals, or Darwin `open` flags that all set `O_CREAT`. */
   readonly call_argument_signatures?: ReadonlyMap<string, AbiSignature>;
   /** Bounded native parameter-associated shape constraints over original values. */
   readonly memory_transfers?: readonly MemoryShapeTransfer[];

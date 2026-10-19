@@ -10,8 +10,12 @@ const HELP = `Usage: open-decomp <command>
   decompile BINARY (--function NAME|--id ID|--address SPACE:0x...)
                    [--language c-like|python-like] [--view source|checked] [--json]
                    [--cache PATH] [--slice ID]
+  export BINARY --out DIR [--language c-like|python-like] [--jobs N] [--name TEXT]
+                 [--cache PATH] [--slice ID]
+                 Write every function as OUT/functions/NAME@0xADDR.c plus index/strings/imports TSVs
+                 and OUT/types.h
   types BINARY [--json] [--cache PATH] [--slice ID]
-  functions --help / decompile --help / types --help    Show command-specific options
+  functions --help / decompile --help / export --help / types --help    Show command-specific options
 
 Analysis reuses persistent SQLite projects in INPUT.open-decomp by default;
 --cache PATH overrides the cache root. Content and selected slice identify projects.
@@ -73,7 +77,12 @@ async function main(args: readonly string[]): Promise<void> {
     await runMcp(args.slice(1));
     return;
   }
-  if (args[0] === 'functions' || args[0] === 'decompile' || args[0] === 'types') {
+  if (
+    args[0] === 'functions' ||
+    args[0] === 'decompile' ||
+    args[0] === 'export' ||
+    args[0] === 'types'
+  ) {
     await runAnalysisCli(args);
     return;
   }

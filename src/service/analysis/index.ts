@@ -698,7 +698,14 @@ export async function executeDecompilation(
         ? {
             ...metadata,
             state: 'partial',
-            reason: graph.coverage.state !== 'complete' ? 'incomplete_index' : 'unsupported_subset',
+            // A bounded share that cut any analysis (a resource_limit
+            // diagnostic) is reported as budget: more budget may complete it.
+            reason:
+              graph.coverage.state !== 'complete'
+                ? 'incomplete_index'
+                : uniqueDiagnostics.some((item) => item.code === 'resource_limit')
+                  ? 'budget'
+                  : 'unsupported_subset',
             continuation: null,
             data,
           }

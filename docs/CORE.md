@@ -94,6 +94,17 @@ variadic tails from literal formats. Header `const` and `char` identity are prin
 extern prototypes (`FILE* fopen(const char*, const char*)`). Regenerate with
 `bun run prototypes`.
 
+Extern data: generated modules also carry `=name|type|flags|header` lines for header
+`extern` objects (`__stderrp`, `optind`, glibc `stderr`/`environ`, `kCF*` constants;
+`findVariable`, lazy like functions). The Mach-O/ELF import binding of such an object
+carries its declaration (`SourceAddress.import.variable`), and the C declaration prints
+its type (`extern FILE* __stderrp;`; Python-like `pointer[FILE]`) when every access in
+the function is one whole-width element at offset 0 and a pointer object is only read;
+loads then read as pointer values (`(uintptr_t)__stderrp` in integer context, bare as
+a `FILE*` argument). Weak or relocation-adjusted imports, arrays, aggregates and code
+pointers keep the access-derived type. Windows data imports and Darwin
+`__stack_chk_guard` (an array no public header declares) are not covered.
+
 ELF library contracts require explicit recognized ELF library attribution; a
 needed-library list or Darwin path is not symbol attribution. ELF DWARF recovery
 is explicitly unavailable (partial diagnostic, no recovered debug declarations),
@@ -216,6 +227,21 @@ member must have the same presented type and width, source name and role name,
 so a coalesced variable keeps a role name only when every member carries it. The
 pass is bounded work and gives up (keeping separate variables) when its graph
 exceeds its allowance.
+
+Library names (`library-names.ts`): a value passed to a library-declared parameter takes
+that header parameter name (leading underscores removed; `a1`, `arg`, `p`, `ptr`, ...
+skipped) when every library use of it, through same-width copies and conversions, agrees;
+conflicts stay neutral. A library result takes, in order, its curated role (`fopen` ->
+`stream`, `open` -> `fd`, `malloc` -> `buffer`, `strlen` -> `length`, `strerror` ->
+`message`, `__error` -> `errno_ptr`, `read`/`fwrite` -> `count`, ...), the declared result
+type (`FILE*` -> `stream`, `char*` -> `str`, named handles -> snake case), else
+`<callee>_result`. Loop/shift/callback roles, element/condition definitions, field names
+and supplied names outrank these; only the `address` pointer view is weaker.
+
+A block parameter that carries only a constant to a return, on an edge every printed
+occurrence of which is followed by its own copy of the return tail, prints as
+`return <constant>;` with the edge copy and the carrier dropped (`return_constant`
+validation record); an edge that still reaches the shared tail keeps its copy.
 
 Loop role names (`index`, `count`, `remaining`, `limit`, `accumulator`) never
 describe a parameter by what the loop later does to it. A coalesced variable's
@@ -407,18 +433,50 @@ liveness roots, but potentially faulting loads and other ordered effects remain;
 checked output retains the full overlay.
 
 Source-only `arity_closure` records its per-call basis before stack promotion.
-Complete native machine call/stack summaries close register-only, nonrecursive
-callees even when optional debug/type metadata is unavailable; those metadata
-diagnostics remain visible. Machine coverage gaps, work/refinement limits and
-incomplete dependencies propagate separately and prevent closure. A closed
-callee cannot read additional caller spills, so those private slots are eligible
-for ordinary validated promotion and an unused `entry_sp` disappears. Unknown
-indirect calls, escaping incoming-stack addresses and variadic native callees
-remain open; written stack extent is never interpreted as an argument count.
+Complete native machine call/stack summaries close register-only callees even
+when optional debug/type metadata is unavailable; those metadata diagnostics
+remain visible. A body's argument list closes when nothing outside its observed
+register prefix can be read: every call (and tail transfer) that an unobserved
+entry argument may reach — through registers, phis, private spills or a stack
+pointer at or above entry SP — must target a closed callee or carry a complete
+library contract. Calls reached only by observed parameters and computed values
+(for example an indirect call after another call clobbered the argument
+registers) add no input and do not block closure. Machine arity completeness is
+inherited only through those reaching calls; coverage gaps, work/refinement
+limits and incomplete dependencies of other callees stay in the reasons but do
+not reopen the list. Recursive groups close coinductively: every member is
+re-observed once assuming the group closed with its current parameters, and
+the assumption is kept only if every member then closes with exactly those
+parameters (a tail-call chain such as an append/grow pair forwarding its
+arguments closes this way when the grow path's other callees are closed).
+A closed callee cannot read additional caller spills, so those private slots are
+eligible for ordinary validated promotion and an unused `entry_sp` disappears.
+Indirect calls an unobserved argument reaches, escaping incoming-stack addresses
+and variadic native callees remain open; written stack extent is never
+interpreted as an argument count.
 Proven invocation constants and identity aliases remain actual ABI inputs before
 the source-only prefix-gap check. Substitution therefore cannot manufacture a
 missing leading argument. These refinements use the existing work budget and
 leave the original checked summary unchanged.
+
+The native dependency worklist loads bodies breadth-first (each load at most a
+quarter of the remaining optional work; no new body once half of the initial
+allowance is spent) and then refines strongly connected components callees
+first: a non-recursive body is observed once against its finished callees, and
+only recursive groups are seeded and iterated. Memory shapes are not transferred
+along recursive edges (content-addressed shape evidence derived around a cycle
+would be new every round and never converge). When the refinement share runs
+out, finished components keep their facts and only unfinished ones (and their
+callers) are cut with a `native interface refinement work limit` reason. A callee
+summary cut by any bounded share is reported as a `resource_limit` diagnostic,
+and a selected function left partial with such a diagnostic reports reason
+`budget` instead of `unsupported_subset`.
+
+Darwin variadic stack arguments stored in different predecessors of one shared
+call resolve when, on every incoming edge, the owning store wrote the same SSA
+value (it dominates the join) or a value — through identity moves, concat
+components, or an equal rematerialized constant — that the edge copies into one
+block parameter of the join.
 Discovery-established tails to uniquely resolved imported callable entries may
 use complete nonvariadic register-only library contracts. Their interfaces
 propagate through the same bounded native dependency worklist as source-only
@@ -701,6 +759,26 @@ literals pass directly to character/void pointers, and use one pointer cast
 only for incompatible byte-pointer types; no pointer-to-integer round trip is
 inserted. Failed literal proof or exhausted presentation capacity retains the
 original image-backed address.
+Source-view `string_literal` (recorded per site) prints any pointer-width
+constant that addresses the start or an interior of an immutable, NUL-terminated
+string as that literal in value positions: call arguments, stores, returns,
+copies, select arms and equality comparisons, whatever the callee type
+(`fopen(path, "rb")`, `value == 0 ? "con" : value`). The receiving type decides
+the spelling: a character/void pointer takes the bare literal, another pointer a
+cast, an integer destination or operand `(uintptr_t)"..."` (Python-like:
+`string_address("...")`), so a pointer is never silently converted. Arithmetic
+operands keep the integer. Strings longer than 200 characters show their prefix
+and a marker keeping the address and the omitted byte count. Escapes follow each
+dialect (control, format and bidirectional characters are never printed raw).
+`character_literal` prints a constant as `'/'`, `'\\'`, `'.'` or `'\0'` (Python-like
+`ord('/')`) only with character evidence: a byte loaded through a pointer to
+bytes (inferred formal, declared `char`/`uint8_t` pointer, library `char*`
+parameter or result, offsets of those), widened or narrowed; or a library
+parameter marked `character` in the contract catalog (`strchr`, `strrchr`,
+`memchr`, ctype and `putc` families; not `memset`'s fill byte). Equality
+comparisons and call arguments also admit `'\n'`-style escapes and NUL; ordered
+comparisons and add/subtract keep to printable codes. Arbitrary integers are never
+character-ified.
 Named image addresses without an established C object/function type retain their
 exact VA and display name under `symbolic_address`; the renderer does not invent
 a global's source type just to declare its symbol.

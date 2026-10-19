@@ -1,5 +1,5 @@
 import type { Target } from '../../core/index.js';
-import { generatedDeclaration } from './generated/index.js';
+import { generatedDeclaration, generatedVariable } from './generated/index.js';
 import type { TypeSpec } from './spec.js';
 export { ABI_TYPEDEFS, type AbiTypedef, type ScalarSpec, type TypeSpec } from './spec.js';
 
@@ -32,6 +32,10 @@ export interface CatalogEntry {
   readonly library: LibraryKind;
   readonly returns: TypeSpec;
   readonly parameters: readonly (readonly [string, TypeSpec])[];
+  /** Indices of `int` parameters that carry one character code (C11 7.4, 7.24.5:
+   * converted to `unsigned char`). Only these constants may print as character
+   * literals; `memset`'s fill byte is data, not a character. */
+  readonly character?: readonly number[];
   readonly noreturn?: boolean;
   readonly variadic?: boolean;
   readonly variadic_rule?: {
@@ -213,6 +217,80 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
     ],
     { memory: [footprint(0, 'read', count(2)), footprint(1, 'read', count(2))], captures: [] },
   ),
+  strchr: entry(
+    'c',
+    C,
+    [
+      ['s', C],
+      ['c', 'int'],
+    ],
+    { memory: [footprint(0, 'read')], captures: [], character: [1] },
+  ),
+  strrchr: entry(
+    'c',
+    C,
+    [
+      ['s', C],
+      ['c', 'int'],
+    ],
+    { memory: [footprint(0, 'read')], captures: [], character: [1] },
+  ),
+  memchr: entry(
+    'c',
+    V,
+    [
+      ['s', V],
+      ['c', 'int'],
+      ['n', 'size_t'],
+    ],
+    { memory: [footprint(0, 'read', count(2))], captures: [], character: [1] },
+  ),
+  ...Object.fromEntries(
+    [
+      'isalnum',
+      'isalpha',
+      'isblank',
+      'iscntrl',
+      'isdigit',
+      'isgraph',
+      'islower',
+      'isprint',
+      'ispunct',
+      'isspace',
+      'isupper',
+      'isxdigit',
+      'tolower',
+      'toupper',
+    ].map((name) => [name, entry('c', 'int', [['c', 'int']], { captures: [], character: [0] })]),
+  ),
+  putchar: entry('c', 'int', [['c', 'int']], { character: [0] }),
+  fputc: entry(
+    'c',
+    'int',
+    [
+      ['c', 'int'],
+      ['stream', FILE],
+    ],
+    { memory: [footprint(1, 'read_write')], character: [0] },
+  ),
+  putc: entry(
+    'c',
+    'int',
+    [
+      ['c', 'int'],
+      ['stream', FILE],
+    ],
+    { memory: [footprint(1, 'read_write')], character: [0] },
+  ),
+  ungetc: entry(
+    'c',
+    'int',
+    [
+      ['c', 'int'],
+      ['stream', FILE],
+    ],
+    { memory: [footprint(1, 'read_write')], character: [0] },
+  ),
   puts: entry('c', 'int', [['string', C]], { memory: [footprint(0, 'read')] }),
   printf: entry('c', 'int', [['format', C]], {
     memory: [footprint(0, 'read')],
@@ -232,6 +310,25 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
       variadic_rule: { kind: 'format', argument: 1 },
     },
   ),
+  fopen: entry(
+    'c',
+    FILE,
+    [
+      ['path', C],
+      ['mode', C],
+    ],
+    { memory: [footprint(0, 'read'), footprint(1, 'read')] },
+  ),
+  fdopen: entry(
+    'posix',
+    FILE,
+    [
+      ['descriptor', 'int'],
+      ['mode', C],
+    ],
+    { memory: [footprint(1, 'read')] },
+  ),
+  fclose: entry('c', 'int', [['stream', FILE]], { memory: [footprint(0, 'read_write')] }),
   snprintf: entry(
     'c',
     'int',
@@ -622,6 +719,31 @@ export function findDeclaration(
   for (const library of LIBRARY_KINDS) {
     if (!identifiesLibraryKind(importLibrary, library, format)) continue;
     const generated = generatedDeclaration(library, name);
+    if (generated) return generated;
+  }
+  return undefined;
+}
+
+/** A header-declared extern data object. Only its type is recorded: never a size, an
+ * array extent or a layout, and no write or alias fact. */
+export interface CatalogVariable {
+  readonly library: LibraryKind;
+  readonly type: TypeSpec;
+  /** The object itself is const-qualified (`const CFStringRef`, `char *const`). */
+  readonly constant: boolean;
+  readonly source: string;
+}
+
+/** The extern data declaration a native import of `name` from `importLibrary` carries
+ * (`__stderrp` -> `FILE *`). `name` is the normalized C name (see `libraryLookupName`). */
+export function findVariable(
+  name: string,
+  importLibrary: string,
+  format: Target['format'],
+): CatalogVariable | undefined {
+  for (const library of LIBRARY_KINDS) {
+    if (!identifiesLibraryKind(importLibrary, library, format)) continue;
+    const generated = generatedVariable(library, name);
     if (generated) return generated;
   }
   return undefined;
