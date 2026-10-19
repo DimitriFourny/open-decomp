@@ -18,10 +18,7 @@ export interface FunctionScope {
   readonly image_id: string;
 }
 type Executor = Pick<QueryService, 'execute'>;
-type Lookup =
-  | ToolResult<'binary_info'>
-  | ToolResult<'functions_find'>
-  | ToolResult<'symbols_find'>;
+type Lookup = ToolResult<'binary_info'> | ToolResult<'functions_find'> | ToolResult<'symbols_find'>;
 type FunctionQuery = Omit<
   ToolInput<'functions_find'>,
   'project_id' | 'revision' | 'image_id' | 'page'

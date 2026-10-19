@@ -88,7 +88,8 @@ export class QueryService {
           args.source.kind === 'import' &&
           !args.wait) ||
         (operation === 'function_decompile' && 'wait' in args && args.wait === false);
-      const automatic = operation === 'function_decompile' && 'wait' in args && args.wait === 'auto';
+      const automatic =
+        operation === 'function_decompile' && 'wait' in args && args.wait === 'auto';
       if ((asynchronous || automatic) && (options.signal || options.onProgress)) {
         const { signal, onProgress } = options;
         const controller = new AbortController();

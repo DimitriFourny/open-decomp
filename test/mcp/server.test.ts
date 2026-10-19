@@ -132,7 +132,11 @@ test(
     );
     const open = listed.tools.find((tool) => tool.name === 'project_open')!;
     assert.equal(open.inputSchema.type, 'object');
-    assert.equal(open.outputSchema, undefined, 'results are validated by the server, not advertised');
+    assert.equal(
+      open.outputSchema,
+      undefined,
+      'results are validated by the server, not advertised',
+    );
     assert.ok(
       Buffer.byteLength(JSON.stringify(listed)) < 40_000,
       'tools/list stays small enough to put in a model context',

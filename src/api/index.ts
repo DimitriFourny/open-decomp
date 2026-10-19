@@ -3,15 +3,12 @@ import { constants } from 'node:fs';
 import { lstat, mkdir, open, realpath } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
-import {
-  OperationError,
-  sliceIdSchema,
-} from '../core/index.js';
+import { OperationError, sliceIdSchema } from '../core/index.js';
 import type { ToolInput, ToolResult, WireJob } from '../core/index.js';
 import { QueryService } from '../service/queries/index.js';
 import type { QueryCallOptions } from '../service/queries/index.js';
 import { materializeDecompilation } from '../service/queries/materialize.js';
-import { FunctionSelectionError, selectFunction } from '../service/queries/selector.js';
+import { selectFunction } from '../service/queries/selector.js';
 export { FunctionSelectionError } from '../service/queries/selector.js';
 
 export type { ToolInput, ToolResult, WireJob } from '../core/index.js';

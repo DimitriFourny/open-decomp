@@ -7,7 +7,6 @@ import type {
 import { z } from 'zod';
 import {
   OperationError,
-  decodeDiagnostic,
   exportToolJsonSchemas,
   projectDecompilationArtifactResult,
   toolNameSchema,
@@ -36,7 +35,6 @@ import type { FunctionRecord } from '../service/queries/selector.js';
 import { decompileText } from './decompile.js';
 import type { FunctionLabel } from './decompile.js';
 import { advertisedInputSchema, prepareRequest } from './handles.js';
-import type { DetailMode, HandleSite } from './handles.js';
 import { investigationText } from './investigation.js';
 import { functionsListing, shortIds, stringsListing, symbolsListing } from './listing.js';
 import { navigationText } from './navigation.js';
@@ -93,7 +91,10 @@ const descriptions: Record<ToolName, string> = {
 /** Input schema for the SDK registry. Validation mirrors tools/call: the MCP request shape (handles,
  * detail, default wait) is reduced to the core request, which stays authoritative. Diagnostics
  * cannot echo megabytes of attacker-controlled keys or one issue per batch item. */
-function protocolSchema(name: ToolName, jsonSchema: Record<string, unknown>): StandardSchemaWithJSON {
+function protocolSchema(
+  name: ToolName,
+  jsonSchema: Record<string, unknown>,
+): StandardSchemaWithJSON {
   return {
     '~standard': {
       version: 1,

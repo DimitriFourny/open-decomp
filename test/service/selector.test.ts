@@ -30,7 +30,10 @@ const functions = [
 function index(indexState: 'complete' | 'partial'): Pick<QueryService, 'execute'> {
   const execute = async (operation: string, input: Record<string, unknown>) => {
     if (operation === 'symbols_find')
-      return { state: 'complete', data: { items: [], page: { index_state: indexState, next_cursor: null } } };
+      return {
+        state: 'complete',
+        data: { items: [], page: { index_state: indexState, next_cursor: null } },
+      };
     assert.equal(operation, 'functions_find');
     const query = input['query'] as { text: string } | undefined;
     const address = input['address'] as { value: string } | undefined;
@@ -55,7 +58,9 @@ test('function handles: full ID, ID prefix, address and name are told apart', ()
   assert.deepEqual(parseFunctionHandle('entity_' + 'a'.repeat(12)), {
     id_prefix: 'entity_' + 'a'.repeat(12),
   });
-  assert.deepEqual(parseFunctionHandle('va:0x1000A'), { address: { space: 'va', value: '0x1000a' } });
+  assert.deepEqual(parseFunctionHandle('va:0x1000A'), {
+    address: { space: 'va', value: '0x1000a' },
+  });
   assert.deepEqual(parseFunctionHandle('rva:0x10'), { address: { space: 'rva', value: '0x10' } });
   // Fewer than 12 digits is not a prefix: it can only be a name.
   assert.deepEqual(parseFunctionHandle('entity_abc'), { name: 'entity_abc' });
@@ -64,7 +69,11 @@ test('function handles: full ID, ID prefix, address and name are told apart', ()
 
 test('selecting a function never guesses: unique match, ambiguity and absence are distinct', async () => {
   const complete = index('complete');
-  const byPrefix = await selectFunction(complete, scope, parseFunctionHandle('entity_cafe00112233'));
+  const byPrefix = await selectFunction(
+    complete,
+    scope,
+    parseFunctionHandle('entity_cafe00112233'),
+  );
   assert.equal(byPrefix.original_name, '_gamma');
   assert.equal((await selectFunction(complete, scope, { name: '_beta' })).id, functions[1]!.id);
   assert.equal(

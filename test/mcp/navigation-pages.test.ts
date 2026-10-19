@@ -103,9 +103,15 @@ for (const limit of [20, 1000])
         const text = response.content.find((item) => item.type === 'text');
         assert.ok(text?.type === 'text');
         for (const fn of result.data.items)
-          assert.ok(text.text.includes(fn.id.slice(0, 19)), 'every row carries a short function ID');
+          assert.ok(
+            text.text.includes(fn.id.slice(0, 19)),
+            'every row carries a short function ID',
+          );
         assert.ok(text.text.includes(`next_cursor ${result.data.page.next_cursor ?? 'none'}`));
-        assert.equal(text.text.split('\n').length, result.data.items.length + 1 + result.diagnostics.length);
+        assert.equal(
+          text.text.split('\n').length,
+          result.data.items.length + 1 + result.diagnostics.length,
+        );
         cursor = result.data.page.next_cursor ?? undefined;
         if (cursor) {
           assert.equal(result.state, 'partial');
