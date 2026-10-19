@@ -40,6 +40,53 @@ interface StructLayout {
   >;
 }
 const MATH: CType = { kind: 'math' };
+/** Decode the body of a C or Python-like string/character literal (octal and
+ * \\u/\\U escapes included). */
+export function unescapeLiteral(body: string): string {
+  const bytes: number[] = [];
+  const simple: Record<string, number> = {
+    a: 7,
+    b: 8,
+    t: 9,
+    n: 10,
+    v: 11,
+    f: 12,
+    r: 13,
+    '\\': 92,
+    '"': 34,
+    "'": 39,
+    '?': 63,
+  };
+  for (let index = 0; index < body.length;) {
+    const character = body[index]!;
+    if (character !== '\\') {
+      const code = body.codePointAt(index)!;
+      bytes.push(...Buffer.from(String.fromCodePoint(code)));
+      index += code > 0xffff ? 2 : 1;
+      continue;
+    }
+    const next = body[index + 1]!;
+    const octal = /^[0-7]{1,3}/.exec(body.slice(index + 1));
+    if (octal) {
+      bytes.push(parseInt(octal[0], 8));
+      index += 1 + octal[0].length;
+    } else if (next === 'u' || next === 'U') {
+      const width = next === 'u' ? 4 : 8;
+      bytes.push(
+        ...Buffer.from(
+          String.fromCodePoint(parseInt(body.slice(index + 2, index + 2 + width), 16)),
+        ),
+      );
+      index += 2 + width;
+    } else {
+      assert.ok(next in simple, `Unsupported escape \\${next}`);
+      bytes.push(simple[next]!);
+      index += 2;
+    }
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
 const INT: Extract<CType, { kind: 'int' }> = { kind: 'int', bits: 32, signed: true };
 const unsignedType = (bits: number): CType => ({ kind: 'int', bits, signed: false });
 type Expr =
@@ -284,7 +331,7 @@ class Parser {
       if (result) this.returnType = { kind: 'float', bits: result[1] === 'float' ? 32 : 64 };
       const indents = [0];
       const token =
-        /[ \t]+|#[^\n]*|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+\.[0-9]*(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|<<|>>|[.()[\],:=?<>+*/%&|^~!-]/gy;
+        /[ \t]+|#[^\n]*|ord\('(?:\\u[0-9a-f]{4}|\\[0-7]{1,3}|\\.|[^'\\])'\)|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+\.[0-9]*(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|<<|>>|[.()[\],:=?<>+*/%&|^~!-]/gy;
       for (const line of lines.slice(endHeader + 1)) {
         if (/^\s*(?:#|$)/.test(line)) continue;
         const indent = line.length - line.trimStart().length;
@@ -317,7 +364,7 @@ class Parser {
       return;
     }
     const token =
-      /\s+|#[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+\.[0-9]*(?:[eE][+-]?[0-9]+)?f?|[0-9]+[eE][+-]?[0-9]+f?|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|\.\.\.|->|==|!=|<=|>=|<<|>>|&&|\|\||[{}()[\],.;:=?<>@+*/%&|^~!-]/gy;
+      /\s+|#[^\n]*|\/\*[\s\S]*?\*\/|'(?:\\(?:[0-7]{1,3}|.)|[^'\\])'|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+\.[0-9]*(?:[eE][+-]?[0-9]+)?f?|[0-9]+[eE][+-]?[0-9]+f?|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|\.\.\.|->|==|!=|<=|>=|<<|>>|&&|\|\||[{}()[\],.;:=?<>@+*/%&|^~!-]/gy;
     let offset = 0;
     const offsets: number[] = [];
     while (offset < text.length) {
@@ -1345,7 +1392,16 @@ class Parser {
       this.take(close);
       return { kind: 'list', values };
     }
-    if (token.startsWith('"')) return { kind: 'literal', value: JSON.parse(token) as string };
+    if (token.startsWith('"'))
+      return { kind: 'literal', value: unescapeLiteral(token.slice(1, -1)) };
+    // A C character constant has type int; Python spells the code as ord('c').
+    if (token.startsWith("'") || token.startsWith("ord('")) {
+      const body = token.slice(token.indexOf("'") + 1, token.lastIndexOf("'"));
+      const code = unescapeLiteral(body).codePointAt(0)!;
+      return this.python
+        ? { kind: 'literal', value: BigInt(code) }
+        : { kind: 'literal', value: BigInt(code), ctype: INT };
+    }
     if (/^\d/.test(token)) {
       if (!token.startsWith('0x') && /[.eE]/.test(token)) {
         const bits = token.endsWith('f') ? 32 : 64;
