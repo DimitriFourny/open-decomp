@@ -2363,7 +2363,9 @@ export function execute(
     for (let steps = 0; steps < 20000; steps++) {
       const op =
         parser.ops[pc++] ??
-        (parser.voidResult ? { kind: 'return' as const, expression: { kind: 'list' as const, values: [] } } : undefined);
+        (parser.voidResult
+          ? { kind: 'return' as const, expression: { kind: 'list' as const, values: [] } }
+          : undefined);
       assert.ok(op, 'Emitted control fell out of function');
       switch (op.kind) {
         case 'assign':

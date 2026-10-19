@@ -328,7 +328,10 @@ for (const indexed of [false, true, 'shared', 'array'] as const)
       revision: 1,
     });
     const output = emit(ssa, { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } });
-    assert.match(output.emission.text, /members used here; size unknown; full layout in the types view/);
+    assert.match(
+      output.emission.text,
+      /members used here; size unknown; full layout in the types view/,
+    );
     assert.match(output.emission.text, /uint8_t f_4;/);
     assert.match(output.emission.text, /uint32_t f_18(?:\[\])?;/);
     assert.match(output.emission.text, indexed === true ? /\]\.f_18/ : /->f_18/);

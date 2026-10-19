@@ -444,10 +444,7 @@ export function usualArithmetic(left: IntegerCType, right: IntegerCType): Intege
 
 /** Two declared pointer variables of one C type (ignoring a top-level `const`)
  * compare for identity without a conversion. */
-function samePointer(
-  left: { readonly type: string },
-  right: { readonly type: string },
-): boolean {
+function samePointer(left: { readonly type: string }, right: { readonly type: string }): boolean {
   const bare = (spelling: string): string => spelling.replace(/^const /, '');
   return bare(left.type) === bare(right.type);
 }

@@ -1300,7 +1300,11 @@ export class Renderer {
     const address =
       value.ctype?.bits === (this.input.source?.abi.layout.pointer_bits ?? 64)
         ? value
-        : { text: `(uintptr_t)${this.printer.group(value, UNARY)}`, precedence: UNARY, ctype: null };
+        : {
+            text: `(uintptr_t)${this.printer.group(value, UNARY)}`,
+            precedence: UNARY,
+            ctype: null,
+          };
     return `(${spelling})${this.printer.group(address, UNARY)}`;
   }
 
@@ -1460,11 +1464,7 @@ export class Renderer {
           ctype: { bits: bitWidth(value.type), signed: false },
           pointer: {
             text: storage,
-            type: member
-              ? this.sourceType(member)
-              : slot
-                ? this.formalSpelling(slot)
-                : global!.c,
+            type: member ? this.sourceType(member) : slot ? this.formalSpelling(slot) : global!.c,
           },
         };
       }
@@ -1976,7 +1976,10 @@ export class Renderer {
       const bare = /^(?:const )?(?:char|void)\s*\*$/.test(spelling);
       // A string literal is itself a `const char *` expression.
       if (bare)
-        return { ...this.printer.primary(text, integerAddress), pointer: { text, type: 'const char*' } };
+        return {
+          ...this.printer.primary(text, integerAddress),
+          pointer: { text, type: 'const char*' },
+        };
       return !cast
         ? this.printer.primary(text, integerAddress)
         : { text: `(${spelling})${text}`, precedence: UNARY, ctype: integerAddress };
@@ -4561,7 +4564,8 @@ export class Renderer {
     for (const [transfer, list] of occurrences)
       for (const occurrence of list) {
         const destination = occurrence.destination;
-        if (destination?.kind === 'block') entries.set(destination, (entries.get(destination) ?? 0) + 1);
+        if (destination?.kind === 'block')
+          entries.set(destination, (entries.get(destination) ?? 0) + 1);
         entered.set(
           transfer.target,
           (entered.get(transfer.target) ?? true) &&
@@ -5338,14 +5342,12 @@ export class Renderer {
     if (source?.float_values?.has(value.id)) return 'scalar';
     const formal = source?.formal_types?.get(value.id);
     if (formal)
-      return formal.kind === 'pointer'
-        ? { spelling: this.formalSpelling(formal) }
-        : 'scalar';
-    const typeId = this.sourceValueTypes.get(value.id) ?? source?.value_types?.get(value.id)?.type_id;
+      return formal.kind === 'pointer' ? { spelling: this.formalSpelling(formal) } : 'scalar';
+    const typeId =
+      this.sourceValueTypes.get(value.id) ?? source?.value_types?.get(value.id)?.type_id;
     if (!typeId) return undefined;
     const definition = this.typeRecords.get(typeId)?.definition;
-    if (definition?.kind === 'pointer')
-      return { type_id: typeId, spelling: this.valueType(value) };
+    if (definition?.kind === 'pointer') return { type_id: typeId, spelling: this.valueType(value) };
     // An unsigned integer of the machine width is the value's own storage, not a
     // declaration a pointer use could contradict.
     return definition?.kind === 'integer' &&

@@ -275,7 +275,10 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
       const definitions = (anchor: string): void => {
         for (const definition of program.source?.definitions?.get(anchor) ?? []) {
           if (host.inlined.has(definition.result.id)) continue;
-          assign(definition.result, program.expressions.get(definition.result.id) ?? definition.expression);
+          assign(
+            definition.result,
+            program.expressions.get(definition.result.id) ?? definition.expression,
+          );
         }
       };
       const assign = (result: Value, body: Expression): void => {
@@ -344,7 +347,9 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
                   values.set(result.id, result);
                   const row = ensure(result.id);
                   row.definitions.push(
-                    known && known !== 'scalar' ? { kind: 'pointer', fact: known } : { kind: 'other' },
+                    known && known !== 'scalar'
+                      ? { kind: 'pointer', fact: known }
+                      : { kind: 'other' },
                   );
                 }
               break;
@@ -378,7 +383,9 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
       for (const value of program.tails.get(control.id)?.boundary.arguments ?? [])
         visit(value, { kind: 'free' });
       const transfers =
-        control.kind === 'jump' ? [control.transfer] : controlArms(control).map((arm) => arm.transfer);
+        control.kind === 'jump'
+          ? [control.transfer]
+          : controlArms(control).map((arm) => arm.transfer);
       for (const transfer of transfers)
         for (const copy of program.transfers.get(transfer) ?? []) {
           context.checkpoint(1);
@@ -410,9 +417,7 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
   const isChar = (spelling: string): boolean =>
     python ? spelling === 'pointer[char]' : bare(spelling) === 'char*';
   const isByte = (spelling: string): boolean =>
-    python
-      ? /^pointer\[u?int8_t\]$/.test(spelling)
-      : /^(?:const )?u?int8_t\*$/.test(spelling);
+    python ? /^pointer\[u?int8_t\]$/.test(spelling) : /^(?:const )?u?int8_t\*$/.test(spelling);
   const chosen = new Map<string, LocalTypeChoice>();
   for (const members of groups.values()) {
     context.checkpoint(members.length);
@@ -431,7 +436,9 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
     const knownTypes = new Set(known.map((fact) => fact.type_id));
     const knownSpellings = new Set(known.map((fact) => fact.spelling));
     if (knownTypes.size > 1 && knownSpellings.size > 1) continue;
-    const typedUses = uses.filter((use): use is Extract<Use, { kind: 'pointer' }> => use.kind === 'pointer');
+    const typedUses = uses.filter(
+      (use): use is Extract<Use, { kind: 'pointer' }> => use.kind === 'pointer',
+    );
     const typedDefinitions = definitions.filter(
       (definition): definition is Extract<Definition, { kind: 'pointer' }> =>
         definition.kind === 'pointer',
@@ -473,8 +480,9 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
     // The type record of a member that has one, else of the evidence that spells it.
     const typeId =
       known[0]?.type_id ??
-      types.find((fact) => fact.type_id !== undefined && bare(fact.spelling) === bare(owner.spelling))
-        ?.type_id ??
+      types.find(
+        (fact) => fact.type_id !== undefined && bare(fact.spelling) === bare(owner.spelling),
+      )?.type_id ??
       evidence.find((fact) => fact.type_id !== undefined)?.type_id;
     // Cost model, in printed conversions, over the members that are not already
     // pointers. A pointer local read in integer context prints `(uintptr_t)p` and
