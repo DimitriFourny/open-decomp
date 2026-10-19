@@ -51,6 +51,7 @@ import type { CallScope } from './calls.js';
 import {
   nativeDependencies,
   prepareNativeUnit,
+  type NativePreparationInput,
   type PreparedNativeUnit,
 } from './native-prepare.js';
 import {
@@ -837,7 +838,9 @@ export function nativeCapacity(
 }
 
 /** Supported, unopposed library import contracts for native dependency bodies. */
-export function nativeLibraryContracts(input: SourceFactsInput): SuppliedCallContract[] {
+export function nativeLibraryContracts(
+  input: Pick<NativePreparationInput, 'image' | 'library'>,
+): SuppliedCallContract[] {
   return input.library.contracts
     .filter((contract) => contract.abi_state === 'supported' && !contract.conflicts_with.length)
     .map((contract) => ({
@@ -851,7 +854,7 @@ export function nativeLibraryContracts(input: SourceFactsInput): SuppliedCallCon
 
 /** The per-image prepared-unit cache for this exact request identity. */
 export function nativeUnitCache(
-  input: SourceFactsInput,
+  input: NativePreparationInput & { readonly identity?: CacheIdentity },
   capacity: NativeSummaryCapacity,
   context: OperationContext,
 ): NativeUnitCache {
@@ -891,7 +894,7 @@ export function nativeUnitCache(
 
 /** Prepare (or reuse) one native body; cache hits replay their dependency reads. */
 export function loadNativeUnit(
-  input: SourceFactsInput,
+  input: NativePreparationInput,
   cached: NativeUnitCache,
   fn: FunctionRecord,
   boundedContext: OperationContext,

@@ -41,7 +41,11 @@ import {
   loadFunctionGraph,
   type IndexState,
 } from './scope.js';
-import { executeDecompilation, executeAnnotations } from '../analysis/index.js';
+import {
+  executeDecompilation,
+  executeAnnotations,
+  executeImageTypes,
+} from '../analysis/index.js';
 import {
   investigationArtifact,
   investigationItems,
@@ -428,6 +432,31 @@ async function dispatch(
               entry_points: image.entry_points,
               capabilities: image.capabilities,
             }),
+          },
+        };
+      }
+      if (args.view === 'types') {
+        const dump = executeImageTypes(
+          scope,
+          args.revision,
+          image,
+          Math.min(
+            scope.context.budget.output_bytes,
+            scope.max_result_bytes ?? Infinity,
+            MAX_FRAME_BYTES - 16384,
+          ) - 4096,
+        );
+        return {
+          ...envelope,
+          diagnostics: [],
+          ...(dump.state === 'partial'
+            ? { state: 'partial', reason: 'budget', continuation: null }
+            : { state: 'complete' }),
+          data: {
+            view: 'types',
+            text: dump.text,
+            functions: { analyzed: dump.analyzed, total: dump.total },
+            types: dump.types,
           },
         };
       }

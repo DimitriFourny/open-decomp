@@ -40,7 +40,12 @@ import type { AnalysisReadset } from '../../project/cache/dependencies.js';
 import { nativeCallIndex } from './calls.js';
 import { nativeArgumentValues } from './native-arguments.js';
 import { parameterRegisters } from './native-abi.js';
-import { nativeDependencies, type PreparedNativeUnit } from './native-prepare.js';
+import {
+  nativeDependencies,
+  type NativePreparationInput,
+  type PreparedNativeUnit,
+} from './native-prepare.js';
+import { renderImageTypeDeclarations } from '../../emitters/image-types.js';
 import type { NativeDependency } from './native-worklist.js';
 import {
   loadNativeUnit,
@@ -71,7 +76,7 @@ const factCaches = new WeakMap<
   { readonly identity: string; readonly facts: Map<string, FunctionFacts> }
 >();
 
-function factCache(input: SourceFactsInput): Map<string, FunctionFacts> {
+function factCache(input: NativePreparationInput): Map<string, FunctionFacts> {
   const { image, components, revision } = input;
   const identity = fingerprint({
     revision,
@@ -305,7 +310,7 @@ export function functionTypeObjects(
 }
 
 function typeFunctions(
-  input: SourceFactsInput,
+  input: Pick<NativePreparationInput, 'functions' | 'image'>,
   ids: Iterable<string>,
 ): ReadonlyMap<string, ImageTypeFunction> {
   const byId = new Map(input.functions.map((fn) => [fn.id, fn]));
@@ -326,7 +331,10 @@ function typeFunctions(
 }
 
 /** Direct callers per callee, from established call/tail-call references. */
-function callerIndex(input: SourceFactsInput, context: OperationContext): Map<string, string[]> {
+function callerIndex(
+  input: Pick<NativePreparationInput, 'functions' | 'image' | 'references'>,
+  context: OperationContext,
+): Map<string, string[]> {
   const index = nativeCallIndex(input.image, input.functions, input.references, context);
   const callers = new Map<string, Set<string>>();
   for (const reference of input.references) {
@@ -366,7 +374,7 @@ export interface ImageTypeExploration {
 /** Load facts for one body: cached facts (replaying their reads) or a bounded
  * native preparation. Null when the body has no complete local recovery. */
 function loadFacts(
-  input: SourceFactsInput,
+  input: NativePreparationInput,
   fn: FunctionRecord,
   load: (fn: FunctionRecord) => PreparedNativeUnit,
   cache: Map<string, FunctionFacts>,
@@ -840,4 +848,139 @@ export function recoverImageTypes(
       ],
     };
   }
+}
+
+export interface ImageTypeDump {
+  /** C declarations of every merged type with observed members. */
+  readonly text: string;
+  /** Partial: not every function body was analyzed, or the text was cut. */
+  readonly state: 'complete' | 'partial';
+  readonly analyzed: number;
+  readonly total: number;
+  readonly types: number;
+}
+
+/** Whole-image type recovery: every function body in entry order (as far as
+ * the work budget allows), one unification, C declarations of every type that
+ * spans functions or flows. Names follow the per-function rules; a class is
+ * bounded when the image's reference index or this pass is incomplete. */
+export function imageTypeDump(
+  input: NativePreparationInput,
+  context: OperationContext,
+  max_bytes: number,
+): ImageTypeDump {
+  const capacity = {
+    instructions: context.budget.instructions,
+    blocks: context.budget.blocks,
+    nodes: context.budget.ir_nodes,
+  };
+  const units = nativeUnitCache(input, capacity, context);
+  const contracts = nativeLibraryContracts(input);
+  const cache = factCache(input);
+  const limit = Math.floor(((context.remainingWork?.() ?? context.budget.work) * 3) / 4);
+  let used = 0;
+  const bounded: OperationContext = {
+    ...context,
+    budget: { ...context.budget, work: limit },
+    remainingWork: () => Math.max(0, limit - used),
+    checkpoint(work) {
+      context.checkpoint(0);
+      if (used + work > limit)
+        throw new OperationError({
+          code: 'resource_limit',
+          severity: 'warning',
+          message: 'Image type recovery work limit exceeded',
+          evidence_ids: [],
+          details: { kind: 'limit', resource: 'work', limit, consumed: used + work },
+        });
+      context.checkpoint(work);
+      used += work;
+    },
+  };
+  const ordered = [...input.functions].sort((a, b) =>
+    a.entry.value < b.entry.value ? -1 : a.entry.value > b.entry.value ? 1 : a.id.localeCompare(b.id),
+  );
+  const objects: ImageTypeObject[] = [];
+  const analyzed = new Set<string>();
+  let complete = true;
+  for (const [index, fn] of ordered.entries()) {
+    context.progress('image_types', index, ordered.length);
+    try {
+      const facts = loadFacts(
+        input,
+        fn,
+        (target) => loadNativeUnit(input, units, target, bounded, contracts),
+        cache,
+        bounded,
+      );
+      if (facts) objects.push(...facts.objects);
+      analyzed.add(fn.id);
+    } catch (error) {
+      const details = error instanceof OperationError ? error.diagnostic.details : undefined;
+      if (
+        !(error instanceof OperationError) ||
+        error.code !== 'resource_limit' ||
+        details?.kind !== 'limit' ||
+        details.resource !== 'work'
+      )
+        throw error;
+      context.checkpoint(0);
+      // The shared pass limit ends the walk; one oversized body is skipped.
+      if (details.limit === limit || bounded.remainingWork!() === 0) {
+        complete = false;
+        break;
+      }
+    }
+  }
+  const references = input.scope.store.queryRecords({
+    kind: 'reference',
+    image_id: input.image.id,
+    revision: input.revision,
+    limit: 1,
+  }).index_state;
+  const open = new Set<string>();
+  for (const object of objects)
+    for (const { anchor } of object.anchors)
+      if (anchor.kind !== 'stack' && (!complete || references !== 'complete'))
+        open.add(imageAnchorKey(anchor));
+  const unloaded = new Set(input.functions.filter((fn) => !analyzed.has(fn.id)).map((fn) => fn.id));
+  const solution = solveImageTypes(
+    objects,
+    {
+      functions: typeFunctions(
+        input,
+        new Set(
+          objects.flatMap((object) => [
+            object.function_id,
+            ...object.anchors.map(({ anchor }) => anchor.function_id),
+          ]),
+        ),
+      ),
+      unloaded,
+      open,
+    },
+    new AnalysisBudget({
+      max_work: context.remainingWork?.() ?? context.budget.work,
+      checkpoint: (work) => context.checkpoint(work),
+    }),
+  );
+  const names = typeFunctions(input, input.functions.map((fn) => fn.id));
+  const declared = [...solution.classes]
+    .filter((item) => !item.local && item.fields.length)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  let shown = declared.length,
+    text = '';
+  for (;;) {
+    context.checkpoint(shown + 1);
+    text = renderImageTypeDeclarations(declared.slice(0, shown), (id) => names.get(id)?.name ?? id);
+    if (Buffer.byteLength(text) <= max_bytes || shown === 0) break;
+    shown = Math.floor(shown / 2);
+  }
+  return {
+    text,
+    state: complete && shown === declared.length ? 'complete' : 'partial',
+    analyzed: analyzed.size,
+    total: input.functions.length,
+    types: shown,
+  };
 }

@@ -3,7 +3,7 @@ import type { BinarySession, FunctionSelector } from '../api/index.js';
 import { distinctDiagnostics, entityIdSchema, sliceIdSchema } from '../core/index.js';
 import type { ToolResult, WireDiagnostic, WireJob } from '../core/index.js';
 
-type Command = 'functions' | 'decompile';
+type Command = 'functions' | 'decompile' | 'types';
 interface Arguments {
   command: Command;
   binary: string;
@@ -19,12 +19,16 @@ type ParsedArguments = Arguments | { help: Command };
 type FunctionsResult = ToolResult<'functions_find'>;
 type FunctionRow = Extract<FunctionsResult, { data: unknown }>['data']['items'][number];
 type AnalysisResult =
-  FunctionsResult | ToolResult<'function_decompile'> | ToolResult<'project_open'>;
+  | FunctionsResult
+  | ToolResult<'function_decompile'>
+  | ToolResult<'project_open'>
+  | ToolResult<'binary_info'>;
 
 const usage = {
   functions: 'open-decomp functions BINARY [--name TEXT] [--json] [--cache PATH] [--slice ID]',
   decompile:
     'open-decomp decompile BINARY (--function NAME | --id ID | --address va:0x.../rva:0x.../file:0x...) [--language c-like|python-like] [--view source|checked] [--json] [--cache PATH] [--slice ID]',
+  types: 'open-decomp types BINARY [--json] [--cache PATH] [--slice ID]',
 } as const;
 
 class UsageError extends Error {}
@@ -77,8 +81,8 @@ function row(item: FunctionRow): string {
 }
 function parse(args: readonly string[]): ParsedArguments {
   const command = args[0];
-  if (command !== 'functions' && command !== 'decompile')
-    throw new UsageError('Expected functions or decompile; see open-decomp --help');
+  if (command !== 'functions' && command !== 'decompile' && command !== 'types')
+    throw new UsageError('Expected functions, decompile or types; see open-decomp --help');
   const separator = args.indexOf('--');
   if (args.slice(1, separator < 0 ? undefined : separator).includes('--help'))
     return { help: command };
@@ -89,7 +93,9 @@ function parse(args: readonly string[]): ParsedArguments {
     '--slice',
     ...(command === 'functions'
       ? ['--name']
-      : ['--function', '--id', '--address', '--language', '--view']),
+      : command === 'decompile'
+        ? ['--function', '--id', '--address', '--language', '--view']
+        : []),
   ];
   let json = false,
     positionalOnly = false;
@@ -127,6 +133,7 @@ function parse(args: readonly string[]): ParsedArguments {
     if (!sliceIdSchema.safeParse(slice).success) throw new UsageError('--slice must be a slice ID');
     result.sliceId = slice;
   }
+  if (command === 'types') return result;
   if (command === 'functions') {
     const name = values.get('--name');
     if (name !== undefined) {
@@ -174,7 +181,9 @@ function help(command: Command): void {
     `Usage: ${usage[command]}\n\n${
       command === 'functions'
         ? 'List every matching function; --name performs a case-insensitive substring search.\nJSON result is {pages:[...]} with the original schema envelope for each page.'
-        : 'Decompile one exact, unambiguous function name, entity ID or address.\nText stdout contains only pseudocode; JSON preserves the result envelope.'
+        : command === 'decompile'
+          ? 'Decompile one exact, unambiguous function name, entity ID or address.\nText stdout contains only pseudocode; JSON preserves the result envelope.'
+          : 'Print the image-wide merged structure types as C declarations (the names decompile uses).\nAnalyzes function bodies within the default budget; a partial result exits 2.'
     }\n\n--cache PATH  Override the sidecar cache root (default: BINARY.open-decomp).\n--slice ID    Select a binary slice.\n--json        Write {project_path,reused,result} JSON to stdout.\n--help        Show this help.\nProgress, project reuse and diagnostics go to stderr. Work stays in the foreground.\nExit: 0 complete/empty; 2 semantic partial; 1 error/unsupported/cancelled; 130 SIGINT; 143 SIGTERM.\n`,
   );
 }
@@ -246,7 +255,7 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
     process.stderr.write(
       `error: ${terminal(error instanceof Error ? error.message : String(error))}\n`,
     );
-    if (args[0] === 'functions' || args[0] === 'decompile')
+    if (args[0] === 'functions' || args[0] === 'decompile' || args[0] === 'types')
       process.stderr.write(`Usage: ${usage[args[0]]}\n`);
     process.exitCode = 1;
     return;
@@ -289,7 +298,16 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
     report(session.opened, 'open');
     if (parsed.command === 'functions')
       code = await functions(session, parsed, controller.signal, onProgress);
-    else {
+    else if (parsed.command === 'types') {
+      const result = await session.types({}, { signal: controller.signal, onProgress });
+      report(result, 'types');
+      code = exitCode(result);
+      if (parsed.json)
+        process.stdout.write(
+          `${JSON.stringify({ project_path: session.projectPath, reused: session.reused, result })}\n`,
+        );
+      else if ('data' in result && result.data.view === 'types') process.stdout.write(result.data.text);
+    } else {
       const result = await session.decompile(parsed.selector!, {
         ...(parsed.emitter === undefined ? {} : { emitter: parsed.emitter }),
         ...(parsed.view === undefined ? {} : { view: parsed.view }),

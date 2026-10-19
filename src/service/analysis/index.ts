@@ -11,6 +11,7 @@ import {
   type CacheIdentity,
   type CanonicalValue,
   type Diagnostic,
+  type LoadedImage,
   type OperationContext,
   type ProjectStore,
   type ResultMetadata,
@@ -59,7 +60,8 @@ import {
 import { pipelineComponents, pipelineVersions } from './versions.js';
 import { boundIR, requirePass } from './passes.js';
 import { recoverSourceEvidence } from './source-facts.js';
-import { recoverImageTypes } from './image-types.js';
+import { imageTypeDump, recoverImageTypes, type ImageTypeDump } from './image-types.js';
+export type { ImageTypeDump } from './image-types.js';
 export { executeAnnotations } from './annotations.js';
 
 export interface AnalysisScope {
@@ -707,5 +709,46 @@ export async function executeDecompilation(
       context.checkpoint(0);
       return { result, catalog: { ...catalog, evidence } };
     },
+  );
+}
+
+/** Whole-image merged structure types as C declarations (see imageTypeDump). */
+export function executeImageTypes(
+  scope: AnalysisScope,
+  revision: number,
+  image: LoadedImage,
+  max_bytes: number,
+): ImageTypeDump {
+  const { context } = scope;
+  const components = pipelineComponents(image.target);
+  const debug = recoverDebugInfo(image, context);
+  const library = recoverLibraryContracts({ image, abi: components.abi, revision }, context);
+  const { functions, references } = loadFunctionIndex(scope, revision, image);
+  return imageTypeDump(
+    {
+      scope,
+      image,
+      revision,
+      functions,
+      references,
+      debug,
+      library,
+      native_types: [
+        ...debug.types.map((type) => ({
+          ...type,
+          source: 'debug' as const,
+          status: 'established' as const,
+        })),
+        ...library.types.map((type) => ({
+          ...type,
+          source: 'library' as const,
+          status: 'established' as const,
+        })),
+      ],
+      components,
+      observable_register_masks: abiObservableRegisterMasks(components.abi, context),
+    },
+    context,
+    max_bytes,
   );
 }
