@@ -39,7 +39,8 @@ interface Row {
   file: string;
   state: string;
   reason: string;
-  readonly codeBytes: bigint;
+  /** Instruction bytes of the function's disassembly; null when unreadable. */
+  codeBytes: bigint | null;
   fileBytes: number;
   callers: string[];
   callees: string[];
@@ -140,15 +141,25 @@ function pageOf<T>(result: PagedResult<T>, operation: string): Page<T> {
   };
 }
 
-/** Compact disassembly for a function without usable pseudocode: nothing is dropped silently. */
+interface Disassembly {
+  /** Instruction text lines (empty unless requested) plus notes about gaps/incompleteness. */
+  readonly lines: string[];
+  /** Sum of instruction sizes; null when the disassembly view could not be read. */
+  readonly bytes: bigint | null;
+}
+/** Compact disassembly: the function's real extent, and (for functions without pseudocode)
+ * its text, so nothing is dropped silently. */
 async function disassemble(
   session: BinarySession,
   id: string,
   signal: AbortSignal,
-): Promise<string[]> {
+  keepLines: boolean,
+): Promise<Disassembly> {
   const lines: string[] = [];
   const seen = new Set<string>();
-  let cursor: string | undefined;
+  let cursor: string | undefined,
+    bytes = 0n,
+    incomplete = false;
   do {
     signal.throwIfAborted();
     const result = await session.getFunction(
@@ -168,10 +179,12 @@ async function disassemble(
       lines.push(
         `; disassembly unavailable: ${oneLine('error' in result ? result.error.message : result.state)}`,
       );
-      return lines;
+      return { lines, bytes: null };
     }
     const { data } = result;
     for (const item of data.items) {
+      bytes += BigInt(item.size);
+      if (!keepLines) continue;
       const text = item.presentation
         ? `${item.presentation.mnemonic} ${item.presentation.operands}`.trimEnd()
         : '(undecoded)';
@@ -179,17 +192,18 @@ async function disassemble(
         `${item.address.value}: ${text}${item.validity === 'valid' ? '' : `  ; ${item.validity}`}`,
       );
     }
-    for (const gap of data.gaps)
-      lines.push(`; gap ${gap.range.start.value}+${gap.range.size}: ${gap.reason}`);
-    if (result.state === 'partial' && data.page.index_state !== 'complete')
-      lines.push('; disassembly is incomplete');
+    if (keepLines)
+      for (const gap of data.gaps)
+        lines.push(`; gap ${gap.range.start.value}+${gap.range.size}: ${gap.reason}`);
+    if (result.state === 'partial' && data.page.index_state !== 'complete') incomplete = true;
     cursor = data.page.next_cursor ?? undefined;
     if (cursor !== undefined) {
       if (seen.has(cursor)) throw new Error('Disassembly pagination repeated a cursor');
       seen.add(cursor);
     }
   } while (cursor !== undefined);
-  return lines;
+  if (keepLines && incomplete) lines.push('; disassembly is incomplete');
+  return { lines, bytes };
 }
 
 interface ExportData {
@@ -318,8 +332,6 @@ class Exporter {
     for (const fn of functions) {
       const name = this.#names.get(fn.id)!;
       if (filter !== undefined && !name.toLowerCase().includes(filter)) continue;
-      let size = 0n;
-      for (const range of fn.ranges) size += BigInt(range.size);
       rows.push({
         fn,
         name,
@@ -327,7 +339,7 @@ class Exporter {
         file: '',
         state: '',
         reason: '',
-        codeBytes: size,
+        codeBytes: null,
         fileBytes: 0,
         callers: [],
         callees: [],
@@ -459,6 +471,13 @@ class Exporter {
       row.reason =
         'error' in result ? `${result.error.code}: ${oneLine(result.error.message)}` : result.state;
     }
+    const disassembly = await disassemble(
+      session,
+      row.fn.id,
+      this.#signal,
+      pseudocode === undefined,
+    );
+    row.codeBytes = disassembly.bytes;
     const names = (list: readonly string[]): string =>
       list.length === 0
         ? '-'
@@ -466,16 +485,15 @@ class Exporter {
           ? `${list.slice(0, 12).join(', ')}, +${list.length - 12} more`
           : list.join(', ');
     const status = row.state === 'complete' ? 'complete' : `${row.state} (${row.reason})`;
-    const facts = `${escape(row.name)} @ ${row.va} | ${pseudocode === undefined ? 'no pseudocode: ' : ''}${status} | ${row.codeBytes} bytes | callers: ${escape(names(row.callers))} | callees: ${escape(names(row.callees))}`;
+    const facts = `${escape(row.name)} @ ${row.va} | ${pseudocode === undefined ? 'no pseudocode: ' : ''}${status} | ${row.codeBytes ?? '?'} bytes | callers: ${escape(names(row.callers))} | callees: ${escape(names(row.callees))}`;
     let text: string;
     if (pseudocode !== undefined) {
       const header =
         language === 'python-like' ? `# ${facts}` : `/* ${facts.replaceAll('*/', '* /')} */`;
       text = `${header}\n${pseudocode.endsWith('\n') ? pseudocode : `${pseudocode}\n`}`;
     } else {
-      const lines = await disassemble(session, row.fn.id, this.#signal);
       row.file = row.file.replace(/\.(c|py)$/, '.asm');
-      text = `; ${facts}\n; compact native disassembly (address: instruction)\n${lines.join('\n')}\n`;
+      text = `; ${facts}\n; compact native disassembly (address: instruction)\n${disassembly.lines.join('\n')}\n`;
     }
     await writeFile(join(this.#functionsDirectory, row.file), text);
     row.fileBytes = Buffer.byteLength(text);
@@ -509,7 +527,7 @@ class Exporter {
           escape(`functions/${row.file}`),
           row.state,
           escape(row.reason),
-          row.codeBytes.toString(),
+          row.codeBytes?.toString() ?? '?',
           escape(row.callers.join(',')),
           escape(row.callees.join(',')),
         ]),
@@ -575,7 +593,7 @@ class Exporter {
     const extension = this.#options.language === 'python-like' ? 'py' : 'c';
     await write('README.txt', [
       `Open Decomp export (${this.#options.language}) of ${escape(basename(this.#input))}: ${summary.functions} functions (${summary.complete} complete, ${summary.partial} partial, ${summary.failed} failed).`,
-      `index.tsv: one row per function: address, name, file, state, reason, code_bytes, callers, callees. Start here; grep it by name or state.`,
+      `index.tsv: one row per function: address, name, file, state, reason, code_bytes (instruction bytes of its body; ? = unreadable), callers, callees. Start here; grep it by name or state.`,
       `functions/NAME@0xADDR.${extension}: pseudocode exactly as 'open-decomp decompile' prints it, preceded by one header comment (state, size, callers, callees; '?' = unresolved indirect call).`,
       `functions/NAME@0xADDR.asm: only where pseudocode could not be produced; compact native disassembly and the reason in the header. state=partial files are real but incomplete pseudocode (reason in index.tsv).`,
       `Names use the C spelling of the native symbol (Mach-O leading underscore removed); stripped functions are sub_<hex address>. Every name is a symbol fact, never a guess.`,
