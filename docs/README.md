@@ -27,9 +27,20 @@ open-decomp functions ./app --name main
 open-decomp decompile ./app --function main
 open-decomp decompile ./app --address va:0x100000574 --language python-like
 open-decomp decompile ./app --function main --json --cache ./analysis-cache
+open-decomp export ./app --out ./app-decomp --jobs 4
 ```
 
-`functions --name` is a case-insensitive substring search; `decompile --function` is exact and case-sensitive. Use discovered original/display names (including format-specific prefixes), a stable `--id`, or an explicit `--address va:0x...`, `rva:0x...` or `file:0x...`. Multiple indexed matches are an error, not a first-match selection. Both commands support `--help`, `--cache PATH`, and explicit `--slice ID`.
+`functions --name` is a case-insensitive substring search; `decompile --function` is exact and case-sensitive. Use discovered original/display names (including format-specific prefixes), a stable `--id`, or an explicit `--address va:0x...`, `rva:0x...` or `file:0x...`. Multiple indexed matches are an error, not a first-match selection. All three commands support `--help`, `--cache PATH`, and explicit `--slice ID`.
+
+### Export a whole binary as a greppable directory
+
+`export BINARY --out DIR [--language c-like|python-like] [--jobs N] [--name SUBSTRING] [--cache PATH] [--slice ID]` is the fastest way for an agent with file tools to read a binary: one process decompiles every function and writes
+
+- `DIR/functions/NAME@0xADDR.c` (`.py` for python-like): one header comment (name, address, state and reason, code bytes, caller and callee names; `?` marks an unresolved indirect call) followed by exactly the text `decompile` prints. Names are the C spelling of the native symbol (Mach-O's leading underscore dropped); unnamed functions are `sub_<hex>` (or the import a stub forwards to). Filenames are sanitized and unique.
+- `DIR/functions/NAME@0xADDR.asm`: only for functions with no pseudocode (failed, unsupported, cancelled); the header states why and the body is the compact native disassembly, so no function is missing.
+- `DIR/index.tsv` (address, name, file, state, reason, code_bytes = instruction bytes of the function body, callers, callees), `strings.tsv` (address, escaped text, referencing functions), `imports.tsv`, `exports.tsv` and a short `README.txt`.
+
+Output order and content are deterministic, re-running overwrites generated files, and the exit status is 0 whenever everything was written; partial and failed functions are rows in `index.tsv`. Native indexes that are incomplete (function discovery and references usually are) are named on stderr and in `README.txt`: caller/callee/referenced-by lists are then lower bounds. `--jobs N` (default `min(4, CPUs/2)`) runs N workers; because a project database has one owner, extra workers analyze private copy-on-write copies of the finished import under the cache root and remove them afterwards, so only the first worker's decompilations are cached for later runs. `--name` limits the export to functions whose name contains the text. SIGINT/SIGTERM stop the export (exit 130/143) before the index files are written.
 
 The default sidecar is **`<canonical binary path>.open-decomp/`**, containing content-addressed SQLite project directories, immutable input snapshots, navigation indexes and analysis artifacts. Unchanged bytes resume the existing project; matching decompilations return cache hits. Each invocation still reads/hashes the binary to validate identity. Changed bytes select a new entry without overwriting earlier investigations. `--cache` overrides the cache root for read-only input locations or centralized storage. There is no silent fallback, automatic eviction or automatic replay of failed imports.
 
