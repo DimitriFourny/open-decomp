@@ -69,6 +69,58 @@ const unresolved = (): NativeInterface => ({
   argument_list_complete: false,
 });
 
+/** Recursive dependency groups among loaded units (strongly connected
+ * components with more than one member or a self edge), callees first. */
+function recursiveGroups<U extends NativeSummaryUnit>(
+  units: ReadonlyMap<string, U>,
+  key: (dependency: NativeDependency) => string,
+  context: OperationContext,
+): string[][] {
+  const index = new Map<string, number>(),
+    low = new Map<string, number>(),
+    onStack = new Set<string>(),
+    stack: string[] = [],
+    groups: string[][] = [];
+  const edges = (id: string): string[] =>
+    [...new Set(units.get(id)!.dependencies.map(key))].filter((target) => units.has(target));
+  for (const root of units.keys()) {
+    if (index.has(root)) continue;
+    const frames: { id: string; next: string[] }[] = [];
+    const enter = (id: string): void => {
+      index.set(id, index.size);
+      low.set(id, index.get(id)!);
+      stack.push(id);
+      onStack.add(id);
+      frames.push({ id, next: edges(id) });
+    };
+    enter(root);
+    while (frames.length) {
+      context.checkpoint(1);
+      const frame = frames.at(-1)!;
+      const target = frame.next.pop();
+      if (target !== undefined) {
+        if (!index.has(target)) enter(target);
+        else if (onStack.has(target))
+          low.set(frame.id, Math.min(low.get(frame.id)!, index.get(target)!));
+        continue;
+      }
+      frames.pop();
+      const parent = frames.at(-1);
+      if (parent) low.set(parent.id, Math.min(low.get(parent.id)!, low.get(frame.id)!));
+      if (low.get(frame.id) !== index.get(frame.id)) continue;
+      const group: string[] = [];
+      let member: string;
+      do {
+        member = stack.pop()!;
+        onStack.delete(member);
+        group.push(member);
+      } while (member !== frame.id);
+      if (group.length > 1 || edges(frame.id).includes(frame.id)) groups.push(group);
+    }
+  }
+  return groups;
+}
+
 /** Analyze only the direct dependency closure of the requested roots. Loading and
  * refinement are separate: a recursive edge never reloads/re-lifts its caller.
  * The injected loader owns graph/SSA work and must honor the supplied capacities;
@@ -175,6 +227,7 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
   for (const root of options.roots) schedule(root);
   for (const dependency of options.root_dependencies ?? [])
     demand(schedule(dependency.target, dependency.assumptions), dependency.return_demand ?? []);
+  const initialWork = context.remainingWork?.();
   for (let cursor = 0; cursor < pending.length; cursor++) {
     const { fn, key, assumptions } = pending[cursor]!;
     context.checkpoint(1);
@@ -193,6 +246,21 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
       failures.set(key, [`native dependency ${exhausted.join('/')} capacity exhausted`]);
       continue;
     }
+    // Fair shares: one expensive dependency cannot starve refinement of the
+    // others. A load receives at most a quarter of the remaining work and no
+    // new body is loaded once half of the initial allowance is gone, so finished
+    // interfaces keep a reserve for the fixed point instead of all being lost
+    // at the shared limit. An exhausted share is that dependency's own limit.
+    const available = context.remainingWork?.();
+    if (!prepared && available !== undefined && initialWork !== undefined) {
+      if (available < initialWork / 2) {
+        failures.set(key, [`native dependency load work reserve (${initialWork})`]);
+        continue;
+      }
+    }
+    const share = available === undefined ? undefined : Math.max(1, Math.floor(available / 4));
+    let used = 0,
+      loading = true;
     const bounded: OperationContext = {
       ...context,
       budget: {
@@ -201,11 +269,35 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
         blocks: remaining.blocks,
         ir_nodes: remaining.nodes,
       },
+      ...(share === undefined
+        ? {}
+        : {
+            // Loaders may retain this context (lazy indexes); the share bounds
+            // only the load itself.
+            remainingWork: () =>
+              loading
+                ? Math.max(0, Math.min(share - used, context.remainingWork!()))
+                : context.remainingWork!(),
+            checkpoint(work: number) {
+              if (loading && used + work > share)
+                throw new OperationError({
+                  code: 'resource_limit',
+                  severity: 'warning',
+                  message: 'Native dependency work share exhausted',
+                  evidence_ids: [],
+                  details: { kind: 'limit', resource: 'work', limit: share, consumed: used + work },
+                });
+              context.checkpoint(work);
+              used += work;
+            },
+          }),
     };
     let unit: U;
     try {
       unit = prepared ?? options.load(fn, bounded);
+      loading = false;
     } catch (error) {
+      loading = false;
       const details = error instanceof OperationError ? error.diagnostic.details : undefined;
       // Only this optional dependency's capacities are recoverable. Cancellation,
       // deadlines, selected-body failures and the outer work limit still escape.
@@ -213,7 +305,8 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
         details?.kind === 'limit' &&
         ((details.resource === 'ir_nodes' && details.limit === remaining.nodes) ||
           (details.resource === 'blocks' && details.limit === remaining.blocks) ||
-          (details.resource === 'instructions' && details.limit === remaining.instructions));
+          (details.resource === 'instructions' && details.limit === remaining.instructions) ||
+          (details.resource === 'work' && share !== undefined && details.limit === share));
       if (!(error instanceof OperationError) || error.code !== 'resource_limit' || !local)
         throw error;
       context.checkpoint(0);
@@ -290,42 +383,179 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
     });
   options.on_partial?.(units, summaries);
 
-  // A changed callee schedules only its direct callers. Self/mutual recursion use
-  // the same finite queue and the same shared operation/work clock as all roots.
-  const queue = [...units.keys()],
-    queued = new Set(queue);
-  for (let cursor = 0; cursor < queue.length; cursor++) {
-    context.checkpoint(1);
-    const id = queue[cursor]!;
-    queued.delete(id);
-    const unit = units.get(id)!;
-    const visits = (refinements.get(id) ?? 0) + 1;
-    if (visits > options.max_refinements) {
-      refinementLimits.set(id, `native interface refinement limit (${options.max_refinements})`);
-      continue;
-    }
-    refinements.set(id, visits);
+  const dependencyKey = (dependency: NativeDependency): string =>
+    contextKeys.get(nativeContextKey(dependency.target.id, dependency.assumptions)) ??
+    dependency.target.id;
+  const dependenciesOf = (
+    unit: U,
+    assumed?: ReadonlyMap<string, NativeInterface>,
+  ): Map<string, NativeInterface> => {
     const dependencies = new Map<string, NativeInterface>();
     for (const dependency of unit.dependencies) {
       context.checkpoint(1);
-      const key =
-        contextKeys.get(nativeContextKey(dependency.target.id, dependency.assumptions)) ??
-        dependency.target.id;
-      dependencies.set(dependency.call_id, summaries.get(key)?.observed ?? unresolved());
+      const key = dependencyKey(dependency);
+      dependencies.set(
+        dependency.call_id,
+        assumed?.get(key) ?? summaries.get(key)?.observed ?? unresolved(),
+      );
     }
-    const observed = options.observe(unit, dependencies, context, [
-        ...(demands.get(id)?.values() ?? []),
-      ]),
-      previous = summaries.get(id)!;
-    if (options.equal(previous.observed, observed)) continue;
-    summaries.set(id, { ...previous, observed });
-    options.on_partial?.(units, summaries);
-    for (const caller of parents.get(id) ?? []) {
-      context.checkpoint(1);
-      if (queued.has(caller)) continue;
-      queued.add(caller);
-      queue.push(caller);
+    return dependencies;
+  };
+  // Refinement runs in three quarters of what loading left, so limit and
+  // reason propagation below always finish. When it stops, every summary whose
+  // observation is still pending, or that transitively depends on one, is cut
+  // with an explicit refinement limit; all others are already at their fixed
+  // point and keep their established facts.
+  const refineLimit =
+    context.remainingWork === undefined ? undefined : Math.floor((context.remainingWork() * 3) / 4);
+  let refineUsed = 0;
+  const refineContext: OperationContext =
+    refineLimit === undefined
+      ? context
+      : {
+          ...context,
+          remainingWork: () =>
+            Math.max(0, Math.min(refineLimit - refineUsed, context.remainingWork!())),
+          checkpoint(work: number) {
+            if (refineUsed + work > refineLimit)
+              throw new OperationError({
+                code: 'resource_limit',
+                severity: 'warning',
+                message: 'Native interface refinement work share exhausted',
+                evidence_ids: [],
+                details: {
+                  kind: 'limit',
+                  resource: 'work',
+                  limit: refineLimit,
+                  consumed: refineUsed + work,
+                },
+              });
+            context.checkpoint(work);
+            refineUsed += work;
+          },
+        };
+  const unsettled = new Set<string>();
+  // A changed callee schedules only its direct callers. Self/mutual recursion use
+  // the same finite queue and the same shared operation/work clock as all roots.
+  const refine = (initial: readonly string[]): void => {
+    const queue = [...initial],
+      queued = new Set(queue);
+    for (const id of queue) unsettled.add(id);
+    for (let cursor = 0; cursor < queue.length; cursor++) {
+      refineContext.checkpoint(1);
+      const id = queue[cursor]!;
+      queued.delete(id);
+      const unit = units.get(id)!;
+      const visits = (refinements.get(id) ?? 0) + 1;
+      if (visits > options.max_refinements) {
+        refinementLimits.set(id, `native interface refinement limit (${options.max_refinements})`);
+        unsettled.delete(id);
+        continue;
+      }
+      refinements.set(id, visits);
+      const observed = options.observe(unit, dependenciesOf(unit), refineContext, [
+          ...(demands.get(id)?.values() ?? []),
+        ]),
+        previous = summaries.get(id)!;
+      if (!queued.has(id)) unsettled.delete(id);
+      if (options.equal(previous.observed, observed)) continue;
+      summaries.set(id, { ...previous, observed });
+      options.on_partial?.(units, summaries);
+      for (const caller of parents.get(id) ?? []) {
+        refineContext.checkpoint(1);
+        if (queued.has(caller) || !units.has(caller)) continue;
+        queued.add(caller);
+        queue.push(caller);
+        unsettled.add(caller);
+      }
     }
+  };
+
+  // Least-fixpoint refinement starts every recursive member open, so a group
+  // whose members wait only on each other never closes its argument lists.
+  // Coinductive check: assume every member closed with its current observed
+  // parameters, re-observe each body once against those assumptions, and keep
+  // the results only when every member then closes with exactly the assumed
+  // parameters. Any actual read happens at a finite call depth, so induction
+  // over that depth makes the self-consistent assumption a proof; otherwise the
+  // group stays open.
+  const parameterKey = (observed: NativeInterface): string =>
+    observed.parameters
+      .map((register) => `${register.root}:${register.offset_bits}:${register.width_bits}`)
+      .join(',');
+  try {
+    refine([...units.keys()]);
+    for (const group of recursiveGroups(units, dependencyKey, refineContext)) {
+      const members = group.map((id) => [id, summaries.get(id)!] as const);
+      if (
+        members.every(([, summary]) => summary.observed.argument_list_closure !== undefined) ||
+        members.some(
+          ([id, summary]) =>
+            summary.observed.parameter_state === 'ambiguous' ||
+            summary.observed.variadic_stack ||
+            summary.observed.stack_parameters?.length ||
+            refinementLimits.has(id),
+        )
+      )
+        continue;
+      const assumed = new Map(
+        members.map(([id, summary]) => [
+          id,
+          {
+            ...summary.observed,
+            argument_list_closure: summary.observed.argument_list_closure ?? 'callee_reads',
+          } satisfies NativeInterface,
+        ]),
+      );
+      const results = members.map(([id]) => {
+        const unit = units.get(id)!;
+        return [
+          id,
+          options.observe(unit, dependenciesOf(unit, assumed), refineContext, [
+            ...(demands.get(id)?.values() ?? []),
+          ]),
+        ] as const;
+      });
+      if (
+        !results.every(
+          ([id, observed]) =>
+            observed.argument_list_closure !== undefined &&
+            observed.parameter_state !== 'ambiguous' &&
+            parameterKey(observed) === parameterKey(assumed.get(id)!),
+        )
+      )
+        continue;
+      const outside = new Set<string>();
+      for (const [id, observed] of results) {
+        summaries.set(id, { ...summaries.get(id)!, observed });
+        for (const caller of parents.get(id) ?? [])
+          if (!group.includes(caller)) outside.add(caller);
+      }
+      options.on_partial?.(units, summaries);
+      refine([...outside]);
+    }
+  } catch (error) {
+    const details = error instanceof OperationError ? error.diagnostic.details : undefined;
+    if (
+      !(error instanceof OperationError) ||
+      error.code !== 'resource_limit' ||
+      details?.kind !== 'limit' ||
+      details.resource !== 'work' ||
+      refineLimit === undefined ||
+      details.limit > refineLimit
+    )
+      throw error;
+    context.checkpoint(0);
+    const cut = [...unsettled];
+    for (let cursor = 0; cursor < cut.length; cursor++)
+      for (const caller of parents.get(cut[cursor]!) ?? []) {
+        context.checkpoint(1);
+        if (!units.has(caller) || unsettled.has(caller)) continue;
+        unsettled.add(caller);
+        cut.push(caller);
+      }
+    for (const id of unsettled)
+      refinementLimits.set(id, `native interface refinement work limit (${refineLimit})`);
   }
 
   // Limit/reason propagation is itself a bounded fixed point. SCCs with no open

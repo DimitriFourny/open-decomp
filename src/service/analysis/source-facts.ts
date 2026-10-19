@@ -28,8 +28,10 @@ import {
 } from '../../analysis/types/index.js';
 import {
   bitWidth,
+  expressionOperands,
   type DataType,
   type Expression,
+  type Instruction,
   type RegisterIR,
   type SSAForm,
   type Value,
@@ -369,6 +371,62 @@ function observeParameters(
   const use = (value: Value): void => note(analysis.stack.values.get(value.id));
   const spills: StackFact[] = [];
   const calls = new Map(analysis.calls.map((call) => [call.node_id, call]));
+  // A call whose callee interface is unresolved, open or recursive may read any
+  // argument storage. It can observe this function's own incoming arguments only
+  // through a path from an entry argument register that no semantic use has
+  // already made a parameter: an argument register at the call whose value may
+  // depend on such an entry value (directly, through phis or computed), a
+  // missing binding, a private spill of such a value, or a stack pointer that is
+  // not below entry SP (the callee's stack arguments would be our incoming
+  // ones). Without such a path the callee sees only observed parameters and
+  // values this body computed, so it adds no input; ABI conformance is assumed.
+  const opaque = new Set<string>();
+  const entryRoots = new Map(
+    entryBindings
+      .filter((binding) => byRoot.has(binding.register.root))
+      .map((binding) => [binding.value.id, binding.register.root]),
+  );
+  const phiSources = new Map<string, Value[]>();
+  for (const copy of storageCopies) {
+    const list = phiSources.get(copy.destination.id) ?? [];
+    list.push(copy.source);
+    phiSources.set(copy.destination.id, list);
+  }
+  const mayHoldUnobserved = (start: Value): boolean => {
+    const pending = [start],
+      seen = new Set<string>();
+    while (pending.length) {
+      context.checkpoint(1);
+      const value = pending.pop()!;
+      if (seen.has(value.id)) continue;
+      seen.add(value.id);
+      const root = entryRoots.get(value.id);
+      if ((root !== undefined && !observed.has(root)) || seen.size > 256) return true;
+      const expression = definitions.get(value.id);
+      if (expression) pending.push(...expressionOperands(expression));
+      else pending.push(...(phiSources.get(value.id) ?? []));
+    }
+    return false;
+  };
+  const passesUnobserved = (node: Extract<Instruction, { kind: 'call' }>): boolean => {
+    const sp = analysis.stack.snapshots.get(node.id)?.stack_pointer.value;
+    if (sp?.kind !== 'stack' || sp.offset >= 0n) return true;
+    if (
+      spills.some((fact) =>
+        fact.incoming_registers.some(
+          (register) => byRoot.has(register.root) && !observed.has(register.root),
+        ),
+      )
+    )
+      return true;
+    return candidates.some((candidate) => {
+      const cells = node.register_inputs.filter(
+        (binding) => binding.register.root === candidate.root,
+      );
+      return !cells.length || cells.some((binding) => mayHoldUnobserved(binding.value));
+    });
+  };
+  const callNodes = new Map<string, Extract<Instruction, { kind: 'call' }>>();
   for (const block of ir.blocks) {
     if (!analysis.stack.snapshots.has(block.terminator.id)) continue;
     if (conditionalFpFailures.has(block.id)) continue;
@@ -389,8 +447,12 @@ function observeParameters(
           call?.contracts.filter(
             (contract) => contract.status === 'established' && contract.layout.state === 'complete',
           ) ?? [];
-        if ((!contracts.length && !interfaces.has(node.id)) || call?.status === 'conflicting')
-          ambiguous = true;
+        callNodes.set(node.id, node);
+        if (call?.status === 'conflicting') ambiguous = true;
+        else if (!contracts.length && !interfaces.has(node.id)) {
+          if (node.target.kind === 'indirect') opaque.add(node.id);
+          else ambiguous = true;
+        }
         for (const contract of contracts) {
           for (const parameter of contract.parameters)
             for (const location of parameter.locations) note(location.fact);
@@ -408,6 +470,7 @@ function observeParameters(
     else if (terminator.kind === 'return') for (const value of terminator.values) use(value);
   }
   for (const fact of nativeCallInputs(analysis, interfaces, context)) note(fact);
+  for (const id of opaque) if (passesUnobserved(callNodes.get(id)!)) ambiguous = true;
   const { returns, return_types, written_result } = nativeReturnInterface(
     ir,
     abi,
@@ -486,7 +549,8 @@ function observeParameters(
                   contract.layout.state === 'complete' &&
                   contract.layout.argument_count !== null,
               ) === true ||
-            closedCallee(interfaces.get(node.id)),
+            closedCallee(interfaces.get(node.id)) ||
+            (callNodes.has(node.id) && !passesUnobserved(callNodes.get(node.id)!)),
         ) &&
         (block.terminator.kind !== 'indirect' || closedCallee(interfaces.get(block.terminator.id)))
       );

@@ -104,7 +104,10 @@ export function constantCandidates(
   stack: StackRecoveryResult | null,
   context: OperationContext,
 ): (value: Value) => readonly bigint[] | null {
-  const definitions = new Map<string, { readonly type: DataType; readonly expression: Expression }>();
+  const definitions = new Map<
+    string,
+    { readonly type: DataType; readonly expression: Expression }
+  >();
   const incoming = new Map<string, Value[]>();
   const entryParameters = new Set<string>();
   const parameters = new Map<string, Value>();
@@ -178,10 +181,13 @@ export function constantCandidates(
         }
         if (combinations.length <= MAX_CANDIDATES * MAX_CANDIDATES) {
           const values: (readonly bigint[] | null)[] = combinations.map((combination) => {
-            const evaluated = evaluateExpression(definition.type, definition.expression, (operand) =>
-              combination.has(operand.id)
-                ? { kind: 'bits', bits: combination.get(operand.id)! }
-                : { kind: 'unknown', reason: 'unbound operand' },
+            const evaluated = evaluateExpression(
+              definition.type,
+              definition.expression,
+              (operand) =>
+                combination.has(operand.id)
+                  ? { kind: 'bits', bits: combination.get(operand.id)! }
+                  : { kind: 'unknown', reason: 'unbound operand' },
             );
             return evaluated.kind === 'bits' ? [evaluated.bits] : null;
           });
@@ -234,7 +240,10 @@ function locationCandidates(
     const set = candidates(cell.value);
     if (!set) return null;
     values = values.flatMap((prefix) =>
-      set.map((item) => prefix | (BigInt.asUintN(cell.register.width_bits, item) << BigInt(cursor - start))),
+      set.map(
+        (item) =>
+          prefix | (BigInt.asUintN(cell.register.width_bits, item) << BigInt(cursor - start)),
+      ),
     );
     if (values.length > MAX_CANDIDATES) return null;
     cursor += cell.register.width_bits;

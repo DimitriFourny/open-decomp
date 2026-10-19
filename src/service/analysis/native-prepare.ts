@@ -430,7 +430,15 @@ export function prepareNativeUnit(
     reasons,
     arity_complete:
       optionalWorkComplete &&
-      !graph.coverage.reasons.length &&
+      // Discovery reports an indirect call as unresolved control flow, but the
+      // call returns and the lifted graph is still complete: only an unknown or
+      // non-tail indirect terminator leaves machine control flow unresolved.
+      graph.coverage.reasons.every((reason) => reason === 'unresolved control flow') &&
+      ir.blocks.every(
+        (block) =>
+          block.terminator.kind !== 'unknown' &&
+          (block.terminator.kind !== 'indirect' || block.terminator.tail_call === true),
+      ) &&
       analysis?.state === 'complete' &&
       analysis.stack.state === 'complete',
     demand_index,
