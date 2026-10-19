@@ -12,7 +12,13 @@ import {
   type RecoveredType,
   type RegisterDescriptor,
 } from '../../core/index.js';
-import { bitWidth, type Expression, type RegisterBinding, type SSAForm, type Value } from '../../ir/index.js';
+import {
+  bitWidth,
+  type Expression,
+  type RegisterBinding,
+  type SSAForm,
+  type Value,
+} from '../../ir/index.js';
 import { AnalysisBudget } from '../../analysis/ssa/budget.js';
 import {
   createAffineResolver,
@@ -272,7 +278,13 @@ export function functionTypeObjects(
       budget.charge();
       const callee = node.kind === 'call' ? callees.get(node.id) : undefined;
       if (node.kind !== 'call' || !callee) continue;
-      for (const [index, value] of nativeArgumentValues(ir, types.calls, node.id, observed, context))
+      for (const [index, value] of nativeArgumentValues(
+        ir,
+        types.calls,
+        node.id,
+        observed,
+        context,
+      ))
         anchor(value, { kind: 'argument', function_id: callee.target.id, index }, false);
       const returned = result && registerValue(node.register_outputs, result, concatenations);
       if (returned) anchor(returned, { kind: 'return', function_id: callee.target.id }, false);
@@ -549,7 +561,12 @@ export function exploreImageTypes(
     {
       functions: typeFunctions(
         input,
-        new Set(objects.flatMap((object) => [object.function_id, ...object.anchors.map(({ anchor }) => anchor.function_id)])),
+        new Set(
+          objects.flatMap((object) => [
+            object.function_id,
+            ...object.anchors.map(({ anchor }) => anchor.function_id),
+          ]),
+        ),
       ),
       unloaded,
       open,
@@ -737,7 +754,9 @@ export function applyImageTypes(
     if (at < 0) continue;
     const record = records[at]!;
     const proofIds =
-      item.functions.length > 1 ? [...new Set([...record.evidence_ids, proof(item)])].sort() : record.evidence_ids;
+      item.functions.length > 1
+        ? [...new Set([...record.evidence_ids, proof(item)])].sort()
+        : record.evidence_ids;
     const definition =
       item.functions.length > 1 && record.definition.kind === 'structure'
         ? layout(item, record.definition, 0, proofIds)
@@ -789,7 +808,13 @@ export function recoverImageTypes(
 ): { readonly types: TypeRecoveryResult; readonly diagnostics: readonly Diagnostic[] } {
   const { context } = input.scope;
   if (local.state !== 'complete' || types.state !== 'complete') return { types, diagnostics: [] };
-  const limit = Math.floor((context.remainingWork?.() ?? context.budget.work) * 3 / 4);
+  // Optional merging never takes the work rendering needs: it keeps at least a
+  // quarter of what remains and as much as the selected function used so far.
+  const remaining = context.remainingWork?.() ?? context.budget.work;
+  const limit = Math.max(
+    0,
+    remaining - Math.max(Math.ceil(remaining / 4), context.budget.work - remaining),
+  );
   let used = 0;
   const bounded: OperationContext = {
     ...context,
@@ -898,7 +923,11 @@ export function imageTypeDump(
     },
   };
   const ordered = [...input.functions].sort((a, b) =>
-    a.entry.value < b.entry.value ? -1 : a.entry.value > b.entry.value ? 1 : a.id.localeCompare(b.id),
+    a.entry.value < b.entry.value
+      ? -1
+      : a.entry.value > b.entry.value
+        ? 1
+        : a.id.localeCompare(b.id),
   );
   const objects: ImageTypeObject[] = [];
   const analyzed = new Set<string>();
@@ -964,7 +993,10 @@ export function imageTypeDump(
       checkpoint: (work) => context.checkpoint(work),
     }),
   );
-  const names = typeFunctions(input, input.functions.map((fn) => fn.id));
+  const names = typeFunctions(
+    input,
+    input.functions.map((fn) => fn.id),
+  );
   const declared = [...solution.classes]
     .filter((item) => !item.local && item.fields.length)
     .sort((a, b) => a.name.localeCompare(b.name));

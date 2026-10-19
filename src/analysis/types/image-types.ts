@@ -144,7 +144,8 @@ function mergeFields(
         ? {
             ...previous,
             stride: previous.stride ?? field.stride,
-            kind: previous.kind === 'pointer' || field.kind === 'pointer' ? 'pointer' : previous.kind,
+            kind:
+              previous.kind === 'pointer' || field.kind === 'pointer' ? 'pointer' : previous.kind,
           }
         : field,
     );
@@ -185,7 +186,7 @@ export function solveImageTypes(
   // callee-side object that dereferences the value or forwards it to one.
   const confirmed = new Set<string>();
   for (const key of anchored.keys()) if (key.startsWith('stack:')) confirmed.add(key);
-  for (let changed = true; changed; ) {
+  for (let changed = true; changed;) {
     changed = false;
     for (const [key, list] of owners) {
       if (confirmed.has(key)) continue;
@@ -196,9 +197,7 @@ export function solveImageTypes(
           return (
             object.fields.length > 0 ||
             object.pointees.length > 0 ||
-            object.anchors.some(
-              (item) => !item.own && confirmed.has(imageAnchorKey(item.anchor)),
-            )
+            object.anchors.some((item) => !item.own && confirmed.has(imageAnchorKey(item.anchor)))
           );
         })
       ) {
@@ -300,8 +299,7 @@ export function solveImageTypes(
   // A flow is unexplored when its callee body is unavailable or its callers
   // were not all visited; the class may then miss members.
   const unexplored = (key: string, anchor: ImageTypeAnchor): boolean =>
-    anchor.kind !== 'stack' &&
-    (options.open.has(key) || options.unloaded.has(anchor.function_id));
+    anchor.kind !== 'stack' && (options.open.has(key) || options.unloaded.has(anchor.function_id));
   interface Pending {
     root: string;
     id: string;
@@ -317,16 +315,14 @@ export function solveImageTypes(
       id: ids.get(root)!,
       members,
       bounded: members.some((member) =>
-        byKey
-          .get(member)!
-          .anchors.some(({ anchor }) => unexplored(imageAnchorKey(anchor), anchor)),
+        byKey.get(member)!.anchors.some(({ anchor }) => unexplored(imageAnchorKey(anchor), anchor)),
       ),
     });
   classes.sort((a, b) => a.id.localeCompare(b.id));
   const byId = new Map(classes.map((item) => [item.id, item]));
   // A pointee view's members follow its holder's members: an incompletely
   // explored holder leaves its pointees incomplete too.
-  for (let changed = true; changed; ) {
+  for (let changed = true; changed;) {
     changed = false;
     for (const item of classes) {
       if (!item.bounded) continue;

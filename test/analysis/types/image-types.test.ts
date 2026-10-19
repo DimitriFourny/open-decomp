@@ -49,14 +49,22 @@ const classOf = (solution: ImageTypeSolution, key: string) =>
 
 // One caller passes the same pointer to two callees: one object, one name.
 const shared = [
-  object('caller|p', 'caller', [], [
-    { anchor: argument('first'), own: false },
-    { anchor: argument('second'), own: false },
-  ]),
+  object(
+    'caller|p',
+    'caller',
+    [],
+    [
+      { anchor: argument('first'), own: false },
+      { anchor: argument('second'), own: false },
+    ],
+  ),
   object('first|a0', 'first', [word(0n)], [{ anchor: argument('first'), own: true }]),
-  object('second|a0', 'second', [word(8n, 64), word(16n)], [
-    { anchor: argument('second'), own: true },
-  ]),
+  object(
+    'second|a0',
+    'second',
+    [word(8n, 64), word(16n)],
+    [{ anchor: argument('second'), own: true }],
+  ),
 ];
 
 test('views of one pointer flowing to two callees merge into one named layout', () => {
@@ -83,10 +91,15 @@ test('views of one pointer flowing to two callees merge into one named layout', 
 
 test('overlapping incompatible views stay separate and record the conflict', () => {
   const solution = solve([
-    object('caller|p', 'caller', [], [
-      { anchor: argument('first'), own: false },
-      { anchor: argument('second'), own: false },
-    ]),
+    object(
+      'caller|p',
+      'caller',
+      [],
+      [
+        { anchor: argument('first'), own: false },
+        { anchor: argument('second'), own: false },
+      ],
+    ),
     object('first|a0', 'first', [word(0n, 64)], [{ anchor: argument('first'), own: true }]),
     object('second|a0', 'second', [word(4n)], [{ anchor: argument('second'), own: true }]),
   ]);
@@ -114,13 +127,21 @@ test('a flow the callee never uses as an object joins nothing', () => {
 
 test('pointee views of merged members merge as well', () => {
   const solution = solve([
-    object('first|a0', 'first', [{ ...word(0x20n, 64), kind: 'pointer' }], [
-      { anchor: argument('first'), own: true },
-    ], [{ offset: 0x20n, stride: null, object: 'first|q' }]),
+    object(
+      'first|a0',
+      'first',
+      [{ ...word(0x20n, 64), kind: 'pointer' }],
+      [{ anchor: argument('first'), own: true }],
+      [{ offset: 0x20n, stride: null, object: 'first|q' }],
+    ),
     object('first|q', 'first', [word(0n)], []),
-    object('caller|p', 'caller', [{ ...word(0x20n, 64), kind: 'pointer' }], [
-      { anchor: argument('first'), own: false },
-    ], [{ offset: 0x20n, stride: null, object: 'caller|q' }]),
+    object(
+      'caller|p',
+      'caller',
+      [{ ...word(0x20n, 64), kind: 'pointer' }],
+      [{ anchor: argument('first'), own: false }],
+      [{ offset: 0x20n, stride: null, object: 'caller|q' }],
+    ),
     object('caller|q', 'caller', [word(4n)], []),
   ]);
   const pointee = classOf(solution, 'first|q');
@@ -138,9 +159,13 @@ test('pointee views of merged members merge as well', () => {
 test('an incompletely explored flow marks the class and its pointees bounded with a layout digest', () => {
   const objects = [
     ...shared.slice(0, 2),
-    object('second|a0', 'second', [word(8n, 64), { ...word(0x18n, 64), kind: 'pointer' }], [
-      { anchor: argument('second'), own: true },
-    ], [{ offset: 0x18n, stride: null, object: 'second|q' }]),
+    object(
+      'second|a0',
+      'second',
+      [word(8n, 64), { ...word(0x18n, 64), kind: 'pointer' }],
+      [{ anchor: argument('second'), own: true }],
+      [{ offset: 0x18n, stride: null, object: 'second|q' }],
+    ),
     object('second|q', 'second', [word(0n)], []),
   ];
   const complete = solve(objects);

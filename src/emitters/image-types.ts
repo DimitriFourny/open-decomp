@@ -56,11 +56,10 @@ export function renderImageTypeDeclarations(
             )
           : undefined;
       const target = pointee && names.get(pointee.class_id);
-      const spelling = field.kind === 'pointer' && field.width_bits === 64 ? `${target ?? 'void'}*` : type;
+      const spelling =
+        field.kind === 'pointer' && field.width_bits === 64 ? `${target ?? 'void'}*` : type;
       const array =
-        field.offset === last &&
-        field.offset > 0n &&
-        field.stride === BigInt(field.width_bits / 8);
+        field.offset === last && field.offset > 0n && field.stride === BigInt(field.width_bits / 8);
       parts.push(`${spelling} f_${field.offset.toString(16)}${array ? '[]' : ''};`);
       packed ||= field.offset % BigInt(field.width_bits / 8) !== 0n;
       end = field.offset + BigInt(field.width_bits / 8);
@@ -74,12 +73,20 @@ export function renderImageTypeDeclarations(
       ...(item.conflicts.length
         ? [`conflicts with ${item.conflicts.map((id) => classNames.get(id) ?? id).join(', ')}`]
         : []),
-      ...[...new Set(item.fields.flatMap((field) => (field.stride !== null && field.stride !== BigInt(field.width_bits / 8) ? [field.stride] : [])))].map(
-        (stride) => `observed element stride ${stride}; not an allocation extent`,
-      ),
+      ...[
+        ...new Set(
+          item.fields.flatMap((field) =>
+            field.stride !== null && field.stride !== BigInt(field.width_bits / 8)
+              ? [field.stride]
+              : [],
+          ),
+        ),
+      ].map((stride) => `observed element stride ${stride}; not an allocation extent`),
     ];
     lines.push(`/* ${notes.join('; ')} */`);
-    lines.push(`struct ${item.name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`);
+    lines.push(
+      `struct ${item.name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
+    );
   }
   return `${lines.join('\n')}\n`;
 }

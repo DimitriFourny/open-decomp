@@ -1,8 +1,4 @@
-import type {
-  ImageTypeBinding,
-  MemoryShape,
-  SuppliedTypeRecord,
-} from '../analysis/types/index.js';
+import type { ImageTypeBinding, MemoryShape, SuppliedTypeRecord } from '../analysis/types/index.js';
 import { fingerprint, type OperationContext } from '../core/index.js';
 import type { LocalValidationSession } from '../reconstruction/local-validation.js';
 

@@ -41,11 +41,7 @@ import {
   loadFunctionGraph,
   type IndexState,
 } from './scope.js';
-import {
-  executeDecompilation,
-  executeAnnotations,
-  executeImageTypes,
-} from '../analysis/index.js';
+import { executeDecompilation, executeAnnotations, executeImageTypes } from '../analysis/index.js';
 import {
   investigationArtifact,
   investigationItems,

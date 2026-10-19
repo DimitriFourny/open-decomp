@@ -27,7 +27,11 @@ function formalStruct(text: string): { name: string; declaration: string; member
   assert.ok(name, text);
   const declaration = new RegExp(`^struct ${name} \\{.*\\};$`, 'm').exec(text)?.[0];
   assert.ok(declaration, text);
-  return { name, declaration, members: [...declaration.matchAll(/ (f_[0-9a-f]+)/g)].map((m) => m[1]!) };
+  return {
+    name,
+    declaration,
+    members: [...declaration.matchAll(/ (f_[0-9a-f]+)/g)].map((m) => m[1]!),
+  };
 }
 
 test(
@@ -76,7 +80,11 @@ test(
     // The whole-image header declares the same name with the same layout and
     // is valid C on its own.
     const dump = executeImageTypes(
-      { store: p.state.store, context: createOperationContext(), job_id: p.job('function_decompile') },
+      {
+        store: p.state.store,
+        context: createOperationContext(),
+        job_id: p.job('function_decompile'),
+      },
       p.state.store.snapshot().revision,
       p.image,
       1 << 20,

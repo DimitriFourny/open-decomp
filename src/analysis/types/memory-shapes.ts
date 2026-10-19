@@ -421,7 +421,9 @@ export function createAffineResolver(
         }
       for (const [id, expression] of definitions) {
         budget.charge();
-        const block = parameters.get(expression.kind === 'concat' ? (expression.values[0]?.id ?? '') : '')?.block;
+        const block = parameters.get(
+          expression.kind === 'concat' ? (expression.values[0]?.id ?? '') : '',
+        )?.block;
         if (!block || expression.kind !== 'concat') continue;
         const list = loopCandidates.get(block) ?? [];
         list.push({ id, type: { kind: 'integer', bits: 64 } });

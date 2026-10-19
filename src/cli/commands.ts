@@ -306,7 +306,8 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
         process.stdout.write(
           `${JSON.stringify({ project_path: session.projectPath, reused: session.reused, result })}\n`,
         );
-      else if ('data' in result && result.data.view === 'types') process.stdout.write(result.data.text);
+      else if ('data' in result && result.data.view === 'types')
+        process.stdout.write(result.data.text);
     } else {
       const result = await session.decompile(parsed.selector!, {
         ...(parsed.emitter === undefined ? {} : { emitter: parsed.emitter }),
