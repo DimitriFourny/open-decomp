@@ -615,6 +615,12 @@ export function planSource(
       target: callee.target,
       result_types:
         callee.return_types ?? callee.returns.map((register) => integer(register.width_bits)),
+      ...(view === 'source' &&
+      callee.returns_void &&
+      !callee.returns.length &&
+      callee.parameter_state !== 'ambiguous'
+        ? { result_void: true as const }
+        : {}),
       boundary: {
         kind: callee.parameter_state === 'ambiguous' || args.missing ? 'physical' : 'inferred',
         signature: null,
@@ -1228,7 +1234,11 @@ export function planSource(
         });
     }
   }
-  if (!functionSignature && tails.size) {
+  // Tails into proven-void callees contribute no result; the renderer declares
+  // the function void only when no return path yields one either.
+  if (!functionSignature && tails.size && [...tails.values()].every((tail) => tail.result_void))
+    returnType = null;
+  else if (!functionSignature && tails.size) {
     const types = [...tails.values()].map((tail) =>
       tail.result_types.length === 1 ? tail.result_types[0]! : null,
     );

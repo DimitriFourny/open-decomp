@@ -366,6 +366,7 @@ export function objcSourceFacts(input: {
       parameter_types,
       returns,
       return_types,
+      ...(typed && parsed?.returns.role === 'void' ? { returns_void: true as const } : {}),
       parameter_state: 'observed',
       argument_list_complete: false,
       ...(variadic

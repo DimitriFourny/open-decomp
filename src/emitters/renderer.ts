@@ -3293,6 +3293,14 @@ export class Renderer {
       : operation;
   }
 
+  /** A tail transfer returns its callee's result; a proven-void callee is a
+   * call statement followed by a plain return. */
+  private tailStatement(depth: number, call: string, empty: boolean): void {
+    if (!empty) return this.writer.statement(depth, `return ${call}`);
+    this.writer.statement(depth, call);
+    this.writer.statement(depth, 'return');
+  }
+
   /** Message receiver text: a class-reference load (through same-width bitcasts,
    * inline or as its SSA local) names its class; otherwise the printed operand,
    * parenthesized in Python unless it is a plain name or attribute path. */
@@ -5945,18 +5953,16 @@ export class Renderer {
               return this.objcLiteral(value) ?? this.valueLiteral(value)?.text ?? this.value(value);
             });
             ids.push(control.target.id);
-            this.writer.statement(
-              depth,
-              `return ${this.guarded(
-                objcMessageText(
-                  this.language,
-                  message,
-                  this.objcReceiver(tail.boundary.arguments[0]!, printed[0]!),
-                  printed.slice(skip),
-                  [],
-                ),
-              )}`,
+            const sent = this.guarded(
+              objcMessageText(
+                this.language,
+                message,
+                this.objcReceiver(tail.boundary.arguments[0]!, printed[0]!),
+                printed.slice(skip),
+                [],
+              ),
             );
+            this.tailStatement(depth, sent, tail.result_void === true);
             break;
           }
           const key = this.addressKey(tail.target),
@@ -5992,7 +5998,11 @@ export class Renderer {
             `Native tail transfer to ${this.writer.quote(key)} using observed ${this.input.source!.abi.id} storage. Preserve unknown target effects and forward its actual results. An absent observed result layout is unknown, not void.`,
           );
           ids.push(control.target.id);
-          this.writer.statement(depth, `return ${name}(${this.writer.join(arguments_)})`);
+          this.tailStatement(
+            depth,
+            `${name}(${this.writer.join(arguments_)})`,
+            tail.result_void === true,
+          );
           break;
         }
         const args: string[] = [];
@@ -6356,11 +6366,19 @@ export class Renderer {
       this.declaredTypes.set(value.id, type);
       parameters.push({ value, type, name });
     }
-    let hasTailCall = false;
+    // A tail into a proven-void callee yields no result: with no returned value
+    // on any other path the function is void, not of unknown result.
+    let hasTailCall = false,
+      voidTail = false;
     for (const block of this.program.blocks.values()) {
       this.context.checkpoint(1);
-      if (block.control.kind === 'indirect' && block.control.tail_call) hasTailCall = true;
+      if (block.control.kind !== 'indirect' || !block.control.tail_call) continue;
+      if (this.program.tails.get(block.control.id)?.result_void) voidTail = true;
+      else hasTailCall = true;
     }
+    if (voidTail)
+      for (const projection of this.program.returns.values())
+        if (projection.results.length || projection.kind === 'physical') hasTailCall = true;
     let returnType = signature
       ? this.sourceType(signature.signature.return_type)
       : this.program.source
