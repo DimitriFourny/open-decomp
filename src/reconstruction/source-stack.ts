@@ -58,6 +58,23 @@ export function planSourceStack(
       row.push(copy.source);
       incoming.set(copy.destination.id, row);
     }
+  // The value whose low-to-high extracts `parts` tile exactly, or null.
+  const recombined = (parts: readonly Value[]): Value | null => {
+    let base: Value | null = null,
+      width = 0;
+    for (const part of parts) {
+      const expression = expressions.get(part.id);
+      if (
+        expression?.kind !== 'extract' ||
+        expression.offset !== width ||
+        (base !== null && base.id !== expression.value.id)
+      )
+        return null;
+      base = expression.value;
+      width += bitWidth(part.type);
+    }
+    return base && width === bitWidth(base.type) ? base : null;
+  };
   let changed = true;
   while (changed) {
     changed = false;
@@ -67,7 +84,11 @@ export function planSourceStack(
       let offset: bigint | undefined;
       if (expression.kind === 'cast' && expression.op === 'bitcast')
         offset = addresses.get(expression.value.id);
-      else if (
+      else if (expression.kind === 'concat') {
+        // Register-cell halves of one value, recombined in order, are that value.
+        const whole = recombined(expression.values);
+        if (whole) offset = addresses.get(whole.id);
+      } else if (
         expression.kind === 'integer' &&
         (expression.op === 'add' || expression.op === 'sub')
       ) {
@@ -183,7 +204,11 @@ export function planSourceStack(
   const expose = (value: Value): void => {
     if (!tainted.has(value.id)) return;
     saveEscaped = true;
-    const offset = addresses.get(value.id);
+    // A register-cell half of a frame address hands over that address.
+    const expression = expressions.get(value.id),
+      offset =
+        addresses.get(value.id) ??
+        (expression?.kind === 'extract' ? addresses.get(expression.value.id) : undefined);
     if (offset === undefined) frameExposed = true;
     else exposedOffsets.add(offset);
   };
