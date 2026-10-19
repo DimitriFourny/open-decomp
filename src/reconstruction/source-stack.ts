@@ -201,16 +201,39 @@ export function planSourceStack(
     saveEscaped = view !== 'source',
     frameExposed = saveEscaped;
   const exposedOffsets = new Set<bigint>();
+  // Known frame offsets of every address a tainted value is derived from (cell
+  // halves, indexed/phi'd pointers, pointers spilled to the frame and reloaded),
+  // or null when some tainted leaf has no known origin.
+  const baseOffsets = (start: Value): bigint[] | null => {
+    const bases = new Set<bigint>(),
+      seen = new Set<string>(),
+      pending = [start];
+    while (pending.length) {
+      context.checkpoint(1);
+      const value = pending.pop()!;
+      if (seen.has(value.id) || !tainted.has(value.id)) continue;
+      seen.add(value.id);
+      const offset = addresses.get(value.id);
+      if (offset !== undefined) {
+        bases.add(offset);
+        continue;
+      }
+      const expression = expressions.get(value.id);
+      if (expression) pending.push(...expressionOperands(expression));
+      else {
+        const sources = incoming.get(value.id) ?? memoryDependencies.get(value.id);
+        if (!sources?.length) return null;
+        pending.push(...sources);
+      }
+    }
+    return [...bases];
+  };
   const expose = (value: Value): void => {
     if (!tainted.has(value.id)) return;
     saveEscaped = true;
-    // A register-cell half of a frame address hands over that address.
-    const expression = expressions.get(value.id),
-      offset =
-        addresses.get(value.id) ??
-        (expression?.kind === 'extract' ? addresses.get(expression.value.id) : undefined);
-    if (offset === undefined) frameExposed = true;
-    else exposedOffsets.add(offset);
+    const bases = baseOffsets(value);
+    if (bases) for (const offset of bases) exposedOffsets.add(offset);
+    else frameExposed = true;
   };
   const abi = input.source!.abi;
   const preservedRoot = (root: string): boolean =>
@@ -320,8 +343,10 @@ export function planSourceStack(
         escaped = true;
         expose(node.value);
       }
-      if (offset === undefined && tainted.has(node.address.id))
-        escaped = saveEscaped = frameExposed = true;
+      if (offset === undefined && tainted.has(node.address.id)) {
+        escaped = true;
+        expose(node.address);
+      }
       if (offset === undefined || width % 8) continue;
       const end = offset + BigInt(width / 8);
       accesses.push({ node, block: block.id, offset, end, key: `${offset}:${end}` });
@@ -768,7 +793,7 @@ export function planSourceStack(
       validation.requireAbi(
         'frame_save',
         [exits[0]!.control.id, ...saveStores],
-        'Frame save/restore elision assumes ABI conformance: callees preserve callee-saved registers and never write their caller’s frame outside outgoing argument storage, and the saved slots are not stack arguments. Each hidden store and reload remains in the checked view and the original mappings.',
+        'Frame save/restore elision assumes ABI conformance: callees preserve callee-saved registers and never write their caller’s frame outside outgoing argument storage, the saved slots are not stack arguments, and a frame address handed to a callee (or indexed from) designates its own object, never a save slot. Each hidden store and reload remains in the checked view and the original mappings.',
       );
   }
   // Source view: a non-volatile frame load dominated by a store covering its
