@@ -57,6 +57,7 @@ import {
   nativeDependencyWorklist,
   type NativeInterface,
   type NativeSummary,
+  type NativeSummaryCapacity,
 } from './native-worklist.js';
 import {
   nativeCallInputs,
@@ -824,7 +825,10 @@ export function nativeSelectedNodes(ir: SSAForm): number {
 }
 
 /** Dependency capacity left after the selected body; part of the cache identity. */
-export function nativeCapacity(input: SourceFactsInput, context: OperationContext) {
+export function nativeCapacity(
+  input: SourceFactsInput,
+  context: OperationContext,
+): NativeSummaryCapacity {
   return {
     nodes: context.budget.ir_nodes - nativeSelectedNodes(input.ir),
     blocks: context.budget.blocks - input.ir.blocks.length,
@@ -848,7 +852,7 @@ export function nativeLibraryContracts(input: SourceFactsInput): SuppliedCallCon
 /** The per-image prepared-unit cache for this exact request identity. */
 export function nativeUnitCache(
   input: SourceFactsInput,
-  capacity: ReturnType<typeof nativeCapacity>,
+  capacity: NativeSummaryCapacity,
   context: OperationContext,
 ): NativeUnitCache {
   const { components, image, revision } = input,
