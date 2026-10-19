@@ -278,16 +278,16 @@ for (const fixture of [
       assert.ok(!/cache|entity_/.test(head!), head);
       const handle = head!.slice(head!.lastIndexOf(' ') + 1);
       assert.ok(artifact.id.startsWith(handle));
-      const viaHandle = (
-        await call('function_get', {
-          ...scope,
-          function_id: fn.id,
-          view: 'investigation',
-          artifact_id: handle,
-        })
-      ).result;
-      assert.ok('data' in viaHandle && viaHandle.data.view === 'investigation');
-      assert.equal(viaHandle.data.artifact_id, artifact.id);
+      // A short handle selects the same artifact; the investigation text is a projection, so the
+      // structured result carries the resolved full ID.
+      const viaHandle = await client.callTool({
+        name: 'function_get',
+        arguments: { ...scope, function_id: fn.id, view: 'investigation', artifact_id: handle },
+      });
+      assert.ok(!viaHandle.isError, JSON.stringify(viaHandle.content));
+      const investigated = toolSchemas.function_get.output.parse(viaHandle.structuredContent);
+      assert.ok('data' in investigated && investigated.data.view === 'investigation');
+      assert.equal(investigated.data.artifact_id, artifact.id);
       const limited = await call('function_decompile', {
         ...scope,
         function_id: fn.id,
