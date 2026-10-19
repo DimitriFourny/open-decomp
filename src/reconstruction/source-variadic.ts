@@ -30,9 +30,14 @@ export function planVariadicStackArguments(
   const source = input.source,
     stack = input.types?.calls?.stack;
   if (source?.abi.id !== 'darwin-arm64' || stack?.state !== 'complete') return consumed;
-  const callees = new Map(
-    source.callees.flatMap((callee) => (callee.variadic_stack ? [[callee.call_id, callee]] : [])),
+  // Source-view refinements (e.g. a known variadic Objective-C selector) replace
+  // the observed record of the same call.
+  const inferred = new Map(
+    [...source.callees, ...(source.source_callees ?? [])].map(
+      (callee) => [callee.call_id, callee] as const,
+    ),
   );
+  const callees = new Map([...inferred].filter(([, callee]) => callee.variadic_stack));
   if (!callees.size) return consumed;
   // The stack analysis treats a live frame pointer at any call as an escape.
   // Under ABI conformance (recorded with each rewrite) callees use preserved
@@ -84,7 +89,6 @@ export function planVariadicStackArguments(
   // consumed store must be visible at no such boundary but its own call. Only
   // an observed callee without stack inputs, or an established complete
   // non-variadic register-only contract, is known not to read those bytes.
-  const inferred = new Map(source.callees.map((callee) => [callee.call_id, callee]));
   const stackContracts = new Set(
     (input.types?.calls?.calls ?? []).flatMap((call) =>
       call.contracts.some(

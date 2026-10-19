@@ -6,7 +6,8 @@ import type { RuntimeLimits, RuntimeMetadata } from './model.js';
 export type { RuntimeKind, RuntimeRecord, RuntimeMetadata, RuntimeLimits } from './model.js';
 
 /** Static Mach-O ARM64 metadata only: Objective-C class/metaclass/category,
- * protocol/adoption, absolute/relative methods, ivars and selector/class refs;
+ * protocol/adoption, absolute/relative methods, ivars, selector/class refs,
+ * `__objc_stubs` selector stubs and `__cfstring` constant strings;
  * Swift module/extension/protocol/nominal contexts and field/enum descriptors.
  * Runtime method targets must independently be readable executable ARM64 code.
  * Declarations, pointer slots and metadata objects never become callable entries.
@@ -37,7 +38,9 @@ export function recoverRuntimeMetadata(
       if (
         section.kind === 'section' &&
         section.virtual_range.size > 0n &&
-        (ObjCRecovery.sections.has(section.name) || SwiftRecovery.sections.has(section.name))
+        (ObjCRecovery.sections.has(section.name) ||
+          ObjCRecovery.auxiliary.has(section.name) ||
+          SwiftRecovery.sections.has(section.name))
       )
         present = true;
     }
