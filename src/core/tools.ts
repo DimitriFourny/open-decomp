@@ -336,7 +336,11 @@ export const functionGetArgsSchema = z
     ...requestContext,
     function_id: entityIdSchema,
     view: z.enum(['metadata', 'disassembly', 'cfg', 'investigation']).default('metadata'),
-    artifact_id: artifactSchema.shape.id.optional(),
+    // The published ID, or a unique `artifact_<12+ hex>` prefix of it (what MCP headers print).
+    artifact_id: z
+      .string()
+      .regex(/^artifact_[0-9a-f]{12,64}$/)
+      .optional(),
     subject_id: entityIdSchema.optional(),
     kinds: z
       .array(

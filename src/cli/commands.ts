@@ -57,7 +57,8 @@ function diagnostic(item: WireDiagnostic, count = 1): void {
       );
   }
 }
-/** One line per distinct diagnostic, in first-seen order, with its occurrence count. */
+/** One line per distinct caveat (`caveats`: counts, name lists for partial callee summaries,
+ * no info diagnostics; `--json` keeps every diagnostic). Slice choices list their candidates. */
 function report(result: AnalysisResult, operation: string): void {
   const all = [...result.diagnostics];
   if (
@@ -67,7 +68,12 @@ function report(result: AnalysisResult, operation: string): void {
     )
   )
     all.push(result.error);
-  for (const { diagnostic: item, count } of distinctDiagnostics(all)) diagnostic(item, count);
+  const choices = all.filter((item) => item.details?.kind === 'slice_selection');
+  for (const { diagnostic: item, count } of distinctDiagnostics(choices)) diagnostic(item, count);
+  for (const { severity, code, text } of caveats(
+    all.filter((item) => item.details?.kind !== 'slice_selection'),
+  ))
+    process.stderr.write(`${severity}: ${terminal(code)}: ${terminal(text)}\n`);
   if (result.state === 'partial')
     process.stderr.write(`warning: ${operation}: partial (${result.reason})\n`);
   else if (result.state !== 'complete' && result.state !== 'empty')
