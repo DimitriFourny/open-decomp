@@ -14,6 +14,7 @@ import {
   type DataType,
   type Expression,
   type Instruction,
+  type RegisterBinding,
   type SSAForm,
 } from '../../ir/index.js';
 import { preparedCallArguments } from '../../analysis/calls/argument-preparation.js';
@@ -112,27 +113,48 @@ export function objcSourceFacts(input: {
     return undefined;
   };
   const used = new Map<bigint, NonNullable<SourceAddress['objc']>>();
+  const note = (value: bigint | undefined): void => {
+    const fact = value === undefined ? undefined : objcAddress(value);
+    if (value === undefined || !fact) return;
+    used.set(value, fact);
+    const source =
+      index.strings.get(value) ?? index.selector_refs.get(value) ?? index.class_refs.get(value);
+    if (source) cite(source);
+  };
   for (const block of ir.blocks)
     for (const node of block.instructions) {
-      if (node.kind !== 'assign' || node.result.type.kind !== 'integer') continue;
-      if (node.result.type.bits !== image.target.address_bits) continue;
-      const value = constant(node.result);
-      const fact = value === undefined ? undefined : objcAddress(value);
-      if (value !== undefined && fact) {
-        used.set(value, fact);
-        const source =
-          index.strings.get(value) ?? index.selector_refs.get(value) ?? index.class_refs.get(value);
-        if (source) cite(source);
+      if (node.kind === 'assign' && node.result.type.kind === 'integer')
+        if (node.result.type.bits === image.target.address_bits) note(constant(node.result));
+      if (node.kind !== 'call') continue;
+      // A call input may be bound as several constant register cells.
+      const roots = new Map<string, { bits: bigint; width: number } | null>();
+      for (const binding of node.register_inputs) {
+        const prior = roots.get(binding.register.root);
+        const bits = constant(binding.value);
+        if (prior === null) continue;
+        roots.set(
+          binding.register.root,
+          bits === undefined
+            ? null
+            : {
+                bits: (prior?.bits ?? 0n) | (bits << BigInt(binding.register.offset_bits)),
+                width: (prior?.width ?? 0) + binding.register.width_bits,
+              },
+        );
       }
+      for (const cell of roots.values())
+        if (cell && cell.width === image.target.address_bits) note(cell.bits);
     }
+  const annotated = new Set<bigint>();
   const addresses = input.addresses.map((item) => {
     const fact = item.address.space === 'va' ? used.get(item.address.value) : undefined;
     if (!fact) return item;
-    used.delete(item.address.value);
+    annotated.add(item.address.value);
     return { ...item, objc: fact };
   });
   for (const [value, fact] of used)
-    addresses.push({ address: { image_id: image.id, space: 'va', value }, objc: fact });
+    if (!annotated.has(value))
+      addresses.push({ address: { image_id: image.id, space: 'va', value }, objc: fact });
 
   const callIndex = nativeCallIndex(image, input.functions, input.references, context);
   const registers = (type: AbiType, count: number): RegisterDescriptor[] =>
@@ -196,7 +218,10 @@ export function objcSourceFacts(input: {
       parameters.push({ ...location.register, width_bits: bitWidth(type) });
       parameter_types.push(type);
     }
-    if (returns === null) return { parameters, parameter_types, returns: null, return_types: null };
+    // Darwin does not define the upper bits of a sub-32-bit result register;
+    // such results keep their observed storage instead of a narrowed type.
+    if (returns === null || (returns.kind === 'integer' && returns.bits < 32))
+      return { parameters, parameter_types, returns: null, return_types: null };
     if (returns.kind === 'void') return { parameters, parameter_types, returns: [], return_types: [] };
     const type = scalar(returns),
       location = classified.returns.length === 1 ? classified.returns[0] : undefined;
@@ -214,8 +239,8 @@ export function objcSourceFacts(input: {
       return_types: [type],
     };
   };
-  const selectorOf = (call: CallNode): ObjCFact | undefined => {
-    const binding = call.register_inputs.find(
+  const selectorOf = (inputs: readonly RegisterBinding[]): ObjCFact | undefined => {
+    const binding = inputs.find(
       (item) =>
         item.register.root === selectorRegister.root &&
         item.register.offset_bits === 0 &&
@@ -229,20 +254,49 @@ export function objcSourceFacts(input: {
 
   const messages = new Map<string, ObjCMessage>();
   const callees: InferredCallee[] = [];
-  for (const call of calls) {
+  // Calls and tail transfers with a constant direct target.
+  const sites: {
+    readonly id: string;
+    readonly target: bigint;
+    readonly inputs: readonly RegisterBinding[];
+    readonly call?: CallNode;
+    readonly evidence_ids: readonly string[];
+  }[] = [];
+  for (const call of calls)
+    if (call.target.kind === 'direct' && call.target.address.image_id === image.id)
+      sites.push({
+        id: call.id,
+        target: call.target.address.value,
+        inputs: call.register_inputs,
+        call,
+        evidence_ids: call.provenance.evidence_ids,
+      });
+  for (const block of ir.blocks) {
+    const control = block.terminator;
+    if (control.kind !== 'indirect' || !control.tail_call) continue;
+    const target = constant(control.target);
+    const exit = ir.register_states.find((row) => row.block === block.id)?.exit;
+    if (target !== undefined && exit)
+      sites.push({
+        id: control.id,
+        target,
+        inputs: exit,
+        evidence_ids: control.provenance.evidence_ids,
+      });
+  }
+  for (const site of sites) {
     context.checkpoint(1);
-    if (call.target.kind !== 'direct' || call.target.address.image_id !== image.id) continue;
-    const target = call.target.address.value;
+    const target = site.target;
     const imported = callIndex.imports_by_address.get(`${image.id}:va:${target}`) ?? [];
     const name = imported.length === 1 ? imported[0]!.original_name : null;
     const runtime = name ? RUNTIME_MESSAGES[name] : undefined;
     if (runtime) {
-      messages.set(call.id, { ...runtime, form: 'runtime', variadic: false });
+      if (site.call) messages.set(site.id, { ...runtime, form: 'runtime', variadic: false });
       continue;
     }
     const stub = index.stubs.get(target);
     const dispatcher = name ? DISPATCHERS[name] : undefined;
-    const fact = stub ?? (dispatcher ? selectorOf(call) : undefined);
+    const fact = stub ?? (dispatcher ? selectorOf(site.inputs) : undefined);
     if (!fact) continue;
     const selector = fact.name,
       arity = selectorArity(selector),
@@ -256,6 +310,9 @@ export function objcSourceFacts(input: {
             parsed.returns.abi,
           )
         : null;
+    // Without a type encoding a tail transfer has no caller preparation to
+    // check argument classes against; only a keyword-free selector qualifies.
+    if (!site.call && !typed && arity > 0) continue;
     const interface_ =
       typed ??
       layout(
@@ -271,16 +328,19 @@ export function objcSourceFacts(input: {
       ? interface_.parameter_types.filter((_, index) => index !== 1)
       : interface_.parameter_types;
     const expected = new Set(parameters.map((register) => register.root));
-    const extra = call.register_inputs.some(
-      (binding) =>
-        !expected.has(binding.register.root) &&
-        (integerArguments.some((register) => register.root === binding.register.root) ||
-          floatArguments.some((register) => register.root === binding.register.root)) &&
-        !(stub && binding.register.root === selectorRegister.root) &&
-        prepared(call, binding),
-    );
+    const call = site.call;
+    const extra =
+      call !== undefined &&
+      call.register_inputs.some(
+        (binding) =>
+          !expected.has(binding.register.root) &&
+          (integerArguments.some((register) => register.root === binding.register.root) ||
+            floatArguments.some((register) => register.root === binding.register.root)) &&
+          !(stub && binding.register.root === selectorRegister.root) &&
+          prepared(call, binding),
+      );
     if (extra) continue;
-    const observed = input.callees.get(call.id);
+    const observed = input.callees.get(site.id);
     let returns = interface_.returns,
       return_types = interface_.return_types;
     if (returns === null || return_types === null) {
@@ -297,18 +357,20 @@ export function objcSourceFacts(input: {
       }
     }
     if (dispatcher !== 'super')
-      messages.set(call.id, { selector, form: stub ? 'stub' : 'send', variadic });
+      messages.set(site.id, { selector, form: stub ? 'stub' : 'send', variadic });
     callees.push({
-      call_id: call.id,
-      target: call.target.address,
+      call_id: site.id,
+      target: { image_id: image.id, space: 'va', value: target },
       parameters,
       parameter_types,
       returns,
       return_types,
       parameter_state: 'observed',
       argument_list_complete: false,
-      ...(variadic ? {} : { argument_list_closure: 'objc_selector' as const }),
-      evidence_ids: [...cite(fact), ...call.provenance.evidence_ids],
+      ...(variadic
+        ? { variadic_stack: true as const }
+        : { argument_list_closure: 'objc_selector' as const }),
+      evidence_ids: [...cite(fact), ...site.evidence_ids],
     });
   }
 

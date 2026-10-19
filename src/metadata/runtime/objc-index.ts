@@ -92,6 +92,25 @@ export function objcImageIndex(
       methods.set(record.target.value, list);
     }
   }
+  // A bound `_OBJC_CLASS_$_Name` slot (e.g. in __got) holds that class object,
+  // exactly as a __objc_classrefs slot does; metaclass slots are not classes.
+  const imageEvidence = new Map(image.evidence.map((item) => [item.id, item]));
+  const slots = new Map<bigint, ObjCFact | null>();
+  for (const imported of image.imports) {
+    context.checkpoint(1);
+    const name = imported.original_name;
+    if (!imported.slot || !name?.startsWith('_OBJC_CLASS_$_')) continue;
+    const location = image.address_map.translate(imported.slot, 'va');
+    if (location.kind !== 'mapped') continue;
+    const at = location.address.value,
+      prior = slots.get(at),
+      fact = {
+        name: name.slice('_OBJC_CLASS_$_'.length),
+        evidence: imported.evidence_ids.flatMap((id) => imageEvidence.get(id) ?? []),
+      };
+    slots.set(at, prior === undefined || prior?.name === fact.name ? fact : null);
+  }
+  for (const [at, fact] of slots) if (fact && !class_refs.has(at)) class_refs.set(at, fact);
   const index =
     metadata.state === 'absent'
       ? null
