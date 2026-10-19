@@ -8,6 +8,8 @@ export interface ObservedMember {
   readonly bits: number;
   readonly size: bigint;
   readonly count?: bigint | null;
+  /** Declared source member name (Objective-C ivar), when the record has one. */
+  readonly name?: string;
 }
 
 /** Names and layouts are presentation views, never allocation/sizeof evidence. */
@@ -191,15 +193,21 @@ export class SourceStructs {
     return this.images.get(id);
   }
 
-  /** Image-wide names come from merged image types; any other structure is
-   * named by a digest of its layout, never by a per-function ordinal, so one
-   * name never denotes two different layouts. */
+  /** A declared tag (an Objective-C class) names its structure; image-wide names
+   * come from merged image types; any other structure is named by a digest of
+   * its layout, never by a per-function ordinal, so one name never denotes two
+   * different layouts. */
   name(id: string): string {
     const previous = this.names.get(id);
     if (previous) return previous;
+    const record = this.records.get(id);
+    const tag =
+      record?.definition.kind === 'structure' && record.spelling && /^[A-Za-z_$][\w$]*$/.test(record.spelling)
+        ? record.spelling
+        : undefined;
     const image = this.images.get(id)?.name;
-    const key = this.records.get(id)?.source === 'analysis' ? this.key(id) : `declared:${id}`;
-    let name = image ?? this.canonical.get(key);
+    const key = record?.source === 'analysis' ? this.key(id) : `declared:${id}`;
+    let name = tag ?? image ?? this.canonical.get(key);
     if (!name) {
       name = `struct_${fingerprint(key).slice(0, 6)}`;
       this.canonical.set(key, name);
@@ -273,6 +281,7 @@ export class SourceStructs {
         bits: storage.bits,
         size,
         ...(array ? { count: array.count } : {}),
+        ...(record.member_names && /^[A-Za-z_$][\w$]*$/.test(field.name) ? { name: field.name } : {}),
       });
       end = field.offset + size;
     }

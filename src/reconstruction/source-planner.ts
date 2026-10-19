@@ -813,6 +813,10 @@ export function planSource(
   const physicalEntry = new Set(entry.register_entry.map((binding) => binding.value.id));
   parameters.push(...entry.parameters.filter((value) => !physicalEntry.has(value.id)));
   const declaredFunction = signatureFor(input.function.id);
+  // An established void interface returns nothing on any path: a tail transfer
+  // forwards no result even when its callee's interface is unresolved.
+  if (view === 'source' && declaredFunction?.declaration.returns.kind === 'void')
+    for (const [id, tail] of tails) tails.set(id, { ...tail, result_void: true });
   const declaredLayout = declaredFunction ? abi.classifyCall(declaredFunction.declaration) : null;
   let functionSignature: { signature: SignatureAssociation; declaration: AbiSignature } | null =
     null;

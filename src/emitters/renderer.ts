@@ -2572,9 +2572,10 @@ export class Renderer {
       if (!node) return null;
       this.memberPointers.set(node, member.typeId);
     }
+    const field = member.name ?? `f_${member.offset.toString(16)}`;
     let access = indexedStruct
-      ? `${baseText}[${this.value(index!)}].f_${member.offset.toString(16)}`
-      : `${baseText}->f_${member.offset.toString(16)}`;
+      ? `${baseText}[${this.value(index!)}].${field}`
+      : `${baseText}->${field}`;
     if (member.count !== undefined) {
       const displacement = (offset - member.offset) / BigInt(member.bits / 8);
       const subscript = index
@@ -2692,7 +2693,7 @@ export class Renderer {
                 : '__uint128_t'
               : this.sourceType(member.typeId);
         const array = member.count === undefined ? '' : `[${member.count ?? ''}]`;
-        parts.push(`${spelling} f_${member.offset.toString(16)}${array};`);
+        parts.push(`${spelling} ${member.name ?? `f_${member.offset.toString(16)}`}${array};`);
         packed ||= member.offset % BigInt(member.bits / 8) !== 0n;
         end = member.offset + member.size;
       }
@@ -2703,13 +2704,16 @@ export class Renderer {
         this.writer.comment(0, `observed access stride ${stride}; not an allocation extent`);
       }
       const image = this.sourceStructs.image(id);
+      const runtime = this.typeRecords.get(id)?.source === 'runtime';
       this.writer.comment(
         0,
-        `observed members only; size unknown${
-          image && image.functions > 1
-            ? `; merged from ${image.functions} functions${image.state === 'bounded' ? ' (flows partly explored)' : ''}`
-            : ''
-        }${image?.conflicts.length ? `; conflicts with ${image.conflicts.join(', ')}` : ''}`,
+        runtime
+          ? 'Objective-C ivars at their static offsets (class metadata); isa/unrepresentable members are gaps; size unknown'
+          : `observed members only; size unknown${
+              image && image.functions > 1
+                ? `; merged from ${image.functions} functions${image.state === 'bounded' ? ' (flows partly explored)' : ''}`
+                : ''
+            }${image?.conflicts.length ? `; conflicts with ${image.conflicts.join(', ')}` : ''}`,
       );
       this.writer.line(
         0,
@@ -3271,6 +3275,16 @@ export class Renderer {
           : objcCandidate !== undefined)
       )
         return this.local(operandValue);
+      // A message operand read from a declared pointer member or typed global is
+      // that lvalue itself: message syntax needs no integer conversion.
+      const loaded =
+        objcCandidate && literal === undefined && this.sourceView
+          ? this.inlined.get(operandValue.id)?.node
+          : undefined;
+      if (loaded?.kind === 'load' && this.inline.has(operandValue.id)) {
+        const storage = this.storage(loaded);
+        if (this.memberPointers.has(loaded.id) || this.typedPointerGlobal(loaded.id)) return storage;
+      }
       const text = pointer
         ? (literal ?? this.sourceAddressValue(value, !this.sourceView))
         : (literal ?? this.value(value));

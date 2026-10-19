@@ -2,7 +2,7 @@ import type { AbiType } from '../../core/index.js';
 
 /** Source role of one Objective-C type-encoding element; `object`, `class` and
  * `selector` are pointer-width references (`id`, `Class`, `SEL`). */
-export type ObjCTypeRole = 'object' | 'class' | 'selector' | 'pointer' | 'bool' | 'scalar' | 'void';
+export type ObjCTypeRole = 'object' | 'class' | 'selector' | 'string' | 'pointer' | 'bool' | 'scalar' | 'void';
 export interface ObjCEncodedType {
   readonly abi: AbiType;
   readonly role: ObjCTypeRole;
@@ -35,6 +35,27 @@ const OPEN: Record<string, string> = { '{': '}', '(': ')', '[': ']' };
  * and unknown elements return null rather than a guessed layout; the encoding
  * cannot express variadic methods, so callers decide arity separately. */
 export function parseObjCMethodType(encoding: string): ObjCMethodType | null {
+  const elements = parseObjCElements(encoding);
+  const returns = elements?.[0];
+  const parameters = elements?.slice(1) ?? [];
+  if (
+    !returns ||
+    parameters.some((parameter) => parameter.role === 'void') ||
+    parameters.length < 2 ||
+    parameters[0]!.abi.kind !== 'pointer' ||
+    parameters[1]!.role !== 'selector'
+  )
+    return null;
+  return { returns, parameters };
+}
+
+/** One supported scalar/pointer element (an ivar type encoding), or null. */
+export function parseObjCType(encoding: string): ObjCEncodedType | null {
+  const elements = parseObjCElements(encoding);
+  return elements?.length === 1 && elements[0]!.role !== 'void' ? elements[0]! : null;
+}
+
+function parseObjCElements(encoding: string): ObjCEncodedType[] | null {
   let at = 0;
   const skipDigits = (): void => {
     while (at < encoding.length && /[0-9-]/.test(encoding[at]!)) at++;
@@ -87,27 +108,19 @@ export function parseObjCMethodType(encoding: string): ObjCMethodType | null {
       result = { abi: { kind: 'pointer' }, role: 'object' };
     } else if (head === '#') result = { abi: { kind: 'pointer' }, role: 'class' };
     else if (head === ':') result = { abi: { kind: 'pointer' }, role: 'selector' };
-    else if (head === '*') result = { abi: { kind: 'pointer' }, role: 'pointer' };
+    else if (head === '*') result = { abi: { kind: 'pointer' }, role: 'string' };
     else if (head === '^') result = skip() ? { abi: { kind: 'pointer' }, role: 'pointer' } : null;
     else if (SCALARS[head]) result = { abi: SCALARS[head], role: 'scalar' };
     if (result) skipDigits();
     return result;
   };
-  const returns = element();
-  if (!returns) return null;
-  const parameters: ObjCEncodedType[] = [];
+  const elements: ObjCEncodedType[] = [];
   while (at < encoding.length) {
-    const parameter = element();
-    if (!parameter || parameter.role === 'void') return null;
-    parameters.push(parameter);
+    const item = element();
+    if (!item) return null;
+    elements.push(item);
   }
-  if (
-    parameters.length < 2 ||
-    parameters[0]!.abi.kind !== 'pointer' ||
-    parameters[1]!.role !== 'selector'
-  )
-    return null;
-  return { returns, parameters };
+  return elements;
 }
 
 /** Number of keyword arguments a selector names (its colon count). */
