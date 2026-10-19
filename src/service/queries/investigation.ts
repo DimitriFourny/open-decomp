@@ -142,7 +142,10 @@ export function investigationArtifact(
     cursor = page.next_cursor ?? undefined;
   } while (cursor);
   if (!artifact)
-    return queryFailure('not_found', 'Published artifact is absent from this exact function snapshot');
+    return queryFailure(
+      'not_found',
+      'Published artifact is absent from this exact function snapshot',
+    );
   const payload = readAnalysisArtifact(scope.store, artifact, scope.context);
   const identity = payload.identity;
   if (

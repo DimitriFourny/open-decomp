@@ -304,8 +304,10 @@ class Parser {
       ? /^(?<name>\w+) = memory_view\((?<address>0x[\da-f]+), "uint(?<bits>\d+)_t", (?:True|False)\)(?:  # .*)?$/gm
       : /extern (?:const )?uint(?<bits>\d+)_t (?<name>\w+)(?:\[\])?;(?: \/\* (?:VA (?<address>0x[\da-f]+))?[^*]*\*\/)?/g;
     for (const match of text.matchAll(declarations)) {
-      const { name, bits: width, address: stated } = match.groups!;
-      const spelled = /^data_([\da-f]+)$/.exec(name!)?.[1];
+      const name = match.groups!['name']!,
+        width = match.groups!['bits']!,
+        stated = match.groups!['address'];
+      const spelled = /^data_([\da-f]+)$/.exec(name)?.[1];
       assert.ok(stated !== undefined || spelled !== undefined, `No address for ${name}`);
       const address = BigInt(stated ?? `0x${spelled}`),
         bits = Number(width);
