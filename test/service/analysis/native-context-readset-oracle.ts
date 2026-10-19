@@ -111,7 +111,7 @@ try {
       facts.memory_transfers?.flatMap((transfer) => transfer.parameter_shape.fields) ?? [];
     assert.ok(fields.some((field) => field.offset === 0n && field.width_bits === 64));
     assert.ok(fields.some((field) => field.offset === 8n && field.width_bits === 64));
-    return { facts, readset: dependencies?.finish(), stages };
+    return { facts, readset: dependencies?.finish(), stages, remaining: context.remainingWork() };
   };
   run(2, false); // Cache a valid immutable body, intentionally without a ledger.
   const before = lifts.get(callee.id) ?? 0;
@@ -135,6 +135,11 @@ try {
   );
   assert.deepEqual(replayed.facts.memory_transfers, collected.facts.memory_transfers);
   assert.deepEqual(replayed.facts.callees, collected.facts.callees);
+  assert.equal(
+    replayed.remaining,
+    collected.remaining,
+    'A native cache hit must charge exactly the work of preparing the body',
+  );
   assert.ok(replayed.readset);
   assert.ok(
     replayed.readset.reads.some(

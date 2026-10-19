@@ -176,11 +176,19 @@ interface DurableTypeDependency {
   readonly evidence_ids: readonly string[];
 }
 
+/** One read a traced computation captured (or found already captured), with the charges
+ * a fresh capture of it makes. */
+export interface TracedRead {
+  readonly key: string;
+  readonly read: AnalysisReadset['reads'][number];
+  readonly charges: 1 | 2;
+}
 /** All negative reads are retained. Mutable store/maps are never used as cache keys. */
 export class AnalysisDependencyCollector {
   readonly store: ProjectStore;
   readonly #reads = new Map<string, AnalysisReadset['reads'][number]>();
   #annotationDepth = 0;
+  #trace: TracedRead[] | undefined;
   #annotations: AnnotationReadIndex | undefined;
   constructor(
     readonly source: ProjectStore,
@@ -253,17 +261,25 @@ export class AnalysisDependencyCollector {
     (this.#annotations ??= allAnnotations(this.source, this.revision, this.context));
   private capture(selector: Selector, value?: unknown): void {
     const key = digest(selector);
-    if (this.#reads.has(key)) return;
+    const existing = this.#reads.get(key);
+    // A fresh capture charges once, plus once more for the store read of a value-less one.
+    const charges = value === undefined ? 2 : 1;
+    if (existing) {
+      this.#trace?.push({ key, read: existing, charges });
+      return;
+    }
     if (this.#reads.size >= MAX_READS) exhausted('Analysis dependency readset bound exceeded');
     this.context.checkpoint(1);
-    this.#reads.set(key, {
+    const read = {
       selector,
       fingerprint: digest(
         value === undefined
           ? readSelector(this.source, this.revision, selector, this.context, this.annotations)
           : value,
       ),
-    });
+    };
+    this.#reads.set(key, read);
+    this.#trace?.push({ key, read, charges });
   }
 
   recordFunction(image_id: string, id: string, record?: FunctionRecord | null): void {
@@ -306,10 +322,14 @@ export class AnalysisDependencyCollector {
 
   recordProof(id: string, initial?: Evidence | null): void {
     const pending = [id];
+    // While tracing, already captured closures are walked too, so the trace holds every
+    // read a computation needs regardless of what this collector captured before it.
+    const visited = this.#trace && new Set<string>();
     while (pending.length) {
       const next = pending.pop()!;
       const selector = { kind: 'proof' as const, id: next };
-      if (this.#reads.has(digest(selector))) continue;
+      if (visited ? visited.has(next) : this.#reads.has(digest(selector))) continue;
+      visited?.add(next);
       const proof =
         next === id && initial !== undefined
           ? initial
@@ -321,10 +341,12 @@ export class AnalysisDependencyCollector {
 
   recordType(id: string, initial?: DurableTypeDependency | null): void {
     const pending = [id];
+    const visited = this.#trace && new Set<string>();
     while (pending.length) {
       const next = pending.pop()!;
       const selector = { kind: 'type' as const, id: next };
-      if (this.#reads.has(digest(selector))) continue;
+      if (visited ? visited.has(next) : this.#reads.has(digest(selector))) continue;
+      visited?.add(next);
       const type =
         next === id && initial !== undefined ? initial : this.source.readType(next, this.revision);
       this.capture(selector, type);
@@ -404,12 +426,55 @@ export class AnalysisDependencyCollector {
     }
   }
 
+  /** Run `compute`, recording every read it captures or would capture, in order. */
+  traced<T>(compute: () => T): { readonly value: T; readonly trace: readonly TracedRead[] } {
+    const outer = this.#trace,
+      trace: TracedRead[] = [];
+    this.#trace = trace;
+    try {
+      return { value: compute(), trace };
+    } finally {
+      this.#trace = outer;
+      outer?.push(...trace);
+    }
+  }
+
+  /** Work `replayTrace` will charge, or undefined when replay would first have to load the
+   * annotation index (whose cost is only known by loading it). */
+  traceCharges(trace: readonly TracedRead[]): number | undefined {
+    let charges = 0;
+    for (const entry of trace) {
+      const kind = entry.read.selector.kind;
+      if (!this.#annotations && (kind === 'all_annotations' || kind === 'type_annotations'))
+        return undefined;
+      if (!this.#reads.has(entry.key)) charges += entry.charges;
+    }
+    return charges;
+  }
+
+  /** Apply a traced computation's reads at the same revision as if it ran here: reads
+   * new to this collector are captured in traced order with a fresh capture's charges;
+   * already captured reads cost nothing, exactly as in `capture`. */
+  replayTrace(trace: readonly TracedRead[]): void {
+    for (const entry of trace) {
+      const kind = entry.read.selector.kind;
+      if (kind === 'all_annotations' || kind === 'type_annotations') this.annotations();
+      this.#trace?.push(entry);
+      if (this.#reads.has(entry.key)) continue;
+      if (this.#reads.size >= MAX_READS) exhausted('Analysis dependency readset bound exceeded');
+      for (let charge = 0; charge < entry.charges; charge++) this.context.checkpoint(1);
+      this.#reads.set(entry.key, entry.read);
+    }
+  }
+
+  /** Snapshots are taken after every prepared dependency, so they must not re-validate
+   * the whole (growing) ledger: entries are built here from typed selectors and
+   * digests in schema field order and never mutated. Only an empty ledger, which the
+   * schema rejects, still goes through it. */
   finish(): AnalysisReadset {
-    const readset = analysisReadsetSchema.parse({
-      version: 1,
-      complete: true,
-      reads: [...this.#reads.values()],
-    });
+    const readset: AnalysisReadset = this.#reads.size
+      ? { version: 1, complete: true, reads: [...this.#reads.values()] }
+      : analysisReadsetSchema.parse({ version: 1, complete: true, reads: [] });
     finishedReadsets.set(readset, this);
     return readset;
   }
