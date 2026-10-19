@@ -6674,7 +6674,7 @@ export class Renderer {
     w.comment(
       0,
       this.program.source
-        ? `${this.language === 'c-like' ? 'C-like' : 'Python-like'}, ${this.program.source.inferred ? 'inferred ABI' : 'source interface'}`
+        ? `${this.language === 'c-like' ? 'C-like' : 'Python-like'}${this.program.source.inferred ? '' : ', source interface'}`
         : `${this.language === 'c-like' ? 'C-like' : 'Python-like'} reconstruction; explicit widths and ordered memory, not original source.`,
     );
     // Source view: the ABI scratch note is inserted after rendering, and only
