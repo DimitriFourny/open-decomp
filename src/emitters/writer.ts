@@ -9,6 +9,10 @@ import {
 import type { Origin } from '../ir/index.js';
 
 const NO_REFS: readonly number[] = Object.freeze([]);
+
+/** A bound on provenance metadata (tables, mappings, refs, metadata bytes), never on the
+ * pseudocode text. The renderer answers it by shedding metadata, not by failing. */
+export class MetadataLimitError extends OperationError {}
 /** Upper bound of one serialized table index plus separator ("999999,"). */
 const REF_BYTES = 7;
 
@@ -60,7 +64,7 @@ class InternTable<T> {
     const known = this.indexes.get(key);
     if (known !== undefined) return known;
     if (this.items.length >= this.limit)
-      this.writer.fail('Pseudocode reference table limit exceeded');
+      this.writer.limitMetadata('Pseudocode reference table limit exceeded');
     this.writer.metadata(this.bytes(item));
     this.indexes.set(key, this.items.length);
     this.items.push(item);
@@ -130,7 +134,10 @@ export class ReferenceUnions {
 }
 
 /** UTF-16 offsets and UTF-8 resource accounting deliberately use different units.
- * Temporary lists/strings are bounded before joining; no silent truncation. */
+ * Temporary lists/strings are bounded before joining; no silent truncation of text.
+ * Text and provenance metadata are bounded separately: metadata overflow throws
+ * `MetadataLimitError`; with `metadata: 'omitted'` no metadata is produced at all and
+ * only the number of mappings that would have been recorded is counted. */
 export class Writer {
   private readonly parts: string[] = [];
   readonly mappings: Emission['mappings'][number][] = [];
@@ -151,11 +158,14 @@ export class Writer {
   /** Non-comment lines, used to keep empty Python-like suites syntactically explicit. */
   codeLines = 0;
   readonly limit: number;
+  /** Mappings not recorded because metadata is omitted. */
+  omittedMappings = 0;
   constructor(
     readonly context: OperationContext,
     readonly indent: number,
     readonly evidence: boolean,
     readonly language: Emission['language'] = 'c-like',
+    readonly metadataMode: 'full' | 'omitted' = 'full',
   ) {
     this.limit = Math.min(context.budget.output_bytes, 16_777_216);
     if (!Number.isInteger(indent) || indent < 1 || indent > 8)
@@ -172,13 +182,25 @@ export class Writer {
     });
   }
 
+  limitMetadata(message: string): never {
+    throw new MetadataLimitError({
+      code: 'resource_limit',
+      severity: 'error',
+      message,
+      evidence_ids: [],
+    });
+  }
+
   guard(bytes: number): void {
     if (bytes > this.limit) this.fail('Pseudocode emission exceeds the output byte budget');
   }
 
+  /** Charge provenance metadata against its own bound; text bytes never count here. */
   metadata(bytes: number): void {
+    if (this.metadataMode === 'omitted') return;
     this.metadataBytes += bytes;
-    this.guard(this.metadataBytes + this.bytes);
+    if (this.metadataBytes > this.limit)
+      this.limitMetadata('Pseudocode metadata exceeds the output byte budget');
   }
 
   /** Bound variadic helper operands while formatting, rather than allocating a
@@ -262,7 +284,7 @@ export class Writer {
     if (depth > 256) this.fail('Pseudocode emission nesting exceeds 256');
     const padding = depth * this.indent;
     const bytes = padding + Buffer.byteLength(text) + 1;
-    this.guard(this.bytes + this.metadataBytes + bytes);
+    this.guard(this.bytes + bytes);
     const line = `${' '.repeat(padding)}${text}\n`;
     this.parts.push(line);
     this.bytes += bytes;
@@ -287,7 +309,7 @@ export class Writer {
     for (const line of inserted) {
       bytes += Buffer.byteLength(line);
       delta += line.length;
-      this.guard(this.bytes + this.metadataBytes + bytes);
+      this.guard(this.bytes + bytes);
     }
     for (let item = 0; item < this.mappings.length; item++) {
       this.context.checkpoint(0);
@@ -323,17 +345,17 @@ export class Writer {
 
   /** Table index of one entity identity, interned on first use. */
   id(value: string): number {
-    return this.ids.add(value, value);
+    return this.metadataMode === 'omitted' ? 0 : this.ids.add(value, value);
   }
 
   /** Table index of one proof identity, interned on first use. */
   proof(value: string): number {
-    return this.proofs.add(value, value);
+    return this.metadataMode === 'omitted' ? 0 : this.proofs.add(value, value);
   }
 
   /** Table index of one binary range, interned on first use. */
   range(value: AddressRange): number {
-    return this.ranges.add(rangeKey(value), value);
+    return this.metadataMode === 'omitted' ? 0 : this.ranges.add(rangeKey(value), value);
   }
 
   /** Existing table index of an identity; lookups never grow the published table. */
@@ -440,6 +462,10 @@ export class Writer {
   ): void {
     this.context.checkpoint(1);
     if (end === start) return;
+    if (this.metadataMode === 'omitted') {
+      this.omittedMappings++;
+      return;
+    }
     const prepared = semanticIds instanceof MappingReferences ? semanticIds : undefined;
     const semanticInput = semanticIds instanceof MappingReferences ? semanticIds.ids : semanticIds;
     if (prepared && (prepared.owner !== this || prepared.ids[0] !== origin.id))
@@ -452,11 +478,11 @@ export class Writer {
       origin.provenance.instruction_ids.length > 10000 ||
       origin.provenance.ranges.length > 10000
     )
-      this.fail('Pseudocode mapping cardinality limit exceeded');
+      this.limitMetadata('Pseudocode mapping cardinality limit exceeded');
     const evidence = this.evidence
       ? this.union(this.proofs, this.proofUnions, origin.provenance.evidence_ids, extraEvidence)
       : NO_REFS;
-    if (evidence.length > 1000) this.fail('Pseudocode mapping evidence limit exceeded');
+    if (evidence.length > 1000) this.limitMetadata('Pseudocode mapping evidence limit exceeded');
     const semantic = prepared
       ? prepared.seal()
       : this.union(this.ids, this.idUnions, [origin.id], semanticInput);
@@ -483,7 +509,7 @@ export class Writer {
     a: readonly string[],
     b: readonly string[],
   ): readonly number[] {
-    if (a.length + b.length > 10000) this.fail('Pseudocode mapping reference limit exceeded');
+    if (a.length + b.length > 10000) this.limitMetadata('Pseudocode mapping reference limit exceeded');
     if (b.length === 0) {
       const cached = cache.get(a);
       if (cached) {
