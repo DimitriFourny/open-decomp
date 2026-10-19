@@ -1,0 +1,975 @@
+{
+  "schema": 1,
+  "name": "open-decomp llm-tasks question set",
+  "frozen": "2026-10-19",
+  "method": "Questions are authored from source code only (sqlite3.c, brotli.c with the build configuration the binary itself reports in its compile-option string table) and checked against the instruction stream with llvm-objdump, an independent tool. The set is frozen before any decompiler output is built; no question is added, dropped or reworded after the first build. Gold answers and scoring rules never come from decompiler output.",
+  "disclosure": "The author had incidentally seen the archived Ghidra output of the 10 SQLite archive functions (needed to confirm they are comparable binaries) and one earlier open-decomp ParseInt output before freezing. No question was tuned to a tool: the set was written from the source and gold-checked with llvm-objdump.",
+  "binaries": {
+    "sqlite3-arm64": {
+      "file": "sqlite3-arm64",
+      "sha256": "4e01e37ea6fc2cfb008521558f999ac06cdbb4504e3eeb422c1a84b5ead57e56",
+      "description": "SQLite 3.54.0 shell, macOS arm64, the binary the archived Ghidra run analysed (baseline-2026-10-17 inputs/sqlite3-arm64)",
+      "source": "sqlite3.c"
+    },
+    "brotli": {
+      "file": "brotli",
+      "sha256": "9a3bf1017b44e9733ac7655b0b8ce6c564db789caac10a070fb979a06e0123c7",
+      "description": "brotli 1.2.0 CLI, Homebrew macOS arm64",
+      "source": "brotli.c"
+    }
+  },
+  "sources": {
+    "sqlite3.c": {
+      "sha256": "2da161e310ef0aba3465f22a4d12b8a43723236f0942fa76e8aac523c3317243",
+      "origin": "sqlite-autoconf-3540000 amalgamation (archive sha256 134ec0802dda5795816e25d25872d20b312cb3973438c49b30bc40b7705ea9ed)"
+    },
+    "brotli.c": {
+      "sha256": "cb6c8ca6668d324d50cd085fc3ddb3f202afe34fb562b5b583c0d7b0cceccd0c",
+      "origin": "https://raw.githubusercontent.com/google/brotli/v1.2.0/c/tools/brotli.c (tag v1.2.0, commit 028fb5a23661f123017c060daa546b55cf4bde29)",
+      "url": "https://raw.githubusercontent.com/google/brotli/v1.2.0/c/tools/brotli.c"
+    }
+  },
+  "build_config": {
+    "sqlite3": "Option list read from the binary: THREADSAFE=1, ENABLE_API_ARMOR, MAX_VARIABLE_NUMBER=250000, MAX_SCHEMA=10000000, MAX_VDBE_OP=250000000, MAX_WORKER_THREADS=8, ENABLE_PREUPDATE_HOOK, ENABLE_UNLOCK_NOTIFY, TEMP_STORE=1, MUTEX_PTHREADS (full list: strings of the binary after COMPILER=clang-21.0.0). Struct offsets come from offsetof() in an amalgamation compiled with that option set (x86-independent LP64 layout).",
+    "brotli": "Context struct offsets from offsetof() over the verbatim struct definition (LP64, BROTLI_BOOL = int); O_* values from the macOS SDK."
+  },
+  "questions": [
+    {
+      "id": "sq-libversion-value",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_libversion_number",
+      "address": "0x100049ef0",
+      "kind": "return_value",
+      "question": "What integer value does this function return? Answer in decimal.",
+      "answer_format": "integer",
+      "gold": "3054000 (SQLITE_VERSION_NUMBER for 3.54.0)",
+      "scoring": {
+        "type": "numeric",
+        "value": 3054000
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [188397, 188397],
+        "anchor": "sqlite3_libversion_number(void){ return SQLITE_VERSION_NUMBER; }"
+      },
+      "ghidra_archived": true
+    },
+    {
+      "id": "sq-threadsafe-value",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_threadsafe",
+      "address": "0x100049efc",
+      "kind": "return_value",
+      "question": "What integer value does this function return?",
+      "answer_format": "integer",
+      "gold": "1 (this build has SQLITE_THREADSAFE=1 per its embedded compile-option list)",
+      "scoring": {
+        "type": "numeric",
+        "value": 1
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [188403, 188403],
+        "anchor": "sqlite3_threadsafe(void){ return SQLITE_THREADSAFE; }"
+      },
+      "ghidra_archived": true,
+      "gold_note": "Build configuration THREADSAFE=1 is read from the binary's own compile-option string table."
+    },
+    {
+      "id": "sq-changes64-field",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_changes64",
+      "address": "0x10004b174",
+      "kind": "struct_field",
+      "question": "The function returns a 64-bit counter read from the connection object passed as its first argument. At what byte offset into that object is the counter? Answer in decimal or 0x hex.",
+      "answer_format": "integer",
+      "gold": "120 = 0x78 (sqlite3.nChange)",
+      "scoring": {
+        "type": "numeric",
+        "value": 120
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [189452, 189463],
+        "anchor": "iRet = db->nChange;"
+      },
+      "ghidra_archived": true,
+      "gold_note": "Offset computed with offsetof() on the amalgamation compiled with the binary's option set; matches the instruction stream."
+    },
+    {
+      "id": "sq-changes64-invalid",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_changes64",
+      "address": "0x10004b174",
+      "kind": "error_path",
+      "question": "What does the function return when its connection-validity check fails, and what numeric code does it pass to the logging function in that case? Answer as \"<return value>; <log code>\".",
+      "answer_format": "short phrase",
+      "gold": "Returns 0; logs SQLITE_MISUSE = 21 (0x15)",
+      "scoring": {
+        "type": "rubric",
+        "facts": [
+          {
+            "id": "returns_zero",
+            "pattern": "\\b(0|zero)\\b"
+          },
+          {
+            "id": "log_code_21",
+            "pattern": "\\b(21|0x0?15|SQLITE_MISUSE|misuse)\\b"
+          }
+        ]
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [189452, 189463],
+        "anchor": "(void)SQLITE_MISUSE_BKPT;"
+      },
+      "ghidra_archived": true,
+      "gold_note": "Requires SQLITE_ENABLE_API_ARMOR (present in this build)."
+    },
+    {
+      "id": "sq-total-changes64-field",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_total_changes64",
+      "address": "0x10004b224",
+      "kind": "struct_field",
+      "question": "The function returns a 64-bit counter read from the connection object passed as its first argument. At what byte offset into that object is the counter? Answer in decimal or 0x hex.",
+      "answer_format": "integer",
+      "gold": "128 = 0x80 (sqlite3.nTotalChange)",
+      "scoring": {
+        "type": "numeric",
+        "value": 128
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [189472, 189483],
+        "anchor": "iRet = db->nTotalChange;"
+      },
+      "ghidra_archived": true
+    },
+    {
+      "id": "sq-errcode-null",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_errcode",
+      "address": "0x10004d284",
+      "kind": "return_value",
+      "question": "What value does the function return when its argument is NULL?",
+      "answer_format": "integer",
+      "gold": "7 (SQLITE_NOMEM)",
+      "scoring": {
+        "type": "numeric",
+        "value": 7
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [191140, 191154],
+        "anchor": "if( !db ) return SQLITE_NOMEM_BKPT;"
+      },
+      "ghidra_archived": true
+    },
+    {
+      "id": "sq-errcode-normal",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_errcode",
+      "address": "0x10004d284",
+      "kind": "struct_field",
+      "question": "In the normal path (non-NULL valid connection, no malloc failure) the returned value combines two 32-bit fields of the connection object. Give the bitwise operation and the two byte offsets (decimal or 0x hex).",
+      "answer_format": "short phrase",
+      "gold": "AND of errCode (offset 80 = 0x50) and errMask (offset 88 = 0x58)",
+      "scoring": {
+        "type": "rubric",
+        "facts": [
+          {
+            "id": "op_and",
+            "pattern": "\\band\\b|&|bitwise"
+          },
+          {
+            "id": "off_errCode",
+            "pattern": "\\b(80|0x0*50)\\b"
+          },
+          {
+            "id": "off_errMask",
+            "pattern": "\\b(88|0x0*58)\\b"
+          }
+        ]
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [191140, 191154],
+        "anchor": "iRet = db->errCode & db->errMask;"
+      },
+      "ghidra_archived": true
+    },
+    {
+      "id": "sq-errcode-sick",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_errcode",
+      "address": "0x10004d284",
+      "kind": "return_value",
+      "question": "What value is returned when the connection-state check (the SafetyCheckSickOrOk call) fails?",
+      "answer_format": "integer",
+      "gold": "21 (SQLITE_MISUSE)",
+      "scoring": {
+        "type": "numeric",
+        "value": 21
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [191140, 191154],
+        "anchor": "return SQLITE_MISUSE_BKPT;"
+      },
+      "ghidra_archived": true,
+      "gold_note": "Source returns SQLITE_MISUSE_BKPT; sqlite3_log(SQLITE_MISUSE) is the side effect of the breakpoint macro."
+    },
+    {
+      "id": "sq-limit-maxid",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_limit",
+      "address": "0x10004d4c0",
+      "kind": "constant",
+      "question": "The limit id is an int. What is the largest id value the function accepts (larger ids make it return -1 immediately)?",
+      "answer_format": "integer",
+      "gold": "14 (SQLITE_LIMIT_TRIGGER_STEPS; SQLITE_N_LIMIT is 15)",
+      "scoring": {
+        "type": "numeric",
+        "value": 14
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [191342, 191395],
+        "anchor": "if( limitId<0 || limitId>=SQLITE_N_LIMIT ){"
+      },
+      "ghidra_archived": true
+    },
+    {
+      "id": "sq-limit-minlength",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_limit",
+      "address": "0x10004d4c0",
+      "kind": "constant",
+      "question": "For limit id 0, a non-negative newVal below some threshold is raised to that threshold before being stored. What is the threshold?",
+      "answer_format": "integer",
+      "gold": "30 (SQLITE_MIN_LENGTH)",
+      "scoring": {
+        "type": "numeric",
+        "value": 30
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [191342, 191395],
+        "anchor": "newLimit = SQLITE_MIN_LENGTH;"
+      },
+      "ghidra_archived": true
+    },
+    {
+      "id": "sq-limit-hard-varnum",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_limit",
+      "address": "0x10004d4c0",
+      "kind": "constant",
+      "question": "A new limit larger than a per-id compile-time hard bound is clamped to that bound. What is the hard bound for limit id 9 (the bound-variable-number limit) in this binary? Answer in decimal.",
+      "answer_format": "integer",
+      "gold": "250000 (SQLITE_MAX_VARIABLE_NUMBER=250000 in this build; aHardLimit[9])",
+      "scoring": {
+        "type": "numeric",
+        "value": 250000
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [191270, 191286],
+        "anchor": "SQLITE_MAX_VARIABLE_NUMBER,      /* IMP: R-38091-32352 */"
+      },
+      "ghidra_archived": true,
+      "gold_note": "Value read from the build's embedded option list and confirmed in the aHardLimit table bytes; the stock default would be 32766."
+    },
+    {
+      "id": "sq-stricmp-case",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_stricmp",
+      "address": "0x10003d250",
+      "kind": "return_value",
+      "question": "What integer does sqlite3_stricmp(\"A\", \"c\") return (both pointers non-NULL)?",
+      "answer_format": "integer",
+      "gold": "-2: lower(\"A\")=97 minus lower(\"c\")=99",
+      "scoring": {
+        "type": "numeric",
+        "value": -2
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [37234, 37260],
+        "anchor": "c = (int)UpperToLower[c] - (int)UpperToLower[x];"
+      },
+      "ghidra_archived": true
+    },
+    {
+      "id": "sq-stricmp-null",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_stricmp",
+      "address": "0x10003d250",
+      "kind": "return_value",
+      "question": "What does it return if the first argument is NULL and the second is a non-NULL string?",
+      "answer_format": "integer",
+      "gold": "-1",
+      "scoring": {
+        "type": "numeric",
+        "value": -1
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [37234, 37241],
+        "anchor": "return zRight ? -1 : 0;"
+      },
+      "ghidra_archived": true
+    },
+    {
+      "id": "sq-strnicmp-diff",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_strnicmp",
+      "address": "0x10003d2ac",
+      "kind": "return_value",
+      "question": "What integer does sqlite3_strnicmp(\"abcd\", \"abcz\", 4) return (non-NULL pointers)?",
+      "answer_format": "integer",
+      "gold": "-22: lower(\"d\")=100 minus lower(\"z\")=122",
+      "scoring": {
+        "type": "numeric",
+        "value": -22
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [37261, 37272],
+        "anchor": "return N<0 ? 0 : UpperToLower[*a] - UpperToLower[*b];"
+      },
+      "ghidra_archived": true
+    },
+    {
+      "id": "sq-complete-callee",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_complete",
+      "address": "0x100049e10",
+      "kind": "callee",
+      "question": "Which function does it call, and when exactly does it return 1? Answer as \"<callee>; <condition on the callee result>\".",
+      "answer_format": "short phrase",
+      "gold": "Calls sqlite3_incomplete and returns 1 iff its result == 0",
+      "scoring": {
+        "type": "rubric",
+        "facts": [
+          {
+            "id": "callee",
+            "pattern": "sqlite3_incomplete"
+          },
+          {
+            "id": "zero_cond",
+            "pattern": "\\b(0|zero)\\b"
+          }
+        ]
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [188158, 188160],
+        "anchor": "return sqlite3_incomplete(zSql)==0;"
+      },
+      "ghidra_archived": true
+    },
+    {
+      "id": "sq-initialize-fastpath",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_initialize",
+      "address": "0x10003927c",
+      "kind": "branch_condition",
+      "question": "What does it return when the global \"already initialized\" flag is already set, and which function does it call otherwise? Answer as \"<return value>; <function>\".",
+      "answer_format": "short phrase",
+      "gold": "Returns 0 (SQLITE_OK) on the fast path; otherwise returns the result of sqlite3Initialize()",
+      "scoring": {
+        "type": "rubric",
+        "facts": [
+          {
+            "id": "fast_zero",
+            "pattern": "\\b(0|zero|SQLITE_OK)\\b"
+          },
+          {
+            "id": "slow_callee",
+            "pattern": "sqlite3Initialize"
+          }
+        ]
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [188646, 188665],
+        "anchor": "return sqlite3Initialize();"
+      },
+      "ghidra_archived": true
+    },
+    {
+      "id": "sq-incomplete-null",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_incomplete",
+      "address": "0x100049964",
+      "kind": "return_value",
+      "question": "What value does it return if its argument is NULL?",
+      "answer_format": "integer",
+      "gold": "21 (SQLITE_MISUSE; requires SQLITE_ENABLE_API_ARMOR, present)",
+      "scoring": {
+        "type": "numeric",
+        "value": 21
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [187960, 188156],
+        "anchor": "return SQLITE_MISUSE_BKPT;"
+      }
+    },
+    {
+      "id": "sq-incomplete-keywords",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_incomplete",
+      "address": "0x100049964",
+      "kind": "callee",
+      "question": "Which SQL keywords does the scanner recognise specially (compared case-insensitively against string literals)? List all of them, comma-separated.",
+      "answer_format": "list",
+      "gold": "create, trigger, temp, temporary, end, explain",
+      "scoring": {
+        "type": "set",
+        "items": ["create", "trigger", "temp", "temporary", "end", "explain"]
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [187960, 188156],
+        "anchor": "sqlite3StrNICmp(zSql, \"temporary\", 9)==0"
+      }
+    },
+    {
+      "id": "sq-incomplete-empty",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_incomplete",
+      "address": "0x100049964",
+      "kind": "return_value",
+      "question": "What value does it return when the input consists only of whitespace (no unterminated comment or quote)?",
+      "answer_format": "integer",
+      "gold": "16 (SQLITE_EMPTY)",
+      "scoring": {
+        "type": "numeric",
+        "value": 16
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [188151, 188156],
+        "anchor": "if( state==0 && pending==0 ) return SQLITE_EMPTY;"
+      }
+    },
+    {
+      "id": "sq-btreeleaveall-stride",
+      "binary": "sqlite3-arm64",
+      "function": "btreeLeaveAll",
+      "address": "0x10005d388",
+      "kind": "loop_bound",
+      "question": "The function walks an array of per-database entries reachable from the connection object (first argument). What is the stride in bytes between consecutive entries?",
+      "answer_format": "integer",
+      "gold": "32 (sizeof(Db)); pBt is at entry offset 8",
+      "scoring": {
+        "type": "numeric",
+        "value": 32
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [72595, 72602],
+        "anchor": "p = db->aDb[i].pBt;"
+      }
+    },
+    {
+      "id": "sq-btreeleaveall-fields",
+      "binary": "sqlite3-arm64",
+      "function": "btreeLeaveAll",
+      "address": "0x10005d388",
+      "kind": "struct_field",
+      "question": "For each non-NULL Btree pointer, one byte-sized flag is tested and a 32-bit counter is decremented. Give the byte offsets within the Btree object of the flag and of the counter (flag first), decimal or 0x hex.",
+      "answer_format": "short phrase",
+      "gold": "sharable at offset 17 = 0x11; wantToLock at offset 20 = 0x14",
+      "scoring": {
+        "type": "rubric",
+        "facts": [
+          {
+            "id": "flag_17",
+            "pattern": "\\b(17|0x0*11)\\b"
+          },
+          {
+            "id": "counter_20",
+            "pattern": "\\b(20|0x0*14)\\b"
+          }
+        ]
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [72533, 72543],
+        "anchor": "p->wantToLock--;"
+      },
+      "gold_note": "sqlite3BtreeLeave and unlockBtreeMutex are inlined/called from the loop body; offsets from offsetof()."
+    },
+    {
+      "id": "sq-resultpointer-flags",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_result_pointer",
+      "address": "0x100042080",
+      "kind": "constant",
+      "question": "What 16-bit flags value does the function finally store into the output value cell? Answer in decimal or 0x hex.",
+      "answer_format": "integer",
+      "gold": "0x1a01 = 6657 (MEM_Null|MEM_Dyn|MEM_Subtype|MEM_Term, via inlined sqlite3VdbeMemSetPointer)",
+      "scoring": {
+        "type": "numeric",
+        "value": 6657
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [86236, 86248],
+        "anchor": "pMem->flags = MEM_Null|MEM_Dyn|MEM_Subtype|MEM_Term;"
+      },
+      "gold_note": "sqlite3VdbeMemSetPointer has no symbol in this binary (inlined into sqlite3_result_pointer and sqlite3_bind_pointer)."
+    },
+    {
+      "id": "sq-resultpointer-destructor",
+      "binary": "sqlite3-arm64",
+      "function": "sqlite3_result_pointer",
+      "address": "0x100042080",
+      "kind": "callee",
+      "question": "If the xDestructor argument is NULL, which function pointer is stored as the destructor instead? Give the function name.",
+      "answer_format": "name",
+      "gold": "sqlite3NoopDestructor",
+      "scoring": {
+        "type": "exact",
+        "accept": ["sqlite3NoopDestructor"]
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [86236, 86248],
+        "anchor": "pMem->xDel = xDestructor ? xDestructor : sqlite3NoopDestructor;"
+      }
+    },
+    {
+      "id": "sq-rename-intargs",
+      "binary": "sqlite3-arm64",
+      "function": "renameColumnFunc",
+      "address": "0x1000e2b70",
+      "kind": "call_args",
+      "question": "renameColumnFunc is an SQL function receiving an argv array of values. List the argv indexes it reads as integers (not text), comma-separated.",
+      "answer_format": "list",
+      "gold": "5, 7, 8 (iCol, bQuote, bTemp)",
+      "scoring": {
+        "type": "set",
+        "items": ["5", "7", "8"]
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [122213, 122240],
+        "anchor": "int bTemp = sqlite3_value_int(argv[8]);"
+      }
+    },
+    {
+      "id": "sq-rename-nullchecks",
+      "binary": "sqlite3-arm64",
+      "function": "renameColumnFunc",
+      "address": "0x1000e2b70",
+      "kind": "branch_condition",
+      "question": "Which argv indexes cause the function to return immediately (before taking any locks) when their text value is NULL? List indexes, comma-separated.",
+      "answer_format": "list",
+      "gold": "0, 4, 6 (zSql, zTable, zNew)",
+      "scoring": {
+        "type": "set",
+        "items": ["0", "4", "6"]
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [122241, 122252],
+        "anchor": "if( zNew==0 ) return;"
+      }
+    },
+    {
+      "id": "sq-rename-tablefields",
+      "binary": "sqlite3-arm64",
+      "function": "renameColumnFunc",
+      "address": "0x1000e2b70",
+      "kind": "struct_field",
+      "question": "After looking up the Table object, the column index is bounds-checked against a count field of Table and then used to index a column array. Give the byte offset of the count field in Table and the byte size of one column entry (decimal or 0x hex), count offset first.",
+      "answer_format": "short phrase",
+      "gold": "nCol at offset 54 = 0x36; sizeof(Column) = 16",
+      "scoring": {
+        "type": "rubric",
+        "facts": [
+          {
+            "id": "ncol_54",
+            "pattern": "\\b(54|0x0*36)\\b"
+          },
+          {
+            "id": "stride_16",
+            "pattern": "\\b(16|0x0*10)\\b"
+          }
+        ]
+      },
+      "source": {
+        "file": "sqlite3.c",
+        "lines": [122244, 122250],
+        "anchor": "if( pTab==0 || iCol>=pTab->nCol ){"
+      }
+    },
+    {
+      "id": "bro-parseint-maxdigits",
+      "binary": "brotli",
+      "function": "ParseInt",
+      "address": "0x100002f94",
+      "kind": "constant",
+      "question": "What is the maximum number of decimal digits ParseInt will accept in the number string?",
+      "answer_format": "integer",
+      "gold": "5",
+      "scoring": {
+        "type": "numeric",
+        "value": 5
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [227, 243],
+        "anchor": "for (i = 0; i < 5; ++i) {"
+      }
+    },
+    {
+      "id": "bro-parseint-leadingzero",
+      "binary": "brotli",
+      "function": "ParseInt",
+      "address": "0x100002f94",
+      "kind": "return_value",
+      "question": "What does ParseInt return (0 or 1) for s=\"012\", low=0, high=100?",
+      "answer_format": "integer",
+      "gold": "0 (more than one digit and a leading zero)",
+      "scoring": {
+        "type": "numeric",
+        "value": 0
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [227, 243],
+        "anchor": "if (i > 1 && s[0] == '0') return BROTLI_FALSE;"
+      }
+    },
+    {
+      "id": "bro-checkalias-terminator",
+      "binary": "brotli",
+      "function": "CheckAlias",
+      "address": "0x100002f0c",
+      "kind": "branch_condition",
+      "question": "Besides end-of-string, which single character may follow the alias prefix in the program name for the alias to count as a match?",
+      "answer_format": "short phrase",
+      "gold": "\".\" (full stop)",
+      "scoring": {
+        "type": "regex",
+        "pattern": "^[\\s\"\\'`]*(\\.|dot\\b|period\\b|full stop\\b)",
+        "flags": "i"
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [254, 265],
+        "anchor": "if (terminator == 0 || terminator == '.') return BROTLI_TRUE;"
+      }
+    },
+    {
+      "id": "bro-checkalias-separators",
+      "binary": "brotli",
+      "function": "CheckAlias",
+      "address": "0x100002f0c",
+      "kind": "constant",
+      "question": "Before comparing, the program name is reduced to its base name by searching for two path-separator characters. Which two characters?",
+      "answer_format": "short phrase",
+      "gold": "\"/\" and \"\\\" (forward slash and backslash)",
+      "scoring": {
+        "type": "rubric",
+        "facts": [
+          {
+            "id": "slash",
+            "pattern": "/|\\bforward[- ]?slash\\b|(?<![a-z])slash\\b"
+          },
+          {
+            "id": "backslash",
+            "pattern": "\\\\|backslash"
+          }
+        ]
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [246, 252],
+        "anchor": "strrchr(path, '\\\\')"
+      }
+    },
+    {
+      "id": "bro-openfiles-skipfield",
+      "binary": "brotli",
+      "function": "OpenFiles",
+      "address": "0x1000033ac",
+      "kind": "struct_field",
+      "question": "OpenFiles takes a pointer to a context struct. At what byte offset in that struct is the flag tested to decide whether to skip opening the output file? Answer in decimal or 0x hex.",
+      "answer_format": "integer",
+      "gold": "32 = 0x20 (test_integrity)",
+      "scoring": {
+        "type": "numeric",
+        "value": 32
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [1018, 1025],
+        "anchor": "if (!context->test_integrity && is_ok) {"
+      }
+    },
+    {
+      "id": "bro-openfiles-flags",
+      "binary": "brotli",
+      "function": "OpenFiles",
+      "address": "0x1000033ac",
+      "kind": "constant",
+      "question": "What integer flags argument is passed to open() for the output file when overwriting is NOT forced (use this macOS ABI's O_ values)? Answer in decimal or 0x hex.",
+      "answer_format": "integer",
+      "gold": "0xe01 = 3585 (O_CREAT 0x200 | O_EXCL 0x800 | O_WRONLY 1 | O_TRUNC 0x400); forced overwrite uses 0x601 = 1537",
+      "scoring": {
+        "type": "numeric",
+        "value": 3585
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [795, 817],
+        "anchor": "O_CREAT | (force ? 0 : O_EXCL) | O_WRONLY | O_TRUNC"
+      },
+      "gold_note": "Macros evaluated with the macOS SDK <fcntl.h>; instruction stream shows #0xe01 / #0x601 selected on force_overwrite."
+    },
+    {
+      "id": "bro-openfiles-stdout",
+      "binary": "brotli",
+      "function": "OpenFiles",
+      "address": "0x1000033ac",
+      "kind": "file_mode",
+      "question": "When no output path is set, which file descriptor number is wrapped with fdopen for output, and with which mode string? Answer as \"<fd>; <mode>\".",
+      "answer_format": "short phrase",
+      "gold": "fd 1 (STDOUT_FILENO), mode \"wb\"",
+      "scoring": {
+        "type": "rubric",
+        "facts": [
+          {
+            "id": "fd1",
+            "pattern": "\\b1\\b|stdout"
+          },
+          {
+            "id": "mode_wb",
+            "pattern": "\\bwb\\b"
+          }
+        ]
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [795, 801],
+        "anchor": "*f = fdopen(MAKE_BINARY(STDOUT_FILENO), \"wb\");"
+      }
+    },
+    {
+      "id": "bro-filesize-failure",
+      "binary": "brotli",
+      "function": "FileSize",
+      "address": "0x10000316c",
+      "kind": "return_value",
+      "question": "What does FileSize return when the file cannot be opened?",
+      "answer_format": "integer",
+      "gold": "-1",
+      "scoring": {
+        "type": "numeric",
+        "value": -1
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [819, 834],
+        "anchor": "return -1;"
+      }
+    },
+    {
+      "id": "bro-filesize-calls",
+      "binary": "brotli",
+      "function": "FileSize",
+      "address": "0x10000316c",
+      "kind": "call_order",
+      "question": "List the libc functions FileSize calls, in call order on the success path, comma-separated.",
+      "answer_format": "list",
+      "gold": "fopen, fseek, ftell, fclose",
+      "scoring": {
+        "type": "set",
+        "ordered": true,
+        "items": ["fopen", "fseek", "ftell", "fclose"]
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [819, 834],
+        "anchor": "retval = ftell(f);"
+      }
+    },
+    {
+      "id": "bro-writeoutput-offsets",
+      "binary": "brotli",
+      "function": "WriteOutput",
+      "address": "0x100003850",
+      "kind": "struct_field",
+      "question": "The number of bytes to write is the difference of two pointer fields of the context struct. Give their two byte offsets (decimal or 0x hex), comma-separated.",
+      "answer_format": "list",
+      "gold": "448 (next_out) and 376 (output)",
+      "scoring": {
+        "type": "set",
+        "items": ["448", "376"]
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [1101, 1114],
+        "anchor": "size_t out_size = (size_t)(context->next_out - context->output);"
+      }
+    },
+    {
+      "id": "bro-writeoutput-error",
+      "binary": "brotli",
+      "function": "WriteOutput",
+      "address": "0x100003850",
+      "kind": "error_message",
+      "question": "What message text (up to the first %s placeholder) is written to stderr when writing the output fails?",
+      "answer_format": "short phrase",
+      "gold": "failed to write output [%s]: %s",
+      "scoring": {
+        "type": "regex",
+        "pattern": "failed to write output",
+        "flags": "i"
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [1101, 1114],
+        "anchor": "\"failed to write output [%s]: %s\\n\""
+      }
+    },
+    {
+      "id": "bro-nextfile-size",
+      "binary": "brotli",
+      "function": "NextFile",
+      "address": "0x1000031d4",
+      "kind": "callee",
+      "question": "Which function of this program does NextFile call to determine the input file's length?",
+      "answer_format": "name",
+      "gold": "FileSize",
+      "scoring": {
+        "type": "exact",
+        "accept": ["FileSize"]
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [945, 1016],
+        "anchor": "context->input_file_length = FileSize(arg);"
+      }
+    },
+    {
+      "id": "bro-nextfile-mismatch",
+      "binary": "brotli",
+      "function": "NextFile",
+      "address": "0x1000031d4",
+      "kind": "error_message",
+      "question": "When decompressing without an explicit output path, what message is printed to stderr if the input file name does not end with the expected suffix? Give the message text; the file-name placeholder may be omitted.",
+      "answer_format": "short phrase",
+      "gold": "input file [%s] suffix mismatch",
+      "scoring": {
+        "type": "regex",
+        "pattern": "suffix mismatch",
+        "flags": "i"
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [945, 1016],
+        "anchor": "\"input file [%s] suffix mismatch\\n\""
+      }
+    },
+    {
+      "id": "bro-main-quality",
+      "binary": "brotli",
+      "function": "main",
+      "address": "0x100001588",
+      "kind": "constant",
+      "question": "What default compression quality value does main initialise in the context before parsing options?",
+      "answer_format": "integer",
+      "gold": "11",
+      "scoring": {
+        "type": "numeric",
+        "value": 11
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [1461, 1470],
+        "anchor": "context.quality = 11;"
+      }
+    },
+    {
+      "id": "bro-main-buffer",
+      "binary": "brotli",
+      "function": "main",
+      "address": "0x100001588",
+      "kind": "constant",
+      "question": "How many bytes does main malloc for the combined input/output file buffer?",
+      "answer_format": "integer",
+      "gold": "1048576 = 2 * (1<<19)",
+      "scoring": {
+        "type": "numeric",
+        "value": 1048576
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [1510, 1514],
+        "anchor": "context.buffer = (uint8_t*)malloc(kFileBufferSize * 2);"
+      },
+      "gold_note": "kFileBufferSize is declared at line 1067 (1<<19); the malloc is at line 1512."
+    },
+    {
+      "id": "bro-main-lgwin",
+      "binary": "brotli",
+      "function": "main",
+      "address": "0x100001588",
+      "kind": "constant",
+      "question": "Option parsing (inlined into main) calls ParseInt for the window-size value (-w / --lgwin). What upper bound is passed, and what is the smallest nonzero window-bits value accepted? Answer as \"<upper bound>; <smallest nonzero>\".",
+      "answer_format": "short phrase",
+      "gold": "24 (BROTLI_MAX_WINDOW_BITS); 10 (BROTLI_MIN_WINDOW_BITS)",
+      "scoring": {
+        "type": "rubric",
+        "facts": [
+          {
+            "id": "max_24",
+            "pattern": "\\b24\\b"
+          },
+          {
+            "id": "min_10",
+            "pattern": "\\b10\\b"
+          }
+        ]
+      },
+      "source": {
+        "file": "brotli.c",
+        "lines": [467, 486],
+        "anchor": "if (params->lgwin != 0 && params->lgwin < BROTLI_MIN_WINDOW_BITS) {"
+      },
+      "gold_note": "ParseParams (source line 267) has no symbol and is inlined into main in this binary."
+    }
+  ],
+  "variants": {
+    "sqlite3-dylib": {
+      "binary": "sqlite3-arm64",
+      "file": "libsqlite3.3.54.0.dylib",
+      "sha256": "cbd373e61913b2990f6e5eb2cf06a9ad7e33b8192948297152dbf1a10bcc0205",
+      "description": "SQLite 3.54.0 libsqlite3.dylib, macOS arm64 (Homebrew-style build, /tmp/odtest). Same function bodies and sizes as sqlite3-arm64 for these 14 functions; its compile-option list lacks only STMTVTAB, BYTECODE_VTAB, DBPAGE_VTAB, OFFSET_SQL_FUNC, EXPLAIN_COMMENTS, UNKNOWN_SQL_FUNC, STRICT_SUBTYPE, DQS=0, USE_URI. Gold struct offsets and constants were spot-checked against its disassembly (0x78, 0x80, 0x50/0x58, 0x88 and limit id 0xe, 0x1a01, 0x36). No archived Ghidra output exists for it.",
+      "addresses": {
+        "sqlite3_libversion_number": "0x12ea4",
+        "sqlite3_threadsafe": "0x12eb0",
+        "sqlite3_changes64": "0x14128",
+        "sqlite3_total_changes64": "0x141d8",
+        "sqlite3_errcode": "0x16238",
+        "sqlite3_limit": "0x16474",
+        "sqlite3_stricmp": "0x5d3c",
+        "sqlite3_strnicmp": "0x5d98",
+        "sqlite3_complete": "0x12dc4",
+        "sqlite3_initialize": "0x1d68",
+        "sqlite3_incomplete": "0x12918",
+        "btreeLeaveAll": "0x2633c",
+        "sqlite3_result_pointer": "0xb0c4",
+        "renameColumnFunc": "0xaa5b8"
+      }
+    }
+  }
+}
