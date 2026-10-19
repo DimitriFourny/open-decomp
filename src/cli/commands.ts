@@ -1,6 +1,6 @@
 import { openBinary, BinaryOpenError, FunctionSelectionError } from '../api/index.js';
 import type { BinarySession, FunctionSelector } from '../api/index.js';
-import { entityIdSchema, sliceIdSchema } from '../core/index.js';
+import { distinctDiagnostics, entityIdSchema, sliceIdSchema } from '../core/index.js';
 import type { ToolResult, WireDiagnostic, WireJob } from '../core/index.js';
 
 type Command = 'functions' | 'decompile';
@@ -37,9 +37,9 @@ function terminal(value: string, limit = 8192): string {
   );
   return escaped.length > limit ? `${escaped.slice(0, limit)}…` : escaped;
 }
-function diagnostic(item: WireDiagnostic): void {
+function diagnostic(item: WireDiagnostic, count = 1): void {
   process.stderr.write(
-    `${terminal(item.severity)}: ${terminal(item.code)}: ${terminal(item.message)}\n`,
+    `${terminal(item.severity)}: ${terminal(item.code)}: ${terminal(item.message)}${count > 1 ? ` (×${count})` : ''}\n`,
   );
   if (item.details?.kind === 'slice_selection') {
     for (const slice of item.details.slices)
@@ -48,15 +48,17 @@ function diagnostic(item: WireDiagnostic): void {
       );
   }
 }
+/** One line per distinct diagnostic, in first-seen order, with its occurrence count. */
 function report(result: AnalysisResult, operation: string): void {
-  for (const item of result.diagnostics) diagnostic(item);
+  const all = [...result.diagnostics];
   if (
     'error' in result &&
     !result.diagnostics.some(
       (item) => item.code === result.error.code && item.message === result.error.message,
     )
   )
-    diagnostic(result.error);
+    all.push(result.error);
+  for (const { diagnostic: item, count } of distinctDiagnostics(all)) diagnostic(item, count);
   if (result.state === 'partial')
     process.stderr.write(`warning: ${operation}: partial (${result.reason})\n`);
   else if (result.state !== 'complete' && result.state !== 'empty')

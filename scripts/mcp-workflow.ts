@@ -122,14 +122,22 @@ export function resultData<T>(result: ResultEnvelope<T>): T {
   return result.data;
 }
 
-/** Client-side validation supplements the SDK's advertised output-schema validation. */
+/** Client-side validation of the structured envelope (no output schema is advertised). Decompilations
+ * request detail:'full' so the envelope is available; the default text-first delivery is exercised
+ * directly. */
 export async function callMcpTool<K extends ToolName>(
   client: Client,
   name: K,
   args: ToolInput<K>,
 ): Promise<ToolResult<K>> {
   const result = await client.callTool(
-    { name, arguments: args as Record<string, unknown> },
+    {
+      name,
+      arguments: {
+        ...(name === 'function_decompile' ? { detail: 'full' } : {}),
+        ...(args as Record<string, unknown>),
+      },
+    },
     { timeout: 90000 },
   );
   assert.ok(result.structuredContent, `${name} did not return structured content`);
@@ -345,9 +353,10 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
         discovery.tools.map((tool) => tool.name).sort(),
         Object.keys(toolSchemas).sort(),
       );
+      assert.ok(Buffer.byteLength(JSON.stringify(discovery)) < 40_000, 'tools/list is compact');
       for (const tool of discovery.tools) {
         assert.equal(tool.inputSchema.type, 'object');
-        assert.equal(tool.outputSchema?.type, 'object');
+        assert.equal(tool.outputSchema, undefined);
         assert.ok(tool.description?.length);
       }
       const templates = await client.listResourceTemplates();
@@ -605,10 +614,11 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
         const queued = await callMcpTool(client, 'function_decompile', {
           ...scope(),
           function_id: fn.id,
+          wait: false,
         });
         assert.equal(queued.state, 'queued');
         if (queued.state !== 'queued')
-          assert.fail('Default decompilation must return a durable job');
+          assert.fail('wait:false decompilation must return a durable job');
         const completed = await finishJob(client, queued.job, revision);
         const handle = completed.job.artifacts[0];
         assert.ok(handle);
@@ -679,6 +689,36 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
         );
         assert.equal(cancelFinished.outcome, 'already_finished');
         assert.equal(cancelFinished.job.state, 'completed');
+        // Default delivery is text-first: header + pseudocode, no structured envelope, and a
+        // function selected by name or address resolves to the same cached analysis.
+        const fnName = fn.display_name ?? fn.original_name;
+        for (const selector of [
+          ...(fnName === null ? [] : [fnName]),
+          `va:${fn.entry.value}`,
+          fn.id.slice(0, 19),
+        ]) {
+          const textFirst = await client.callTool({
+            name: 'function_decompile',
+            arguments: { ...scope(), function_id: selector },
+          });
+          assert.notEqual(textFirst.isError, true, `${selector}: ${JSON.stringify(textFirst)}`);
+          assert.equal(textFirst.structuredContent, undefined);
+          const body = textFirst.content[0];
+          assert.ok(body?.type === 'text');
+          assert.ok(body.text.includes(baselineData.emission.text), selector);
+          assert.ok(body.text.includes(handle.id), 'the header names the artifact');
+          assert.ok(Buffer.byteLength(body.text) < baselineData.emission.text.length + 4096);
+        }
+        const ambiguous = await client.callTool({
+          name: 'function_decompile',
+          arguments: { ...scope(), function_id: 'entity_' + '0'.repeat(12) },
+        });
+        assert.equal(ambiguous.isError, true);
+        const failure = z
+          .object({ code: z.string(), path: z.string(), hint: z.string() })
+          .parse(ambiguous.structuredContent);
+        assert.ok(['function_not_found', 'function_search_incomplete'].includes(failure.code));
+        assert.equal(failure.path, 'function_id');
         const subject = baseline.catalog.subjects.find((item) => item.kind === 'value');
         assert.ok(subject, 'Real analysis must publish an annotatable derived subject');
         const type_id = entityIdentity(image.selected_slice_id, 'mcp-client-type', fn.id);
@@ -927,9 +967,18 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
           restoredData.emission,
           'Artifact-only delivery must preserve the full reconstruction',
         );
+        // Under a small output budget the envelope moves to the artifact, yet the text-first
+        // default still delivers the stored pseudocode.
+        const smallText = await client.callTool({
+          name: 'function_decompile',
+          arguments: { ...scope(), function_id: fn.id, budget: { output_bytes: 4096 } },
+        });
+        const smallBody = smallText.content[0];
+        assert.ok(smallBody?.type === 'text' && smallBody.text.includes(smallData.emission.text));
         const cancellable = await callMcpTool(client, 'function_decompile', {
           ...scope(),
           function_id: fn.id,
+          wait: false,
           options: { indent: 7 },
         });
         assert.ok(cancellable.state === 'queued');

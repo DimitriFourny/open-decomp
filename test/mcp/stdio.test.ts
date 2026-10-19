@@ -190,11 +190,12 @@ for (const shutdown of [
       if (shutdown === 'backpressure' || shutdown === 'stalled-output') {
         // Keep the peer alive without draining large discovery replies. Resume only
         // after exit so the parent can consume EOF and observe the child's close event.
-        // The single-response case exercises a real child/OS pipe deadline; fake
-        // timers in this parent cannot advance the separate process's clock.
+        // The stalled case exercises a real child/OS pipe deadline; fake timers in this
+        // parent cannot advance the separate process's clock. Discovery replies are compact,
+        // so several are needed to exceed the pipe's capacity.
         process.child.once('exit', () => process.child.stdout.resume());
         process.child.stdout.pause();
-        const requests = shutdown === 'backpressure' ? MAX_MCP_PENDING_REQUESTS + 4 : 1;
+        const requests = shutdown === 'backpressure' ? MAX_MCP_PENDING_REQUESTS + 4 : 8;
         for (let index = 0; index < requests; index++) {
           process.child.stdin.write(
             `${JSON.stringify({ jsonrpc: '2.0', id: 100 + index, method: 'tools/list', params: {} })}\n`,
