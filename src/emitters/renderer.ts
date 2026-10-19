@@ -97,6 +97,7 @@ import {
   machineType,
   finiteFloatBits,
   integerStorageBits,
+  pointerAssignable,
   usualArithmetic,
   type IntegerCType,
   type Printed,
@@ -136,6 +137,7 @@ import {
 } from './source-inlining.js';
 import { SourceStructs, type ObservedMember } from './source-structs.js';
 import { planFlagTests, type FlagTest } from './source-flags.js';
+import { planLocalTypes, type Fact, type PointerFact } from './source-local-types.js';
 
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
 /** Element kind of a declared scalar pointer: integer or IEEE. */
@@ -279,7 +281,9 @@ export class Renderer {
   >();
   private readonly typeRecords = new Map<string, SuppliedTypeRecord | null>();
   private readonly libraryDeclarations = new Map<string, readonly CatalogEntry[]>();
-  private readonly callParameterSpellings = new Map<string, string>();
+  private readonly callParameterSpellings = new Map<string, string | null>();
+  /** C integer type of each printed struct-member lvalue, by its text. */
+  private readonly memberTypes = new Map<string, IntegerCType>();
   private readonly sourceStructs: SourceStructs;
   private readonly sourceEvidence = new Map<string, { ids: Set<string>; evidence: Set<string> }>();
   private readonly expanding = new Set<string>();
@@ -302,6 +306,10 @@ export class Renderer {
     { readonly object: GlobalObject; readonly name: string }
   >();
   private readonly sourceValueTypes = new Map<string, string>();
+  /** Single call results, by result value id (their library return spelling). */
+  private readonly callResults = new Map<string, BoundaryProjection>();
+  /** Pointer spellings chosen for locals from their definitions and uses. */
+  private readonly localSpellings = new Map<string, string>();
   private readonly sourceRoleNames: ReadonlyMap<string, string | null>;
   /** Loop header phis: each is its own loop-carried variable (see planSourceNames). */
   private readonly sourceCarried: ReadonlySet<string>;
@@ -459,8 +467,10 @@ export class Renderer {
     for (const projection of this.program.calls.values()) {
       if (!projection.signature) continue;
       const declaration = projection.signature.signature;
-      if (projection.results.length === 1)
+      if (projection.results.length === 1) {
         this.sourceValueTypes.set(projection.results[0]!.id, declaration.return_type);
+        this.callResults.set(projection.results[0]!.id, projection);
+      }
     }
     if (this.sourceView) {
       this.stridedPointerTypes();
@@ -731,6 +741,13 @@ export class Renderer {
         return this.sourceType(source);
     }
     if (formal) return this.formalSpelling(formal);
+    const local = this.localSpellings.get(value.id);
+    if (local !== undefined) return local;
+    const call = this.callResults.get(value.id);
+    if (call && source === call.signature?.signature.return_type) {
+      const spelling = this.callResultSpelling(call);
+      if (spelling !== undefined) return spelling;
+    }
     if (source) return this.sourceType(source);
     return this.dataType(value.type);
   }
@@ -926,6 +943,7 @@ export class Renderer {
     if (!this.sourceView)
       return this.printer.primary(this.checkedInterpretation(value, printed.text, id));
     if (this.program.source.float_values?.has(value.id)) return printed;
+    const given = id;
     id ??=
       this.sourceValueTypes.get(value.id) ??
       this.program.source.value_types?.get(value.id)?.type_id;
@@ -945,19 +963,16 @@ export class Renderer {
           : this.printer.reduce(type.bits, printed);
       const step = assigned && this.pointerStep(id!, assigned, type.bits);
       if (step) return step;
-      // Integer-to-pointer conversion of the exact address bits; a narrower
-      // integer goes through uintptr_t (no implicit widening warning).
-      const address =
-        printed.ctype?.bits === type.bits && !printed.ctype.signed
-          ? printed
-          : {
-              text: `(uintptr_t)${this.printer.group(printed, UNARY)}`,
-              precedence: UNARY,
-              ctype: null,
-            };
+      // Integer-to-pointer conversion of the exact address bits (a declared
+      // pointer of the receiving type converts implicitly; a narrower integer goes
+      // through uintptr_t, no implicit widening warning). A local with its own
+      // inferred spelling (`char *`, `FILE *`) casts to that spelling.
+      const declared = given === undefined ? this.declaredSpelling(value) : undefined;
+      const spelling = declared?.endsWith('*') ? declared : this.sourceType(id!);
+      const text = this.pointerValue(printed, spelling);
       return {
-        text: `(${this.sourceType(id!)})${this.printer.group(address, UNARY)}`,
-        precedence: UNARY,
+        text,
+        precedence: text === printed.pointer?.text ? PRIMARY : UNARY,
         ctype: null,
       };
     }
@@ -992,6 +1007,23 @@ export class Renderer {
           'Interpret the proven source signed scalar from its unchanged machine bits.',
           [text],
         );
+  }
+
+  /** C type of the scalar a source load reads through `storage`: a struct
+   * member's declared integer type, a declared scalar pointer's pointee, or the
+   * unsigned integer of the access width. Unknown for another member path. */
+  private loadCType(
+    load: Extract<Instruction, { kind: 'load' }>,
+    storage: string,
+  ): IntegerCType | null {
+    const member = this.memberTypes.get(storage);
+    if (member) return member;
+    if (storage.includes('->')) return null;
+    const id =
+      this.sourceValueTypes.get(load.address.id) ??
+      this.program.source?.value_types?.get(load.address.id)?.type_id;
+    const pointee = id && !this.inline.has(load.address.id) ? this.scalarPointee(id) : null;
+    return pointee ?? { bits: bitWidth(load.result.type), signed: false };
   }
 
   /** Byte size of the scalar a declared source pointer type points to. */
@@ -1224,6 +1256,42 @@ export class Renderer {
       : value.text;
   }
 
+  /** C only: `value` where a pointer of C type `spelling` is wanted. A declared
+   * pointer variable passes as itself when C converts it implicitly (the same
+   * type, `void *`, or added `const`) and through one pointer cast otherwise; an
+   * address of exactly pointer width converts directly, any other width first
+   * to `uintptr_t`. */
+  private pointerValue(value: Printed, spelling: string): string {
+    const pointer = value.pointer;
+    if (pointer)
+      return pointerAssignable(pointer.type, spelling)
+        ? pointer.text
+        : `(${spelling})${pointer.text}`;
+    const address =
+      value.ctype?.bits === (this.input.source?.abi.layout.pointer_bits ?? 64)
+        ? value
+        : { text: `(uintptr_t)${this.printer.group(value, UNARY)}`, precedence: UNARY, ctype: null };
+    return `(${spelling})${this.printer.group(address, UNARY)}`;
+  }
+
+  /** C only: text of `value` where C converts it to the signed `bits`-bit type
+   * (a prototyped argument, an assignment, a return): the signed operand of the
+   * same-width unsigned reinterpretation that produced `value` is itself, and the
+   * implicit conversion back to signed restores exactly its bits. */
+  private signedContext(value: Printed, bits: number): string {
+    const original = value.from?.operand;
+    return this.sourceView &&
+      !this.nativeIntegerStorage &&
+      original?.ctype?.bits === bits &&
+      original.ctype.signed &&
+      value.from!.bits === bits &&
+      value.ctype?.bits === bits &&
+      !value.ctype.signed &&
+      this.printer.simplify('signed_conversion_context')
+      ? original.text
+      : value.text;
+  }
+
   private assigned(destination: Value, value: Printed): string {
     const declared = this.declaredInteger(destination, this.declaredSpelling(destination));
     return this.converted(
@@ -1353,10 +1421,13 @@ export class Renderer {
       ) {
         // A typed pointer slot read in integer context yields its address bits.
         this.expanding.delete(value.id);
+        const slot = this.slotType(load.id),
+          global = this.typedPointerGlobal(load.id);
         return {
           text: `(uintptr_t)${storage}`,
           precedence: UNARY,
           ctype: { bits: bitWidth(value.type), signed: false },
+          pointer: { text: storage, type: slot ? this.formalSpelling(slot) : global!.c },
         };
       }
       if (this.sourceView && this.program.source?.float_accesses?.has(load.id)) {
@@ -1369,13 +1440,7 @@ export class Renderer {
           ctype: null,
         };
       }
-      const id =
-        this.sourceValueTypes.get(load.address.id) ??
-        this.program.source?.value_types?.get(load.address.id)?.type_id;
-      const pointee = id && !this.inline.has(load.address.id) ? this.scalarPointee(id) : null;
-      const type = storage.includes('->')
-        ? null
-        : (pointee ?? { bits: bitWidth(value.type), signed: false });
+      const type = this.loadCType(load, storage);
       const result = this.printer.reduce(bitWidth(value.type), {
         text: storage,
         precedence: storage.startsWith('*') ? UNARY : PRIMARY,
@@ -1433,6 +1498,7 @@ export class Renderer {
                 text: `(uintptr_t)${name}`,
                 precedence: UNARY,
                 ctype: { bits: value.type.bits, signed: false },
+                pointer: { text: name, type: spelling },
               };
         return this.printer.primary(name);
       }
@@ -1868,7 +1934,10 @@ export class Renderer {
     }
     if (spelling?.endsWith('*')) {
       const bare = /^(?:const )?(?:char|void)\s*\*$/.test(spelling);
-      return bare || !cast
+      // A string literal is itself a `const char *` expression.
+      if (bare)
+        return { ...this.printer.primary(text, integerAddress), pointer: { text, type: 'const char*' } };
+      return !cast
         ? this.printer.primary(text, integerAddress)
         : { text: `(${spelling})${text}`, precedence: UNARY, ctype: integerAddress };
     }
@@ -2437,6 +2506,9 @@ export class Renderer {
         : String(displacement);
       access += `[${subscript}]`;
     }
+    const memberType = this.typeRecords.get(member.typeId)?.definition;
+    if (memberType?.kind === 'integer' && memberType.bits === bits)
+      this.memberTypes.set(access, { bits, signed: memberType.signed });
     return access;
   }
 
@@ -2598,11 +2670,25 @@ export class Renderer {
     declared: (entry: CatalogEntry) => { spec: TypeSpec; readOnly: boolean } | undefined,
   ): string {
     const fallback = this.sourceType(typeId);
-    if (!this.sourceView || this.language !== 'c-like' || association.source !== 'library')
-      return fallback;
+    return this.language === 'c-like'
+      ? (this.libraryCSpelling(association, typeId, subject, declared) ?? fallback)
+      : fallback;
+  }
+
+  /** The library's own C spelling of a declared pointer type, in either dialect
+   * (the Python-like locals map it from `char` identity): undefined when no
+   * contract evidence refines the generic type spelling. */
+  private libraryCSpelling(
+    association: NonNullable<BoundaryProjection['signature']>,
+    typeId: string,
+    subject: string,
+    declared: (entry: CatalogEntry) => { spec: TypeSpec; readOnly: boolean } | undefined,
+  ): string | undefined {
+    const fallback = this.sourceType(typeId);
+    if (!this.sourceView || association.source !== 'library') return undefined;
     const cached = this.callParameterSpellings.get(subject);
-    if (cached !== undefined) return cached;
-    this.callParameterSpellings.set(subject, fallback);
+    if (cached !== undefined) return cached ?? undefined;
+    this.callParameterSpellings.set(subject, null);
     let depth = 0,
       base = typeId,
       record = this.typeRecords.get(base);
@@ -2615,13 +2701,13 @@ export class Renderer {
       base = record.definition.to;
       record = this.typeRecords.get(base);
     }
-    if (depth === 0 || record?.source !== 'library') return fallback;
+    if (depth === 0 || record?.source !== 'library') return undefined;
     let spelling: string | undefined;
     for (const id of association.evidence_ids) {
       this.context.checkpoint(1);
       for (const entry of this.libraryDeclarations.get(id) ?? []) {
         const found = declared(entry);
-        if (!found) return fallback;
+        if (!found) return undefined;
         let spec = found.spec,
           levels = 0,
           constant = false;
@@ -2635,14 +2721,15 @@ export class Renderer {
           (spec === 'char' &&
             !(record.definition.kind === 'integer' && record.definition.bits === 8))
         )
-          return fallback;
+          return undefined;
         const next = `${constant || (levels === 1 && found.readOnly) ? 'const ' : ''}${spec === 'char' ? 'char' : this.sourceType(base)}${'*'.repeat(levels)}`;
-        if (spelling !== undefined && spelling !== next) return fallback;
+        if (spelling !== undefined && spelling !== next) return undefined;
         spelling = next;
       }
     }
     if (
       !spelling ||
+      (this.language !== 'c-like' && !/^(?:const )?char\*$/.test(spelling)) ||
       spelling === fallback ||
       !this.localValidation.presentation(
         'library_string_parameter',
@@ -2651,9 +2738,62 @@ export class Renderer {
         [association.id, typeId],
       )
     )
-      return fallback;
+      return undefined;
     this.callParameterSpellings.set(subject, spelling);
     return spelling;
+  }
+
+  /** The dialect's spelling of a library-declared pointer: C as the library
+   * spells it; Python-like `pointer[char]` for character identity, else the
+   * generic type spelling. */
+  private dialectPointer(spelling: string, typeId: string): string {
+    return this.language === 'c-like'
+      ? spelling
+      : /^(?:const )?char\*$/.test(spelling)
+        ? 'pointer[char]'
+        : this.sourceType(typeId);
+  }
+
+  /** Declared type of call parameter `index` where it is a pointer, else a scalar. */
+  private callParameterFact(
+    projection: BoundaryProjection,
+    index: number,
+  ): PointerFact | 'scalar' | undefined {
+    const association = projection.signature;
+    const parameter = association?.signature.parameters[index];
+    if (!association || !parameter) return undefined;
+    const definition = this.typeRecords.get(parameter.type_id)?.definition;
+    if (definition?.kind !== 'pointer') return 'scalar';
+    const library = this.libraryCSpelling(association, parameter.type_id, parameter.id, (entry) => {
+      const spec = entry.parameters[index]?.[1];
+      if (spec === undefined) return undefined;
+      const accesses = entry.memory?.filter((item) => item.argument === index) ?? [];
+      return {
+        spec,
+        readOnly: accesses.length > 0 && accesses.every((item) => item.access === 'read'),
+      };
+    });
+    return {
+      type_id: parameter.type_id,
+      spelling: library
+        ? this.dialectPointer(library, parameter.type_id)
+        : this.sourceType(parameter.type_id),
+    };
+  }
+
+  /** Declared spelling of a single call result that is a pointer, else undefined. */
+  private callResultSpelling(projection: BoundaryProjection): string | undefined {
+    const association = projection.signature;
+    if (!association) return undefined;
+    const typeId = association.signature.return_type;
+    if (this.typeRecords.get(typeId)?.definition.kind !== 'pointer') return undefined;
+    const library = this.libraryCSpelling(
+      association,
+      typeId,
+      `${association.id}:return`,
+      (entry) => ({ spec: entry.returns, readOnly: false }),
+    );
+    return library ? this.dialectPointer(library, typeId) : undefined;
   }
 
   private callParameterType(projection: BoundaryProjection, index: number): string {
@@ -3078,9 +3218,14 @@ export class Renderer {
           ? undefined
           : this.sourceLiteral(value, pointer && bytePointer);
       if (literal !== undefined) literals.push(value.id);
-      const text = pointer
-        ? (literal ?? this.sourceAddressValue(value, !this.sourceView))
-        : (literal ?? this.value(value));
+      const printed = pointer
+        ? literal === undefined
+          ? this.sourceAddressPrinted(value, !this.sourceView)
+          : undefined
+        : literal === undefined
+          ? this.printed(value)
+          : undefined;
+      const text = literal ?? printed!.text;
       if (pointer && this.language === 'c-like') {
         const spelling = this.callParameterType(projection, index);
         if (literal !== undefined)
@@ -3090,7 +3235,7 @@ export class Renderer {
         const loaded = this.inlined.get(value.id)?.node;
         if (loaded?.kind === 'load' && this.typedPointerGlobal(loaded.id)?.c === spelling)
           return this.storage(loaded);
-        return `((${spelling})(uintptr_t)(${text}))`;
+        return this.pointerValue(printed!, spelling);
       }
       const type = parameter && this.typeRecords.get(parameter.type_id)?.definition;
       if (type?.kind === 'integer' && type.signed && this.language === 'python-like')
@@ -3099,6 +3244,13 @@ export class Renderer {
           'Interpret source integer argument with its established signed ABI type.',
           [text],
         );
+      // A declared prototype converts an argument to its parameter type: the
+      // value's own signed variable passes unchanged to a signed parameter.
+      if (printed && type?.kind === 'integer' && type.signed && this.language === 'c-like')
+        return this.signedContext(printed, type.bits);
+      // An undeclared parameter reads the callee's observed interface: an
+      // argument that is a declared pointer variable passes as that pointer.
+      if (printed?.pointer && !parameter && this.language === 'c-like') return printed.pointer.text;
       return text;
     });
     if (
@@ -3178,7 +3330,9 @@ export class Renderer {
         result.type.kind === 'integer' &&
         integerStorageBits(result.type.bits) !== result.type.bits
       ) &&
-      (!declared || this.sourceType(declared.return_type) === this.valueType(result))
+      (!declared ||
+        ((projection && this.callResultSpelling(projection)) ??
+          this.sourceType(declared.return_type)) === this.valueType(result))
     );
   }
 
@@ -3298,7 +3452,7 @@ export class Renderer {
           this.sourceInterpretation(node.result, {
             text: storage,
             precedence: storage.startsWith('*') ? UNARY : 16,
-            ctype: null,
+            ctype: node.kind === 'load' ? this.loadCType(node, storage) : null,
           }).text
         }`
       : storage;
@@ -4822,6 +4976,119 @@ export class Renderer {
       : { positive: negated, negative: merged };
   }
 
+  /** The declared source type a value already has: a pointer type (record and
+   * spelling), `scalar` for any other declared type, undefined when it is
+   * printed with its machine width only. */
+  private knownFact(value: Value): Fact | undefined {
+    const source = this.program.source;
+    if (source?.float_values?.has(value.id) || source?.formal_types?.has(value.id))
+      return 'scalar';
+    const typeId = this.sourceValueTypes.get(value.id) ?? source?.value_types?.get(value.id)?.type_id;
+    if (!typeId) return undefined;
+    const definition = this.typeRecords.get(typeId)?.definition;
+    if (definition?.kind === 'pointer')
+      return { type_id: typeId, spelling: this.valueType(value) };
+    // An unsigned integer of the machine width is the value's own storage, not a
+    // declaration a pointer use could contradict.
+    return definition?.kind === 'integer' &&
+      !definition.signed &&
+      definition.bits === bitWidth(value.type)
+      ? undefined
+      : 'scalar';
+  }
+
+  /** Declared pointer type a load reads: a header-declared pointer global, a
+   * typed promoted slot, or a declared pointer member. */
+  private typedLoadFact(id: string): PointerFact | undefined {
+    const slot = this.slotType(id);
+    if (slot?.kind === 'pointer') return { spelling: this.formalSpelling(slot) };
+    const declared = this.globals.accesses.get(id)?.object.declared?.type;
+    return declared?.kind === 'pointer'
+      ? { spelling: this.language === 'c-like' ? declared.c : declared.python }
+      : undefined;
+  }
+
+  /** Source view: give each set of integer locals connected by phi copies the
+   * pointer type its definitions and uses establish (see planLocalTypes). */
+  private chooseLocalTypes(): void {
+    const program = this.program,
+      source = program.source;
+    if (!source) return;
+    const bits = this.input.source?.abi.layout.pointer_bits ?? 64;
+    const formals = new Set(program.parameters.map((value) => value.id));
+    const signature = program.signature?.signature;
+    const resultId = signature?.return_type ?? source.return_source_type;
+    const result: Fact | undefined = resultId
+      ? this.typeRecords.get(resultId)?.definition.kind === 'pointer'
+        ? { type_id: resultId, spelling: this.sourceType(resultId) }
+        : 'scalar'
+      : source.return_pointer
+        ? {
+            spelling:
+              source.return_pointer === 'char'
+                ? this.language === 'c-like'
+                  ? 'char*'
+                  : 'pointer[char]'
+                : this.language === 'c-like'
+                  ? 'uint8_t*'
+                  : 'pointer[uint8_t]',
+          }
+        : source.return_type || source.return_types?.length
+          ? 'scalar'
+          : undefined;
+    const choices = planLocalTypes({
+      program,
+      context: this.context,
+      language: this.language,
+      pointer_bits: bits,
+      inline: this.inline,
+      inlined: this.inlined,
+      inlined_calls: this.inlinedCalls,
+      formals,
+      constant: this.constantOf,
+      known: (value) => this.knownFact(value),
+      parameter: (projection, index) => this.callParameterFact(projection, index),
+      load: (id) => this.typedLoadFact(id),
+      literal: (value) => this.sourceLiteral(value, true) !== undefined,
+      result,
+      variable: (value) =>
+        value.type.kind === 'integer' &&
+        value.type.bits === bits &&
+        program.live.has(value.id) &&
+        !this.inline.has(value.id) &&
+        !this.inlined.has(value.id) &&
+        !this.inlinedCalls.has(value.id) &&
+        !formals.has(value.id) &&
+        !source.stack_addresses.has(value.id) &&
+        !source.float_values?.has(value.id) &&
+        !this.fpPresentation.unobserved.has(value.id),
+    });
+    for (const choice of choices.values()) {
+      const typeId = choice.fact.type_id!;
+      const changed = choice.members.filter(
+        (id) =>
+          (this.sourceValueTypes.get(id) ?? source.value_types?.get(id)?.type_id) !== typeId ||
+          this.valueType(program.values.get(id)!) !== choice.fact.spelling,
+      );
+      if (
+        !changed.length ||
+        !this.localValidation.presentation(
+          'local_source_type',
+          changed[0]!,
+          'integer locals connected by phi copies take the pointer type their typed call parameters, typed global, slot and call-result definitions, identity tests and dereferences establish, when none of their uses is integer arithmetic and the conversions saved outnumber those added; every use and definition still prints its exact conversion, so values, widths and evaluation order are unchanged',
+          changed.slice(0, 64),
+        )
+      )
+        continue;
+      for (const id of changed) {
+        this.sourceValueTypes.set(id, typeId);
+        if (choice.fact.spelling !== this.sourceType(typeId))
+          this.localSpellings.set(id, choice.fact.spelling);
+        else this.localSpellings.delete(id);
+      }
+    }
+  }
+
   /** Source view: coalesce phi copies, then lay out return tails and loop
    * syntax. Each step checks its side conditions on this reconstruction and
    * records one presentation rewrite; the checked view never calls this. */
@@ -4934,6 +5201,7 @@ export class Renderer {
         nodes.push(site);
         this.inlinedCallSites.set(site.anchor, nodes);
       }
+    this.chooseLocalTypes();
     const liveness = new VariableLiveness(
       program,
       this.context,

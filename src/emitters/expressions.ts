@@ -380,6 +380,9 @@ export interface Printed {
   readonly from?: { readonly operand: Printed; readonly bits: number };
   /** The one-bit operand of a logical negation: negating twice is the identity. */
   readonly negated?: Printed;
+  /** The same address bits as a C lvalue of declared pointer type `type`: a
+   * context converting to exactly that pointer type may print it directly. */
+  readonly pointer?: { readonly text: string; readonly type: string };
 }
 /** Binding strength shared by both dialects; only binary operators differ. */
 export const PRIMARY = 16;
@@ -439,6 +442,25 @@ export function usualArithmetic(left: IntegerCType, right: IntegerCType): Intege
   return unsigned.bits >= signed.bits ? unsigned : signed;
 }
 
+/** Two declared pointer variables of one C type (ignoring a top-level `const`)
+ * compare for identity without a conversion. */
+function samePointer(
+  left: { readonly type: string },
+  right: { readonly type: string },
+): boolean {
+  const bare = (spelling: string): string => spelling.replace(/^const /, '');
+  return bare(left.type) === bare(right.type);
+}
+
+/** C implicit conversion between pointer spellings: the same type, to or from
+ * `void *`, or adding a top-level `const` (never dropping it). */
+export function pointerAssignable(from: string, to: string): boolean {
+  const constant = (spelling: string): boolean => spelling.startsWith('const ');
+  const bare = (spelling: string): string => spelling.replace(/^const /, '');
+  if (constant(from) && !constant(to)) return false;
+  return bare(from) === bare(to) || bare(to) === 'void*' || bare(from) === 'void*';
+}
+
 /** Records one source-view presentation rewrite; false when its record bound is
  * reached and the explicit form must stay. Only a source view that records its
  * rewrites simplifies at all: the checked view never receives a recorder. */
@@ -471,6 +493,12 @@ const simplifications = {
     'a rotation of a w-bit unsigned bare variable by a constant 0<k<w is (x << k) | (x >> (w-k)) reduced to w bits, printed in the direction with the smaller count; the variable is pure, so reading it twice in one expression is exact',
   character_literal:
     'a constant combined with a value established as one character code (a byte loaded through a pointer to bytes, or a library character parameter) is that code spelled as the character constant of the same value',
+  pointer_identity:
+    'identity comparison of two declared pointer variables of one type, or of one with the null constant (integer zero): equal address bits compare equal, so no integer round trip is printed',
+  equality_sign_reinterpretation:
+    'equality of two values of at least the width of int is unchanged by reinterpreting either as signed or unsigned of the same width: C converts a mixed pair to the unsigned type of the same bit pattern',
+  signed_conversion_context:
+    'a context that converts to a signed integer type of the same width (prototyped argument, assignment, return) receives the signed variable that a same-width unsigned reinterpretation merely re-read: the conversion restores its exact bits',
 } as const;
 
 /** Source-view syntax shared by expression and memory printing. */
@@ -1233,8 +1261,38 @@ export function expressionText(
       };
       // Every unsigned-compare operand is its non-negative bit pattern, so any
       // common C type compares the same values.
-      const left = side(expression.left, expression.right),
+      let left = side(expression.left, expression.right),
         right = side(expression.right, expression.left);
+      if (escapes && !python) {
+        // Identity of two declared pointers of one type, or of one with the null
+        // constant: the pointer variables compare as themselves (equal address
+        // bits); a null pointer constant is the integer constant zero.
+        const zero = (value: Value): boolean => options.constant?.(value) === 0n;
+        const same = left.pointer && right.pointer && samePointer(left.pointer, right.pointer);
+        const nullTest =
+          (left.pointer && !right.pointer && zero(expression.right)) ||
+          (right.pointer && !left.pointer && zero(expression.left));
+        if ((same || nullTest) && printer.simplify('pointer_identity')) {
+          if (left.pointer) left = printer.primary(left.pointer.text);
+          if (right.pointer) right = printer.primary(right.pointer.text);
+        } else if (bits >= 32) {
+          // Equality of full-width (at least `int`) values is invariant under
+          // reinterpreting either one as signed or unsigned: C converts a mixed
+          // pair to the unsigned type with the same bit pattern.
+          const strip = (value: Printed): Printed =>
+            value.from &&
+            value.from.bits === bits &&
+            value.ctype?.bits === bits &&
+            !value.ctype.signed &&
+            value.from.operand.ctype?.bits === bits &&
+            value.from.operand.ctype.signed &&
+            printer.simplify('equality_sign_reinterpretation')
+              ? value.from.operand
+              : value;
+          left = strip(left);
+          right = strip(right);
+        }
+      }
       return printer.binary(
         comparisonOperators[expression.op],
         left,
