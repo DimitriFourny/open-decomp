@@ -159,7 +159,14 @@ async function call<K extends ToolName>(
   name: K,
   input: ToolInput<K>,
 ): Promise<ToolResult<K>> {
-  const response = await client.callTool({ name, arguments: input as Record<string, unknown> });
+  // Decompilations request the full envelope; text-first delivery is covered by server.test.ts.
+  const response = await client.callTool({
+    name,
+    arguments: {
+      ...(name === 'function_decompile' ? { detail: 'full' } : {}),
+      ...(input as Record<string, unknown>),
+    },
+  });
   return validateToolResponse(name, response.structuredContent, validateToolRequest(name, input));
 }
 
@@ -715,7 +722,7 @@ test(
       arguments: { ...scope, budget: { work: DEFAULT_BUDGET.work + 1 } },
     });
     assert.equal(budget.isError, true);
-    assert.equal(budget.structuredContent, undefined);
+    assert.match(JSON.stringify(budget.structuredContent), /"code":"not_authorized"/);
     const cancelled = await call(sdk, 'analysis_cancel', { ...scope, job_id: opened.job.id });
     assert.ok('data' in cancelled && cancelled.data.job.state === 'cancelled');
   },
@@ -866,7 +873,7 @@ test(
     assert.equal(first.state, 'failed');
     const limited = await alice.callTool({ name: 'binary_info', arguments: scope });
     assert.equal(limited.isError, true);
-    assert.equal(limited.structuredContent, undefined);
+    assert.match(JSON.stringify(limited.structuredContent), /"code":"not_authorized"/);
     const other = await call(bob, 'binary_info', scope);
     assert.equal(other.state, 'failed');
     if (other.state === 'failed') assert.equal(other.error.code, 'not_found');

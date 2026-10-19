@@ -319,6 +319,11 @@ export const functionsFindArgsSchema = z.strictObject({
   ...requestContext,
   image_id: imageIdSchema,
   id: entityIdSchema.optional(),
+  /** Unique-prefix lookup (at least 12 hex digits); an ambiguous prefix returns every match. */
+  id_prefix: z
+    .string()
+    .regex(/^entity_[0-9a-f]{12,63}$/)
+    .optional(),
   query: querySchema.default(defaultQuery),
   address: addressSchema.optional(),
   boundary: z.enum(['candidate', 'established', 'conflicting']).optional(),
@@ -397,7 +402,9 @@ export const functionGetArgsSchema = z
 export const functionDecompileArgsSchema = z.strictObject({
   ...requestContext,
   function_id: entityIdSchema,
-  wait: z.boolean().default(false),
+  /** true awaits the terminal result; false returns the durable job at admission; 'auto' awaits a
+   * short bounded time and otherwise returns the job. */
+  wait: z.union([z.boolean(), z.literal('auto')]).default(false),
   delivery: z.enum(['auto', 'artifact']).default('auto'),
   options: analysisOptionsSchema.default(DEFAULT_ANALYSIS_OPTIONS),
 });

@@ -72,24 +72,45 @@ async function setup(t: TestContext, options: Partial<WorkerPoolOptions> = {}) {
       fetch: (url, init) => handler.fetch(new Request(url, init)),
     }),
   );
+  /** `detail` is the MCP-only delivery option; decompilations default to the full envelope here so
+   * tests can validate it, and pass detail:'text' to exercise the default text-first delivery. */
   async function call<K extends ToolName>(
     name: K,
-    input: ToolInput<K>,
+    input: ToolInput<K> & { detail?: 'text' | 'full' },
   ): Promise<{ response: CallToolResult; result: ToolResult<K> }> {
-    const response = await client.callTool({ name, arguments: input as Record<string, unknown> });
+    const { detail, ...core } = input;
+    const response = await client.callTool({
+      name,
+      arguments: {
+        ...core,
+        ...(name === 'function_decompile' ? { detail: detail ?? 'full' } : {}),
+      } as Record<string, unknown>,
+    });
     assert.ok(Buffer.byteLength(JSON.stringify(response)) <= MCP_MAX_RESULT_BYTES);
     const result = validateToolResponse(
       name,
       response.structuredContent,
-      validateToolRequest(name, input),
+      validateToolRequest(name, core),
     );
     const text = response.content.find((item) => item.type === 'text');
     assert.ok(text?.type === 'text');
-    assert.deepEqual(
-      decodeNavigationText(text.text),
-      result,
-      'text-only consumers receive every fact of the core delivery envelope',
-    );
+    if (name === 'functions_find' || name === 'symbols_find' || name === 'strings_find')
+      assert.ok(text.text.startsWith(`${name} `), 'compact listing rows for text consumers');
+    else if (result.state === 'failed' || result.state === 'unsupported')
+      assert.deepEqual(JSON.parse(text.text).error, result.error);
+    else if (name === 'function_decompile') {
+      const decompiled = toolSchemas.function_decompile.output.parse(result);
+      if ('data' in decompiled && decompiled.data.delivery === 'inline')
+        assert.ok(
+          text.text.endsWith(decompiled.data.emission.text),
+          'pseudocode is delivered as text',
+        );
+    } else
+      assert.deepEqual(
+        decodeNavigationText(text.text),
+        result,
+        'text-only consumers receive every fact of the core delivery envelope',
+      );
     assert.equal(
       response.isError === true,
       result.state === 'failed' || result.state === 'unsupported',
@@ -111,7 +132,15 @@ test(
     );
     const open = listed.tools.find((tool) => tool.name === 'project_open')!;
     assert.equal(open.inputSchema.type, 'object');
-    assert.equal(open.outputSchema?.type, 'object');
+    assert.equal(
+      open.outputSchema,
+      undefined,
+      'results are validated by the server, not advertised',
+    );
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(listed)) < 40_000,
+      'tools/list stays small enough to put in a model context',
+    );
     assert.ok(open.inputSchema.properties?.['source']);
     const templates = await client.listResourceTemplates();
     assert.equal(templates.resourceTemplates[0]?.uriTemplate, ARTIFACT_URI_TEMPLATE);
@@ -130,7 +159,10 @@ test(
       arguments: { edits: Array.from({ length: 1000 }, () => ({ invalid: 'x'.repeat(100) })) },
     });
     assert.equal(invalid.isError, true);
-    assert.equal(invalid.structuredContent, undefined);
+    const failure = z
+      .strictObject({ code: z.string(), path: z.string(), hint: z.string() })
+      .parse(invalid.structuredContent);
+    assert.equal(failure.code, 'invalid_arguments');
     assert.ok(Buffer.byteLength(JSON.stringify(invalid)) < 2048);
     const failed = await call('binary_info', { project_id: newIdentity('project'), revision: 0 });
     assert.equal(failed.result.state, 'failed');
@@ -191,7 +223,9 @@ for (const fixture of [
         (item) => item.entry.value.toLowerCase() === fixture.arithmetic,
       );
       assert.ok(fn);
-      const queued = (await call('function_decompile', { ...scope, function_id: fn.id })).result;
+      const queued = (
+        await call('function_decompile', { ...scope, function_id: fn.id, wait: false })
+      ).result;
       assert.equal(queued.state, 'queued');
       if (queued.state !== 'queued')
         assert.fail('Analysis must expose a durable job without client progress extensions');
