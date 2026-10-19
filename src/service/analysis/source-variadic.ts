@@ -64,6 +64,35 @@ export function printfArgumentTypes(format: string, abi: AbiProfile): readonly A
   return types;
 }
 
+/** Standard scanf conversions: each unsuppressed conversion stores through one pointer.
+ * Positional syntax, unknown conversions and malformed scansets retain an open list. */
+export function scanfArgumentTypes(format: string): readonly AbiType[] | null {
+  const types: AbiType[] = [];
+  for (let cursor = 0; cursor < format.length; cursor++) {
+    if (format[cursor] !== '%') continue;
+    cursor++;
+    if (format[cursor] === '%') continue;
+    const suppressed = format[cursor] === '*';
+    if (suppressed) cursor++;
+    while (/[0-9]/.test(format[cursor] ?? '')) cursor++;
+    if (format[cursor] === '$') return null;
+    if (format[cursor] === 'm') cursor++;
+    if (format.startsWith('hh', cursor) || format.startsWith('ll', cursor)) cursor += 2;
+    else if ('hljztL'.includes(format[cursor] ?? '\0')) cursor++;
+    const conversion = format[cursor];
+    if (conversion === '[') {
+      cursor++;
+      if (format[cursor] === '^') cursor++;
+      if (format[cursor] === ']') cursor++;
+      cursor = format.indexOf(']', cursor);
+      if (cursor < 0) return null;
+    } else if (!conversion || !'diouxXaAeEfFgGscpn'.includes(conversion)) return null;
+    if (!suppressed) types.push({ kind: 'pointer' });
+    if (types.length > 64) return null;
+  }
+  return types;
+}
+
 const MAX_CANDIDATES = 8;
 
 /** Bounded finite value set of an integer SSA value: constants and addresses
@@ -228,7 +257,7 @@ function openModeRequired(abi: AbiProfile, flags: readonly bigint[]): boolean | 
 export interface VariadicRuleCall {
   readonly call_id: string;
   readonly contract: LibraryContracts['contracts'][number];
-  readonly kind: 'format' | 'open_flags';
+  readonly kind: 'format' | 'scanf_format' | 'open_flags';
   readonly values: readonly bigint[];
 }
 
@@ -264,7 +293,7 @@ export function variadicRuleCalls(
       !contract ||
       !rule ||
       contract.conflicts_with.length ||
-      (rule.kind !== 'format' && rule.kind !== 'open_flags') ||
+      (rule.kind !== 'format' && rule.kind !== 'scanf_format' && rule.kind !== 'open_flags') ||
       !contract.abi_signature.parameters
     )
       continue;
@@ -316,14 +345,18 @@ export function variadicRuleFacts(
   for (const { call_id, contract, kind, values } of calls) {
     context.checkpoint(1);
     let additional: readonly AbiType[] | null = null;
-    if (kind === 'format') {
+    if (kind === 'format' || kind === 'scanf_format') {
       for (const address of values) {
         context.checkpoint(1);
         const literal = addresses.find(
           (item) => item.address.value === address && item.string !== undefined,
         );
         const types =
-          literal?.string === undefined ? null : printfArgumentTypes(literal.string, abi);
+          literal?.string === undefined
+            ? null
+            : kind === 'scanf_format'
+              ? scanfArgumentTypes(literal.string)
+              : printfArgumentTypes(literal.string, abi);
         if (!types || (additional && JSON.stringify(types) !== JSON.stringify(additional))) {
           additional = null;
           break;

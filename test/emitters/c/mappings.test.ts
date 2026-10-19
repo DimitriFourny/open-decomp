@@ -315,10 +315,15 @@ for (const language of ['c-like', 'python-like'] as const)
           (error: unknown) => error instanceof OperationError && error.code === code,
         );
       };
+      // The output byte budget bounds the pseudocode text itself; provenance metadata
+      // beyond it is shed instead (see metadata-limits.test.ts).
       bounded(
         () =>
           emitSelected(
-            input,
+            {
+              ...input,
+              names: [{ entity_id: b.function_id, name: 'long_name_'.repeat(200) }],
+            },
             DEFAULT_ANALYSIS_OPTIONS,
             createOperationContext({ budget: { output_bytes: 1024 } }),
           ),

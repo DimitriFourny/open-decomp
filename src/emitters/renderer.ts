@@ -1,11 +1,16 @@
 import {
   fingerprint,
+  MAX_RESULT_DIAGNOSTICS,
+  omittedDiagnosticsSummary,
   OperationError,
   type Address,
   type Annotation,
   type CallClobbers,
   type Diagnostic,
   type Emitter,
+  type EmissionOmission,
+  type EmissionRequirement,
+  type Inference,
   type OperationContext,
   type RegisterDescriptor,
   type Requirement,
@@ -47,7 +52,11 @@ import { indexedDataAccesses, type IndexedDataAccess } from './source-tables.js'
 import { cScalarSupport } from './source-c-support.js';
 import { UnsignedBounds } from './source-bounds.js';
 import { cSourceName } from '../metadata/symbols/c-names.js';
-import { catalog, type CatalogEntry } from '../metadata/library-contracts/catalog.js';
+import {
+  findDeclarationByPath,
+  type CatalogEntry,
+  type TypeSpec,
+} from '../metadata/library-contracts/catalog.js';
 import {
   planSourceNames,
   sourceGenericStems,
@@ -84,7 +93,7 @@ import {
   type Printed,
   type SimplificationRecorder,
 } from './expressions.js';
-import { Writer } from './writer.js';
+import { MetadataLimitError, Writer } from './writer.js';
 import type { EmissionInput, EmissionResult } from './model.js';
 import { collectInferences } from './inference.js';
 import {
@@ -159,6 +168,9 @@ export class Renderer {
   private readonly names = new Map<string, string | null>();
   private readonly identifiers = new Map<string, EmissionResult['identifiers'][number]>();
   private readonly diagnostics: Diagnostic[] = [];
+  /** Diagnostics and citations beyond the wire list bound, counted for the summary. */
+  private readonly shedDiagnostics = new Map<Diagnostic['code'], number>();
+  private shedCitations = 0;
   private readonly origins = new Map<string, Origin>();
   private readonly statements = new Map<string, Instruction>();
   private readonly controls = new Map<string, Control>();
@@ -242,7 +254,7 @@ export class Renderer {
     { readonly init: ParallelTransfer; readonly step: ParallelTransfer }
   >();
   private readonly typeRecords = new Map<string, SuppliedTypeRecord | null>();
-  private readonly libraryDeclarations = new Map<string, CatalogEntry>();
+  private readonly libraryDeclarations = new Map<string, readonly CatalogEntry[]>();
   private readonly callParameterSpellings = new Map<string, string>();
   private readonly sourceStructs: SourceStructs;
   private readonly sourceEvidence = new Map<string, { ids: Set<string>; evidence: Set<string> }>();
@@ -277,8 +289,9 @@ export class Renderer {
     private readonly language: 'c-like' | 'python-like',
     private readonly version: string,
     private readonly inlineCalls = true,
+    private readonly metadata: 'full' | 'omitted' = 'full',
   ) {
-    this.writer = new Writer(context, options.indent, options.include_evidence, language);
+    this.writer = new Writer(context, options.indent, options.include_evidence, language, metadata);
     this.program = reconstruct(input, context, options.view === 'checked' ? 'checked' : 'source');
     this.inline = new Set(this.program.inline);
     this.bounds = new UnsignedBounds(this.program.expressions, context);
@@ -373,8 +386,10 @@ export class Renderer {
     if (this.sourceView && language === 'c-like')
       for (const proof of input.types?.evidence ?? []) {
         context.checkpoint(1);
-        if (proof.origin.kind === 'library' && Object.hasOwn(catalog, proof.origin.contract))
-          this.libraryDeclarations.set(proof.id, catalog[proof.origin.contract]!);
+        if (proof.origin.kind === 'library') {
+          const found = findDeclarationByPath(proof.origin.contract, proof.origin.library);
+          if (found.length) this.libraryDeclarations.set(proof.id, found);
+        }
       }
     for (const signature of input.types?.signatures ?? []) {
       context.checkpoint(1 + signature.signature.parameters.length + signature.evidence_ids.length);
@@ -447,8 +462,18 @@ export class Renderer {
 
   private report(diagnostic: Diagnostic): void {
     this.context.checkpoint(1 + diagnostic.evidence_ids.length);
-    if (this.diagnostics.length >= 1000 || diagnostic.evidence_ids.length > 1000)
-      this.writer.fail('Pseudocode diagnostic limit exceeded');
+    // The wire list holds one entry less than its bound: the last is the omission summary.
+    if (this.diagnostics.length >= MAX_RESULT_DIAGNOSTICS - 1) {
+      this.shedDiagnostics.set(
+        diagnostic.code,
+        (this.shedDiagnostics.get(diagnostic.code) ?? 0) + 1,
+      );
+      return;
+    }
+    if (diagnostic.evidence_ids.length > 1000) {
+      this.shedCitations += diagnostic.evidence_ids.length - 1000;
+      diagnostic = { ...diagnostic, evidence_ids: diagnostic.evidence_ids.slice(0, 1000) };
+    }
     this.writer.metadata(
       Buffer.byteLength(diagnostic.message) +
         (diagnostic.entity_id?.length ?? 0) +
@@ -1765,11 +1790,17 @@ export class Renderer {
   /** Forward declarations of types without a printed body: written only if the
    * finished text refers to them. */
   private readonly deferredTypedefs: string[] = [];
+  /** Named pointer typedefs (`HANDLE`, `CFStringRef`) of library contracts: deferred
+   * typedef name -> full declaration. */
+  private readonly handleTypedefs = new Map<string, string>();
 
   private opaqueType(id: string): string {
     let name = this.sourceOpaqueTypes.get(id);
     if (!name) {
-      name = this.sourceIdentifier(id, `opaque_${this.sourceOpaqueTypes.size + 1}`);
+      const spelling = this.typeRecords.get(id)?.spelling;
+      // `struct tag` spellings are complete type names and need no typedef.
+      if (spelling !== undefined && /^(?:struct|union) /.test(spelling)) return spelling;
+      name = this.sourceIdentifier(id, spelling ?? `opaque_${this.sourceOpaqueTypes.size + 1}`);
       this.sourceOpaqueTypes.set(id, name);
     }
     return name;
@@ -1799,6 +1830,8 @@ export class Renderer {
             : 'double'
           : `ieee${type.bits}_t`;
       case 'pointer':
+        if (this.sourceView && this.language === 'c-like' && record.spelling !== undefined)
+          return record.spelling;
         return this.language === 'c-like'
           ? `${this.sourceType(type.to, depth + 1)}*`
           : `pointer[${this.sourceType(type.to, depth + 1)}]`;
@@ -2206,6 +2239,22 @@ export class Renderer {
       else this.deferredTypedefs.push(name);
     }
     this.deferredTypedefs.push(...this.sourceOpaqueTypes.values());
+    for (const id of pending) {
+      const record = this.typeRecords.get(id);
+      if (
+        this.language === 'c-like' &&
+        record?.source === 'library' &&
+        record.spelling !== undefined &&
+        record.definition.kind === 'pointer' &&
+        !this.handleTypedefs.has(record.spelling)
+      ) {
+        this.handleTypedefs.set(
+          record.spelling,
+          `typedef ${this.sourceType(record.definition.to)}* ${record.spelling};`,
+        );
+        this.deferredTypedefs.push(record.spelling);
+      }
+    }
     const declaredArrays = new Set<string>();
     const declareArray = (id: string): void => {
       if (declaredArrays.has(id)) return;
@@ -2293,57 +2342,97 @@ export class Renderer {
     return true;
   }
 
-  /** C character identity comes from the installed contract's evidence, never
-   * from a guessed callee name or an arbitrary 8-bit pointee. */
-  private callParameterType(projection: BoundaryProjection, index: number): string {
-    const association = projection.signature!;
-    const parameter = association.signature.parameters[index]!;
-    const fallback = this.sourceType(parameter.type_id);
+  /** C spelling of a library-declared pointer type: `char` identity, header-declared
+   * `const` and named opaque pointees come from the installed contract's evidence, never
+   * from a guessed callee name or an arbitrary 8-bit pointee. A read-only declared
+   * argument footprint also permits `const`. */
+  private libraryPointerSpelling(
+    association: NonNullable<BoundaryProjection['signature']>,
+    typeId: string,
+    subject: string,
+    declared: (entry: CatalogEntry) => { spec: TypeSpec; readOnly: boolean } | undefined,
+  ): string {
+    const fallback = this.sourceType(typeId);
     if (!this.sourceView || this.language !== 'c-like' || association.source !== 'library')
       return fallback;
-    const cached = this.callParameterSpellings.get(parameter.id);
+    const cached = this.callParameterSpellings.get(subject);
     if (cached !== undefined) return cached;
-    this.callParameterSpellings.set(parameter.id, fallback);
-    const pointer = this.typeRecords.get(parameter.type_id);
-    const character =
-      pointer?.definition.kind === 'pointer'
-        ? this.typeRecords.get(pointer.definition.to)
-        : undefined;
-    if (
-      pointer?.source !== 'library' ||
-      character?.source !== 'library' ||
-      character.definition.kind !== 'integer' ||
-      character.definition.bits !== 8
-    )
-      return fallback;
+    this.callParameterSpellings.set(subject, fallback);
+    let depth = 0,
+      base = typeId,
+      record = this.typeRecords.get(base);
+    while (
+      record?.source === 'library' &&
+      record.definition.kind === 'pointer' &&
+      record.spelling === undefined
+    ) {
+      depth++;
+      base = record.definition.to;
+      record = this.typeRecords.get(base);
+    }
+    if (depth === 0 || record?.source !== 'library') return fallback;
     let spelling: string | undefined;
     for (const id of association.evidence_ids) {
       this.context.checkpoint(1);
-      const declaration = this.libraryDeclarations.get(id);
-      if (!declaration) continue;
-      const type = declaration.parameters[index]?.[1];
-      if (!type || typeof type === 'string' || type.kind !== 'pointer' || type.to !== 'char')
-        return fallback;
-      const accesses = declaration.memory?.filter((item) => item.argument === index) ?? [];
-      const next =
-        accesses.length && accesses.every((item) => item.access === 'read')
-          ? 'const char*'
-          : 'char*';
-      if (spelling !== undefined && spelling !== next) return fallback;
-      spelling = next;
+      for (const entry of this.libraryDeclarations.get(id) ?? []) {
+        const found = declared(entry);
+        if (!found) return fallback;
+        let spec = found.spec,
+          levels = 0,
+          constant = false;
+        while (typeof spec === 'object' && spec.kind === 'pointer') {
+          constant = spec.const === true;
+          spec = spec.to;
+          levels++;
+        }
+        if (
+          levels !== depth ||
+          (spec === 'char' &&
+            !(record.definition.kind === 'integer' && record.definition.bits === 8))
+        )
+          return fallback;
+        const next = `${constant || (levels === 1 && found.readOnly) ? 'const ' : ''}${spec === 'char' ? 'char' : this.sourceType(base)}${'*'.repeat(levels)}`;
+        if (spelling !== undefined && spelling !== next) return fallback;
+        spelling = next;
+      }
     }
     if (
       !spelling ||
+      spelling === fallback ||
       !this.localValidation.presentation(
         'library_string_parameter',
-        parameter.id,
-        'library-contract C character pointer; const only for a declared read-only argument footprint',
-        [association.id, parameter.type_id],
+        subject,
+        'library-contract pointer spelling: C character identity, header-declared const (or a declared read-only argument footprint) and named opaque pointees',
+        [association.id, typeId],
       )
     )
       return fallback;
-    this.callParameterSpellings.set(parameter.id, spelling);
+    this.callParameterSpellings.set(subject, spelling);
     return spelling;
+  }
+
+  private callParameterType(projection: BoundaryProjection, index: number): string {
+    const association = projection.signature!;
+    const parameter = association.signature.parameters[index]!;
+    return this.libraryPointerSpelling(association, parameter.type_id, parameter.id, (entry) => {
+      const spec = entry.parameters[index]?.[1];
+      if (spec === undefined) return undefined;
+      const accesses = entry.memory?.filter((item) => item.argument === index) ?? [];
+      return {
+        spec,
+        readOnly: accesses.length > 0 && accesses.every((item) => item.access === 'read'),
+      };
+    });
+  }
+
+  private callReturnType(projection: BoundaryProjection): string {
+    const association = projection.signature!;
+    return this.libraryPointerSpelling(
+      association,
+      association.signature.return_type,
+      `${association.id}:return`,
+      (entry) => ({ spec: entry.returns, readOnly: false }),
+    );
   }
 
   /** Call-site declarations describe the recovered interface, not an authored prototype. */
@@ -2358,7 +2447,7 @@ export class Renderer {
       const signature = projection.signature?.signature;
       if (projection.results.length > 1) continue;
       const result = signature
-        ? this.sourceType(signature.return_type)
+        ? this.callReturnType(projection)
         : projection.results.length === 1
           ? this.valueType(projection.results[0]!)
           : projection.kind !== 'physical'
@@ -3083,6 +3172,7 @@ export class Renderer {
       for (const binding of projection.outputs)
         if (
           this.program.live.has(binding.value.id) &&
+          !this.fpPresentation.unobserved.has(binding.value.id) &&
           !returned.has(binding.value.id) &&
           !this.program.expressions.has(binding.value.id)
         ) {
@@ -5711,6 +5801,7 @@ export class Renderer {
       this.context.checkpoint(1);
       if (
         !this.program.live.has(value.id) ||
+        this.fpPresentation.unobserved.has(value.id) ||
         this.inline.has(value.id) ||
         this.inlinedCalls.has(value.id) ||
         formals.has(value.id) ||
@@ -5762,11 +5853,17 @@ export class Renderer {
     }
     if (support !== undefined && this.deferredTypedefs.length) {
       const text = w.text().slice(support);
-      const used = this.deferredTypedefs.filter((name) => new RegExp(`\\b${name}\\b`).test(text));
-      insert(
-        support,
-        used.map((name) => `typedef struct ${name} ${name};`),
+      const mentions = (name: string, haystack: string): boolean =>
+        new RegExp(`\\b${name}\\b`).test(haystack);
+      const handles = [...this.handleTypedefs].filter(([name]) => mentions(name, text));
+      const scan = `${text}\n${handles.map(([, declaration]) => declaration).join('\n')}`;
+      const used = this.deferredTypedefs.filter(
+        (name) => !this.handleTypedefs.has(name) && mentions(name, scan),
       );
+      insert(support, [
+        ...used.map((name) => `typedef struct ${name} ${name};`),
+        ...handles.map(([, declaration]) => declaration),
+      ]);
     }
     if (support !== undefined) insert(support, cScalarSupport(w.text().slice(support)));
     for (const item of this.input.function.coverage) {
@@ -5796,33 +5893,56 @@ export class Renderer {
     for (const record of this.localValidation.records)
       if (record.kind === 'control' && record.status === 'rejected')
         rejectTranslation(record, this.controls.get(record.subject) ?? this.input.function);
-    const requirements = sourceRequirementProofs(
-      this.program,
-      w.mappings,
-      { ids: w.ids.items, ranges: w.ranges.items },
-      this.context,
-      abiConformanceRequirements(
-        this.input.function.id,
-        this.localValidation.abiConformance,
-        (id) => this.origins.get(id),
+    const omitted: EmissionOmission[] = [];
+    let requirements: EmissionRequirement[] = [],
+      inferences: readonly Inference[] = [];
+    if (w.metadataMode === 'omitted') {
+      // Provenance exceeded a bound during the full render: the text is complete and
+      // identical, and the shed metadata classes are named in the emission.
+      omitted.push(
+        { kind: 'mappings', reason: 'output_limit', omitted: w.omittedMappings },
+        { kind: 'inferences', reason: 'output_limit', omitted: null },
+        { kind: 'requirements', reason: 'output_limit', omitted: null },
+      );
+    } else {
+      try {
+        requirements = sourceRequirementProofs(
+          this.program,
+          w.mappings,
+          { ids: w.ids.items, ranges: w.ranges.items },
+          this.context,
+          abiConformanceRequirements(
+            this.input.function.id,
+            this.localValidation.abiConformance,
+            (id) => this.origins.get(id),
+            this.context,
+          ),
+        ).map((record) =>
+          w.requirement(
+            this.fpPresentation.guards.size && record.kind === 'fp_environment'
+              ? { ...record, explanation: SOURCE_FP_ENVIRONMENT }
+              : record,
+          ),
+        );
+      } catch (error) {
+        if (!(error instanceof MetadataLimitError)) throw error;
+        requirements = [];
+        omitted.push({ kind: 'requirements', reason: 'output_limit', omitted: null });
+      }
+      const collected = collectInferences(
+        this.input,
+        this.program,
+        this.localValidation.records,
+        w,
         this.context,
-      ),
-    ).map((record) =>
-      w.requirement(
-        this.fpPresentation.guards.size && record.kind === 'fp_environment'
-          ? { ...record, explanation: SOURCE_FP_ENVIRONMENT }
-          : record,
-      ),
-    );
-    const inferences = collectInferences(
-      this.input,
-      this.program,
-      this.localValidation.records,
-      w,
-      this.context,
-      this.inferenceSites,
-      this.sourceDataValue,
-    );
+        this.inferenceSites,
+        this.sourceDataValue,
+      );
+      inferences = collected.records;
+      if (collected.omitted !== 0)
+        omitted.push({ kind: 'inferences', reason: 'output_limit', omitted: collected.omitted });
+    }
+    const summary = omittedDiagnosticsSummary(this.shedDiagnostics, this.shedCitations);
     const declarationSpan = { start: this.headerStart, end: this.headerEnd };
     const review = {
       operation: 'function_get',
@@ -5846,9 +5966,10 @@ export class Renderer {
         local_validation: this.localValidation.records,
         inferences,
         requirements,
+        ...(omitted.length ? { omitted } : {}),
         review,
       },
-      diagnostics: this.diagnostics,
+      diagnostics: [...this.diagnostics, ...(summary ? [summary] : [])],
       coverage: {
         statements: this.statements.size,
         controls: this.controls.size,
@@ -5869,10 +5990,20 @@ export function renderSource(
   language: 'c-like' | 'python-like',
   version: string,
 ): EmissionResult {
+  const attempt = (metadata: 'full' | 'omitted'): EmissionResult => {
+    try {
+      return new Renderer(input, options, context, language, version, true, metadata).render();
+    } catch (error) {
+      if (!(error instanceof CallInliningRetry)) throw error;
+      return new Renderer(input, options, context, language, version, false, metadata).render();
+    }
+  };
   try {
-    return new Renderer(input, options, context, language, version).render();
+    return attempt('full');
   } catch (error) {
-    if (!(error instanceof CallInliningRetry)) throw error;
-    return new Renderer(input, options, context, language, version, false).render();
+    // Provenance metadata is bounded separately from the text. When it cannot be
+    // held, render the same text without it and say so; never fail the pseudocode.
+    if (!(error instanceof MetadataLimitError)) throw error;
+    return attempt('omitted');
   }
 }

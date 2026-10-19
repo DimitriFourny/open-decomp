@@ -196,6 +196,7 @@ export const layerSchema = z.enum([
   'abi',
   'analysis',
   'reconstruction',
+  'provenance',
 ]);
 export const capabilitySchema = z.strictObject({
   layer: layerSchema,

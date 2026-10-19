@@ -541,6 +541,7 @@ async function dispatch(
       const candidates = page.items.filter(
         (item) =>
           (!args.id || item.id === args.id) &&
+          (!args.id_prefix || item.id.startsWith(args.id_prefix)) &&
           (!args.boundary || item.boundary === args.boundary) &&
           (!args.analysis || item.analysis === args.analysis) &&
           (address === null ||

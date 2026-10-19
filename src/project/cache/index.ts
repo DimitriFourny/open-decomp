@@ -8,6 +8,7 @@ import {
   decodeEvidence,
   decodeTypeDefinition,
   encodeArtifact,
+  EMISSION_METADATA_SHED_ORDER,
   encodeEvidence,
   encodeTypeDefinition,
   entityIdSchema,
@@ -35,6 +36,7 @@ import {
   type TrustedSemanticCatalog,
 } from '../annotations/index.js';
 import { typeReferences } from '../annotations/subjects.js';
+import { shedStoredMetadata } from './limits.js';
 import {
   ANALYSIS_ARTIFACT_MEDIA_TYPE,
   ANALYSIS_ARTIFACT_VERSION,
@@ -163,7 +165,8 @@ function validateComputation(
     (result.state !== 'complete' && result.state !== 'partial') ||
     result.data.delivery !== 'inline' ||
     (result.state === 'partial' &&
-      (result.reason === 'output_limit' || result.continuation !== null)) ||
+      ((result.reason === 'output_limit' && !result.data.emission.omitted?.length) ||
+        result.continuation !== null)) ||
     result.data.cache !== 'computed' ||
     result.data.function_id !== identity.function_id ||
     result.project_id !== store.project_id ||
@@ -423,24 +426,43 @@ export async function runCachedDecompilation(
   if (!reused && input.dependencies !== undefined)
     computation = { ...computation, dependencies: input.dependencies.finish() };
   if (reused) context.progress('dependency-reuse', 1, 1);
-  const bytes = Buffer.from(
-    JSON.stringify({
-      format_version: ANALYSIS_ARTIFACT_VERSION,
-      identity,
-      result: computation.result,
-      ...(computation.dependencies === undefined ? {} : { dependencies: computation.dependencies }),
-      catalog: {
-        subjects: computation.catalog.subjects,
-        types: computation.catalog.types.map((record) => ({
-          ...record,
-          definition: encodeTypeDefinition(record.definition),
-        })),
-        evidence: computation.catalog.evidence.map(encodeEvidence),
-      },
-    }),
-  );
+  const serialize = (value: AnalysisComputation): Buffer =>
+    Buffer.from(
+      JSON.stringify({
+        format_version: ANALYSIS_ARTIFACT_VERSION,
+        identity,
+        result: value.result,
+        ...(value.dependencies === undefined ? {} : { dependencies: value.dependencies }),
+        catalog: {
+          subjects: value.catalog.subjects,
+          types: value.catalog.types.map((record) => ({
+            ...record,
+            definition: encodeTypeDefinition(record.definition),
+          })),
+          evidence: value.catalog.evidence.map(encodeEvidence),
+        },
+      }),
+    );
+  let bytes = serialize(computation);
+  // The artifact bound never costs the pseudocode. Derived data is shed in order: the
+  // incremental-reuse readset (the artifact then serves only its exact revision), then
+  // whole provenance classes of the emission, each named in `emission.omitted` and in a
+  // partial `provenance` coverage entry. Text, signature and the annotation catalog stay.
+  if (bytes.length > MAX_ANALYSIS_ARTIFACT_BYTES && computation.dependencies !== undefined) {
+    const { dependencies: _readset, ...exact } = computation;
+    computation = exact;
+    bytes = serialize(computation);
+  }
+  for (const kinds of EMISSION_METADATA_SHED_ORDER) {
+    if (bytes.length <= MAX_ANALYSIS_ARTIFACT_BYTES) break;
+    computation = { ...computation, result: shedStoredMetadata(computation.result, kinds) };
+    bytes = serialize(computation);
+  }
   if (bytes.length > MAX_ANALYSIS_ARTIFACT_BYTES)
-    fail('resource_limit', 'Full analysis artifact exceeds 16 MiB');
+    fail(
+      'resource_limit',
+      `Analysis artifact exceeds 16 MiB even without provenance metadata (pseudocode ${Buffer.byteLength(computation.result.data.emission.text)} bytes)`,
+    );
   context.checkpoint(1);
   // IDs and digests have fixed wire widths. Size the exact response shape before commit;
   // publication supplies only the final, equally sized opaque artifact ID.

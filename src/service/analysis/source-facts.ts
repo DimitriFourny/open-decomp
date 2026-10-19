@@ -1446,7 +1446,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   const ruleCalls = variadicRuleCalls(input.ir, input.types.calls, input.library, context);
   const addresses = sourceAddresses(
     input,
-    ruleCalls.flatMap((call) => (call.kind === 'format' ? call.values : [])),
+    ruleCalls.flatMap((call) => (call.kind === 'open_flags' ? [] : call.values)),
   );
   const variadic = variadicRuleFacts(ruleCalls, addresses, abi, context);
   return {
