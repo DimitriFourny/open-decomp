@@ -1607,6 +1607,19 @@ export function execute(
   const sourceCallsObserved: { name: string; arguments: bigint[] }[] = [];
   const uninitializedStack = new Set<bigint>();
   let nextStackAddress = 0x7000000000000000n;
+  /** The address of a string literal's static, NUL-terminated UTF-8 bytes
+   * (C11 6.4.5), interned once per distinct literal. */
+  const literalAddress = (text: string): bigint => {
+    const interned = literals.get(text);
+    if (interned !== undefined) return interned;
+    const bytes = [...Buffer.from(text, 'utf8'), 0];
+    let base = nextLiteralAddress;
+    while (bytes.some((_, offset) => memory.has(base + BigInt(offset)))) base += 0x1000n;
+    bytes.forEach((byte, offset) => memory.set(base + BigInt(offset), byte));
+    nextLiteralAddress = base + BigInt(bytes.length + 15) - (BigInt(bytes.length + 15) % 16n);
+    literals.set(text, base);
+    return base;
+  };
   const number = (value: Data | undefined): bigint => {
     assert.equal(typeof value, 'bigint');
     return value as bigint;
@@ -1712,18 +1725,9 @@ export function execute(
     if (prefix.includes(null)) throw new Boundary('unknown', []);
     // A string literal argument is the address of its static, NUL-terminated
     // UTF-8 bytes (C11 6.4.5), interned once per distinct literal.
-    const arguments_ = prefix.map((arg) => {
-      if (typeof arg !== 'string') return number(arg);
-      const interned = literals.get(arg);
-      if (interned !== undefined) return interned;
-      const bytes = [...Buffer.from(arg, 'utf8'), 0];
-      let base = nextLiteralAddress;
-      while (bytes.some((_, offset) => memory.has(base + BigInt(offset)))) base += 0x1000n;
-      bytes.forEach((byte, offset) => memory.set(base + BigInt(offset), byte));
-      nextLiteralAddress = base + BigInt(bytes.length + 15) - (BigInt(bytes.length + 15) % 16n);
-      literals.set(arg, base);
-      return base;
-    });
+    const arguments_ = prefix.map((arg) =>
+      typeof arg === 'string' ? literalAddress(arg) : number(arg),
+    );
     const context = { arguments_complete: !remainder };
     events.push('call');
     sourceCallsObserved.push({ name, arguments: arguments_ });
@@ -1752,6 +1756,12 @@ export function execute(
     if (name === 'image_address') return number(args[2]);
     if (name === 'data_address') return number(args[1]) + number(args[2]);
     if (name === 'address_of') return number(args[0]) + number(args[1]);
+    if (name === 'string_address') return literalAddress(string(args[0]));
+    if (name === 'function_address') {
+      const entry = environment.get(string(args[0]));
+      assert.equal(typeof entry, 'bigint', `Oracle has no address for function ${args[0]}`);
+      return entry as bigint;
+    }
     if (name === 'stack_storage') {
       const size = number(args[0]),
         alignment = number(args[1]);
@@ -2353,11 +2363,14 @@ export function execute(
         return result;
       }
       case 'binary': {
-        const a = evaluate(expression.left, math);
+        let a = evaluate(expression.left, math);
+        if (typeof a === 'string') a = literalAddress(a);
         if (a === null) return null;
         if (expression.op === '&&' && number(a) === 0n) return 0n;
         if (expression.op === '||' && number(a) !== 0n) return 1n;
-        const b = evaluate(expression.right, math);
+        let b = evaluate(expression.right, math);
+        // A string literal operand of address arithmetic is its static address.
+        if (typeof b === 'string') b = literalAddress(b);
         if (expression.op === '&&' || expression.op === '||')
           return b === null ? null : BigInt(number(b) !== 0n);
         if (a === null || b === null) return null;
