@@ -206,6 +206,87 @@ test('arity completeness is inherited only through calls an unobserved argument 
   }
 });
 
+test('arity-relied callees load before effect-only callees and keep the load reserve', () => {
+  // root forwards an unobserved argument only to r, so its arity relies on r
+  // alone. gap's own graph is incomplete: no callee can close it, so behind is
+  // never relied on although gap forwards to it.
+  const root = fn('root', 0x2000n),
+    r = fn('r', 0x2010n),
+    gap = fn('gap', 0x2020n),
+    behind = fn('behind', 0x2030n),
+    effects = [1, 2, 3, 4, 5, 6].map((index) => fn(`e${index}`, 0x2100n + BigInt(index) * 0x10n));
+  const body = (
+    target: FunctionRecord,
+    dependencies: Unit['dependencies'],
+    complete = true,
+  ): Unit => ({
+    function: target,
+    instructions: 1,
+    blocks: 1,
+    nodes: 1,
+    required_nodes: 1,
+    dependencies,
+    local: [],
+    evidence: [],
+    evidence_ids: [],
+    reasons: complete ? [] : ['unresolved control flow'],
+    arity_complete: complete,
+    budget_truncated: false,
+  });
+  const bodies = new Map<string, Unit>([
+    [
+      root.id,
+      body(root, [
+        ...effects.map((target) => ({ call_id: `root-${target.id}`, target })),
+        { call_id: 'root-r', target: r },
+      ]),
+    ],
+    [r.id, body(r, [])],
+    [gap.id, body(gap, [{ call_id: 'gap-behind', target: behind }], false)],
+    [behind.id, body(behind, [])],
+    ...effects.map((target) => [target.id, body(target, [])] as const),
+  ]);
+  const relied = (unit: Unit): string[] =>
+    unit.function.id === root.id ? ['root-r'] : unit.function.id === gap.id ? ['gap-behind'] : [];
+  for (const demandDriven of [false, true]) {
+    const loaded: string[] = [];
+    const result = nativeDependencyWorklist({
+      roots: [],
+      root_dependencies: [
+        { call_id: 'selected-root', target: root },
+        { call_id: 'selected-gap', target: gap },
+      ],
+      context: createOperationContext({ budget: { work: 1_000 } }),
+      capacity: { instructions: 100, blocks: 100, nodes: 100 },
+      max_functions: 64,
+      max_refinements: 64,
+      load(target, bounded) {
+        loaded.push(target.id);
+        bounded.checkpoint(90);
+        return bodies.get(target.id)!;
+      },
+      ...(demandDriven ? { argument_reaching: (unit: Unit) => new Set(relied(unit)) } : {}),
+      initialize,
+      observe: (unit, dependencies) => ({
+        ...observe(unit, dependencies),
+        argument_reaching_calls: relied(unit),
+      }),
+      equal,
+    });
+    const summary = result.summaries.get(root.id)!;
+    // Breadth-first loading spends the reserve on effect-only callees first.
+    assert.equal(loaded.includes(r.id), demandDriven);
+    assert.equal(summary.arity_complete === true, demandDriven);
+    assert.ok(!loaded.includes(behind.id));
+    if (demandDriven) {
+      assert.deepEqual(loaded.slice(0, 3), [root.id, gap.id, r.id]);
+      // Effects past the reserve stay explicit reasons; they never close or open arity.
+      assert.match(summary.reasons.join('; '), /e\d: native dependency load work reserve/);
+    }
+    assert.equal(result.summaries.get(gap.id)?.arity_complete, false);
+  }
+});
+
 test('recursive groups converge although memory shapes would grow along recursive edges', () => {
   let observations = 0;
   const result = nativeDependencyWorklist({

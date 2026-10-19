@@ -7,15 +7,21 @@ import {
   type OperationContext,
 } from '../../core/index.js';
 
-/** Calls deliberately contribute only their continuation to intraprocedural reachability. */
-export function instructionSuccessors(instruction: DecodedInstruction): readonly Address[] {
+/** Calls deliberately contribute only their continuation to intraprocedural
+ * reachability; a direct call to a proven noreturn callee contributes none. */
+export function instructionSuccessors(
+  instruction: DecodedInstruction,
+  noreturn?: Pick<ReadonlyMap<bigint, unknown>, 'has'>,
+): readonly Address[] {
   if (instruction.validity !== 'valid') return [];
   const flow = instruction.flow;
   switch (flow.kind) {
     case 'fallthrough':
       return [flow.next];
     case 'call':
-      return [flow.fallthrough];
+      return !flow.indirect && flow.target && noreturn?.has(flow.target.value)
+        ? []
+        : [flow.fallthrough];
     case 'branch':
       return flow.fallthrough ? [flow.target, flow.fallthrough] : [flow.target];
     case 'indirect_branch':
@@ -40,6 +46,8 @@ export interface CFGInput {
   readonly evidence: ReadonlyMap<string, readonly string[]>;
   /** Proven jump-table targets by indirect branch address; they replace its unknown edge. */
   readonly jump_tables?: ReadonlyMap<bigint, readonly Address[]>;
+  /** Direct call targets proven not to return, with the evidence of that proof. */
+  readonly noreturn_calls?: ReadonlyMap<bigint, readonly string[]>;
 }
 
 /** Build maximal basic blocks from reachable instructions, not a sweep of an enclosing range.
@@ -59,7 +67,8 @@ export function buildCFG(input: CFGInput, context: OperationContext): readonly C
   const incoming = new Map<bigint, number>();
   for (const instruction of sorted) {
     context.checkpoint(1);
-    for (const successor of tableTargets(instruction) ?? instructionSuccessors(instruction)) {
+    for (const successor of tableTargets(instruction) ??
+      instructionSuccessors(instruction, input.noreturn_calls)) {
       incoming.set(successor.value, (incoming.get(successor.value) ?? 0) + 1);
       if (instruction.flow.kind !== 'fallthrough') leaders.add(successor.value);
     }
@@ -115,9 +124,23 @@ export function buildCFG(input: CFGInput, context: OperationContext): readonly C
         case 'fallthrough':
           edge('fallthrough', flow.next, false);
           break;
-        case 'call':
-          edge('fallthrough', flow.fallthrough, false);
+        case 'call': {
+          const noreturn =
+            !flow.indirect && flow.target
+              ? input.noreturn_calls?.get(flow.target.value)
+              : undefined;
+          if (noreturn)
+            edges.push({
+              from: id,
+              to: null,
+              target: null,
+              kind: 'trap',
+              conditional: false,
+              evidence_ids: [...new Set([...evidence_ids, ...noreturn])],
+            });
+          else edge('fallthrough', flow.fallthrough, false);
           break;
+        }
         case 'branch':
           edge(
             !flow.conditional &&
