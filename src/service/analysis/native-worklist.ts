@@ -165,6 +165,12 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
   /** Already analyzed selected bodies are reused if recursion reaches them. */
   readonly preloaded?: ReadonlyMap<string, U>;
   readonly load: (fn: FunctionRecord, context: OperationContext) => U;
+  /** Calls of a loaded body that an unobserved entry argument may reach when no
+   * callee is known to read anything: a callee-independent superset of every
+   * later `argument_reaching_calls`. Only these callees can widen the body's
+   * argument list, so they are loaded before calls that matter only for
+   * effects or results. Absent, every call is assumed to be relied on. */
+  readonly argument_reaching?: (unit: U, context: OperationContext) => ReadonlySet<string>;
   readonly observe: (
     unit: U,
     dependencies: ReadonlyMap<string, NativeInterface>,
@@ -183,12 +189,21 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
   const { context } = options;
   const units = new Map<string, U>(),
     summaries = new Map<string, NativeSummary>();
-  const scheduled = new Set<string>();
-  const pending: {
+  interface Scheduled {
     readonly fn: FunctionRecord;
     readonly key: string;
     readonly assumptions?: NativeContext;
-  }[] = [];
+  }
+  const scheduled = new Map<string, Scheduled>();
+  // Demand-driven loading. A requested call's arity relies only on its target's
+  // own reads and, transitively, on the callees an unobserved argument may reach;
+  // a body whose own graph cannot close relies on none. That sub-closure loads
+  // first, breadth-first; every other dependency (wanted only for effects,
+  // results and shapes) loads afterwards from what the reserve still allows.
+  const demanded: Scheduled[] = [],
+    deferred: Scheduled[] = [];
+  const arityDemanded = new Set<string>(),
+    processed = new Set<string>();
   const baselines = new Map<string, U>(),
     contextKeys = new Map<string, string>();
   const contextCounts = new Map<string, number>(),
@@ -236,16 +251,121 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
       contextCounts.set(fn.id, count + 1);
       contextCount++;
     }
-    scheduled.add(key);
-    pending.push({ fn, key, ...(assumptions ? { assumptions } : {}) });
+    const entry = { fn, key, ...(assumptions ? { assumptions } : {}) };
+    scheduled.set(key, entry);
+    deferred.push(entry);
     return key;
   };
-  for (const root of options.roots) schedule(root);
-  for (const dependency of options.root_dependencies ?? [])
-    demand(schedule(dependency.target, dependency.assumptions), dependency.return_demand ?? []);
+  // Fair shares: one expensive dependency cannot starve refinement of the
+  // others. A step (a load or its demand probe) receives at most a quarter of
+  // the remaining work; an exhausted share is that dependency's own limit.
+  const shareContext = (
+    budget: OperationContext['budget'],
+  ): { readonly bounded: OperationContext; readonly share?: number; close(): void } => {
+    const available = context.remainingWork?.();
+    if (available === undefined) return { bounded: { ...context, budget }, close() {} };
+    const share = Math.max(1, Math.floor(available / 4));
+    let used = 0,
+      active = true;
+    return {
+      share,
+      close() {
+        active = false;
+      },
+      bounded: {
+        ...context,
+        budget,
+        // Loaders may retain this context (lazy indexes); the share bounds
+        // only the step itself.
+        remainingWork: () =>
+          active
+            ? Math.max(0, Math.min(share - used, context.remainingWork!()))
+            : context.remainingWork!(),
+        checkpoint(work: number) {
+          if (active && used + work > share)
+            throw new OperationError({
+              code: 'resource_limit',
+              severity: 'warning',
+              message: 'Native dependency work share exhausted',
+              evidence_ids: [],
+              details: { kind: 'limit', resource: 'work', limit: share, consumed: used + work },
+            });
+          context.checkpoint(work);
+          used += work;
+        },
+      },
+    };
+  };
+  /** Dependencies whose arity this body's own arity may inherit (the same rule
+   * as the completeness propagation below, with the probe's superset). */
+  const relied = (key: string, unit: U): readonly NativeDependency[] => {
+    if (
+      !(unit.arity_complete ?? unit.reasons.length === 0) ||
+      unit.budget_truncated ||
+      fallbackReasons.has(key)
+    )
+      return [];
+    if (!options.argument_reaching) return unit.dependencies;
+    const step = shareContext(context.budget);
+    let calls: ReadonlySet<string>;
+    try {
+      calls = options.argument_reaching(unit, step.bounded);
+    } catch (error) {
+      const details = error instanceof OperationError ? error.diagnostic.details : undefined;
+      if (
+        !(error instanceof OperationError) ||
+        error.code !== 'resource_limit' ||
+        details?.kind !== 'limit' ||
+        details.resource !== 'work' ||
+        details.limit !== step.share
+      )
+        throw error;
+      context.checkpoint(0);
+      // An unfinished probe narrows nothing: every call stays relied on.
+      return unit.dependencies;
+    } finally {
+      step.close();
+    }
+    return unit.dependencies.filter((dependency) => calls.has(dependency.call_id));
+  };
+  const demandArity = (start: string): void => {
+    const stack = [start];
+    while (stack.length) {
+      context.checkpoint(1);
+      const key = stack.pop()!;
+      if (arityDemanded.has(key)) continue;
+      arityDemanded.add(key);
+      const unit = units.get(key);
+      if (!unit) {
+        if (!processed.has(key)) demanded.push(scheduled.get(key)!);
+        continue;
+      }
+      for (const dependency of relied(key, unit))
+        stack.push(
+          contextKeys.get(nativeContextKey(dependency.target.id, dependency.assumptions))!,
+        );
+    }
+  };
+  for (const root of options.roots) demandArity(schedule(root));
+  for (const dependency of options.root_dependencies ?? []) {
+    const key = schedule(dependency.target, dependency.assumptions);
+    demand(key, dependency.return_demand ?? []);
+    demandArity(key);
+  }
   const initialWork = context.remainingWork?.();
-  for (let cursor = 0; cursor < pending.length; cursor++) {
-    const { fn, key, assumptions } = pending[cursor]!;
+  let demandedCursor = 0,
+    deferredCursor = 0;
+  for (;;) {
+    const next =
+      demandedCursor < demanded.length
+        ? demanded[demandedCursor++]
+        : deferredCursor < deferred.length
+          ? deferred[deferredCursor++]
+          : undefined;
+    if (!next) break;
+    const { fn, key, assumptions } = next;
+    if (processed.has(key)) continue;
+    processed.add(key);
     context.checkpoint(1);
     const prepared = baselines.get(fn.id) ?? options.preloaded?.get(fn.id);
     if (!baselines.has(fn.id) && baselines.size >= options.max_functions) {
@@ -262,11 +382,9 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
       failures.set(key, [`native dependency ${exhausted.join('/')} capacity exhausted`]);
       continue;
     }
-    // Fair shares: one expensive dependency cannot starve refinement of the
-    // others. A load receives at most a quarter of the remaining work and no
-    // new body is loaded once half of the initial allowance is gone, so finished
-    // interfaces keep a reserve for the fixed point instead of all being lost
-    // at the shared limit. An exhausted share is that dependency's own limit.
+    // No new body is loaded once half of the initial allowance is gone, so
+    // finished interfaces keep a reserve for the fixed point instead of all
+    // being lost at the shared limit.
     const available = context.remainingWork?.();
     if (!prepared && available !== undefined && initialWork !== undefined) {
       if (available < initialWork / 2) {
@@ -274,46 +392,18 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
         continue;
       }
     }
-    const share = available === undefined ? undefined : Math.max(1, Math.floor(available / 4));
-    let used = 0,
-      loading = true;
-    const bounded: OperationContext = {
-      ...context,
-      budget: {
-        ...context.budget,
-        instructions: remaining.instructions,
-        blocks: remaining.blocks,
-        ir_nodes: remaining.nodes,
-      },
-      ...(share === undefined
-        ? {}
-        : {
-            // Loaders may retain this context (lazy indexes); the share bounds
-            // only the load itself.
-            remainingWork: () =>
-              loading
-                ? Math.max(0, Math.min(share - used, context.remainingWork!()))
-                : context.remainingWork!(),
-            checkpoint(work: number) {
-              if (loading && used + work > share)
-                throw new OperationError({
-                  code: 'resource_limit',
-                  severity: 'warning',
-                  message: 'Native dependency work share exhausted',
-                  evidence_ids: [],
-                  details: { kind: 'limit', resource: 'work', limit: share, consumed: used + work },
-                });
-              context.checkpoint(work);
-              used += work;
-            },
-          }),
-    };
+    const { bounded, share, close } = shareContext({
+      ...context.budget,
+      instructions: remaining.instructions,
+      blocks: remaining.blocks,
+      ir_nodes: remaining.nodes,
+    });
     let unit: U;
     try {
       unit = prepared ?? options.load(fn, bounded);
-      loading = false;
+      close();
     } catch (error) {
-      loading = false;
+      close();
       const details = error instanceof OperationError ? error.diagnostic.details : undefined;
       // Only this optional dependency's capacities are recoverable. Cancellation,
       // deadlines, selected-body failures and the outer work limit still escape.
@@ -389,6 +479,11 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
       parents.set(dependencyKey, callers);
       demand(dependencyKey, dependency.return_demand ?? []);
     }
+    if (arityDemanded.has(key))
+      for (const dependency of relied(key, unit))
+        demandArity(
+          contextKeys.get(nativeContextKey(dependency.target.id, dependency.assumptions))!,
+        );
   }
 
   const dependencyKey = (dependency: NativeDependency): string =>
@@ -674,7 +769,7 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
   for (const [id, limits] of failures)
     summaries.set(id, {
       observed: unresolved(),
-      evidence_ids: pending.find((entry) => entry.key === id)?.fn.evidence_ids ?? [],
+      evidence_ids: scheduled.get(id)?.fn.evidence_ids ?? [],
       reasons: limits,
       complete: false,
     });

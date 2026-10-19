@@ -3067,7 +3067,7 @@ export class Renderer {
         : projection.argument_list_complete === false || projection.kind === 'physical';
       if (signature?.variadic && parameters.length === 0) continue;
       if (open) parameters.push(parameters.length ? '...' : 'uintptr_t');
-      const text = `extern ${result} ${name}(${parameters.length ? this.writer.join(parameters) : 'void'});`;
+      const text = `extern ${signature?.noreturn ? '_Noreturn ' : ''}${result} ${name}(${parameters.length ? this.writer.join(parameters) : 'void'});`;
       const previous = declarations.get(name);
       declarations.set(
         name,
@@ -4743,6 +4743,28 @@ export class Renderer {
       default:
         return false;
     }
+  }
+
+  /** Source view: a trap whose block ends in a call established as noreturn
+   * adds nothing a reader of that call does not know. */
+  private noreturnCallExit(
+    control: Extract<Control, { kind: 'trap' }>,
+    block: BlockRegion,
+  ): boolean {
+    const last = block.statements.at(-1);
+    return (
+      this.sourceView &&
+      last?.kind === 'call' &&
+      this.input.types?.calls?.calls.some(
+        (call) => call.node_id === last.id && call.noreturn === 'yes',
+      ) === true &&
+      this.localValidation.presentation(
+        'noreturn_call_exit',
+        control.id,
+        `trap terminator implied by the preceding call to a noreturn callee; reason ${this.writer.quote(control.reason)} and the physical exit state stay in this record`,
+        [control.id, last.id],
+      )
+    );
   }
 
   /** A loop test's exit edge. Copy-free, the loop syntax performs it; its
@@ -6422,6 +6444,9 @@ export class Renderer {
       case 'indirect':
       case 'trap':
       case 'unknown': {
+        // The preceding noreturn call already ends this path in source text; the
+        // trap keeps its record and (header) mapping.
+        if (control.kind === 'trap' && this.noreturnCallExit(control, block)) break;
         const tail =
           control.kind === 'indirect' && control.tail_call
             ? this.program.tails.get(control.id)

@@ -21,6 +21,8 @@ import { Arm64Decoder } from '../../src/decoders/arm64/index.js';
 import { X86Decoder } from '../../src/decoders/x86_64/index.js';
 import { MachOLoader } from '../../src/loaders/macho/index.js';
 import { PELoader } from '../../src/loaders/pe/index.js';
+import { Arm64Lifter } from '../../src/lifters/arm64/index.js';
+import { DarwinArm64Abi } from '../../src/abi/darwin-arm64/index.js';
 import {
   discoverFunctions,
   prepareDiscoveryIndex,
@@ -676,6 +678,53 @@ test('overlapping instruction streams and fallthrough boundary conflicts are not
     discover(fallthrough, { assertions: [assertion(fallthrough, 1)] }).graphs[0]!.function.boundary,
     'conflicting',
   );
+});
+test('a final call to a declared noreturn callee ends flow before the next function entry', () => {
+  // f: bl stub (its return address is g's entry, like a final `bl ___stack_chk_fail`);
+  // g: ret; stub: ret
+  const words = [0x94000002, 0xd65f03c0, 0xd65f03c0];
+  const bytes = Buffer.alloc(words.length * 4);
+  words.forEach((word, i) => bytes.writeUInt32LE(word, i * 4));
+  const image = raw([...bytes], 'arm64');
+  const assertions = [assertion(image, 4)];
+  const declared = new Map([[0x1008n, ['evidence_import_binding']]]);
+  for (const noreturn of [false, true]) {
+    const result = discover(image, {
+      assertions,
+      ...(noreturn ? { noreturn_calls: declared } : {}),
+    });
+    const caller = result.graphs.find((graph) => graph.function.entry.value === 0x1000n)!;
+    assert.equal(caller.function.boundary, noreturn ? 'established' : 'conflicting');
+    assert.equal(
+      caller.diagnostics.some(
+        (item) => item.message === 'Intraprocedural flow reaches another function entry',
+      ),
+      !noreturn,
+    );
+    assert.deepEqual(
+      caller.instructions.map((instruction) => instruction.address.value),
+      [0x1000n],
+    );
+    const edges = caller.blocks.flatMap((block) => block.edges);
+    assert.deepEqual(
+      edges.map((edge) => edge.kind),
+      [noreturn ? 'trap' : 'fallthrough'],
+    );
+    const lifted = new Arm64Lifter().lift(caller, new DarwinArm64Abi(), createOperationContext());
+    const exit = lifted.ir.blocks.find((block) =>
+      block.instructions.some((node) => node.kind === 'call'),
+    )!;
+    assert.equal(exit.terminator.kind, noreturn ? 'trap' : 'unknown');
+    if (noreturn) {
+      // The proof cites the declaration's evidence and is published with the graph.
+      const proof = result.evidence.find(
+        (item) =>
+          edges[0]!.evidence_ids.includes(item.id) &&
+          item.derived_from.includes('evidence_import_binding'),
+      );
+      assert.ok(proof);
+    }
+  }
 });
 
 test("selected discovery publishes every proof its diagnostics cite, including another root's seed proofs", () => {

@@ -329,6 +329,13 @@ export class X86Lifter implements Lifter<RegisterIR> {
         );
         const target = edges.length === 1 ? blocks.get(edges[0]!.to!) : undefined;
         if (target) block.jump(target);
+        else if (
+          source.edges.length === 1 &&
+          source.edges[0]!.kind === 'trap' &&
+          decoded.get(source.instructions.at(-1) ?? '')?.flow.kind === 'call'
+        )
+          // Discovery ends a block at a call to a proven noreturn callee.
+          block.terminate({ kind: 'trap', reason: 'Call to a noreturn callee does not return' });
         else boundary(block, 'Missing or ambiguous discovered fallthrough');
       }
     }

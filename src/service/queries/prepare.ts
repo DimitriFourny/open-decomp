@@ -12,6 +12,7 @@ import { buildStringIndex } from '../../analysis/strings/index.js';
 import { buildReferenceIndex } from '../../analysis/references/index.js';
 import { classifyImportStubs } from '../../analysis/discovery/stubs.js';
 import { recoverRuntimeMetadata } from '../../metadata/runtime/index.js';
+import { libraryNoreturnCalls } from '../../metadata/library-contracts/index.js';
 import { decorateImageNames } from '../../metadata/symbols/index.js';
 
 /** Prepare outside SQLite; publish native facts, the import report and navigation
@@ -68,7 +69,15 @@ export async function prepareQueryImport(
       : new X86Decoder({ formatting: false });
   let discovery;
   try {
-    discovery = discoverFunctions({ image: decorated, decoder, revision }, context);
+    discovery = discoverFunctions(
+      {
+        image: decorated,
+        decoder,
+        revision,
+        noreturn_calls: libraryNoreturnCalls(decorated, context),
+      },
+      context,
+    );
   } finally {
     decoder.dispose();
   }

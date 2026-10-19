@@ -75,6 +75,79 @@ export interface LibraryContracts {
   readonly diagnostics: readonly Diagnostic[];
 }
 
+/** Imports bound through a nonzero relocation addend (by symbol or slot): their
+ * nominal library identity does not establish the callable contract. */
+function adjustedImports(image: LoadedImage, context: OperationContext): ReadonlySet<string> {
+  const nonzero = new Set<string>(),
+    adjustedSlots = new Set<bigint>(),
+    adjustedNames = new Set<string>();
+  for (const relocation of image.relocations) {
+    context.checkpoint(1);
+    if (relocation.symbol_id !== null && relocation.addend !== 0n) {
+      nonzero.add(relocation.symbol_id);
+      const slot = image.address_map.translate(relocation.address, 'va');
+      if (slot.kind === 'mapped') adjustedSlots.add(slot.address.value);
+    }
+  }
+  for (const imported of image.imports) {
+    context.checkpoint(1);
+    const slot = imported.slot === null ? null : image.address_map.translate(imported.slot, 'va');
+    if (
+      nonzero.has(imported.id) ||
+      (slot?.kind === 'mapped' && adjustedSlots.has(slot.address.value))
+    ) {
+      adjustedNames.add(fingerprint([imported.library, imported.original_name]));
+    }
+  }
+  return adjustedNames;
+}
+
+/** Callable import entries (virtual addresses) whose library declaration is
+ * noreturn, with the import binding evidence: the same identity rules as
+ * `recoverLibraryContracts` (no weak, adjusted or Swift-runtime import), and an
+ * entry shared by declarations that disagree on noreturn is excluded. */
+export function libraryNoreturnCalls(
+  image: LoadedImage,
+  context: OperationContext,
+): ReadonlyMap<bigint, readonly string[]> {
+  const adjusted = adjustedImports(image, context);
+  const entries = new Map<bigint, { noreturn: boolean; evidence_ids: string[] }>();
+  for (const imported of image.imports) {
+    context.checkpoint(1);
+    if (
+      imported.original_name === null ||
+      imported.library === null ||
+      imported.callable_entry === null ||
+      imported.weak ||
+      adjusted.has(fingerprint([imported.library, imported.original_name]))
+    )
+      continue;
+    const declaration = findDeclaration(
+      libraryLookupName(image.target.format, imported.original_name),
+      imported.library,
+      image.target.format,
+    );
+    if (
+      !declaration ||
+      declaration.library === 'swift-core' ||
+      declaration.library === 'swift-concurrency'
+    )
+      continue;
+    const entry = image.address_map.translate(imported.callable_entry, 'va');
+    if (entry.kind !== 'mapped') continue;
+    const prior = entries.get(entry.address.value);
+    entries.set(entry.address.value, {
+      noreturn: (prior?.noreturn ?? true) && declaration.noreturn === true,
+      evidence_ids: [...(prior?.evidence_ids ?? []), ...imported.evidence_ids],
+    });
+  }
+  return new Map(
+    [...entries].flatMap(([address, entry]) =>
+      entry.noreturn ? [[address, [...new Set(entry.evidence_ids)]] as const] : [],
+    ),
+  );
+}
+
 /** Match exact native import names AND nominal library identity. No local symbol,
  * demangled text, ordinal guess, weak binding or nonzero import addend establishes
  * a contract. The declaration remains conditional on that library implementation;
@@ -107,30 +180,10 @@ export function recoverLibraryContracts(
     evidence: Evidence[] = [],
     diagnostics: Diagnostic[] = [],
     types = new Map<string, LibraryType>();
-  const nonzero = new Set<string>(),
-    groups = new Map<string, number[]>(),
+  const groups = new Map<string, number[]>(),
     semantics: string[] = [];
-  const adjustedSlots = new Set<bigint>(),
-    adjustedNames = new Set<string>();
+  const adjustedNames = adjustedImports(image, context);
   let partial = false;
-  for (const relocation of image.relocations) {
-    context.checkpoint(1);
-    if (relocation.symbol_id !== null && relocation.addend !== 0n) {
-      nonzero.add(relocation.symbol_id);
-      const slot = image.address_map.translate(relocation.address, 'va');
-      if (slot.kind === 'mapped') adjustedSlots.add(slot.address.value);
-    }
-  }
-  for (const imported of image.imports) {
-    context.checkpoint(1);
-    const slot = imported.slot === null ? null : image.address_map.translate(imported.slot, 'va');
-    if (
-      nonzero.has(imported.id) ||
-      (slot?.kind === 'mapped' && adjustedSlots.has(slot.address.value))
-    ) {
-      adjustedNames.add(fingerprint([imported.library, imported.original_name]));
-    }
-  }
   const integer = (bits: number, signed: boolean, name: string): TypeSpecResolution => ({
     definition: { kind: 'integer', bits, signed },
     abi_type: { kind: 'integer', bits, signed },

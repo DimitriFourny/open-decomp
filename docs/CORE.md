@@ -459,9 +459,16 @@ the source-only prefix-gap check. Substitution therefore cannot manufacture a
 missing leading argument. These refinements use the existing work budget and
 leave the original checked summary unchanged.
 
-The native dependency worklist loads bodies breadth-first (each load at most a
+The native dependency worklist loads bodies demand-first (each load at most a
 quarter of the remaining optional work; no new body once half of the initial
-allowance is spent) and then refines strongly connected components callees
+allowance is spent). A requested call's arity relies only on its target's own
+reads and, transitively, on the callees an unobserved entry argument may reach
+(a callee-independent superset of `argument_reaching_calls`, probed once per
+loaded body); a body whose own graph cannot close (unit coverage gaps, budget
+truncation, context fallback) relies on none. That sub-closure loads first,
+breadth-first; dependencies needed only for effects, results and shapes load
+afterwards from whatever the reserve still allows and stay explicit reasons when
+cut. Refinement then runs over strongly connected components callees
 first: a non-recursive body is observed once against its finished callees, and
 only recursive groups are seeded and iterated. Memory shapes are not transferred
 along recursive edges (content-addressed shape evidence derived around a cycle
@@ -471,6 +478,33 @@ callers) are cut with a `native interface refinement work limit` reason. A calle
 summary cut by any bounded share is reported as a `resource_limit` diagnostic,
 and a selected function left partial with such a diagnostic reports reason
 `budget` instead of `unsupported_subset`.
+
+Most open arities on SQLite are not budget cuts: an unobserved argument register
+forwarded untouched to an indirect call (configuration function pointers in
+`sqlite3Malloc`, `sqlite3_free`, mutex hooks) may be read by the unknown target,
+so every caller that reaches it keeps `...`. Even a 10x budget does not close
+them. Caller consensus would be sound for the source interface (when every call
+site is known, registers no caller sets carry garbage at entry and are not source
+parameters) but is not implemented: the dominant blocker `sqlite3_free` is
+exported (consensus excluded), "every call site known" needs an image-wide escape
+proof that existing block-local address recovery and partial discovery cannot
+give (on ARM64 a linear sweep for B/BL/ADR/ADRP to the callee or its page plus
+complete chained-fixup relocations and export exclusion), and internal hubs such
+as `sqlite3Malloc` receive their callers' own forwarded registers, so consensus
+depends on the callers' arities in turn (a coinductive caller/callee fixed point
+over every caller body).
+
+Discovery ends intraprocedural flow at a direct call to a callable import whose
+supported, unconflicted library declaration is noreturn (`libraryNoreturnCalls`;
+weak, addend-adjusted and Swift-runtime imports excluded). The return address is
+not followed — after a final `bl ___stack_chk_fail` it is the next function's
+entry, formerly a `conflicting boundaries` gap — and the call block ends with a
+`trap` edge whose derived evidence cites the import binding; lifters terminate it
+as a trap instead of an unresolved continuation. The source view prints only the
+call (C declares the callee `extern _Noreturn …`) when the call analysis
+establishes the callee noreturn; the trap keeps a `noreturn_call_exit`
+presentation record and header mapping, still terminates its region for
+structuring, and the checked view prints the explicit `trap_exit`.
 
 Darwin variadic stack arguments stored in different predecessors of one shared
 call resolve when, on every incoming edge, the owning store wrote the same SSA

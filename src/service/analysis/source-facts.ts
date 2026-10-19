@@ -1110,6 +1110,36 @@ function nativeShapeTransfers(
   return transfers;
 }
 
+/** Calls an unobserved entry argument of this body may reach when no dependency
+ * interface is known: dependency interfaces only add observed parameters, so
+ * this is a superset of every later observation's `argument_reaching_calls`. */
+function nativeArgumentReaching(
+  input: SourceFactsInput,
+  unit: PreparedNativeUnit,
+  context: OperationContext,
+): ReadonlySet<string> {
+  if (!unit.ir || !unit.analysis) return new Set(unit.dependencies.map((item) => item.call_id));
+  const interfaces = new Map<string, NativeInterface>();
+  for (const observed of unit.observed_calls)
+    interfaces.set(
+      observed.call_id,
+      mergeNativeInterface(undefined, observed, input.components.abi, context),
+    );
+  return new Set(
+    observeParameters(
+      unit.ir,
+      input.components.abi,
+      unit.analysis,
+      context,
+      interfaces,
+      false,
+      [],
+      unit.context_assumptions !== undefined,
+      unit.interface_index,
+    ).argument_reaching_calls,
+  );
+}
+
 function observeNativeUnit(
   input: SourceFactsInput,
   unit: PreparedNativeUnit,
@@ -1492,6 +1522,8 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         if (reusablePreparation(unit)) admit(fn.id, unit);
         return unit;
       },
+      argument_reaching: (unit, boundedContext) =>
+        nativeArgumentReaching(input, unit, boundedContext),
       initialize: (unit, boundedContext, demand) =>
         observeNativeUnit(input, unit, new Map(), boundedContext, demand, true),
       observe: (unit, summaries, boundedContext, demand) =>
