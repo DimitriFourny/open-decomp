@@ -506,19 +506,42 @@ export function selectSourcePrimaryResult(
   const restored = (value: Value, target: string): boolean =>
     onPath(value, target, (node) => node.kind === 'call' || node.kind === 'unknown_effect') ===
     true;
+  const effect = (node: BlockRegion['statements'][number]): boolean =>
+    node.kind === 'store' ||
+    node.kind === 'call' ||
+    node.kind === 'unknown_effect' ||
+    node.kind === 'memory_fence';
+  // Whether an effect lies in some block after `from` on a path to `exit`
+  // (including `exit` itself), for example a further loop iteration.
+  const effectBefore = (from: string, exit: string): boolean => {
+    const reaching = new Set([exit]),
+      backward = [exit];
+    while (backward.length) {
+      context.checkpoint(1);
+      for (const id of predecessorsOf(backward.pop()!))
+        if (!reaching.has(id)) {
+          reaching.add(id);
+          backward.push(id);
+        }
+    }
+    const visited = new Set<string>(),
+      pending = [...(successors.get(from) ?? [])];
+    while (pending.length) {
+      context.checkpoint(1);
+      const id = pending.pop()!;
+      if (visited.has(id) || !reaching.has(id)) continue;
+      visited.add(id);
+      if (blocks.get(id)?.statements.some(effect)) return true;
+      if (id !== exit) pending.push(...(successors.get(id) ?? []));
+    }
+    return false;
+  };
   // A projected call result is the function's final action when no store,
-  // call, unknown effect or fence follows it on any path to the exit: the
-  // `return f(...)` a frame teardown kept from becoming a tail transfer.
-  const finalCall = (value: Value, target: string): boolean =>
-    onPath(
-      value,
-      target,
-      (node) =>
-        node.kind === 'store' ||
-        node.kind === 'call' ||
-        node.kind === 'unknown_effect' ||
-        node.kind === 'memory_fence',
-    ) === false;
+  // call, unknown effect or fence follows it on any path to the exit (also
+  // beyond the phi edge that carries it, such as a further loop iteration):
+  // the `return f(...)` a frame teardown kept from becoming a tail transfer.
+  const finalCall = (value: Value, target: string, exit: string): boolean =>
+    onPath(value, target, effect) === false && (target === exit || !effectBefore(target, exit));
   // Phis of blocks outside a loop merge alternative paths into an exit: each
   // incoming source must hold the register at the end of its own predecessor.
   // A loop header phi carries one variable across iterations and stays whole.
@@ -588,7 +611,7 @@ export function selectSourcePrimaryResult(
         for (const value of [...walked.leaves, ...walked.constants]) {
           if (parameters.has(value.id)) established = true;
           else if (callOutputs.has(value.id)) {
-            if (finalCall(value, path.target)) established = true;
+            if (finalCall(value, path.target, block.id)) established = true;
             else {
               shared = true;
               kinds.add('a call result left in place before later effects');
