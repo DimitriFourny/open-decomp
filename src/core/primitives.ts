@@ -130,6 +130,18 @@ export const diagnosticSchema = z.strictObject({
         limit: revisionSchema,
         consumed: revisionSchema,
       }),
+      /** The source call interface is unresolved at one call: arguments after those shown are
+       * not established and its effects stay explicit. */
+      z.strictObject({ kind: z.literal('call_interface') }),
+      /** The source return list is unresolved; the listed storage may also carry results.
+       * Entries are `<root>[<offset_bits>:<width_bits>]` with the root's architecture prefix. */
+      z.strictObject({
+        kind: z.literal('return_storage'),
+        storage: z.array(z.string().min(1).max(256)).min(1).max(1024),
+      }),
+      /** A native callee's summary is incomplete (code resource_limit: cut by a budget share,
+       * otherwise unsupported or unresolved semantics); the message lists the reasons. */
+      z.strictObject({ kind: z.literal('callee_partial'), callee: z.string().min(1).max(4096) }),
     ])
     .optional(),
 });

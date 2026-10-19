@@ -90,13 +90,14 @@ type ToolCall = (
   blocks: number;
 }>;
 
-/** Default text carries `// <state> (<reason>); ...` on its second line; failures are a JSON envelope. */
+/** Default text starts with `// NAME @ va | <state>(<reason>) | artifact`; failures are a JSON envelope. */
 function decompileState(
   text: string,
   structured: Record<string, unknown> | undefined,
   isError: boolean,
 ): string {
-  const header = /^\/\/ (complete|partial|failed|unsupported|cancelled)\b/m.exec(text);
+  // Header line: `// NAME @ va:0x… | partial(reason) | artifact_<12 hex>`.
+  const header = /^\/\/ [^\n]* \| (complete|partial|failed|unsupported|cancelled)\b/m.exec(text);
   if (header !== null) return header[1]!;
   const fromEnvelope = structured?.state ?? /"state":"(\w+)"/.exec(text)?.[1];
   return typeof fromEnvelope === 'string' ? fromEnvelope : isError ? 'error' : 'unknown';

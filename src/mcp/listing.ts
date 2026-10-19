@@ -1,5 +1,5 @@
-import { distinctDiagnostics } from '../core/index.js';
-import type { DistinctDiagnostic, ToolResult, WireDiagnostic } from '../core/index.js';
+import { caveats } from '../core/index.js';
+import type { ToolResult, WireDiagnostic } from '../core/index.js';
 
 /** Compact, line-oriented text for the three search tools. A row keeps what a reader needs to
  * choose its next call (address, name, kind, status, short ID); per-record evidence IDs, ranges
@@ -20,24 +20,6 @@ export function shortIds(ids: readonly string[]): Map<string, string> {
     result.set(id, `${id.slice(0, id.indexOf('_') + 1)}${body.slice(0, length)}`);
   }
   return result;
-}
-
-const severityRank: Record<WireDiagnostic['severity'], number> = { error: 0, warning: 1, info: 2 };
-const MAX_MESSAGE = 240;
-
-/** Distinct diagnostics, most severe first (stable within a severity). */
-export function bySeverity(diagnostics: readonly WireDiagnostic[]): DistinctDiagnostic[] {
-  return distinctDiagnostics(diagnostics).sort(
-    (a, b) => severityRank[a.diagnostic.severity] - severityRank[b.diagnostic.severity],
-  );
-}
-
-export function diagnosticLine({ diagnostic, count }: DistinctDiagnostic): string {
-  const message =
-    diagnostic.message.length > MAX_MESSAGE
-      ? `${diagnostic.message.slice(0, MAX_MESSAGE)}…`
-      : diagnostic.message;
-  return `${diagnostic.severity} ${diagnostic.code}${count > 1 ? ` ×${count}` : ''}: ${message}`;
 }
 
 interface Named {
@@ -69,7 +51,7 @@ interface Page {
 function listing(tool: string, page: Page, rows: readonly string[]): string {
   return [
     `${tool} ${page.state}${page.reason === undefined ? '' : ` (${page.reason})`}; index ${page.index_state}; ${rows.length} rows; next_cursor ${page.next_cursor ?? 'none'}`,
-    ...bySeverity(page.diagnostics).map((item) => `! ${diagnosticLine(item)}`),
+    ...caveats(page.diagnostics).map((item) => `! ${item.severity} ${item.code}: ${item.text}`),
     ...rows,
   ].join('\n');
 }

@@ -1,13 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { exportToolJsonSchemas, validateToolRequest } from '../../src/core/index.js';
-import type { WireDiagnostic } from '../../src/core/index.js';
 import {
   HANDLE_PLACEHOLDER,
   advertisedInputSchema,
   prepareRequest,
 } from '../../src/mcp/handles.js';
-import { bySeverity, diagnosticLine, shortIds } from '../../src/mcp/listing.js';
+import { shortIds } from '../../src/mcp/listing.js';
 
 const scope = { project_id: `project_${'1'.repeat(64)}`, revision: 1 };
 
@@ -87,7 +86,7 @@ test('advertised input schemas offer handles, wait:"auto" and detail without mut
   assert.match(JSON.stringify(xrefs), /Function: exact name/);
 });
 
-test('short IDs stay short unless listed IDs collide, and diagnostics collapse to counted lines', () => {
+test('short IDs stay short unless listed IDs collide', () => {
   const a = `entity_${'a'.repeat(12)}${'0'.repeat(52)}`;
   const b = `entity_${'a'.repeat(12)}${'1'.repeat(52)}`;
   const c = `entity_${'c'.repeat(64)}`;
@@ -95,23 +94,4 @@ test('short IDs stay short unless listed IDs collide, and diagnostics collapse t
   assert.equal(short.get(c), `entity_${'c'.repeat(12)}`);
   assert.notEqual(short.get(a), short.get(b));
   assert.ok(a.startsWith(short.get(a)!) && b.startsWith(short.get(b)!));
-  const warning: WireDiagnostic = {
-    severity: 'warning',
-    code: 'unavailable_semantics',
-    message: 'unresolved',
-    evidence_ids: [],
-  };
-  const error: WireDiagnostic = {
-    severity: 'error',
-    code: 'internal_error',
-    message: 'bad',
-    evidence_ids: [],
-  };
-  const lines = bySeverity([warning, { ...warning, entity_id: c }, error, warning]).map(
-    diagnosticLine,
-  );
-  assert.deepEqual(lines, [
-    'error internal_error: bad',
-    'warning unavailable_semantics ×3: unresolved',
-  ]);
 });
