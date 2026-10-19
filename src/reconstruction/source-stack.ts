@@ -248,8 +248,6 @@ export function planSourceStack(
         !preservedRoot(binding.register.root) &&
         tainted.has(binding.value.id),
     );
-  const argumentTainted = (bindings: readonly RegisterBinding[]): boolean =>
-    argumentBindings(bindings).length > 0;
   // Validate closure before classifying outgoing storage: a fully analyzed
   // register-only callee cannot observe private spills merely because the caller
   // wrote them. Refused presentation records keep the conservative open area.
