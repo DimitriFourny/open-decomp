@@ -8,7 +8,7 @@ import { integer, type SSAForm } from '../../../src/ir/index.js';
 import type { SourceAddress } from '../../../src/reconstruction/source-model.js';
 import { navigationBytes } from '../../analysis/navigation-fixture.js';
 import { builder, register } from '../../ir/support.js';
-import { emit } from './support.js';
+import { emit, emittedFormals, execute } from './support.js';
 
 const languages = ['c-like', 'python-like'] as const;
 const rdi = () => register('rdi', 64, 0, 'replace_root', 'x86_64:rdi');
@@ -266,6 +266,18 @@ for (const language of languages)
     if (language === 'c-like') assert.match(text, /\(uintptr_t\)"create" \+ /);
     else assert.match(text, /string_address\("create"\) \+ /);
     assert.doesNotMatch(text, /0x2000/);
+    // The literal's static bytes are addressed like the image bytes they stand for.
+    const emission = emit(ssa, sourceOf([recovered]), language).emission;
+    const formal = emittedFormals(emission)[0]!;
+    for (const [offset, char] of [
+      [0n, 0x63n],
+      [2n, 0x65n],
+      [5n, 0x65n],
+      [6n, 0n],
+    ] as const) {
+      const result = execute(emission, new Map(formal.semantic_ids.map((id) => [id, offset])));
+      assert.deepEqual(result.values, [char]);
+    }
   });
 
 for (const language of languages)
