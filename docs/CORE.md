@@ -375,6 +375,10 @@ executes both dialects against a host oracle for every ARM64 and x86-64
 condition code, CCMP/CCMN chains and FP ordered/unordered compares with NaN
 inputs.
 
+Call-clobbered FP environment values (FPCR/MXCSR epochs) whose only demand was an
+omitted environment guard print no `unknown_value` placeholder or local; the
+epoch stays in the requirement site and checked view.
+
 Source-only `exit_scratch` presentation keeps exact exit slices and provenance
 in reconstruction facts while summarizing register names once at the function
 header. Exact values and entry/call/computation origins remain in exit metadata
@@ -435,8 +439,15 @@ Source-only `frame_save` uses the ABI's preserved register slices (including
 Windows x64 XMM6–XMM15 low 128 bits), not architecture-specific register lists.
 One nonvolatile entry-value store must dominate every same-slot reload; every
 return/tail exit must restore exactly those bits, including ordered concatenated
-reload slices. Overlaps, escaping addresses and outgoing argument storage refuse
-the rewrite. Proven saves take precedence over scalar-local promotion, so leaf
+reload slices. An exit that never ran the save (shrink wrapping: the save sits in
+one branch) qualifies when its register still holds the unmodified entry value on
+that path, alone or through phis with the reload. Overlaps, outgoing argument
+storage and a frame address of unknown offset anywhere in possible argument/result
+storage refuse the rewrite; an escaped address of known offset (a local passed to
+a callee, directly, indexed, as register-cell halves or spilled) designates its
+own object and refuses only a save slot containing that offset. This rests on the
+recorded `abi_conformance` requirement that such an address never designates a
+save slot. Proven saves take precedence over scalar-local promotion, so leaf
 push/pop and frame-pointer saves do not create unknown-valued source locals.
 Each applied slot records `frame_save` and requires `abi_conformance`; bounded
 inference exhaustion retains the explicit form. Checked-view memory facts stay

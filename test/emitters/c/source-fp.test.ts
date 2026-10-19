@@ -203,6 +203,8 @@ test('repeated guard epochs retain call effects and ignore MXCSR status-only wri
       const f = fixture(abi, 64, 'mul', false, 3, false, call);
       const { emission } = emit(f.ir, { source: f.source }, language);
       assert.doesNotMatch(emission.text, /requirement_predicate\(/);
+      // The call's FP-environment clobber only fed omitted guards: no placeholder local.
+      assert.doesNotMatch(emission.text, /unknown_value|call clobbers/);
       // One visible requirement reference, a prefix of the metadata ID.
       const references = [...emission.text.matchAll(/\b(requirement_[0-9a-f]+)…?/g)];
       assert.equal(references.length, 1);

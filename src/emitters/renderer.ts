@@ -3172,6 +3172,7 @@ export class Renderer {
       for (const binding of projection.outputs)
         if (
           this.program.live.has(binding.value.id) &&
+          !this.fpPresentation.unobserved.has(binding.value.id) &&
           !returned.has(binding.value.id) &&
           !this.program.expressions.has(binding.value.id)
         ) {
@@ -5800,6 +5801,7 @@ export class Renderer {
       this.context.checkpoint(1);
       if (
         !this.program.live.has(value.id) ||
+        this.fpPresentation.unobserved.has(value.id) ||
         this.inline.has(value.id) ||
         this.inlinedCalls.has(value.id) ||
         formals.has(value.id) ||
