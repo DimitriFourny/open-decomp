@@ -111,11 +111,13 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
     if (left !== right) parent.set(left, right);
   };
   const values = new Map<string, Value>();
+  /** Phi copies between two printed variables (destination, source). */
+  const copies: [string, string][] = [];
   const operandsOf = (value: Value): Value | undefined => {
     // The printed variable a chain of same-width reinterpretations re-presents.
     for (let step = 0; step < 16; step++) {
       if (host.inlined_calls.has(value.id)) return undefined;
-      if (host.variable(value)) return value;
+      if (host.variable(value) || host.formals.has(value.id)) return value;
       if (!host.inline.has(value.id)) return undefined;
       const expression = program.expressions.get(value.id);
       const source = identity(expression, value);
@@ -157,7 +159,7 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
       if (body) expression(body, use, depth + 1, value);
       return;
     }
-    if (host.variable(value)) record(value, use);
+    if (host.variable(value) || host.formals.has(value.id)) record(value, use);
   };
   const expression = (body: Expression, use: Use, depth: number, value?: Value): void => {
     const through = value && identity(body, value);
@@ -229,6 +231,7 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
     const variable = operandsOf(source);
     if (variable) {
       union(result.id, variable.id);
+      copies.push([result.id, variable.id]);
       values.set(variable.id, variable);
       return;
     }
@@ -440,9 +443,6 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
     ];
     if (!evidence.length) continue;
     const dereferenced = uses.some((use) => use.kind === 'deref');
-    // A set is an integer until its uses prove otherwise: arithmetic on it keeps
-    // every member as declared, and so does a dereference through an untyped one.
-    if (uses.some((use) => use.kind === 'block') || (!known.length && dereferenced)) continue;
     // One pointer type: every spelling names the same pointee, ignoring `void *`
     // (which every object pointer converts to). A byte pointer that is only ever
     // passed on (no dereference) is the library's `char` where one use says so;
@@ -476,23 +476,38 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
       types.find((fact) => fact.type_id !== undefined && bare(fact.spelling) === bare(owner.spelling))
         ?.type_id ??
       evidence.find((fact) => fact.type_id !== undefined)?.type_id;
-    if (typeId === undefined) continue;
-    // Cost model, in printed conversions: each typed use, identity test and typed
-    // definition saves one; each integer use and untyped definition costs one.
+    // Cost model, in printed conversions, over the members that are not already
+    // pointers. A pointer local read in integer context prints `(uintptr_t)p` and
+    // an integer expression assigned to it `(T*)expr`: every typed use and
+    // definition, pointer identity test and copy from a pointer variable saves one
+    // conversion; every integer use (arithmetic, comparison, raw dereference,
+    // store) and untyped definition adds one. A set of integers becomes pointers
+    // only for a saving; members next to an existing pointer, on a tie.
+    const pointerMember = (id: string): boolean =>
+      events.get(id)!.facts.some((fact) => fact !== 'scalar');
     let score = 0;
-    for (const use of uses)
-      if (use.kind === 'pointer') score++;
-      else if (use.kind === 'identity') {
-        const zero = host.constant(use.other) === 0n || host.variable(use.other);
-        score += zero ? 1 : -1;
-      } else if (use.kind === 'cast') score--;
-    for (const definition of definitions)
-      if (definition.kind === 'pointer') score++;
-      else if (definition.kind === 'other') score--;
-    if (score < 0) continue;
-    chosen.set(members[0]!, {
-      fact: { type_id: typeId, spelling },
-      members,
+    for (const id of members) {
+      if (pointerMember(id)) continue;
+      const row = events.get(id)!;
+      for (const use of row.uses)
+        if (use.kind === 'pointer') score++;
+        else if (use.kind === 'identity') {
+          const pointerLike = host.constant(use.other) === 0n || host.variable(use.other);
+          score += pointerLike ? 1 : -1;
+        } else score--;
+      for (const definition of row.definitions)
+        if (definition.kind === 'pointer' || definition.kind === 'literal') score++;
+        else if (definition.kind === 'other') score--;
+    }
+    const memberSet = new Set(members);
+    for (const [to, from] of copies)
+      if (memberSet.has(to) && pointerMember(to) !== pointerMember(from)) score++;
+    if (score < (known.length ? 0 : 1)) continue;
+    const assignable = members.filter((id) => !host.formals.has(id));
+    if (!assignable.length) continue;
+    chosen.set(assignable[0]!, {
+      fact: { ...(typeId === undefined ? {} : { type_id: typeId }), spelling },
+      members: assignable,
       typed_uses: typedUses.length,
       typed_definitions: typedDefinitions.length,
     });

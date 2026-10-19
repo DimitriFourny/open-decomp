@@ -963,6 +963,21 @@ export class Renderer {
       this.sourceValueTypes.get(value.id) ??
       this.program.source.value_types?.get(value.id)?.type_id;
     const type = id && this.typeRecords.get(id)?.definition;
+    const spelled = given === undefined ? this.localSpellings.get(value.id) : undefined;
+    if (!type && spelled !== undefined && value.type.kind === 'integer') {
+      // A local that only a pointer spelling types (no type record): same
+      // conversion of the exact address bits.
+      if (this.language === 'python-like')
+        return printed.ctype && !printed.ctype.signed && printed.ctype.bits <= value.type.bits
+          ? printed
+          : this.printer.reduce(value.type.bits, printed);
+      const text = this.pointerValue(printed, spelled);
+      return {
+        text,
+        precedence: text === printed.pointer?.text ? PRIMARY : UNARY,
+        ctype: null,
+      };
+    }
     if (
       !type ||
       (type.kind !== 'integer' && type.kind !== 'pointer') ||
@@ -5320,8 +5335,12 @@ export class Renderer {
    * printed with its machine width only. */
   private knownFact(value: Value): Fact | undefined {
     const source = this.program.source;
-    if (source?.float_values?.has(value.id) || source?.formal_types?.has(value.id))
-      return 'scalar';
+    if (source?.float_values?.has(value.id)) return 'scalar';
+    const formal = source?.formal_types?.get(value.id);
+    if (formal)
+      return formal.kind === 'pointer'
+        ? { spelling: this.formalSpelling(formal) }
+        : 'scalar';
     const typeId = this.sourceValueTypes.get(value.id) ?? source?.value_types?.get(value.id)?.type_id;
     if (!typeId) return undefined;
     const definition = this.typeRecords.get(typeId)?.definition;
@@ -5403,10 +5422,11 @@ export class Renderer {
         !this.fpPresentation.unobserved.has(value.id),
     });
     for (const choice of choices.values()) {
-      const typeId = choice.fact.type_id!;
+      const typeId = choice.fact.type_id;
       const changed = choice.members.filter(
         (id) =>
-          (this.sourceValueTypes.get(id) ?? source.value_types?.get(id)?.type_id) !== typeId ||
+          (typeId !== undefined &&
+            (this.sourceValueTypes.get(id) ?? source.value_types?.get(id)?.type_id) !== typeId) ||
           this.valueType(program.values.get(id)!) !== choice.fact.spelling,
       );
       if (
@@ -5420,8 +5440,8 @@ export class Renderer {
       )
         continue;
       for (const id of changed) {
-        this.sourceValueTypes.set(id, typeId);
-        if (choice.fact.spelling !== this.sourceType(typeId))
+        if (typeId !== undefined) this.sourceValueTypes.set(id, typeId);
+        if (typeId === undefined || choice.fact.spelling !== this.sourceType(typeId))
           this.localSpellings.set(id, choice.fact.spelling);
         else this.localSpellings.delete(id);
       }
