@@ -592,6 +592,27 @@ function observeParameters(
   };
 }
 
+/** The value a register-cell reassembly (`concat` of consecutive `extract`s of
+ * one value, lowest part first) re-presents unchanged; otherwise `value`. */
+function wholeValue(value: Value, expressions: ReadonlyMap<string, Expression>): Value {
+  for (let depth = 0; depth < 8; depth++) {
+    const expression = expressions.get(value.id);
+    if (expression?.kind !== 'concat' || !expression.values.length) return value;
+    let offset = 0,
+      source: Value | undefined;
+    for (const part of expression.values) {
+      const piece = expressions.get(part.id);
+      if (piece?.kind !== 'extract' || piece.offset !== offset) return value;
+      if (source && source.id !== piece.value.id) return value;
+      source = piece.value;
+      offset += bitWidth(part.type);
+    }
+    if (!source || bitWidth(source.type) !== offset) return value;
+    value = source;
+  }
+  return value;
+}
+
 /** Most bytes of an indexed read-only table the source facts carry: enough for
  * the complete small tables and the printed prefix of larger ones. */
 const TABLE_BYTES_READ = 512n;
@@ -623,18 +644,34 @@ function sourceAddresses(
           writes.push({ address, size: BigInt(Math.ceil(bitWidth(node.value.type) / 8)) });
       }
       if (node.kind === 'load' || node.kind === 'store') {
-        // A constant plus a variable addresses indexed storage: the constant is a table base.
-        const sum = expressions.get(node.address.id);
-        if (sum?.kind === 'integer' && sum.op === 'add')
-          for (const operand of [sum.left, sum.right]) {
-            const base = constant(operand);
-            if (
-              base !== undefined &&
-              base < U64_LIMIT &&
-              constant(sum.left === operand ? sum.right : sum.left) === undefined
-            )
-              tableBases.add(addressKey({ image_id: image.id, space: 'va', value: base }));
-          }
+        // Constants added to a variable offset address indexed storage: each is a table base.
+        const leaves: Value[] = [];
+        const flatten = (original: Value, depth: number): void => {
+          const value = wholeValue(original, expressions);
+          const sum = expressions.get(value.id);
+          if (
+            sum?.kind === 'integer' &&
+            sum.op === 'add' &&
+            depth < 4 &&
+            constant(value) === undefined
+          ) {
+            flatten(sum.left, depth + 1);
+            flatten(sum.right, depth + 1);
+          } else leaves.push(value);
+        };
+        flatten(node.address, 0);
+        // Constant leaves sum to the base (an ADRP page and its low offset are two).
+        let total = 0n,
+          known = 0;
+        for (const leaf of leaves) {
+          const value = constant(leaf);
+          if (value === undefined) continue;
+          total += value;
+          known++;
+        }
+        total = BigInt.asUintN(64, total);
+        if (known > 0 && known < leaves.length && total < U64_LIMIT)
+          tableBases.add(addressKey({ image_id: image.id, space: 'va', value: total }));
       }
       if (
         node.kind !== 'load' ||

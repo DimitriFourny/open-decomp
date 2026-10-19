@@ -3343,7 +3343,7 @@ export class Renderer {
           'indexed_data_load',
           id,
           'exact mapped data base plus nonwrapping integer index, element-width scaling and aligned symbol displacement; native names use their C spelling; no array bound or string ownership inferred',
-          [node.address.id, table.index.id],
+          [node.address.id, ...table.terms.map((term) => term.index.id)],
         )
       )
         continue;
@@ -3460,7 +3460,8 @@ export class Renderer {
     const rest = total === undefined ? undefined : total - shown;
     const more =
       rest === undefined ? 'further elements not shown' : rest > 0n ? `${rest} more` : undefined;
-    const note = `${name}: image VA 0x${hex}, read-only; ${total === undefined ? `first ${shown}` : `${total}`} elements (${basis})`;
+    const elements = `${total === undefined ? `first ${shown}` : `${total}`} ${this.language === 'c-like' ? '' : `uint${table.bits}_t `}elements`;
+    const note = `${name}: image VA 0x${hex}, read-only; ${elements} (${basis})`;
     const per = Math.max(1, Math.floor(16 / width));
     const rows: string[] = [];
     for (let at = 0; at < values.length; at += per)
@@ -3498,19 +3499,24 @@ export class Renderer {
   private sourceStorage(node: Extract<Instruction, { kind: 'load' | 'store' }>): string {
     const table = this.dataTables.get(node.id);
     if (table) {
-      let index = this.printer.reduce(bitWidth(table.index.type), this.printed(table.index));
-      if (table.stride !== 1n || table.offset !== 0n) index = this.printer.reduce(64, index);
-      if (table.stride !== 1n)
-        index = this.printer.binary('*', index, this.printer.literal(table.stride, 64), {
-          bits: 64,
-          signed: false,
-        });
+      const wide = table.terms.length > 1 || table.terms.some((term) => term.stride !== 1n);
+      let index: Printed | undefined;
+      for (const term of table.terms) {
+        let part = this.printer.reduce(bitWidth(term.index.type), this.printed(term.index));
+        if (wide || table.offset !== 0n) part = this.printer.reduce(64, part);
+        if (term.stride !== 1n)
+          part = this.printer.binary('*', part, this.printer.literal(term.stride, 64), {
+            bits: 64,
+            signed: false,
+          });
+        index = index ? this.printer.binary('+', index, part, { bits: 64, signed: false }) : part;
+      }
       if (table.offset !== 0n)
-        index = this.printer.binary('+', this.printer.literal(table.offset, 64), index, {
+        index = this.printer.binary('+', this.printer.literal(table.offset, 64), index!, {
           bits: 64,
           signed: false,
         });
-      return `${table.name}[${index.text}]`;
+      return `${table.name}[${index!.text}]`;
     }
     const type = this.accessType(node),
       access = node.access,
@@ -5723,7 +5729,9 @@ export class Renderer {
     const subject = this.input.function.id,
       program = this.program;
     this.indexedData = indexedDataAccesses(program, this.context);
-    const indices = new Map([...this.indexedData].map(([id, table]) => [id, table.index]));
+    const indices = new Map(
+      [...this.indexedData].map(([id, table]) => [id, table.terms.map((term) => term.index)]),
+    );
     const typeId = (value: Value): string | undefined =>
       this.sourceValueTypes.get(value.id) ?? program.source?.value_types?.get(value.id)?.type_id;
     // A constant rotation prints its operand twice: it stays a variable.

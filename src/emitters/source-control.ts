@@ -151,7 +151,7 @@ export class VariableLiveness {
     private readonly context: OperationContext,
     limit = 4096,
     private readonly inlined: ReadonlyMap<string, InlineSite> = new Map(),
-    private readonly alternateIndices: ReadonlyMap<string, Value> = new Map(),
+    private readonly alternateIndices: ReadonlyMap<string, readonly Value[]> = new Map(),
     /** Values printed as an operand of their reader, never as a variable. */
     omitted: ReadonlySet<string> = new Set(),
   ) {
@@ -199,8 +199,7 @@ export class VariableLiveness {
       const inlined = this.inlined.get(current.id)?.node;
       if (inlined?.kind === 'load') {
         if (!this.program.source?.locals.has(inlined.id)) pending.push(inlined.address);
-        const index = this.alternateIndices.get(inlined.id);
-        if (index) pending.push(index);
+        pending.push(...(this.alternateIndices.get(inlined.id) ?? []));
         continue;
       }
       const index = this.index.get(current.id);
@@ -256,8 +255,7 @@ export class VariableLiveness {
         else if (node.kind === 'load' || node.kind === 'store') {
           if (!program.source?.locals.has(node.id)) reads.push(node.address);
           if (node.kind === 'store') reads.push(node.value);
-          const index = this.alternateIndices.get(node.id);
-          if (index) reads.push(index);
+          reads.push(...(this.alternateIndices.get(node.id) ?? []));
         }
         if (node.kind === 'call') {
           const projection = program.calls.get(node.id);

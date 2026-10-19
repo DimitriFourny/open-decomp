@@ -267,3 +267,50 @@ for (const language of languages)
     else assert.match(text, /string_address\("create"\) \+ /);
     assert.doesNotMatch(text, /0x2000/);
   });
+
+for (const language of languages)
+  test(`${language} a two-index table (row * 8 + column) prints one contents table`, () => {
+    const bytes = Buffer.from(Array.from({ length: 64 }, (_, index) => index + 1));
+    const image = navigationBytes(Uint8Array.of(0xc3), bytes);
+    const start = { image_id: image.id, space: 'va' as const, value: 0x2000n };
+    const loaded = {
+      ...image,
+      mappings: image.mappings.map((mapping) => ({ ...mapping, permissions: ['read' as const] })),
+      sections: image.sections.map((section) => ({ ...section, permissions: ['read' as const] })),
+    };
+    const recovered = recoverDataAddress(loaded, start, createOperationContext())!;
+    const b = builder(`two-index-${language}`),
+      entry = b.block('entry');
+    const row = entry.cast(
+      'zero_extend',
+      integer(64),
+      entry.cast('truncate', integer(32), entry.readRegister(rdi())),
+    );
+    const column = entry.cast(
+      'zero_extend',
+      integer(64),
+      entry.cast(
+        'truncate',
+        integer(8),
+        entry.readRegister(register('rsi', 64, 0, 'replace_root', 'x86_64:rsi')),
+      ),
+    );
+    const sum = entry.int(
+      'add',
+      entry.int(
+        'add',
+        entry.address(start),
+        entry.int('shl', row, entry.constant(integer(64), 3n)),
+      ),
+      column,
+    );
+    const value = entry.load(integer(8), sum, { endian: 'little', alignment: 1, volatile: false });
+    entry.return([value]);
+    const ssa = constructSSA(b.finish(entry, [integer(8)])).value as SSAForm;
+    const object = { ...recovered.object!, byte_length: 64n };
+    const text = emit(ssa, sourceOf([{ ...recovered, object, object_bytes: [...bytes] }]), language)
+      .emission.text;
+    assert.match(text, /\w+\[.*\* 8.*\]/);
+    assert.ok(text.includes('1, 2, 3, 4, 5, 6, 7, 8'), text);
+    assert.ok(text.includes('57, 58, 59, 60, 61, 62, 63, 64'), text);
+  });

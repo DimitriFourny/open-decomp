@@ -7,12 +7,12 @@ import { sourceConstantValues, sourceDataValues } from '../reconstruction/source
 
 export interface IndexedDataAccess {
   readonly data: SourceAddress & { readonly object: NonNullable<SourceAddress['object']> };
-  readonly index: Value;
-  readonly stride: bigint;
+  /** Variable terms of the element index, each `index * stride` (in elements). */
+  readonly terms: readonly { readonly index: Value; readonly stride: bigint }[];
   readonly offset: bigint;
   readonly bits: number;
   /** Greatest element index the access reaches from the object base, counted in
-   * elements: `offset + stride * (greatest value of index)`. The index's width,
+   * elements: `offset` plus every term's stride times the greatest value of its index. The index's width,
    * masks and the comparisons dominating the access bound it. */
   readonly last: bigint;
 }
@@ -166,16 +166,35 @@ export function indexedDataAccesses(
       bitWidth(node.address.type) !== 64
     )
       return;
-    const address = program.expressions.get(node.address.id);
-    if (address?.kind !== 'integer' || address.op !== 'add') return;
-    let base = data(address.left),
-      index = address.right;
-    if (!base?.object) {
-      base = data(address.right);
-      index = address.left;
+    // The address is a sum: one constant naming mapped storage, constant byte
+    // displacements, and variable terms (each optionally scaled by a constant).
+    const leaves: Value[] = [];
+    const flatten = (value: Value, depth: number): void => {
+      const expression = program.expressions.get(value.id);
+      if (
+        expression?.kind === 'integer' &&
+        expression.op === 'add' &&
+        depth < 4 &&
+        constant(value) === undefined
+      ) {
+        flatten(expression.left, depth + 1);
+        flatten(expression.right, depth + 1);
+      } else leaves.push(value);
+    };
+    flatten(node.address, 0);
+    if (leaves.length < 2 || leaves.length > 4) return;
+    let base: SourceAddress | undefined,
+      displacement = 0n;
+    const variable: Value[] = [];
+    for (const leaf of leaves) {
+      const item = data(leaf);
+      if (!base && item?.object) base = item;
+      else if (constant(leaf) !== undefined) displacement += constant(leaf)!;
+      else variable.push(leaf);
     }
     if (
       !base?.object ||
+      !variable.length ||
       base.object.kind === 'unknown' ||
       base.address.space !== 'va' ||
       base.object.address.space !== 'va' ||
@@ -184,42 +203,49 @@ export function indexedDataAccesses(
       base.address.value !== base.object.address.value + base.object.offset
     )
       return;
-    let scale = 1n;
-    const scaled = program.expressions.get(index.id);
-    if (scaled?.kind === 'integer' && (scaled.op === 'mul' || scaled.op === 'shl')) {
-      let amount = constant(scaled.right);
-      let operand = scaled.left;
-      if (amount === undefined && scaled.op === 'mul') {
-        amount = constant(scaled.left);
-        operand = scaled.right;
-      }
-      if (amount === undefined || amount < 0n || (scaled.op === 'shl' && amount > 63n)) return;
-      scale = scaled.op === 'shl' ? 1n << amount : amount;
-      index = operand;
-    }
-    const widest = index;
-    index = narrow(index);
-    let limit = maximum(index);
-    const guard = guarded(widest, block);
-    if (guard !== undefined && guard < limit) limit = guard;
     const size = BigInt(bits / 8),
       object = base.object;
+    // A displacement is an unsigned byte offset; a wrapped (negative) one is no table.
+    displacement = BigInt.asUintN(64, displacement);
+    if (displacement >= 1n << 32n) return;
+    const terms: { index: Value; stride: bigint }[] = [];
+    let reach = object.offset + displacement;
+    for (const leaf of variable) {
+      let index = leaf,
+        scale = 1n;
+      const scaled = program.expressions.get(index.id);
+      if (scaled?.kind === 'integer' && (scaled.op === 'mul' || scaled.op === 'shl')) {
+        let amount = constant(scaled.right);
+        let operand = scaled.left;
+        if (amount === undefined && scaled.op === 'mul') {
+          amount = constant(scaled.left);
+          operand = scaled.right;
+        }
+        if (amount === undefined || amount < 0n || (scaled.op === 'shl' && amount > 63n)) return;
+        scale = scaled.op === 'shl' ? 1n << amount : amount;
+        index = operand;
+      }
+      const widest = index;
+      index = narrow(index);
+      let limit = maximum(index);
+      const guard = guarded(widest, block);
+      if (guard !== undefined && guard < limit) limit = guard;
+      if (index.type.kind !== 'integer' || scale === 0n || scale % size !== 0n) return;
+      reach += limit * scale;
+      terms.push({ index, stride: scale / size });
+    }
     if (
-      index.type.kind !== 'integer' ||
-      scale === 0n ||
-      scale % size !== 0n ||
-      object.offset % size !== 0n ||
+      (object.offset + displacement) % size !== 0n ||
       object.address.value % size !== 0n ||
-      object.address.value + object.offset + limit * scale >= 1n << 64n
+      object.address.value + reach >= 1n << 64n
     )
       return;
     result.set(node.id, {
       data: { ...base, object },
-      index,
-      stride: scale / size,
-      offset: object.offset / size,
+      terms,
+      offset: (object.offset + displacement) / size,
       bits,
-      last: object.offset / size + (limit * scale) / size,
+      last: reach / size,
     });
   };
   for (const block of program.blocks.values())
