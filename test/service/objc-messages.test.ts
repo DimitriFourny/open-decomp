@@ -60,7 +60,7 @@ test(
     // A known variadic selector keeps its explicit open remainder.
     assert.match(
       summary,
-      /\[NSString stringWithFormat:@"%@=%ld", [^\]]*unknown_argument_remainder\(\)\]/,
+      /\[NSString stringWithFormat:@"%@=%ld", [^\]]*\.\.\.\]/,
     );
     assert.match(summary, /\[self label\]/);
     assert.match(await text(session, '+[ODCounter greeting]'), /return @"hello, fixture";/);

@@ -6,8 +6,7 @@ import { integer, type SSAForm } from '../../../src/ir/index.js';
 import { builder, image, register } from '../../ir/support.js';
 import { emit, emittedFormals, execute } from './support.js';
 
-const i32 = integer(32),
-  i64 = integer(64);
+const i64 = integer(64);
 const source = { abi: sysvAMD64Abi, callees: [], addresses: [] };
 const rdi = register('rdi', 64, 0, 'replace_root', 'x86_64:rdi');
 const writing = { registers: [], flags: [], memory: 'unknown_read_write' as const };
