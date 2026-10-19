@@ -1,0 +1,330 @@
+# Parameter names for functions whose macOS SDK declaration is unnamed. The names are the
+# public ones of ISO C / POSIX / the BSD manual pages (interface facts). `a: x y` names the
+# parameters of every function left of the colon; a trailing `f`/`l` of a math function
+# inherits the base function's names. A line whose arity differs from the header is ignored.
+
+# <math.h>
+acos acosh asin asinh atan atanh cbrt ceil cos cosh erf erfc exp exp2 expm1 fabs floor ilogb lgamma llrint llround log log10 log1p log2 logb lrint lround nearbyint rint round sin sinh sqrt tan tanh tgamma trunc exp10 fpclassify isfinite isinf isnan signbit: x
+atan2 copysign fdim fmax fmin fmod hypot nextafter pow remainder scalb: x y
+fma: x y z
+ldexp scalbn scalbln: x n
+frexp: value exp
+modf: value iptr
+remquo: x y quo
+lgamma_r: x signgamp
+nan: tagp
+nexttoward: x y
+# <stdlib.h> <string.h> <stdio.h>
+abs labs llabs: j
+atoi atol atoll atof: nptr
+at_quick_exit atexit: func
+strtod strtof strtold: nptr endptr
+strtol strtoll strtoul strtoull strtoimax strtoumax: nptr endptr base
+rand_r: seed
+srand srandom: seed
+fgets: s size stream
+fgetws: ws n stream
+gets: s
+puts: s
+fputs: s stream
+fputws: ws stream
+fputc putc fputwc putwc: c stream
+fgetc getc fgetwc getwc getc_unlocked getc_unlocked: stream
+ungetc: c stream
+putchar putchar_unlocked: c
+fopen: filename mode
+freopen: filename mode stream
+fclose fflush feof ferror clearerr fileno ftell rewind fgetpos flockfile ftrylockfile funlockfile: stream
+fseek: stream offset whence
+fseeko: stream offset whence
+fsetpos: stream pos
+setbuf: stream buf
+setvbuf: stream buf mode size
+fread fwrite: ptr size nmemb stream
+tmpnam tmpnam_r: s
+tmpfile: 
+remove unlink rmdir: path
+rename: old new
+perror: s
+qsort: base nmemb size compar
+bsearch: key base nmemb size compar
+malloc: size
+calloc: count size
+realloc: ptr size
+free: ptr
+getenv unsetenv: name
+setenv: name value overwrite
+putenv: string
+system: command
+exit _Exit quick_exit _exit: status
+strlen: s
+strnlen: s maxlen
+strcmp strcasecmp: s1 s2
+strncmp strncasecmp: s1 s2 n
+strcpy strcat stpcpy: dst src
+strncpy strncat stpncpy: dst src n
+strlcpy strlcat: dst src size
+strchr strrchr: s c
+strstr strcasestr: haystack needle
+strspn strcspn strpbrk: s charset
+strtok: str sep
+strtok_r: str sep lasts
+strdup: s1
+strndup: s1 n
+strerror: errnum
+strerror_r: errnum buf buflen
+strcoll: s1 s2
+strxfrm: dst src n
+memchr memrchr: s c n
+memcpy memmove: dst src n
+memset: b c len
+memcmp bcmp: s1 s2 n
+bcopy: src dst len
+bzero: b len
+# <ctype.h> <wchar.h>
+isalnum isalpha isascii isblank iscntrl isdigit isgraph islower isprint ispunct isspace isupper isxdigit toascii tolower toupper: c
+iswalnum iswalpha iswblank iswcntrl iswdigit iswgraph iswlower iswprint iswpunct iswspace iswupper iswxdigit towlower towupper: wc
+btowc: c
+wctob: c
+wcslen: s
+wcscmp: s1 s2
+wcsncmp: s1 s2 n
+wcscpy wcscat: dst src
+wcsncpy wcsncat: dst src n
+wcschr wcsrchr: s c
+wmemcpy wmemmove: dst src n
+wmemset: s c n
+mbrtowc: pwc s n ps
+wcrtomb: s wc ps
+mbstowcs: pwcs s n
+wcstombs: s pwcs n
+mblen: s n
+mbtowc: pwc s n
+wctomb: s wc
+# <time.h>
+time: tloc
+difftime: time1 time0
+mktime timegm: tm
+asctime: tm
+asctime_r: tm buf
+ctime: clock
+ctime_r: clock buf
+gmtime localtime: clock
+gmtime_r localtime_r: clock result
+strftime: s maxsize format timeptr
+strptime: buf format tm
+nanosleep: rqtp rmtp
+clock_gettime clock_getres clock_settime: clock_id tp
+gettimeofday: tp tzp
+settimeofday: tp tzp
+usleep: useconds
+sleep alarm: seconds
+# <signal.h> <setjmp.h>
+signal: sig func
+raise: sig
+kill: pid sig
+killpg: pgrp sig
+sigaction: sig act oact
+sigprocmask pthread_sigmask: how set oset
+sigpending: set
+sigsuspend: sigmask
+sigwait: set sig
+sigemptyset sigfillset: set
+sigaddset sigdelset sigismember: set signo
+setjmp _setjmp: env
+longjmp _longjmp: env val
+sigsetjmp: env savemask
+siglongjmp: env val
+# <unistd.h> <fcntl.h> <sys/*.h>
+open: path oflag
+openat: fd path oflag
+creat: path mode
+close fsync fdatasync dup fchdir isatty ttyname: fd
+dup2: fildes fildes2
+dup3: oldfd newfd flags
+pipe: fildes
+lseek: fildes offset whence
+read pread: fd buf nbyte
+write pwrite: fd buf nbyte
+readv writev: fd iov iovcnt
+truncate: path length
+ftruncate: fd length
+access: path amode
+faccessat: fd path amode flag
+chdir chroot: path
+getcwd: buf size
+chmod: path mode
+fchmod: fd mode
+fchmodat: fd path mode flag
+chown lchown: path owner group
+fchown: fd owner group
+fchownat: fd path owner group flag
+link: path1 path2
+symlink: path1 path2
+readlink: path buf bufsize
+mkdir: path mode
+mkfifo: path mode
+mknod: path mode dev
+umask: cmask
+stat lstat: path buf
+fstat: fd buf
+fstatat: fd path buf flag
+statvfs: path buf
+fstatvfs: fd buf
+fcntl: fd cmd
+ioctl: fildes request
+flock: fd operation
+unlinkat: fd path flag
+mkstemp mkdtemp: template
+mkostemp: template oflags
+realpath: file_name resolved_name
+basename dirname: path
+execv: path argv
+execve: path argv envp
+execvp: file argv
+fork vfork: 
+wait: stat_loc
+waitpid: pid stat_loc options
+wait4: pid stat_loc options rusage
+getpid getppid getuid geteuid getgid getegid: 
+getpgid getsid: pid
+setpgid: pid pgid
+setuid seteuid: uid
+setgid setegid: gid
+getgroups: gidsetsize grouplist
+getrlimit setrlimit: resource rlp
+getrusage: who rusage
+getpriority: which who
+setpriority: which who prio
+sysconf: name
+pathconf: path name
+fpathconf: fd name
+confstr: name buf len
+gethostname: name namelen
+sethostname: name namelen
+getlogin_r: name namesize
+getopt: argc argv optstring
+nice: incr
+pause: 
+chdir: path
+sync: 
+# <dirent.h>
+opendir: filename
+fdopendir: fd
+readdir readdir_r closedir rewinddir telldir: dirp
+seekdir: dirp loc
+scandir: dirname namelist select compar
+alphasort: d1 d2
+# <dlfcn.h>
+dlopen: path mode
+dlsym: handle symbol
+dlclose: handle
+dladdr: addr info
+dlerror: 
+# <pthread.h>
+pthread_create: thread attr start_routine arg
+pthread_join: thread value_ptr
+pthread_detach pthread_cancel: thread
+pthread_exit: value_ptr
+pthread_self: 
+pthread_equal: t1 t2
+pthread_once: once_control init_routine
+pthread_mutex_init: mutex attr
+pthread_mutex_destroy pthread_mutex_lock pthread_mutex_trylock pthread_mutex_unlock: mutex
+pthread_cond_init: cond attr
+pthread_cond_destroy pthread_cond_signal pthread_cond_broadcast: cond
+pthread_cond_wait: cond mutex
+pthread_cond_timedwait: cond mutex abstime
+pthread_key_create: key destructor
+pthread_key_delete pthread_getspecific: key
+pthread_setspecific: key value
+pthread_attr_init pthread_attr_destroy: attr
+pthread_rwlock_init: rwlock attr
+pthread_rwlock_destroy pthread_rwlock_rdlock pthread_rwlock_wrlock pthread_rwlock_tryrdlock pthread_rwlock_trywrlock pthread_rwlock_unlock: rwlock
+sched_yield: 
+sem_init: sem pshared value
+sem_destroy sem_post sem_wait sem_trywait: sem
+sem_open: name oflag
+sem_close: sem
+sem_unlink: name
+# <sys/mman.h>
+mmap: addr len prot flags fd offset
+munmap: addr len
+mprotect: addr len prot
+msync: addr len flags
+mlock munlock: addr len
+madvise: addr len advice
+mincore: addr len vec
+shm_open: name oflag mode
+shm_unlink: name
+# <sys/socket.h> <netdb.h> <arpa/inet.h>
+socket: domain type protocol
+socketpair: domain type protocol sv
+bind connect: socket address address_len
+accept getpeername getsockname: socket address address_len
+listen: socket backlog
+send: socket buffer length flags
+recv: socket buffer length flags
+sendto: socket buffer length flags dest_addr dest_len
+recvfrom: socket buffer length flags address address_len
+sendmsg recvmsg: socket message flags
+shutdown: socket how
+getsockopt: socket level option_name option_value option_len
+setsockopt: socket level option_name option_value option_len
+getaddrinfo: nodename servname hints res
+freeaddrinfo: ai
+getnameinfo: sa salen host hostlen serv servlen flags
+gai_strerror: ecode
+gethostbyname: name
+gethostbyaddr: addr len type
+getservbyname: name proto
+getservbyport: port proto
+getprotobyname: name
+getprotobynumber: proto
+inet_addr inet_ntoa: in
+inet_aton: cp pin
+inet_pton: af src dst
+inet_ntop: af src dst size
+htons ntohs: netshort
+htonl ntohl: netlong
+select: nfds readfds writefds errorfds timeout
+pselect: nfds readfds writefds errorfds timeout sigmask
+poll: fds nfds timeout
+# <termios.h> <pwd.h> <grp.h>
+tcgetattr tcsetattr: fildes optional_actions termios_p
+tcgetattr: fildes termios_p
+tcsetattr: fildes optional_actions termios_p
+cfgetispeed cfgetospeed: termios_p
+cfsetispeed cfsetospeed cfsetspeed: termios_p speed
+cfmakeraw: termios_p
+tcflush tcdrain tcflow tcsendbreak: fildes
+getpwnam getgrnam: name
+getpwuid: uid
+getgrgid: gid
+getpwnam_r: name pwd buffer bufsize result
+getpwuid_r: uid pwd buffer bufsize result
+getgrnam_r: name grp buffer bufsize result
+getgrgid_r: gid grp buffer bufsize result
+# misc
+fnmatch: pattern string flags
+glob: pattern flags errfunc pglob
+globfree: pglob
+regcomp: preg pattern cflags
+regexec: preg string nmatch pmatch eflags
+regerror: errcode preg errbuf errbuf_size
+regfree: preg
+setlocale: category locale
+asprintf: strp fmt
+dprintf: fd format
+vasprintf: strp fmt ap
+atexit_b: block
+arc4random_uniform: upper_bound
+arc4random_buf: buf nbytes
+getentropy: buf buflen
+backtrace: array size
+backtrace_symbols: array size
+backtrace_symbols_fd: array size fd
+sysctl: name namelen oldp oldlenp newp newlen
+sysctlbyname: name oldp oldlenp newp newlen
+sysctlnametomib: name mibp sizep
+fdopen: fd mode

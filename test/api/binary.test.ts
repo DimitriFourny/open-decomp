@@ -238,3 +238,27 @@ test('an automatically discovered sidecar cannot redirect project writes through
   await assert.rejects(openBinary(input), { code: 'invalid_input' });
   assert.deepEqual(await readdir(destination), []);
 });
+
+test(
+  'an import stub is listed under its import name, complete, and selectable by that name',
+  { timeout: 60000 },
+  async (t) => {
+    const { input, sessions } = await setup(t);
+    const session = await openBinary(input);
+    sessions.push(session);
+    const listed = await session.findFunctions({ page: { limit: 100 } });
+    assert.ok('data' in listed);
+    const stubs = listed.data.items.filter((item) => item.kind === 'import_stub');
+    assert.ok(stubs.length > 0);
+    for (const stub of stubs) {
+      assert.ok(stub.original_name !== null);
+      assert.equal(stub.analysis, 'complete');
+      assert.equal(stub.boundary, 'established');
+    }
+    const puts = stubs.find((item) => item.original_name === '_puts');
+    assert.ok(puts);
+    assert.equal(listed.data.items.filter((item) => item.original_name === '_puts').length, 1);
+    const result = await session.decompile({ name: '_puts' });
+    assert.ok('data' in result && result.data.function_id === puts.id);
+  },
+);

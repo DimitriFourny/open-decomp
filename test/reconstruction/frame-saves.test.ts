@@ -10,12 +10,74 @@ import { windowsX64Abi } from '../../src/abi/windows-x64/index.js';
 import { constructSSA } from '../../src/analysis/ssa/index.js';
 import { recoverTypes } from '../../src/analysis/types/index.js';
 import { integer, type SSAForm } from '../../src/ir/index.js';
+import { newIdentity } from '../../src/core/index.js';
 import { structureControlFlow } from '../../src/presentation/index.js';
 import { reconstruct } from '../../src/reconstruction/index.js';
 import { builder, image, slice } from '../ir/support.js';
 import { acknowledgeRequirements, emit, emittedFormals, execute } from '../emitters/c/support.js';
 
 const u64 = integer(64);
+type Shape = 'shrink-wrapped' | 'modified-early' | 'slot-escapes' | 'other-object-escapes';
+
+/** The save lives only in one branch (shrink wrapping); the other path returns
+ * with the register never touched. */
+function shrinkWrapped(abi: AbiProfile, saved: RegisterDescriptor, shape: Shape) {
+  const b = builder(`shrink-wrapped-${abi.id}-${saved.id}-${shape}`),
+    entry = b.block('entry'),
+    work = b.block('work'),
+    early = b.block('early');
+  const location = abi.classifyCall({
+    returns: { kind: 'void' },
+    parameters: [{ kind: 'integer', bits: 64, signed: false }],
+    variadic: false,
+    fixed_parameter_count: 1,
+  }).parameters[0]!.locations[0]!;
+  assert.equal(location.kind, 'register');
+  if (location.kind !== 'register') throw new Error('Expected register argument');
+  const argument = location.register;
+  const original = entry.readRegister(saved);
+  const stackEntry = entry.readRegister(abi.stack_pointer);
+  const condition = entry.extract(entry.readRegister(argument), 0, 1);
+  entry.branch(condition, entry.edge(work), entry.edge(early));
+  const frame = work.int('sub', stackEntry, work.constant(u64, 64n)),
+    slot = work.int('add', frame, work.constant(u64, 32n));
+  work.writeRegister(abi.stack_pointer, frame);
+  work.store(slot, original);
+  work.writeRegister(saved, work.constant(u64, 5n));
+  const object =
+    shape === 'other-object-escapes' ? frame : shape === 'slot-escapes' ? slot : undefined;
+  if (object) work.writeRegister(argument, object);
+  work.call(
+    { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+    [],
+    [],
+    abi.unknown_call_clobbers,
+    [newIdentity('evidence')],
+  );
+  work.writeRegister(saved, work.load(u64, slot));
+  work.writeRegister(abi.stack_pointer, stackEntry);
+  work.return([work.constant(u64, 7n)]);
+  if (shape === 'modified-early') early.writeRegister(saved, early.constant(u64, 9n));
+  early.return([early.constant(u64, 7n)]);
+  const ir = constructSSA(b.finish(entry, [u64])).value as SSAForm;
+  const types = recoverTypes(ir, abi, createOperationContext(), {
+    image_id: image,
+    slice_id: slice,
+    revision: 0,
+  });
+  const extra = { types, source: { abi, callees: [], addresses: [] } };
+  const structured = structureControlFlow(ir, createOperationContext());
+  assert.ok(structured.value);
+  return {
+    ir,
+    extra,
+    source: reconstruct(
+      { function: structured.value, ...extra },
+      createOperationContext(),
+      'source',
+    ),
+  };
+}
 type Gate =
   | 'valid'
   | 'volatile'
@@ -172,6 +234,51 @@ for (const abi of [sysvAMD64Abi, windowsX64Abi]) {
       assert.deepEqual(result.values, [0x0807060504030201n]);
       assert.deepEqual(result.events, ['load']);
     }
+  });
+}
+
+for (const abi of [sysvAMD64Abi, windowsX64Abi]) {
+  const saved = abi.preserved.find(
+    (register) => register.bank === 'integer' && register.root !== abi.stack_pointer.root,
+  )!;
+  test(`${abi.id}: a save inside one branch is elided when the other path leaves the register untouched`, () => {
+    const { ir, extra, source } = shrinkWrapped(abi, saved, 'shrink-wrapped');
+    assert.equal(source.source?.frame_saves?.stores.size, 1);
+    assert.equal(source.source?.frame_saves?.reloads.size, 1);
+    assert.ok(
+      source.local_validation_session?.abiConformance.some((site) => site.rule === 'frame_save'),
+    );
+    for (const language of ['c-like', 'python-like'] as const) {
+      const output = emit(ir, extra, language).emission;
+      assert.doesNotMatch(output.text, /unknown_value|entry_sp|stack_frame|\blocal\d/);
+      const condition = emittedFormals(output)[0];
+      assert.ok(condition);
+      for (const taken of [0n, 1n]) {
+        const result = execute(
+          output,
+          new Map([[condition.statement_id, taken]]),
+          new Map(),
+          0n,
+          new Map(),
+          new Map(),
+          new Map([['sub_2000', () => []]]),
+          acknowledgeRequirements(output),
+        );
+        assert.deepEqual(result.values, [7n]);
+      }
+    }
+  });
+  test(`${abi.id}: a path that modifies the register without restoring it refuses the save`, () => {
+    const { source } = shrinkWrapped(abi, saved, 'modified-early');
+    assert.equal(source.source?.frame_saves?.stores.size ?? 0, 0);
+  });
+  test(`${abi.id}: a save slot whose own address escapes is not elided`, () => {
+    const { source } = shrinkWrapped(abi, saved, 'slot-escapes');
+    assert.equal(source.source?.frame_saves?.stores.size ?? 0, 0);
+  });
+  test(`${abi.id}: an escaped frame object elsewhere does not expose the save slot`, () => {
+    const { source } = shrinkWrapped(abi, saved, 'other-object-escapes');
+    assert.equal(source.source?.frame_saves?.stores.size, 1);
   });
 }
 

@@ -1,5 +1,5 @@
 import type { OperationContext, RegisterDescriptor } from '../core/index.js';
-import { expressionOperands, type Expression } from '../ir/index.js';
+import { expressionOperands, type Expression, type Value } from '../ir/index.js';
 import type { ControlArm, Region } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
 import { sourceRequirementPredicates } from './source-requirements.js';
@@ -12,6 +12,8 @@ export interface SourceFpPresentation {
   readonly guards: ReadonlySet<string>;
   /** Unsupported-environment failure blocks of `guards`, not printed. */
   readonly omitted: ReadonlySet<string>;
+  /** Call-clobber outputs whose only demand was an omitted guard condition. */
+  readonly unobserved: ReadonlySet<string>;
   readonly expressions: ReadonlySet<Expression>;
 }
 
@@ -24,8 +26,9 @@ export function sourceFpPresentation(
 ): SourceFpPresentation {
   const guards = new Set<string>(),
     omitted = new Set<string>(),
+    unobserved = new Set<string>(),
     expressions = new Set<Expression>();
-  const unchanged = { body: program.function.body, guards, omitted, expressions };
+  const unchanged = { body: program.function.body, guards, omitted, unobserved, expressions };
   const validation = program.local_validation_session;
   if (program.view !== 'source' || !program.source || !validation) return unchanged;
   // Literals are the typed constants plus the integer-typed constants that join
@@ -192,6 +195,38 @@ export function sourceFpPresentation(
       continue;
     guards.add(control.id);
     omitted.add(no.transfer.target);
+  }
+  // An omitted guard no longer reads its condition. Values whose every demand
+  // came through it are unobserved; a call clobber among them is not printed.
+  if (guards.size) {
+    const remaining = new Map<string, number>(),
+      copies = new Map<string, Value[]>(),
+      outputs = new Set<string>(),
+      pending: Value[] = [];
+    for (const row of program.transfers.values())
+      for (const copy of row) {
+        const list = copies.get(copy.destination.id) ?? [];
+        list.push(copy.source);
+        copies.set(copy.destination.id, list);
+      }
+    for (const boundary of program.calls.values())
+      for (const binding of boundary.outputs) outputs.add(binding.value.id);
+    const release = (value: Value): void => {
+      const count = (remaining.get(value.id) ?? program.use_counts.get(value.id) ?? 0) - 1;
+      remaining.set(value.id, count);
+      if (count === 0) pending.push(value);
+    };
+    for (const block of program.blocks.values())
+      if (block.control.kind === 'if' && guards.has(block.control.id))
+        release(block.control.condition);
+    for (let cursor = 0; cursor < pending.length; cursor++) {
+      context.checkpoint(1);
+      const value = pending[cursor]!,
+        expression = program.expressions.get(value.id);
+      if (outputs.has(value.id)) unobserved.add(value.id);
+      if (expression) for (const operand of expressionOperands(expression)) release(operand);
+      else for (const source of copies.get(value.id) ?? []) release(source);
+    }
   }
   const rewrite = (region: Region): Region => {
     context.checkpoint(1);
@@ -370,5 +405,5 @@ export function sourceFpPresentation(
     );
     for (const [, expression] of candidates) expressions.add(expression);
   }
-  return { body, guards, omitted, expressions };
+  return { body, guards, omitted, unobserved, expressions };
 }

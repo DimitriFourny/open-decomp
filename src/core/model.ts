@@ -309,6 +309,8 @@ export const functionSchema = z.strictObject({
   entry: addressSchema,
   ranges: z.array(rangeSchema).min(1).max(10000),
   boundary: z.enum(['candidate', 'established', 'conflicting']),
+  /** Present only for a recognized import stub/thunk/PLT entry; its name is the import's. */
+  kind: z.literal('import_stub').optional(),
   signature: signatureSchema.nullable(),
   analysis: z.enum(['not_analyzed', 'partial', 'complete', 'unsupported']),
 });

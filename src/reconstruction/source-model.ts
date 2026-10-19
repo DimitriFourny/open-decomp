@@ -10,6 +10,7 @@ import type { DataType, Instruction, Value } from '../ir/index.js';
 import type { MemoryShapeTransfer } from '../analysis/types/memory-shapes.js';
 import type { Requirement } from '../core/inference.js';
 import type { NativeContext } from '../service/analysis/native-context.js';
+import type { TypeSpec } from '../metadata/library-contracts/spec.js';
 
 /** Observed native callee inputs, not a user-supplied or proven source prototype. */
 export interface InferredCallee {
@@ -75,6 +76,28 @@ export interface SourceAddress {
     readonly mutable: boolean;
     readonly kind: 'bytes' | 'jump_table' | 'literal_pool' | 'unknown';
     readonly evidence_ids: readonly string[];
+  };
+  /** The address is the loader-bound slot of an imported symbol (Mach-O bind/GOT,
+   * ELF GLOB_DAT, PE IAT). The dynamic linker alone writes it: an exact
+   * pointer-width read yields the imported symbol's address, so one more
+   * dereference reaches the imported object. Type and extent stay unknown. */
+  readonly import?: {
+    readonly id: string;
+    /** Native linkage name of the symbol as the loader recorded it. */
+    readonly name: string;
+    /** C spelling of `name`; asserted names stay verbatim. */
+    readonly source_name: string;
+    readonly library: string | null;
+    /** Import/bind records that evidence this slot's binding. */
+    readonly evidence_ids: readonly string[];
+    /** The library header's declaration of the imported object (`__stderrp` is a
+     * `FILE *`): a nominal fact about the named library's declaration, never a
+     * size, an array extent or a layout. */
+    readonly variable?: {
+      readonly type: TypeSpec;
+      readonly constant: boolean;
+      readonly source: string;
+    };
   };
 }
 /** Facts supplied by the native analysis pipeline; never selected by host ABI. */
