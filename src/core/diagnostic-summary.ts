@@ -74,7 +74,7 @@ export function caveats(diagnostics: readonly WireDiagnostic[]): Caveat[] {
         lines.push(() => ({
           severity,
           code,
-          text: `return list unresolved (possible result storage: ${names([...registers])})`,
+          text: `return list unresolved (possible storage: ${names([...registers])})`,
         }));
       for (const slice of details.storage) {
         const root = slice.replace(/\[.*$/, '');

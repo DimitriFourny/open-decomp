@@ -3146,18 +3146,25 @@ export class Renderer {
       const plain = (text: string): string => text.replace(/\*\//g, '* /');
       // Compact for readers: the library basename, plus the native name only when it is
       // not the printed name or its Mach-O `_`-prefixed form. Slot VA, binding records
-      // and the declaration's source stay in the mapped evidence.
+      // and the declaration's source stay in the mapped evidence. An image VA is stated only
+      // where the text does not already carry it (the printed name or a python memory_view).
       const native = global.import?.name;
+      const hex = global.address.value.toString(16);
       const where = global.import
         ? `import${native === name || native === `_${name}` ? '' : ` ${plain(native!)}`}${global.import.library === null ? '' : ` from ${plain(global.import.library.slice(global.import.library.lastIndexOf('/') + 1))}`}`
-        : `VA 0x${global.address.value.toString(16)}${global.object.byte_length === null ? '' : `, ${global.object.byte_length} bytes`}${global.object.kind === 'bytes' ? '' : `, ${global.object.kind.replace('_', ' ')}`}`;
+        : [
+            ...(python || name.split('_').includes(hex) ? [] : [`VA 0x${hex}`]),
+            ...(global.object.byte_length === null ? [] : [`${global.object.byte_length} bytes`]),
+            ...(global.object.kind === 'bytes' ? [] : [global.object.kind.replace('_', ' ')]),
+          ].join(', ');
+      const comment = where === '' ? '' : python ? `  # ${where}` : ` /* ${where} */`;
       if (python) {
         lines.push(
           `${
             global.import
               ? `${name} = import_view(${JSON.stringify(global.import.library ?? '')}, ${JSON.stringify(global.import.name)}, "${type}")`
-              : `${name} = memory_view(0x${global.address.value.toString(16)}, "${type}", ${global.object.mutable ? 'True' : 'False'})`
-          }  # ${where}`,
+              : `${name} = memory_view(0x${hex}, "${type}", ${global.object.mutable ? 'True' : 'False'})`
+          }${comment}`,
         );
         this.writer.helper(
           global.import ? 'import_view' : 'memory_view',
@@ -3168,8 +3175,8 @@ export class Renderer {
       } else
         lines.push(
           declared
-            ? `extern ${type}${declared.constant ? ' const' : ''} ${name}; /* ${where} */`
-            : `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'}; /* ${where} */`,
+            ? `extern ${type}${declared.constant ? ' const' : ''} ${name};${comment}`
+            : `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'};${comment}`,
         );
       const length = lines.slice(first).reduce((sum, line) => sum + line.length + 1, 0);
       spans.push({ object: global, start: offset, end: offset + length });
@@ -3219,19 +3226,17 @@ export class Renderer {
       if (declared.has(key)) continue;
       declared.add(key);
       const start = this.writer.offset;
-      this.writer.comment(
-        0,
-        `${name}: image VA 0x${object.address.value.toString(16)}; byte extent ${object.byte_length ?? 'unknown'}`,
-      );
+      const hex = object.address.value.toString(16);
+      const extent = object.byte_length === null ? 'extent unknown' : `${object.byte_length} bytes`;
       if (this.language === 'c-like')
         this.writer.line(
           0,
-          `extern ${object.mutable ? '' : 'const '}uint${table.bits}_t ${name}[];`,
+          `extern ${object.mutable ? '' : 'const '}uint${table.bits}_t ${name}[]; /* VA 0x${hex}, ${extent} */`,
         );
       else
         this.writer.line(
           0,
-          `${name} = memory_view(0x${object.address.value.toString(16)}, "uint${table.bits}_t", ${object.mutable ? 'True' : 'False'})`,
+          `${name} = memory_view(0x${hex}, "uint${table.bits}_t", ${object.mutable ? 'True' : 'False'})  # ${extent}`,
         );
       this.writer.helper(
         this.language === 'c-like' ? name : 'memory_view',
@@ -6669,7 +6674,7 @@ export class Renderer {
     w.comment(
       0,
       this.program.source
-        ? `${this.language === 'c-like' ? 'C-like' : 'Python-like'} pseudocode, ${this.program.source.inferred ? 'inferred ABI' : 'source interface'}`
+        ? `${this.language === 'c-like' ? 'C-like' : 'Python-like'}, ${this.program.source.inferred ? 'inferred ABI' : 'source interface'}`
         : `${this.language === 'c-like' ? 'C-like' : 'Python-like'} reconstruction; explicit widths and ordered memory, not original source.`,
     );
     // Source view: the ABI scratch note is inserted after rendering, and only
