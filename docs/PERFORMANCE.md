@@ -650,6 +650,42 @@ python3 scripts/bench/quality-dev-loop.py aggregate --packets .local/quality-dev
 
 `run` writes `.local/quality-dev/runs/<label>/<cell>/<function>.c` and `summary.json` (status `complete`/`partial`/`failed`, exit code, seconds, failure diagnostics); each cell uses one throwaway cache under `/tmp`, deleted afterwards. `packets` reuses the frozen six-dimension 0–4 rubric and instruction wording, writes `case-NNN/{X.c,Y.c,question.json}` with a seeded random X/Y assignment, and keeps the mapping in `private/` for sealing; add `--require-label OTHER` to restrict a round to pairs that also have text in an earlier run. `aggregate` decodes preferences and dimension means per tool, function, O0/O2, target and symbol state into `aggregate.json` and `aggregate.md`.
 
+## Source view round 8 (2026-10-19, commits `50c361b`, `41b9dee`)
+
+Round 8 changes:
+
+- jump-table `switch` recovery (`discovery/2`, `targets/2`, `structure/3`, lifters arm64 1.0.6 / x86 4);
+- FP frame slots, FP-bank formals, and slot-chain FP results;
+- `short_circuit_flag`;
+- `copy_coalescing` and `local_load_reuse` (related values only);
+- `incidental_result` and `indirect_result`;
+- `scalar_array_pointee`;
+- inline rotates and `loop_exit_merge`;
+- x86 MXCSR guard parity in parameter discovery;
+- parameter role checks;
+- native bounded shifts, `strength_reduced_multiply`, and brace-less cases.
+
+Measurement roots: `.local/quality-rounds/round8-2026-10-19/` and `.local/quality-heldout2/round8-2026-10-19/` (both at `50c361b`). The measurement runner was a sonnet-worker. Reviewers were A opus-worker and B sonnet-worker, fresh per packet set.
+
+| Suite (reviewed pairs)          | Open Decomp vs Ghidra                           | Open Decomp vs angr                | Exact subset, OD / Ghidra / angr            |
+| ------------------------------- | ----------------------------------------------- | ---------------------------------- | ------------------------------------------- |
+| Frozen published suite (60/80)  | OD 92, Ghidra 27, tie 1                         | OD 107, angr 32, tie 21            | 54 / 36 / 42 cells (unchanged from round 7) |
+| Second held-out suite (96/128)  | OD 44, Ghidra 138, tie 10                       | OD 84, angr 153, tie 13, neither 6 | 84 / 86 / 80 cells; OD 6 counterexamples    |
+| Development loop (60, 1 review) | OD 25, Ghidra 23, tie 12 (round 7: 18 / 38 / 4) | —                                  | —                                           |
+
+**The frozen-suite win does not generalise.** Rounds 4–8 used reviewer comments on the five frozen functions to choose work. On eight unseen functions, Ghidra and even angr are preferred over Open Decomp on every dimension except unresolved semantics. The frozen suite now measures fit to those functions, not decompiler quality. Claims must come from the second held-out suite, or from a newer sealed set.
+
+Category-level reasons in the second-suite reviews were:
+
+- helper-macro preambles and helper calls (bit-insert, divide-trap, 128-bit);
+- goto labels;
+- integer addresses with casts instead of pointers;
+- extra temporaries;
+- frame and unknown-register plumbing;
+- one wrong `shift_count` name.
+
+**Correctness:** Open Decomp's source view was wrong for `h2_level` in six x86-64 cells. FP argument registers were declared as integers, an O0 FP result was returned through the integer register, and Win64 stack doubles were typed as integers. Round 7 had the same defect. Commit `41b9dee` fixes it (all 24 cells pass 58/58 in a re-evaluation). That triage read `h2_level`'s source and outputs, so `h2_level` is no longer blind for correctness. The other seven functions were not read.
+
 ## Normalized four-lane performance (2026-10-17, commit `901602b`)
 
 Exclusive serialized slot (`.local/performance/quality.measurement.lock`), `dist/` aggregate `dd0ea263…` unchanged before/after, Node **v26.11.1** (not the historical 24.22.0 host), Ghidra 12.1.4, bridge `73ea1c8e…`. Protocol `scripts/bench/quality-persistent.py` unchanged: same MCP client for all four lanes (Open Decomp unobserved/observed, pinned Ghidra MCP bridge, persistent Ghidra `DecompInterface`), 11 equal requests in 156/156 matched cells, 3 fresh runs, 10 warm, 30 pings, balanced order. 1,716/1,716 observer/control pairs and 6/6 import controls equivalent. Raw evidence: `~/Documents/open-decomp-perf-2026-10-17-final/p25-normalized/comparison.json`.
