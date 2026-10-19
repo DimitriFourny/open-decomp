@@ -196,7 +196,13 @@ test(
       // shared fprintf call resolve completely: the path is one value stored
       // on both edges, the code a value the join's x21 parameter carries.
       const report = await decompile('native_report', emitter);
-      assert.doesNotMatch(report.text, /unknown_argument_remainder|unknown_arguments|entry_sp/);
+      assert.doesNotMatch(
+        report.text
+          .split('\n')
+          .filter((line) => !line.startsWith('extern '))
+          .join('\n'),
+        /unknown_argument_remainder|unknown_arguments|\.\.\.\)|entry_sp/,
+      );
       const printed = callArguments(report.text, 'fprintf');
       assert.equal(printed.length, 1, report.text);
       assert.equal(printed[0]!.length, 4, report.text);

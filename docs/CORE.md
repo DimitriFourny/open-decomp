@@ -63,7 +63,7 @@ register transfers establish the independent value input passed to the callback;
 the caller's subsequent 32-bit arithmetic establishes which result bits it
 consumes. Neither fact establishes a complete argument list or defined upper
 result bits. Both dialects retain the known argument, the consumed result and an
-explicit `unknown_argument_remainder()` marker. Unknown callback memory effects
+explicit `...` open-argument marker (C `f(a, ...)`, Python-like `f(a, ...)` with the Ellipsis literal; the file header states its meaning once, and the `unknown_argument_remainder`/`unknown_arguments` helper entries stay in the emission metadata). Unknown callback memory effects
 and potentially outgoing stack storage remain conservative. These observations
 do not follow or execute arbitrary callback targets.
 
@@ -725,7 +725,7 @@ bound `_OBJC_CLASS_$_X` slot) prints as the class name, a selector-slot read as
 isKindOfClass/respondsToSelector` print as the equivalent messages (`[[cls alloc] init]`).
 Tail transfers render `return [recv sel]` when their selector has a type encoding (or no
 keywords). Known Foundation variadic selectors (`stringWithFormat:` …) keep their explicit
-`unknown_argument_remainder()`. Unresolved selectors, `objc_msgSendSuper2` (shown with
+`...` remainder. Unresolved selectors, `objc_msgSendSuper2` (shown with
 `@selector(...)`) and ARC calls (`objc_retain`/`objc_release`/`objc_storeStrong`/…,
 catalogued libobjc contracts) remain explicit calls; nothing is dropped. A function that is
 a method implementation is headed `-[Class sel](… self, … _cmd, …)` (Python-like
@@ -733,10 +733,12 @@ a method implementation is headed `-[Class sel](… self, … _cmd, …)` (Pytho
 
 Source type views interpret unchanged machine storage only when complete, compatible associations support them. Signed operation constraints alone do not declare signed inputs; hypotheses and conflicting layouts do not establish source declarations. Narrow fragments never discard observable high carrier bits. Typed pointer arithmetic and cyclic transfers retain exact target bits; field/array views preserve original access ordering, aliasing, faults and provenance without inventing object bounds or element counts. Dedicated C/Python regressions cover signed fields, unknown-count arrays, full-width pointer returns and typed phi swaps; public Mach-O/PE memory and loop cases retain their results and ordered accesses.
 
+Source-view locals take their printed pointer type from every definition and use of a connected set of integer locals (phi copies): typed library/prototype parameters, header-declared pointer globals and results (`char *`/`const char *`/`FILE *`), identity tests against null or a same-typed pointer, and member or slot reads. `local_source_type` records the choice. A set becomes pointers only when typed uses and definitions save more printed conversions than integer uses (arithmetic, comparison, raw dereference, stores, untyped definitions) add; conflicting pointee types, scalar-typed members and ties keep the integer declaration. A pointer read as an integer prints `(uintptr_t)p`, so pointer-typed locals never change arithmetic or scaling. The printer drops conversions that C's own rules make no-ops for the printed operand types: a declared pointer passed where its own (or `void *`, or a `const`-adding) pointer type is wanted, pointer identity tests, a signed variable passed to a signed parameter or compared for equality (C converts the mixed pair to the unsigned type of the same bits; Python-like keeps its explicit reduction), and reductions of a struct member read to its own declared integer type; ordered comparisons keep their signed/unsigned conversion. A constant that reaches a `return` through a variable that is dead after it (`index = 0; return index;`) prints as `return 0;` whenever the return is entered by exactly one printed edge (`return_constant`); a join entered by several arms keeps its carrier. A trailing bare `return;` of a `void` function is not printed (falling off the end returns).
+
 Synthetic source structure views use deterministic `struct_N` names, unified by
 observed member types and offsets within the function. Their C typedefs expose
-`f_<hex offset>` members and explicit byte gaps, with `observed members only;
-size unknown` annotations. `observed_struct_layout` records nonoverlap and exact
+`f_<hex offset>` members and explicit byte gaps, with `members used here; size
+unknown; full layout in the types view` annotations: a function declares only the members its text accesses (byte gaps keep every offset; a structure the text never accesses stays an incomplete typedef), the image-wide layout lives in the types view / `types.h`. `observed_struct_layout` records nonoverlap and exact
 width checks and a target-layout ABI requirement; overlapping, unsupported or
 budget-exhausted layouts stay opaque. Nested pointer types retain their complete
 declaration closure. Proven scalar array strides produce array members without

@@ -172,7 +172,7 @@ for (const abi of targets) {
     assert.ok(!rules(fixture.view('checked')).includes('arity_closure'));
     for (const language of ['c-like', 'python-like'] as const) {
       const output = emit(fixture.ir, fixture.extra, language).emission;
-      assert.doesNotMatch(output.text, /entry_sp|unknown_argument_remainder/);
+      assert.doesNotMatch(output.text, /entry_sp|unknown_argument_remainder|, \.\.\./);
       let calls = 0;
       const observed = execute(
         output,

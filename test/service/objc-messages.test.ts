@@ -58,10 +58,7 @@ test(
     const summary = await text(session, '-[ODCounter(Describe) summary]');
     assert.match(summary, /-\[ODCounter summary\]\(\w+ self\b/);
     // A known variadic selector keeps its explicit open remainder.
-    assert.match(
-      summary,
-      /\[NSString stringWithFormat:@"%@=%ld", [^\]]*unknown_argument_remainder\(\)\]/,
-    );
+    assert.match(summary, /\[NSString stringWithFormat:@"%@=%ld", [^\]]*\.\.\.\]/);
     assert.match(summary, /\[self label\]/);
     assert.match(await text(session, '+[ODCounter greeting]'), /return @"hello, fixture";/);
     // Super sends stay explicit dispatcher calls with their selector.

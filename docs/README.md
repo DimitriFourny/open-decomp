@@ -33,7 +33,7 @@ open-decomp types ./app > app-types.h
 
 ```
 
-`functions --name` is a case-insensitive substring search; `decompile --function` is exact and case-sensitive. Use discovered original/display names (including format-specific prefixes), a stable `--id`, or an explicit `--address va:0x...`, `rva:0x...` or `file:0x...`. Multiple indexed matches are an error, not a first-match selection. `types` prints the image-wide merged structure types as C declarations, the same names `decompile` uses (observed members only). All commands support `--help`, `--cache PATH`, and explicit `--slice ID`.
+`functions --name` is a case-insensitive substring search; `decompile --function` is exact and case-sensitive. Use discovered original/display names (including format-specific prefixes), a stable `--id`, or an explicit `--address va:0x...`, `rva:0x...` or `file:0x...`. Multiple indexed matches are an error, not a first-match selection. `types` prints the image-wide merged structure types as C declarations, the same names `decompile` uses, with the complete merged layout (a function's text declares only the members it accesses; observed members only). All commands support `--help`, `--cache PATH`, and explicit `--slice ID`.
 
 ### Export a whole binary as a greppable directory
 
