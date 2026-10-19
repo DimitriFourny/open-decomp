@@ -255,8 +255,8 @@ EnumUILanguagesW|i|lpUILanguageEnumProc:p,dwFlags:m,lParam:q||g
 EraseTape|m|hDevice:&HANDLE;,dwEraseType:m,bImmediate:i||1
 EscapeCommFunction|i|hFile:&HANDLE;,dwFunc:m||1
 ExecuteUmsThread|i|UmsThread:*v||1
-ExitProcess|v|uExitCode:u||k
-ExitThread|v|dwExitCode:m||k
+ExitProcess|v|uExitCode:u|n|k
+ExitThread|v|dwExitCode:m|n|k
 ExpandEnvironmentStringsA|m|lpSrc:^c,lpDst:*c,nSize:m||n
 ExpandEnvironmentStringsW|m|lpSrc:^w,lpDst:*w,nSize:m||n
 ExpungeConsoleCommandHistoryA|v|exe_name:*c||2
@@ -326,7 +326,7 @@ FreeConsole|i|||7
 FreeEnvironmentStringsA|i|penv:*c||n
 FreeEnvironmentStringsW|i|penv:*w||n
 FreeLibrary|i|hLibModule:&HINSTANCE;||3
-FreeLibraryAndExitThread|v|hLibModule:&HINSTANCE;,dwExitCode:m||3
+FreeLibraryAndExitThread|v|hLibModule:&HINSTANCE;,dwExitCode:m|n|3
 FreeLibraryWhenCallbackReturns|v|pci:*@struct _TP_CALLBACK_INSTANCE;,mod:&HINSTANCE;||b
 FreeResource|i|hResData:&HANDLE;||3
 FreeUserPhysicalPages|i|hProcess:&HANDLE;,NumberOfPages:*r,PageArray:*r||8
@@ -952,7 +952,7 @@ RtlInstallFunctionTableCallback|h|TableIdentifier:r,BaseAddress:r,Length:m,Callb
 RtlIsEcCode|h|CodePointer:r||10
 RtlLookupFunctionEntry|*@struct _RUNTIME_FUNCTION;|ControlPc:r,ImageBase:*r,HistoryTable:*@struct _UNWIND_HISTORY_TABLE;||10
 RtlPcToFileHeader|*v|PcValue:*v,BaseOfImage:**v||10
-RtlRestoreContext|v|ContextRecord:*@struct _CONTEXT;,ExceptionRecord:*@struct _EXCEPTION_RECORD;||10
+RtlRestoreContext|v|ContextRecord:*@struct _CONTEXT;,ExceptionRecord:*@struct _EXCEPTION_RECORD;|n|10
 RtlSecureZeroMemory|*v|ptr:*v,cnt:z||10
 RtlUnwind|v|TargetFrame:*v,TargetIp:*v,ExceptionRecord:*@EXCEPTION_RECORD;,ReturnValue:*v||10
 RtlUnwindEx|v|TargetFrame:*v,TargetIp:*v,ExceptionRecord:*@EXCEPTION_RECORD;,ReturnValue:*v,ContextRecord:*@struct _CONTEXT;,HistoryTable:*@struct _UNWIND_HISTORY_TABLE;||10

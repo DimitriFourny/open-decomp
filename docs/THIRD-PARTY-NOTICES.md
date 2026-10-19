@@ -89,6 +89,10 @@ These SHA256 values were read from the pinned dependency assets during notice pr
 
 Demangling is bounded local display decoration. Neither a demangled name nor the presence of a WASM payload establishes ABI signatures, type layouts or instruction-semantic support.
 
+## Header-derived library prototype data
+
+`src/metadata/library-contracts/generated/data/*.ts` stores function _interface facts_ only: names, parameter names, parameter and result types, variadic and noreturn attributes, and the declaring header path. They were extracted by `scripts/generate-library-prototypes.ts` (`bun run prototypes`) from the macOS SDK (`usr/include`, `CoreFoundation.framework`), the mingw-w64 headers and import libraries (public-domain/ZPL-licensed upstream; used for names and DLL membership), and hand-written declarations under `scripts/library-prototypes/` (glibc, Itanium C++ ABI, Darwin checked builtins, and parameter names from ISO C/POSIX/BSD manual pages). No header text, comment, macro, struct layout or implementation is copied. Each entry's `source` records the SDK/mingw version and header; the data does not authenticate any loaded library and carries no memory-effect claims. Regenerate and review the diff when the SDK or mingw-w64 changes.
+
 ## Fixture licensing and excluded inputs
 
 [fixtures/LICENSE](../fixtures/LICENSE) retains the MIT notice for original fixture source, build/test recipes, fixture data and compiled corpus binaries under `fixtures/`, `test/metadata/fixtures/`, `test/abi/windows-x64/fixtures/`, `test/abi/sysv-amd64/fixtures/`, and the corresponding `scripts/fixtures/` and `test/fixtures/` files. The application-wide MIT grant is in the root [LICENSE](../LICENSE); the fixture-specific notice remains intact. Preserve the applicable copyright and full permission/warranty text when redistributing the corpus.

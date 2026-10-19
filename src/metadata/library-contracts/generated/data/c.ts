@@ -5,7 +5,7 @@ export const data = `&locale_t=@struct _xlocale;
 __cxa_atexit|i|function:p,argument:*v,dso_handle:*v||0
 __cxa_finalize|v|dso_handle:*v||0
 __cxa_thread_atexit_impl|i|function:p,argument:*v,dso_handle:*v||0
-abort|v|||1
+abort|v||n|1
 abs|i|j:i||2
 acos|d|x:d||3
 acosf|f|x:f||3
@@ -67,7 +67,7 @@ erfcf|f|x:f||3
 erfcl|e|x:e||3
 erff|f|x:f||3
 erfl|e|x:e||3
-exit|v|status:i||2
+exit|v|status:i|n|2
 exp|d|x:d||3
 exp2|d|x:d||3
 exp2f|f|x:f||3
@@ -213,7 +213,7 @@ logbf|f|x:f||3
 logbl|e|x:e||3
 logf|f|x:f||3
 logl|e|x:e||3
-longjmp|v|env:*v,val:i||f
+longjmp|v|env:*v,val:i|n|f
 lrint|l|x:d||3
 lrintf|l|x:f||3
 lrintl|l|x:e||3
@@ -262,7 +262,7 @@ puts|i|s:^c||7
 putwc|$wint_t;|c:w,stream:*@FILE;||6
 putwchar|$wint_t;|ch:w||6
 qsort|v|base:*v,nel:z,width:z,compar:p||2
-quick_exit|v|status:i||2
+quick_exit|v|status:i|n|2
 raise|i|sig:i||i
 rand|i|||2
 realloc|*v|ptr:*v,size:z||4

@@ -2,9 +2,9 @@
 export const provenance = "macOS SDK 27.0 usr/include";
 export const headers: readonly string[] = ["_stdlib.h","unistd.h","setjmp.h","sys/socket.h","sys/aio.h","dirent.h","libgen.h","signal.h","sys/termios.h","sys/stat.h","_time.h","sys/syslog.h","sys/fcntl.h","_ctermid.h","dlfcn.h","_stdio.h","sys/unistd.h","grp.h","netdb.h","pwd.h","_strings.h","fnmatch.h","sys/statvfs.h","sys/ipc.h","ftw.h","sys/time.h","sys/resource.h","glob.h","iconv.h","net/if.h","arpa/inet.h","_wctype.h","math.h","_wchar.h","_string.h","sys/mman.h","sys/msg.h","_langinfo.h","sys/poll.h","spawn.h","sys/select.h","pthread.h","sys/uio.h","_regex.h","sys/stdio.h","pthread/sched.h","sys/_select.h","sys/semaphore.h","sys/sem.h","sys/shm.h","termios.h","sys/times.h","sys/utsname.h","utime.h","sys/wait.h","wordexp.h"];
 export const data = `&iconv_t=@struct __tag_iconv_t;
-_Exit|v|status:i||0
-_exit|v|status:i||1
-_longjmp|v|env:*v,val:i||2
+_Exit|v|status:i|n|0
+_exit|v|status:i|n|1
+_longjmp|v|env:*v,val:i|n|2
 _setjmp|i|env:*v||2
 a64l|l|a1:^c||0
 accept|i|socket:i,address:*@struct sockaddr;,address_len:*u||3
@@ -292,7 +292,7 @@ pthread_condattr_setpshared|i|a:*@__darwin_pthread_condattr_t;,s:i||15
 pthread_create|i|thread:*m,attr:^@__darwin_pthread_attr_t;,start_routine:p,arg:*v||15
 pthread_detach|i|thread:m||15
 pthread_equal|i|t1:m,t2:m||15
-pthread_exit|v|value_ptr:*v||15
+pthread_exit|v|value_ptr:*v|n|15
 pthread_getconcurrency|i|||15
 pthread_getschedparam|i|thread:m,pol:*i,param:*@struct sched_param;||15
 pthread_getspecific|*v|key:$pthread_key_t;||15
@@ -427,7 +427,7 @@ sighold|i|a1:i||7
 sigignore|i|a1:i||7
 siginterrupt|i|a1:i,a2:i||7
 sigismember|i|set:^@sigset_t;,signo:i||7
-siglongjmp|v|env:*v,val:i||2
+siglongjmp|v|env:*v,val:i|n|2
 sigpause|i|a1:i||7
 sigpending|i|set:*@sigset_t;||7
 sigprocmask|i|how:i,set:^@sigset_t;,oset:*@sigset_t;||7

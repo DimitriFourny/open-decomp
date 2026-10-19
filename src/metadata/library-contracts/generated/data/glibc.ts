@@ -2,9 +2,9 @@
 export const provenance = "scripts/library-prototypes/glibc.h (glibc 2.39 ABI)";
 export const headers: readonly string[] = ["glibc.h"];
 export const data = `__asprintf_chk|i|result:**c,flag:i,format:^c|vf2|0
-__assert_fail|v|assertion:^c,file:^c,line:u,function:^c||0
-__assert_perror_fail|v|errnum:i,file:^c,line:u,function:^c||0
-__chk_fail|v|||0
+__assert_fail|v|assertion:^c,file:^c,line:u,function:^c|n|0
+__assert_perror_fail|v|errnum:i,file:^c,line:u,function:^c|n|0
+__chk_fail|v||n|0
 __ctype_b_loc|*^t|||0
 __ctype_get_mb_cur_max|z|||0
 __ctype_tolower_loc|*^i|||0
@@ -31,7 +31,7 @@ __isoc99_sscanf|i|s:^c,format:^c|vs1|0
 __libc_current_sigrtmax|i|||0
 __libc_current_sigrtmin|i|||0
 __libc_start_main|i|main:p,argc:i,argv:**c,init:p,fini:p,rtld_fini:p,stack_end:*v||0
-__longjmp_chk|v|env:*v,val:i||0
+__longjmp_chk|v|env:*v,val:i|n|0
 __memcpy_chk|*v|dest:*v,src:^v,len:z,destlen:z||0
 __memmove_chk|*v|dest:*v,src:^v,len:z,destlen:z||0
 __mempcpy_chk|*v|dest:*v,src:^v,len:z,destlen:z||0

@@ -405,7 +405,7 @@ dispatch_io_set_high_water|v|channel:&dispatch_io_t;,high_water:z||1a
 dispatch_io_set_interval|v|channel:&dispatch_io_t;,interval:k,flags:m||1a
 dispatch_io_set_low_water|v|channel:&dispatch_io_t;,low_water:z||1a
 dispatch_io_write|v|channel:&dispatch_io_t;,offset:$off_t;,data:&dispatch_data_t;,queue:&dispatch_queue_t;,io_handler:p||1a
-dispatch_main|v|||15
+dispatch_main|v||n|15
 dispatch_once|v|predicate:*y,block:p||1b
 dispatch_once_f|v|predicate:*y,context:*v,function:p||1b
 dispatch_queue_attr_make_initially_inactive|&dispatch_queue_attr_t;|attr:&dispatch_queue_attr_t;||15
@@ -1388,7 +1388,7 @@ xpc_listener_create|&xpc_listener_t;|service:^c,target_queue:&dispatch_queue_t;,
 xpc_listener_reject_peer|v|peer:&xpc_session_t;,reason:^c||37
 xpc_listener_set_peer_code_signing_requirement|i|listener:&xpc_listener_t;,requirement:^c||37
 xpc_listener_set_peer_requirement|v|listener:&xpc_listener_t;,requirement:&xpc_peer_requirement_t;||37
-xpc_main|v|handler:p||33
+xpc_main|v|handler:p|n|33
 xpc_null_create|*v|||33
 xpc_peer_requirement_create_entitlement_exists|&xpc_peer_requirement_t;|entitlement:^c,error_out:*&xpc_rich_error_t;||38
 xpc_peer_requirement_create_entitlement_matches_value|&xpc_peer_requirement_t;|entitlement:^c,value:*v,error_out:*&xpc_rich_error_t;||38

@@ -155,7 +155,8 @@ function collect(unit: Unit, text: string): Collected {
           returns: returnsFunction ? 'void (*)(void)' : type.slice(0, open).trim(),
           parameters,
           variadic: /\.\.\.\)/.test(type),
-          noreturn: attributes.some((item: Ast) => /NoReturn/.test(item.kind)),
+          // `noreturn` is part of the function type, so clang prints it only in the type string.
+          noreturn: /\bnoreturn\b/.test(type) || attributes.some((item: Ast) => /NoReturn/.test(item.kind)),
           formatted: attributes.some((item: Ast) => item.kind === 'FormatAttr' && !item.implicit),
           isStatic: node.storageClass === 'static',
           file,
