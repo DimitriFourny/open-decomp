@@ -363,6 +363,10 @@ export class BinarySession {
       cursor = page.data.page.next_cursor ?? undefined;
     } while (cursor !== undefined && definitions.size < 2);
     if (!authoritative) throw new FunctionSelectionError('incomplete', indexed);
+    // A stub is named by the loader's import, which no native symbol/export defines: with
+    // authoritative tables defining no function of this name, the one indexed stub is it.
+    if (definitions.size === 0 && indexed.length === 1 && indexed[0]!.kind === 'import_stub')
+      return indexed[0]!;
     const functions = new Map(indexed.map((item) => [item.id, item] as const));
     const defined = new Map<string, number>();
     for (const [key, address] of [...definitions].slice(0, 16)) {
