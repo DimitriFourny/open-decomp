@@ -16,6 +16,7 @@ const INTEGRATION = [
   'test/mcp/stdio.test.ts',
   'test/reconstruction/float-source.test.ts',
   'test/reconstruction/fp-vector-source.test.ts',
+  'test/reconstruction/image-types-source.test.ts',
   'test/reconstruction/integer-conversion-source.test.ts',
   'test/reconstruction/memory-shapes-source.test.ts',
   'test/reconstruction/source-names-executable.test.ts',

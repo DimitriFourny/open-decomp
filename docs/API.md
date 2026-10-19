@@ -105,6 +105,15 @@ do {
 
 A recognized import stub/thunk/PLT entry has `kind: "import_stub"` (omitted otherwise) and the import's name; `decompile({ name })` selects it by that name.
 
+## Image structure types
+
+```ts
+binary.types(options?: { budget? }, callOptions?): Promise<ToolResult<'binary_info'>>
+binary.typeDeclarations(callOptions?): Promise<string | null>
+```
+
+`types()` runs `binary_info` view `types`: `data.text` is a self-contained C header of the image-wide merged structure types (the names `decompile()` output uses; observed members only, sizes unknown), with `data.functions.analyzed/total` and `data.types`. It is `partial` (`budget`) when not every function body was analyzed within the budget. `typeDeclarations()` returns just that text (or `null` on failure).
+
 ## Decompile and handle results
 
 ```ts

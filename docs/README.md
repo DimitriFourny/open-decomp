@@ -27,10 +27,13 @@ open-decomp functions ./app --name main
 open-decomp decompile ./app --function main
 open-decomp decompile ./app --address va:0x100000574 --language python-like
 open-decomp decompile ./app --function main --json --cache ./analysis-cache
+
 open-decomp export ./app --out ./app-decomp --jobs 4
+open-decomp types ./app > app-types.h
+
 ```
 
-`functions --name` is a case-insensitive substring search; `decompile --function` is exact and case-sensitive. Use discovered original/display names (including format-specific prefixes), a stable `--id`, or an explicit `--address va:0x...`, `rva:0x...` or `file:0x...`. Multiple indexed matches are an error, not a first-match selection. All three commands support `--help`, `--cache PATH`, and explicit `--slice ID`.
+`functions --name` is a case-insensitive substring search; `decompile --function` is exact and case-sensitive. Use discovered original/display names (including format-specific prefixes), a stable `--id`, or an explicit `--address va:0x...`, `rva:0x...` or `file:0x...`. Multiple indexed matches are an error, not a first-match selection. `types` prints the image-wide merged structure types as C declarations, the same names `decompile` uses (observed members only). All commands support `--help`, `--cache PATH`, and explicit `--slice ID`.
 
 ### Export a whole binary as a greppable directory
 
@@ -38,7 +41,7 @@ open-decomp export ./app --out ./app-decomp --jobs 4
 
 - `DIR/functions/NAME@0xADDR.c` (`.py` for python-like): one header comment (name, address, state and reason, code bytes, caller and callee names; `?` marks an unresolved indirect call) followed by exactly the text `decompile` prints. Names are the C spelling of the native symbol (Mach-O's leading underscore dropped); unnamed functions are `sub_<hex>` (or the import a stub forwards to). Filenames are sanitized and unique.
 - `DIR/functions/NAME@0xADDR.asm`: only for functions with no pseudocode (failed, unsupported, cancelled); the header states why and the body is the compact native disassembly, so no function is missing.
-- `DIR/index.tsv` (address, name, file, state, reason, code_bytes = instruction bytes of the function body, callers, callees), `strings.tsv` (address, escaped text, referencing functions), `imports.tsv`, `exports.tsv` and a short `README.txt`.
+- `DIR/index.tsv` (address, name, file, state, reason, code_bytes = instruction bytes of the function body, callers, callees), `strings.tsv` (address, escaped text, referencing functions), `imports.tsv`, `exports.tsv`, `types.h` (the image-wide merged structure types the pseudocode names, as `open-decomp types` prints them) and a short `README.txt`.
 
 Output order and content are deterministic, re-running overwrites generated files, and the exit status is 0 whenever everything was written; partial and failed functions are rows in `index.tsv`. Native indexes that are incomplete (function discovery and references usually are) are named on stderr and in `README.txt`: caller/callee/referenced-by lists are then lower bounds. `--jobs N` (default `min(4, CPUs/2)`) runs N workers; because a project database has one owner, extra workers analyze private copy-on-write copies of the finished import under the cache root and remove them afterwards, so only the first worker's decompilations are cached for later runs. `--name` limits the export to functions whose name contains the text. SIGINT/SIGTERM stop the export (exit 130/143) before the index files are written.
 
@@ -144,7 +147,7 @@ All 14 MCP tools expose concrete input/output JSON Schemas and structured conten
 | Tool                                             | Main purpose                                                                                                                                                             |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `project_open`, `project_close`                  | Import/resume, owner/job close policy and persistence.                                                                                                                   |
-| `binary_info`                                    | Summary, headers, sections, mappings, entries, relocations, hints and capabilities.                                                                                      |
+| `binary_info`                                    | Summary, headers, sections, mappings, entries, relocations, hints, capabilities, and merged image structure types as C declarations.                                     |
 | `symbols_find`, `strings_find`, `functions_find` | Snapshot-bound filtered/paged navigation. Matching is exact/prefix/contains, not arbitrary regex; Mach-O names also match their C spelling (leading underscore removed). |
 | `function_get`                                   | Metadata, structured disassembly with gaps, or CFG.                                                                                                                      |
 | `function_decompile`                             | Bounded homemade analysis and C-like or Python-like output with source/evidence mappings.                                                                                |

@@ -38,6 +38,7 @@ import {
   buildMemoryShape,
   createAffineResolver,
   memoryAddressSources,
+  memoryLoopParameters,
   memoryPointerFragments,
 } from './memory-shapes.js';
 import type {
@@ -870,6 +871,7 @@ export function recoverTypes(
       },
       budget,
       memoryAddressSources(input, budget),
+      memoryLoopParameters(input, budget),
     );
     const stackAccess = new Map(stack.accesses.map((access) => [access.node_id, access]));
     const groups = new Map<
@@ -946,6 +948,14 @@ export function recoverTypes(
               ].sort(),
             }
           : {}),
+        ...(!isStack && (address.index || previous?.indices?.length)
+          ? {
+              indices: [
+                ...(previous?.indices ?? []),
+                ...(address.index ? [{ node_id: node.id, value_id: address.index }] : []),
+              ],
+            }
+          : {}),
       });
       group.dynamic ||= address.stride !== null;
       groups.set(key, group);
@@ -1019,6 +1029,24 @@ export function recoverTypes(
                   bits: 64,
                   to: generated({ kind: 'unknown', size: null }, proof),
                 },
+                proof,
+              );
+            const pointees = new Set(
+              field.width_bits === 64
+                ? field.value_ids.filter((value_id) => {
+                    const pointee = groups.get(value_id);
+                    return (
+                      pointee?.base.kind === 'value' &&
+                      [...pointee.fields.values()].every((item) => item.offset >= 0n)
+                    );
+                  })
+                : [],
+            );
+            // A loaded/stored value later dereferenced as one exact base: the
+            // member holds a pointer to that observed view, not an integer.
+            if (pointees.size === 1)
+              return generated(
+                { kind: 'pointer', bits: 64, to: id('shape-type', [...pointees][0]!) },
                 proof,
               );
             return machineType(values.get(field.value_ids[0]!)!.type, proof);

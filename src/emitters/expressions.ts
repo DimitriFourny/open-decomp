@@ -380,6 +380,9 @@ export interface Printed {
   readonly from?: { readonly operand: Printed; readonly bits: number };
   /** The one-bit operand of a logical negation: negating twice is the identity. */
   readonly negated?: Printed;
+  /** The same address bits as a C lvalue of declared pointer type `type`: a
+   * context converting to exactly that pointer type may print it directly. */
+  readonly pointer?: { readonly text: string; readonly type: string };
 }
 /** Binding strength shared by both dialects; only binary operators differ. */
 export const PRIMARY = 16;
