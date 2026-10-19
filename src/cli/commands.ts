@@ -1,6 +1,6 @@
 import { openBinary, BinaryOpenError, FunctionSelectionError } from '../api/index.js';
 import type { BinarySession, FunctionSelector } from '../api/index.js';
-import { distinctDiagnostics, entityIdSchema, sliceIdSchema } from '../core/index.js';
+import { caveats, distinctDiagnostics, entityIdSchema, sliceIdSchema } from '../core/index.js';
 import type { ToolResult, WireDiagnostic, WireJob } from '../core/index.js';
 import { exportBinary } from './export.js';
 

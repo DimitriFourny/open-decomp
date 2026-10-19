@@ -2840,15 +2840,13 @@ export class Renderer {
       if (stride) {
         if (stride > end) parts.push(`uint8_t gap_${end.toString(16)}[${stride - end}];`);
         packed ||= members.some((member) => stride % BigInt(member.bits / 8) !== 0n);
-        lines.push(`/* observed access stride ${stride}; not an allocation extent */`);
+        lines.push(`/* access stride ${stride}, not size */`);
       }
       const image = this.sourceStructs.image(id);
       lines.push(
-        `/* members used here; size unknown; full layout in the types view${
-          image && image.functions > 1
-            ? `; merged from ${image.functions} functions${image.state === 'bounded' ? ' (flows partly explored)' : ''}`
-            : ''
-        }${image?.conflicts.length ? `; conflicts with ${image.conflicts.join(', ')}` : ''} */`,
+        `/* partial${image && image.functions > 1 ? `; ${image.functions} fns` : ''}${
+          image?.conflicts.length ? `; conflicts with ${image.conflicts.join(', ')}` : ''
+        } */`,
         `struct ${name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
       );
     }
@@ -3086,16 +3084,15 @@ export class Renderer {
         )
       )
         continue;
-      if (!signature) {
+      if (!signature)
         this.localValidation.requireAbi(
           'call_declaration',
           [node.id],
           'The declaration describes the observed native call interface under the target ABI, not a proven authored prototype; unresolved trailing arguments remain explicit.',
         );
-        this.writer.comment(0, 'unknown prototype; observed call interface only');
-      }
       const start = this.writer.offset;
-      this.writer.line(0, text);
+      // An open argument list already prints `...`; a closed observed one is marked inferred.
+      this.writer.line(0, signature || text.includes('...') ? text : `${text} /* inferred */`);
       this.mapped(node, start, [], signature?.evidence_ids ?? []);
     }
   }
@@ -3582,12 +3579,6 @@ export class Renderer {
       )
     )
       target = this.functionPointer(node, projection, target, open);
-    const variadic = projection.variadic_stack_arguments ?? 0;
-    if (variadic)
-      this.writer.comment(
-        depth,
-        `last ${variadic} argument${variadic === 1 ? '' : 's'} observed in Darwin variadic outgoing stack slots (a lower bound; the source arity stays open)${projection.kind === 'physical' ? '; the register arguments before them are an observed, possibly incomplete prefix' : ''}`,
-      );
     let operation: string;
     if (send) {
       const { message, skip, arity } = send;
@@ -6678,7 +6669,7 @@ export class Renderer {
     w.comment(
       0,
       this.program.source
-        ? `${this.language === 'c-like' ? 'C-like' : 'Python-like'} pseudocode; ${this.program.source.inferred ? 'inferred ABI interface' : 'recovered source interface'}.`
+        ? `${this.language === 'c-like' ? 'C-like' : 'Python-like'} pseudocode, ${this.program.source.inferred ? 'inferred ABI' : 'source interface'}`
         : `${this.language === 'c-like' ? 'C-like' : 'Python-like'} reconstruction; explicit widths and ordered memory, not original source.`,
     );
     // Source view: the ABI scratch note is inserted after rendering, and only
@@ -7045,8 +7036,7 @@ export class Renderer {
     if (this.structureSlot) insert(this.structureSlot.at, this.structureLines());
     let support = supportAt;
     if (this.ellipsisUsed) {
-      const comment =
-        '`...` as a call argument: the argument list is open (arguments after those shown are not established); not zero arguments, not a purity claim.';
+      const comment = '...: more args possible';
       const delta = insert(scratchAt, [
         this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
       ]);
@@ -7063,7 +7053,7 @@ export class Renderer {
           [...this.program.returns.keys()].slice(0, 64),
         )
       ) {
-        const comment = `ABI scratch at return: ${[...scratch].join(', ')}; exact slices and values retained in exit metadata, not additional results.`;
+        const comment = `ABI scratch at return, not results: ${[...scratch].join(', ')}`;
         const delta = insert(scratchAt, [
           this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
         ]);
