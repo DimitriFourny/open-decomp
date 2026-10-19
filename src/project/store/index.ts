@@ -232,6 +232,7 @@ export class SqliteProjectStore implements ProjectStore {
   // Prepared statements of this connection, by SQL text. Compiling a statement costs
   // far more than most indexed reads; dynamic SQL shapes are bounded by the cap.
   readonly #statements = new Map<string, StatementSync>();
+  readonly #annotatedRevisions = new Map<number, boolean>();
 
   private constructor(path: string, db: DatabaseSync) {
     this.#path = path;
@@ -380,8 +381,9 @@ export class SqliteProjectStore implements ProjectStore {
     revision: number,
   ): Row | undefined {
     this.#revision(revision);
-    return this.#prepare(`SELECT * FROM ${table} WHERE id=? AND revision<=? ORDER BY revision DESC LIMIT 1`)
-      .get(id, revision);
+    return this.#prepare(
+      `SELECT * FROM ${table} WHERE id=? AND revision<=? ORDER BY revision DESC LIMIT 1`,
+    ).get(id, revision);
   }
 
   #storagePath(kind: 'images' | 'artifacts', filename: string): string {
@@ -391,8 +393,9 @@ export class SqliteProjectStore implements ProjectStore {
 
   snapshot(revision = this.#current()): ProjectSnapshot {
     this.#revision(revision);
-    const images = this.#prepare('SELECT i.image_id,i.sha256,s.slice_id FROM images i JOIN image_imports s USING(image_id) WHERE s.revision<=? ORDER BY i.image_id,s.slice_id')
-      .all(revision);
+    const images = this.#prepare(
+      'SELECT i.image_id,i.sha256,s.slice_id FROM images i JOIN image_imports s USING(image_id) WHERE s.revision<=? ORDER BY i.image_id,s.slice_id',
+    ).all(revision);
     return {
       project_id: this.project_id,
       revision,
@@ -419,8 +422,9 @@ export class SqliteProjectStore implements ProjectStore {
     if (hashImage(input.bytes) !== input.sha256)
       fail('invalid_input', 'Image content does not match its claimed hash');
     const image_id = imageIdentity(input.sha256);
-    const prior = this.#prepare('SELECT revision FROM image_imports WHERE image_id=? AND slice_id=?')
-      .get(image_id, input.selected_slice_id);
+    const prior = this.#prepare(
+      'SELECT revision FROM image_imports WHERE image_id=? AND slice_id=?',
+    ).get(image_id, input.selected_slice_id);
     const path = this.#storagePath('images', input.sha256);
     if (existsSync(path)) {
       if (contentHash(checkedFile(path, MAX_IMAGE_BYTES)) !== input.sha256)
@@ -430,10 +434,12 @@ export class SqliteProjectStore implements ProjectStore {
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       this.#prepare('INSERT OR IGNORE INTO images VALUES (?,?)').run(image_id, input.sha256);
-      this.#prepare('INSERT INTO image_imports VALUES (?,?,?)')
-        .run(image_id, input.selected_slice_id, nextRevision(revision));
-      this.#prepare('UPDATE metadata SET revision=? WHERE singleton=1')
-        .run(nextRevision(revision));
+      this.#prepare('INSERT INTO image_imports VALUES (?,?,?)').run(
+        image_id,
+        input.selected_slice_id,
+        nextRevision(revision),
+      );
+      this.#prepare('UPDATE metadata SET revision=? WHERE singleton=1').run(nextRevision(revision));
       this.#db.exec('COMMIT');
     } catch (error) {
       this.#db.exec('ROLLBACK');
@@ -461,9 +467,10 @@ export class SqliteProjectStore implements ProjectStore {
     this.#revision(revision);
     imageIdSchema.parse(imageId);
     sliceIdSchema.parse(sliceId);
-    const row = this.#prepare(`SELECT revision,CASE WHEN length(payload)<=${MAX_RECORD_BYTES} THEN payload ELSE NULL END AS payload
-          FROM loaded_images WHERE image_id=? AND slice_id=? AND revision<=? ORDER BY revision DESC LIMIT 1`)
-      .get(imageId, sliceId, revision);
+    const row = this.#prepare(
+      `SELECT revision,CASE WHEN length(payload)<=${MAX_RECORD_BYTES} THEN payload ELSE NULL END AS payload
+          FROM loaded_images WHERE image_id=? AND slice_id=? AND revision<=? ORDER BY revision DESC LIMIT 1`,
+    ).get(imageId, sliceId, revision);
     if (!row) fail('not_found', 'Image has not been loaded for this slice');
     const metadataRevision = numberField(row, 'revision');
     const key = `${imageId}:${sliceId}:${metadataRevision}`;
@@ -519,12 +526,15 @@ export class SqliteProjectStore implements ProjectStore {
     this.#revision(revision);
     imageIdSchema.parse(imageId);
     if (!Object.hasOwn(RECORD_SCHEMAS, kind)) fail('invalid_input', 'Unknown record kind');
-    const record = this.#prepare('SELECT revision FROM records WHERE image_id=? AND kind=? AND revision<=? ORDER BY revision DESC LIMIT 1')
-      .get(imageId, kind, revision);
-    const index = this.#prepare('SELECT revision,state FROM indexes WHERE image_id=? AND kind=? AND revision<=? ORDER BY revision DESC LIMIT 1')
-      .get(imageId, kind, revision);
-    const image = this.#prepare('SELECT revision FROM loaded_images WHERE image_id=? AND revision<=? ORDER BY revision DESC LIMIT 1')
-      .get(imageId, revision);
+    const record = this.#prepare(
+      'SELECT revision FROM records WHERE image_id=? AND kind=? AND revision<=? ORDER BY revision DESC LIMIT 1',
+    ).get(imageId, kind, revision);
+    const index = this.#prepare(
+      'SELECT revision,state FROM indexes WHERE image_id=? AND kind=? AND revision<=? ORDER BY revision DESC LIMIT 1',
+    ).get(imageId, kind, revision);
+    const image = this.#prepare(
+      'SELECT revision FROM loaded_images WHERE image_id=? AND revision<=? ORDER BY revision DESC LIMIT 1',
+    ).get(imageId, revision);
     return fingerprint([
       record ? numberField(record, 'revision') : null,
       index ? [numberField(index, 'revision'), stringField(index, 'state')] : null,
@@ -542,8 +552,10 @@ export class SqliteProjectStore implements ProjectStore {
     this.#revision(query.revision);
     imageIdSchema.parse(query.image_id);
     if (
-      !this.#prepare('SELECT 1 FROM image_imports WHERE image_id=? AND revision<=? LIMIT 1')
-        .get(query.image_id, query.revision)
+      !this.#prepare('SELECT 1 FROM image_imports WHERE image_id=? AND revision<=? LIMIT 1').get(
+        query.image_id,
+        query.revision,
+      )
     )
       fail('not_found', 'Image is absent from the requested snapshot');
     if (query.address) addressSchema.parse(wireValue(query.address));
@@ -611,8 +623,9 @@ export class SqliteProjectStore implements ProjectStore {
       RECORD_SCHEMAS[query.kind].parse(wireValue(value));
       return value;
     });
-    const index = this.#prepare('SELECT state FROM indexes WHERE image_id=? AND kind=? AND revision<=? ORDER BY revision DESC LIMIT 1')
-      .get(query.image_id, query.kind, query.revision);
+    const index = this.#prepare(
+      'SELECT state FROM indexes WHERE image_id=? AND kind=? AND revision<=? ORDER BY revision DESC LIMIT 1',
+    ).get(query.image_id, query.kind, query.revision);
     const index_state = index
       ? z.enum(['complete', 'partial', 'not_started']).parse(index['state'])
       : items.length > 0
@@ -649,15 +662,19 @@ export class SqliteProjectStore implements ProjectStore {
       value: unknown,
     ): void => {
       guard();
-      this.#prepare(`INSERT OR REPLACE INTO ${table}(id,revision,payload) VALUES (?,?,?)`)
-        .run(id, revision, encodeStored(value));
+      this.#prepare(`INSERT OR REPLACE INTO ${table}(id,revision,payload) VALUES (?,?,?)`).run(
+        id,
+        revision,
+        encodeStored(value),
+      );
     };
     const tx: StoreTransaction = {
       putImage: (image) => {
         guard();
         validateImage(image);
-        const imported = this.#prepare('SELECT i.sha256 FROM images i JOIN image_imports s USING(image_id) WHERE i.image_id=? AND s.slice_id=?')
-          .get(image.id, image.selected_slice_id);
+        const imported = this.#prepare(
+          'SELECT i.sha256 FROM images i JOIN image_imports s USING(image_id) WHERE i.image_id=? AND s.slice_id=?',
+        ).get(image.id, image.selected_slice_id);
         if (
           !imported ||
           imported['sha256'] !== image.sha256 ||
@@ -689,16 +706,20 @@ export class SqliteProjectStore implements ProjectStore {
         lineageSchema.parse(change);
         if (change.revision !== revision)
           fail('stale_revision', 'Lineage must use the transaction revision');
-        this.#prepare('INSERT INTO lineage VALUES (?,?,?)')
-          .run(fingerprint({ ...change }), revision, encodeStored(change));
+        this.#prepare('INSERT INTO lineage VALUES (?,?,?)').run(
+          fingerprint({ ...change }),
+          revision,
+          encodeStored(change),
+        );
       },
       putRecord: (imageId, kind, record) => {
         guard();
         imageIdSchema.parse(imageId);
         if (!Object.hasOwn(RECORD_SCHEMAS, kind)) fail('invalid_input', 'Unknown record kind');
         RECORD_SCHEMAS[kind].parse(wireValue(record));
-        const existing = this.#prepare('SELECT image_id FROM records WHERE kind=? AND id=? LIMIT 1')
-          .get(kind, record.id);
+        const existing = this.#prepare(
+          'SELECT image_id FROM records WHERE kind=? AND id=? LIMIT 1',
+        ).get(kind, record.id);
         if (existing && existing['image_id'] !== imageId)
           fail('conflicting_evidence', 'Entity identity cannot move between images');
         const location = recordLocation(record);
@@ -710,19 +731,22 @@ export class SqliteProjectStore implements ProjectStore {
             : 'original_name' in record
               ? `${record.original_name ?? ''}\n${record.display_name ?? ''}`
               : '';
-        this.#prepare('INSERT OR REPLACE INTO records VALUES (?,?,?,?,?,?,?,?)')
-          .run(
-            kind,
-            record.id,
-            imageId,
-            revision,
-            text.toLowerCase(),
-            location?.space ?? null,
-            location ? location.value.toString(16).padStart(16, '0') : null,
-            encodeStored(record),
-          );
-        this.#prepare('INSERT OR IGNORE INTO indexes VALUES (?,?,?,?)')
-          .run(imageId, kind, revision, 'partial');
+        this.#prepare('INSERT OR REPLACE INTO records VALUES (?,?,?,?,?,?,?,?)').run(
+          kind,
+          record.id,
+          imageId,
+          revision,
+          text.toLowerCase(),
+          location?.space ?? null,
+          location ? location.value.toString(16).padStart(16, '0') : null,
+          encodeStored(record),
+        );
+        this.#prepare('INSERT OR IGNORE INTO indexes VALUES (?,?,?,?)').run(
+          imageId,
+          kind,
+          revision,
+          'partial',
+        );
       },
       setIndexState: (imageId, kind, state) => {
         guard();
@@ -731,8 +755,12 @@ export class SqliteProjectStore implements ProjectStore {
         z.enum(['complete', 'partial', 'not_started']).parse(state);
         if (!this.#prepare('SELECT 1 FROM images WHERE image_id=?').get(imageId))
           fail('not_found', 'Index image is not imported');
-        this.#prepare('INSERT OR REPLACE INTO indexes VALUES (?,?,?,?)')
-          .run(imageId, kind, revision, state);
+        this.#prepare('INSERT OR REPLACE INTO indexes VALUES (?,?,?,?)').run(
+          imageId,
+          kind,
+          revision,
+          state,
+        );
       },
       setAnnotation: (annotation) => {
         guard();
@@ -742,8 +770,12 @@ export class SqliteProjectStore implements ProjectStore {
         const prior = this.#latest('annotations', annotation.id, current);
         if (prior && prior['entity_id'] !== annotation.entity_id)
           fail('conflicting_evidence', 'Annotation identity cannot move to another entity');
-        this.#prepare('INSERT OR REPLACE INTO annotations VALUES (?,?,?,?)')
-          .run(annotation.id, annotation.entity_id, revision, encodeStored(annotation));
+        this.#prepare('INSERT OR REPLACE INTO annotations VALUES (?,?,?,?)').run(
+          annotation.id,
+          annotation.entity_id,
+          revision,
+          encodeStored(annotation),
+        );
         changed.push(annotation);
       },
       removeAnnotation: (id, actor) => {
@@ -752,10 +784,17 @@ export class SqliteProjectStore implements ProjectStore {
         annotationActorSchema.parse(actor);
         const prior = this.#latest('annotations', id, current);
         if (!prior || prior['payload'] === null) fail('not_found', 'Annotation does not exist');
-        this.#prepare('INSERT OR REPLACE INTO annotations VALUES (?,?,?,NULL)')
-          .run(id, stringField(prior, 'entity_id'), revision);
-        this.#prepare('INSERT OR REPLACE INTO annotation_removals VALUES (?,?,?,?)')
-          .run(id, revision, actor.author, actor.origin);
+        this.#prepare('INSERT OR REPLACE INTO annotations VALUES (?,?,?,NULL)').run(
+          id,
+          stringField(prior, 'entity_id'),
+          revision,
+        );
+        this.#prepare('INSERT OR REPLACE INTO annotation_removals VALUES (?,?,?,?)').run(
+          id,
+          revision,
+          actor.author,
+          actor.origin,
+        );
         removed.push(id);
       },
     };
@@ -845,11 +884,27 @@ export class SqliteProjectStore implements ProjectStore {
     });
   }
 
+  /** Whether any annotation row exists at or below a readable revision. Readable
+   * revisions are immutable (writes always create the next revision), so the
+   * answer is memoized; analysis asks per subject, usually of an unannotated image. */
+  #hasAnnotations(revision: number): boolean {
+    let present = this.#annotatedRevisions.get(revision);
+    if (present === undefined) {
+      present =
+        this.#prepare('SELECT 1 FROM annotations WHERE revision<=? LIMIT 1').get(revision) !==
+        undefined;
+      this.#annotatedRevisions.set(revision, present);
+    }
+    return present;
+  }
+
   readAnnotations(entityId: string, revision: number): readonly Annotation[] {
     this.#revision(revision);
     entityIdSchema.parse(entityId);
-    const rows = this.#prepare('SELECT a.payload FROM annotations a WHERE a.entity_id=? AND a.revision<=? AND a.revision=(SELECT MAX(v.revision) FROM annotations v WHERE v.id=a.id AND v.revision<=?) AND a.payload IS NOT NULL ORDER BY a.id LIMIT 10001')
-      .all(entityId, revision, revision);
+    if (!this.#hasAnnotations(revision)) return [];
+    const rows = this.#prepare(
+      'SELECT a.payload FROM annotations a WHERE a.entity_id=? AND a.revision<=? AND a.revision=(SELECT MAX(v.revision) FROM annotations v WHERE v.id=a.id AND v.revision<=?) AND a.payload IS NOT NULL ORDER BY a.id LIMIT 10001',
+    ).all(entityId, revision, revision);
     if (rows.length > 10000) fail('resource_limit', 'Too many annotations for one entity');
     return rows.map((row) => {
       const value = decodeStored<Annotation>(row['payload']);
@@ -938,8 +993,9 @@ export class SqliteProjectStore implements ProjectStore {
         after > query.revision)
     )
       fail('invalid_cursor', 'Annotation history cursor has an invalid revision');
-    const rows = this.#prepare('SELECT a.*, r.author AS removal_author, r.origin AS removal_origin FROM annotations a LEFT JOIN annotation_removals r ON a.id=r.id AND a.revision=r.revision WHERE a.id=? AND a.revision<=? AND a.revision>? ORDER BY a.revision LIMIT ?')
-      .all(query.id, query.revision, after, query.limit + 1);
+    const rows = this.#prepare(
+      'SELECT a.*, r.author AS removal_author, r.origin AS removal_origin FROM annotations a LEFT JOIN annotation_removals r ON a.id=r.id AND a.revision=r.revision WHERE a.id=? AND a.revision<=? AND a.revision>? ORDER BY a.revision LIMIT ?',
+    ).all(query.id, query.revision, after, query.limit + 1);
     const more = rows.length > query.limit;
     const items: AnnotationHistoryEntry[] = (more ? rows.slice(0, query.limit) : rows).map(
       (row) => {
@@ -1023,8 +1079,9 @@ export class SqliteProjectStore implements ProjectStore {
   readLineage(entityId: string, revision: number): readonly z.infer<typeof lineageSchema>[] {
     this.#revision(revision);
     entityIdSchema.parse(entityId);
-    const rows = this.#prepare('SELECT payload FROM lineage WHERE revision<=? ORDER BY revision,id LIMIT 10001')
-      .all(revision);
+    const rows = this.#prepare(
+      'SELECT payload FROM lineage WHERE revision<=? ORDER BY revision,id LIMIT 10001',
+    ).all(revision);
     if (rows.length > 10000) fail('resource_limit', 'Lineage query exceeds budget');
     return rows
       .map((row) => lineageSchema.parse(decodeStored(row['payload'])))
@@ -1068,8 +1125,9 @@ export class SqliteProjectStore implements ProjectStore {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 8)
       fail('invalid_input', 'Invalid analysis reuse candidate bound');
     const scope = cacheIdentityKey({ ...identity, annotation_revision: 0, evidence_revision: 0 });
-    const rows = this.#prepare('SELECT a.payload FROM analysis_reuse r JOIN artifacts a ON a.id=r.artifact_id WHERE r.scope=? AND r.revision<? ORDER BY r.revision DESC,r.artifact_id LIMIT ?')
-      .all(scope, identity.annotation_revision, limit);
+    const rows = this.#prepare(
+      'SELECT a.payload FROM analysis_reuse r JOIN artifacts a ON a.id=r.artifact_id WHERE r.scope=? AND r.revision<? ORDER BY r.revision DESC,r.artifact_id LIMIT ?',
+    ).all(scope, identity.annotation_revision, limit);
     return rows.map((row) => {
       const artifact = decodeStored<Artifact>(row['payload']);
       encodeArtifact(artifact);
@@ -1109,7 +1167,9 @@ export class SqliteProjectStore implements ProjectStore {
     if (ids.length === 0) return { items: [], next_cursor: null };
     // Bound index work per requested ID, rather than sorting every historical
     // option/version variant matching a large multi-ID catalog query.
-    const lookup = this.#prepare('SELECT artifact_id FROM analysis_artifacts WHERE revision=? AND analysis_id=? AND artifact_id>? ORDER BY artifact_id LIMIT ?');
+    const lookup = this.#prepare(
+      'SELECT artifact_id FROM analysis_artifacts WHERE revision=? AND analysis_id=? AND artifact_id>? ORDER BY artifact_id LIMIT ?',
+    );
     let candidates: string[] = [];
     for (const id of ids) {
       const matches = lookup
@@ -1211,13 +1271,21 @@ export class SqliteProjectStore implements ProjectStore {
     writeImmutable(path, input.bytes);
     this.#db.exec('BEGIN IMMEDIATE');
     try {
-      this.#prepare('INSERT INTO artifacts VALUES (?,?,?,?,?)')
-        .run(artifact.id, current, job.id, cacheIdentityKey(input.cache), encodeStored(artifact));
+      this.#prepare('INSERT INTO artifacts VALUES (?,?,?,?,?)').run(
+        artifact.id,
+        current,
+        job.id,
+        cacheIdentityKey(input.cache),
+        encodeStored(artifact),
+      );
       const index = this.#prepare('INSERT INTO analysis_artifacts VALUES (?,?,?)');
       for (const id of analysisIds) index.run(current, id, artifact.id);
       if (input.reuse_scope !== undefined)
-        this.#prepare('INSERT INTO analysis_reuse VALUES (?,?,?)')
-          .run(input.reuse_scope, current, artifact.id);
+        this.#prepare('INSERT INTO analysis_reuse VALUES (?,?,?)').run(
+          input.reuse_scope,
+          current,
+          artifact.id,
+        );
       this.saveJob({
         ...job,
         state: 'completed',
@@ -1335,8 +1403,10 @@ export class SqliteProjectStore implements ProjectStore {
     const cursor = query.cursor ? decodeCursor(query.cursor, binding) : null;
     if (cursor && (cursor.after.length !== 1 || !jobIdSchema.safeParse(cursor.after[0]).success))
       fail('invalid_cursor', 'Job cursor has an invalid key');
-    const rows = this.#prepare('SELECT payload FROM jobs WHERE id>? ORDER BY id LIMIT ?')
-      .all(cursor?.after[0] ?? '', query.limit + 1);
+    const rows = this.#prepare('SELECT payload FROM jobs WHERE id>? ORDER BY id LIMIT ?').all(
+      cursor?.after[0] ?? '',
+      query.limit + 1,
+    );
     const more = rows.length > query.limit;
     const items = (more ? rows.slice(0, query.limit) : rows).map((row) => {
       const job = decodeStored<Job>(row['payload']);
