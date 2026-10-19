@@ -141,6 +141,14 @@ export const localValidationSchema = z.strictObject({
   reason: z.string().min(1).max(8192).optional(),
   counterexample: z.record(z.string().max(1024), z.string().max(8192)).optional(),
 });
+/** Provenance metadata that was bounded out of this emission. The pseudocode text is
+ * always complete; a record here means the named metadata is absent (`omitted` counts
+ * the records known to be dropped, `null` when the bound hit before they were counted). */
+export const emissionOmissionSchema = z.strictObject({
+  kind: z.enum(['mappings', 'inferences', 'requirements']),
+  reason: z.literal('output_limit'),
+  omitted: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).nullable(),
+});
 /** Canonical compact emission. Each distinct entity identity, proof identity and
  * binary range is stated once in `ids`, `evidence` and `ranges`; mappings,
  * inferences and requirements cite them by index. Every inference subject is
@@ -160,6 +168,7 @@ export const emissionSchema = z
     local_validation: z.array(localValidationSchema).max(1000).optional(),
     inferences: z.array(inferenceSchema).max(10000).optional(),
     requirements: z.array(requirementSchema).max(1000).optional(),
+    omitted: z.array(emissionOmissionSchema).max(3).optional(),
     helpers: z
       .array(z.strictObject({ name: z.string().min(1), explanation: z.string().min(1).max(8192) }))
       .max(1000),
@@ -586,6 +595,9 @@ export function resultSchema<S extends z.ZodType>(data: S): z.ZodType<ResultEnve
           'continuation' in result &&
           result.continuation === null &&
           result.artifacts.length === 0 &&
+          // An inline decompilation delivers its text; its output limit bounded metadata
+          // (named by `emission.omitted`), so there is nothing further to continue.
+          record['delivery'] !== 'inline' &&
           page?.next_cursor == null &&
           record['next_address'] == null
         ) {
@@ -1051,7 +1063,7 @@ export const functionDecompileResultSchema = resultSchema(
       (result.state !== 'partial' || result.reason !== 'output_limit')) ||
     (data.delivery_reason === 'requested' &&
       result.state !== 'complete' &&
-      (result.state !== 'partial' || result.reason === 'output_limit'))
+      result.state !== 'partial')
   )
     context.addIssue({
       code: 'custom',
