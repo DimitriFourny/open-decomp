@@ -131,7 +131,8 @@ export async function prepareQueryImport(
                     }
                   : {}),
                 kind: 'import_stub' as const,
-                boundary: named.boundary === 'conflicting' ? named.boundary : ('established' as const),
+                boundary:
+                  named.boundary === 'conflicting' ? named.boundary : ('established' as const),
                 analysis: 'complete' as const,
                 evidence_ids: [...new Set([...named.evidence_ids, ...stub.evidence_ids])].sort(),
               }

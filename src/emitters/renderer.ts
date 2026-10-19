@@ -2602,7 +2602,10 @@ export class Renderer {
   /** Declarations of every global the finished body names, inserted before the
    * function so the text refers only to declared names. Each is mapped to its
    * first planned access with the image/import evidence of the object. */
-  private declareGlobals(at: number, insert: (at: number, lines: readonly string[]) => number): void {
+  private declareGlobals(
+    at: number,
+    insert: (at: number, lines: readonly string[]) => number,
+  ): void {
     if (!this.usedGlobals.size) return;
     const python = this.language === 'python-like';
     const lines: string[] = [],
@@ -2650,7 +2653,12 @@ export class Renderer {
         origin,
         span.start,
         [],
-        [...new Set([...span.object.object.evidence_ids, ...(span.object.import?.evidence_ids ?? [])])],
+        [
+          ...new Set([
+            ...span.object.object.evidence_ids,
+            ...(span.object.import?.evidence_ids ?? []),
+          ]),
+        ],
         span.end,
       );
     }

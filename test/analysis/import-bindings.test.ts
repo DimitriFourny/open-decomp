@@ -37,8 +37,18 @@ const none = () => ({ asserted: [], annotated: false });
 
 const targets = [
   { loader: () => new MachOLoader(), file: 'macho-arm64-symbols', symbol: '_puts', source: 'puts' },
-  { loader: () => new ELFLoader(), file: 'elf-x86_64-symbols', symbol: 'fixture_external', source: 'fixture_external' },
-  { loader: () => new PELoader(), file: 'pe-x86_64-symbols.exe', symbol: 'ExitProcess', source: 'ExitProcess' },
+  {
+    loader: () => new ELFLoader(),
+    file: 'elf-x86_64-symbols',
+    symbol: 'fixture_external',
+    source: 'fixture_external',
+  },
+  {
+    loader: () => new PELoader(),
+    file: 'pe-x86_64-symbols.exe',
+    symbol: 'ExitProcess',
+    source: 'ExitProcess',
+  },
 ] as const;
 
 for (const target of targets)
@@ -78,13 +88,20 @@ test('stub entries and lazily bound slots are not data bindings', () => {
   const image = load(new MachOLoader(), 'macho-arm64-symbols');
   const stubs = image.imports.filter((item) => item.callable_entry);
   assert.ok(stubs.length > 0);
-  const candidates = new Map(stubs.map((item) => [key(item.callable_entry!), item.callable_entry!]));
+  const candidates = new Map(
+    stubs.map((item) => [key(item.callable_entry!), item.callable_entry!]),
+  );
   assert.equal(recoverImportBindings(image, candidates, none, createOperationContext()).size, 0);
 });
 
 for (const target of [
   { loader: () => new MachOLoader(), file: 'macho-arm64-symbols', name: '_puts', arm: true },
-  { loader: () => new ELFLoader(), file: 'elf-x86_64-symbols', name: 'fixture_external', arm: false },
+  {
+    loader: () => new ELFLoader(),
+    file: 'elf-x86_64-symbols',
+    name: 'fixture_external',
+    arm: false,
+  },
 ])
   test(`${target.file}: a body that only forwards through an import slot is a complete named stub`, () => {
     const image = load(target.loader(), target.file);

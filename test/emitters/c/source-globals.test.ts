@@ -35,8 +35,8 @@ const u32 = integer(32),
 
 function ssaOf(
   name: string,
-  body: (block: ReturnType<ReturnType<typeof builder>['block']>) => ReturnType<typeof u64>[],
-  results = [u64],
+  body: (block: ReturnType<ReturnType<typeof builder>['block']>) => unknown[],
+  results: (typeof u64)[] = [u64],
 ): SSAForm {
   const b = builder(name),
     block = b.block('entry');
@@ -53,14 +53,24 @@ for (const language of ['c-like', 'python-like'] as const) {
     const pointer = block.load(u64, block.address(SLOT));
     block.return([block.load(u64, pointer)]);
     const ssa = constructSSA(b.finish(block, [u64])).value as SSAForm;
-    const output = emit(ssa, { source: { abi: sysvAMD64Abi, callees: [], addresses: [slot] } }, language);
+    const output = emit(
+      ssa,
+      { source: { abi: sysvAMD64Abi, callees: [], addresses: [slot] } },
+      language,
+    );
     const text = output.emission.text;
     assert.doesNotMatch(text, /data_address/);
     if (language === 'c-like') {
-      assert.match(text, /extern uint64_t __stderrp; \/\* import ___stderrp from \/usr\/lib\/libSystem\.B\.dylib, slot 0x2010 \*\//);
+      assert.match(
+        text,
+        /extern uint64_t __stderrp; \/\* import ___stderrp from \/usr\/lib\/libSystem\.B\.dylib, slot 0x2010 \*\//,
+      );
       assert.match(text, /return __stderrp;/);
     } else {
-      assert.match(text, /__stderrp = import_view\("\/usr\/lib\/libSystem\.B\.dylib", "___stderrp", "uint64_t"\)/);
+      assert.match(
+        text,
+        /__stderrp = import_view\("\/usr\/lib\/libSystem\.B\.dylib", "___stderrp", "uint64_t"\)/,
+      );
       assert.match(text, /return __stderrp\[0\]/);
     }
     // The bind record, not only the slot bytes, evidences the declaration and the access.
@@ -73,7 +83,11 @@ for (const language of ['c-like', 'python-like'] as const) {
       block = b.block('entry');
     block.return([block.load(u64, block.address(SLOT))]);
     const ssa = constructSSA(b.finish(block, [u64])).value as SSAForm;
-    const output = emit(ssa, { source: { abi: sysvAMD64Abi, callees: [], addresses: [slot] } }, language);
+    const output = emit(
+      ssa,
+      { source: { abi: sysvAMD64Abi, callees: [], addresses: [slot] } },
+      language,
+    );
     const text = output.emission.text;
     assert.doesNotMatch(text, /data_address|0x2010\)/);
     if (language === 'c-like') {
@@ -89,7 +103,11 @@ for (const language of ['c-like', 'python-like'] as const) {
     block.store(pointer, block.constant(u32, 7n));
     block.return([block.constant(u64, 0n)]);
     const ssa = constructSSA(b.finish(block, [u64])).value as SSAForm;
-    const output = emit(ssa, { source: { abi: sysvAMD64Abi, callees: [], addresses: [slot] } }, language);
+    const output = emit(
+      ssa,
+      { source: { abi: sysvAMD64Abi, callees: [], addresses: [slot] } },
+      language,
+    );
     const text = output.emission.text;
     if (language === 'c-like') {
       assert.match(text, /extern uint32_t __stderrp;/);
@@ -110,7 +128,11 @@ test('a slot written by the function is no import binding: reads stay explicit m
 });
 
 const GLOBAL = at(0x3000n);
-const object = (byteLength: bigint | null, offset = 0n, base = GLOBAL): SourceAddress['object'] => ({
+const object = (
+  byteLength: bigint | null,
+  offset = 0n,
+  base = GLOBAL,
+): NonNullable<SourceAddress['object']> => ({
   address: base,
   byte_length: byteLength,
   offset,
@@ -155,7 +177,13 @@ for (const language of ['c-like', 'python-like'] as const) {
       (block) => {
         const first = block.load(u32, block.address(GLOBAL));
         const second = block.load(u32, block.address(at(GLOBAL.value + 8n)));
-        return [block.int('add', block.cast('zero_extend', u64, first), block.cast('zero_extend', u64, second))];
+        return [
+          block.int(
+            'add',
+            block.cast('zero_extend', u64, first),
+            block.cast('zero_extend', u64, second),
+          ),
+        ];
       },
       [u64],
     );
@@ -176,7 +204,11 @@ for (const language of ['c-like', 'python-like'] as const) {
       assert.match(output.emission.text, /counters\[0\]/);
       assert.match(output.emission.text, /counters\[2\]/);
     }
-    const result = execute(output.emission, new Map(), memoryOf([1, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0]));
+    const result = execute(
+      output.emission,
+      new Map(),
+      memoryOf([1, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0]),
+    );
     assert.deepEqual(result.values, [6n]);
   });
 
@@ -186,7 +218,13 @@ for (const language of ['c-like', 'python-like'] as const) {
       (block) => {
         const wide = block.load(u32, block.address(GLOBAL));
         const narrow = block.load(integer(16), block.address(at(GLOBAL.value + 4n)));
-        return [block.int('add', block.cast('zero_extend', u64, wide), block.cast('zero_extend', u64, narrow))];
+        return [
+          block.int(
+            'add',
+            block.cast('zero_extend', u64, wide),
+            block.cast('zero_extend', u64, narrow),
+          ),
+        ];
       },
       [u64],
     );
@@ -203,7 +241,13 @@ for (const language of ['c-like', 'python-like'] as const) {
 }
 
 test('a known extent that an access would exceed keeps byte storage', () => {
-  const ssa = ssaOf('past-extent', (block) => [block.cast('zero_extend', u64, block.load(u32, block.address(at(GLOBAL.value + 4n))))], [u64]);
+  const ssa = ssaOf(
+    'past-extent',
+    (block) => [
+      block.cast('zero_extend', u64, block.load(u32, block.address(at(GLOBAL.value + 4n)))),
+    ],
+    [u64],
+  );
   const output = emit(ssa, {
     source: { abi: sysvAMD64Abi, callees: [], addresses: [global(4n, 6n)] },
   });
@@ -212,7 +256,11 @@ test('a known extent that an access would exceed keeps byte storage', () => {
 });
 
 test('checked view keeps the explicit helper and declares nothing', () => {
-  const ssa = ssaOf('checked-global', (block) => [block.cast('zero_extend', u64, block.load(u32, block.address(GLOBAL)))], [u64]);
+  const ssa = ssaOf(
+    'checked-global',
+    (block) => [block.cast('zero_extend', u64, block.load(u32, block.address(GLOBAL)))],
+    [u64],
+  );
   const output = emit(
     ssa,
     { source: { abi: sysvAMD64Abi, callees: [], addresses: [global(0n)] } },

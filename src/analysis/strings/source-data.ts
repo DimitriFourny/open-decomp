@@ -478,7 +478,10 @@ export function recoverDataAddress(
 export function recoverImportBindings(
   image: LoadedImage,
   candidates: ReadonlyMap<string, Address>,
-  annotations: (importId: string) => { readonly asserted: readonly string[]; readonly annotated: boolean },
+  annotations: (importId: string) => {
+    readonly asserted: readonly string[];
+    readonly annotated: boolean;
+  },
   context: OperationContext,
 ): ReadonlyMap<string, NonNullable<SourceAddress['import']>> {
   const key = (address: Address): string => `${address.image_id}:${address.space}:${address.value}`;

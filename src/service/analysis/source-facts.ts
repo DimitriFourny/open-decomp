@@ -750,8 +750,13 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
     if (imported) {
       // Slot bytes are loader inputs, never the values later read: neither a
       // string nor constant bytes may be recovered from them.
-      const { string: _s, string_byte_length: _l, string_encoding: _e, string_start: _t, ...slot } =
-        recovered ?? { address };
+      const {
+        string: _s,
+        string_byte_length: _l,
+        string_encoding: _e,
+        string_start: _t,
+        ...slot
+      } = recovered ?? { address };
       const object = recovered?.object;
       result.push({
         ...slot,
@@ -761,9 +766,7 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
           offset: 0n,
           mutable: object?.mutable ?? true,
           kind: 'bytes',
-          evidence_ids: [
-            ...new Set([...(object?.evidence_ids ?? []), ...imported.evidence_ids]),
-          ],
+          evidence_ids: [...new Set([...(object?.evidence_ids ?? []), ...imported.evidence_ids])],
         },
         import: imported,
       });

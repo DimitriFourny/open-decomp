@@ -989,7 +989,6 @@ export function sourceIdentifierStem(preferred: string, linkage = false): string
   // A native linkage name (`__stderrp`) keeps its leading underscores; only the
   // generated helpers' own spellings stay reserved.
   const prefixed = linkage ? reservedLinkageName.test(stem) : reservedRuntimePrefix.test(stem);
-  if (reservedWord.test(stem) || reservedRuntimeName.test(stem) || prefixed)
-    stem = `value_${stem}`;
+  if (reservedWord.test(stem) || reservedRuntimeName.test(stem) || prefixed) stem = `value_${stem}`;
   return stem;
 }
