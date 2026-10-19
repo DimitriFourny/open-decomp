@@ -8,7 +8,7 @@ import type { LocalValidationRecord } from '../reconstruction/local-validation.j
 import { sourceConstantValues, sourceDataValues } from '../reconstruction/source-data.js';
 import type { SourceAddress } from '../reconstruction/source-model.js';
 import type { EmissionInput } from './model.js';
-import { ReferenceUnions, type Writer } from './writer.js';
+import { MetadataLimitError, ReferenceUnions, type Writer } from './writer.js';
 
 type Mapping = Emission['mappings'][number];
 type Details = Inference['details'];
@@ -20,9 +20,19 @@ const identity = (address: Address) => ({
   address: String(address.value),
 });
 
+export interface InferenceCollection {
+  readonly records: readonly Inference[];
+  /** Records bounded out of `records`; null when a global metadata bound stopped the
+   * collection before the remaining records could be counted. */
+  readonly omitted: number | null;
+}
+
 /** Collect from semantic models and the writer's finalized mappings, never
  * emitted text. Records cite the writer's interned tables directly. The indexes
- * are local to one render; no inference performs an all-IR/mapping scan. */
+ * are local to one render; no inference performs an all-IR/mapping scan.
+ * Inference records are provenance metadata: a record that exceeds a wire bound is
+ * skipped and counted, and a global metadata bound ends collection with the records
+ * gathered so far. Neither discards or changes any record that is delivered. */
 export function collectInferences(
   input: EmissionInput,
   program: Reconstruction,
@@ -31,7 +41,39 @@ export function collectInferences(
   context: OperationContext,
   sites?: ReadonlyMap<string, { readonly start: number; readonly end: number }>,
   resolveData?: (value: Value) => SourceAddress | undefined,
-): readonly Inference[] {
+): InferenceCollection {
+  const records: Inference[] = [];
+  const tally = { skipped: 0 };
+  try {
+    gatherInferences(
+      input,
+      program,
+      localValidation,
+      writer,
+      context,
+      records,
+      tally,
+      sites,
+      resolveData,
+    );
+  } catch (error) {
+    if (!(error instanceof MetadataLimitError)) throw error;
+    return { records, omitted: null };
+  }
+  return { records, omitted: tally.skipped };
+}
+
+function gatherInferences(
+  input: EmissionInput,
+  program: Reconstruction,
+  localValidation: readonly LocalValidationRecord[],
+  writer: Writer,
+  context: OperationContext,
+  result: Inference[],
+  tally: { skipped: number },
+  sites?: ReadonlyMap<string, { readonly start: number; readonly end: number }>,
+  resolveData?: (value: Value) => SourceAddress | undefined,
+): void {
   const mappings = writer.mappings;
   const original = new Map<string, Origin>();
   const loadResults = new Map<string, string>();
@@ -96,7 +138,8 @@ export function collectInferences(
     context.checkpoint(1);
     const cached = resolved.get(id);
     if (cached) return cached;
-    if (active.has(id) || active.size >= 128) writer.fail('Inference origin graph limit exceeded');
+    if (active.has(id) || active.size >= 128)
+      writer.limitMetadata('Inference origin graph limit exceeded');
     active.add(id);
     const origins = program.source?.value_origins?.get(id);
     const result = new Set<string>();
@@ -201,7 +244,6 @@ export function collectInferences(
     linked.set(id, rows);
     return rows;
   };
-  const result: Inference[] = [];
   const references = new ReferenceUnions(context);
   interface Member {
     readonly subjects: readonly string[];
@@ -269,7 +311,10 @@ export function collectInferences(
       }
     }
     if (!subjectIds.size) return;
-    if (result.length >= 10000) writer.fail('Inference record limit exceeded');
+    if (result.length >= 10000) {
+      tally.skipped++;
+      return;
+    }
     const instructions = instructionUnion.finish(),
       proofs = proofUnion.finish(),
       ranges = rangeUnion.finish();
@@ -299,7 +344,9 @@ export function collectInferences(
           );
         return;
       }
-      writer.fail('Inference reference limit exceeded');
+      // One record beyond the wire bounds is dropped and counted, never the render.
+      tally.skipped++;
+      return;
     }
     // Reference unions charge their word visits and materialize each immutable
     // result once. Only the subject list is newly copied for every record.
@@ -769,5 +816,4 @@ export function collectInferences(
       annotation.evidence_ids,
     );
   }
-  return result;
 }
