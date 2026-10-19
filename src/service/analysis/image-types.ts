@@ -7,7 +7,6 @@ import {
   type Diagnostic,
   type Evidence,
   type FunctionRecord,
-  type LoadedImage,
   type OperationContext,
   type RecoveredType,
   type RegisterDescriptor,
@@ -42,7 +41,6 @@ import type {
   TypeRecoveryResult,
 } from '../../analysis/types/index.js';
 import { cSourceName } from '../../metadata/symbols/c-names.js';
-import type { AnalysisReadset } from '../../project/cache/dependencies.js';
 import { nativeCallIndex } from './calls.js';
 import { nativeArgumentValues } from './native-arguments.js';
 import { parameterRegisters } from './native-abi.js';
@@ -54,13 +52,11 @@ import {
 import { renderImageTypeDeclarations } from '../../emitters/image-types.js';
 import type { NativeDependency } from './native-worklist.js';
 import {
-  loadNativeUnit,
-  nativeCapacity,
   nativeLibraryContracts,
-  nativeUnitCache,
+  nativeUnitLoader,
+  preparedUnitCache,
   type SourceFactsInput,
 } from './source-facts.js';
-import { pipelineVersions } from './versions.js';
 
 /** Bounded neighborhood: at most this many other function bodies per request. */
 const MAX_NEIGHBOR_FUNCTIONS = 12;
@@ -71,35 +67,21 @@ const MAX_POINTEE_DEPTH = 2;
 
 interface FunctionFacts {
   readonly objects: readonly ImageTypeObject[];
-  readonly readset?: AnalysisReadset;
 }
 
-/** Per-image function facts for one exact revision/component identity. Facts
- * derive only from one body's local SSA/type recovery, so any request with
- * the same identity reuses them; incomplete preparations are never cached. */
-const factCaches = new WeakMap<
-  LoadedImage,
-  { readonly identity: string; readonly facts: Map<string, FunctionFacts> }
->();
-
-function factCache(input: NativePreparationInput): Map<string, FunctionFacts> {
-  const { image, components, revision } = input;
-  const identity = fingerprint({
-    revision,
-    image: image.sha256,
-    slice: image.selected_slice_id,
-    target: image.target,
-    versions: pipelineVersions(image.target, 'c-like'),
-    lifter: `${components.lifter.name}/${components.lifter.version}`,
-    abi: `${components.abi.id}/${components.abi.version}`,
-    native_types: input.native_types,
-  } as unknown as CanonicalValue);
-  let cached = factCaches.get(image);
-  if (!cached || cached.identity !== identity) {
-    cached = { identity, facts: new Map() };
-    factCaches.set(image, cached);
-  }
-  return cached.facts;
+/** The shared prepared-unit loader under `context`: a reuse charges exactly the
+ * work and reads its preparation did, so results and budgets never depend on
+ * what earlier requests in this process prepared. */
+function unitLoader(input: NativePreparationInput, context: OperationContext) {
+  const load = nativeUnitLoader(
+    input,
+    preparedUnitCache(input),
+    nativeLibraryContracts(input),
+    (work, reads) =>
+      work <= (context.remainingWork?.() ?? 0) &&
+      work + reads <= (input.scope.context.remainingWork?.() ?? 0),
+  );
+  return (fn: FunctionRecord) => load(fn, context);
 }
 
 /** The whole 64-bit value of one register among boundary bindings: one exact
@@ -376,25 +358,18 @@ function callerIndex(
   );
 }
 
-/** Load facts for one body: cached facts (replaying their reads) or a bounded
- * native preparation. Null when the body has no complete local recovery. */
+/** Facts of one body from its (prepared or reused) native unit. Null when the
+ * body has no complete local recovery. */
 function loadFacts(
   input: NativePreparationInput,
   fn: FunctionRecord,
   load: (fn: FunctionRecord) => PreparedNativeUnit,
-  cache: Map<string, FunctionFacts>,
   context: OperationContext,
 ): FunctionFacts | null {
-  const cached = cache.get(fn.id);
-  if (cached && (!input.scope.dependencies || cached.readset)) {
-    context.checkpoint(1 + cached.objects.length);
-    if (cached.readset) input.scope.dependencies?.replay(cached.readset);
-    return cached;
-  }
   const unit = load(fn);
   if (!unit.ir || !unit.types || unit.types.state !== 'complete' || unit.budget_truncated)
     return null;
-  const facts: FunctionFacts = {
+  return {
     objects: functionTypeObjects(
       fn,
       unit.ir,
@@ -403,10 +378,7 @@ function loadFacts(
       input.components.abi,
       context,
     ),
-    ...(unit.dependency_readset ? { readset: unit.dependency_readset } : {}),
   };
-  if (cache.size < 4096) cache.set(fn.id, facts);
-  return facts;
 }
 
 /** Bounded, deterministic exploration of the pointer flows reachable from the
@@ -419,10 +391,7 @@ export function exploreImageTypes(
   context: OperationContext,
   limits: { readonly max_functions: number } = { max_functions: MAX_NEIGHBOR_FUNCTIONS },
 ): ImageTypeSolution {
-  const capacity = nativeCapacity(input, context);
-  const units = nativeUnitCache(input, capacity, context);
-  const contracts = nativeLibraryContracts(input);
-  const cache = factCache(input);
+  const load = unitLoader(input, context);
   const byId = new Map(input.functions.map((fn) => [fn.id, fn]));
   const callers = callerIndex(input, context);
   const root = input.ir.id;
@@ -433,13 +402,7 @@ export function exploreImageTypes(
     let loaded: FunctionFacts | null = null;
     if (fn)
       try {
-        loaded = loadFacts(
-          input,
-          fn,
-          (target) => loadNativeUnit(input, units, target, context, contracts),
-          cache,
-          context,
-        );
+        loaded = loadFacts(input, fn, load, context);
       } catch (error) {
         const details = error instanceof OperationError ? error.diagnostic.details : undefined;
         if (
@@ -904,14 +867,6 @@ export function imageTypeDump(
   context: OperationContext,
   max_bytes: number,
 ): ImageTypeDump {
-  const capacity = {
-    instructions: context.budget.instructions,
-    blocks: context.budget.blocks,
-    nodes: context.budget.ir_nodes,
-  };
-  const units = nativeUnitCache(input, capacity, context);
-  const contracts = nativeLibraryContracts(input);
-  const cache = factCache(input);
   const limit = Math.floor(((context.remainingWork?.() ?? context.budget.work) * 3) / 4);
   let used = 0;
   const bounded: OperationContext = {
@@ -932,6 +887,7 @@ export function imageTypeDump(
       used += work;
     },
   };
+  const load = unitLoader(input, bounded);
   const ordered = [...input.functions].sort((a, b) =>
     a.entry.value < b.entry.value
       ? -1
@@ -945,13 +901,7 @@ export function imageTypeDump(
   for (const [index, fn] of ordered.entries()) {
     context.progress('image_types', index, ordered.length);
     try {
-      const facts = loadFacts(
-        input,
-        fn,
-        (target) => loadNativeUnit(input, units, target, bounded, contracts),
-        cache,
-        bounded,
-      );
+      const facts = loadFacts(input, fn, load, bounded);
       if (facts) objects.push(...facts.objects);
       analyzed.add(fn.id);
     } catch (error) {
