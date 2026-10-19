@@ -854,12 +854,16 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
  * component/target/native-type identity — not by budget, capacity or root.
  * Dependency observations are still solved afresh per request.
  *
- * Only preparations that hit no limit are kept. Every limit inside preparation is a
- * nondecreasing function of the worklist allowance it started with, so such a unit is
- * what preparation returns under any allowance at least that large and any capacity it
- * fits. Reuse then leaves exactly what preparing it would: the same work charge and the
- * same dependency reads in the same order, so a request's result and later budgets
- * never depend on what earlier requests in this process prepared. */
+ * Only preparations that hit no limit are kept. Every work limit inside preparation
+ * (`prepareNativeUnit`) is derived from the worklist allowance remaining when it is set:
+ * at least a quarter of it (SSA takes 3/4, optional type/stack work 1/4), with nested
+ * analyses bounded by what their enclosing limit has left. Limits only stop work. So a
+ * preparation that charged W without hitting one returns the same unit under any
+ * allowance of at least 4W + 3 (each limit then exceeds all work charged after it was
+ * set), or at least the allowance it actually ran with, and under any capacity it fits.
+ * Reuse then leaves exactly what preparing it would: the same work charge and the same
+ * dependency reads in the same order, so a request's result and later budgets never
+ * depend on what earlier requests in this process prepared. */
 interface PreparedUnitEntry {
   /** Without `dependency_readset`, which is a snapshot of the preparing request. */
   readonly unit: PreparedNativeUnit;
@@ -867,7 +871,7 @@ interface PreparedUnitEntry {
   readonly work: number;
   /** Reads the preparation made; absent when it ran without a dependency collector. */
   readonly trace?: readonly TracedRead[];
-  /** Smallest worklist work allowance at which this preparation finished without limits. */
+  /** Smallest worklist allowance under which preparation provably returns this unit. */
   readonly allowance: number;
   readonly size: number;
 }
@@ -1344,7 +1348,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         unit,
         work,
         ...(trace ? { trace } : {}),
-        allowance: Math.min(allowance, prior?.allowance ?? allowance),
+        allowance: Math.min(allowance, 4 * work + 3, prior?.allowance ?? allowance),
         size: preparedSize(unit) + (trace?.length ?? 0),
       };
       if (entry.size <= MAX_PREPARED_UNIT_SIZE) {
