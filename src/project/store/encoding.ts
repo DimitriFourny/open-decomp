@@ -42,10 +42,12 @@ export function encodeStored(value: unknown): Uint8Array {
   return buffer;
 }
 
+const utf8 = new TextDecoder('utf-8', { fatal: true });
+
 export function decodeStored<T>(bytes: unknown): T {
   if (!(bytes instanceof Uint8Array) || bytes.length > MAX_RECORD_BYTES)
     throw new TypeError('Invalid stored record bytes');
-  const envelope: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  const envelope: unknown = JSON.parse(utf8.decode(bytes));
   if (
     envelope === null ||
     typeof envelope !== 'object' ||
@@ -80,12 +82,16 @@ export function decodeStored<T>(bytes: unknown): T {
           Object.hasOwn(result, entry[0])
         )
           throw new TypeError('Invalid or duplicate stored property');
-        Object.defineProperty(result, entry[0], {
-          value: decode(entry[1], depth + 1),
-          enumerable: true,
-          writable: true,
-          configurable: true,
-        });
+        const decoded = decode(entry[1], depth + 1);
+        // Plain stores keep fast object shapes; only `__proto__` needs a defined property.
+        if (entry[0] === '__proto__')
+          Object.defineProperty(result, entry[0], {
+            value: decoded,
+            enumerable: true,
+            writable: true,
+            configurable: true,
+          });
+        else result[entry[0]] = decoded;
       }
       return result;
     }
