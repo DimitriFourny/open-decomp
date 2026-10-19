@@ -350,6 +350,13 @@ export class Arm64Lifter implements Lifter<RegisterIR> {
         const successor =
           edges.length === 1 && edges[0]!.to !== null ? blocks.get(edges[0]!.to!) : undefined;
         if (successor) block.jump(successor);
+        else if (
+          edges.length === 1 &&
+          edges[0]!.kind === 'trap' &&
+          instructions.get(discovered.instructions.at(-1) ?? '')?.flow.kind === 'call'
+        )
+          // Discovery ends a block at a call to a proven noreturn callee.
+          block.terminate({ kind: 'trap', reason: 'Call to a noreturn callee does not return' });
         else {
           unknown(block, 'Discovered block has an unresolved exit or decode gap');
           block.terminate({ kind: 'unknown', reason: 'Unresolved discovered continuation' });

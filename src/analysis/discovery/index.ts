@@ -46,6 +46,11 @@ export interface DiscoveryInput {
   /** Already-published roots remain boundaries even if not loader-named. */
   readonly functions?: readonly FunctionRecord[];
   readonly previous?: readonly FunctionGraph[];
+  /** Direct call targets (virtual addresses) declared noreturn by supported,
+   * unconflicted library contracts, with the evidence of each declaration. Such a
+   * call ends intraprocedural flow: its return address is never followed (it is
+   * often the next function's entry, as after a final `bl ___stack_chk_fail`). */
+  readonly noreturn_calls?: ReadonlyMap<bigint, readonly string[]>;
 }
 export interface JumpTableCandidate {
   readonly instruction_id: string | null;
@@ -370,7 +375,7 @@ export function discoverFunctions(
       seed(instruction.flow.target, 'direct call target', [flowEvidence], true);
       if (!selected) enqueue(instruction.flow.target);
     }
-    for (const successor of instructionSuccessors(instruction)) {
+    for (const successor of instructionSuccessors(instruction, input.noreturn_calls)) {
       addIncoming(successor.value, instruction);
       enqueue(successor);
     }
@@ -530,7 +535,8 @@ export function discoverFunctions(
         members.push(instruction);
         localDiagnostics.push(...instruction.diagnostics);
         const table = tableAt(instruction);
-        for (const successor of table?.proof.targets ?? instructionSuccessors(instruction)) {
+        for (const successor of table?.proof.targets ??
+          instructionSuccessors(instruction, input.noreturn_calls)) {
           if (successor.value !== item.entry.value && functionEntries.has(successor.value)) {
             // A table reaching another root is rejected below, not a boundary conflict.
             if (!table && (instruction.flow.kind !== 'branch' || instruction.flow.conditional)) {
@@ -554,7 +560,7 @@ export function discoverFunctions(
         context.checkpoint(1);
         byId.set(instruction.id, instruction);
         for (const successor of tableAt(instruction)?.proof.targets ??
-          instructionSuccessors(instruction)) {
+          instructionSuccessors(instruction, input.noreturn_calls)) {
           const list = predecessors.get(successor.value);
           if (list) list.push(instruction);
           else predecessors.set(successor.value, [instruction]);
@@ -665,11 +671,21 @@ export function discoverFunctions(
     const id = entityIdentity(image.selected_slice_id, 'function', { entry: item.entry.value });
     const resolved: ResolvedJumpTable[] = [];
     const tableTargets = new Map<bigint, readonly Address[]>();
+    const noreturnCalls = new Map<bigint, readonly string[]>();
     for (const instruction of members) {
       const table = tableAt(instruction);
-      if (!table) continue;
-      resolved.push({ ...table.proof, evidence_ids: [table.evidence] });
-      tableTargets.set(instruction.address.value, table.proof.targets);
+      if (table) {
+        resolved.push({ ...table.proof, evidence_ids: [table.evidence] });
+        tableTargets.set(instruction.address.value, table.proof.targets);
+      }
+      const flow = instruction.flow;
+      if (instruction.validity !== 'valid' || flow.kind !== 'call' || flow.indirect || !flow.target)
+        continue;
+      const parents = input.noreturn_calls?.get(flow.target.value);
+      if (parents && !noreturnCalls.has(flow.target.value))
+        noreturnCalls.set(flow.target.value, [
+          derive('direct call target declared noreturn', flow.target, parents),
+        ]);
     }
     const blocks = buildCFG(
       {
@@ -680,6 +696,7 @@ export function discoverFunctions(
         function_entries: functionEntries,
         evidence: instructionEvidence,
         jump_tables: tableTargets,
+        noreturn_calls: noreturnCalls,
       },
       context,
     );
