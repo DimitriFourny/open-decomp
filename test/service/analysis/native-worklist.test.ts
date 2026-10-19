@@ -201,7 +201,8 @@ test('arity completeness is inherited only through calls an unobserved argument 
       equal,
     });
     assert.equal(result.summaries.get(c.id)?.arity_complete, false);
-    for (const target of [a, b]) assert.equal(result.summaries.get(target.id)?.arity_complete, !reached);
+    for (const target of [a, b])
+      assert.equal(result.summaries.get(target.id)?.arity_complete, !reached);
   }
 });
 
@@ -219,7 +220,9 @@ test('recursive groups converge although memory shapes would grow along recursiv
     // transferred along the a<->b cycle this would never reach a fixed point.
     observe: (unit, dependencies) => {
       observations++;
-      const inherited = [...dependencies.values()].flatMap((callee) => callee.parameter_shapes ?? []);
+      const inherited = [...dependencies.values()].flatMap(
+        (callee) => callee.parameter_shapes ?? [],
+      );
       return {
         ...observe(unit, dependencies),
         parameter_shapes: [
