@@ -1033,7 +1033,7 @@ for (const [file, fragment] of [
           await service.execute('symbols_find', {
             ...scope,
             kinds: ['symbol'],
-            query: { text: 'ODObject.number', match: 'exact' },
+            query: { text: '-[ODObject number]', match: 'exact' },
           }),
         );
         const method = runtime.items.find(
