@@ -10,6 +10,7 @@ import { X86Decoder } from '../../decoders/x86_64/index.js';
 import { discoverFunctions } from '../../analysis/discovery/index.js';
 import { buildStringIndex } from '../../analysis/strings/index.js';
 import { buildReferenceIndex } from '../../analysis/references/index.js';
+import { classifyImportStubs } from '../../analysis/discovery/stubs.js';
 import { recoverRuntimeMetadata } from '../../metadata/runtime/index.js';
 import { decorateImageNames } from '../../metadata/symbols/index.js';
 
@@ -76,6 +77,7 @@ export async function prepareQueryImport(
     { image: decorated, discovery, strings, revision },
     context,
   );
+  const stubs = classifyImportStubs(decorated, discovery.graphs, references.references, context);
   const evidence = new Map(
     [...decorated.evidence, ...references.evidence].map((item) => [item.id, item]),
   );
@@ -113,10 +115,28 @@ export async function prepareQueryImport(
       for (const item of names.exports) tx.putRecord(image.id, 'export', item);
       for (const graph of discovery.graphs) {
         const label = labels.get(`${graph.function.entry.value}:${graph.function.original_name}`);
+        const stub = stubs.get(graph.function.id);
+        const named = label ? { ...graph.function, display_name: label } : graph.function;
         tx.putRecord(
           image.id,
           'function',
-          label ? { ...graph.function, display_name: label } : graph.function,
+          stub
+            ? {
+                ...named,
+                // A stub is the import it forwards to; an existing native name stays.
+                ...(named.original_name === null
+                  ? {
+                      original_name: stub.import.original_name,
+                      display_name: stub.import.display_name,
+                    }
+                  : {}),
+                kind: 'import_stub' as const,
+                boundary:
+                  named.boundary === 'conflicting' ? named.boundary : ('established' as const),
+                analysis: 'complete' as const,
+                evidence_ids: [...new Set([...named.evidence_ids, ...stub.evidence_ids])].sort(),
+              }
+            : named,
         );
       }
       for (const item of references.strings?.strings ?? strings.strings)

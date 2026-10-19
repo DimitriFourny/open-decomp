@@ -6,7 +6,7 @@ type IntegerOperation = Extract<Expression, { kind: 'integer' }>['op'];
 /** Comments and literals can name a helper without calling it. */
 const NON_CODE = /\/\*[\s\S]*?\*\/|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g;
 const REFERENCE =
-  /\b(?:(bv_[a-z]+|insert_bits|flag_sub_overflow|flag_add_carry)\((?:\s*(\d+))?|(__od_bitcast_(?:f32_u32|u32_f32|f64_u64|u64_f64)|data_address|u?int128_t|bool|true|false|isunordered)\b)/g;
+  /\b(?:(bv_[a-z]+|insert_bits|flag_sub_overflow|flag_add_carry)\((?:\s*(\d+))?|(__od_bitcast_(?:f32_u32|u32_f32|f64_u64|u64_f64)|u?int128_t|bool|true|false|isunordered)\b)/g;
 
 const BITCASTS = [
   ['f32_u32', 'float', 'uint32_t'],
@@ -73,10 +73,6 @@ export function cScalarSupport(text: string): string[] {
   for (const [name, result, parameter] of bitcasts)
     lines.push(
       `static inline ${result} __od_bitcast_${name}(${parameter} value) { ${result} result; _Static_assert(sizeof(result) == sizeof(value), "matching IEEE storage"); memcpy(&result, &value, sizeof(result)); return result; }`,
-    );
-  if (used.has('data_address'))
-    lines.push(
-      'static inline uintptr_t data_address(const char *name, uintptr_t base, uintptr_t offset, ...) { (void)name; return base + offset; }',
     );
   return lines;
 }

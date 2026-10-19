@@ -23,6 +23,8 @@ export interface SuppliedTypeRecord {
   readonly source: TypeSource;
   readonly status: TypeStatus;
   readonly evidence_ids: readonly string[];
+  /** Declared C name printed for an opaque or named-pointer library type. */
+  readonly spelling?: string;
 }
 /** Exact semantic IDs only. Names, register spellings and demangled text are not keys. */
 export interface TypeBinding {

@@ -101,6 +101,8 @@ do {
 
 `findFunctions(options?, callOptions?)` accepts the shared `functions_find` query/paging/budget fields; it supplies the session's project, revision and image IDs. `callOptions` accepts `signal` and `onProgress`. Keep query filters unchanged across cursor pages. A terminal cursor under a partial index means the known index was exhausted, **not** that all functions are known.
 
+A recognized import stub/thunk/PLT entry has `kind: "import_stub"` (omitted otherwise) and the import's name; `decompile({ name })` selects it by that name.
+
 ## Decompile and handle results
 
 ```ts
@@ -108,7 +110,7 @@ binary.decompile(selector: FunctionSelector, options?: DecompileOptions)
   : Promise<ToolResult<'function_decompile'>>
 ```
 
-Choose exactly one selector: `{name}`, `{id}`, or `{address: {space, value}}`. Options are `emitter: 'c-like' | 'python-like'`, a partial shared `budget`, `signal`, and `onProgress`. Function resolution is a separate bounded navigation query; the supplied decompilation budget applies to analysis, not to that query.
+Choose exactly one selector: `{name}`, `{id}`, or `{address: {space, value}}`. Options are `emitter: 'c-like' | 'python-like'`, a partial shared `budget`, `signal`, and `onProgress`. Function resolution (shared with the MCP function handles, `src/service/queries/selector.ts`) is a separate bounded navigation query; the supplied decompilation budget applies to analysis, not to that query.
 
 The method waits for the operation and assembles artifact-backed output automatically. It validates page metadata, size, SHA-256 and the stored result's request binding. The returned inline result retains the **semantic** state, diagnostics, coverage and source mappings. Consequently, a returned object can exceed `budget.output_bytes`: that field bounds individual service delivery, not the assembled artifact. The existing 16 MiB analysis-artifact limit still applies. Output is C-like or Python-like **pseudocode**, not recovered original source or necessarily executable code.
 

@@ -54,6 +54,35 @@ export function printfArgumentTypes(format: string, abi: AbiProfile): readonly A
   return types;
 }
 
+/** Standard scanf conversions: each unsuppressed conversion stores through one pointer.
+ * Positional syntax, unknown conversions and malformed scansets retain an open list. */
+export function scanfArgumentTypes(format: string): readonly AbiType[] | null {
+  const types: AbiType[] = [];
+  for (let cursor = 0; cursor < format.length; cursor++) {
+    if (format[cursor] !== '%') continue;
+    cursor++;
+    if (format[cursor] === '%') continue;
+    const suppressed = format[cursor] === '*';
+    if (suppressed) cursor++;
+    while (/[0-9]/.test(format[cursor] ?? '')) cursor++;
+    if (format[cursor] === '$') return null;
+    if (format[cursor] === 'm') cursor++;
+    if (format.startsWith('hh', cursor) || format.startsWith('ll', cursor)) cursor += 2;
+    else if ('hljztL'.includes(format[cursor] ?? '\0')) cursor++;
+    const conversion = format[cursor];
+    if (conversion === '[') {
+      cursor++;
+      if (format[cursor] === '^') cursor++;
+      if (format[cursor] === ']') cursor++;
+      cursor = format.indexOf(']', cursor);
+      if (cursor < 0) return null;
+    } else if (!conversion || !'diouxXaAeEfFgGscpn'.includes(conversion)) return null;
+    if (!suppressed) types.push({ kind: 'pointer' });
+    if (types.length > 64) return null;
+  }
+  return types;
+}
+
 /** Literal bytes must have immutable, terminated image provenance. Never use a
  * nearby string, mutable storage, a guessed library name or a conflicting contract. */
 export function formatArgumentSignatures(
@@ -77,7 +106,8 @@ export function formatArgumentSignatures(
     if (
       !contract ||
       contract.conflicts_with.length ||
-      contract.variadic_rule?.kind !== 'format' ||
+      (contract.variadic_rule?.kind !== 'format' &&
+        contract.variadic_rule?.kind !== 'scanf_format') ||
       !contract.abi_signature.parameters
     )
       continue;
@@ -113,7 +143,10 @@ export function formatArgumentSignatures(
       (item) => item.address.value === address && item.string !== undefined,
     );
     if (literal?.string === undefined) continue;
-    const additional = printfArgumentTypes(literal.string, abi);
+    const additional =
+      contract.variadic_rule.kind === 'scanf_format'
+        ? scanfArgumentTypes(literal.string)
+        : printfArgumentTypes(literal.string, abi);
     if (!additional) continue;
     result.set(call.node_id, {
       ...contract.abi_signature,

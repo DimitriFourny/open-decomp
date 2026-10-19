@@ -72,6 +72,9 @@ const reservedRuntimeName =
 const reservedRuntimePrefix =
   /^(?:__|bv_|fp_|cast_|vector_|flag_|memory_|unknown_|physical_|source_|type_|transfer_|requirement_)/;
 
+const reservedLinkageName =
+  /^(?:__od_|__builtin_|__pointer$|__unknown_effect$|bv_|fp_|cast_|vector_|flag_|memory_|unknown_|physical_|source_|type_|transfer_|requirement_)/;
+
 export interface SourceNamePlan {
   /** Preferred name per value or local; null where independent roles conflict. */
   readonly names: ReadonlyMap<string, string | null>;
@@ -980,10 +983,12 @@ export function planSourceNames(
 
 /** One allocator namespace serves source identifiers in both dialects. Helpers
  * and language keywords are not valid preferred variable names. */
-export function sourceIdentifierStem(preferred: string): string {
+export function sourceIdentifierStem(preferred: string, linkage = false): string {
   let stem = preferred.replace(/[^A-Za-z0-9_]/g, '_').slice(0, 64);
   if (!/^[A-Za-z_]/.test(stem)) stem = `value_${stem}`;
-  if (reservedWord.test(stem) || reservedRuntimeName.test(stem) || reservedRuntimePrefix.test(stem))
-    stem = `value_${stem}`;
+  // A native linkage name (`__stderrp`) keeps its leading underscores; only the
+  // generated helpers' own spellings stay reserved.
+  const prefixed = linkage ? reservedLinkageName.test(stem) : reservedRuntimePrefix.test(stem);
+  if (reservedWord.test(stem) || reservedRuntimeName.test(stem) || prefixed) stem = `value_${stem}`;
   return stem;
 }
