@@ -639,6 +639,49 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
           : undefined;
     if (address) candidates.set(addressKey(address), address);
   }
+  // Any call's observed argument registers and stack values, whatever its
+  // contract: a constant that addresses a string is a literal wherever it is
+  // used. Registers are tracked as cells; cells that tile a whole pointer-width
+  // register form its constant.
+  for (const call of input.types.calls?.calls ?? []) {
+    const cells = new Map<string, { offset: number; width: number; bits: bigint }[]>();
+    for (const { register, fact } of call.register_candidates) {
+      context.checkpoint(1);
+      if (fact.value.kind !== 'constant') continue;
+      const row = cells.get(register.root) ?? [];
+      row.push({
+        offset: register.offset_bits,
+        width: register.width_bits,
+        bits: BigInt.asUintN(register.width_bits, fact.value.bits),
+      });
+      cells.set(register.root, row);
+    }
+    for (const row of cells.values()) {
+      row.sort((left, right) => left.offset - right.offset || right.width - left.width);
+      let cursor = 0,
+        whole = 0n;
+      for (const cell of row)
+        if (cell.offset === cursor) {
+          whole |= cell.bits << BigInt(cell.offset);
+          cursor += cell.width;
+        }
+      if (cursor === image.target.address_bits)
+        candidates.set(addressKey({ image_id: image.id, space: 'va', value: whole }), {
+          image_id: image.id,
+          space: 'va',
+          value: whole,
+        });
+    }
+    for (const fact of call.explicit_arguments) {
+      context.checkpoint(1);
+      if (fact.value.kind === 'address')
+        candidates.set(addressKey(fact.value.address), fact.value.address);
+      else if (fact.value.kind === 'constant' && fact.value.bits >= 0n && fact.value.bits < U64_LIMIT) {
+        const address: Address = { image_id: image.id, space: 'va', value: fact.value.bits };
+        candidates.set(addressKey(address), address);
+      }
+    }
+  }
   for (const block of input.ir.blocks)
     for (const node of block.instructions)
       if (node.kind === 'assign' && node.expression.kind === 'address')

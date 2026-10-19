@@ -1,3 +1,4 @@
+import { characterLiteral } from './string-literals.js';
 import type { Address } from '../core/index.js';
 import { bitWidth, sameType, type DataType, type Expression, type Value } from '../ir/index.js';
 import type { Writer } from './writer.js';
@@ -468,6 +469,8 @@ const simplifications = {
     'adding a constant in the upper half of the result width is subtracting its two-complement magnitude: the same value modulo 2^width',
   rotate_inline:
     'a rotation of a w-bit unsigned bare variable by a constant 0<k<w is (x << k) | (x >> (w-k)) reduced to w bits, printed in the direction with the smaller count; the variable is pure, so reading it twice in one expression is exact',
+  character_literal:
+    'a constant combined with a value established as one character code (a byte loaded through a pointer to bytes, or a library character parameter) is that code spelled as the character constant of the same value',
 } as const;
 
 /** Source-view syntax shared by expression and memory printing. */
@@ -692,6 +695,14 @@ export class SourcePrinter {
     return this.primary(text, ctype);
   }
 
+  /** Character constant of the same code (`'/'`, or Python `ord('/')`), when the
+   * code has a character spelling; `escapes` also admits NUL and the standard
+   * escapes. The value, its type and every operation are unchanged. */
+  character(value: bigint, escapes: boolean): Printed | undefined {
+    const text = characterLiteral(value, this.writer.language, escapes);
+    return text === undefined ? undefined : { ...this.literal(value, 64), text };
+  }
+
   /** Signed decimal constant for a signed comparison operand. */
   signedLiteral(value: bigint): Printed {
     const magnitude = this.literal(value < 0n ? -value : value, 64);
@@ -714,6 +725,11 @@ export interface ExpressionOptions {
   /** Proven inclusive unsigned upper bound of an integer operand. */
   readonly maximum?: (value: Value) => bigint | undefined;
   readonly nativeIntegerStorage?: boolean;
+  /** Proven character code values: constants combined with them print as characters. */
+  readonly character?: (value: Value) => boolean;
+  /** A value printed in value position (a call argument, store, comparison for
+   * identity or select arm): the string literal of a constant address, if any. */
+  readonly literal?: (value: Value) => Printed | undefined;
   /** Source view: records each exact simplification it applies. */
   readonly presentation?: SimplificationRecorder;
   /** Approved scalar operation under the recorded FP environment requirement. */
@@ -767,6 +783,16 @@ export function expressionText(
   };
   const range = (value: Printed, bits: number): IntegerCType =>
     value.ctype ?? { bits, signed: false };
+  /** A constant combined with a character code, spelled as that character. */
+  const characterOf = (
+    other: Value,
+    constant: bigint | undefined,
+    escapes: boolean,
+  ): Printed | undefined => {
+    if (constant === undefined || !options.character?.(other)) return undefined;
+    const printed = printer.character(constant, escapes);
+    return printed && printer.simplify('character_literal', [other.id]) ? printed : undefined;
+  };
   /** Prefix `-`/`~` at the result width; a 1-bit complement is logical negation. */
   const prefix = (symbol: '-' | '~', printed: Printed): Printed => {
     if (symbol === '~' && width === 1 && type.kind === 'integer') return printer.not(printed);
@@ -1027,8 +1053,15 @@ export function expressionText(
           }
         }
         let left = operand(leftValue);
-        const right =
+        let right =
           subtrahend === undefined ? operand(expression.right) : printer.literal(subtrahend, width);
+        if (op !== '*')
+          right =
+            characterOf(
+              leftValue,
+              subtrahend ?? options.constant?.(expression.right),
+              false,
+            ) ?? right;
         if (python) {
           const l = range(left, width).bits,
             r = range(right, width).bits;
@@ -1185,8 +1218,14 @@ export function expressionText(
     case 'compare': {
       const bits = bitWidth(expression.left.type);
       const isSigned = expression.op.startsWith('s');
-      const side = (value: Value): Printed => {
+      const escapes = expression.op === 'eq' || expression.op === 'ne';
+      const side = (value: Value, other: Value): Printed => {
         const constant = options.constant?.(value);
+        // Identity comparisons print a character code or a string address as
+        // such; an ordered comparison of a character keeps only printable codes.
+        const spelled =
+          characterOf(other, constant, escapes) ?? (escapes ? options.literal?.(value) : undefined);
+        if (spelled) return spelled;
         if (isSigned) {
           const signed = constant === undefined ? undefined : BigInt.asIntN(bits, constant);
           return signed !== undefined && signed >= -(1n << 31n) && signed < 1n << 31n
@@ -1197,8 +1236,8 @@ export function expressionText(
       };
       // Every unsigned-compare operand is its non-negative bit pattern, so any
       // common C type compares the same values.
-      const left = side(expression.left),
-        right = side(expression.right);
+      const left = side(expression.left, expression.right),
+        right = side(expression.right, expression.left);
       return printer.binary(
         comparisonOperators[expression.op],
         left,
@@ -1305,8 +1344,8 @@ export function expressionText(
     }
     case 'select': {
       const condition = operand(expression.condition),
-        yes = operand(expression.when_true),
-        no = operand(expression.when_false);
+        yes = options.literal?.(expression.when_true) ?? operand(expression.when_true),
+        no = options.literal?.(expression.when_false) ?? operand(expression.when_false);
       const ctype =
         yes.ctype && no.ctype
           ? python

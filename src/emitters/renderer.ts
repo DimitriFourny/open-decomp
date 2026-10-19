@@ -46,6 +46,8 @@ import {
 import { indexedDataAccesses, type IndexedDataAccess } from './source-tables.js';
 import { cScalarSupport } from './source-c-support.js';
 import { UnsignedBounds } from './source-bounds.js';
+import { characterEvidence } from './source-characters.js';
+import { stringLiteral, STRING_LITERAL_LIMIT } from './string-literals.js';
 import { cSourceName } from '../metadata/symbols/c-names.js';
 import { catalog, type CatalogEntry } from '../metadata/library-contracts/catalog.js';
 import {
@@ -135,6 +137,9 @@ interface ConditionTerm {
   /** `value` is not the printed test (a flag-carried short circuit): never fold it. */
   readonly opaque?: true;
 }
+const STRING_LITERAL_SCOPE =
+  'pointer-width constants addressing an immutable NUL-terminated string with established encoding (an interior address denotes its suffix bytes), printed as that string literal where the constant is a value: argument, store, return, copy, select arm or identity comparison';
+
 /** Exact complement of each integer predicate (no NaN case for integers). */
 const NEGATED_PREDICATE: Readonly<Record<IntegerPredicate, IntegerPredicate>> = {
   eq: 'ne',
@@ -255,6 +260,8 @@ export class Renderer {
   private readonly sourceNames = new Map<string, string>();
   private readonly usedSourceNames = new Set<string>();
   private readonly sourceAddresses = new Map<string, SourceAddress | null>();
+  /** Source view: values holding one character code (see source-characters.ts). */
+  private characters: ReadonlySet<string> = new Set();
   private readonly sourceDataValue: (value: Value) => SourceAddress | undefined;
   private readonly dataTables = new Map<string, IndexedDataAccess & { readonly name: string }>();
   private indexedData: ReadonlyMap<string, IndexedDataAccess> = new Map();
@@ -370,7 +377,7 @@ export class Renderer {
       context.checkpoint(1);
       this.typeRecords.set(record.id, this.typeRecords.has(record.id) ? null : record);
     }
-    if (this.sourceView && language === 'c-like')
+    if (this.sourceView)
       for (const proof of input.types?.evidence ?? []) {
         context.checkpoint(1);
         if (proof.origin.kind === 'library' && Object.hasOwn(catalog, proof.origin.contract))
@@ -408,7 +415,12 @@ export class Renderer {
       if (projection.results.length === 1)
         this.sourceValueTypes.set(projection.results[0]!.id, declaration.return_type);
     }
-    if (this.sourceView) this.stridedPointerTypes();
+    if (this.sourceView) {
+      this.stridedPointerTypes();
+      this.characters = characterEvidence(this.program, context, {
+        bytePointer: (id) => this.bytePointerType(id),
+      }).values;
+    }
     for (const block of this.program.blocks.values()) {
       context.checkpoint(1);
       this.origins.set(block.id, block);
@@ -1094,6 +1106,9 @@ export class Renderer {
           }
         : {}),
       constant: this.constantOf,
+      ...(this.sourceView
+        ? { character: (value: Value) => this.characters.has(value.id), literal: this.valueLiteral }
+        : {}),
       maximum: (value: Value) => this.bounds.maximum(value),
       nativeIntegerStorage: this.nativeIntegerStorage,
       ...(this.recorder ? { presentation: this.recorder } : {}),
@@ -1165,6 +1180,8 @@ export class Renderer {
       // reinterpretation: C assignment would otherwise numerically convert.
       if (this.expressionType(uncast).kind === this.expressionType(source).kind) source = uncast;
     }
+    const literal = this.sourceView ? this.valueLiteral(source) : undefined;
+    if (literal) return this.assignedText(destination, literal);
     if (
       this.sourceView &&
       !this.inline.has(source.id) &&
@@ -1516,20 +1533,31 @@ export class Renderer {
   private addressKey(address: Address): string {
     return `${address.image_id}:${address.space}:${address.value}`;
   }
+  /** String literal text of an item; a string past STRING_LITERAL_LIMIT shows
+   * its prefix and an explicit marker keeping the address and omitted length. */
+  private stringLiteralText(item: SourceAddress): string {
+    const literal = stringLiteral(item.string!, this.language);
+    this.context.checkpoint(1 + literal.text.length);
+    this.writer.guard(Buffer.byteLength(literal.text));
+    if (literal.omitted_bytes === 0) return literal.text;
+    const address = `0x${item.address.value.toString(16)}`;
+    return this.language === 'c-like'
+      ? `${literal.text} /* ${address}: +${literal.omitted_bytes} bytes */`
+      : this.call(
+          'string_prefix',
+          `Pointer to the NUL-terminated string at the given address; only its first ${STRING_LITERAL_LIMIT} characters are shown. Arguments: that prefix, string address, number of further bytes not shown.`,
+          [literal.text, address, String(literal.omitted_bytes)],
+        );
+  }
   private sourceAddress = (address: Address, literal = false): string => {
     const key = this.addressKey(address),
       item = this.sourceAddresses.get(key);
     if (
       literal &&
       item?.string !== undefined &&
-      (!this.sourceView || (item.string_start === true && item.object?.mutable === false))
+      (!this.sourceView || this.stringLiteralEligible(item, true))
     )
-      return this.writer
-        .quote(item.string)
-        .replace(/\\u000a/g, '\\n')
-        .replace(/\\u000d/g, '\\r')
-        .replace(/\\u0009/g, '\\t')
-        .replace(/\\u0000/g, '\\0');
+      return this.stringLiteralText(item);
     if (item?.object) {
       const object = item.object;
       return this.call(
@@ -1608,10 +1636,12 @@ export class Renderer {
     return (name !== undefined && this.sourceView && this.linkageNames.get(id)) || name;
   }
 
-  /** Source view: a C string literal for an exact pointer-width constant
-   * argument addressing the start (not an interior suffix) of an immutable,
-   * NUL-terminated string with an established encoding; otherwise undefined. */
-  private sourceLiteral(value: Value): string | undefined {
+  /** Source view: the string literal of an exact pointer-width constant that
+   * addresses an immutable, NUL-terminated string with an established encoding;
+   * otherwise undefined. An interior address (a tail-merged string) denotes the
+   * same bytes as its suffix. The empty string is a literal only where the
+   * context already establishes a character pointer (`allowEmpty`). */
+  private sourceLiteral(value: Value, allowEmpty = false): string | undefined {
     if (
       !this.sourceView ||
       value.type.kind !== 'integer' ||
@@ -1620,16 +1650,55 @@ export class Renderer {
       return undefined;
     const address = this.sourceAddressOf(value),
       item = address && this.sourceAddresses.get(this.addressKey(address));
-    if (
-      !address ||
-      !item ||
-      item.string === undefined ||
-      item.string_encoding === undefined ||
-      item.string_start !== true ||
-      item.object?.mutable !== false
-    )
-      return undefined;
+    if (!address || !item || !this.stringLiteralEligible(item, allowEmpty)) return undefined;
     return this.sourceAddress(address, true);
+  }
+
+  private stringLiteralEligible(item: SourceAddress, allowEmpty: boolean): boolean {
+    return (
+      item.string !== undefined &&
+      item.string_encoding !== undefined &&
+      item.object?.mutable === false &&
+      (allowEmpty || item.string !== '')
+    );
+  }
+
+  /** The literal of a constant string address printed in a value position (a
+   * call argument, store, return, copy, select arm or identity comparison);
+   * never as an operand of arithmetic, where the constant is just an integer. */
+  private valueLiteral = (value: Value): Printed | undefined => {
+    const text = this.sourceLiteral(value);
+    return text !== undefined &&
+      this.localValidation.presentation(
+        'string_literal',
+        value.id,
+        STRING_LITERAL_SCOPE,
+        [value.id],
+      )
+      ? this.printer.primary(text, { bits: 64, signed: false })
+      : undefined;
+  };
+
+  /** Library-declared character parameter of a source call. Every library
+   * declaration the signature rests on must agree. */
+  private characterParameter(projection: BoundaryProjection, index: number): boolean {
+    let agreed = false;
+    for (const id of projection.signature?.evidence_ids ?? []) {
+      this.context.checkpoint(1);
+      const declaration = this.libraryDeclarations.get(id);
+      if (!declaration) continue;
+      if (!declaration.character?.includes(index)) return false;
+      agreed = true;
+    }
+    return agreed;
+  }
+
+  /** A pointer type whose pointee is an 8-bit integer (`char`, `uint8_t`). */
+  private bytePointerType(id: string): boolean {
+    const pointer = this.typeRecords.get(id)?.definition;
+    if (pointer?.kind !== 'pointer') return false;
+    const target = this.typeRecords.get(pointer.to)?.definition;
+    return target?.kind === 'integer' && target.bits === 8;
   }
 
   private sourceCallee(node: Extract<Instruction, { kind: 'call' }>): string {
@@ -2633,8 +2702,15 @@ export class Renderer {
       const pointee = pointer ? this.typeRecords.get(parameterType.to)?.definition : undefined;
       const bytePointer =
         pointee?.kind === 'void' || (pointee?.kind === 'integer' && pointee.bits === 8);
+      const code =
+        !pointer && this.characterParameter(projection, index) ? this.constantOf(value) : undefined;
+      const character = code === undefined ? undefined : this.printer.character(code, true);
+      if (character && this.printer.simplify('character_literal', [value.id]))
+        return character.text;
       const literal =
-        !literalsAllowed || (pointer && !bytePointer) ? undefined : this.sourceLiteral(value);
+        !literalsAllowed || (pointer && !bytePointer)
+          ? undefined
+          : this.sourceLiteral(value, pointer && bytePointer);
       if (literal !== undefined) literals.push(value.id);
       const text = pointer
         ? (literal ?? this.sourceAddressValue(value, !this.sourceView))
@@ -2661,7 +2737,7 @@ export class Renderer {
       !this.localValidation.presentation(
         'string_literal',
         node.id,
-        'pointer-width constant call arguments addressing the exact start of an immutable NUL-terminated string with established encoding, printed as that string literal',
+        STRING_LITERAL_SCOPE,
         literals,
       )
     )
@@ -2821,9 +2897,13 @@ export class Renderer {
         this.variableKey(node.result) === this.variableKey(expression.value)
       )
         return '';
+      const literal =
+        expression.kind === 'constant' || expression.kind === 'address'
+          ? this.valueLiteral(node.result)
+          : undefined;
       return `${this.local(node.result)} = ${this.assignedText(
         node.result,
-        this.expression(expression, this.expressionType(node.result)),
+        literal ?? this.expression(expression, this.expressionType(node.result)),
         expression,
       )}`;
     }
@@ -2924,13 +3004,18 @@ export class Renderer {
             const typed = this.language === 'c-like' ? this.slotType(node.id) : undefined;
             const floating = this.floatSlot(node.id);
             const pointer = typed && this.pointerText(node.value, typed);
+            const literal = !floating && !pointer ? this.valueLiteral(node.value) : undefined;
             text = `${storage} = ${
               pointer ??
               (floating
                 ? this.floatingValue(node.value, floating).text
-                : typed
-                  ? `(${this.formalSpelling(typed)})(uintptr_t)${this.printer.group(this.printed(node.value), UNARY)}`
-                  : this.converted(this.printed(node.value), bitWidth(node.value.type)))
+                : literal
+                  ? typed && !/^(?:const )?(?:char|void)\s*\*$/.test(this.formalSpelling(typed))
+                    ? `(${this.formalSpelling(typed)})${literal.text}`
+                    : literal.text
+                  : typed
+                    ? `(${this.formalSpelling(typed)})(uintptr_t)${this.printer.group(this.printed(node.value), UNARY)}`
+                    : this.converted(this.printed(node.value), bitWidth(node.value.type)))
             }`;
           } else text = this.assignmentText(node, storage);
           break;
@@ -5126,6 +5211,8 @@ export class Renderer {
             if (scalar) return this.scalarReturn(value, scalar.bits, scalar.signed).text;
             if (this.program.source?.return_pointer && !this.program.source.return_source_type)
               return this.sourceAddressValue(value, true);
+            const literal = this.valueLiteral(value);
+            if (literal) return literal.text;
             const returned = this.sourceInterpretation(
               value,
               this.printed(value),
@@ -5194,7 +5281,7 @@ export class Renderer {
           this.sourceNames.set(key, name);
           const arguments_ = tail.boundary.arguments.map((value) => {
             ids.push(value.id);
-            return this.value(value);
+            return this.valueLiteral(value)?.text ?? this.value(value);
           });
           if (tail.boundary.argument_list_complete === false)
             arguments_.push(
