@@ -1035,4 +1035,76 @@ for (const language of ['c-like', 'python-like'] as const)
         assert.deepEqual(observed.values, [reference(words, n, limit)], `${n} ${limit}`);
       }
     });
+
+    test('case arms print without braces unless an arm declares', () => {
+      const b = program('source-switch-braces'),
+        entry = b.block('entry', [i32]),
+        first = b.block('first'),
+        second = b.block('second'),
+        other = b.block('other');
+      const selector = entry.parameters[0]!;
+      entry.terminate({
+        kind: 'switch',
+        value: selector,
+        cases: [
+          { bits: 1n, edge: entry.edge(first) },
+          { bits: 2n, edge: entry.edge(second) },
+        ],
+        otherwise: entry.edge(other),
+      });
+      for (const [block, marker] of [
+        [first, 11n],
+        [second, 22n],
+        [other, 33n],
+      ] as const) {
+        block.store(block.constant(i64, 0x1000n), block.constant(i32, marker));
+        block.return([block.constant(i32, marker)]);
+      }
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language, 'source', true),
+        checked = emit(input, language, 'checked', true);
+      const text = source.emission.text;
+      if (c) {
+        assert.match(text, /case 1:\n\s+\S/);
+        assert.match(text, /default:\n\s+\S/);
+        assert.doesNotMatch(text, /(?:case \d+|default): \{/);
+        // Every opening brace is closed: the switch's and the function's.
+        assert.equal(text.match(/\{/g)?.length, text.match(/\}/g)?.length);
+        assert.equal(text.match(/\{/g)?.length, 2);
+        // The checked view keeps its braced arms.
+        assert.match(checked.emission.text, /case 0x1: \{/);
+      }
+      for (const value of [0n, 1n, 2n, 3n]) {
+        const args = new Map([[selector.id, value]]);
+        const actual = execute(source.emission, args, memory());
+        const expected = execute(checked.emission, args, memory());
+        assert.deepEqual(actual.values, expected.values);
+        assert.deepEqual(actual.memory, expected.memory);
+      }
+    });
+
+    test('a case arm holding a loop keeps its braces', () => {
+      const b = program('source-switch-loop-braces'),
+        entry = b.block('entry', [i32]),
+        spin = b.block('spin', [i32]),
+        done = b.block('done', [i32]),
+        other = b.block('other');
+      const selector = entry.parameters[0]!;
+      entry.terminate({
+        kind: 'switch',
+        value: selector,
+        cases: [{ bits: 1n, edge: entry.edge(spin, [selector]) }],
+        otherwise: entry.edge(other),
+      });
+      const remaining = spin.parameters[0]!;
+      spin.branch(
+        spin.compare('eq', remaining, spin.constant(i32, 0n)),
+        spin.edge(done, [remaining]),
+        spin.edge(spin, [spin.int('sub', remaining, spin.constant(i32, 1n))]),
+      );
+      done.return(done.parameters);
+      other.return([other.constant(i32, 9n)]);
+      const text = emit(b.finish(entry, [i32]), language, 'source', true).emission.text;
+      if (c) assert.match(text, /case 1: \{/);
+    });
   });

@@ -666,3 +666,135 @@ for (const abi of [sysvAMD64Abi, darwinArm64Abi])
     assert.deepEqual(observed.values, [18n]);
     assert.equal(observed.memory.get(0x2000n), 18);
   });
+
+/** Unoptimized `double scaled_or_zero(const double *a, uint64_t n)`: the result
+ * is spilled, copied slot to slot by plain reloads and reloaded into the FP
+ * result register just before returning, after the integer result register
+ * received `n << 1` (or `n` on the zero path). `typed` false spills the raw
+ * element bits instead of `a[0] * 2.0`: then nothing types the FP register. */
+function slotChain(abi: AbiProfile, typed: boolean) {
+  const layout = abi.classifyCall({
+    returns: f64,
+    parameters: [{ kind: 'pointer' }, word],
+    variadic: false,
+    fixed_parameter_count: 2,
+  });
+  const pointer = register(layout.parameters[0]!.locations[0]),
+    count = register(layout.parameters[1]!.locations[0]),
+    fp = register(layout.returns[0]);
+  const low: RegisterDescriptor = {
+    ...fp,
+    id: `${fp.root}:0:64`,
+    width_bits: 64,
+    write_rule: 'preserve_other_bits',
+  };
+  const intResult = register(
+    abi.classifyCall({ returns: word, parameters: [], variadic: false, fixed_parameter_count: 0 })
+      .returns[0],
+  );
+  const b = builder(`slot-chain-${abi.id}-${typed}`),
+    entry = b.block('entry'),
+    zero = b.block('zero'),
+    nonzero = b.block('nonzero'),
+    done = b.block('done');
+  const sp = entry.readRegister(abi.stack_pointer);
+  const slot = (offset: bigint) => entry.int('sub', sp, entry.constant(u64, offset));
+  const spilled = slot(16n),
+    copied = slot(24n),
+    returned = slot(8n);
+  const n = entry.readRegister(count);
+  entry.branch(
+    entry.compare('eq', n, entry.constant(u64, 0n)),
+    entry.edge(zero),
+    entry.edge(nonzero),
+  );
+  zero.store(returned, zero.constant(u64, 0n));
+  zero.writeRegister(intResult, n);
+  zero.jump(done);
+  const element = nonzero.load(u64, nonzero.readRegister(pointer));
+  nonzero.store(
+    spilled,
+    typed
+      ? nonzero.cast(
+          'bitcast',
+          u64,
+          nonzero.fp('mul', nonzero.cast('bitcast', f64, element), nonzero.constant(f64, bits(2))),
+        )
+      : element,
+  );
+  nonzero.writeRegister(intResult, nonzero.int('shl', n, nonzero.constant(u64, 1n)));
+  nonzero.store(copied, nonzero.load(u64, spilled));
+  nonzero.store(returned, nonzero.load(u64, copied));
+  nonzero.jump(done);
+  done.writeRegister(low, done.load(u64, returned));
+  done.return([]);
+  const ir = constructSSA(b.finish(entry, [])).value as SSAForm;
+  const source: SourceEvidence = { abi, callees: [], addresses: [] };
+  const types = recoverTypes(ir, abi, createOperationContext(), {
+    image_id: image,
+    slice_id: slice,
+    revision: 0,
+  });
+  const program = reconstruct(
+    { function: structureControlFlow(ir, createOperationContext()).value!, types, source },
+    createOperationContext(),
+    'source',
+  );
+  return { ir, source, types, program };
+}
+
+for (const abi of [sysvAMD64Abi, windowsX64Abi, darwinArm64Abi])
+  test(`${abi.id} an FP result copied between frame slots before its final reload is the result`, () => {
+    const fixture = slotChain(abi, true);
+    for (const projection of fixture.program.returns.values()) {
+      assert.equal(projection.results.length, 1);
+      assert.deepEqual(projection.results[0]!.type, f64);
+    }
+    for (const language of ['c-like', 'python-like'] as const) {
+      const { emission } = emit(
+        fixture.ir,
+        { source: fixture.source, types: fixture.types },
+        language,
+      );
+      assert.match(emission.text, language === 'c-like' ? /^double fn_/m : /-> double:/);
+      assert.doesNotMatch(emission.text, /physical_return/);
+      const formals = emittedFormals(emission);
+      assert.equal(formals.length, 2);
+      const memory = new Map<bigint, number>();
+      for (let byte = 0; byte < 8; byte++)
+        memory.set(0x2000n + BigInt(byte), Number((bits(1.5) >> BigInt(byte * 8)) & 255n));
+      for (const [n, expected] of [
+        [0n, 0],
+        [1n, 3],
+      ] as const) {
+        const observed = execute(
+          emission,
+          new Map([
+            [formals[0]!.statement_id, 0x2000n],
+            [formals[1]!.statement_id, n],
+          ]),
+          new Map(memory),
+        );
+        assert.deepEqual(observed.values, [bits(expected)]);
+      }
+    }
+  });
+
+for (const abi of [sysvAMD64Abi, windowsX64Abi])
+  test(`${abi.id} an untyped FP register written after the integer result keeps the explicit exit form`, () => {
+    const { program, ir, source, types } = slotChain(abi, false);
+    for (const projection of program.returns.values())
+      assert.ok(!projection.results.some((value) => value.type.kind === 'integer'));
+    assert.ok(
+      program.local_validation?.some(
+        (record) =>
+          record.rule === 'primary_result' &&
+          record.reason?.includes('without typed IEEE evidence'),
+      ),
+    );
+    for (const language of ['c-like', 'python-like'] as const) {
+      const { emission } = emit(ir, { source, types }, language);
+      assert.match(emission.text, /physical_return\(/);
+      assert.doesNotMatch(emission.text, language === 'c-like' ? /^uint64_t fn_/m : /-> uint64_t:/);
+    }
+  });

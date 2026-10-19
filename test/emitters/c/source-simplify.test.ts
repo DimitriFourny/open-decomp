@@ -412,6 +412,162 @@ const scenarios: readonly Scenario[] = [
       rule: 'rotate_inline',
     };
   }),
+  ...(['shl', 'lshr', 'ashr'] as const).map((op): Scenario => ({
+    name: `${op} by a count masked below the width is the native shift`,
+    build: (entry, a, b) => entry.int(op, a, entry.int('and', b, entry.constant(i64, 63n))),
+    expected: (a, b) => {
+      const count = b & 63n;
+      return op === 'shl'
+        ? lowBits(a << count, 64)
+        : op === 'lshr'
+          ? a >> count
+          : lowBits(signed(a, 64) >> count, 64);
+    },
+    absent: { c: /bv_(?:shl|lshr|ashr)|__od_bv/, python: /bv_(?:shl|lshr|ashr)/ },
+    present: {
+      c: op === 'shl' ? /arg0 << \(\w+ & 0x3f\)/ : />> \(\w+ & 0x3f\)/,
+      python: op === 'shl' ? /arg0 << \(\w+ & 0x3f\)/ : />> \(\w+ & 0x3f\)/,
+    },
+    rule: 'bounded_shift_count',
+  })),
+  ...([8, 16, 32] as const).flatMap((bits) =>
+    (['shl', 'lshr', 'ashr'] as const).map((op): Scenario => ({
+      name: `${bits}-bit ${op} by a count masked to ${bits - 1} is the native shift`,
+      build: (entry, a, b) => {
+        const type = integer(bits);
+        const count = entry.int(
+          'and',
+          entry.extract(b, 0, bits),
+          entry.constant(type, BigInt(bits - 1)),
+        );
+        return entry.cast('zero_extend', i64, entry.int(op, entry.extract(a, 0, bits), count));
+      },
+      expected: (a, b) => {
+        const x = lowBits(a, bits),
+          count = lowBits(b, bits) & BigInt(bits - 1);
+        return lowBits(
+          op === 'shl' ? x << count : op === 'lshr' ? x >> count : signed(x, bits) >> count,
+          bits,
+        );
+      },
+      absent: { c: /bv_(?:shl|lshr|ashr)|__od_bv/, python: /bv_(?:shl|lshr|ashr)/ },
+      rule: 'bounded_shift_count',
+    })),
+  ),
+  {
+    name: 'a shift count masked twice is masked once',
+    build: (entry, a, b) =>
+      entry.int(
+        'shl',
+        a,
+        entry.int('and', entry.int('and', b, entry.constant(i64, 63n)), entry.constant(i64, 63n)),
+      ),
+    expected: (a, b) => lowBits(a << (b & 63n), 64),
+    absent: { c: /& 0x3f & 0x3f|bv_shl/, python: /& 0x3f & 0x3f|bv_shl/ },
+    rule: 'bounded_shift_count',
+  },
+  {
+    name: 'a shift count masked beyond the width keeps its helper',
+    build: (entry, a, b) => entry.int('shl', a, entry.int('and', b, entry.constant(i64, 127n))),
+    expected: (a, b) => ((b & 127n) >= 64n ? 0n : lowBits(a << (b & 127n), 64)),
+    present: { c: /bv_shl\(64, arg0, \w+ & 0x7f\)/, python: /bv_shl\(64, arg0, \w+ & 0x7f\)/ },
+  },
+  {
+    name: 'a shift by an unmasked count keeps its helper',
+    build: (entry, a, b) => entry.int('lshr', a, b),
+    expected: (a, b) => (b >= 64n ? 0n : a >> b),
+    present: { c: /bv_lshr\(64, arg0, \w+\)/, python: /bv_lshr\(64, arg0, \w+\)/ },
+  },
+  {
+    name: 'a count bounded by a narrow zero extension below the width needs no helper',
+    build: (entry, a, b) =>
+      entry.int('shl', a, entry.cast('zero_extend', i64, entry.extract(b, 0, 5))),
+    expected: (a, b) => lowBits(a << (b & 31n), 64),
+    absent: { c: /bv_shl|__od_bv/, python: /bv_shl/ },
+    rule: 'bounded_shift_count',
+  },
+  {
+    name: 'a count bounded only by a byte zero extension keeps its helper',
+    build: (entry, a, b) =>
+      entry.int('shl', a, entry.cast('zero_extend', i64, entry.extract(b, 0, 8))),
+    expected: (a, b) => ((b & 255n) >= 64n ? 0n : lowBits(a << (b & 255n), 64)),
+    present: { c: /bv_shl\(64, arg0, /, python: /bv_shl\(64, arg0, / },
+  },
+  {
+    name: 'x + (x << k) is a multiply',
+    build: (entry, a) => entry.int('add', a, entry.int('shl', a, entry.constant(i64, 3n))),
+    expected: (a) => lowBits(a * 9n, 64),
+    absent: { c: /<< 3/, python: /<< 3/ },
+    present: { c: /arg0 \* 9/, python: /arg0 \* 9/ },
+    rule: 'strength_reduced_multiply',
+  },
+  {
+    name: '(x << k) - x is a multiply',
+    build: (entry, a) => entry.int('sub', entry.int('shl', a, entry.constant(i64, 3n)), a),
+    expected: (a) => lowBits(a * 7n, 64),
+    absent: { c: /<< 3/, python: /<< 3/ },
+    present: { c: /arg0 \* 7/, python: /arg0 \* 7/ },
+    rule: 'strength_reduced_multiply',
+  },
+  {
+    name: 'x + c*x and c*x - x fold the constant factor',
+    build: (entry, a) =>
+      entry.int(
+        'xor',
+        entry.int('add', entry.int('mul', a, entry.constant(i64, 5n)), a),
+        entry.int('sub', entry.int('mul', a, entry.constant(i64, 5n)), a),
+      ),
+    expected: (a) => lowBits(a * 6n, 64) ^ lowBits(a * 4n, 64),
+    present: { c: /arg0 \* 6/, python: /arg0 \* 6/ },
+    rule: 'strength_reduced_multiply',
+  },
+  {
+    name: 'x + (x << k) over a narrow width is a multiply at that width',
+    build: (entry, a) => {
+      const x = entry.extract(a, 0, 16);
+      return entry.cast(
+        'zero_extend',
+        i64,
+        entry.int('add', x, entry.int('shl', x, entry.constant(i16, 7n))),
+      );
+    },
+    expected: (a) => lowBits(lowBits(a, 16) * 129n, 16),
+    absent: { c: /<< 7/, python: /<< 7/ },
+    present: { c: /\* 129/, python: /\* 129/ },
+    rule: 'strength_reduced_multiply',
+  },
+  {
+    name: 'a lone shift stays a shift',
+    build: (entry, a) => entry.int('shl', a, entry.constant(i64, 3n)),
+    expected: (a) => lowBits(a << 3n, 64),
+    absent: { c: /\* 8/, python: /\* 8/ },
+    present: { c: /arg0 << 3/, python: /arg0 << 3/ },
+  },
+  {
+    name: 'x - (x << k) is not a multiply by a negative constant',
+    build: (entry, a) => entry.int('sub', a, entry.int('shl', a, entry.constant(i64, 3n))),
+    expected: (a) => lowBits(a - (a << 3n), 64),
+    present: { c: /arg0 << 3/, python: /arg0 << 3/ },
+  },
+  {
+    name: 'x + (y << k) of two operands is not a multiply',
+    build: (entry, a, b) => entry.int('add', a, entry.int('shl', b, entry.constant(i64, 3n))),
+    expected: (a, b) => lowBits(a + (b << 3n), 64),
+    absent: { c: /\* 9/, python: /\* 9/ },
+    present: { c: /arg1 << 3/, python: /arg1 << 3/ },
+  },
+  {
+    name: 'x + (x << 63) keeps the shift: its factor is not a small multiplier',
+    build: (entry, a) => entry.int('add', a, entry.int('shl', a, entry.constant(i64, 63n))),
+    expected: (a) => lowBits(a + (a << 63n), 64),
+    present: { c: /<< 0x3f/, python: /<< 0x3f/ },
+  },
+  {
+    name: '(x << 1) - x is x',
+    build: (entry, a) => entry.int('sub', entry.int('shl', a, entry.constant(i64, 1n)), a),
+    expected: (a) => a,
+    absent: { c: /\* 1\b/, python: /\* 1\b/ },
+  },
   {
     name: 'a rotate by a variable count keeps its helper',
     build: (entry, a, b) => entry.int('ror', a, b),
@@ -493,10 +649,13 @@ interface Signature {
 function signature(text: string): Signature {
   const header = text.split('\n').find((line) => /^def |\) \{$/.test(line)) ?? '';
   const formals = new Map<string, { bits: number; signed: boolean }>();
-  for (const match of header.matchAll(/\b(u?)int(\d+)_t\s+(arg\d+)\b|\b(arg\d+): (u?)int(\d+)_t/g))
-    formals.set((match[3] ?? match[4])!, {
-      bits: Number(match[2] ?? match[6]),
-      signed: (match[1] ?? match[5]) === '',
+  // Formals are keyed by position: a role name (`shift_count`) replaces `argN`.
+  const list = /\((.*)\)/.exec(header)?.[1] ?? '';
+  let index = 0;
+  for (const match of list.matchAll(/\b(u?)int(\d+)_t\s+\w+|\w+: (u?)int(\d+)_t/g))
+    formals.set(`arg${index++}`, {
+      bits: Number(match[2] ?? match[4]),
+      signed: (match[1] ?? match[3]) === '',
     });
   const result = /^(?:u?int(\d+)_t|bool) \w+\(|-> u?int(\d+)_t/.exec(header);
   return { formals, result: Number(result?.[1] ?? result?.[2] ?? 64) };
@@ -596,6 +755,9 @@ const presentationRules = [
   'negative_addend',
   'shift_idiom',
   'rotate_inline',
+  'bounded_mask',
+  'bounded_shift_count',
+  'strength_reduced_multiply',
 ];
 const recorded = (emission: EmissionResult['emission']) =>
   (emission.local_validation ?? []).flatMap((record) =>

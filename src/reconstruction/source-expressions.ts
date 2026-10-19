@@ -23,6 +23,9 @@ export interface SourceExpressionDemand {
   readonly pending: string[];
 }
 
+const strengthReducedMultiplyScope =
+  'x + (x << k), x + x*c, (x << k) - x and x*c - x over one SSA value x of the result width are x*(2^k + 1), x*(c + 1), x*(2^k - 1) and x*(c - 1): distributivity modulo 2^width, so the printed width-bit product equals the sum or difference; both operands are the identical value x (no operand is duplicated or dropped), and the folded constant must lie in [2, 2^(width-1)) so it reads as a multiplier';
+
 /** Conservative structural demand before normalization. Follow every phi input
  * even when the destination already has a source alias: this is a superset,
  * not the final demand after rewriting/identity elimination. */
@@ -227,6 +230,11 @@ export function normalizeSourceExpressions(
     }
     return null;
   };
+  /** x + c*x, c*x + x and c*x - x over one value x of the result width are x*k
+   * modulo 2^width for the folded coefficient k; k must read as a multiplier
+   * (2 <= k < 2^(width-1)), never as a negated or wrapped one. */
+  const strengthReducible = (base: Value, coefficient: bigint, width: number): boolean =>
+    bitWidth(base.type) === width && coefficient >= 2n && coefficient < 1n << BigInt(width - 1);
   const run = (): void => {
     context.checkpoint(0);
     for (let cursor = 0; cursor < queue.length; cursor++) {
@@ -245,6 +253,7 @@ export function normalizeSourceExpressions(
       });
       let replacement: Expression = expression;
       let cellRewrite = false;
+      let strengthReduced = false;
       if (
         sourceCells &&
         (expression.kind === 'concat' ||
@@ -288,7 +297,7 @@ export function normalizeSourceExpressions(
             };
             cellRewrite = true;
           }
-        } else if (expression.op === 'shl' && !packingShifts.has(id)) {
+        } else if (!sourceCells && expression.op === 'shl' && !packingShifts.has(id)) {
           const count = constant(expression.right);
           if (count !== null)
             replacement = {
@@ -309,13 +318,43 @@ export function normalizeSourceExpressions(
               : left?.value.id === expression.right.id
                 ? left
                 : null;
-          if (matched)
+          if (matched && !sourceCells)
             replacement = {
               kind: 'integer',
               op: 'mul',
               left: matched.value,
               right: factor(value, matched.coefficient + 1n, block),
             };
+          else if (matched) {
+            const coefficient = BigInt.asUintN(value.type.bits, matched.coefficient + 1n);
+            if (strengthReducible(matched.value, coefficient, value.type.bits)) {
+              replacement = {
+                kind: 'integer',
+                op: 'mul',
+                left: matched.value,
+                right: factor(value, coefficient, block),
+              };
+              strengthReduced = true;
+            }
+          }
+        } else if (expression.op === 'sub' && sourceCells) {
+          const product = observe(expression.left.id);
+          const minuend =
+            product?.kind === 'integer' && (product.op === 'mul' || product.op === 'shl')
+              ? scaled(expression.left)
+              : null;
+          if (minuend?.value.id === expression.right.id) {
+            const coefficient = BigInt.asUintN(value.type.bits, minuend.coefficient - 1n);
+            if (strengthReducible(minuend.value, coefficient, value.type.bits)) {
+              replacement = {
+                kind: 'integer',
+                op: 'mul',
+                left: minuend.value,
+                right: factor(value, coefficient, block),
+              };
+              strengthReduced = true;
+            }
+          }
         }
       }
       if (expression.kind === 'extract') {
@@ -351,6 +390,21 @@ export function normalizeSourceExpressions(
           source?.kind === 'integer' &&
           ['add', 'sub', 'mul', 'and', 'or', 'xor'].includes(source.op)
         ) {
+          const block = owner.get(id)!;
+          replacement = {
+            ...source,
+            left: narrow(source.left, width, block),
+            right: narrow(source.right, width, block),
+          };
+        } else if (
+          sourceCells &&
+          expression.offset === 0 &&
+          source?.kind === 'integer' &&
+          source.op === 'shl' &&
+          (constant(source.right) ?? BigInt(width)) < BigInt(width)
+        ) {
+          // The low bits of x << c (c below the narrow width) are the low bits
+          // of x shifted by c: the narrowed constant count keeps its value.
           const block = owner.get(id)!;
           replacement = {
             ...source,
@@ -510,7 +564,15 @@ export function normalizeSourceExpressions(
         // bitvector checker models neither ordered compares nor selects.
         // A shift idiom is proved by its own side conditions on the exact mask
         // and count; the bitvector checker does not model rotates or selects.
-        if (!condition && !shiftIdiom && (!wiring || !validation.allowance.exhausted)) {
+        // A strength-reduced multiply is proved by its own side conditions: the
+        // bit-vector checker would spend its whole shared allowance on one
+        // 64-bit constant multiplication.
+        if (
+          !condition &&
+          !shiftIdiom &&
+          !strengthReduced &&
+          (!wiring || !validation.allowance.exhausted)
+        ) {
           if (validation.skipExhaustedBitvector(id)) continue;
           const checked = validation.check('bitvector', id, 'source expression rewrite', () =>
             validateBitvectorCandidate(
@@ -542,6 +604,16 @@ export function normalizeSourceExpressions(
             'shift_idiom',
             id,
             shiftIdiomScope,
+            expressionOperands(original).map((operand) => operand.id),
+          )
+        )
+          continue;
+        if (
+          strengthReduced &&
+          !validation.presentation(
+            'strength_reduced_multiply',
+            id,
+            strengthReducedMultiplyScope,
             expressionOperands(original).map((operand) => operand.id),
           )
         )

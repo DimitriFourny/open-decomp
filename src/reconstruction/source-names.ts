@@ -4,7 +4,8 @@ import { bitWidth, expressionOperands, type IntegerPredicate, type Value } from 
 import type { ParallelTransfer, Region } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
 
-type Role = 'address' | 'callback' | 'count' | 'index' | 'accumulator' | 'shift_count' | 'limit';
+type Role =
+  'address' | 'callback' | 'count' | 'index' | 'accumulator' | 'shift_count' | 'limit' | 'operand';
 const roleBits: Record<Role, number> = {
   address: 1,
   callback: 2,
@@ -13,16 +14,17 @@ const roleBits: Record<Role, number> = {
   accumulator: 16,
   shift_count: 32,
   limit: 64,
+  operand: 128,
 };
+/** `operand` names nothing: a shift count that is also an ordinary arithmetic or
+ * bitwise operand carries two roles, so it stays neutral. */
+const namingRoles = (Object.keys(roleBits) as Role[]).filter((role) => role !== 'operand');
 const roleNames = new Map<number, Role>(
-  (Object.keys(roleBits) as Role[]).map((role): [number, Role] => [roleBits[role], role]),
+  namingRoles.map((role): [number, Role] => [roleBits[role], role]),
 );
 /** Every identifier stem a role can print as, and the generic stems a value
  * takes from its definition alone; a role outranks a generic name. */
-export const sourceRoleStems: ReadonlySet<string> = new Set([
-  ...Object.keys(roleBits),
-  'remaining',
-]);
+export const sourceRoleStems: ReadonlySet<string> = new Set([...namingRoles, 'remaining']);
 
 const integerInverse: Record<IntegerPredicate, IntegerPredicate> = {
   eq: 'ne',
@@ -157,6 +159,11 @@ export function planSourceNames(
     }
   };
   const shifts: { count: Value; constant: boolean }[] = [];
+  /** Operands of ordinary arithmetic/bitwise expressions, and the values that
+   * only derive a shift count (its mask, conversions, `w - n`): those are the
+   * shift count's own spelling, not another use of it. */
+  const arithmetic: { user: string; operand: Value }[] = [];
+  const derivations = new Set<string>();
   for (const [id, expression] of program.expressions) {
     context.checkpoint(1);
     const value = program.values.get(id)!;
@@ -186,7 +193,35 @@ export function planSourceNames(
         count,
         constant: program.expressions.get(canonical(expression.left, true).id)?.kind === 'constant',
       });
+      for (
+        let spelling: Value | null = expression.right;
+        spelling && !derivations.has(spelling.id);
+      ) {
+        derivations.add(spelling.id);
+        const definition = program.expressions.get(spelling.id);
+        if (definition?.kind === 'cast' || definition?.kind === 'extract')
+          spelling = definition.value;
+        else if (
+          definition?.kind === 'integer' &&
+          ['and', 'add', 'sub'].includes(definition.op) &&
+          program.expressions.get(definition.right.id)?.kind === 'constant'
+        )
+          spelling = definition.left;
+        else if (
+          definition?.kind === 'integer' &&
+          ['and', 'add', 'sub'].includes(definition.op) &&
+          program.expressions.get(definition.left.id)?.kind === 'constant'
+        )
+          spelling = definition.right;
+        else spelling = null;
+      }
     }
+    if (expression.kind === 'integer') {
+      const rotating = ['shl', 'lshr', 'ashr', 'rol', 'ror'].includes(expression.op);
+      for (const operand of rotating ? [expression.left] : [expression.left, expression.right])
+        arithmetic.push({ user: id, operand });
+    } else if (expression.kind === 'integer_unary' && ['neg', 'not'].includes(expression.op))
+      arithmetic.push({ user: id, operand: expression.value });
   }
   // A parameter shifted into a constant (`1 << n & mask`, a bit-set test) is an
   // operation or position selector the caller chose, not a shift count.
@@ -255,6 +290,12 @@ export function planSourceNames(
       const value = program.values.get(id);
       if (value) mark(value, 'address');
     }
+  propagate();
+  // A shift count (or a copy of one) that is also an ordinary arithmetic or
+  // bitwise operand has no single role to name it by.
+  for (const { user, operand } of arithmetic)
+    if (!derivations.has(user) && (roles.get(operand.id) ?? 0) & roleBits.shift_count)
+      mark(operand, 'operand');
   propagate();
 
   const loops = new Map<string, Set<string>>();

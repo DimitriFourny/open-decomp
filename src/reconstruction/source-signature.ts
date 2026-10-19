@@ -1,4 +1,4 @@
-import type { OperationContext } from '../core/index.js';
+import type { AbiType, OperationContext } from '../core/index.js';
 import type { EmissionInput } from '../emitters/model.js';
 import { bitWidth, expressionOperands, type Instruction, type Value } from '../ir/index.js';
 import type { BoundaryProjection, Reconstruction } from './model.js';
@@ -43,8 +43,10 @@ export function permitsVoidSourceSignature(
  * read/write through a native float/double lvalue (`float_accesses`).
  * A promoted frame-private slot is storage between its stores and reloads, like
  * a phi: it is an FP local (`float_locals`) exactly when every stored value and
- * every reload belongs to the component. An FP-bank formal reads like a memory
- * read: only its consumers (same-width IEEE reinterpretations) type it. */
+ * every reload belongs to the component. An incoming-stack formal reads like a
+ * memory read: only its consumers (same-width IEEE reinterpretations) type it,
+ * and only where the target ABI passes an IEEE value in its position through
+ * the same stack slot. FP-bank register formals are IEEE-typed by the planner. */
 export function projectSourceFloating(
   program: Reconstruction,
   input: EmissionInput,
@@ -115,20 +117,43 @@ export function projectSourceFloating(
   };
   const accesses: Extract<Instruction, { kind: 'load' | 'store' }>[] = [];
   const loads = new Map<string, Value>();
-  // Entry values of FP-bank argument registers are the formal analogue of an
-  // ordinary memory read: the register bank is the ABI fact, consumers the evidence.
-  for (const formal of program.parameters) {
-    const register = program.parameter_registers.get(formal.id);
-    if (
-      register &&
-      (register.bank === 'vector' || register.bank === 'float') &&
-      formal.type.kind === 'integer' &&
-      [32, 64].includes(bitWidth(formal.type)) &&
-      program.live.has(formal.id) &&
-      !conflicting(formal)
-    )
-      loads.set(formal.id, formal);
-  }
+  // An incoming-stack word is the formal analogue of an ordinary memory read.
+  // Retyping it must not move it: classify the presented interface with this
+  // formal as IEEE and require its original stack slot (Win64 assigns slots by
+  // position; SysV/AAPCS64 only once the FP argument registers are exhausted).
+  // Only an interface of scalar formals (float/double, integers of at most a
+  // machine word) is classified here.
+  const presented = program.parameters.map((formal): AbiType | undefined =>
+    formal.type.kind === 'float' && (formal.type.bits === 32 || formal.type.bits === 64)
+      ? { kind: 'float', bits: formal.type.bits }
+      : formal.type.kind === 'integer' && formal.type.bits <= 64
+        ? { kind: 'integer', bits: formal.type.bits, signed: false }
+        : undefined,
+  );
+  const scalars = presented.filter((type): type is AbiType => type !== undefined);
+  if (scalars.length === presented.length)
+    program.parameters.forEach((formal, index) => {
+      const offset = program.source!.formal_stack_offsets?.get(formal.id);
+      const bits = bitWidth(formal.type);
+      if (
+        offset === undefined ||
+        formal.type.kind !== 'integer' ||
+        (bits !== 32 && bits !== 64) ||
+        !program.live.has(formal.id) ||
+        conflicting(formal)
+      )
+        return;
+      const location = input.source!.abi.classifyCall({
+        returns: { kind: 'void' },
+        parameters: scalars.map((type, position) =>
+          position === index ? { kind: 'float', bits } : type,
+        ),
+        variadic: false,
+        fixed_parameter_count: scalars.length,
+      }).parameters[index]?.locations;
+      if (location?.length === 1 && location[0]!.kind === 'stack' && location[0]!.offset === offset)
+        loads.set(formal.id, formal);
+    });
   // Promoted slots: private storage whose reloads read exactly the stored values.
   const slots = new Map<
     string,

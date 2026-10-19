@@ -2,8 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { darwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
+import { windowsX64Abi } from '../../../src/abi/windows-x64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
-import { createOperationContext, type AbiProfile } from '../../../src/core/index.js';
+import { recoverTypes } from '../../../src/analysis/types/index.js';
+import {
+  createOperationContext,
+  type AbiLocation,
+  type AbiProfile,
+  type AbiType,
+} from '../../../src/core/index.js';
 import { integer, type DataType, type SSAForm } from '../../../src/ir/index.js';
 import {
   fpEnvironmentGuard,
@@ -12,7 +19,7 @@ import {
 } from '../../../src/lifters/arm64/semantics.js';
 import { structureControlFlow } from '../../../src/presentation/index.js';
 import { reconstruct } from '../../../src/reconstruction/index.js';
-import { builder } from '../../ir/support.js';
+import { builder, image, slice } from '../../ir/support.js';
 import { emit, emittedFormals, execute } from './support.js';
 
 const u64 = integer(64);
@@ -263,3 +270,132 @@ for (const language of ['c-like', 'python-like'] as const)
     assert.doesNotMatch(emission.text, /\buint64_t arg0\b|arg0: uint64_t/, emission.text);
     assert.doesNotMatch(emission.text, /__od_bitcast_|cast_bitcast\(/, emission.text);
   });
+
+/** `uint64_t sign_flipped_bits(double x)`: the FP-bank argument's bits move to
+ * the integer result register with no IEEE use. A C formal of an integer type
+ * would be passed in an integer register, so the formal must still be IEEE.
+ * `split` reads the argument as two 32-bit register cells. */
+function bitsOfFormal(abi: AbiProfile, split: boolean) {
+  const layout = abi.classifyCall({
+    returns: { kind: 'integer', bits: 64, signed: false },
+    parameters: [{ kind: 'float', bits: 64 }],
+    variadic: false,
+    fixed_parameter_count: 1,
+  });
+  const argument = layout.parameters[0]!.locations[0]!,
+    result = layout.returns[0]!;
+  assert.ok(argument.kind === 'register' && result.kind === 'register');
+  const b = builder(`fp-formal-bits-${abi.id}-${split}`),
+    entry = b.block('entry');
+  const cell = (offset: number, width: number) =>
+    entry.readRegister({
+      ...argument.register,
+      id: `${argument.register.root}:${offset}:${width}`,
+      offset_bits: offset,
+      width_bits: width,
+      write_rule: 'preserve_other_bits',
+    });
+  const value = split ? entry.concat([cell(0, 32), cell(32, 32)]) : cell(0, 64);
+  entry.writeRegister(result.register, entry.int('xor', value, entry.constant(u64, 1n << 63n)));
+  entry.return([]);
+  return {
+    ir: constructSSA(b.finish(entry, [])).value as SSAForm,
+    source: { abi, callees: [], addresses: [] },
+  };
+}
+
+for (const abi of [sysvAMD64Abi, windowsX64Abi, darwinArm64Abi])
+  for (const split of [false, true])
+    for (const language of ['c-like', 'python-like'] as const)
+      test(`${abi.id} ${language} an FP-bank formal used only as integer bits${split ? ' in two cells' : ''} is still declared double`, () => {
+        const f = bitsOfFormal(abi, split);
+        const { emission } = emit(f.ir, { source: f.source }, language);
+        assert.match(emission.text, language === 'c-like' ? /\(double arg0\)/ : /arg0: double/);
+        assert.doesNotMatch(emission.text, /uint64_t arg0\b|arg0: uint64_t/, emission.text);
+        // Cell slices read the formal's bits, never a lane of a float value.
+        assert.doesNotMatch(emission.text, /cast_zero_extend|cast_truncate/, emission.text);
+        const formals = emittedFormals(emission);
+        assert.equal(formals.length, 1);
+        const input = 0x3ff8000000000000n;
+        const observed = execute(emission, new Map([[formals[0]!.statement_id, input]]));
+        assert.deepEqual(observed.values, [input ^ (1n << 63n)]);
+        // The checked view keeps the machine-typed entry value.
+        const checked = emit(f.ir, { source: f.source }, language, 'checked').emission;
+        assert.doesNotMatch(checked.text, /\bdouble\b/);
+      });
+
+/** Every register argument position is consumed and the following incoming
+ * stack word is read as an IEEE double: the FP result is the product of every
+ * argument's bits read as double. Win64: four FP arguments, the fifth on the
+ * stack; SysV: six integer-class arguments, the seventh on the stack. */
+function stackFormal(abi: AbiProfile) {
+  const windows = abi.id === 'windows-x64';
+  const f64: DataType = { kind: 'float', bits: 64 };
+  const parameters: AbiType[] = Array.from({ length: windows ? 5 : 7 }, () =>
+    windows ? { kind: 'float', bits: 64 } : { kind: 'integer', bits: 64, signed: false },
+  );
+  const layout = abi.classifyCall({
+    returns: { kind: 'float', bits: 64 },
+    parameters,
+    variadic: false,
+    fixed_parameter_count: parameters.length,
+  });
+  const stack = layout.parameters.at(-1)!.locations[0]!;
+  assert.ok(stack.kind === 'stack');
+  const low = (location: AbiLocation | undefined) => {
+    assert.ok(location?.kind === 'register');
+    return {
+      ...location.register,
+      id: `${location.register.root}:0:64`,
+      width_bits: 64,
+      write_rule: 'preserve_other_bits' as const,
+    };
+  };
+  const b = builder(`stack-formal-${abi.id}`),
+    entry = b.block('entry');
+  const registers = layout.parameters
+    .slice(0, -1)
+    .map((parameter) => entry.readRegister(low(parameter.locations[0])));
+  const word = entry.load(
+    u64,
+    entry.int('add', entry.readRegister(abi.stack_pointer), entry.constant(u64, stack.offset)),
+  );
+  let product = entry.cast('bitcast', f64, word);
+  for (const value of registers)
+    product = entry.fp('mul', product, entry.cast('bitcast', f64, value));
+  entry.writeRegister(low(layout.returns[0]), entry.cast('bitcast', u64, product));
+  entry.return([]);
+  const ir = constructSSA(b.finish(entry, [])).value as SSAForm;
+  const types = recoverTypes(ir, abi, createOperationContext(), {
+    image_id: image,
+    slice_id: slice,
+    revision: 0,
+  });
+  return { ir, source: { abi, callees: [], addresses: [] }, types };
+}
+
+const encode = (value: number): bigint => {
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, value, true);
+  return view.getBigUint64(0, true);
+};
+
+for (const abi of [windowsX64Abi, sysvAMD64Abi])
+  for (const language of ['c-like', 'python-like'] as const)
+    test(`${abi.id} ${language} a stack word consumed only as IEEE is double exactly where the ABI keeps a double in that slot`, () => {
+      const f = stackFormal(abi);
+      const { emission } = emit(f.ir, { source: f.source, types: f.types }, language);
+      const values = abi.id === 'windows-x64' ? [1.5, 2, 0.5, -4, 3] : [1.5, 2, 0.5, -4, 1, 1, 3];
+      const formals = emittedFormals(emission);
+      assert.equal(formals.length, values.length, emission.text);
+      if (abi.id === 'windows-x64')
+        // Win64 assigns the fifth argument's stack slot whatever its type.
+        assert.doesNotMatch(emission.text, /\buint64_t\b/, emission.text);
+      // SysV would pass a seventh double in xmm0, not in the stack word.
+      else assert.doesNotMatch(emission.text, /\bdouble arg|arg\d: double/, emission.text);
+      const observed = execute(
+        emission,
+        new Map(formals.map((formal, index) => [formal.statement_id, encode(values[index]!)])),
+      );
+      assert.deepEqual(observed.values, [encode(-18)]);
+    });

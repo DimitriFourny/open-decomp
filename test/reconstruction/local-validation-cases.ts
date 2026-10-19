@@ -107,6 +107,10 @@ export function localValidationCounterexamples(): void {
     makeWrongFactor,
     sourceContext,
     sourceValidation,
+    // The shift-to-multiply candidate is the checked-view normalization: the source
+    // view keeps a lone shift and only folds the strength-reduced patterns.
+    undefined,
+    false,
   );
   assert.equal(
     sourceDefinitions.get(sourceResult.id),

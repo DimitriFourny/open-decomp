@@ -208,6 +208,17 @@ export function planSource(
         )
         .map((binding) => binding.value.id),
     );
+    // Source view: bit slices of an IEEE result are taken from its whole-bit
+    // integer view; extracting a lane from a float value has no C spelling.
+    let bits: Value | undefined;
+    const sliced = (): Value =>
+      view === 'source' && type.kind === 'float'
+        ? (bits ??= make(`${key}:bits`, integer(bitWidth(type)), block, {
+            kind: 'cast',
+            op: 'bitcast',
+            value: whole,
+          }))
+        : whole;
     for (const location of locations) {
       if (location.kind !== 'register') return null;
       for (const binding of bindings) {
@@ -225,7 +236,7 @@ export function planSource(
             binding.value,
             bitWidth(binding.value.type) === bitWidth(type) && offset === 0
               ? { kind: 'cast', op: 'bitcast', value: whole }
-              : { kind: 'extract', value: whole, offset },
+              : { kind: 'extract', value: sliced(), offset },
           );
         } else {
           const base = make(`${key}:unmodeled:${binding.value.id}`, binding.value.type, block, {
@@ -239,7 +250,7 @@ export function planSource(
               ? whole
               : make(`${key}:result-part:${binding.value.id}`, integer(high - low), block, {
                   kind: 'extract',
-                  value: whole,
+                  value: sliced(),
                   offset,
                 });
           alias(binding.value, {
@@ -712,6 +723,19 @@ export function planSource(
       ? bitWidth(typed)
       : Math.max(...cells.map((cell) => cell.register.offset_bits + cell.register.width_bits)) -
         register.offset_bits;
+    // Every supported C ABI passes a scalar of an FP/SIMD argument register as
+    // float/double, never as an integer type: an integer source formal would be
+    // classified into an integer register (or another stack slot). Without a
+    // typed use, a scalar-width FP-bank formal is still the IEEE value of its
+    // lane; integer uses read its bits through the entry cell's bitcast.
+    const lane = width === 32 ? 32 : width === 64 ? 64 : undefined;
+    const scalar: DataType | undefined =
+      !typed &&
+      view === 'source' &&
+      (register.bank === 'float' || register.bank === 'vector') &&
+      lane
+        ? { kind: 'float' as const, bits: lane }
+        : undefined;
     const descriptor = {
       ...register,
       width_bits: width,
@@ -721,7 +745,7 @@ export function planSource(
       `parameter:${register.root}`,
       entry.register_entry,
       locations(descriptor),
-      typed ?? (cells.length === 1 ? cells[0]!.value.type : integer(width)),
+      typed ?? scalar ?? (cells.length === 1 ? cells[0]!.value.type : integer(width)),
       entry.id,
     );
     if (value) {
@@ -1196,6 +1220,8 @@ export function planSource(
     )
       ? tuple
       : undefined;
+  const incomingParameters = new Map<bigint, Value>(),
+    formalStackOffsets = new Map<string, bigint>();
   const presentation: SourcePresentation = {
     inferred: !functionSignature,
     parameter_names: parameterNames,
@@ -1220,8 +1246,8 @@ export function planSource(
     call_results: callResults,
     value_origins: valueOrigins,
     definitions,
+    formal_stack_offsets: formalStackOffsets,
   };
-  const incomingParameters = new Map<bigint, Value>();
   let entryParameter: Value | null = null;
   return {
     calls,
@@ -1268,6 +1294,7 @@ export function planSource(
       if (!value) {
         value = make(`parameter:entry-stack:${offset}`, type, entry.id, undefined, contributors);
         incomingParameters.set(offset, value);
+        formalStackOffsets.set(value.id, offset);
       }
       return value;
     },

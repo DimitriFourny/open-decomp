@@ -881,8 +881,10 @@ class Parser {
           this.take(':');
           otherwise = this.ops.length;
         }
-        // Consecutive labels share the next label's statements.
-        if (this.peek() !== 'case' && this.peek() !== 'default') this.block(exits);
+        // Consecutive labels share the next label's statements; a body is either
+        // one braced block or the statements up to the next label.
+        if (this.peek() === '{') this.block(exits);
+        else while (!['case', 'default', '}'].includes(this.peek())) this.statement(exits);
       }
       this.take('}');
       dispatch.target = this.ops.length;

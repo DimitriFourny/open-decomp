@@ -153,6 +153,8 @@ export interface SourcePresentation {
   readonly return_source_type?: string;
   /** Inferred formal spellings; reloads of a typed promoted slot share its type. */
   readonly formal_types?: ReadonlyMap<string, SourceFormalType>;
+  /** Inferred incoming-stack formals by the callee-entry SP offset of their ABI slot. */
+  readonly formal_stack_offsets?: ReadonlyMap<string, bigint>;
   /** Promoted slot (local id) spellings proven by `slot_pointer_type`. */
   readonly local_types?: ReadonlyMap<string, SourceFormalType>;
   readonly return_scalar?: { readonly bits: number; readonly signed: boolean };

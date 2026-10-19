@@ -45,6 +45,7 @@ import {
 } from '../reconstruction/source-fp.js';
 import { indexedDataAccesses, type IndexedDataAccess } from './source-tables.js';
 import { cScalarSupport } from './source-c-support.js';
+import { UnsignedBounds } from './source-bounds.js';
 import { cSourceName } from '../metadata/symbols/c-names.js';
 import { catalog, type CatalogEntry } from '../metadata/library-contracts/catalog.js';
 import {
@@ -180,6 +181,7 @@ export class Renderer {
   private loopExits: ReadonlyMap<ParallelTransfer, LoopExitRoute> = new Map();
   private normalizeLoopTargets = false;
   private readonly exitFlags = new Map<string, string>();
+  private readonly bounds: UnsignedBounds;
   private readonly exitGuards = new Map<string, Set<string>>();
   private readonly emittedExitGuards = new Map<string, Set<string>>();
   private readonly initializedExitFlags = new Set<string>();
@@ -263,6 +265,7 @@ export class Renderer {
     this.writer = new Writer(context, options.indent, options.include_evidence, language);
     this.program = reconstruct(input, context, options.view === 'checked' ? 'checked' : 'source');
     this.inline = new Set(this.program.inline);
+    this.bounds = new UnsignedBounds(this.program.expressions, context);
     this.sourceView = options.view !== 'checked';
     this.body = input.function.body;
     this.requirementPredicates = sourceRequirementPredicates(this.program.source?.requirements);
@@ -748,8 +751,10 @@ export class Renderer {
   private recorderCache?: SimplificationRecorder;
   private get recorder(): SimplificationRecorder | undefined {
     return this.sourceView
-      ? (this.recorderCache ??= (rule, scope) =>
-          this.localValidation.presentation(rule, this.input.function.id, scope))
+      ? (this.recorderCache ??= (rule, scope, subjects) =>
+          subjects?.length
+            ? this.localValidation.presentation(rule, subjects[0]!, scope, subjects)
+            : this.localValidation.presentation(rule, this.input.function.id, scope))
       : undefined;
   }
   /** Exact declared spelling of each formal/local, recorded where declared. */
@@ -1073,6 +1078,7 @@ export class Renderer {
           }
         : {}),
       constant: this.constantOf,
+      maximum: (value: Value) => this.bounds.maximum(value),
       nativeIntegerStorage: this.nativeIntegerStorage,
       ...(this.recorder ? { presentation: this.recorder } : {}),
       nativeFp: this.fpPresentation.expressions.has(expression),
@@ -3891,32 +3897,61 @@ export class Renderer {
     for (const group of plan.groups) {
       this.context.checkpoint(group.labels.length);
       const labels = group.labels.map((bits) => bits.toString());
+      const scoped = c && this.armDeclares(group.arm);
       if (c) {
         for (const label of labels.slice(0, -1)) this.writer.line(depth + 1, `case ${label}:`);
-        this.writer.line(depth + 1, `case ${labels.at(-1)!}: {`);
+        this.writer.line(depth + 1, `case ${labels.at(-1)!}:${scoped ? ' {' : ''}`);
       } else this.writer.line(depth + 1, `case ${labels.join(' | ')}:`);
       this.arm(group.arm, depth + 2, control);
       const edge = landing(group.arm);
       if (edge) for (const member of group.members) this.emittedEdges.set(member.transfer, edge);
       if (c) {
         if (!this.terminates(group.arm)) this.writer.statement(depth + 2, 'break');
-        this.writer.line(depth + 1, '}');
+        if (scoped) this.writer.line(depth + 1, '}');
       }
       printed++;
     }
     if (this.emptyArm(control.otherwise) && (c || printed)) {
       this.transfer(control.otherwise.transfer, depth + 2, control);
     } else {
-      this.writer.line(depth + 1, c ? 'default: {' : 'case _:');
+      const scoped = c && this.armDeclares(control.otherwise);
+      this.writer.line(depth + 1, c ? `default:${scoped ? ' {' : ''}` : 'case _:');
       this.arm(control.otherwise, depth + 2, control);
       if (c) {
         if (!this.terminates(control.otherwise)) this.writer.statement(depth + 2, 'break');
-        this.writer.line(depth + 1, '}');
+        if (scoped) this.writer.line(depth + 1, '}');
       }
     }
     const edge = landing(control.otherwise);
     if (edge) for (const arm of plan.omitted) this.emittedEdges.set(arm.transfer, edge);
     if (c) this.writer.line(depth, '}');
+  }
+
+  /** A C declaration is not a statement: `case N:` cannot label one, and it would
+   * stay in scope for the labels after it. An arm whose printing may declare
+   * (parallel-copy cycle temporaries, loop exit flags; any program
+   * without source reconstruction) keeps its braces. Nested arms count
+   * as well: a flattened `else` prints at the arm's own level. */
+  private armDeclares(arm: ControlArm): boolean {
+    if (!this.program.source || this.printedCopies(arm.transfer).length > 1) return true;
+    return arm.body !== undefined && this.regionDeclares(arm.body);
+  }
+
+  private regionDeclares(region: Region): boolean {
+    this.context.checkpoint(1);
+    if (region.kind === 'sequence') return region.regions.some((part) => this.regionDeclares(part));
+    if (region.kind === 'loop') return true;
+    const control = region.control;
+    const arms =
+      control.kind === 'if'
+        ? [control.when_true, control.when_false]
+        : control.kind === 'switch'
+          ? [...control.cases.map((item) => item.arm), control.otherwise]
+          : [];
+    return (
+      (control.kind === 'jump' && this.printedCopies(control.transfer).length > 1) ||
+      arms.some((arm) => this.armDeclares(arm))
+    );
   }
 
   private emptyArm(arm: ControlArm): boolean {

@@ -146,21 +146,32 @@ test('exhausted source proof work retains later original forms and publishes one
     const first: Value = { id: 'first', type: integer(8) };
     const second: Value = { id: 'second', type: integer(8) };
     const wiring: Value = { id: 'wiring', type: integer(8) };
-    const values = new Map([input, count, first, second, wiring].map((value) => [value.id, value]));
-    // Shift-to-multiply is a speculative arithmetic candidate; a same-width
-    // offset-zero extract is exact wiring and is not gated by proof work.
+    const wide: Value = { id: 'wide', type: integer(16) };
+    const other: Value = { id: 'other', type: integer(16) };
+    const sum: Value = { id: 'sum', type: integer(16) };
+    const difference: Value = { id: 'difference', type: integer(16) };
+    const low: Value = { id: 'low', type: integer(8) };
+    const lowDifference: Value = { id: 'low_difference', type: integer(8) };
+    const values = new Map(
+      [input, count, first, second, wiring, wide, other, sum, difference, low, lowDifference].map(
+        (value) => [value.id, value],
+      ),
+    );
+    // Shift-to-multiply is the speculative arithmetic candidate of the checked
+    // view (the source view keeps a lone shift), and narrowing an arithmetic
+    // word is one in both; a same-width offset-zero extract is exact wiring and
+    // is not gated by proof work.
     const definitions = new Map<string, Expression>([
       [count.id, { kind: 'constant', bits: 1n }],
       [first.id, { kind: 'integer', op: 'shl', left: input, right: count }],
       [second.id, { kind: 'integer', op: 'shl', left: input, right: count }],
       [wiring.id, { kind: 'extract', value: input, offset: 0 }],
+      [sum.id, { kind: 'integer', op: 'add', left: wide, right: other }],
+      [difference.id, { kind: 'integer', op: 'sub', left: wide, right: other }],
+      [low.id, { kind: 'extract', value: sum, offset: 0 }],
+      [lowDifference.id, { kind: 'extract', value: difference, offset: 0 }],
     ]);
-    const owners = new Map([
-      [count.id, 'block'],
-      [first.id, 'block'],
-      [second.id, 'block'],
-      [wiring.id, 'block'],
-    ]);
+    const owners = new Map([...definitions.keys()].map((id): [string, string] => [id, 'block']));
     normalizeSourceExpressions(
       values,
       definitions,
@@ -182,6 +193,8 @@ test('exhausted source proof work retains later original forms and publishes one
       assert.ok(definition.kind === 'integer');
       assert.equal(definition.op, source ? 'shl' : 'mul');
     }
+    for (const value of [low, lowDifference])
+      assert.equal(definitions.get(value.id)!.kind, source ? 'extract' : 'integer');
     assert.equal(definitions.get(wiring.id)!.kind, 'cast');
     const summaries = session.records.filter((record) => record.scope.includes('not attempted'));
     assert.equal(summaries.length, source ? 1 : 0);

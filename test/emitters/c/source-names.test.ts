@@ -597,7 +597,19 @@ function bottomCountdown(label: string, test: 'updated' | 'folded' | 'stale') {
 /** `entry(selector, amount): return (1 << (selector & 63)) & mask` (a bit-set test
  * on an operation code), `loaded << (amount & 63)` (a real shift by a count), or
  * both uses of one parameter. */
-function shiftUses(label: string, uses: { bitTest?: boolean; shifted?: boolean }) {
+function shiftUses(
+  label: string,
+  uses: {
+    bitTest?: boolean;
+    shifted?: boolean;
+    /** The parameter itself is added to another value. */
+    added?: boolean;
+    /** The parameter is negated: a unary arithmetic operand. */
+    negated?: boolean;
+    /** `x >> (64 - n)`: another shift count derived from the parameter. */
+    complement?: boolean;
+  },
+) {
   const b = program(`source-names-shift-${label}`),
     entry = b.block('entry', [i64]);
   const [parameter] = entry.parameters as [Value];
@@ -606,6 +618,24 @@ function shiftUses(label: string, uses: { bitTest?: boolean; shifted?: boolean }
   if (uses.bitTest) parts.push(entry.int('shl', entry.constant(i64, 1n), amount));
   if (uses.shifted)
     parts.push(entry.int('shl', entry.load(i64, entry.constant(i64, 0x1000n)), amount));
+  if (uses.complement)
+    parts.push(
+      entry.int(
+        'lshr',
+        entry.load(i64, entry.constant(i64, 0x1008n)),
+        entry.int('sub', entry.constant(i64, 64n), amount),
+      ),
+    );
+  if (uses.added)
+    parts.push(entry.int('add', entry.load(i64, entry.constant(i64, 0x1010n)), parameter));
+  if (uses.negated)
+    parts.push(
+      entry.int(
+        'xor',
+        entry.load(i64, entry.constant(i64, 0x1018n)),
+        entry.int('sub', entry.constant(i64, 0n), parameter),
+      ),
+    );
   entry.return([
     entry.int(
       'and',
@@ -671,6 +701,25 @@ for (const language of ['c-like', 'python-like'] as const)
 
     test('a parameter that is the amount of a real shift is a shift count', () => {
       const { input, parameter } = shiftUses('shifted', { shifted: true });
+      assert.equal(name(emit(input, language), parameter), 'shift_count');
+    });
+
+    test('a shift count also used as an arithmetic or bitwise operand stays neutral', () => {
+      for (const uses of [{ added: true }, { negated: true }, { added: true, negated: true }]) {
+        const { input, parameter } = shiftUses(`operand-${Object.keys(uses).join('-')}`, {
+          shifted: true,
+          ...uses,
+        });
+        assert.match(
+          name(emit(input, language), parameter) ?? '',
+          /^arg\d+$/,
+          JSON.stringify(uses),
+        );
+      }
+    });
+
+    test('a shift count that only derives other shift counts is still a shift count', () => {
+      const { input, parameter } = shiftUses('complement', { shifted: true, complement: true });
       assert.equal(name(emit(input, language), parameter), 'shift_count');
     });
 

@@ -520,8 +520,26 @@ both casts because the inner conversion discards bits the outer one reads),
 `double_negation` (`!!x` of a one-bit value), `redundant_mask` (`x & m` where `m`
 holds every bit of x's unsigned type), `idempotent_bitwise` (`v & v`/`v | v` of
 one bare variable under identical conversions), `complement_xor` (`x ^ ones` is
-`~x`) and `negative_addend` (`x + c` with `c` in the upper half of the width is
-`x - (2^width - c)`, the same value modulo 2^width). One aggregated presentation
+`~x`), `negative_addend` (`x + c` with `c` in the upper half of the width is
+`x - (2^width - c)`, the same value modulo 2^width), `bounded_shift_count` (a
+`shl`/`lshr`/`ashr` whose count is proven at most width-1 by its own definition,
+for example `b & 0x3f` at 64 bits, a narrow zero extension or a constant mask,
+prints as the native `a << (b & 0x3f)`; the oversize-count helper and its preamble
+appear only for a count that is not so bounded) and `bounded_mask` (`x & m` where
+the unsigned upper bound derived from `x`'s definition, `source-bounds.ts`, is
+covered by `m`). Those two list the operands they applied to rather than the
+function, so their records stay local. Reconstruction's `strength_reduced_multiply`
+(`normalizeSourceExpressions`, source view only, recorded presentation without a
+bitvector check) folds `x + (x << k)`, `x + c*x`, `(x << k) - x` and `c*x - x` of
+one SSA value `x` into `x * k'` with `k'` the exact constant modulo 2^width, only
+for `2 <= k' < 2^(width-1)`; a lone `x << k`, `x - (x << k)`, `x + (y << k)` and a
+multiplier that would read as a negated or wrapped constant stay as written. A
+source-view switch prints `case N:` arms without braces unless the arm may declare
+(a parallel-copy cycle temporary, a loop exit flag, or no source reconstruction);
+the checked view keeps its braced arms. A value used both as a shift count and as
+an ordinary arithmetic/bitwise operand (an `add`, `xor`, negation... of the count
+itself, not the mask or `w - n` that derives another count) carries two roles and
+keeps its neutral name instead of `shift_count`. One aggregated presentation
 record per rule and function lists the simplified subjects. A narrowed
 zero-extended operand shifted right by a count its C type cannot shift by is
 widened first (shifting a `uint32_t` by 32 is undefined), and a negated negation
@@ -743,10 +761,16 @@ when every stored value is a same-width IEEE value, closed FP carrier member or
 literal and every reload is a member of that carrier component, the local is
 declared `float`/`double` and its stores and reloads print as plain assignments
 without bitcasts. An integer consumer of any reload, or a stored integer value,
-keeps the integer local and every bitcast. FP-bank argument registers
-(vector/float bank, 32/64-bit) join the same components by consumer evidence only,
-like an ordinary memory read, so an O0 argument spilled to a slot and reloaded
-as IEEE data is a `double` formal. The rule records a presentation inference and
+keeps the integer local and every bitcast. A scalar-width (32/64-bit) FP-bank
+argument register formal is always IEEE (`float`/`double`): every supported C ABI
+passes an integer-typed formal in an integer register or another stack slot, so
+an integer spelling would misroute it. Its integer uses read the bits through an
+explicit bitcast; partial register cells slice its whole-bit integer view, never a
+lane of the float value. An incoming-stack word formal joins FP components by
+consumer evidence only, like an ordinary memory read, and only where classifying
+the presented interface with that formal as IEEE keeps its original stack slot
+(Win64 positions; SysV/AAPCS64 once the FP argument registers are exhausted).
+The rule records a presentation inference and
 an `abi_conformance` requirement (an assignment to a float/double local keeps the
 exact bits; no excess precision, no signaling-NaN quieting); failing to record it
 re-projects without slot typing. Raw (unpromoted) slots already use
@@ -760,7 +784,11 @@ an address into the returning frame disqualifies it. The integer register must
 be written on some exit (an unchanged argument register may join); the FP
 register needs typed IEEE FP32/FP64 writes on some exit, with literal bits or a
 typed argument allowed elsewhere. A load from an exact private stack slot whose
-every direct store holds typed FP bits (or literal bits) counts as a typed write.
+every direct store holds typed FP bits, literal bits or a reload of another such
+slot (an O0 slot-to-slot copy, also through same-width bitcasts) counts as a
+typed write. When only the integer register qualifies but the FP register is
+written on every exit, after the integer register on every exit path, the
+explicit form remains instead of an integer result.
 When both qualify, positive caller demand decides; then the register written last
 on every path into every exit wins: a definition whose block is dominated by the
 other's definition (or follows it in the same block) is later, and merges compare

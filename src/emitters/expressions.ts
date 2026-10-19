@@ -441,7 +441,12 @@ export function usualArithmetic(left: IntegerCType, right: IntegerCType): Intege
 /** Records one source-view presentation rewrite; false when its record bound is
  * reached and the explicit form must stay. Only a source view that records its
  * rewrites simplifies at all: the checked view never receives a recorder. */
-export type SimplificationRecorder = (rule: string, scope: string) => boolean;
+export type SimplificationRecorder = (
+  rule: string,
+  scope: string,
+  /** The operands the rule applied to; without them the record is the function's. */
+  subjects?: readonly string[],
+) => boolean;
 
 const simplifications = {
   zero_high_join:
@@ -451,6 +456,10 @@ const simplifications = {
   double_negation: 'logical negation of a logical negation of a one-bit value is that value',
   redundant_mask:
     'a constant mask holding every bit of the unsigned type of its other operand leaves that operand unchanged',
+  bounded_mask:
+    'a constant mask holding every bit position up to the proven unsigned upper bound of its other operand leaves that operand unchanged',
+  bounded_shift_count:
+    'a shift whose variable count is proven (by its mask or conversions) to be at most the width minus one is the native shift: C and Python shift by a count below the operand width exactly as the bit-vector operation does, so no oversize-count helper is needed',
   idempotent_bitwise:
     'a bitwise and/or of a variable (under the same conversions) with itself is that variable; one expression reads a variable at one program point',
   complement_xor:
@@ -470,8 +479,8 @@ export class SourcePrinter {
   ) {}
 
   /** Permission (and record) for one exact simplification rule. */
-  simplify(rule: keyof typeof simplifications): boolean {
-    return this.record?.(rule, simplifications[rule]) === true;
+  simplify(rule: keyof typeof simplifications, subjects?: readonly string[]): boolean {
+    return this.record?.(rule, simplifications[rule], subjects) === true;
   }
 
   /** Both printings are one bare variable under the same conversions: pure,
@@ -702,6 +711,8 @@ export interface ExpressionOptions {
   readonly view: 'source' | 'checked';
   /** Proven constant value of an operand, when it prints as a literal. */
   readonly constant?: (value: Value) => bigint | undefined;
+  /** Proven inclusive unsigned upper bound of an integer operand. */
+  readonly maximum?: (value: Value) => bigint | undefined;
   readonly nativeIntegerStorage?: boolean;
   /** Source view: records each exact simplification it applies. */
   readonly presentation?: SimplificationRecorder;
@@ -937,6 +948,28 @@ export function expressionText(
             )
               return kept;
           }
+        // The same holds when the other operand is proven never to exceed the bits
+        // the mask holds (a mask applied twice, a count already masked).
+        if (expression.op === 'and')
+          for (const [kept, mask, other, known] of [
+            [left, options.constant?.(expression.right), expression.left, l],
+            [right, options.constant?.(expression.left), expression.right, r],
+          ] as const) {
+            const bound = mask === undefined ? undefined : options.maximum?.(other);
+            // A signed spelling (a promoted narrow value) must hold the bound as is.
+            if (
+              mask === undefined ||
+              bound === undefined ||
+              (known.signed && bound >= 1n << BigInt(known.bits - 1))
+            )
+              continue;
+            const covered = (1n << BigInt(bound.toString(2).length)) - 1n;
+            if (
+              (mask & covered) === covered &&
+              printer.simplify('bounded_mask', [expression.left.id, expression.right.id])
+            )
+              return kept;
+          }
         // A variable combined with itself (a flag test of one register) is the variable.
         if (
           (expression.op === 'and' || expression.op === 'or') &&
@@ -1037,25 +1070,40 @@ export function expressionText(
         return printer.reduce(width, printer.binary(op, left, right, common));
       }
       const count = options.constant?.(expression.right);
-      if (
+      const shifting =
         (expression.op === 'shl' || expression.op === 'lshr' || expression.op === 'ashr') &&
-        count !== undefined &&
-        count < BigInt(width) &&
-        type.kind === 'integer'
-      ) {
-        const amount = printer.literal(count, bitWidth(expression.right.type));
+        type.kind === 'integer';
+      // Every count the shift can see: the constant, or the proven upper bound
+      // of a variable count (a mask, a narrow zero extension). Below the width
+      // the native shift is the bit-vector shift; at or above it only the
+      // helper's oversize-count rule applies.
+      const highest = shifting ? (count ?? options.maximum?.(expression.right)) : undefined;
+      if (shifting && highest !== undefined && highest < BigInt(width)) {
+        let amount: Printed;
+        if (count !== undefined) amount = printer.literal(count, bitWidth(expression.right.type));
+        else {
+          amount = operand(expression.right);
+          // A signed spelling must still hold the bound as a non-negative count.
+          const known = range(amount, bitWidth(expression.right.type));
+          if (
+            (known.signed && highest >= 1n << BigInt(known.bits - 1)) ||
+            !printer.simplify('bounded_shift_count', [expression.left.id, expression.right.id])
+          )
+            return helper();
+        }
+        const lowest = count ?? 0n;
         let left = operand(expression.left);
         if (expression.op === 'lshr') {
           // A narrowed zero-extension needs its full width for a count the
           // narrow C type cannot shift by (shifting a uint32_t by 32 is undefined).
-          if (!python && count >= BigInt(promote(range(left, width)).bits))
+          if (!python && highest >= BigInt(promote(range(left, width)).bits))
             left = printer.cast(width, false, left);
           const l = range(left, width);
           return printer.binary(
             '>>',
             left,
             amount,
-            python ? { bits: Math.max(1, l.bits - Number(count)), signed: false } : promote(l),
+            python ? { bits: Math.max(1, l.bits - Number(lowest)), signed: false } : promote(l),
           );
         }
         if (expression.op === 'ashr')
@@ -1069,12 +1117,12 @@ export function expressionText(
             ),
           );
         if (python) {
-          const bits = range(left, width).bits + Number(count);
+          const bits = range(left, width).bits + Number(highest);
           const result = printer.binary('<<', left, amount, { bits, signed: false });
           return bits <= width ? result : printer.reduce(width, result);
         }
         let shifted = promote(range(left, width));
-        if (shifted.signed ? width + Number(count) > 31 : shifted.bits < width) {
+        if (shifted.signed ? width + Number(highest) > 31 : shifted.bits < width) {
           left = printer.cast(Math.max(width, 32), false, left);
           shifted = left.ctype!;
         }

@@ -77,7 +77,9 @@ const scalarFloat = (type: DataType): boolean =>
  * written FP value on some exit, with literal bits or a typed argument elsewhere.
  * When both qualify, positive caller demand decides, then the register written
  * last on every exit path, then a native written-result interface naming exactly
- * one of them; otherwise the explicit form remains. */
+ * one of them; otherwise the explicit form remains. An integer-only qualification
+ * also keeps the explicit form when the untyped FP register is written after it
+ * on every exit path. */
 export function selectSourcePrimaryResult(
   input: SourcePrimaryResultInput,
 ): SourcePrimaryResult | null {
@@ -193,22 +195,60 @@ export function selectSourcePrimaryResult(
     }
     return stored;
   };
-  // Every stored value is typed FP of the slot width or literal bits.
-  const slotType = (load: Value): DataType | undefined => {
-    let type: DataType | undefined;
-    for (const stored of slotStores(load) ?? []) {
-      if (expressions.get(stored.id)?.kind === 'constant') continue;
-      const slice = typed
-        .get(stored.id)
-        ?.find(
-          (candidate) =>
-            candidate.offset === 0 &&
-            scalarFloat(candidate.type) &&
-            bitWidth(candidate.type) === bitWidth(load.type),
-        );
-      if (!slice || (type && !sameType(type, slice.type))) return undefined;
-      type = slice.type;
+  // Every stored value is typed FP of the slot width or literal bits; a stored
+  // reload of an exact slot (an unoptimized copy between frame slots, possibly
+  // through same-width bitcasts) carries that slot's type. A slot already being
+  // resolved adds no other value: its contents are those of the stores
+  // resolved around the cycle. `null` means no constraint (only literals or
+  // cycle back-references); unknown slot contents are `undefined`.
+  const reloaded = (value: Value): Value | undefined => {
+    let current = value;
+    for (let depth = 0; depth < 16; depth++) {
+      if (loads.has(current.id)) return current;
+      const expression = expressions.get(current.id);
+      if (
+        expression?.kind !== 'cast' ||
+        expression.op !== 'bitcast' ||
+        bitWidth(expression.value.type) !== bitWidth(current.type)
+      )
+        return undefined;
+      current = expression.value;
     }
+    return undefined;
+  };
+  const slotType = (
+    load: Value,
+    active = new Set<string>(),
+    visits = { count: 0 },
+  ): DataType | null | undefined => {
+    if (active.has(load.id)) return null;
+    const stores = ++visits.count <= 64 ? slotStores(load) : undefined;
+    if (!stores) return undefined;
+    active.add(load.id);
+    let type: DataType | null | undefined = null;
+    for (const stored of stores) {
+      if (expressions.get(stored.id)?.kind === 'constant') continue;
+      const reload = reloaded(stored);
+      const slice =
+        typed
+          .get(stored.id)
+          ?.find(
+            (candidate) =>
+              candidate.offset === 0 &&
+              scalarFloat(candidate.type) &&
+              bitWidth(candidate.type) === bitWidth(load.type),
+          )?.type ??
+        (reload && bitWidth(reload.type) === bitWidth(load.type)
+          ? slotType(reload, active, visits)
+          : undefined);
+      if (slice === null) continue;
+      if (!slice || (type && !sameType(type, slice))) {
+        type = undefined;
+        break;
+      }
+      type = slice;
+    }
+    active.delete(load.id);
     return type;
   };
   // Path-sensitive write order. A definition site is an SSA statement in its
@@ -688,6 +728,30 @@ export function selectSourcePrimaryResult(
         kind: 'explicit',
         written,
         reason: `callers consume ${floatingName} while only ${integerName} qualifies`,
+      };
+    // Without IEEE type evidence the FP register still contradicts an integer
+    // result when it is written on every exit, after the integer register on
+    // every exit path (an untyped reload into the FP result register before
+    // returning): the explicit form remains.
+    if (
+      !integerDemanded &&
+      floatingStates.every(
+        (item) => item.kind === 'written' || item.kind === 'constant' || item.kind === 'untyped',
+      ) &&
+      exits.every((block) => {
+        const integerValue = exitValue(block, input.integer),
+          floatingValue = exitValue(block, input.floating);
+        return (
+          integerValue !== undefined &&
+          floatingValue !== undefined &&
+          later(integerValue, floatingValue) === 'second'
+        );
+      })
+    )
+      return {
+        kind: 'explicit',
+        written,
+        reason: `${floatingName} is written after ${integerName} on every exit path without typed IEEE evidence`,
       };
     // A tail transfer passes its callee's result through; its storage is not
     // classified here, so only return-only functions become void-like.
