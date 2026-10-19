@@ -350,6 +350,7 @@ export class Renderer {
       input.function.id,
       context,
       this.sourceView ? input.types?.shapes : undefined,
+      new Map((input.types?.image_types ?? []).map((binding) => [binding.type_id, binding])),
     );
     this.sourceDataValue = sourceDataValues(
       this.program.expressions,
@@ -2503,7 +2504,15 @@ export class Renderer {
         packed ||= members.some((member) => stride % BigInt(member.bits / 8) !== 0n);
         this.writer.comment(0, `observed access stride ${stride}; not an allocation extent`);
       }
-      this.writer.comment(0, 'observed members only; size unknown');
+      const image = this.sourceStructs.image(id);
+      this.writer.comment(
+        0,
+        `observed members only; size unknown${
+          image && image.functions > 1
+            ? `; merged from ${image.functions} functions${image.state === 'bounded' ? ' (flows partly explored)' : ''}`
+            : ''
+        }${image?.conflicts.length ? `; conflicts with ${image.conflicts.join(', ')}` : ''}`,
+      );
       this.writer.line(
         0,
         `struct ${name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,

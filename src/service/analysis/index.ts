@@ -59,6 +59,7 @@ import {
 import { pipelineComponents, pipelineVersions } from './versions.js';
 import { boundIR, requirePass } from './passes.js';
 import { recoverSourceEvidence } from './source-facts.js';
+import { recoverImageTypes } from './image-types.js';
 export { executeAnnotations } from './annotations.js';
 
 export interface AnalysisScope {
@@ -454,7 +455,7 @@ export async function executeDecompilation(
         }
         names.push(candidates.explicit ? { entity_id, name } : nativeName(entity_id, name));
       }
-      const source = recoverSourceEvidence({
+      const sourceInput = {
         scope,
         identity,
         revision: args.revision,
@@ -472,7 +473,9 @@ export async function executeDecompilation(
         native_types: nativeTypes,
         components,
         observable_register_masks,
-      });
+      };
+      const source = recoverSourceEvidence(sourceInput);
+      const localTypes = types;
       types = refineMemoryShapes(ir, types, fullContext, {
         slice_id: image.selected_slice_id,
         revision: args.revision,
@@ -483,6 +486,8 @@ export async function executeDecompilation(
         (item) => item.code === 'cancelled' || item.code === 'resource_limit',
       );
       if (refinementFailure) throw new OperationError(refinementFailure);
+      const imageTypes = recoverImageTypes(sourceInput, localTypes, types);
+      types = imageTypes.types;
       context.progress('emit', 6, 7);
       const emit = args.options.emitter === 'python-like' ? emitPythonLike : emitC;
       const emitted = emit(
@@ -516,6 +521,7 @@ export async function executeDecompilation(
         ...nameDiagnostics,
         ...emitted.diagnostics,
         ...(source.diagnostics ?? []),
+        ...imageTypes.diagnostics,
       ];
       const uniqueDiagnostics = boundDiagnostics([
         ...new Map(

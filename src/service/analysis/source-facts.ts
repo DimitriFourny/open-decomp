@@ -86,7 +86,7 @@ import { prepareNativeContext } from './native-context-prepare.js';
 import { formatArgumentSignatures } from './source-variadic.js';
 import { nativeLibraryTails } from './native-library-tails.js';
 
-interface SourceFactsInput {
+export interface SourceFactsInput {
   readonly scope: AnalysisScope;
   readonly identity?: CacheIdentity;
   readonly revision: number;
@@ -806,16 +806,132 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
  * consumed return slices of this request. Unknown/truncated preparations are not
  * cached. Immutable image + revision + full component/target identity bind all
  * graph, declaration, annotation and dependency-resolution inputs. */
-const nativeSummaries = new WeakMap<
-  LoadedImage,
-  {
-    readonly identity: string;
-    readonly functions: readonly FunctionRecord[];
-    readonly references: readonly ReferenceRecord[];
-    readonly summaries: Map<string, PreparedNativeUnit>;
-    units: number;
+const nativeSummaries = new WeakMap<LoadedImage, NativeUnitCache>();
+
+export type NativeUnitCache = {
+  readonly identity: string;
+  readonly functions: readonly FunctionRecord[];
+  readonly references: readonly ReferenceRecord[];
+  readonly summaries: Map<string, PreparedNativeUnit>;
+  units: number;
+};
+
+export function nativeSelectedNodes(ir: SSAForm): number {
+  return ir.blocks.reduce(
+    (count, block) => count + 3 + block.parameters.length + block.instructions.length,
+    0,
+  );
+}
+
+/** Dependency capacity left after the selected body; part of the cache identity. */
+export function nativeCapacity(input: SourceFactsInput, context: OperationContext) {
+  return {
+    nodes: context.budget.ir_nodes - nativeSelectedNodes(input.ir),
+    blocks: context.budget.blocks - input.ir.blocks.length,
+    instructions: context.budget.instructions - input.instruction_count,
+  };
+}
+
+/** Supported, unopposed library import contracts for native dependency bodies. */
+export function nativeLibraryContracts(input: SourceFactsInput): SuppliedCallContract[] {
+  return input.library.contracts
+    .filter((contract) => contract.abi_state === 'supported' && !contract.conflicts_with.length)
+    .map((contract) => ({
+      id: contract.id,
+      target: { kind: 'import', image_id: input.image.id, import_id: contract.import_id },
+      signature: contract.abi_signature,
+      noreturn: contract.noreturn,
+      evidence_ids: contract.evidence_ids,
+    }));
+}
+
+/** The per-image prepared-unit cache for this exact request identity. */
+export function nativeUnitCache(
+  input: SourceFactsInput,
+  capacity: ReturnType<typeof nativeCapacity>,
+  context: OperationContext,
+): NativeUnitCache {
+  const { components, image, revision } = input,
+    abi = components.abi;
+  const identity = fingerprint({
+    revision,
+    image: image.sha256,
+    slice: image.selected_slice_id,
+    target: image.target,
+    versions: pipelineVersions(image.target, 'c-like'),
+    lifter: `${components.lifter.name}/${components.lifter.version}`,
+    abi: `${abi.id}/${abi.version}`,
+    identity: input.identity ?? null,
+    budget: input.identity?.budget ?? context.budget,
+    capacity,
+    native_types: input.native_types,
+  } as unknown as CanonicalValue);
+  let cached = nativeSummaries.get(image);
+  if (
+    !cached ||
+    cached.identity !== identity ||
+    cached.functions !== input.functions ||
+    cached.references !== input.references
+  ) {
+    cached = {
+      identity,
+      functions: input.functions,
+      references: input.references,
+      summaries: new Map(),
+      units: 0,
+    };
+    nativeSummaries.set(image, cached);
   }
->();
+  return cached;
+}
+
+/** Prepare (or reuse) one native body; cache hits replay their dependency reads. */
+export function loadNativeUnit(
+  input: SourceFactsInput,
+  cached: NativeUnitCache,
+  fn: FunctionRecord,
+  boundedContext: OperationContext,
+  libraryContracts: readonly SuppliedCallContract[],
+): PreparedNativeUnit {
+  const { scope } = input;
+  let unit = cached.summaries.get(fn.id);
+  if (
+    unit &&
+    (unit.instructions > boundedContext.budget.instructions ||
+      unit.blocks > boundedContext.budget.blocks ||
+      unit.required_nodes > boundedContext.budget.ir_nodes)
+  )
+    unit = undefined;
+  if (unit) {
+    boundedContext.checkpoint(1 + unit.dependencies.length + unit.evidence.length);
+    if (scope.dependencies && unit.dependency_readset)
+      scope.dependencies.replay(unit.dependency_readset);
+    else if (scope.dependencies) {
+      cached.summaries.delete(fn.id);
+      cached.units -= unit.instructions + unit.nodes + unit.evidence.length;
+      unit = undefined;
+    }
+  }
+  if (unit) {
+    scope.context.progress('native_summary_cache', 1, 1);
+    return unit;
+  }
+  unit = prepareNativeUnit(input, fn, boundedContext, libraryContracts);
+  if (scope.dependencies) unit = { ...unit, dependency_readset: scope.dependencies.finish() };
+  if (
+    !unit.budget_truncated &&
+    !unit.reasons.length &&
+    unit.analysis?.state === 'complete' &&
+    !cached.summaries.has(fn.id)
+  ) {
+    const units = unit.instructions + unit.nodes + unit.evidence.length;
+    if (cached.summaries.size < 64 && cached.units + units <= 8192) {
+      cached.summaries.set(fn.id, unit);
+      cached.units += units;
+    }
+  }
+  return unit;
+}
 
 function nativeShapeTransfers(
   unit: PreparedNativeUnit,
@@ -1065,15 +1181,8 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   let dependencies = nativeDependencies(input, input.ir, context, undefined, false, demand_index);
   const targets = new Map<string, FunctionRecord>();
   for (const dependency of dependencies) targets.set(dependency.target.id, dependency.target);
-  const selectedNodes = input.ir.blocks.reduce(
-    (count, block) => count + 3 + block.parameters.length + block.instructions.length,
-    0,
-  );
-  const capacity = {
-    nodes: context.budget.ir_nodes - selectedNodes,
-    blocks: context.budget.blocks - input.ir.blocks.length,
-    instructions: context.budget.instructions - input.instruction_count,
-  };
+  const selectedNodes = nativeSelectedNodes(input.ir);
+  const capacity = nativeCapacity(input, context);
   const summaryWorkLimit = Math.floor((context.remainingWork?.() ?? 0) / 2);
   let summaryWork = 0;
   const summaryContext: OperationContext = {
@@ -1126,46 +1235,8 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       worklistWork += work;
     },
   };
-  const libraryContracts: SuppliedCallContract[] = targets.size
-    ? input.library.contracts
-        .filter((contract) => contract.abi_state === 'supported' && !contract.conflicts_with.length)
-        .map((contract) => ({
-          id: contract.id,
-          target: { kind: 'import', image_id: image.id, import_id: contract.import_id },
-          signature: contract.abi_signature,
-          noreturn: contract.noreturn,
-          evidence_ids: contract.evidence_ids,
-        }))
-    : [];
-  const identity = fingerprint({
-    revision,
-    image: image.sha256,
-    slice: image.selected_slice_id,
-    target: image.target,
-    versions: pipelineVersions(image.target, 'c-like'),
-    lifter: `${components.lifter.name}/${components.lifter.version}`,
-    abi: `${abi.id}/${abi.version}`,
-    identity: input.identity ?? null,
-    budget: input.identity?.budget ?? context.budget,
-    capacity,
-    native_types: input.native_types,
-  } as unknown as CanonicalValue);
-  let cached = nativeSummaries.get(image);
-  if (
-    !cached ||
-    cached.identity !== identity ||
-    cached.functions !== input.functions ||
-    cached.references !== input.references
-  ) {
-    cached = {
-      identity,
-      functions: input.functions,
-      references: input.references,
-      summaries: new Map(),
-      units: 0,
-    };
-    nativeSummaries.set(image, cached);
-  }
+  const libraryContracts = targets.size ? nativeLibraryContracts(input) : [];
+  const cached = nativeUnitCache(input, capacity, context);
   const selected = input.functions.find((fn) => fn.id === input.ir.id);
   const selectedUnit: PreparedNativeUnit | undefined = selected
     ? {
@@ -1244,45 +1315,8 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         partialSummaries = summaries;
       },
       ...(selectedUnit ? { preloaded: new Map([[input.ir.id, selectedUnit]]) } : {}),
-      load(fn, boundedContext) {
-        let unit = cached.summaries.get(fn.id);
-        if (
-          unit &&
-          (unit.instructions > boundedContext.budget.instructions ||
-            unit.blocks > boundedContext.budget.blocks ||
-            unit.required_nodes > boundedContext.budget.ir_nodes)
-        )
-          unit = undefined;
-        if (unit) {
-          boundedContext.checkpoint(1 + unit.dependencies.length + unit.evidence.length);
-          if (scope.dependencies && unit.dependency_readset)
-            scope.dependencies.replay(unit.dependency_readset);
-          else if (scope.dependencies) {
-            cached.summaries.delete(fn.id);
-            cached.units -= unit.instructions + unit.nodes + unit.evidence.length;
-            unit = undefined;
-          }
-        }
-        if (unit) {
-          context.progress('native_summary_cache', 1, 1);
-          return unit;
-        }
-        unit = prepareNativeUnit(input, fn, boundedContext, libraryContracts);
-        if (scope.dependencies) unit = { ...unit, dependency_readset: scope.dependencies.finish() };
-        if (
-          !unit.budget_truncated &&
-          !unit.reasons.length &&
-          unit.analysis?.state === 'complete' &&
-          !cached.summaries.has(fn.id)
-        ) {
-          const units = unit.instructions + unit.nodes + unit.evidence.length;
-          if (cached.summaries.size < 64 && cached.units + units <= 8192) {
-            cached.summaries.set(fn.id, unit);
-            cached.units += units;
-          }
-        }
-        return unit;
-      },
+      load: (fn, boundedContext) =>
+        loadNativeUnit(input, cached, fn, boundedContext, libraryContracts),
       initialize: (unit, boundedContext, demand) =>
         observeNativeUnit(input, unit, new Map(), boundedContext, demand, true),
       observe: (unit, summaries, boundedContext, demand) =>

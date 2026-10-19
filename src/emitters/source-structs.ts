@@ -1,5 +1,9 @@
-import type { MemoryShape, SuppliedTypeRecord } from '../analysis/types/index.js';
-import type { OperationContext } from '../core/index.js';
+import type {
+  ImageTypeBinding,
+  MemoryShape,
+  SuppliedTypeRecord,
+} from '../analysis/types/index.js';
+import { fingerprint, type OperationContext } from '../core/index.js';
 import type { LocalValidationSession } from '../reconstruction/local-validation.js';
 
 export interface ObservedMember {
@@ -23,6 +27,7 @@ export class SourceStructs {
     private readonly subject: string,
     private readonly context: OperationContext,
     shapes: readonly MemoryShape[] = [],
+    private readonly images: ReadonlyMap<string, ImageTypeBinding> = new Map(),
   ) {
     for (const shape of shapes) {
       context.checkpoint(1 + shape.fields.length);
@@ -185,13 +190,22 @@ export class SourceStructs {
     return result;
   }
 
+  /** Image-wide identity of a merged structure type, if recovered. */
+  image(id: string): ImageTypeBinding | undefined {
+    return this.images.get(id);
+  }
+
+  /** Image-wide names come from merged image types; any other structure is
+   * named by a digest of its layout, never by a per-function ordinal, so one
+   * name never denotes two different layouts. */
   name(id: string): string {
     const previous = this.names.get(id);
     if (previous) return previous;
+    const image = this.images.get(id)?.name;
     const key = this.records.get(id)?.source === 'analysis' ? this.key(id) : `declared:${id}`;
-    let name = this.canonical.get(key);
+    let name = image ?? this.canonical.get(key);
     if (!name) {
-      name = `struct_${this.canonical.size + 1}`;
+      name = `struct_${fingerprint(key).slice(0, 6)}`;
       this.canonical.set(key, name);
     }
     this.names.set(id, name);

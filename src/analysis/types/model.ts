@@ -130,4 +130,18 @@ export interface TypeRecoveryResult {
   readonly diagnostics: readonly Diagnostic[];
   /** Null if preparation exhausted its budget before physical ABI analysis. */
   readonly calls: CallAnalysisResult | null;
+  /** Image-wide identities of the structure types used here (see image types). */
+  readonly image_types?: readonly ImageTypeBinding[];
+}
+/** One structure type's image-wide identity: the same name denotes the same
+ * merged layout in every function's output. */
+export interface ImageTypeBinding {
+  readonly type_id: string;
+  readonly name: string;
+  /** Bounded: some pointer flows were not explored; the name carries a layout digest. */
+  readonly state: 'complete' | 'bounded';
+  /** Functions whose observed views were merged into this layout. */
+  readonly functions: number;
+  /** Names of connected layouts that overlap incompatibly and stay separate. */
+  readonly conflicts: readonly string[];
 }

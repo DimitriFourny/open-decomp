@@ -10,22 +10,24 @@ export interface ImageTypeField {
   readonly kind: 'integer' | 'float' | 'pointer';
 }
 
-/** Exact image-level identity of one pointer value at displacement zero:
- * the value a function receives in an integer argument register, returns in
- * its result register, or the address of one entry-SP-relative stack object. */
+/** Exact image-level identity of one pointer flow at displacement zero: the
+ * value a function receives in an integer argument register, returns in its
+ * result register, or the address of one entry-SP-relative stack object. */
 export type ImageTypeAnchor =
   | { readonly kind: 'argument'; readonly function_id: string; readonly index: number }
   | { readonly kind: 'return'; readonly function_id: string }
   | { readonly kind: 'stack'; readonly function_id: string; readonly offset: bigint };
 
-/** One function-local object view (a recovered memory shape or a pointer value
- * that flows between functions). Fields are relative to the anchored pointer. */
+/** One function-local object view: a recovered memory shape, or a pointer value
+ * that flows between functions. Fields are relative to the anchored pointer. */
 export interface ImageTypeObject {
-  /** Image-unique key; also the deterministic local ordering key. */
+  /** Image-unique key; also the deterministic ordering key. */
   readonly key: string;
   readonly function_id: string;
   readonly fields: readonly ImageTypeField[];
-  readonly anchors: readonly ImageTypeAnchor[];
+  /** `own` anchors are this function's entry arguments/result (callee side);
+   * the others are uses at call sites (caller side) or stack addresses. */
+  readonly anchors: readonly { readonly anchor: ImageTypeAnchor; readonly own: boolean }[];
   /** Members whose loaded or stored value is exactly another local object. */
   readonly pointees: readonly {
     readonly offset: bigint;
@@ -35,7 +37,7 @@ export interface ImageTypeObject {
 }
 
 export interface ImageTypeFunction {
-  /** C identifier of the function (`sub_<entry>` when unnamed). */
+  /** C identifier of the function. */
   readonly name: string;
   /** Deterministic order (entry address). */
   readonly order: bigint;
@@ -54,7 +56,8 @@ export interface ImageTypeClass {
     readonly stride: bigint | null;
     readonly class_id: string;
   }[];
-  /** Bounded: some flow into or out of this class was not explored. */
+  /** Bounded: some flow into or out of this class was not explored, so the
+   * member set (and name) may depend on where exploration started. */
   readonly state: 'complete' | 'bounded';
   /** Classes a flow connected to this one whose layouts overlap incompatibly. */
   readonly conflicts: readonly string[];
@@ -68,10 +71,10 @@ export interface ImageTypeSolution {
 
 export interface ImageTypeSolveOptions {
   readonly functions: ReadonlyMap<string, ImageTypeFunction>;
-  /** Anchor keys whose flows were not explored (bounded neighborhood). */
+  /** Functions whose own anchors were never observed (body unavailable). */
+  readonly unloaded: ReadonlySet<string>;
+  /** Anchor keys whose caller side was not fully explored. */
   readonly open: ReadonlySet<string>;
-  /** Bounded classes take their name from this function's own objects. */
-  readonly root_function?: string;
 }
 
 export function imageAnchorKey(anchor: ImageTypeAnchor): string {
@@ -85,7 +88,7 @@ export function imageAnchorKey(anchor: ImageTypeAnchor): string {
 const pointeeKey = (offset: bigint, stride: bigint | null): string => `${offset}:${stride ?? ''}`;
 const fieldEnd = (field: ImageTypeField): bigint =>
   field.offset + BigInt(Math.ceil(field.width_bits / 8));
-const compareFields = (a: ImageTypeField, b: ImageTypeField): number =>
+export const compareImageFields = (a: ImageTypeField, b: ImageTypeField): number =>
   a.offset < b.offset
     ? -1
     : a.offset > b.offset
@@ -104,7 +107,7 @@ function sameMember(a: ImageTypeField, b: ImageTypeField): boolean {
 }
 
 /** Every pair of overlapping members taken from different sides is one member. */
-function compatible(
+export function compatibleImageFields(
   left: readonly ImageTypeField[],
   right: readonly ImageTypeField[],
   budget: AnalysisBudget,
@@ -112,7 +115,7 @@ function compatible(
   const all = [
     ...left.map((field) => ({ field, side: 0 })),
     ...right.map((field) => ({ field, side: 1 })),
-  ].sort((a, b) => compareFields(a.field, b.field));
+  ].sort((a, b) => compareImageFields(a.field, b.field));
   for (let index = 0; index < all.length; index++) {
     const current = all[index]!,
       end = fieldEnd(current.field);
@@ -133,21 +136,18 @@ function mergeFields(
   for (const field of [...left, ...right]) {
     const key = `${field.offset}:${field.width_bits}:${field.kind === 'float'}`;
     const previous = merged.get(key);
-    if (!previous) {
-      merged.set(key, field);
-      continue;
-    }
-    if (previous.stride !== null && field.stride !== null && previous.stride !== field.stride) {
-      merged.set(`${key}:${field.stride}`, field);
-      continue;
-    }
-    merged.set(key, {
-      ...previous,
-      stride: previous.stride ?? field.stride,
-      kind: previous.kind === 'pointer' || field.kind === 'pointer' ? 'pointer' : previous.kind,
-    });
+    merged.set(
+      key,
+      previous
+        ? {
+            ...previous,
+            stride: previous.stride ?? field.stride,
+            kind: previous.kind === 'pointer' || field.kind === 'pointer' ? 'pointer' : previous.kind,
+          }
+        : field,
+    );
   }
-  return [...merged.values()].sort(compareFields);
+  return [...merged.values()].sort(compareImageFields);
 }
 
 interface Root {
@@ -156,12 +156,13 @@ interface Root {
   pointees: Map<string, { offset: bigint; stride: bigint | null; object: string }>;
 }
 
-/** Steensgaard-style unification of function-local object views connected by
- * exact pointer flows (arguments, results, stack addresses) and by the
- * pointees of unified members. A union whose layouts overlap incompatibly is
- * refused and recorded as a conflict, so distinct layouts never share a name.
- * Edges are processed in canonical key order: a fully explored component gets
- * the same classes, layouts and names from any of its functions. */
+/** Unification (Steensgaard-style) of function-local object views connected by
+ * exact pointer flows and by the pointees of unified members. An argument or
+ * result flow is used only once the callee itself confirms it as an object
+ * (it dereferences the value, or passes/returns it into a confirmed flow), so a
+ * stale caller register never joins unrelated objects. A union whose layouts
+ * overlap incompatibly is refused and recorded as a conflict: distinct layouts
+ * never share a class. Flows are processed in canonical key order. */
 export function solveImageTypes(
   objects: readonly ImageTypeObject[],
   options: ImageTypeSolveOptions,
@@ -169,26 +170,60 @@ export function solveImageTypes(
 ): ImageTypeSolution {
   const sorted = [...objects].sort((a, b) => a.key.localeCompare(b.key));
   const byKey = new Map(sorted.map((object) => [object.key, object]));
+  const anchored = new Map<string, string[]>();
+  const owners = new Map<string, string[]>();
+  for (const object of sorted)
+    for (const { anchor, own } of object.anchors) {
+      budget.charge();
+      const key = imageAnchorKey(anchor);
+      (anchored.get(key) ?? anchored.set(key, []).get(key)!).push(object.key);
+      if (own) (owners.get(key) ?? owners.set(key, []).get(key)!).push(object.key);
+    }
+  // Least fixpoint: a stack anchor is local; an argument/result anchor needs a
+  // callee-side object that dereferences the value or forwards it to one.
+  const confirmed = new Set<string>();
+  for (const key of anchored.keys()) if (key.startsWith('stack:')) confirmed.add(key);
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const [key, list] of owners) {
+      if (confirmed.has(key)) continue;
+      budget.charge(list.length);
+      if (
+        list.some((member) => {
+          const object = byKey.get(member)!;
+          return (
+            object.fields.length > 0 ||
+            object.pointees.length > 0 ||
+            object.anchors.some(
+              (item) => !item.own && confirmed.has(imageAnchorKey(item.anchor)),
+            )
+          );
+        })
+      ) {
+        confirmed.add(key);
+        changed = true;
+      }
+    }
+  }
   const parent = new Map<string, string>();
   const roots = new Map<string, Root>();
-  const deferred: [string, string][] = [];
+  const queue: [string, string][] = [];
   for (const object of sorted) {
     budget.charge(1 + object.fields.length + object.pointees.length);
     parent.set(object.key, object.key);
     const pointees = new Map<string, { offset: bigint; stride: bigint | null; object: string }>();
-    const pending: [string, string][] = [];
     for (const pointee of [...object.pointees].sort((a, b) => a.object.localeCompare(b.object))) {
       const key = pointeeKey(pointee.offset, pointee.stride),
         previous = pointees.get(key);
-      if (previous) pending.push([previous.object, pointee.object]);
+      // One member read at several places holds one pointee type.
+      if (previous) queue.push([previous.object, pointee.object]);
       else pointees.set(key, pointee);
     }
     roots.set(object.key, {
       members: [object.key],
-      fields: [...object.fields].sort(compareFields),
+      fields: [...object.fields].sort(compareImageFields),
       pointees,
     });
-    deferred.push(...pending);
   }
   function find(key: string): string {
     let current = key;
@@ -201,14 +236,11 @@ export function solveImageTypes(
     return current;
   }
   const refused: [string, string][] = [];
-  const queue: [string, string][] = [];
   function union(a: string, b: string): void {
     const left = find(a),
       right = find(b);
     if (left === right) return;
-    const x = roots.get(left)!,
-      y = roots.get(right)!;
-    if (!compatible(x.fields, y.fields, budget)) {
+    if (!compatibleImageFields(roots.get(left)!.fields, roots.get(right)!.fields, budget)) {
       refused.push([a, b]);
       return;
     }
@@ -228,25 +260,15 @@ export function solveImageTypes(
     }
   }
   const drain = (): void => {
-    while (queue.length) {
+    for (let index = 0; index < queue.length; index++) {
       budget.charge();
-      const [a, b] = queue.shift()!;
-      union(a, b);
+      union(...queue[index]!);
     }
+    queue.length = 0;
   };
-  // Pointees of one member read at several places are one pointee type.
-  for (const [a, b] of deferred) queue.push([a, b]);
   drain();
-  const anchored = new Map<string, string[]>();
-  for (const object of sorted)
-    for (const anchor of object.anchors) {
-      budget.charge();
-      const key = imageAnchorKey(anchor);
-      const list = anchored.get(key) ?? [];
-      list.push(object.key);
-      anchored.set(key, list);
-    }
   for (const key of [...anchored.keys()].sort()) {
+    if (!confirmed.has(key)) continue;
     const members = anchored.get(key)!;
     for (const member of members.slice(1)) {
       union(members[0]!, member);
@@ -257,38 +279,65 @@ export function solveImageTypes(
   for (const object of sorted) {
     budget.charge();
     const root = find(object.key);
-    const list = groups.get(root) ?? [];
-    list.push(object.key);
-    groups.set(root, list);
+    (groups.get(root) ?? groups.set(root, []).get(root)!).push(object.key);
   }
   const ids = new Map<string, string>();
   for (const [root, members] of groups)
     ids.set(root, `image_type_${fingerprint(members).slice(0, 24)}`);
+  const classOf = (key: string): string => ids.get(find(key))!;
   const conflicts = new Map<string, Set<string>>();
   for (const [a, b] of refused) {
-    const left = ids.get(find(a))!,
-      right = ids.get(find(b))!;
+    const left = classOf(a),
+      right = classOf(b);
     if (left === right) continue;
     (conflicts.get(left) ?? conflicts.set(left, new Set()).get(left)!).add(right);
     (conflicts.get(right) ?? conflicts.set(right, new Set()).get(right)!).add(left);
   }
   const functionName = (id: string): string => options.functions.get(id)?.name ?? 'sub';
   const functionOrder = (id: string): bigint => options.functions.get(id)?.order ?? 0n;
-  const classes: {
+  // A flow is unexplored when its callee body is unavailable or its callers
+  // were not all visited; the class may then miss members.
+  const unexplored = (key: string, anchor: ImageTypeAnchor): boolean =>
+    anchor.kind !== 'stack' &&
+    (options.open.has(key) || options.unloaded.has(anchor.function_id));
+  interface Pending {
     root: string;
     id: string;
     members: string[];
     bounded: boolean;
     name?: string;
-  }[] = [];
-  for (const [root, members] of groups) {
-    const bounded = members.some((member) =>
-      byKey.get(member)!.anchors.some((anchor) => options.open.has(imageAnchorKey(anchor))),
-    );
-    classes.push({ root, id: ids.get(root)!, members, bounded });
   }
+  const classes: Pending[] = [];
+  for (const [root, members] of groups)
+    classes.push({
+      root,
+      id: ids.get(root)!,
+      members,
+      bounded: members.some((member) =>
+        byKey
+          .get(member)!
+          .anchors.some(({ anchor }) => unexplored(imageAnchorKey(anchor), anchor)),
+      ),
+    });
   classes.sort((a, b) => a.id.localeCompare(b.id));
-  // Local ordinals for objects with no flow identity: stable per function.
+  const byId = new Map(classes.map((item) => [item.id, item]));
+  // A pointee view's members follow its holder's members: an incompletely
+  // explored holder leaves its pointees incomplete too.
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const item of classes) {
+      if (!item.bounded) continue;
+      for (const pointee of roots.get(item.root)!.pointees.values()) {
+        budget.charge();
+        const target = byId.get(classOf(pointee.object))!;
+        if (!target.bounded) {
+          target.bounded = true;
+          changed = true;
+        }
+      }
+    }
+  }
+  // Local ordinals for objects without flow identity: stable per function.
   const ordinals = new Map<string, number>();
   const counters = new Map<string, number>();
   for (const object of sorted) {
@@ -296,24 +345,25 @@ export function solveImageTypes(
     counters.set(object.function_id, next);
     ordinals.set(object.key, next);
   }
-  type Candidate = { rank: number; order: bigint; tie: string; name: string };
+  interface Candidate {
+    rank: number;
+    order: bigint;
+    tie: string;
+    name: string;
+  }
   const better = (a: Candidate, b: Candidate | undefined): boolean =>
     !b ||
     a.rank < b.rank ||
     (a.rank === b.rank &&
       (a.order < b.order || (a.order === b.order && a.tie.localeCompare(b.tie) < 0)));
-  const ownName = (
-    members: readonly string[],
-    only: string | undefined,
-  ): Candidate | undefined => {
+  for (const item of classes) {
     let best: Candidate | undefined;
-    for (const member of members) {
+    for (const member of item.members) {
       const object = byKey.get(member)!;
-      if (only !== undefined && object.function_id !== only) continue;
-      for (const anchor of object.anchors) {
+      for (const { anchor, own } of object.anchors) {
         budget.charge();
-        // Arguments/results are named by the function that owns the value.
-        if (only !== undefined && anchor.function_id !== only) continue;
+        // Arguments/results are named after the callee that receives the value.
+        if (anchor.kind !== 'stack' && !own && !confirmed.has(imageAnchorKey(anchor))) continue;
         const fn = functionName(anchor.function_id),
           order = functionOrder(anchor.function_id);
         const candidate: Candidate =
@@ -330,31 +380,22 @@ export function solveImageTypes(
         if (better(candidate, best)) best = candidate;
       }
     }
-    return best;
-  };
-  const byId = new Map(classes.map((item) => [item.id, item]));
-  for (const item of classes) {
-    const candidate = ownName(
-      item.members,
-      item.bounded ? options.root_function : undefined,
-    );
-    if (candidate) item.name = candidate.name;
+    if (best) item.name = best.name;
   }
-  // Pointee classes without their own flow identity are named by the member
-  // that holds them, in deterministic rounds (bounded depth, cycles stop).
-  const pointeesOf = (item: (typeof classes)[number]) =>
+  const pointeesOf = (item: Pending) =>
     [...roots.get(item.root)!.pointees.values()].sort((a, b) =>
       a.offset < b.offset ? -1 : a.offset > b.offset ? 1 : a.object.localeCompare(b.object),
     );
+  // Pointee classes without their own flow identity are named after the
+  // member holding them, in deterministic rounds (bounded depth).
   for (let round = 0; round < 4; round++) {
     const named = new Map<string, string>();
     for (const item of classes) {
       if (!item.name) continue;
       for (const pointee of pointeesOf(item)) {
         budget.charge();
-        const target = byId.get(ids.get(find(pointee.object))!)!;
+        const target = byId.get(classOf(pointee.object))!;
         if (target.name || named.has(target.id)) continue;
-        if (item.bounded !== target.bounded && target.bounded) continue;
         named.set(
           target.id,
           `${item.name}_f${pointee.offset.toString(16)}${pointee.stride === null ? '' : 'e'}`,
@@ -366,32 +407,17 @@ export function solveImageTypes(
   }
   for (const item of classes) {
     if (item.name) continue;
-    const first = [...item.members]
-      .filter((member) =>
-        item.bounded && options.root_function !== undefined
-          ? byKey.get(member)!.function_id === options.root_function
-          : true,
-      )
-      .sort((a, b) => {
-        const x = byKey.get(a)!,
-          y = byKey.get(b)!;
-        const order = functionOrder(x.function_id) - functionOrder(y.function_id);
-        return order < 0n ? -1 : order > 0n ? 1 : ordinals.get(a)! - ordinals.get(b)!;
-      })[0];
-    const object = byKey.get(first ?? item.members[0]!)!;
+    const first = [...item.members].sort((a, b) => {
+      const x = byKey.get(a)!,
+        y = byKey.get(b)!;
+      const order = functionOrder(x.function_id) - functionOrder(y.function_id);
+      return order < 0n ? -1 : order > 0n ? 1 : ordinals.get(a)! - ordinals.get(b)!;
+    })[0]!;
+    const object = byKey.get(first)!;
     item.name = `${functionName(object.function_id)}_obj${ordinals.get(object.key)}`;
-    // A bounded view without a member of the requesting function cannot be
-    // named canonically; its member set disambiguates it.
-    if (item.bounded && first === undefined) item.name += `_${item.id.slice(-4)}`;
   }
-  const used = new Map<string, number>();
-  for (const item of classes) {
-    const count = (used.get(item.name!) ?? 0) + 1;
-    used.set(item.name!, count);
-    if (count > 1) item.name = `${item.name}_${count}`;
-  }
-  const class_of = new Map<string, string>();
   const result: ImageTypeClass[] = [];
+  const class_of = new Map<string, string>();
   for (const item of classes) {
     const root = roots.get(item.root)!;
     for (const member of item.members) class_of.set(member, item.id);
@@ -404,11 +430,33 @@ export function solveImageTypes(
       pointees: pointeesOf(item).map((pointee) => ({
         offset: pointee.offset,
         stride: pointee.stride,
-        class_id: ids.get(find(pointee.object))!,
+        class_id: classOf(pointee.object),
       })),
       state: item.bounded ? 'bounded' : 'complete',
       conflicts: [...(conflicts.get(item.id) ?? [])].sort(),
     });
+  }
+  // A bounded member set may differ by exploration root: its name carries a
+  // digest of the merged layout, so one name never denotes two layouts.
+  for (const [index, item] of result.entries())
+    if (item.state === 'bounded')
+      result[index] = {
+        ...item,
+        name: `${item.name}_${fingerprint(
+          item.fields.map((field) => [
+            field.offset.toString(),
+            field.width_bits,
+            field.stride?.toString() ?? null,
+            field.kind,
+          ]),
+        ).slice(0, 4)}`,
+      };
+  // Refused unions can leave two classes with the same base name.
+  const used = new Map<string, number>();
+  for (const [index, item] of result.entries()) {
+    const count = (used.get(item.name) ?? 0) + 1;
+    used.set(item.name, count);
+    if (count > 1) result[index] = { ...item, name: `${item.name}_${count}` };
   }
   return { classes: result, class_of };
 }
