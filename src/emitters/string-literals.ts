@@ -107,7 +107,7 @@ export function characterLiteral(
     language === 'c-like'
       ? escapeC(character, "'", '', '')
       : value === 0
-        ? '\\x00'
+        ? '\\0'
         : (PYTHON_NAMED[value] ?? escapePython(character, "'", ''));
   // Python has no character type: `ord` is the code of a one-character string.
   return language === 'c-like' ? `'${text}'` : `ord('${text}')`;

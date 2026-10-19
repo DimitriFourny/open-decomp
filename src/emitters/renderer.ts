@@ -1205,7 +1205,9 @@ export class Renderer {
       // reinterpretation: C assignment would otherwise numerically convert.
       if (this.expressionType(uncast).kind === this.expressionType(source).kind) source = uncast;
     }
-    const literal = this.sourceView ? this.valueLiteral(source) : undefined;
+    const literal = this.sourceView
+      ? this.valueLiteral(source, this.declaredSpelling(destination), false)
+      : undefined;
     if (literal) return this.assignedText(destination, literal);
     if (
       this.sourceView &&
@@ -1690,18 +1692,47 @@ export class Renderer {
 
   /** The literal of a constant string address printed in a value position (a
    * call argument, store, return, copy, select arm or identity comparison);
-   * never as an operand of arithmetic, where the constant is just an integer. */
-  private valueLiteral = (value: Value): Printed | undefined => {
+   * never as an operand of arithmetic, where the constant is just an integer.
+   * `spelling` is the declared type of the receiving variable, slot or result:
+   * a character/void pointer takes the bare literal, another pointer a cast, and
+   * an integer (or an expression operand) the address of the string, so no
+   * pointer is ever silently converted to an integer. `cast` false leaves a
+   * pointer conversion to the receiving assignment's own interpretation. */
+  private valueLiteral = (
+    value: Value,
+    spelling?: string,
+    cast = true,
+  ): Printed | undefined => {
     const text = this.sourceLiteral(value);
-    return text !== undefined &&
-      this.localValidation.presentation(
+    if (
+      text === undefined ||
+      !this.localValidation.presentation(
         'string_literal',
         value.id,
         STRING_LITERAL_SCOPE,
         [value.id],
       )
-      ? this.printer.primary(text, { bits: 64, signed: false })
-      : undefined;
+    )
+      return undefined;
+    const integerAddress = { bits: 64, signed: false };
+    if (this.language === 'python-like') {
+      if (spelling?.startsWith('pointer[')) return this.printer.primary(text);
+      return this.printer.primary(
+        this.call(
+          'string_address',
+          'Address of the static NUL-terminated string literal, as an integer address.',
+          [text],
+        ),
+        integerAddress,
+      );
+    }
+    if (spelling?.endsWith('*')) {
+      const bare = /^(?:const )?(?:char|void)\s*\*$/.test(spelling);
+      return bare || !cast
+        ? this.printer.primary(text, integerAddress)
+        : { text: `(${spelling})${text}`, precedence: UNARY, ctype: integerAddress };
+    }
+    return { text: `(uintptr_t)${text}`, precedence: UNARY, ctype: integerAddress };
   };
 
   /** Library-declared character parameter of a source call. Every library
@@ -1710,9 +1741,10 @@ export class Renderer {
     let agreed = false;
     for (const id of projection.signature?.evidence_ids ?? []) {
       this.context.checkpoint(1);
-      const declaration = this.libraryDeclarations.get(id);
-      if (!declaration) continue;
-      if (!declaration.character?.includes(index)) return false;
+      const declarations = this.libraryDeclarations.get(id);
+      if (!declarations?.length) continue;
+      if (!declarations.every((declaration) => declaration.character?.includes(index)))
+        return false;
       agreed = true;
     }
     return agreed;
@@ -2988,7 +3020,7 @@ export class Renderer {
         return '';
       const literal =
         expression.kind === 'constant' || expression.kind === 'address'
-          ? this.valueLiteral(node.result)
+          ? this.valueLiteral(node.result, this.declaredSpelling(node.result), false)
           : undefined;
       return `${this.local(node.result)} = ${this.assignedText(
         node.result,
@@ -3093,15 +3125,16 @@ export class Renderer {
             const typed = this.language === 'c-like' ? this.slotType(node.id) : undefined;
             const floating = this.floatSlot(node.id);
             const pointer = typed && this.pointerText(node.value, typed);
-            const literal = !floating && !pointer ? this.valueLiteral(node.value) : undefined;
+            const literal =
+              !floating && !pointer
+                ? this.valueLiteral(node.value, typed ? this.formalSpelling(typed) : undefined)
+                : undefined;
             text = `${storage} = ${
               pointer ??
               (floating
                 ? this.floatingValue(node.value, floating).text
                 : literal
-                  ? typed && !/^(?:const )?(?:char|void)\s*\*$/.test(this.formalSpelling(typed))
-                    ? `(${this.formalSpelling(typed)})${literal.text}`
-                    : literal.text
+                  ? literal.text
                   : typed
                     ? `(${this.formalSpelling(typed)})(uintptr_t)${this.printer.group(this.printed(node.value), UNARY)}`
                     : this.converted(this.printed(node.value), bitWidth(node.value.type)))
@@ -5300,7 +5333,7 @@ export class Renderer {
             if (scalar) return this.scalarReturn(value, scalar.bits, scalar.signed).text;
             if (this.program.source?.return_pointer && !this.program.source.return_source_type)
               return this.sourceAddressValue(value, true);
-            const literal = this.valueLiteral(value);
+            const literal = this.valueLiteral(value, this.returnSpelling);
             if (literal) return literal.text;
             const returned = this.sourceInterpretation(
               value,
