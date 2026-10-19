@@ -4,6 +4,7 @@ import { createOperationContext, entityIdentity } from '../../src/core/index.js'
 import { mapExpression } from '../../src/analysis/effects/index.js';
 import { IRBuilder, integer, type Expression, type Value } from '../../src/ir/index.js';
 import { normalizeSourceExpressions } from '../../src/reconstruction/source-expressions.js';
+import { wholeValueConcat } from '../../src/reconstruction/source-bit-slices.js';
 import { LocalValidationSession } from '../../src/reconstruction/local-validation.js';
 import { provenance, slice } from '../ir/support.js';
 import { emit, execute } from '../emitters/c/support.js';
@@ -244,3 +245,62 @@ for (const scenario of [
     }
   });
 }
+
+test('whole-value concat: slices of one value joined in order are that value', () => {
+  const v = (id: string, bits: number): Value => ({ id, type: integer(bits) });
+  const word = v('word', 64),
+    other = v('other', 64),
+    narrow = v('narrow', 32);
+  const slices = new Map<string, Expression>();
+  const part = (id: string, base: Value, offset: number, bits: number): Value => {
+    const value = v(id, bits);
+    slices.set(id, { kind: 'extract', value: base, offset });
+    return value;
+  };
+  const zero = (id: string, bits: number): Value => {
+    slices.set(id, { kind: 'constant', bits: 0n });
+    return v(id, bits);
+  };
+  const observe = (id: string) => slices.get(id);
+  const concat = (values: Value[]): Expression => ({ kind: 'concat', values });
+  const lo = part('lo', word, 0, 32),
+    hi = part('hi', word, 32, 32);
+  assert.deepEqual(wholeValueConcat(v('r', 64), concat([lo, hi]), observe), {
+    kind: 'cast',
+    op: 'bitcast',
+    value: word,
+  });
+  // Constant-zero upper parts zero-extend the value.
+  assert.deepEqual(wholeValueConcat(v('r', 128), concat([lo, hi, zero('zeros', 64)]), observe), {
+    kind: 'cast',
+    op: 'zero_extend',
+    value: word,
+  });
+  assert.deepEqual(
+    wholeValueConcat(
+      v('r', 64),
+      concat([part('n0', narrow, 0, 16), part('n1', narrow, 16, 16), zero('z32', 32)]),
+      observe,
+    ),
+    { kind: 'cast', op: 'zero_extend', value: narrow },
+  );
+  // A different base, a gap, a partial cover or a nonzero upper part keeps the join.
+  assert.equal(
+    wholeValueConcat(v('r', 64), concat([lo, part('ho', other, 32, 32)]), observe),
+    null,
+  );
+  assert.equal(
+    wholeValueConcat(v('r', 64), concat([lo, part('gap', word, 24, 32)]), observe),
+    null,
+  );
+  assert.equal(
+    wholeValueConcat(
+      v('r', 32),
+      concat([part('p0', word, 0, 16), part('p1', word, 16, 16)]),
+      observe,
+    ),
+    null,
+  );
+  slices.set('one', { kind: 'constant', bits: 1n });
+  assert.equal(wholeValueConcat(v('r', 128), concat([lo, hi, v('one', 64)]), observe), null);
+});

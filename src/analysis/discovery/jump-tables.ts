@@ -1,0 +1,702 @@
+import type {
+  Address,
+  Arm64Payload,
+  DecodedInstruction,
+  LoadedImage,
+  OperationContext,
+  RegisterDescriptor,
+  ResolvedJumpTable,
+  X86Payload,
+} from '../../core/index.js';
+import { recoverDataBytes } from '../strings/source-data.js';
+
+/** Longest single-entry straight-line chain evaluated backward from a branch. */
+const MAX_CHAIN = 64;
+const U64 = (1n << 64n) - 1n;
+const mask = (bits: number): bigint => (1n << BigInt(bits)) - 1n;
+/** ARM64 encodings whose only architectural writes are operand 0 and, for the
+ * flag-setting (`XS_`) forms, NZCV. */
+const DESTINATION_ONLY =
+  /^(?:(?:AND|ORR|EOR|BIC|ORN|EON)S?_(?:32|64)S?_log_(?:imm|shift)|(?:ADD|SUB)S?_(?:32|64)S?_addsub_(?:ext|shift)|(?:ADC|SBC)S?_(?:32|64)_addsub_carry|(?:MADD|MSUB)_(?:32|64)A_dp_3src|[SU](?:MADDL|MSUBL|MULH)_64\w*_dp_3src|(?:UDIV|SDIV|LSLV|LSRV|ASRV|RORV)_(?:32|64)_dp_2src|CS(?:EL|INC|INV|NEG)_(?:32|64)_condsel|[SU]?BFM_(?:32|64)M_bitfield|EXTR_(?:32|64)_extract|(?:CLZ|CLS|RBIT|REV|REV16|REV32|ABS|CNT|CTZ)_(?:32|64)_dp_1src|MOVK_(?:32|64)_movewide)$/;
+
+type Node =
+  | { readonly k: 'const'; readonly key: string; readonly v: bigint }
+  | { readonly k: 'sym'; readonly key: string }
+  | { readonly k: 'zext' | 'sext'; readonly key: string; readonly bits: number; readonly a: Node }
+  | { readonly k: 'add'; readonly key: string; readonly a: Node; readonly b: Node }
+  | { readonly k: 'shl'; readonly key: string; readonly a: Node; readonly n: number }
+  | {
+      readonly k: 'entry';
+      readonly key: string;
+      readonly load: DecodedInstruction;
+      readonly selector: RegisterDescriptor;
+      readonly table: bigint;
+      readonly index: Node;
+      readonly stride: number;
+      readonly bytes: 1 | 2 | 4 | 8;
+      readonly signed: boolean;
+    };
+interface Guard {
+  readonly instruction: DecodedInstruction;
+  readonly otherwise: Address;
+}
+interface Bound {
+  readonly max: bigint;
+  readonly guard: Guard | null;
+}
+interface Flags {
+  readonly width: number;
+  readonly lhs: Node;
+  readonly rhs: Node;
+}
+type Relation = '<' | '<=' | '>' | '>=';
+
+/** Hash-consed 64-bit symbolic values over one chain; equal keys are equal values. */
+class Values {
+  readonly #nodes = new Map<string, Node>();
+  #fresh = 0;
+  #intern<T extends Node>(node: T): T {
+    const known = this.#nodes.get(node.key);
+    if (known) return known as T;
+    this.#nodes.set(node.key, node);
+    return node;
+  }
+
+  constant(value: bigint): Node {
+    const v = BigInt.asUintN(64, value);
+    return this.#intern({ k: 'const', key: `c${v}`, v });
+  }
+
+  sym(): Node {
+    return this.#intern({ k: 'sym', key: `s${this.#fresh++}` });
+  }
+
+  zext(bits: number, a: Node): Node {
+    if (bits >= 64) return a;
+    if (a.k === 'const') return this.constant(a.v & mask(bits));
+    if (a.k === 'zext' && a.bits <= bits) return a;
+    if (a.k === 'zext') return this.zext(bits, a.a);
+    return this.#intern({ k: 'zext', key: `z${bits}(${a.key})`, bits, a });
+  }
+
+  sext(bits: number, a: Node): Node {
+    if (bits >= 64) return a;
+    if (a.k === 'const') return this.constant(BigInt.asIntN(bits, a.v));
+    if ((a.k === 'zext' || a.k === 'sext') && a.bits >= bits) return this.sext(bits, a.a);
+    return this.#intern({ k: 'sext', key: `x${bits}(${a.key})`, bits, a });
+  }
+
+  add(a: Node, b: Node): Node {
+    if (a.k === 'const' && b.k !== 'const') [a, b] = [b, a];
+    if (b.k === 'const') {
+      if (a.k === 'const') return this.constant(a.v + b.v);
+      if (b.v === 0n) return a;
+      if (a.k === 'add' && a.b.k === 'const') return this.add(a.a, this.constant(a.b.v + b.v));
+    }
+    return this.#intern({ k: 'add', key: `+(${a.key},${b.key})`, a, b });
+  }
+
+  shl(a: Node, n: number): Node {
+    if (n === 0) return a;
+    if (n >= 64) return this.constant(0n);
+    if (a.k === 'const') return this.constant(a.v << BigInt(n));
+    return this.#intern({ k: 'shl', key: `<<(${a.key},${n})`, a, n });
+  }
+
+  entry(fields: Omit<Extract<Node, { k: 'entry' }>, 'k' | 'key'>): Node {
+    return this.#intern({ k: 'entry', key: `e${fields.load.id}`, ...fields });
+  }
+}
+
+/** Constant plus shifted variable terms of a modular address sum. */
+function affine(node: Node): { c: bigint; terms: { node: Node; shift: number }[] } {
+  if (node.k === 'const') return { c: node.v, terms: [] };
+  if (node.k === 'add') {
+    const a = affine(node.a),
+      b = affine(node.b);
+    return { c: BigInt.asUintN(64, a.c + b.c), terms: [...a.terms, ...b.terms] };
+  }
+  if (node.k === 'shl') {
+    const a = affine(node.a);
+    return {
+      c: BigInt.asUintN(64, a.c << BigInt(node.n)),
+      terms: a.terms.map((term) => ({ node: term.node, shift: term.shift + node.n })),
+    };
+  }
+  return { c: 0n, terms: [{ node, shift: 0 }] };
+}
+
+/** Concrete value of a symbolic target for one table entry; undefined for any unknown input. */
+function evaluate(node: Node, entry: bigint): bigint | undefined {
+  switch (node.k) {
+    case 'const':
+      return node.v;
+    case 'sym':
+      return undefined;
+    case 'entry':
+      return entry;
+    case 'zext': {
+      const a = evaluate(node.a, entry);
+      return a === undefined ? undefined : a & mask(node.bits);
+    }
+    case 'sext': {
+      const a = evaluate(node.a, entry);
+      return a === undefined ? undefined : BigInt.asUintN(64, BigInt.asIntN(node.bits, a));
+    }
+    case 'add': {
+      const a = evaluate(node.a, entry),
+        b = evaluate(node.b, entry);
+      return a === undefined || b === undefined ? undefined : BigInt.asUintN(64, a + b);
+    }
+    case 'shl': {
+      const a = evaluate(node.a, entry);
+      return a === undefined ? undefined : BigInt.asUintN(64, a << BigInt(node.n));
+    }
+  }
+}
+
+/** Distinct table-entry nodes and whether any opaque symbol feeds the value. */
+function inputs(node: Node, entries: Map<string, Extract<Node, { k: 'entry' }>>): boolean {
+  switch (node.k) {
+    case 'const':
+      return true;
+    case 'sym':
+      return false;
+    case 'entry':
+      entries.set(node.key, node);
+      return true;
+    case 'zext':
+    case 'sext':
+    case 'shl':
+      return inputs(node.a, entries);
+    case 'add':
+      return inputs(node.a, entries) && inputs(node.b, entries);
+  }
+}
+
+export interface JumpTableProofInput {
+  readonly image: LoadedImage;
+  readonly branch: DecodedInstruction;
+  /** Decoded control predecessors (fallthrough and branch edges) by address. */
+  readonly incoming: ReadonlyMap<bigint, readonly DecodedInstruction[]>;
+  /** Roots have an implicit external predecessor. */
+  readonly is_entry: (address: bigint) => boolean;
+  readonly executable: (address: bigint) => boolean;
+  readonly max_entries: number;
+}
+export type JumpTableProof = Omit<ResolvedJumpTable, 'evidence_ids'>;
+
+/** Prove the complete target set of one indirect branch, or return undefined.
+ *
+ * Evaluates the longest straight-line chain of decoded instructions ending at the
+ * branch in which every instruction after the first has exactly one decoded
+ * predecessor, the previous chain member. Values start opaque at the chain
+ * start. Only exact integer moves, add/sub/shift/extension, PC-relative
+ * constants, compare flags and nonvolatile stack/register slot forwarding are
+ * modeled; any other instruction forgets every register, flag and slot it may
+ * change (all of them on ARM64). The branch target must be a function of exactly
+ * one load from a constant table base plus a stride-scaled index whose unsigned
+ * maximum is established by a conditional branch on the chain (an unsigned
+ * compare of that very index value against a constant) and whose entries lie
+ * in immutable file-backed bytes free of relocations. Every computed target
+ * must be executable (and aligned on ARM64). Callers must re-check that the
+ * chain stays single-entry in the final graph and that targets decode there.
+ */
+export function proveJumpTable(
+  input: JumpTableProofInput,
+  context: OperationContext,
+): JumpTableProof | undefined {
+  const { image, branch } = input;
+  const chain: DecodedInstruction[] = [branch];
+  for (let current = branch; chain.length < MAX_CHAIN;) {
+    context.checkpoint(1);
+    if (input.is_entry(current.address.value)) break;
+    const predecessors = input.incoming.get(current.address.value) ?? [];
+    if (predecessors.length !== 1) break;
+    const previous = predecessors[0]!;
+    if (
+      chain.includes(previous) ||
+      previous.validity !== 'valid' ||
+      (previous.flow.kind !== 'fallthrough' && previous.flow.kind !== 'branch')
+    )
+      break;
+    chain.unshift(previous);
+    current = previous;
+  }
+  if (chain.length < 3) return undefined;
+  const values = new Values();
+  const registers = new Map<string, Node>();
+  const slots = new Map<string, { base: string; offset: bigint; size: number; value: Node }>();
+  const facts = new Map<string, Bound>();
+  let flags: Flags | null = null;
+
+  const read = (register: RegisterDescriptor): Node => {
+    if (register.role === 'zero') return values.constant(0n);
+    if (register.offset_bits !== 0) return values.sym();
+    let root = registers.get(register.root);
+    if (!root) {
+      root = values.sym();
+      registers.set(register.root, root);
+    }
+    return values.zext(register.width_bits, root);
+  };
+  const write = (register: RegisterDescriptor, value: Node): void => {
+    if (register.role === 'zero' || register.write_rule === 'discard') return;
+    if (register.offset_bits === 0 && register.width_bits === register.root_width_bits)
+      registers.set(register.root, value);
+    else if (register.offset_bits === 0 && register.write_rule === 'zero_extend_root')
+      registers.set(register.root, values.zext(register.width_bits, value));
+    else registers.delete(register.root);
+  };
+  const reset = (): void => {
+    registers.clear();
+    slots.clear();
+    flags = null;
+  };
+  const bound = (node: Node): Bound => {
+    let structural: Bound = { max: U64, guard: null };
+    if (node.k === 'const') structural = { max: node.v, guard: null };
+    else if (node.k === 'zext') {
+      const inner = bound(node.a);
+      structural = inner.max <= mask(node.bits) ? inner : { max: mask(node.bits), guard: null };
+    } else if (node.k === 'sext') {
+      const low = bound(values.zext(node.bits, node.a));
+      if (low.max < 1n << BigInt(node.bits - 1)) structural = low;
+    } else if (node.k === 'add' && node.b.k === 'const' && node.b.v < 1n << 63n) {
+      const inner = bound(node.a);
+      if (inner.max + node.b.v <= U64)
+        structural = { max: inner.max + node.b.v, guard: inner.guard };
+    }
+    const fact = facts.get(node.key);
+    if (!fact) return structural;
+    return fact.max <= structural.max
+      ? fact
+      : { max: structural.max, guard: structural.guard ?? fact.guard };
+  };
+  /** Memory value at an address: a bounded table entry, a forwarded slot or a fresh value. */
+  const load = (
+    instruction: DecodedInstruction,
+    address: Node,
+    size: number,
+    signed: boolean,
+    selector: {
+      readonly register: RegisterDescriptor;
+      readonly node: Node;
+      readonly shift: number;
+    } | null,
+  ): Node => {
+    const sum = affine(address);
+    if (
+      selector &&
+      sum.terms.length === 1 &&
+      sum.terms[0]!.node.key === selector.node.key &&
+      sum.terms[0]!.shift === selector.shift &&
+      bound(selector.node).guard &&
+      (size === 1 || size === 2 || size === 4 || size === 8)
+    )
+      return values.entry({
+        load: instruction,
+        selector: selector.register,
+        table: sum.c,
+        index: selector.node,
+        stride: 2 ** selector.shift,
+        bytes: size,
+        signed,
+      });
+    const base = sum.terms.map((term) => `${term.node.key}<<${term.shift}`).join('|');
+    const slot = slots.get(`${base}@${sum.c}:${size}`);
+    const raw = slot?.value ?? values.zext(size * 8, values.sym());
+    return signed ? values.sext(size * 8, raw) : raw;
+  };
+  const store = (address: Node | undefined, size: number, value: Node): void => {
+    if (!address) {
+      slots.clear();
+      return;
+    }
+    const sum = affine(address);
+    const base = sum.terms.map((term) => `${term.node.key}<<${term.shift}`).join('|');
+    const end = sum.c + BigInt(size);
+    for (const [key, slot] of slots)
+      if (slot.base !== base || (slot.offset < end && slot.offset + BigInt(slot.size) > sum.c))
+        slots.delete(key);
+    slots.set(`${base}@${sum.c}:${size}`, {
+      base,
+      offset: sum.c,
+      size,
+      value: values.zext(size * 8, value),
+    });
+  };
+
+  const arm64 = (instruction: DecodedInstruction, payload: Arm64Payload): void => {
+    const encoding = payload.canonical_encoding,
+      operands = payload.operands,
+      fields = payload.fields;
+    const register = (index: number): RegisterDescriptor | undefined => {
+      const operand = operands[index];
+      return operand?.kind === 'register' && operand.register.bank === 'integer'
+        ? operand.register
+        : undefined;
+    };
+    if (payload.behavior === 'nop' || encoding.startsWith('NOP_')) return;
+    const d = register(0),
+      n = register(1),
+      m = register(2);
+    const width = encoding.includes('_64') ? 64 : 32;
+    const lhs = (node: Node): Node => values.zext(width, node);
+    let match: RegExpExecArray | null;
+    if (
+      payload.alias === 'MOV_ORR_log_shift' &&
+      operands.length === 2 &&
+      d &&
+      n &&
+      fields.imm6 === 0n
+    ) {
+      write(d, read(n));
+      return;
+    }
+    if ((match = /^(ADD|SUB)(S?)_(?:32|64)S?_addsub_imm$/.exec(encoding)) && d && n) {
+      const immediate = (fields.imm12 ?? 0n) << (fields.sh ? 12n : 0n);
+      const source = read(n);
+      if (match[2])
+        flags =
+          match[1] === 'SUB' ? { width, lhs: lhs(source), rhs: values.constant(immediate) } : null;
+      write(d, values.add(source, values.constant(match[1] === 'SUB' ? -immediate : immediate)));
+      return;
+    }
+    if ((match = /^(ADD|SUB)(S?)_(?:32|64)S?_addsub_shift$/.exec(encoding)) && d && n && m) {
+      const amount = Number(fields.imm6 ?? 0n);
+      const plain = (fields.shift ?? 0n) === 0n;
+      const rhs = plain ? values.shl(read(m), amount) : values.sym();
+      const source = read(n);
+      if (match[2])
+        flags = match[1] === 'SUB' && plain ? { width, lhs: lhs(source), rhs: lhs(rhs) } : null;
+      write(
+        d,
+        match[1] === 'ADD'
+          ? values.add(source, rhs)
+          : rhs.k === 'const'
+            ? values.add(source, values.constant(-rhs.v))
+            : values.sym(),
+      );
+      return;
+    }
+    if ((match = /^(ADD|SUB)_(?:32|64)_addsub_ext$/.exec(encoding)) && d && n && m) {
+      const option = Number(fields.option ?? 0n),
+        amount = Number(fields.imm3 ?? 0n);
+      const raw = read(m);
+      const extended =
+        option === 3 || option === 7
+          ? raw
+          : option < 3
+            ? values.zext(8 << option, raw)
+            : values.sext(8 << (option - 4), raw);
+      const rhs = values.shl(extended, amount);
+      write(
+        d,
+        match[1] === 'ADD'
+          ? values.add(read(n), rhs)
+          : rhs.k === 'const'
+            ? values.add(read(n), values.constant(-rhs.v))
+            : values.sym(),
+      );
+      return;
+    }
+    if (/^MOV[ZN]_(?:32|64)_movewide$/.test(encoding) && d) {
+      const value = (fields.imm16 ?? 0n) << ((fields.hw ?? 0n) * 16n);
+      write(d, values.constant(encoding.startsWith('MOVN') ? ~value & mask(width) : value));
+      return;
+    }
+    if (encoding === 'ADR_only_pcreladdr' || encoding === 'ADRP_only_pcreladdr') {
+      const relative = operands[1];
+      if (d && relative?.kind === 'relative') {
+        write(d, values.constant(relative.target.value));
+        return;
+      }
+    }
+    if (/^[US]BFM_(?:32|64)M_bitfield$/.test(encoding) && d && n && fields.immr === 0n) {
+      const top = Number(fields.imms ?? 0n) + 1;
+      if (top === 8 || top === 16 || (top === 32 && width === 64)) {
+        write(d, encoding.startsWith('U') ? values.zext(top, read(n)) : values.sext(top, read(n)));
+        return;
+      }
+    }
+    const memory = operands.find((operand) => operand.kind === 'memory');
+    const isLoad = /^LDU?R(S?)(B|H|W)?_/.exec(encoding);
+    const isStore = /^STU?R(B|H)?_/.test(encoding);
+    if (memory?.kind === 'memory' && d && (isLoad || isStore)) {
+      const size = memory.access_bits / 8;
+      if (memory.index && memory.writeback !== 'none') return reset();
+      const base = read(memory.base);
+      let address =
+        memory.writeback === 'post' ? base : values.add(base, values.constant(memory.displacement));
+      let selector: Parameters<typeof load>[4] = null;
+      if (memory.index) {
+        const index = read(memory.index);
+        const node =
+          memory.extend === 'sxtw'
+            ? values.sext(32, index)
+            : memory.extend === 'uxtw'
+              ? values.zext(32, index)
+              : index;
+        address = values.add(address, values.shl(node, memory.shift));
+        selector = { register: memory.index, node, shift: memory.shift };
+      }
+      if (isLoad) write(d, load(instruction, address, size, isLoad[1] === 'S', selector));
+      else store(address, size, read(d));
+      if (memory.writeback !== 'none')
+        write(memory.base, values.add(base, values.constant(memory.displacement)));
+      return;
+    }
+    // Data processing writing only its destination (and NZCV in S forms): that
+    // register becomes opaque, a low-bit mask keeps its exact bound.
+    if (DESTINATION_ONLY.test(encoding) && d) {
+      const immediate = operands[2];
+      const low =
+        encoding.startsWith('AND_') && n && immediate?.kind === 'immediate'
+          ? immediate.value + 1n
+          : 0n;
+      write(
+        d,
+        low > 1n && (low & (low - 1n)) === 0n
+          ? values.zext(low.toString(2).length - 1, read(n!))
+          : values.sym(),
+      );
+      if (/^[A-Z]+S_/.test(encoding)) flags = null;
+      return;
+    }
+    reset();
+  };
+
+  const x86Address = (memory: X86Payload['memory'][number]): Node | undefined => {
+    if (memory.address_bits !== 64 || (memory.segment && /:(fs|gs)$/i.test(memory.segment.id)))
+      return undefined;
+    if (memory.rip_relative_target) return values.constant(memory.rip_relative_target.value);
+    let sum = values.constant(memory.displacement);
+    if (memory.base) sum = values.add(read(memory.base), sum);
+    if (memory.index)
+      sum = values.add(sum, values.shl(read(memory.index), Math.log2(memory.scale)));
+    return sum;
+  };
+  /** Memory operand value; an indexed operand may select a bounded table entry. */
+  const x86Load = (
+    instruction: DecodedInstruction,
+    memory: X86Payload['memory'][number],
+    signed: boolean,
+  ): Node | undefined => {
+    const location = x86Address(memory);
+    if (!location) return undefined;
+    const selector = memory.index
+      ? { register: memory.index, node: read(memory.index), shift: Math.log2(memory.scale) }
+      : null;
+    return load(instruction, location, memory.access_bits / 8, signed, selector);
+  };
+  const x86 = (instruction: DecodedInstruction, payload: X86Payload): void => {
+    const mnemonic = payload.mnemonic.toLowerCase(),
+      operands = payload.operands;
+    const writesFlags =
+      (payload.flags.written |
+        payload.flags.cleared |
+        payload.flags.set |
+        payload.flags.undefined) !==
+      0n;
+    /** Integer source operand value of the given width. */
+    const source = (
+      operand: X86Payload['operands'][number] | undefined,
+      signed = false,
+    ): Node | undefined => {
+      if (operand?.kind === 'register' && operand.register.bank === 'integer') {
+        const value = read(operand.register);
+        return signed ? values.sext(operand.register.width_bits, value) : value;
+      }
+      if (operand?.kind === 'immediate')
+        return values.constant(operand.value & mask(operand.effective_bits));
+      if (operand?.kind === 'memory') return x86Load(instruction, operand.memory, signed);
+      return undefined;
+    };
+    const dest = operands[0],
+      second = operands[1];
+    const destination =
+      dest?.kind === 'register' && dest.register.bank === 'integer' ? dest.register : undefined;
+    let next: Flags | null | undefined;
+    let handled = false;
+    if (mnemonic === 'nop' || mnemonic === 'endbr64') return;
+    if (mnemonic === 'mov' && destination) {
+      const value = source(second);
+      if (value) {
+        write(destination, value);
+        handled = true;
+      }
+    } else if (
+      mnemonic === 'mov' &&
+      dest?.kind === 'memory' &&
+      (second?.kind === 'register' || second?.kind === 'immediate')
+    ) {
+      const value = source(second);
+      if (value) {
+        store(x86Address(dest.memory), dest.memory.access_bits / 8, value);
+        handled = true;
+      }
+    } else if (
+      (mnemonic === 'movzx' || mnemonic === 'movsx' || mnemonic === 'movsxd') &&
+      destination
+    ) {
+      const value = source(second, mnemonic !== 'movzx');
+      if (value) {
+        write(destination, value);
+        handled = true;
+      }
+    } else if (mnemonic === 'lea' && destination && second?.kind === 'memory') {
+      write(destination, x86Address(second.memory) ?? values.sym());
+      handled = true;
+    } else if (
+      mnemonic === 'and' &&
+      destination &&
+      second?.kind === 'immediate' &&
+      (((second.value & mask(destination.width_bits)) + 1n) &
+        (second.value & mask(destination.width_bits))) ===
+        0n
+    ) {
+      // A low-bit mask (2^k - 1) keeps an exact bound; an empty mask is zero.
+      const low = second.value & mask(destination.width_bits);
+      write(destination, values.zext(low ? low.toString(2).length : 0, read(destination)));
+      next = null;
+      handled = true;
+    } else if ((mnemonic === 'add' || mnemonic === 'sub' || mnemonic === 'cmp') && destination) {
+      const left = read(destination),
+        right = source(second);
+      if (right) {
+        next = mnemonic === 'add' ? null : { width: destination.width_bits, lhs: left, rhs: right };
+        if (mnemonic === 'add') write(destination, values.add(left, right));
+        else if (mnemonic === 'sub')
+          write(
+            destination,
+            right.k === 'const' ? values.add(left, values.constant(-right.v)) : values.sym(),
+          );
+        handled = true;
+      }
+    }
+    if (!handled) {
+      for (const access of payload.registers)
+        if (
+          access.access !== 'read' &&
+          access.access !== 'none' &&
+          access.access !== 'conditional_read'
+        )
+          registers.delete(access.register.root);
+      if (payload.memory.some((memory) => memory.access !== 'read' && memory.access !== 'none'))
+        slots.clear();
+    }
+    if (next !== undefined) flags = next;
+    else if (writesFlags) flags = null;
+  };
+
+  const guardFact = (instruction: DecodedInstruction, next: DecodedInstruction): void => {
+    const flow = instruction.flow;
+    if (flow.kind !== 'branch' || !flow.conditional || !flow.fallthrough) return;
+    const taken = flow.target.value === next.address.value;
+    if (taken === (flow.fallthrough.value === next.address.value)) return;
+    const payload = instruction.payload;
+    let relation: Relation | undefined;
+    if (payload?.architecture === 'arm64' && payload.canonical_encoding === 'B_only_condbranch') {
+      const condition = payload.operands.find((operand) => operand.kind === 'condition');
+      if (condition?.kind === 'condition')
+        relation = ({ 2: '>=', 3: '<', 8: '>', 9: '<=' } as const)[condition.code as 2 | 3 | 8 | 9];
+    } else if (payload?.architecture === 'x86_64')
+      relation = (
+        {
+          ja: '>',
+          jnbe: '>',
+          jae: '>=',
+          jnb: '>=',
+          jnc: '>=',
+          jb: '<',
+          jc: '<',
+          jnae: '<',
+          jbe: '<=',
+          jna: '<=',
+        } as const
+      )[payload.mnemonic.toLowerCase() as 'ja'];
+    const current = flags as Flags | null;
+    if (!relation || !current || current.rhs.k !== 'const') return;
+    const edge: Relation = taken
+      ? relation
+      : ({ '>': '<=', '>=': '<', '<': '>=', '<=': '>' } as const)[relation];
+    const limit = current.rhs.v & mask(current.width);
+    const max = edge === '<=' ? limit : edge === '<' && limit > 0n ? limit - 1n : undefined;
+    if (max === undefined) return;
+    const known = facts.get(current.lhs.key);
+    if (!known || max < known.max)
+      facts.set(current.lhs.key, {
+        max,
+        guard: { instruction, otherwise: taken ? flow.fallthrough : flow.target },
+      });
+  };
+
+  let target: Node | undefined;
+  for (let index = 0; index < chain.length; index++) {
+    context.checkpoint(1);
+    const instruction = chain[index]!,
+      payload = instruction.payload;
+    if (!payload || payload.architecture !== image.target.architecture) return undefined;
+    if (instruction === branch) {
+      if (payload.architecture === 'arm64') {
+        const operand = payload.operands[0];
+        if (payload.canonical_encoding !== 'BR_64_branch_reg' || operand?.kind !== 'register')
+          return undefined;
+        target = read(operand.register);
+      } else {
+        const operand = payload.operands[0];
+        if (payload.mnemonic.toLowerCase() !== 'jmp') return undefined;
+        if (operand?.kind === 'register') target = read(operand.register);
+        else if (operand?.kind === 'memory' && operand.memory.access_bits === 64)
+          target = x86Load(instruction, operand.memory, false);
+      }
+      break;
+    }
+    if (instruction.flow.kind === 'branch') {
+      if (instruction.flow.conditional) guardFact(instruction, chain[index + 1]!);
+      continue;
+    }
+    if (payload.architecture === 'arm64') arm64(instruction, payload);
+    else x86(instruction, payload);
+  }
+  if (!target) return undefined;
+  const entries = new Map<string, Extract<Node, { k: 'entry' }>>();
+  if (!inputs(target, entries) || entries.size !== 1) return undefined;
+  const entry = [...entries.values()][0]!;
+  const limit = bound(entry.index);
+  if (!limit.guard || limit.max >= BigInt(input.max_entries)) return undefined;
+  const count = Number(limit.max) + 1;
+  const length = (count - 1) * entry.stride + entry.bytes;
+  const table: Address = { image_id: image.id, space: 'va', value: entry.table };
+  const bytes = recoverDataBytes(image, table, length, context);
+  if (!bytes) return undefined;
+  const targets: Address[] = [];
+  for (let index = 0; index < count; index++) {
+    context.checkpoint(1);
+    let raw = 0n;
+    for (let byte = entry.bytes - 1; byte >= 0; byte--)
+      raw = (raw << 8n) | BigInt(bytes[index * entry.stride + byte]!);
+    const value = entry.signed ? BigInt.asUintN(64, BigInt.asIntN(entry.bytes * 8, raw)) : raw;
+    const destination = evaluate(target, value);
+    if (
+      destination === undefined ||
+      !input.executable(destination) ||
+      (image.target.architecture === 'arm64' && destination % 4n !== 0n)
+    )
+      return undefined;
+    targets.push({ image_id: image.id, space: 'va', value: destination });
+  }
+  return {
+    branch: branch.id,
+    selector: { instruction: entry.load.id, register: entry.selector },
+    table: { start: table, size: BigInt(length) },
+    entry: { bytes: entry.bytes, signed: entry.signed, stride: entry.stride },
+    targets,
+    guard: limit.guard.instruction.id,
+    otherwise: limit.guard.otherwise,
+    // The bound is the guard's own fact on the index value itself.
+    guard_exact: facts.get(entry.index.key) === limit,
+    chain: chain.map((instruction) => instruction.id),
+  };
+}

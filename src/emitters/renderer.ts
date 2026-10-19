@@ -35,6 +35,7 @@ import { reconstruct } from '../reconstruction/index.js';
 import type { BoundaryProjection, Reconstruction } from '../reconstruction/model.js';
 import { validateReconstruction, validateRenderedTransfers } from '../reconstruction/validate.js';
 import { foldSourceCondition } from '../reconstruction/source-conditions.js';
+import { constantRotationOperands } from '../reconstruction/source-shifts.js';
 import type { SourceAddress, SourceFormalType } from '../reconstruction/source-model.js';
 import { sourceDataValues } from '../reconstruction/source-data.js';
 import {
@@ -87,9 +88,11 @@ import type { EmissionInput, EmissionResult } from './model.js';
 import { collectInferences } from './inference.js';
 import {
   VariableLiveness,
+  coalesceValues,
   coalescePhiCopies,
   controlArms,
   formArm,
+  foldSwitchGuards,
   planLayout,
   planLoopForms,
   planLoopExits,
@@ -104,9 +107,11 @@ import {
   planSourceInlining,
   type InlineCall,
   type InlineCallSite,
+  type InlineStore,
   type InlineSite,
 } from './source-inlining.js';
 import { SourceStructs, type ObservedMember } from './source-structs.js';
+import { planFlagTests, type FlagTest } from './source-flags.js';
 
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
 /** Element kind of a declared scalar pointer: integer or IEEE. */
@@ -119,6 +124,8 @@ interface ConditionTerm {
   readonly printed: Printed;
   readonly value: Value;
   readonly positive: boolean;
+  /** `value` is not the printed test (a flag-carried short circuit): never fold it. */
+  readonly opaque?: true;
 }
 /** Exact complement of each integer predicate (no NaN case for integers). */
 const NEGATED_PREDICATE: Readonly<Record<IntegerPredicate, IntegerPredicate>> = {
@@ -181,6 +188,9 @@ export class Renderer {
   private readonly inline: Set<string>;
   private readonly inlined = new Map<string, InlineSite>();
   private readonly inlineSites = new Map<string, InlineSite[]>();
+  /** Stores to private locals printed right after their reader statement, by reader id. */
+  private readonly deferred = new Map<string, InlineStore[]>();
+  private readonly deferredStores = new Set<string>();
   /** Calls printed as an operand of their single reader, by result value id. */
   private readonly inlinedCalls = new Map<string, InlineCallSite>();
   /** Code lines printed when the latest inlined call was held. */
@@ -196,6 +206,16 @@ export class Renderer {
   private readonly loopExitCopies = new Map<string, ParallelTransfer>();
   /** Tests of enclosing `if`s merged into the next printed `if` (nestedIf). */
   private conjunct: readonly ConditionTerm[] | undefined;
+  /** Flag-carried short-circuit tests by merge control id (planFlagTests). */
+  private readonly flagTests = new Map<string, FlagTest>();
+  /** Their stage controls (printed inside the merge test). */
+  private readonly flagStages = new Set<string>();
+  /** Their head blocks, by block id. */
+  private readonly flagHeads = new Map<string, FlagTest>();
+  /** Range-guard `if` controls printed as their proven switch, by switch control id. */
+  private readonly foldedGuards = new Map<string, Control>();
+  /** Flag stores and loads, printed only as the merge test. */
+  private readonly flagAccesses = new Set<string>();
   /** Edge copies printed in a `for` header (by destination variable), not at their edge. */
   private readonly hoisted = new Map<ParallelTransfer, ReadonlySet<string>>();
   /** `for` header edges keyed by the loop test control. */
@@ -474,7 +494,7 @@ export class Renderer {
    * phi class takes a role name only when exactly one role names its members and
    * every other member is that same variable: not a loop header phi (each is a
    * loop-carried variable needing its own proof), and either the initial value
-   * of a header phi of the class that has the role, a merge of only class
+   * (never a parameter's) of a header phi of the class that has the role, a merge of only class
    * members and constants, or a conversion of a member; generic if named at
    * all. A class that also holds any other value is not that role and stays
    * neutral. Without a role, every named member must agree. Undefined when no
@@ -505,6 +525,18 @@ export class Renderer {
           ? expression.value
           : undefined;
       };
+      const parameterIds = new Set(this.program.parameters.map((parameter) => parameter.id));
+      /** True when `input` is a parameter or, through conversions, one's operand. */
+      const fromParameter = (input: Value): boolean => {
+        const seen = new Set<string>();
+        for (let value: Value | undefined = input; value && !seen.has(value.id);) {
+          this.context.checkpoint(1);
+          seen.add(value.id);
+          if (parameterIds.has(value.id)) return true;
+          value = converted(value);
+        }
+        return false;
+      };
       /** True when `input` is a constant or, through conversions, a member of the
        * class `representative` names. */
       const same = (input: Value, representative: string): boolean => {
@@ -532,11 +564,15 @@ export class Renderer {
             const name = own[index];
             if (name === role) return true;
             if ((name && !sourceGenericStems.has(name)) || this.sourceCarried.has(id)) return false;
+            // The initial value of a loop variable shares its role, except that of
+            // a parameter (or a conversion of one): what a caller passes is not
+            // an index or accumulator because the body then steps or folds it.
             const head = this.sourceInitial.get(id);
             if (
               head !== undefined &&
               this.variables.get(head)?.id === representative &&
-              this.sourceRoleNames.get(head) === role
+              this.sourceRoleNames.get(head) === role &&
+              !fromParameter(this.program.values.get(id)!)
             )
               return true;
             const sources = merged.get(id),
@@ -629,6 +665,12 @@ export class Renderer {
   private slotType(node: string): SourceFormalType | undefined {
     const local = this.sourceView ? this.program.source?.locals.get(node) : undefined;
     return local && this.program.source?.local_types?.get(local.id);
+  }
+
+  /** Bit width of the `fp_slot_type` float local a load/store node accesses. */
+  private floatSlot(node: string): 32 | 64 | undefined {
+    const local = this.sourceView ? this.program.source?.locals.get(node) : undefined;
+    return local && this.program.source?.float_locals?.get(local.id);
   }
 
   /** Source element type of a memory access: IEEE for an `fp_memory_access`
@@ -1698,6 +1740,9 @@ export class Renderer {
   }
   private readonly sourceArrays = new Map<string, string>();
   private readonly sourceOpaqueTypes = new Map<string, string>();
+  /** Forward declarations of types without a printed body: written only if the
+   * finished text refers to them. */
+  private readonly deferredTypedefs: string[] = [];
 
   private opaqueType(id: string): string {
     let name = this.sourceOpaqueTypes.get(id);
@@ -2135,10 +2180,10 @@ export class Renderer {
     }
     for (const id of structures) {
       const name = this.sourceStructs.name(id);
-      this.writer.line(0, `typedef struct ${name} ${name};`);
+      if (this.partialLayout(id)) this.writer.line(0, `typedef struct ${name} ${name};`);
+      else this.deferredTypedefs.push(name);
     }
-    for (const name of this.sourceOpaqueTypes.values())
-      this.writer.line(0, `typedef struct ${name} ${name};`);
+    this.deferredTypedefs.push(...this.sourceOpaqueTypes.values());
     const declaredArrays = new Set<string>();
     const declareArray = (id: string): void => {
       if (declaredArrays.has(id)) return;
@@ -2855,12 +2900,15 @@ export class Renderer {
             // Storing converts to the lvalue's own width (a local is declared
             // unsigned; a dereference has exactly the stored width).
             const typed = this.language === 'c-like' ? this.slotType(node.id) : undefined;
+            const floating = this.floatSlot(node.id);
             const pointer = typed && this.pointerText(node.value, typed);
             text = `${storage} = ${
               pointer ??
-              (typed
-                ? `(${this.formalSpelling(typed)})(uintptr_t)${this.printer.group(this.printed(node.value), UNARY)}`
-                : this.converted(this.printed(node.value), bitWidth(node.value.type)))
+              (floating
+                ? this.floatingValue(node.value, floating).text
+                : typed
+                  ? `(${this.formalSpelling(typed)})(uintptr_t)${this.printer.group(this.printed(node.value), UNARY)}`
+                  : this.converted(this.printed(node.value), bitWidth(node.value.type)))
             }`;
           } else text = this.assignmentText(node, storage);
           break;
@@ -3130,11 +3178,25 @@ export class Renderer {
     if (control.kind === 'switch') {
       const nested: readonly Nest[] =
         this.language === 'c-like' ? [...nesting, { kind: 'switch', id: control.id }] : nesting;
-      for (const item of control.cases) {
-        this.context.checkpoint(1);
-        arm(item.arm, nested);
+      const landing = (item: ControlArm): string | null =>
+        item.body ? this.firstBlock(item.body) : follow;
+      if (this.sourceView) {
+        // Grouped and omitted case edges reach the arm printed for them.
+        const plan = this.switchGroups(control);
+        for (const group of plan.groups) {
+          this.context.checkpoint(group.members.length + 1);
+          arm(group.arm, nested);
+          for (const member of group.members) decide(member.transfer, nested, landing(group.arm));
+        }
+        arm(control.otherwise, nested);
+        for (const item of plan.omitted) decide(item.transfer, nested, landing(control.otherwise));
+      } else {
+        for (const item of control.cases) {
+          this.context.checkpoint(1);
+          arm(item.arm, nested);
+        }
+        arm(control.otherwise, nested);
       }
-      arm(control.otherwise, nested);
     }
   }
 
@@ -3558,6 +3620,8 @@ export class Renderer {
     compare: Extract<Expression, { kind: 'compare' }> | undefined,
     compared: Value,
     inverted?: Value,
+    /** Exact complement of `condition` (a flag-carried short circuit). */
+    complement?: Printed,
   ): void {
     const c = this.language === 'c-like';
     const negate = (printed: Printed, flip?: Extract<Expression, { kind: 'compare' }>): string =>
@@ -3570,15 +3634,22 @@ export class Renderer {
     const test = (positive: boolean): string =>
       positive
         ? condition.text
-        : inverted
-          ? this.printed(inverted).text
-          : negate(condition, compare);
+        : complement
+          ? complement.text
+          : inverted
+            ? this.printed(inverted).text
+            : negate(condition, compare);
     const form = this.loopTests.get(control.id);
     if (form?.kind === 'while' && form.chain) {
       const stage = form.chain.find((item) => item.test === control.id)!;
       if (control.id === form.test) {
         const start = this.writer.offset;
         const operands = form.chain.map((item) => {
+          const flag = this.flagTests.get(item.test);
+          if (flag) {
+            const merged = this.flagCondition(flag);
+            return `(${(item.enter ? merged.positive : merged.negative).text})`;
+          }
           const block = this.program.blocks.get(item.block)!;
           const test = block.control;
           if (test.kind !== 'if') this.invalid('A loop condition lost its branch');
@@ -3652,13 +3723,15 @@ export class Renderer {
     const term = (positive: boolean): ConditionTerm => ({
       printed: positive
         ? condition
-        : inverted
-          ? this.printed(inverted)
-          : compare
-            ? this.expression({ ...compare, op: NEGATED_PREDICATE[compare.op] }, compared.type)
-            : this.printer.not(condition),
+        : (complement ??
+          (inverted
+            ? this.printed(inverted)
+            : compare
+              ? this.expression({ ...compare, op: NEGATED_PREDICATE[compare.op] }, compared.type)
+              : this.printer.not(condition))),
       value: control.condition,
       positive,
+      ...(complement ? { opaque: true as const } : {}),
     });
     const open = (positive: boolean): void => {
       const text = pending ? this.conjunction([...pending, term(positive)]) : test(positive);
@@ -3727,6 +3800,125 @@ export class Renderer {
     }
   }
 
+  /** An inlined zero extension does not change which case matches when every
+   * case value fits its operand, so that narrower operand is the selector. */
+  private switchSelector(control: Extract<Control, { kind: 'switch' }>): Value {
+    const expression = this.inline.has(control.value.id)
+      ? this.program.expressions.get(control.value.id)
+      : undefined;
+    if (
+      expression?.kind !== 'cast' ||
+      expression.op !== 'zero_extend' ||
+      expression.value.type.kind !== 'integer' ||
+      !control.cases.every((item) => item.bits < 1n << BigInt(bitWidth(expression.value.type))) ||
+      !this.localValidation.presentation(
+        'switch_selector_extension',
+        control.id,
+        'a zero-extended selector whose case values all fit the unextended operand is switched on that operand; the same case matches for every value',
+        [control.value.id, expression.value.id],
+      )
+    )
+      return control.value;
+    return expression.value;
+  }
+
+  /** Source-view case layout. A copy-free, bodiless case arm reaching another
+   * case's target is a label of that case (one arm prints for the group);
+   * one reaching a copy-free `otherwise` target is left to `default`. */
+  private switchGroups(control: Extract<Control, { kind: 'switch' }>): {
+    readonly groups: readonly {
+      readonly labels: readonly bigint[];
+      readonly arm: ControlArm;
+      readonly members: readonly ControlArm[];
+    }[];
+    readonly omitted: readonly ControlArm[];
+  } {
+    const quiet = (arm: ControlArm): boolean =>
+      !arm.body && this.printedCopies(arm.transfer).length === 0;
+    const fallback =
+      this.printedCopies(control.otherwise.transfer).length === 0
+        ? control.otherwise.transfer.target
+        : null;
+    // Only copy-free arms share labels: a bodiless one joins the first copy-free
+    // arm owning its target's body (or the first such bodiless arm).
+    const owners = new Map<string, ControlArm>();
+    for (const item of control.cases)
+      if (
+        item.arm.body &&
+        this.printedCopies(item.arm.transfer).length === 0 &&
+        !owners.has(item.arm.transfer.target)
+      )
+        owners.set(item.arm.transfer.target, item.arm);
+    for (const item of control.cases)
+      if (quiet(item.arm) && !owners.has(item.arm.transfer.target))
+        owners.set(item.arm.transfer.target, item.arm);
+    const groups = new Map<
+      ControlArm,
+      { labels: bigint[]; arm: ControlArm; members: ControlArm[] }
+    >();
+    const omitted: ControlArm[] = [];
+    for (const item of control.cases) {
+      this.context.checkpoint(1);
+      const arm = item.arm;
+      if (quiet(arm) && arm.transfer.target === fallback) {
+        omitted.push(arm);
+        continue;
+      }
+      const owner = quiet(arm) ? (owners.get(arm.transfer.target) ?? arm) : arm;
+      let group = groups.get(owner);
+      if (!group) {
+        group = { labels: [], arm: owner, members: [] };
+        groups.set(owner, group);
+      }
+      group.labels.push(item.bits);
+      if (arm !== owner) group.members.push(arm);
+    }
+    return { groups: [...groups.values()], omitted };
+  }
+
+  /** Source-view switch: decimal labels, grouped as planned by switchGroups;
+   * grouped and omitted case edges land where the arm printed for them does.
+   * An empty `default` is dropped and an arm that cannot fall through ends
+   * without `break`. */
+  private sourceSwitch(control: Extract<Control, { kind: 'switch' }>, depth: number): void {
+    const c = this.language === 'c-like';
+    const landing = (arm: ControlArm): EmittedEdge | undefined =>
+      arm.body
+        ? { kind: 'goto', target: firstBlock(arm.body) ?? arm.transfer.target }
+        : this.emittedEdges.get(arm.transfer);
+    const plan = this.switchGroups(control);
+    let printed = 0;
+    for (const group of plan.groups) {
+      this.context.checkpoint(group.labels.length);
+      const labels = group.labels.map((bits) => bits.toString());
+      if (c) {
+        for (const label of labels.slice(0, -1)) this.writer.line(depth + 1, `case ${label}:`);
+        this.writer.line(depth + 1, `case ${labels.at(-1)!}: {`);
+      } else this.writer.line(depth + 1, `case ${labels.join(' | ')}:`);
+      this.arm(group.arm, depth + 2, control);
+      const edge = landing(group.arm);
+      if (edge) for (const member of group.members) this.emittedEdges.set(member.transfer, edge);
+      if (c) {
+        if (!this.terminates(group.arm)) this.writer.statement(depth + 2, 'break');
+        this.writer.line(depth + 1, '}');
+      }
+      printed++;
+    }
+    if (this.emptyArm(control.otherwise) && (c || printed)) {
+      this.transfer(control.otherwise.transfer, depth + 2, control);
+    } else {
+      this.writer.line(depth + 1, c ? 'default: {' : 'case _:');
+      this.arm(control.otherwise, depth + 2, control);
+      if (c) {
+        if (!this.terminates(control.otherwise)) this.writer.statement(depth + 2, 'break');
+        this.writer.line(depth + 1, '}');
+      }
+    }
+    const edge = landing(control.otherwise);
+    if (edge) for (const arm of plan.omitted) this.emittedEdges.set(arm.transfer, edge);
+    if (c) this.writer.line(depth, '}');
+  }
+
   private emptyArm(arm: ControlArm): boolean {
     return !arm.body && this.silentTransfer(arm.transfer);
   }
@@ -3758,6 +3950,9 @@ export class Renderer {
       false;
     for (const [index, block] of blocks.entries()) {
       const control = block.control;
+      // A flag short-circuit head prints nothing; its merge test follows.
+      const flag = this.flagHeads.get(block.id),
+        head = flag !== undefined && flag.merge === blocks[index + 1]?.id;
       if (
         this.notes.has(block.id) ||
         this.notes.has(control.id) ||
@@ -3768,9 +3963,11 @@ export class Renderer {
           (node) =>
             printed(node.id) ||
             (this.program.retained.has(node.id) &&
+              !this.flagAccesses.has(node.id) &&
               !('result' in node && this.inlined.has(node.result.id))),
         ) ||
         (index < blocks.length - 1 &&
+          !head &&
           (control.kind !== 'jump' || !this.silentTransfer(control.transfer)))
       )
         return null;
@@ -3792,6 +3989,7 @@ export class Renderer {
   private conjunction(terms: readonly ConditionTerm[]): string {
     let plain = terms[0]!.printed;
     for (const item of terms.slice(1)) plain = this.printer.logical('and', plain, item.printed);
+    if (terms.some((item) => item.opaque)) return plain.text;
     const created = new Map<string, Expression>();
     const make = (key: string, type: DataType, expression?: Expression): Value => {
       const value = {
@@ -3877,6 +4075,60 @@ export class Renderer {
     return ids;
   }
 
+  /** The test of a plain source `if` (`positive`) or its exact complement: a
+   * negated integer predicate, the operand of an inline one-bit negation, or a
+   * logical negation. */
+  private testPrinted(control: Extract<Control, { kind: 'if' }>, positive: boolean): Printed {
+    if (positive) return this.printed(control.condition);
+    let value = control.condition,
+      expression: Expression | undefined;
+    for (let depth = 0; depth < 128 && this.inline.has(value.id); depth++) {
+      this.context.checkpoint(1);
+      expression = this.program.expressions.get(value.id);
+      if (expression?.kind !== 'cast' || expression.op !== 'bitcast') break;
+      value = expression.value;
+    }
+    if (expression?.kind === 'compare')
+      return this.expression({ ...expression, op: NEGATED_PREDICATE[expression.op] }, value.type);
+    if (
+      expression?.kind === 'integer_unary' &&
+      expression.op === 'not' &&
+      bitWidth(value.type) === 1
+    )
+      return this.printed(expression.value);
+    return this.printer.not(this.printed(control.condition));
+  }
+
+  /** A flag-carried short circuit as one condition and its complement. Stage
+   * tests print in their original order, each operand of `&&`/`||` evaluated
+   * only when the earlier ones continue the chain, exactly as the stages ran:
+   * a stage leaving with flag 0 contributes `continue && rest`, one leaving
+   * with flag 1 `leave || rest`; the last stage contributes its stored bit
+   * (or the nested chain whose flag it copies). */
+  private flagCondition(flag: FlagTest): {
+    readonly positive: Printed;
+    readonly negative: Printed;
+  } {
+    const tests = flag.stages.map((stage) =>
+      this.testPrinted(stage.control, stage.value !== stage.enter),
+    );
+    const last = flag.last;
+    let merged =
+      'chain' in last
+        ? this.flagCondition(last.chain)[last.invert ? 'negative' : 'positive']
+        : this.printed(last);
+    for (let index = flag.stages.length - 1; index >= 0; index--)
+      merged = this.printer.logical(
+        flag.stages[index]!.value ? 'or' : 'and',
+        tests[index]!,
+        merged,
+      );
+    const negated = this.printer.not(merged);
+    return flag.positive
+      ? { positive: merged, negative: negated }
+      : { positive: negated, negative: merged };
+  }
+
   /** Source view: coalesce phi copies, then lay out return tails and loop
    * syntax. Each step checks its side conditions on this reconstruction and
    * records one presentation rewrite; the checked view never calls this. */
@@ -3887,10 +4139,12 @@ export class Renderer {
     const indices = new Map([...this.indexedData].map(([id, table]) => [id, table.index]));
     const typeId = (value: Value): string | undefined =>
       this.sourceValueTypes.get(value.id) ?? program.source?.value_types?.get(value.id)?.type_id;
+    // A constant rotation prints its operand twice: it stays a variable.
+    const rotated = constantRotationOperands(program.expressions);
     const plan = planSourceInlining(
       program,
       this.context,
-      (value) => this.names.has(value.id),
+      (value) => this.names.has(value.id) || rotated.has(value.id),
       (node) => indices.get(node.id),
       (destination, expression) => {
         // Same presented storage: the same IEEE width (whole value, or its low
@@ -3936,6 +4190,21 @@ export class Renderer {
       calls = new Map();
       for (const site of propagated) candidates.delete(site.node.result.id);
     }
+    let deferred = plan.deferred;
+    const reused = [...candidates.values()].filter((site) => site.local);
+    if (
+      reused.length &&
+      !this.localValidation.presentation(
+        'local_load_reuse',
+        subject,
+        'a load of a private local that exactly one write to that local (a pure function of the loaded value alone) and one other same-block statement read is printed as the local itself at both readers; no other access to the local lies between the load and its last reader, the write has no register input and no effect beyond the private local, and a write that follows its other reader prints right after that reader with no variable read moved',
+        reused.map(({ node }) => node.id),
+      )
+    ) {
+      calls = new Map();
+      deferred = new Map();
+      for (const site of reused) candidates.delete(site.node.result.id);
+    }
     if (
       candidates.size &&
       this.localValidation.presentation(
@@ -3951,6 +4220,10 @@ export class Renderer {
         const nodes = this.inlineSites.get(site.anchor) ?? [];
         nodes.push(site);
         this.inlineSites.set(site.anchor, nodes);
+      }
+      for (const [anchor, stores] of deferred) {
+        this.deferred.set(anchor, stores);
+        for (const store of stores) this.deferredStores.add(store.id);
       }
     } else if (candidates.size) calls = new Map();
     if (
@@ -4010,30 +4283,25 @@ export class Renderer {
       }
     const storageType = (value: Value): string =>
       machineType((widening.get(value.id) ?? value).type);
-    const variables = coalescePhiCopies(
-      program,
-      liveness,
-      (a, b) => {
-        if (!program.source && (formals.has(a.id) || formals.has(b.id))) return false;
-        const left = widening.get(a.id) ?? a,
-          right = widening.get(b.id) ?? b;
-        const pointerFormal = [left, right].find(
-          (value) => program.source?.formal_types?.get(value.id)?.kind === 'pointer',
-        );
-        const pointerCompatible =
-          pointerFormal &&
-          this.valueType(left).replace(/^const /, '') ===
-            this.valueType(right).replace(/^const /, '');
-        return (
-          storageType(a) === storageType(b) &&
-          (pointerCompatible ||
-            (typeId(left) === typeId(right) && this.valueType(left) === this.valueType(right))) &&
-          (this.names.get(a.id) ?? null) === (this.names.get(b.id) ?? null)
-        );
-      },
-      this.context,
-      assignments,
-    );
+    const compatible = (a: Value, b: Value): boolean => {
+      if (!program.source && (formals.has(a.id) || formals.has(b.id))) return false;
+      const left = widening.get(a.id) ?? a,
+        right = widening.get(b.id) ?? b;
+      const pointerFormal = [left, right].find(
+        (value) => program.source?.formal_types?.get(value.id)?.kind === 'pointer',
+      );
+      const pointerCompatible =
+        pointerFormal &&
+        this.valueType(left).replace(/^const /, '') ===
+          this.valueType(right).replace(/^const /, '');
+      return (
+        storageType(a) === storageType(b) &&
+        (pointerCompatible ||
+          (typeId(left) === typeId(right) && this.valueType(left) === this.valueType(right))) &&
+        (this.names.get(a.id) ?? null) === (this.names.get(b.id) ?? null)
+      );
+    };
+    const variables = coalescePhiCopies(program, liveness, compatible, this.context, assignments);
     if (
       variables.size &&
       this.localValidation.presentation(
@@ -4044,6 +4312,70 @@ export class Renderer {
       )
     )
       this.variables = variables;
+    // In-place updates: a definition that is the last reader of one of its
+    // operand variables shares that variable (`y = f(x)` prints `x = f(x)`).
+    const chains: { destination: Value; source: Value }[] = [];
+    const chain = (destination: Value, operands: readonly Value[]): void => {
+      if (!liveness.index.has(destination.id)) return;
+      for (const operand of operands)
+        for (const leaf of liveness.leaves(operand))
+          chains.push({ destination, source: liveness.values[leaf]! });
+    };
+    const chainDefinitions = (anchor: string): void => {
+      for (const definition of program.source?.definitions?.get(anchor) ?? [])
+        if (!this.inlined.has(definition.result.id))
+          chain(definition.result, expressionOperands(definition.expression));
+    };
+    for (const block of program.blocks.values()) {
+      this.context.checkpoint(1);
+      chainDefinitions(block.id);
+      for (const node of block.statements) {
+        if (program.retained.has(node.id))
+          if (node.kind === 'assign')
+            chain(
+              node.result,
+              expressionOperands(program.expressions.get(node.result.id) ?? node.expression),
+            );
+          else if (node.kind === 'load' && !program.source?.locals.has(node.id))
+            chain(node.result, [node.address]);
+        chainDefinitions(node.id);
+      }
+      chainDefinitions(block.control.id);
+    }
+    // Plain integer temporaries print identically whatever their recovered type
+    // identity; everything else needs the phi-coalescing agreement.
+    const sharedStorage = (a: Value, b: Value): boolean =>
+      this.sourceRoleNames.get(a.id) === this.sourceRoleNames.get(b.id) &&
+      (compatible(a, b) ||
+        (!!program.source &&
+          a.type.kind === 'integer' &&
+          b.type.kind === 'integer' &&
+          !formals.has(a.id) &&
+          !formals.has(b.id) &&
+          !widening.has(a.id) &&
+          !widening.has(b.id) &&
+          this.valueType(a) === this.valueType(b) &&
+          this.valueType(a) === this.dataType(a.type) &&
+          storageType(a) === storageType(b) &&
+          (this.names.get(a.id) ?? null) === (this.names.get(b.id) ?? null)));
+    const chained = coalesceValues(
+      program,
+      liveness,
+      sharedStorage,
+      this.context,
+      this.variables,
+      chains,
+    );
+    if (
+      chained &&
+      this.localValidation.presentation(
+        'copy_coalescing',
+        subject,
+        'a value defined from a printed variable that dies there (in-place update: y = f(x) with no later read of x) shares its storage with that variable when no member of either class is live where a member of the other is defined (including simultaneous block parameters and loop-carried liveness), every member has the same presented type, machine width, source name and role, and no read observes a different value; unrelated values never share storage, formals retain their declaration, and a role name survives only when every member carries it',
+        [...chained.keys()].filter((id) => this.variables.get(id) !== chained.get(id)),
+      )
+    )
+      this.variables = chained;
     const key = (value: Value): string => (this.variables.get(value.id) ?? value).id;
     const definitions = program.source?.definitions;
     const hasDefinitions = (anchor: string): boolean =>
@@ -4055,9 +4387,37 @@ export class Renderer {
       block.statements.every(
         (node) =>
           (!program.retained.has(node.id) ||
+            this.flagAccesses.has(node.id) ||
             ('result' in node && this.inlined.has(node.result.id))) &&
           !hasDefinitions(node.id),
       );
+    // A proven jump table's exact range guard and its switch print as one switch.
+    const quietAnchor = (id: string): boolean =>
+      !this.notes.has(id) && !this.deferred.get(id)?.length;
+    const folded = foldSwitchGuards(
+      this.body,
+      (guard, target) =>
+        silent(target) &&
+        quietAnchor(target.id) &&
+        target.statements.every((node) => quietAnchor(node.id)) &&
+        quietAnchor(guard.control.id) &&
+        !hasDefinitions(guard.control.id) &&
+        !this.requirementPredicates.has(guard.control.id),
+      (transfer) => this.printedCopies(transfer).length,
+      this.context,
+    );
+    if (
+      folded.guards.size &&
+      this.localValidation.presentation(
+        'switch_range_guard',
+        subject,
+        "a proven jump table's range guard (its out-of-range edge is taken exactly when the selector exceeds every case) and the switch it alone enters, whose block prints nothing, print as one switch whose default is the guard's out-of-range arm; no statement, edge copy or effect moves",
+        [...folded.guards.keys()],
+      )
+    ) {
+      this.body = folded.body;
+      for (const [id, guard] of folded.guards) this.foldedGuards.set(id, guard);
+    }
     const layout = planLayout(
       this.body,
       program,
@@ -4108,11 +4468,56 @@ export class Renderer {
           subject,
           'a terminal block is printed at its only edge, or right after the only loop entering it when every other exit of that loop is a duplicated tail',
           layout.relocated.map((item) => item.block),
+        )) &&
+      (!layout.merged.length ||
+        this.localValidation.presentation(
+          'loop_exit_merge',
+          subject,
+          'the exit reached by most loop edges follows the loop, so those edges print as breaks; an exit entered by one loop edge only moves onto that edge and still runs the same statements once on the same path before its own jump, so no exit edge, edge copy or effect changes',
+          layout.merged.map((item) => item.block),
         ))
     ) {
       body = layout.body;
       this.clones = layout.clones;
     }
+    // Short-circuit tests carried by a promoted flag local (typical O0 `&&`).
+    const anchored = (id: string): boolean =>
+      hasDefinitions(id) || this.notes.has(id) || !!this.deferred.get(id)?.length;
+    const flags = planFlagTests(
+      body,
+      program,
+      {
+        prints: (node) =>
+          (program.retained.has(node.id) &&
+            !this.deferredStores.has(node.id) &&
+            !('result' in node && this.inlined.has(node.result.id))) ||
+          anchored(node.id),
+        anchored,
+        copies: (transfer) => this.printedCopies(transfer).length,
+        expression: (id) => (this.inline.has(id) ? program.expressions.get(id) : undefined),
+        readOnlyBy: (value, control) => {
+          const site = this.inlined.get(value.id);
+          return site?.anchor === control && !site.local && !site.propagated;
+        },
+        inPlace: (store) => !this.deferredStores.has(store),
+        plain: (control) => !this.requirementPredicates.has(control.id),
+      },
+      this.context,
+    );
+    for (const [id, flag] of flags)
+      if (
+        this.localValidation.presentation(
+          'short_circuit_flag',
+          id,
+          'a promoted private flag local whose only accesses are 0/1 stores ending each stage of a copy-free chain (later stages print nothing, each entered only from the previous one) and one load read only by the merge test, which the chain alone enters and which tests exactly that bit, prints as that test over the stages joined by && (stage leaving with 0) or || (leaving with 1) in their original order, ending with the last stored bit; each later operand is evaluated only when the earlier ones continue the chain, and the dead flag storage is not printed',
+          [...flag.controls, ...flag.accesses],
+        )
+      ) {
+        this.flagTests.set(id, flag);
+        this.flagHeads.set(flag.head, flag);
+        for (const control of flag.controls) this.flagStages.add(control);
+        for (const access of flag.accesses) this.flagAccesses.add(access);
+      }
     const shaped = planLoopForms(
       body,
       this.language,
@@ -4124,8 +4529,18 @@ export class Renderer {
           ),
         silent,
         plain: (control) => !this.requirementPredicates.has(control.id),
-        reads: (control) =>
-          liveness.leaves(control.condition).map((index) => key(liveness.values[index]!)),
+        reads: (control) => {
+          const flag = this.flagTests.get(control.id);
+          const operands = (test: FlagTest): Value[] => [
+            ...test.stages.map((stage) => stage.control.condition),
+            ...('chain' in test.last ? operands(test.last.chain) : [test.last]),
+          ];
+          const values = flag ? operands(flag) : [control.condition];
+          return values.flatMap((value) =>
+            liveness.leaves(value).map((index) => key(liveness.values[index]!)),
+          );
+        },
+        flag: (block) => this.flagHeads.get(block.id)?.merge,
         live: (block, variables) => {
           const entry = liveness.live(block);
           if (!entry) return true;
@@ -4404,6 +4819,19 @@ export class Renderer {
   }
 
   private control(control: Control, block: BlockRegion, depth: number): void {
+    // A short-circuit flag stage prints inside its merge test: only its
+    // copy-free edges and the stages it guards are visited here.
+    if (this.flagStages.has(control.id)) {
+      const before = this.writer.offset;
+      if (control.kind === 'jump') this.transfer(control.transfer, depth, control);
+      else
+        for (const arm of controlArms(control)) {
+          this.transfer(arm.transfer, depth, control);
+          if (arm.body) this.region(arm.body, depth);
+        }
+      if (this.writer.offset !== before) this.invalid('A short-circuit flag stage printed text');
+      return;
+    }
     this.emitNotes(control.id, depth);
     const start = this.writer.offset;
     const ids = [control.effect.id];
@@ -4415,6 +4843,20 @@ export class Renderer {
         break;
       case 'if': {
         ids.push(control.condition.id);
+        const flag = this.sourceView ? this.flagTests.get(control.id) : undefined;
+        if (flag) {
+          const merged = this.flagCondition(flag);
+          this.sourceIf(
+            control,
+            depth,
+            merged.positive,
+            undefined,
+            control.condition,
+            undefined,
+            merged.negative,
+          );
+          break;
+        }
         const requirement = this.requirementPredicates.get(control.id);
         const originalCondition = this.value(control.condition);
         const condition = requirement
@@ -4472,37 +4914,42 @@ export class Renderer {
         if (this.language === 'c-like') this.writer.line(depth, '}');
         break;
       }
-      case 'switch':
+      case 'switch': {
         ids.push(control.value.id);
+        const selector = this.sourceView ? this.switchSelector(control) : control.value;
         this.writer.line(
           depth,
           this.language === 'c-like'
-            ? `switch (${this.value(control.value)}) {`
-            : `match ${this.value(control.value)}:`,
+            ? `switch (${this.value(selector)}) {`
+            : `match ${this.value(selector)}:`,
         );
-        for (const item of control.cases) {
-          this.context.checkpoint(1);
-          this.writer.line(
-            depth + 1,
-            this.language === 'c-like'
-              ? `case 0x${item.bits.toString(16)}: {`
-              : `case 0x${item.bits.toString(16)}:`,
-          );
-          this.arm(item.arm, depth + 2, control);
+        if (this.sourceView) this.sourceSwitch(control, depth);
+        else {
+          for (const item of control.cases) {
+            this.context.checkpoint(1);
+            this.writer.line(
+              depth + 1,
+              this.language === 'c-like'
+                ? `case 0x${item.bits.toString(16)}: {`
+                : `case 0x${item.bits.toString(16)}:`,
+            );
+            this.arm(item.arm, depth + 2, control);
+            if (this.language === 'c-like') {
+              this.writer.statement(depth + 2, 'break');
+              this.writer.line(depth + 1, '}');
+            }
+          }
+          this.writer.line(depth + 1, this.language === 'c-like' ? 'default: {' : 'case _:');
+          this.arm(control.otherwise, depth + 2, control);
           if (this.language === 'c-like') {
             this.writer.statement(depth + 2, 'break');
             this.writer.line(depth + 1, '}');
+            this.writer.line(depth, '}');
           }
-        }
-        this.writer.line(depth + 1, this.language === 'c-like' ? 'default: {' : 'case _:');
-        this.arm(control.otherwise, depth + 2, control);
-        if (this.language === 'c-like') {
-          this.writer.statement(depth + 2, 'break');
-          this.writer.line(depth + 1, '}');
-          this.writer.line(depth, '}');
         }
         this.propagateLoopExit(control.id, depth);
         break;
+      }
       case 'return': {
         const projection = this.program.returns.get(control.id);
         for (const value of control.values) ids.push(value.id);
@@ -4637,6 +5084,20 @@ export class Renderer {
     }
     this.inferenceSites.set(control.id, { start, end: this.writer.offset });
     this.map(control, start, ids);
+    // A folded range guard is printed by its switch.
+    const guard = this.foldedGuards.get(control.id);
+    if (guard) {
+      this.inferenceSites.set(guard.id, { start, end: this.writer.offset });
+      this.map(guard, start);
+    }
+    // Absorbed stages and flag accesses are printed by this merge test.
+    const flag = this.flagTests.get(control.id);
+    for (const id of flag ? [...flag.controls, ...flag.accesses] : []) {
+      const origin = this.controls.get(id) ?? this.statements.get(id);
+      if (!origin) this.invalid('A short-circuit flag stage lost its origin');
+      this.inferenceSites.set(id, { start, end: this.writer.offset });
+      this.map(origin, start);
+    }
   }
 
   private sourceDefinitions(anchor: string, depth: number): void {
@@ -4742,10 +5203,14 @@ export class Renderer {
         if (held) this.holdCall(held.node, held, depth);
         else if (
           this.program.retained.has(node.id) &&
+          !this.deferredStores.has(node.id) &&
+          !this.flagAccesses.has(node.id) &&
           !('result' in node && this.inlined.has(node.result.id))
         )
           this.reader(() => this.instruction(node, depth));
         this.sourceDefinitions(node.id, depth);
+        for (const store of this.deferred.get(node.id) ?? [])
+          this.reader(() => this.instruction(store, depth));
       }
       this.sourceDefinitions(region.control.id, depth);
       // A plain jump carries a held call on to the block it enters.
@@ -5033,7 +5498,12 @@ export class Renderer {
     const declaredLocals = new Set<string>();
     for (const [node, local] of this.program.source?.locals ?? []) {
       this.context.checkpoint(1);
-      if (declaredLocals.has(local.id) || !this.program.retained.has(node)) continue;
+      if (
+        declaredLocals.has(local.id) ||
+        !this.program.retained.has(node) ||
+        this.flagAccesses.has(node)
+      )
+        continue;
       declaredLocals.add(local.id);
       const name = this.sourceIdentifier(
           local.id,
@@ -5044,10 +5514,20 @@ export class Renderer {
               : `local${this.sourceLocal++}`),
         ),
         start = w.offset;
-      const typed = this.slotType(node);
+      const typed = this.slotType(node),
+        floating = this.floatSlot(node);
       w.statement(
         1,
-        w.declaration(typed ? this.formalSpelling(typed) : this.dataType(local.type), name),
+        w.declaration(
+          floating
+            ? floating === 32
+              ? 'float'
+              : 'double'
+            : typed
+              ? this.formalSpelling(typed)
+              : this.dataType(local.type),
+          name,
+        ),
       );
       this.mapped(this.dataOrigin(node), start, [node]);
     }
@@ -5103,6 +5583,14 @@ export class Renderer {
         ]);
         if (support !== undefined) support += delta;
       }
+    }
+    if (support !== undefined && this.deferredTypedefs.length) {
+      const text = w.text().slice(support);
+      const used = this.deferredTypedefs.filter((name) => new RegExp(`\\b${name}\\b`).test(text));
+      insert(
+        support,
+        used.map((name) => `typedef struct ${name} ${name};`),
+      );
     }
     if (support !== undefined) insert(support, cScalarSupport(w.text().slice(support)));
     for (const item of this.input.function.coverage) {

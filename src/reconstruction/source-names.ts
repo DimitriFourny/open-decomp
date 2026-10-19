@@ -1,6 +1,6 @@
 import type { OperationContext } from '../core/index.js';
 import type { TypeRecoveryResult } from '../analysis/types/index.js';
-import { bitWidth, expressionOperands, type Value } from '../ir/index.js';
+import { bitWidth, expressionOperands, type IntegerPredicate, type Value } from '../ir/index.js';
 import type { ParallelTransfer, Region } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
 
@@ -23,6 +23,40 @@ export const sourceRoleStems: ReadonlySet<string> = new Set([
   ...Object.keys(roleBits),
   'remaining',
 ]);
+
+const integerInverse: Record<IntegerPredicate, IntegerPredicate> = {
+  eq: 'ne',
+  ne: 'eq',
+  ult: 'uge',
+  uge: 'ult',
+  ule: 'ugt',
+  ugt: 'ule',
+  slt: 'sge',
+  sge: 'slt',
+  sle: 'sgt',
+  sgt: 'sle',
+};
+const integerSwapped: Record<IntegerPredicate, IntegerPredicate> = {
+  eq: 'eq',
+  ne: 'ne',
+  ult: 'ugt',
+  ugt: 'ult',
+  ule: 'uge',
+  uge: 'ule',
+  slt: 'sgt',
+  sgt: 'slt',
+  sle: 'sge',
+  sge: 'sle',
+};
+/** One exit test of a loop on a value, read as the predicate `value op bound`
+ * under which the loop continues. `top` tests run before anything else in an
+ * iteration, `bottom` ones last, ahead of the back edge. */
+interface LoopTest {
+  readonly bound: Value;
+  readonly op: IntegerPredicate;
+  readonly position: 'top' | 'bottom' | 'inside';
+}
+
 export const sourceGenericStems: ReadonlySet<string> = new Set([
   'condition',
   'call_result',
@@ -122,6 +156,7 @@ export function planSourceNames(
         if (next.sameWidth || (role !== 'address' && role !== 'callback')) mark(next.value, role);
     }
   };
+  const shifts: { count: Value; constant: boolean }[] = [];
   for (const [id, expression] of program.expressions) {
     context.checkpoint(1);
     const value = program.values.get(id)!;
@@ -147,9 +182,19 @@ export function planSourceNames(
         if (right?.kind === 'constant') count = mask.left;
         else if (left?.kind === 'constant') count = mask.right;
       }
-      mark(count, 'shift_count');
+      shifts.push({
+        count,
+        constant: program.expressions.get(canonical(expression.left, true).id)?.kind === 'constant',
+      });
     }
   }
+  // A parameter shifted into a constant (`1 << n & mask`, a bit-set test) is an
+  // operation or position selector the caller chose, not a shift count.
+  const bitPositions = new Set(
+    shifts.filter((shift) => shift.constant).map((shift) => shift.count.id),
+  );
+  for (const { count } of shifts)
+    if (!(parameters.has(count.id) && bitPositions.has(count.id))) mark(count, 'shift_count');
   const sources = new Map<ParallelTransfer, string>(),
     successors = new Map<string, string[]>();
   for (const block of program.blocks.values()) {
@@ -251,8 +296,11 @@ export function planSourceNames(
     return false;
   };
   const loopTests = new Map<string, Map<string, Value[]>>();
+  /** Per loop, every exit test of each tested value (see `LoopTest`). */
+  const loopForms = new Map<string, Map<string, LoopTest[]>>();
   for (const [header, members] of loops) {
-    const tests = new Map<string, Value[]>();
+    const tests = new Map<string, Value[]>(),
+      shapes = new Map<string, LoopTest[]>();
     for (const id of members) {
       context.checkpoint(1);
       const control = program.blocks.get(id)!.control;
@@ -266,16 +314,29 @@ export function planSourceNames(
       if (condition?.kind !== 'compare') continue;
       const left = canonical(condition.left, true),
         right = canonical(condition.right, true);
-      for (const [value, bound] of [
-        [left, right],
-        [right, left],
+      // The predicate under which the loop continues, read as `value op bound`,
+      // and where the test sits: first in the loop, or last, before the back edge.
+      const stays = members.has(control.when_true.transfer.target)
+          ? condition.op
+          : integerInverse[condition.op],
+        back = (
+          members.has(control.when_true.transfer.target) ? control.when_true : control.when_false
+        ).transfer.target,
+        position = back === header ? 'bottom' : id === header ? 'top' : 'inside';
+      for (const [value, bound, swapped] of [
+        [left, right, false],
+        [right, left, true],
       ] as const) {
         const row = tests.get(value.id) ?? [];
         row.push(bound);
         tests.set(value.id, row);
+        const forms = shapes.get(value.id) ?? [];
+        forms.push({ bound, op: swapped ? integerSwapped[stays] : stays, position });
+        shapes.set(value.id, forms);
       }
     }
     loopTests.set(header, tests);
+    loopForms.set(header, shapes);
   }
   /** Name of each promoted slot from its loop analyses; null when they disagree. */
   const slotNames = new Map<string, string | null>();
@@ -438,6 +499,15 @@ export function planSourceNames(
       return true;
     };
     const pendingBounds: { bound: Value; role: Role }[] = [];
+    const isZero = (value: Value): boolean => {
+      const expression = program.expressions.get(value.id);
+      return expression?.kind === 'constant' && expression.bits === 0n;
+    };
+    /** Values a promoted slot is stored with outside the loop `members`. */
+    const outside = (slot: string, members: ReadonlySet<string>): Value[] =>
+      (slotStores.get(slot) ?? [])
+        .filter((store) => !members.has(store.block))
+        .map((store) => store.value);
     /** `id` and every same-width cast or extract linked to it: a reinterpretation
      * prints the same value under another type; it is not a copy. */
     const reinterpretations = (id: string): string[] => {
@@ -530,14 +600,7 @@ export function planSourceNames(
         // stride as an index, so only a unit step stands without a test.
         if (!bounds.length && step !== 1n && step !== -1n) return;
         // Stepping down from zero counts negated iterations, not what remains.
-        if (
-          role === 'count' &&
-          entries.some((entry) => {
-            const expression = program.expressions.get(entry.id);
-            return expression?.kind === 'constant' && expression.bits === 0n;
-          })
-        )
-          return;
+        if (role === 'count' && entries.some(isZero)) return;
       } else {
         role = 'accumulator';
         if (
@@ -546,15 +609,56 @@ export function planSourceNames(
         )
           return;
       }
+      // The loop's exit tests of its running values. A test reads the number of
+      // steps taken so far when it runs first in an iteration on the loop
+      // variable, or last on its updated value.
+      const exits = running.flatMap((id) =>
+        (loopForms.get(header)!.get(id) ?? []).map((test) => ({ id, test })),
+      );
+      const updated = new Set(leaves.map((leaf) => leaf.id));
+      const stepsTaken = ({ id, test }: (typeof exits)[number]): boolean =>
+        (web.has(id) && test.position === 'top') ||
+        (!web.has(id) && updated.has(id) && test.position === 'bottom');
+      /** The countdown ends where it reaches zero: tested against 0 as steps are
+       * taken, or against 1 by the loop variable just before the final step. */
+      const endsAtZero = ({ id, test }: (typeof exits)[number]): boolean => {
+        const constant = program.expressions.get(test.bound.id);
+        return (
+          constant?.kind === 'constant' &&
+          ['ne', 'ugt', 'sgt'].includes(test.op) &&
+          (stepsTaken({ id, test })
+            ? constant.bits === 0n
+            : web.has(id) && test.position === 'bottom' && constant.bits === 1n)
+        );
+      };
+      // A unit countdown that runs until it reaches zero: its starting value is
+      // the number of iterations.
+      const zeroCounted =
+        role === 'count' && step === -1n && exits.length > 0 && exits.every(endsAtZero);
       if (role === 'index') {
         const bound = bounds.find(
           (candidate) =>
             program.expressions.get(candidate.id)?.kind !== 'constant' &&
             invariant(candidate, members),
         );
-        if (bound) pendingBounds.push({ bound, role: step === 1n ? 'count' : 'limit' });
-      } else if (step === -1n)
-        // A parameter a unit countdown starts from is the number of iterations.
+        if (bound) {
+          // The bound is the iteration count only for a unit step from 0 that
+          // stops strictly below it; any other start or inclusive test makes it
+          // the end of a range, a limit.
+          const tested = exits.filter((exit) => exit.test.bound.id === bound.id);
+          const zeroStart =
+            slot === undefined
+              ? entries.length > 0 && entries.every(isZero)
+              : outside(slot, members).length > 0 && outside(slot, members).every(isZero);
+          const exclusive =
+            tested.length > 0 &&
+            tested.every((exit) => ['ult', 'slt', 'ne'].includes(exit.test.op) && stepsTaken(exit));
+          pendingBounds.push({
+            bound,
+            role: step === 1n && zeroStart && exclusive ? 'count' : 'limit',
+          });
+        }
+      } else if (zeroCounted)
         for (const entry of entries)
           if (parameters.has(entry.id)) pendingBounds.push({ bound: entry, role: 'count' });
       if (slot !== undefined) {
@@ -564,7 +668,11 @@ export function planSourceNames(
       } else
         for (const id of [...web, ...leaves.map((leaf) => leaf.id)])
           for (const same of reinterpretations(id)) {
-            const value = program.values.get(same);
+            // A parameter that is itself the loop variable (the loop starts at
+            // function entry) holds what the caller passed when the loop begins;
+            // only a unit countdown to zero makes that the iteration count.
+            const value =
+              parameters.has(same) && !zeroCounted ? undefined : program.values.get(same);
             if (value) mark(value, role, false);
             if (role === 'count') decreasing.add(same);
           }

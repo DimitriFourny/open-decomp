@@ -7,7 +7,9 @@ import { validateBitvectorCandidate } from './local-validation.js';
 import { sourceRequirementPredicates } from './source-requirements.js';
 
 /** Agree to a void-like interface only in the absence of any positive result
- * evidence. The caller still records the ABI assumption before hiding slices. */
+ * evidence. Native written-result storage is no such evidence once a
+ * `void_like_result` rule (`incidental_result`, `indirect_result`) rejected
+ * it. The caller still records the ABI assumption before hiding slices. */
 export function permitsVoidSourceSignature(
   input: EmissionInput,
   source: SourcePresentation,
@@ -22,8 +24,9 @@ export function permitsVoidSourceSignature(
     !source.return_pointer &&
     !source.return_source_type &&
     !input.source?.function_return_demands?.length &&
-    !input.source?.function_returns?.registers.length &&
-    !input.source?.function_returns?.types.length &&
+    (source.void_like_result !== undefined ||
+      (!input.source?.function_returns?.registers.length &&
+        !input.source?.function_returns?.types.length)) &&
     !input.types?.signatures.some((signature) => signature.subject_id === input.function.id) &&
     [...returns.values()].every(
       (boundary) => boundary.kind === 'inferred' && boundary.results.length === 0,
@@ -37,13 +40,18 @@ export function permitsVoidSourceSignature(
  * An ordinary same-width memory read joins such a component only by consumer
  * evidence (an IEEE reinterpretation or a transport into a carrier); an
  * ordinary store of a component member is a whole-bit FP write. Both then
- * read/write through a native float/double lvalue (`float_accesses`). */
+ * read/write through a native float/double lvalue (`float_accesses`).
+ * A promoted frame-private slot is storage between its stores and reloads, like
+ * a phi: it is an FP local (`float_locals`) exactly when every stored value and
+ * every reload belongs to the component. An FP-bank formal reads like a memory
+ * read: only its consumers (same-width IEEE reinterpretations) type it. */
 export function projectSourceFloating(
   program: Reconstruction,
   input: EmissionInput,
   context: OperationContext,
   memory = true,
-): Pick<SourcePresentation, 'float_values' | 'return_float' | 'float_accesses'> {
+  slotsEnabled = true,
+): Pick<SourcePresentation, 'float_values' | 'return_float' | 'float_accesses' | 'float_locals'> {
   const validation = program.local_validation_session;
   if (
     program.view !== 'source' ||
@@ -107,6 +115,57 @@ export function projectSourceFloating(
   };
   const accesses: Extract<Instruction, { kind: 'load' | 'store' }>[] = [];
   const loads = new Map<string, Value>();
+  // Entry values of FP-bank argument registers are the formal analogue of an
+  // ordinary memory read: the register bank is the ABI fact, consumers the evidence.
+  for (const formal of program.parameters) {
+    const register = program.parameter_registers.get(formal.id);
+    if (
+      register &&
+      (register.bank === 'vector' || register.bank === 'float') &&
+      formal.type.kind === 'integer' &&
+      [32, 64].includes(bitWidth(formal.type)) &&
+      program.live.has(formal.id) &&
+      !conflicting(formal)
+    )
+      loads.set(formal.id, formal);
+  }
+  // Promoted slots: private storage whose reloads read exactly the stored values.
+  const slots = new Map<
+    string,
+    { bits: 32 | 64; stores: Value[]; loads: Value[]; nodes: string[] }
+  >();
+  const unslotted = new Set<string>();
+  if (slotsEnabled)
+    for (const block of program.blocks.values())
+      for (const node of block.statements) {
+        context.checkpoint(1);
+        if ((node.kind !== 'load' && node.kind !== 'store') || !program.retained.has(node.id))
+          continue;
+        const local = program.source.locals.get(node.id);
+        if (!local || unslotted.has(local.id)) continue;
+        const value = node.kind === 'load' ? node.result : node.value;
+        const bits = bitWidth(value.type);
+        if (
+          local.type.kind !== 'integer' ||
+          value.type.kind !== 'integer' ||
+          (bits !== 32 && bits !== 64) ||
+          conflicting(value) ||
+          (slots.get(local.id) && slots.get(local.id)!.bits !== bits)
+        ) {
+          unslotted.add(local.id);
+          slots.delete(local.id);
+          continue;
+        }
+        const slot = slots.get(local.id) ?? { bits, stores: [], loads: [], nodes: [] };
+        slots.set(local.id, slot);
+        slot.nodes.push(node.id);
+        if (node.kind === 'store') slot.stores.push(node.value);
+        else if (program.live.has(node.result.id)) slot.loads.push(node.result);
+      }
+  for (const slot of slots.values())
+    for (const load of slot.loads)
+      incoming.set(load.id, [...(incoming.get(load.id) ?? []), ...slot.stores]);
+  const slotted = new Set([...slots.values()].flatMap((slot) => slot.nodes));
   for (const block of program.blocks.values())
     for (const node of block.statements) {
       context.checkpoint(1);
@@ -228,6 +287,11 @@ export function projectSourceFloating(
     for (const binding of bindings) direct(binding.value);
   for (const copies of program.transfers.values())
     for (const copy of copies) if (!floating.has(copy.destination.id)) direct(copy.source);
+  // A slot is FP storage only if every reload is in the component; otherwise the
+  // stores that feed it are integer writes of those bits.
+  for (const slot of slots.values())
+    if (!slot.loads.length || slot.loads.some((load) => floating.get(load.id) !== slot.bits))
+      for (const store of slot.stores) direct(store);
   for (const block of program.blocks.values()) {
     const control = block.control;
     if (control.kind === 'if') direct(control.condition);
@@ -238,7 +302,10 @@ export function projectSourceFloating(
       if (!program.retained.has(node.id)) continue;
       if (node.kind === 'load' || node.kind === 'store') direct(node.address);
       // An ordinary store writes the whole carrier bits through a float/double lvalue.
-      if ((node.kind === 'store' && !plain(node)) || node.kind === 'write_register')
+      if (
+        (node.kind === 'store' && !plain(node) && !slotted.has(node.id)) ||
+        node.kind === 'write_register'
+      )
         direct(node.value);
     }
   }
@@ -288,7 +355,7 @@ export function projectSourceFloating(
       `${floatAccesses.size} accesses read or write exactly the original bytes; a mixed integer/FP use keeps the explicit integer access and bit reinterpretation`,
     )
   )
-    return projectSourceFloating(program, input, context, false);
+    return projectSourceFloating(program, input, context, false, slotsEnabled);
   if (
     !floating.size ||
     !validation.presentation(
@@ -305,6 +372,43 @@ export function projectSourceFloating(
     [program.function.id],
     'Source float/double denote the target IEEE binary32/binary64 representation in the established ABI FP carriers; whole-bit transport is not a numeric integer/FP conversion. Existing FP-environment requirements still apply.',
   );
+  const floatLocals = new Map<string, 32 | 64>();
+  for (const [id, slot] of slots)
+    if (
+      slot.loads.length &&
+      slot.loads.every((load) => floating.get(load.id) === slot.bits) &&
+      slot.stores.every(
+        (store) =>
+          floating.get(store.id) === slot.bits ||
+          program.expressions.get(store.id)?.kind === 'constant',
+      )
+    )
+      floatLocals.set(id, slot.bits);
+  // Invalidation reaches every carrier stored into a slot that stays integer.
+  for (const [id, slot] of slots)
+    if (
+      !floatLocals.has(id) &&
+      slot.stores.some((store) => carriers.has(store.id) && floating.has(store.id))
+    )
+      return projectSourceFloating(program, input, context, memory, false);
+  if (floatLocals.size) {
+    const subjects = [...floatLocals.keys()].flatMap((id) => slots.get(id)!.nodes);
+    if (
+      !validation.presentation(
+        'fp_slot_type',
+        program.function.id,
+        'exact nonvolatile frame-private promoted slot (private_stack_promotion) whose every stored value is a same-width IEEE value, closed FP carrier member or literal and whose every reload is a member of that carrier component; declared float/double, stores and reloads print without reinterpretation; a mixed integer/FP use keeps the integer slot',
+        subjects.slice(0, 64),
+        `${floatLocals.size} promoted slots hold exactly the bits their float/double local holds; stores and reloads are plain assignments of equal bit patterns`,
+      )
+    )
+      return projectSourceFloating(program, input, context, memory, false);
+    validation.requireAbi(
+      'fp_slot_type',
+      subjects.slice(0, 64),
+      'A float/double local holds and returns exactly the IEEE binary32/binary64 bits assigned to it (no excess precision, no signaling-NaN quieting on assignment); the slot remains private to this activation under the recorded frame_private_to_activation premise. Existing FP-environment requirements still apply.',
+    );
+  }
   if (floatAccesses.size)
     validation.requireAbi(
       'fp_memory_access',
@@ -314,6 +418,7 @@ export function projectSourceFloating(
   return {
     float_values: floating,
     ...(floatAccesses.size ? { float_accesses: floatAccesses } : {}),
+    ...(floatLocals.size ? { float_locals: floatLocals } : {}),
     ...(returnFloat ? { return_float: returnFloat } : {}),
   };
 }

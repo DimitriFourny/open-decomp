@@ -368,11 +368,95 @@ const scenarios: readonly Scenario[] = [
     present: { c: /\(int64_t\)arg0 >> 1/, python: /int64\(arg0\) >> 1/ },
     rule: 'shift_idiom',
   },
+  ...(
+    [
+      ['ror', 64, 1n],
+      ['ror', 64, 63n],
+      ['rol', 64, 1n],
+      ['rol', 64, 63n],
+      ['ror', 32, 27n],
+      ['rol', 32, 5n],
+      ['ror', 32, 5n],
+      ['rol', 32, 27n],
+      ['ror', 16, 3n],
+      ['rol', 16, 13n],
+      ['ror', 8, 7n],
+      ['rol', 8, 1n],
+      ['ror', 8, 4n],
+    ] as const
+  ).map(([op, bits, amount]): Scenario => {
+    const right = op === 'ror' ? Number(amount) : bits - Number(amount),
+      left = bits - right,
+      // All-ones counts print in hexadecimal.
+      count = (n: number) => `(?:${n}|0x${n.toString(16)})`,
+      shifts = (l: number, r: number) =>
+        left < right || (left === right && op === 'rol')
+          ? new RegExp(`\\(\\S+ << ${count(l)}\\) \\| \\(\\S+ >> ${count(r)}\\)`)
+          : new RegExp(`\\(\\S+ >> ${count(r)}\\) \\| \\(\\S+ << ${count(l)}\\)`);
+    return {
+      name: `${op} ${bits} by ${amount} prints inline`,
+      build: (entry, a) => {
+        const rotated = entry.int(
+          op,
+          bits === 64 ? a : entry.extract(a, 0, bits),
+          entry.constant(integer(bits), amount),
+        );
+        return bits === 64 ? rotated : entry.cast('zero_extend', i64, rotated);
+      },
+      expected: (a) => {
+        const x = lowBits(a, bits);
+        return lowBits((x >> BigInt(right)) | (x << BigInt(left)), bits);
+      },
+      absent: { c: /bv_r|__od_bv/, python: /bv_r/ },
+      present: { c: shifts(left, right), python: shifts(left, right) },
+      rule: 'rotate_inline',
+    };
+  }),
   {
-    name: 'a real rotate stays a rotate',
-    build: (entry, a) => entry.int('ror', a, entry.constant(i64, 1n)),
-    expected: (a) => lowBits((a >> 1n) | (a << 63n), 64),
-    present: { c: /bv_ror\(64, arg0, 1\)/, python: /bv_ror\(64, arg0, 1\)/ },
+    name: 'a rotate by a variable count keeps its helper',
+    build: (entry, a, b) => entry.int('ror', a, b),
+    expected: (a, b) => {
+      const k = b % 64n;
+      return lowBits((a >> k) | (a << (64n - k)), 64);
+    },
+    present: { c: /bv_ror\(64, arg0, \w+\)/, python: /bv_ror\(64, arg0, \w+\)/ },
+  },
+  {
+    name: 'a join of slices of different words keeps both slices',
+    build: (entry, a, b) =>
+      entry.concat([
+        entry.extract(entry.int('add', a, b), 0, 32),
+        entry.extract(entry.int('xor', a, b), 32, 32),
+      ]),
+    expected: (a, b) => lowBits(a + b, 32) | (lowBits((a ^ b) >> 32n, 32) << 32n),
+    present: { c: /<< 32/, python: /<< 32/ },
+  },
+  {
+    name: 'slices of one word that leave a gap stay joined',
+    build: (entry, a, b) => {
+      const word = entry.int('add', a, b);
+      return entry.cast(
+        'zero_extend',
+        i64,
+        entry.concat([entry.extract(word, 0, 16), entry.extract(word, 32, 16)]),
+      );
+    },
+    expected: (a, b) => lowBits(a + b, 16) | (lowBits((a + b) >> 32n, 16) << 16n),
+    present: { c: /<< 16/, python: /<< 16/ },
+  },
+  {
+    name: 'a rotate of a computed operand reads that value from one variable',
+    build: (entry, a, b) => entry.int('ror', entry.int('add', a, b), entry.constant(i64, 7n)),
+    expected: (a, b) => {
+      const x = lowBits(a + b, 64);
+      return lowBits((x >> 7n) | (x << 57n), 64);
+    },
+    absent: { c: /bv_r|__od_bv/, python: /bv_r/ },
+    present: {
+      c: /(\w+) = arg0 \+ arg1;\n\s+return \(\1 >> 7\) \| \(\1 << 57\);/,
+      python: /(\w+) = uint64\(arg0 \+ arg1\)\n\s+return uint64\(\(\1 >> 7\) \| \(\1 << 57\)\)/,
+    },
+    rule: 'rotate_inline',
   },
 ];
 
@@ -511,6 +595,7 @@ const presentationRules = [
   'complement_xor',
   'negative_addend',
   'shift_idiom',
+  'rotate_inline',
 ];
 const recorded = (emission: EmissionResult['emission']) =>
   (emission.local_validation ?? []).flatMap((record) =>

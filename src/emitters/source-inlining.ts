@@ -20,6 +20,10 @@ export interface InlineSite {
   readonly origin?: string;
   /** A plain copy printed as its source variable at every reader. */
   readonly propagated?: boolean;
+  /** A load of a private local that every reader prints as the local itself:
+   * `shared` (the local's next write follows every reader) or `sunk` (that write
+   * is printed right after the reader that follows it). */
+  readonly local?: 'shared' | 'sunk';
 }
 
 export type InlineCall = Extract<Instruction, { kind: 'call' }>;
@@ -31,10 +35,14 @@ export interface InlineCallSite {
   /** The statement/control that prints the call as an operand. */
   readonly anchor: string;
 }
+export type InlineStore = Extract<Instruction, { kind: 'store' }>;
 export interface InliningPlan {
   readonly sites: Map<string, InlineSite>;
   /** Keyed by the call's result value id. */
   readonly calls: Map<string, InlineCallSite>;
+  /** Stores to private locals printed right after the statement `id` instead of
+   * at their own position (only for `sunk` load sites). */
+  readonly deferred: Map<string, InlineStore[]>;
 }
 
 /** Conversions whose result depends on the dynamic FP environment (rounding,
@@ -103,6 +111,8 @@ export function planSourceInlining(
     {
       count: number;
       first: Use;
+      /** Every recorded use in program order (bounded by the traversal work cap). */
+      all: Use[];
       anchors: Map<string, { original: number; alternative: number }>;
     }
   >();
@@ -140,10 +150,12 @@ export function planSourceInlining(
       else count.original++;
       previous.count += Math.max(count.original, count.alternative) - before;
       previous.anchors.set(at.anchor, count);
+      previous.all.push(at);
     } else
       uses.set(value.id, {
         count: 1,
         first: at,
+        all: [at],
         anchors: new Map([
           [at.anchor, { original: at.alternative ? 0 : 1, alternative: at.alternative ? 1 : 0 }],
         ]),
@@ -238,7 +250,7 @@ export function planSourceInlining(
     for (const transfer of transfers)
       for (const copy of program.transfers.get(transfer) ?? [])
         use(copy.source, { ...at, transfer: true, conditional: control.kind !== 'jump' });
-    if (!complete) return { sites: new Map(), calls: new Map() };
+    if (!complete) return { sites: new Map(), calls: new Map(), deferred: new Map() };
   }
   const result = new Map<string, InlineSite>();
   const scalar = (value: Value): boolean =>
@@ -423,14 +435,128 @@ export function planSourceInlining(
     }
     if (ordered) result.set(node.result.id, { node, anchor: at.anchor });
   }
+  // The idiom `t = L; L = f(t); ...; reader(t)` (post-increment) and its
+  // reversed order: a load of a private local read by exactly the next write to
+  // that local (a pure function of the loaded value alone) and one other
+  // statement of the same block. Both read the local itself: before the write,
+  // or, when the other reader follows the write, with the write printed right
+  // after that reader. Nothing between touches the local, the write has no
+  // effect beyond the private local, and no variable read moves.
+  const deferred = new Map<string, InlineStore[]>();
+  const stored = new Set<string>(),
+    readers = new Set<string>(),
+    anchorOverride = new Map<string, string>();
+  if (program.source)
+    for (const { block, position, node } of candidates) {
+      context.checkpoint(1);
+      const local = program.source.locals.get(node.id)?.id,
+        row = uses.get(node.result.id);
+      if (
+        node.kind !== 'load' ||
+        !local ||
+        !row ||
+        row.count < 2 ||
+        node.access.volatile ||
+        node.result.type.kind !== 'integer' ||
+        ![8, 16, 32, 64].includes(node.result.type.bits) ||
+        preserve(node.result) ||
+        program.inline.has(node.result.id) ||
+        result.has(node.result.id)
+      )
+        continue;
+      const finals = new Map<string, Use>();
+      let usable = true;
+      for (const use of row.all) {
+        const target = resolve(use);
+        if (
+          !target ||
+          target.at.block !== block.id ||
+          target.at.position <= position ||
+          target.at.position >= block.statements.length ||
+          target.at.conditional ||
+          target.at.transfer ||
+          target.at.alternative ||
+          block.statements[target.at.position]!.id !== target.at.anchor
+        ) {
+          usable = false;
+          break;
+        }
+        finals.set(target.at.anchor, target.at);
+      }
+      if (!usable || finals.size !== 2) continue;
+      const touches = (between: Instruction): boolean =>
+        (between.kind === 'load' || between.kind === 'store') &&
+        program.source!.locals.get(between.id)?.id === local;
+      const ordered = [...finals.values()].sort((a, b) => a.position - b.position);
+      /** Pure integer function of this load alone. */
+      const pure = (value: Value, depth = 0): boolean => {
+        if (value.id === node.result.id) return true;
+        const expression = program.expressions.get(value.id);
+        if (!expression || depth > 16) return false;
+        if (expression.kind === 'constant') return true;
+        const site = result.get(value.id);
+        return (
+          (program.inline.has(value.id) || site?.node.kind === 'assign') &&
+          !environmental(expression) &&
+          expressionOperands(expression).every((operand) => pure(operand, depth + 1))
+        );
+      };
+      const writer = ordered.find((at) => {
+        const statement = block.statements[at.position]!;
+        return (
+          statement.kind === 'store' &&
+          program.retained.has(statement.id) &&
+          !statement.access.volatile &&
+          touches(statement) &&
+          pure(statement.value) &&
+          (program.physical_inputs.get(statement.id) ?? statement.register_inputs).length === 0
+        );
+      });
+      if (!writer) continue;
+      const store = block.statements[writer.position]!;
+      if (store.kind !== 'store') continue;
+      const other = ordered.find((at) => at !== writer)!;
+      const reader = block.statements[other.position]!;
+      const last = Math.max(writer.position, other.position);
+      let clear = !touches(reader);
+      for (let p = position + 1; clear && p <= last; p++) {
+        const between = block.statements[p]!;
+        if (
+          (p !== writer.position && touches(between)) ||
+          program.source.definitions
+            ?.get(between.id)
+            ?.some((definition) => !result.has(definition.result.id))
+        )
+          clear = false;
+      }
+      if (!clear) continue;
+      const sunk = other.position > writer.position;
+      if (sunk) {
+        if (
+          !program.retained.has(reader.id) ||
+          stored.has(reader.id) ||
+          readers.has(store.id) ||
+          !(
+            reader.kind === 'store' ||
+            ((reader.kind === 'assign' || reader.kind === 'load') && !result.has(reader.result.id))
+          )
+        )
+          continue;
+        stored.add(store.id);
+        readers.add(reader.id);
+        deferred.set(reader.id, [...(deferred.get(reader.id) ?? []), store]);
+      }
+      result.set(node.result.id, { node, anchor: other.anchor, local: sunk ? 'sunk' : 'shared' });
+      anchorOverride.set(node.result.id, other.anchor);
+    }
   // Pure definitions were selected before loads, independent of block layout.
   // Resolve all mapping anchors to the final consuming statement/control.
   for (const [id, site] of result) {
     const target = destination(site.node);
-    if (!target) return { sites: new Map(), calls: new Map() };
+    if (!target) return { sites: new Map(), calls: new Map(), deferred: new Map() };
     result.set(id, {
       ...site,
-      anchor: target.at.anchor,
+      anchor: anchorOverride.get(id) ?? target.at.anchor,
       ...(shared.has(id) ? { propagated: true } : {}),
     });
   }
@@ -551,5 +677,5 @@ export function planSourceInlining(
         calls.set(value.id, { node, result: value, anchor: at.anchor });
     }
   }
-  return { sites: result, calls };
+  return { sites: result, calls, deferred };
 }

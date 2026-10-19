@@ -53,8 +53,13 @@ export class SourceStructs {
     this.scalars.set(id, null);
     const record = this.records.get(id),
       type = record?.definition;
-    if (record?.source !== 'analysis' || type?.kind !== 'structure' || type.fields.length !== 1)
+    if (record?.source !== 'analysis' || type?.kind !== 'structure' || type.fields.length === 0)
       return null;
+    if (type.fields.length !== 1) {
+      const element = this.scalarArray(id, type.fields, type.size);
+      if (element) this.scalars.set(id, element);
+      return element;
+    }
     const field = type.fields[0]!;
     let target = field.type_id;
     let scalar = this.records.get(target)?.definition;
@@ -96,6 +101,54 @@ export class SourceStructs {
       return null;
     this.scalars.set(id, target);
     return target;
+  }
+
+  /** A pointee whose observed members are all one integer/float type at
+   * contiguous, element-aligned offsets and that has no size or period evidence
+   * is a plain scalar array (`p[k]`, `p[k + 1]`, ...); anything else (different
+   * widths or kinds, gaps, a proven record stride or size) stays a structure. */
+  private scalarArray(
+    id: string,
+    fields: Extract<SuppliedTypeRecord['definition'], { kind: 'structure' }>['fields'],
+    size: bigint | null,
+  ): string | null {
+    if (size !== null || this.strides.get(id) || fields.length > 64) return null;
+    let element: { id: string; key: string; size: bigint } | undefined;
+    const offsets = new Set<bigint>();
+    for (const field of fields) {
+      this.context.checkpoint(1);
+      let target = field.type_id;
+      let scalar = this.records.get(target)?.definition;
+      if (scalar?.kind === 'array') {
+        if (scalar.count !== null) return null;
+        target = scalar.element;
+        scalar = this.records.get(target)?.definition;
+      }
+      if (
+        (scalar?.kind !== 'integer' && scalar?.kind !== 'float') ||
+        scalar.bits > 64 ||
+        this.records.get(target)?.source !== 'analysis'
+      )
+        return null;
+      const storage = this.storage(target);
+      if (!storage || field.offset < 0n || field.offset % storage.size !== 0n) return null;
+      const key = this.key(target);
+      element ??= { id: target, key, size: storage.size };
+      if (key !== element.key) return null;
+      offsets.add(field.offset);
+    }
+    if (!element || offsets.size < 2) return null;
+    const sorted = [...offsets].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    for (let index = 1; index < sorted.length; index++)
+      if (sorted[index]! - sorted[index - 1]! !== element.size) return null;
+    return this.validation.presentation(
+      'scalar_array_pointee',
+      this.subject,
+      'analysis-only members of one scalar type at contiguous element-aligned offsets with no size or record-stride evidence; subscripts address the same bytes, no object extent inferred',
+      [id],
+    )
+      ? element.id
+      : null;
   }
 
   private key(id: string, active = new Map<string, number>()): string {

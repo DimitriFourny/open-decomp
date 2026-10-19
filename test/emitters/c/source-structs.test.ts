@@ -8,14 +8,22 @@ import {
 } from '../../../src/core/index.js';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
-import { recoverTypes, type SuppliedTypeRecord } from '../../../src/analysis/types/index.js';
+import {
+  recoverTypes,
+  type MemoryShape,
+  type SuppliedTypeRecord,
+} from '../../../src/analysis/types/index.js';
 import { LocalValidationSession } from '../../../src/reconstruction/local-validation.js';
 import { SourceStructs } from '../../../src/emitters/source-structs.js';
 import { integer, type SSAForm } from '../../../src/ir/index.js';
 import { builder, image, register, slice } from '../../ir/support.js';
 import { emit, execute } from './support.js';
 
-function planner(definitions: Record<string, RecoveredType>, exhausted = false) {
+function planner(
+  definitions: Record<string, RecoveredType>,
+  exhausted = false,
+  shapes: readonly MemoryShape[] = [],
+) {
   const context = createOperationContext();
   const records = new Map<string, SuppliedTypeRecord>(
     Object.entries(definitions).map(([id, definition]) => [
@@ -27,7 +35,7 @@ function planner(definitions: Record<string, RecoveredType>, exhausted = false) 
   if (exhausted)
     for (let index = 0; index < 256; index++)
       validation.presentation('fixture', String(index), `capacity ${index}`);
-  return new SourceStructs(records, validation, 'function', context);
+  return new SourceStructs(records, validation, 'function', context, shapes);
 }
 const word: RecoveredType = { kind: 'integer', bits: 32, signed: false };
 function shape(fields: readonly [bigint, string][]): RecoveredType {
@@ -87,6 +95,155 @@ test('single scalar, floating, pointer and proven-stride array pointees collapse
   ])
     assert.equal(structs.scalar(id!), type);
   assert.equal(structs.scalar('offsetShape'), null);
+});
+
+test('contiguous same-type members collapse to a scalar array pointee; struct evidence keeps the structure', () => {
+  const byte: RecoveredType = { kind: 'integer', bits: 8, signed: false },
+    sbyte: RecoveredType = { kind: 'integer', bits: 8, signed: true };
+  const definitions: Record<string, RecoveredType> = {
+    word,
+    sameWord: word,
+    byte,
+    sbyte,
+    floating: { kind: 'float', bits: 32 },
+    pointer: { kind: 'pointer', bits: 64, to: 'word' },
+    array: { kind: 'array', element: 'word', count: null },
+    fixed: { kind: 'array', element: 'word', count: 4n },
+    unrolled: shape([
+      [0n, 'word'],
+      [4n, 'sameWord'],
+      [8n, 'word'],
+      [12n, 'word'],
+    ]),
+    shifted: shape([
+      [4n, 'word'],
+      [8n, 'word'],
+    ]),
+    bytes: shape([
+      [0n, 'byte'],
+      [1n, 'byte'],
+      [2n, 'byte'],
+    ]),
+    floats: shape([
+      [0n, 'floating'],
+      [4n, 'floating'],
+    ]),
+    indexed: shape([
+      [0n, 'word'],
+      [4n, 'array'],
+    ]),
+    mixedWidth: shape([
+      [0n, 'byte'],
+      [1n, 'word'],
+    ]),
+    mixedKind: shape([
+      [0n, 'word'],
+      [4n, 'floating'],
+    ]),
+    mixedSign: shape([
+      [0n, 'byte'],
+      [1n, 'sbyte'],
+    ]),
+    gap: shape([
+      [0n, 'word'],
+      [8n, 'word'],
+    ]),
+    misaligned: shape([
+      [0n, 'word'],
+      [2n, 'word'],
+    ]),
+    pointers: shape([
+      [0n, 'pointer'],
+      [8n, 'pointer'],
+    ]),
+    counted: shape([
+      [0n, 'word'],
+      [4n, 'fixed'],
+    ]),
+    sized: { ...(shape([[0n, 'word']]) as object), size: 8n } as RecoveredType,
+    sizedPair: {
+      ...(shape([
+        [0n, 'word'],
+        [4n, 'word'],
+      ]) as object),
+      size: 16n,
+    } as RecoveredType,
+  };
+  const structs = planner(definitions);
+  for (const [id, type] of [
+    ['unrolled', 'word'],
+    ['shifted', 'word'],
+    ['bytes', 'byte'],
+    ['floats', 'floating'],
+    ['indexed', 'word'],
+  ])
+    assert.equal(structs.scalar(id!), type, id);
+  for (const id of [
+    'mixedWidth',
+    'mixedKind',
+    'mixedSign',
+    'gap',
+    'misaligned',
+    'pointers',
+    'counted',
+    'sized',
+    'sizedPair',
+  ])
+    assert.equal(structs.scalar(id), null, id);
+  assert.equal(structs.layout('unrolled'), null);
+  assert.ok(structs.layout('mixedWidth'));
+  assert.ok(structs.layout('gap'));
+  assert.equal(structs.name('mixedWidth'), 'struct_1');
+
+  // A proven record period is struct evidence.
+  const periodic = planner(
+    {
+      word,
+      pair: shape([
+        [0n, 'word'],
+        [4n, 'word'],
+      ]),
+    },
+    false,
+    [
+      {
+        id: 'shape',
+        type_id: 'pair',
+        base: { kind: 'value', value_id: 'base' },
+        base_offset: 0n,
+        observed_extent: null,
+        fields: [0n, 4n].map((offset, index) => ({
+          id: `observed-${index}`,
+          offset,
+          width_bits: 32,
+          node_ids: [],
+          value_ids: [],
+          evidence_ids: [],
+          access: ['read' as const],
+          stack_region: null,
+          stride: 16n,
+        })),
+        alias: 'possible',
+        escape: 'unknown',
+        dynamic: true,
+        evidence_ids: [],
+      },
+    ],
+  );
+  assert.equal(periodic.scalar('pair'), null);
+  assert.ok(periodic.layout('pair'));
+});
+
+test('scalar-array collapse records its presentation rule and refuses when capacity is exhausted', () => {
+  const records = {
+    word,
+    pair: shape([
+      [0n, 'word'],
+      [4n, 'word'],
+    ]),
+  };
+  assert.equal(planner(records).scalar('pair'), 'word');
+  assert.equal(planner(records, true).scalar('pair'), null);
 });
 
 test('array members retain proven strides and unknown counts; ambiguous overlap stays explicit', () => {
@@ -218,6 +375,99 @@ for (const indexed of [false, true, 'shared', 'array'] as const)
     assert.deepEqual(observed.events, ['load', 'load']);
     memory.delete([...memory.keys()].at(-1)!);
     assert.equal(execute(output.emission, inputs, memory).exit, 'fault');
+  });
+
+test('a bodyless structure typedef appears once, before the text that uses it', () => {
+  const b = builder('source-bodyless-struct'),
+    block = b.block('entry');
+  const pointer = block.readRegister(register('rdi', 64, 0, 'replace_root', 'x86_64:rdi'));
+  const first = block.load(
+    integer(32),
+    block.int('add', pointer, block.constant(integer(64), 0x20000n)),
+  );
+  const second = block.cast(
+    'zero_extend',
+    integer(32),
+    block.load(integer(8), block.int('add', pointer, block.constant(integer(64), 0x20004n))),
+  );
+  block.return([block.int('add', first, second)]);
+  const ssa = constructSSA(b.finish(block, [integer(32)])).value as SSAForm;
+  const types = recoverTypes(ssa, sysvAMD64Abi, createOperationContext(), {
+    slice_id: slice,
+    image_id: image,
+    revision: 1,
+  });
+  const text = emit(ssa, { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } })
+    .emission.text;
+  assert.equal(text.match(/^typedef struct struct_1 struct_1;$/gm)?.length, 1);
+  assert.doesNotMatch(text, /^struct struct_1 \{/m);
+  assert.ok(text.indexOf('typedef struct struct_1') < text.indexOf('struct_1* '));
+  const compiled = spawnSync(
+    'clang',
+    ['-x', 'c', '-fsyntax-only', '-std=c11', '-include', 'stdint.h', '-include', 'stddef.h', '-'],
+    { input: text, encoding: 'utf8' },
+  );
+  assert.equal(compiled.status, 0, compiled.stderr);
+});
+
+for (const mixed of [false, true])
+  test(`unrolled ${mixed ? 'mixed-width' : 'same-width'} accesses print ${mixed ? 'a structure' : 'a scalar array with subscripts'}`, () => {
+    const b = builder('source-unrolled-array'),
+      block = b.block('entry');
+    const pointer = block.readRegister(register('rdi', 64, 0, 'replace_root', 'x86_64:rdi'));
+    const first = block.load(integer(32), pointer);
+    const second = block.load(
+      integer(32),
+      block.int('add', pointer, block.constant(integer(64), 4n)),
+    );
+    const thirdAddress = block.int('add', pointer, block.constant(integer(64), 8n));
+    const third = mixed
+      ? block.cast('zero_extend', integer(32), block.load(integer(8), thirdAddress))
+      : block.load(integer(32), thirdAddress);
+    block.return([block.int('add', block.int('add', first, second), third)]);
+    const ssa = constructSSA(b.finish(block, [integer(32)])).value as SSAForm;
+    const types = recoverTypes(ssa, sysvAMD64Abi, createOperationContext(), {
+      slice_id: slice,
+      image_id: image,
+      revision: 1,
+    });
+    const output = emit(ssa, { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } });
+    const text = output.emission.text;
+    if (mixed) {
+      assert.match(text, /observed members only; size unknown/);
+      assert.match(text, /->f_8/);
+    } else {
+      assert.doesNotMatch(text, /struct_\d+|->f_/);
+      assert.match(text, /uint32_t\* \w+\)/);
+      assert.match(text, /\[1\]/);
+      assert.match(text, /\[2\]/);
+    }
+    const compiled = spawnSync(
+      'clang',
+      ['-x', 'c', '-fsyntax-only', '-std=c11', '-include', 'stdint.h', '-include', 'stddef.h', '-'],
+      { input: text, encoding: 'utf8' },
+    );
+    assert.equal(compiled.status, 0, compiled.stderr);
+    if (!mixed) {
+      const id = ssa.register_states
+        .find((state) => state.block === ssa.entry)!
+        .entry.find((binding) => binding.register.root === 'x86_64:rdi')!.value.id;
+      const mapping = expandEmission(output.emission).mappings.find((item) =>
+        item.semantic_ids.includes(id),
+      )!;
+      const memory = new Map<bigint, number>();
+      for (const [offset, value] of [
+        [0n, 1],
+        [4n, 2],
+        [8n, 3],
+      ] as const)
+        for (let byte = 0; byte < 4; byte++)
+          memory.set(0x1000n + offset + BigInt(byte), byte === 0 ? value : 0);
+      const inputs = new Map(mapping.semantic_ids.map((subject) => [subject, 0x1000n]));
+      const observed = execute(output.emission, inputs, memory);
+      assert.deepEqual(observed.values, [6n]);
+      assert.deepEqual(observed.events, ['load', 'load', 'load']);
+    }
   });
 
 test('unknown pointer targets receive valid opaque declarations without an invented layout', () => {

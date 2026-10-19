@@ -11,11 +11,12 @@ import { darwinArm64Abi } from '../../src/abi/darwin-arm64/index.js';
 import { sysvAMD64Abi } from '../../src/abi/sysv-amd64/index.js';
 import { windowsX64Abi } from '../../src/abi/windows-x64/index.js';
 import { constructSSA } from '../../src/analysis/ssa/index.js';
+import { recoverTypes } from '../../src/analysis/types/index.js';
 import { integer, type SSAForm } from '../../src/ir/index.js';
 import { structureControlFlow } from '../../src/presentation/index.js';
 import { reconstruct } from '../../src/reconstruction/index.js';
 import type { SourceEvidence } from '../../src/reconstruction/source-model.js';
-import { builder } from '../ir/support.js';
+import { builder, image, slice } from '../ir/support.js';
 import { emit, emittedFormals, execute } from '../emitters/c/support.js';
 
 const u64 = integer(64),
@@ -313,3 +314,355 @@ for (const abi of [sysvAMD64Abi, darwinArm64Abi])
         assert.equal(BigInt.asUintN(32, observed.values[0]!), 2n);
       }
     });
+
+/** `void zero(uint64_t *a, uint64_t n) { for (i = 0; i < n; i++) a[i] = 0; }`
+ * with the stale loop index left in the integer result register (`index`), or
+ * `uint64_t zero_count(...)` whose result register holds a counter that only
+ * the exit consumes while a scratch register indexes the array (`count`). */
+function zeroFill(
+  abi: AbiProfile,
+  mode: 'index' | 'count',
+  evidence: Partial<SourceEvidence> = {},
+) {
+  const layout = abi.classifyCall({
+    returns: word,
+    parameters: [{ kind: 'pointer' }, word],
+    variadic: false,
+    fixed_parameter_count: 2,
+  });
+  const pointer = register(layout.parameters[0]!.locations[0]),
+    count = register(layout.parameters[1]!.locations[0]),
+    result = register(layout.returns[0]);
+  const scratch = abi.unknown_call_clobbers.registers.find(
+    (item) =>
+      item.root === (abi.id === 'darwin-arm64' ? 'arm64:x9' : 'x86_64:r10') &&
+      item.width_bits === 64,
+  )!;
+  const index = mode === 'index' ? result : scratch;
+  const b = builder(`zero-fill-${abi.id}-${mode}`),
+    entry = b.block('entry'),
+    body = b.block('body'),
+    done = b.block('done');
+  const base = entry.readRegister(pointer),
+    n = entry.readRegister(count);
+  entry.writeRegister(index, entry.constant(u64, 0n));
+  if (mode === 'count') entry.writeRegister(result, entry.constant(u64, 0n));
+  entry.branch(entry.compare('eq', n, entry.constant(u64, 0n)), entry.edge(done), entry.edge(body));
+  const i = body.readRegister(index);
+  body.store(
+    body.int('add', base, body.int('shl', i, body.constant(u64, 3n))),
+    body.constant(u64, 0n),
+  );
+  if (mode === 'count')
+    body.writeRegister(result, body.int('add', body.readRegister(result), body.constant(u64, 1n)));
+  const next = body.int('add', i, body.constant(u64, 1n));
+  body.writeRegister(index, next);
+  body.branch(body.compare('ult', next, n), body.edge(body), body.edge(done));
+  done.return([]);
+  const ir = constructSSA(b.finish(entry, [])).value as SSAForm;
+  const source: SourceEvidence = { abi, callees: [], addresses: [], ...evidence };
+  const view = (kind: 'source' | 'checked') =>
+    reconstruct(
+      { function: structureControlFlow(ir, createOperationContext()).value!, source },
+      createOperationContext(),
+      kind,
+    );
+  return { ir, source, view, result };
+}
+
+/** Emits the fixture, zero-fills three elements and returns text and results. */
+const runZeroFill = (
+  fixture: { ir: SSAForm; source: SourceEvidence },
+  language: 'c-like' | 'python-like',
+) => {
+  const { emission } = emit(fixture.ir, { source: fixture.source }, language);
+  const formals = emittedFormals(emission);
+  assert.equal(formals.length, 2);
+  const memory = new Map<bigint, number>();
+  for (let byte = 0n; byte < 32n; byte++) memory.set(0x2000n + byte, 0xff);
+  const observed = execute(
+    emission,
+    new Map([
+      [formals[0]!.statement_id, 0x2000n],
+      [formals[1]!.statement_id, 3n],
+    ]),
+    memory,
+  );
+  for (let byte = 0n; byte < 32n; byte++)
+    assert.equal(observed.memory.get(0x2000n + byte), byte < 24n ? 0 : 0xff);
+  return { text: emission.text, values: observed.values };
+};
+
+for (const abi of [sysvAMD64Abi, windowsX64Abi, darwinArm64Abi])
+  test(`${abi.id} a stale loop index in the integer result register is void-like`, () => {
+    const fixture = zeroFill(abi, 'index');
+    const source = fixture.view('source');
+    for (const projection of source.returns.values()) {
+      assert.equal(projection.results.length, 0);
+      assert.equal(projection.outputs.length, 0);
+      assert.ok(
+        projection.exit_scratch?.some((slice) => slice.register.root === fixture.result.root),
+      );
+    }
+    assert.ok(
+      source.local_validation?.some(
+        (record) =>
+          record.rule === 'incidental_result' &&
+          record.reason?.includes('a value that also addresses memory or feeds calls or branches'),
+      ),
+    );
+    assert.ok(
+      source.local_validation_session?.abiConformance.some(
+        (site) => site.rule === 'incidental_result',
+      ),
+    );
+    // The checked view keeps the exact physical exit state.
+    for (const projection of fixture.view('checked').returns.values())
+      assert.equal(projection.exit_scratch, undefined);
+    for (const language of ['c-like', 'python-like'] as const) {
+      const { text, values } = runZeroFill(fixture, language);
+      assert.match(text, language === 'c-like' ? /^void fn_/m : /-> void:/);
+      assert.doesNotMatch(text, /physical_return|\breturn [^;\n]/);
+      assert.deepEqual(values, []);
+    }
+  });
+
+test('caller demand keeps a stale-looking integer result register', () => {
+  const plain = zeroFill(sysvAMD64Abi, 'index');
+  const demanded = zeroFill(sysvAMD64Abi, 'index', { function_return_demands: [plain.result] });
+  const source = demanded.view('source');
+  for (const projection of source.returns.values()) {
+    assert.equal(projection.results.length, 1);
+    assert.equal(projection.results[0]!.type.kind, 'integer');
+  }
+  assert.ok(!source.local_validation?.some((record) => record.rule === 'incidental_result'));
+  const { text, values } = runZeroFill(demanded, 'c-like');
+  assert.match(text, /^uint64_t fn_/m);
+  assert.deepEqual(values, [3n]);
+});
+
+for (const abi of [sysvAMD64Abi, darwinArm64Abi])
+  test(`${abi.id} a counter consumed only by the exit stays the result`, () => {
+    const fixture = zeroFill(abi, 'count');
+    const source = fixture.view('source');
+    for (const projection of source.returns.values()) {
+      assert.equal(projection.results.length, 1);
+      assert.equal(projection.results[0]!.type.kind, 'integer');
+    }
+    assert.ok(!source.local_validation?.some((record) => record.rule === 'incidental_result'));
+    for (const language of ['c-like', 'python-like'] as const) {
+      const { text, values } = runZeroFill(fixture, language);
+      assert.doesNotMatch(text, /physical_return|^void fn_|-> void:/m);
+      assert.deepEqual(values, [3n]);
+    }
+  });
+
+/** Darwin `x = f(p); [*p = 0;] return x;` with `f` returning in x0: the call is
+ * the final action, or a store follows it (`void g(p) { f(p); *p = 0; }`). */
+function callResult(trailingStore: boolean) {
+  const abi = darwinArm64Abi;
+  const x0 = register(
+    abi.classifyCall({
+      returns: word,
+      parameters: [word],
+      variadic: false,
+      fixed_parameter_count: 1,
+    }).returns[0],
+  );
+  const x19 = abi.preserved.find((item) => item.root === 'arm64:x19' && item.width_bits === 64)!;
+  const b = builder(`call-result-${trailingStore}`),
+    block = b.block('entry');
+  block.writeRegister(x19, block.readRegister(x0));
+  block.call(
+    { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+    [],
+    [],
+    abi.unknown_call_clobbers,
+  );
+  if (trailingStore) block.store(block.readRegister(x19), block.constant(u64, 0n));
+  block.return([]);
+  const ir = constructSSA(b.finish(block, [])).value as SSAForm;
+  const call = ir.blocks[0]!.instructions.find((node) => node.kind === 'call')!;
+  const source: SourceEvidence = {
+    abi,
+    addresses: [],
+    callees: [
+      {
+        call_id: call.id,
+        parameters: [x0],
+        returns: [x0],
+        argument_list_complete: true,
+        evidence_ids: [],
+      },
+    ],
+  };
+  const types = recoverTypes(ir, abi, createOperationContext(), {
+    image_id: image,
+    slice_id: slice,
+    revision: 0,
+  });
+  const program = reconstruct(
+    { function: structureControlFlow(ir, createOperationContext()).value!, types, source },
+    createOperationContext(),
+    'source',
+  );
+  return { ir, source, types, program, x0 };
+}
+
+test('a callee result passed through as the final action stays the result', () => {
+  const fixture = callResult(false);
+  for (const projection of fixture.program.returns.values()) {
+    assert.equal(projection.results.length, 1);
+    assert.equal(projection.results[0]!.type.kind, 'integer');
+  }
+  assert.ok(
+    !fixture.program.local_validation?.some((record) => record.rule === 'incidental_result'),
+  );
+});
+
+test('a callee result left in place before a later store is void-like', () => {
+  const fixture = callResult(true);
+  for (const projection of fixture.program.returns.values()) {
+    assert.equal(projection.results.length, 0);
+    assert.ok(projection.exit_scratch?.some((slice) => slice.register.root === fixture.x0.root));
+  }
+  assert.ok(
+    fixture.program.local_validation?.some(
+      (record) =>
+        record.rule === 'incidental_result' &&
+        record.reason?.includes('a call result left in place before later effects'),
+    ),
+  );
+  const { emission } = emit(fixture.ir, { types: fixture.types, source: fixture.source }, 'c-like');
+  assert.match(emission.text, /^void fn_/m);
+  assert.doesNotMatch(emission.text, /physical_return/);
+});
+
+/** Darwin `struct big f(const struct big *in)`: x8 carries the caller's
+ * indirect result location; a 128-bit copy also leaves bits in v0. With
+ * `store: false` x8 is only read into the integer result register. */
+function indirectResult(store: boolean) {
+  const abi = darwinArm64Abi;
+  const x = (n: number) =>
+    abi.unknown_call_clobbers.registers.find(
+      (item) => item.root === `arm64:x${n}` && item.width_bits === 64,
+    )!;
+  const fp = register(
+    abi.classifyCall({ returns: f64, parameters: [], variadic: false, fixed_parameter_count: 0 })
+      .returns[0],
+  );
+  const v0: RegisterDescriptor = { ...fp, id: `${fp.root}:0:64`, width_bits: 64 };
+  const b = builder(`indirect-result-${store}`),
+    block = b.block('entry');
+  const input = block.readRegister(x(0)),
+    output = block.readRegister(x(8));
+  const low = block.load(u64, input);
+  if (store) {
+    block.store(output, low);
+    block.store(
+      block.int('add', output, block.constant(u64, 8n)),
+      block.load(u64, block.int('add', input, block.constant(u64, 8n))),
+    );
+    block.writeRegister(v0, low);
+  } else block.writeRegister(x(0), block.int('add', output, low));
+  block.return([]);
+  const ir = constructSSA(b.finish(block, [])).value as SSAForm;
+  const source: SourceEvidence = { abi, callees: [], addresses: [] };
+  const view = (kind: 'source' | 'checked') =>
+    reconstruct(
+      { function: structureControlFlow(ir, createOperationContext()).value!, source },
+      createOperationContext(),
+      kind,
+    );
+  return { ir, source, view, v0 };
+}
+
+test('darwin-arm64 a stored-through x8 entry value is the indirect result formal', () => {
+  const fixture = indirectResult(true);
+  const source = fixture.view('source');
+  assert.ok(
+    source.parameters.some(
+      (value) => source.parameter_registers.get(value.id)?.root === 'arm64:x8',
+    ),
+  );
+  for (const projection of source.returns.values()) {
+    assert.equal(projection.results.length, 0);
+    assert.equal(projection.outputs.length, 0);
+    assert.ok(projection.exit_scratch?.some((slice) => slice.register.root === fixture.v0.root));
+  }
+  assert.ok(source.local_validation?.some((record) => record.rule === 'indirect_result'));
+  assert.ok(
+    source.local_validation_session?.abiConformance.some((site) => site.rule === 'indirect_result'),
+  );
+  // The checked view keeps x8 an entry value, not a formal.
+  const checked = fixture.view('checked');
+  assert.ok(
+    !checked.parameters.some(
+      (value) => checked.parameter_registers.get(value.id)?.root === 'arm64:x8',
+    ),
+  );
+  for (const language of ['c-like', 'python-like'] as const) {
+    const { emission } = emit(fixture.ir, { source: fixture.source }, language);
+    assert.match(emission.text, language === 'c-like' ? /^void fn_/m : /-> void:/);
+    assert.doesNotMatch(emission.text, /physical_return|unknown_value|non-argument entry register/);
+    assert.equal(emittedFormals(emission).length, 2);
+  }
+});
+
+test('an x8 entry value that addresses no store stays an unknown entry value', () => {
+  const source = indirectResult(false).view('source');
+  assert.ok(
+    !source.parameters.some(
+      (value) => source.parameter_registers.get(value.id)?.root === 'arm64:x8',
+    ),
+  );
+  assert.ok(!source.local_validation?.some((record) => record.rule === 'indirect_result'));
+});
+
+// `u64 fixture_memory(u64 *p, u64 d) { *p += d; return *p; }`: the sum is both
+// stored and returned; storing a value is no evidence that it is incidental.
+for (const abi of [sysvAMD64Abi, darwinArm64Abi])
+  test(`${abi.id} a value both stored and returned stays the result`, () => {
+    const layout = abi.classifyCall({
+      returns: word,
+      parameters: [{ kind: 'pointer' }, word],
+      variadic: false,
+      fixed_parameter_count: 2,
+    });
+    const pointer = register(layout.parameters[0]!.locations[0]),
+      delta = register(layout.parameters[1]!.locations[0]),
+      result = register(layout.returns[0]);
+    const b = builder(`stored-result-${abi.id}`),
+      block = b.block('entry');
+    const address = block.readRegister(pointer);
+    const sum = block.int('add', block.load(u64, address), block.readRegister(delta));
+    block.writeRegister(result, sum);
+    block.store(address, sum);
+    block.return([]);
+    const ir = constructSSA(b.finish(block, [])).value as SSAForm;
+    const source: SourceEvidence = { abi, callees: [], addresses: [] };
+    const program = reconstruct(
+      { function: structureControlFlow(ir, createOperationContext()).value!, source },
+      createOperationContext(),
+      'source',
+    );
+    for (const projection of program.returns.values()) {
+      assert.equal(projection.results.length, 1);
+      assert.equal(projection.results[0]!.type.kind, 'integer');
+    }
+    assert.ok(!program.local_validation?.some((record) => record.rule === 'incidental_result'));
+    const { emission } = emit(ir, { source }, 'c-like');
+    const formals = emittedFormals(emission);
+    const memory = new Map<bigint, number>();
+    for (let byte = 0n; byte < 8n; byte++) memory.set(0x2000n + byte, byte === 0n ? 7 : 0);
+    const observed = execute(
+      emission,
+      new Map([
+        [formals[0]!.statement_id, 0x2000n],
+        [formals[1]!.statement_id, 11n],
+      ]),
+      memory,
+    );
+    assert.deepEqual(observed.values, [18n]);
+    assert.equal(observed.memory.get(0x2000n), 18);
+  });

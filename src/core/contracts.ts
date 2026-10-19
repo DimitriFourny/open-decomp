@@ -91,6 +91,33 @@ export interface Decoder extends ComponentIdentity {
   };
   dispose(): void;
 }
+/** A proven multi-way transfer: one indirect branch whose complete target set is
+ * established from immutable table bytes and a dominating unsigned bound guard. */
+export interface ResolvedJumpTable {
+  /** The indirect branch instruction. */
+  readonly branch: string;
+  /** The value of `register` (zero-extended to 64 bits) before `instruction`
+   * executes is the table index; that instruction and `branch` share one block. */
+  readonly selector: { readonly instruction: string; readonly register: RegisterDescriptor };
+  /** Exact entry bytes: entry i is read at `table.start + i * stride`. */
+  readonly table: AddressRange;
+  readonly entry: {
+    readonly bytes: 1 | 2 | 4 | 8;
+    readonly signed: boolean;
+    readonly stride: number;
+  };
+  /** targets[i] is the destination for index i; the index never exceeds targets.length - 1. */
+  readonly targets: readonly Address[];
+  /** Conditional branch whose out-of-range edge (`otherwise`) bounds the index. */
+  readonly guard: string;
+  readonly otherwise: Address;
+  /** The guard compares this very index: its `otherwise` edge is taken exactly
+   * when the index exceeds targets.length - 1. */
+  readonly guard_exact: boolean;
+  /** Straight-line single-entry instructions from the evaluation start to `branch`. */
+  readonly chain: readonly string[];
+  readonly evidence_ids: readonly string[];
+}
 /** Discovery owns block boundaries. Calls are reference edges, not intraprocedural successors. */
 export interface FunctionGraph {
   readonly function: FunctionRecord;
@@ -103,6 +130,8 @@ export interface FunctionGraph {
   /** Query-local decode proofs, published with the result rather than mutating
    * the historical image-wide discovery index. Absent for legacy/native graphs. */
   readonly evidence?: readonly Evidence[];
+  /** Indirect branches whose CFG successors are exactly a proven table's targets. */
+  readonly jump_tables?: readonly ResolvedJumpTable[];
 }
 /** The semantic IR module supplies RegisterIR. Core does not define semantic operations or strings masquerading as IR. */
 export interface Lifter<RegisterIR> extends ComponentIdentity {

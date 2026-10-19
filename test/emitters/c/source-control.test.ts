@@ -778,6 +778,8 @@ for (const language of ['c-like', 'python-like'] as const)
         add = b.block('add'),
         step = b.block('step'),
         done = b.block('done', [i32]),
+        // Separate returns keep every loop exit single: no exit is shared.
+        finished = b.block('finished', [i32]),
         overflow = b.block('overflow'),
         zero = b.block('zero');
       const [count, stop] = entry.parameters as [Value, Value];
@@ -803,10 +805,11 @@ for (const language of ['c-like', 'python-like'] as const)
           next,
           step.int('add', pointer, step.constant(i64, 4n)),
         ]),
-        step.edge(done, [next]),
+        step.edge(finished, [next]),
       );
       overflow.jump(done, [overflow.int('xor', next, remaining)]);
       done.return(done.parameters);
+      finished.return(finished.parameters);
       const input = b.finish(entry, [i32]),
         source = emit(input, language),
         checked = emit(input, language, 'checked');
@@ -926,6 +929,110 @@ for (const language of ['c-like', 'python-like'] as const)
             assert.equal(observed.events.length, loads! + (effect ? (loads === 4 ? 2 : 1) : 0));
           }
         }
+      }
+    });
+
+    /** `for (i < n) { v = a[i]; if (v == stop) break; sum += v; if (sum > 10) return sum ^ i; } return sum;`
+     * as compiled: the two loop exits and the overflow path all jump to one return. */
+    const multiExit = (name: string, effects = false) => {
+      const b = program(name),
+        entry = b.block('entry', [i32, i32]),
+        loop = b.block('loop', [i64, i64]),
+        body = b.block('body'),
+        step = b.block('step'),
+        over = b.block('over', [i64, i64]);
+      const done = effects
+        ? [b.block('done-a', [i64]), b.block('done-b', [i64])]
+        : [b.block('done', [i64])];
+      const [count, stop] = entry.parameters as [Value, Value];
+      entry.jump(loop, [entry.constant(i64, 0n), entry.constant(i64, 0n)]);
+      const [acc, index] = loop.parameters as [Value, Value];
+      loop.branch(
+        loop.compare('uge', index, loop.cast('zero_extend', i64, count)),
+        loop.edge(done[0]!, [acc]),
+        loop.edge(body),
+      );
+      const element = body.load(
+        i32,
+        body.int(
+          'add',
+          body.constant(i64, 0x1000n),
+          body.int('mul', index, body.constant(i64, 4n)),
+        ),
+      );
+      body.branch(
+        body.compare('eq', element, stop),
+        body.edge(done[effects ? 1 : 0]!, [acc]),
+        body.edge(step),
+      );
+      const sum = step.int('add', acc, step.cast('zero_extend', i64, element));
+      step.branch(
+        step.compare('ugt', sum, step.constant(i64, 10n)),
+        step.edge(over, [sum, index]),
+        step.edge(loop, [sum, step.int('add', index, step.constant(i64, 1n))]),
+      );
+      over.jump(done[0]!, [over.int('xor', over.parameters[0]!, over.parameters[1]!)]);
+      done.forEach((block, at) => {
+        if (effects) block.store(block.constant(i64, 0x1020n), block.constant(i32, BigInt(at + 1)));
+        block.return(block.parameters);
+      });
+      return { input: b.finish(entry, [i64]), count, stop };
+    };
+    const reference = (words: readonly number[], count: number, stop: number): bigint => {
+      let sum = 0n;
+      for (let i = 0; i < count; i++) {
+        const value = BigInt(words[i] ?? 0);
+        if (value === BigInt(stop)) break;
+        sum += value;
+        if (sum > 10n) return sum ^ BigInt(i);
+      }
+      return sum;
+    };
+    const exitInputs: readonly (readonly [number, number, readonly number[]])[] = [
+      [0, 9, []],
+      [3, 9, [1, 2, 3]],
+      [3, 2, [1, 2, 3]],
+      [3, 9, [8, 5, 1]],
+      [3, 9, [1, 10, 3]],
+    ];
+
+    test('loop exits reaching one return share it; the overflow exit moves onto its edge', () => {
+      const { input, count, stop } = multiExit('source-exit-merge');
+      const source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      assert.equal(source.emission.text.match(/\breturn\b/g)?.length, 1, source.emission.text);
+      assert.doesNotMatch(source.emission.text, /\bgoto\b/);
+      assert.ok(rules(source).includes('loop_exit_merge'));
+      assert.ok(!rules(checked).includes('loop_exit_merge'));
+      for (const [n, limit, words] of exitInputs)
+        for (const output of [source, checked]) {
+          const observed = execute(
+            output.emission,
+            new Map([
+              [count.id, BigInt(n)],
+              [stop.id, BigInt(limit)],
+            ]),
+            memory(words),
+          );
+          assert.deepEqual(observed.values, [reference(words, n, limit)], `${n} ${limit}`);
+        }
+    });
+
+    test('loop exits with different effects before their returns keep both returns', () => {
+      const { input, count, stop } = multiExit('source-exit-effects', true);
+      const source = emit(input, language);
+      assert.ok(!rules(source).includes('loop_exit_merge'), source.emission.text);
+      assert.ok((source.emission.text.match(/\breturn\b/g)?.length ?? 0) >= 2);
+      for (const [n, limit, words] of exitInputs) {
+        const observed = execute(
+          source.emission,
+          new Map([
+            [count.id, BigInt(n)],
+            [stop.id, BigInt(limit)],
+          ]),
+          memory(words),
+        );
+        assert.deepEqual(observed.values, [reference(words, n, limit)], `${n} ${limit}`);
       }
     });
   });

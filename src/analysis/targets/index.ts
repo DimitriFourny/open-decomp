@@ -265,6 +265,7 @@ export function recoverTargets(
     if (graph.slice_id !== image.selected_slice_id || graph.function.entry.image_id !== image.id)
       throw new RangeError('Discovery belongs to another image/slice');
     const byId = new Map(graph.instructions.map((instruction) => [instruction.id, instruction]));
+    const proven = new Map(graph.jump_tables?.map((item) => [item.branch, item]));
     for (const block of graph.blocks) {
       const state = new Map<string, Value>();
       const get = (register: RegisterDescriptor): Value | undefined =>
@@ -607,7 +608,23 @@ export function recoverTargets(
           assigned.register.role !== 'zero'
         )
           state.set(assigned.register.root, assigned.value);
-        if (
+        const resolved = proven.get(instruction.id);
+        if (resolved) {
+          const seen = new Set<bigint>();
+          for (const target of resolved.targets)
+            if (!seen.has(target.value)) {
+              seen.add(target.value);
+              record(
+                instruction,
+                owner,
+                'branch',
+                target.value,
+                'established',
+                'Proven jump-table target: bounded index into immutable table entries',
+                resolved.evidence_ids,
+              );
+            }
+        } else if (
           (instruction.flow.kind === 'call' && instruction.flow.indirect) ||
           instruction.flow.kind === 'indirect_branch'
         ) {

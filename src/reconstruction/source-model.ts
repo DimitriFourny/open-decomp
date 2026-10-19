@@ -162,9 +162,19 @@ export interface SourcePresentation {
   /** Load/store node ids proven by `fp_memory_access`: the access reads or
    * writes its `float_values` member through a native float/double lvalue. */
   readonly float_accesses?: ReadonlySet<string>;
+  /** Promoted slot locals (by local id) approved by `fp_slot_type`: declared
+   * float/double, every stored and reloaded value a `float_values` member. */
+  readonly float_locals?: ReadonlyMap<string, 32 | 64>;
   /** Source view only: the primary-result rule rejected the native written-result
    * storage, which then no longer counts as result evidence for exit overlays. */
   readonly observed_result_rejected?: true;
+  /** Source view only: the rule that made the interface void-like.
+   * `incidental_result`: the integer result register is established on no exit
+   * path and the FP carrier is unchanged or undefined on every exit;
+   * `indirect_result`: the function returns through its incoming indirect
+   * result location. Computed primary exit slices are then ABI scratch, kept
+   * in exit metadata. */
+  readonly void_like_result?: 'incidental_result' | 'indirect_result';
   readonly field_subjects?: ReadonlyMap<string, readonly string[]>;
   /** Localized preconditions and residual sites; never a blanket CFG assumption. */
   readonly requirements?: readonly Requirement[];

@@ -38,6 +38,8 @@ export interface CFGInput {
   readonly instructions: readonly DecodedInstruction[];
   readonly function_entries: Pick<ReadonlySet<bigint>, 'has'>;
   readonly evidence: ReadonlyMap<string, readonly string[]>;
+  /** Proven jump-table targets by indirect branch address; they replace its unknown edge. */
+  readonly jump_tables?: ReadonlyMap<bigint, readonly Address[]>;
 }
 
 /** Build maximal basic blocks from reachable instructions, not a sweep of an enclosing range.
@@ -49,11 +51,15 @@ export function buildCFG(input: CFGInput, context: OperationContext): readonly C
   const sorted = [...input.instructions].sort((a, b) =>
     a.address.value < b.address.value ? -1 : a.address.value > b.address.value ? 1 : 0,
   );
+  const tableTargets = (instruction: DecodedInstruction): readonly Address[] | undefined =>
+    instruction.validity === 'valid' && instruction.flow.kind === 'indirect_branch'
+      ? input.jump_tables?.get(instruction.address.value)
+      : undefined;
   const leaders = new Set<bigint>([input.entry.value]);
   const incoming = new Map<bigint, number>();
   for (const instruction of sorted) {
     context.checkpoint(1);
-    for (const successor of instructionSuccessors(instruction)) {
+    for (const successor of tableTargets(instruction) ?? instructionSuccessors(instruction)) {
       incoming.set(successor.value, (incoming.get(successor.value) ?? 0) + 1);
       if (instruction.flow.kind !== 'fallthrough') leaders.add(successor.value);
     }
@@ -124,10 +130,19 @@ export function buildCFG(input: CFGInput, context: OperationContext): readonly C
           );
           if (flow.fallthrough) edge('fallthrough', flow.fallthrough, true);
           break;
-        case 'indirect_branch':
-          edge('unknown', null, flow.conditional);
+        case 'indirect_branch': {
+          const targets = tableTargets(last);
+          if (targets) {
+            const seen = new Set<bigint>();
+            for (const target of targets)
+              if (!seen.has(target.value)) {
+                seen.add(target.value);
+                edge('branch', target, true);
+              }
+          } else edge('unknown', null, flow.conditional);
           if (flow.fallthrough) edge('fallthrough', flow.fallthrough, true);
           break;
+        }
         case 'trap':
           edge('trap', null, flow.conditional);
           if (flow.fallthrough) edge('fallthrough', flow.fallthrough, true);

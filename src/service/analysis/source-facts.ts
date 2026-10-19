@@ -70,6 +70,7 @@ import { pipelineVersions } from './versions.js';
 import { nativeArgumentValues } from './native-arguments.js';
 import { parameterRegisters } from './native-abi.js';
 import { fpEnvironmentGuard } from '../../lifters/arm64/semantics.js';
+import { x86FpEnvironmentGuard } from '../../lifters/x86_64/semantics.js';
 import {
   registerTypeSlices,
   registerTypes,
@@ -171,6 +172,99 @@ function mergeNativeInterface(
   };
 }
 
+/** Failure blocks of the lifter's precise FPCR/MXCSR environment guards, not a
+ * blanket exemption for unknown instructions. Supported-path observations remain
+ * conditional. ARM guards test the supported FPCR state and branch false to a
+ * failure with the guard's unknown effect; x86 guards test the unsupported
+ * MXCSR[6:16] state and branch true to a failure without effects. Every
+ * predecessor must be such a guard of the entry/call control state. */
+export function fpEnvironmentFailures(
+  ir: SSAForm,
+  abi: AbiProfile,
+  definitions: ReadonlyMap<string, Expression>,
+  predecessors: ReadonlyMap<string, readonly SSAForm['blocks'][number][]>,
+  facts: ReadonlyMap<string, StackFact>,
+): ReadonlySet<string> {
+  const failures = new Set<string>();
+  const x86 = abi.architecture === 'x86_64';
+  for (const block of ir.blocks) {
+    if (
+      block.terminator.kind !== 'unknown' ||
+      (x86
+        ? block.terminator.reason !== x86FpEnvironmentGuard.unsupported_exit ||
+          block.instructions.some((node) => node.kind !== 'assign')
+        : block.terminator.reason !== fpEnvironmentGuard.unsupported_exit ||
+          !block.instructions.some(
+            (node) =>
+              node.kind === 'unknown_effect' &&
+              node.reason === fpEnvironmentGuard.unsupported_effect,
+          ) ||
+          block.instructions.some(
+            (node) =>
+              node.kind !== 'assign' &&
+              (node.kind !== 'unknown_effect' ||
+                node.reason !== fpEnvironmentGuard.unsupported_effect),
+          ))
+    )
+      continue;
+    const parents = predecessors.get(block.id);
+    if (
+      !parents?.length ||
+      !parents.every((parent) => {
+        const branch = parent.terminator;
+        if (
+          branch.kind !== 'branch' ||
+          (x86 ? branch.when_true : branch.when_false).target !== block.id ||
+          (x86 ? branch.when_false : branch.when_true).target === block.id
+        )
+          return false;
+        const comparison = definitions.get(branch.condition.id);
+        if (x86) {
+          if (comparison?.kind !== 'compare' || comparison.op !== 'ne') return false;
+          const expected = definitions.get(comparison.right.id);
+          const controls = facts.get(comparison.left.id)?.incoming_registers;
+          return (
+            expected?.kind === 'constant' &&
+            expected.bits === x86FpEnvironmentGuard.supported_bits &&
+            comparison.left.type.kind === 'integer' &&
+            comparison.left.type.bits === x86FpEnvironmentGuard.width_bits &&
+            controls !== undefined &&
+            controls.length > 0 &&
+            controls.every(
+              (register) =>
+                register.root === x86FpEnvironmentGuard.control_root &&
+                register.offset_bits === x86FpEnvironmentGuard.offset_bits &&
+                register.width_bits === x86FpEnvironmentGuard.width_bits,
+            )
+          );
+        }
+        if (comparison?.kind !== 'compare' || comparison.op !== 'eq') return false;
+        const zero = definitions.get(comparison.right.id),
+          masked = definitions.get(comparison.left.id);
+        if (
+          zero?.kind !== 'constant' ||
+          zero.bits !== 0n ||
+          masked?.kind !== 'integer' ||
+          masked.op !== 'and'
+        )
+          return false;
+        const mask = definitions.get(masked.right.id);
+        const controls = facts.get(masked.left.id)?.incoming_registers;
+        return (
+          mask?.kind === 'constant' &&
+          mask.bits === fpEnvironmentGuard.mask &&
+          controls !== undefined &&
+          controls.length > 0 &&
+          controls.every((register) => register.root === fpEnvironmentGuard.control_root)
+        );
+      })
+    )
+      continue;
+    failures.add(block.id);
+  }
+  return failures;
+}
+
 /** Roots count only when they reach semantic observations. Physical snapshots,
  * phi transport, register clobbers, private spills and preservation are not uses. */
 function observeParameters(
@@ -237,62 +331,13 @@ function observeParameters(
     nativeTypeSlices(ir, interfaces, context, interfaceIndex),
   );
   const entryBindings = ir.register_states.find((row) => row.block === ir.entry)?.entry ?? [];
-  // This is the lifter's precise FPCR failure boundary, not a blanket exemption
-  // for unknown instructions. Its supported-path observations remain conditional.
-  const conditionalFpFailures = new Set<string>();
-  if (abi.architecture === 'arm64')
-    for (const block of ir.blocks) {
-      if (
-        block.terminator.kind !== 'unknown' ||
-        block.terminator.reason !== fpEnvironmentGuard.unsupported_exit ||
-        !block.instructions.some(
-          (node) =>
-            node.kind === 'unknown_effect' && node.reason === fpEnvironmentGuard.unsupported_effect,
-        ) ||
-        block.instructions.some(
-          (node) =>
-            node.kind !== 'assign' &&
-            (node.kind !== 'unknown_effect' ||
-              node.reason !== fpEnvironmentGuard.unsupported_effect),
-        )
-      )
-        continue;
-      const parents = predecessors.get(block.id);
-      if (
-        !parents?.length ||
-        !parents.every((parent) => {
-          const branch = parent.terminator;
-          if (
-            branch.kind !== 'branch' ||
-            branch.when_false.target !== block.id ||
-            branch.when_true.target === block.id
-          )
-            return false;
-          const comparison = definitions.get(branch.condition.id);
-          if (comparison?.kind !== 'compare' || comparison.op !== 'eq') return false;
-          const zero = definitions.get(comparison.right.id),
-            masked = definitions.get(comparison.left.id);
-          if (
-            zero?.kind !== 'constant' ||
-            zero.bits !== 0n ||
-            masked?.kind !== 'integer' ||
-            masked.op !== 'and'
-          )
-            return false;
-          const mask = definitions.get(masked.right.id);
-          const controls = analysis.stack.values.get(masked.left.id)?.incoming_registers;
-          return (
-            mask?.kind === 'constant' &&
-            mask.bits === fpEnvironmentGuard.mask &&
-            controls !== undefined &&
-            controls.length > 0 &&
-            controls.every((register) => register.root === fpEnvironmentGuard.control_root)
-          );
-        })
-      )
-        continue;
-      conditionalFpFailures.add(block.id);
-    }
+  const conditionalFpFailures = fpEnvironmentFailures(
+    ir,
+    abi,
+    definitions,
+    predecessors,
+    analysis.stack.values,
+  );
   let ambiguous =
     analysis.state !== 'complete' ||
     analysis.stack.accesses.some(
@@ -322,6 +367,7 @@ function observeParameters(
     }
   };
   const use = (value: Value): void => note(analysis.stack.values.get(value.id));
+  const spills: StackFact[] = [];
   const calls = new Map(analysis.calls.map((call) => [call.node_id, call]));
   for (const block of ir.blocks) {
     if (!analysis.stack.snapshots.has(block.terminator.id)) continue;
@@ -332,7 +378,9 @@ function observeParameters(
       else if (node.kind === 'store') {
         use(node.address);
         // A private spill is observed through its subsequent loads, not its save.
-        if (analysis.stack.values.get(node.address.id)?.value.kind !== 'stack') use(node.value);
+        const fact = analysis.stack.values.get(node.value.id);
+        if (analysis.stack.values.get(node.address.id)?.value.kind !== 'stack') note(fact);
+        else if (fact) spills.push(fact);
       } else if (node.kind === 'call') {
         for (const argument of node.arguments) use(argument);
         if (node.target.kind === 'indirect') use(node.target.value);
@@ -376,6 +424,16 @@ function observeParameters(
     const snapshot = analysis.stack.snapshots.get(exit.terminator.id);
     if (snapshot) for (const register of returns) note(inspectRegister(snapshot, register));
   }
+  // A computed-address stack read (for example through a `va_list`) may load a
+  // spilled argument register that no exact load observes: its arity stays open.
+  if (
+    analysis.stack.accesses.some((access) => access.kind === 'read' && access.region === 'dynamic')
+  )
+    for (const fact of spills)
+      for (const register of fact.incoming_registers) {
+        context.checkpoint(1);
+        if (byRoot.has(register.root) && !observed.has(register.root)) ambiguous = true;
+      }
   const missingBanks = new Set<string>();
   for (const candidate of candidates) {
     if (!observed.has(candidate.root)) missingBanks.add(candidate.bank);

@@ -11,6 +11,29 @@ type Make = (
 export const shiftIdiomScope =
   'a constant rotation whose result is masked to exactly its non-wrapped bits is the plain shift (ror(x,k) & (ones>>k) = x>>k, ror(x,k) & (ones<<(w-k)) = x<<(w-k), rol by the complementary count), a logical shift OR-ed with the sign bit replicated into exactly the vacated top bits is the arithmetic shift, and a bit field lying entirely inside the non-wrapped or the wrapped part of a rotation is the same field of the rotated operand; 0<k<w and every mask must equal the vacated/retained bits exactly, so a true rotate keeps its rotate';
 
+/** Operands of rotations by a constant 0<k<w (w = 8/16/32/64): the source view
+ * prints those as two shifts that each read the operand, so it must be a
+ * printed variable (never a re-evaluated inline expression). */
+export function constantRotationOperands(
+  expressions: ReadonlyMap<string, Expression>,
+): Set<string> {
+  const operands = new Set<string>();
+  for (const expression of expressions.values()) {
+    if (expression.kind !== 'integer' || (expression.op !== 'rol' && expression.op !== 'ror'))
+      continue;
+    const count = expressions.get(expression.right.id),
+      width = bitWidth(expression.left.type);
+    if (
+      count?.kind === 'constant' &&
+      [8, 16, 32, 64].includes(width) &&
+      count.bits > 0n &&
+      count.bits < BigInt(width)
+    )
+      operands.add(expression.left.id);
+  }
+  return operands;
+}
+
 /** Exact shift/rotate idioms produced by bitfield-move lowering. Both rewrites
  * are bit-exact for a constant count 0<k<w; a rotate with any other mask is a
  * real rotate and is left alone. Returns the replacement, or null. */

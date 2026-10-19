@@ -3,6 +3,7 @@ import type {
   DataType,
   Effect,
   Instruction,
+  JumpTableOrigin,
   Origin,
   RegisterBinding,
   Terminator,
@@ -43,6 +44,7 @@ export type Control =
       readonly value: Value;
       readonly cases: readonly { readonly bits: bigint; readonly arm: ControlArm }[];
       readonly otherwise: ControlArm;
+      readonly jump_table?: JumpTableOrigin;
     })
   | Extract<Terminator, { readonly kind: 'return' | 'indirect' | 'trap' | 'unknown' }>;
 export interface BlockRegion extends Origin {

@@ -12,7 +12,7 @@ import {
 } from '../ir/index.js';
 import { identityOperand, integerIdentity } from './expressions.js';
 import { LocalValidationSession, validateBitvectorCandidate } from './local-validation.js';
-import { recombineBitSlices } from './source-bit-slices.js';
+import { recombineBitSlices, wholeValueConcat } from './source-bit-slices.js';
 import { foldSourceCondition } from './source-conditions.js';
 import { foldShiftIdiom, shiftIdiomScope } from './source-shifts.js';
 
@@ -419,7 +419,7 @@ export function normalizeSourceExpressions(
         ? foldSourceCondition(value, expression, observe, resolve, create, owner.get(id)!, context)
         : null;
       if (condition) replacement = condition;
-      const recombined =
+      let recombined =
         sourceCells && !condition
           ? recombineBitSlices(
               value,
@@ -431,6 +431,10 @@ export function normalizeSourceExpressions(
               packingShifts,
             )
           : null;
+      // The slices of one value joined back in order are that value, even when
+      // the value is arithmetic the lane analysis does not look through.
+      if (sourceCells && !condition && !recombined && replacement === expression)
+        recombined = wholeValueConcat(value, expression, observe);
       if (recombined) {
         replacement = recombined;
         cellRewrite = true;

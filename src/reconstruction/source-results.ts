@@ -1,6 +1,14 @@
 import type { AbiLocation, OperationContext, RegisterDescriptor } from '../core/index.js';
 import type { StackRecoveryResult } from '../analysis/stack/index.js';
-import { bitWidth, sameType, type DataType, type Expression, type Value } from '../ir/index.js';
+import {
+  bitWidth,
+  expressionOperands,
+  sameType,
+  type DataType,
+  type Expression,
+  type RegisterBinding,
+  type Value,
+} from '../ir/index.js';
 import type { BlockRegion } from '../presentation/index.js';
 import { registerTypes, type RegisterTypeSlice } from './source-register-types.js';
 
@@ -11,8 +19,12 @@ type RegisterLocation = Extract<AbiLocation, { kind: 'register' }>;
  * exit; `integer` keeps the integer path without the FP alternative (`reason`
  * when the FP register also qualified); `explicit` retains the physical exit
  * form because candidates or caller evidence conflict; `none` infers no
- * register result (observed native results remain). Null means no decision:
- * the caller's existing projection applies unchanged. */
+ * register result (observed native results remain unless `void_like` names
+ * the rule that makes the function void-like: `incidental_result` when the
+ * integer register qualifies, but no exit path establishes it deliberately,
+ * no caller demands it and the FP carrier is unchanged or undefined on every
+ * exit; the register stays in exit metadata). Null means no decision: the
+ * caller's existing projection applies unchanged. */
 export type SourcePrimaryResult =
   | {
       readonly kind: 'float';
@@ -21,7 +33,12 @@ export type SourcePrimaryResult =
       readonly rejected: string;
     }
   | { readonly kind: 'integer'; readonly reason?: string }
-  | { readonly kind: 'explicit' | 'none'; readonly written: boolean; readonly reason: string };
+  | {
+      readonly kind: 'explicit' | 'none';
+      readonly written: boolean;
+      readonly reason: string;
+      readonly void_like?: 'incidental_result' | 'indirect_result';
+    };
 
 type ExitState =
   | { readonly kind: 'undefined' | 'frame' | 'untyped' | 'vector' }
@@ -67,7 +84,10 @@ export function selectSourcePrimaryResult(
   const { blocks, entry, expressions, sources, typed, parameters, stack, context } = input;
   const exits = [...blocks.values()].filter((block) => block.control.kind === 'return');
   if (!exits.length) return null;
-  const callResults = new Set<string>();
+  // Call results, projected or native: their incidental use is the classic
+  // leftover of a void function ending in a call.
+  const callResults = new Set<string>(),
+    callOutputs = new Set<string>();
   for (const values of input.callResults.values())
     for (const value of values) callResults.add(value.id);
   const loads = new Map<string, Value>(),
@@ -79,8 +99,13 @@ export function selectSourcePrimaryResult(
       if (node.kind === 'load') loads.set(node.result.id, node.address);
       else if (node.kind === 'store') storeValues.set(node.id, node.value);
       else if (node.kind === 'read_register') computed.add(node.result.id);
-      if (node.kind === 'call') for (const value of node.results) computed.add(value.id);
+      if (node.kind === 'call')
+        for (const value of node.results) {
+          computed.add(value.id);
+          callOutputs.add(value.id);
+        }
     }
+  for (const id of callResults) callOutputs.add(id);
   const entryParameters = new Set(entry.parameters.map((value) => value.id));
   const frame = (value: Value): boolean => {
     const kind = stack?.values.get(value.id)?.value.kind;
@@ -88,9 +113,9 @@ export function selectSourcePrimaryResult(
   };
   // Leaves of one exit slice through lossless transport, phis and projections.
   const walk = (start: Value, root: string) => {
-    const leaves: Value[] = [];
-    let self = 0,
-      constants = 0;
+    const leaves: Value[] = [],
+      self: Value[] = [],
+      constants: Value[] = [];
     const pending = [start],
       seen = new Set<string>();
     while (pending.length) {
@@ -102,7 +127,7 @@ export function selectSourcePrimaryResult(
       if (frame(value)) return { kind: 'frame' as const };
       const parameter = parameters.get(value.id);
       if (parameter) {
-        if (parameter.root === root) self++;
+        if (parameter.root === root) self.push(value);
         else leaves.push(value);
         continue;
       }
@@ -113,7 +138,7 @@ export function selectSourcePrimaryResult(
       const expression = expressions.get(value.id);
       if (expression) {
         if (expression.kind === 'indeterminate') return { kind: 'undefined' as const };
-        if (expression.kind === 'constant') constants++;
+        if (expression.kind === 'constant') constants.push(value);
         else if (expression.kind === 'cast' && transportCasts.includes(expression.op))
           pending.push(expression.value);
         else if (expression.kind === 'extract' || expression.kind === 'insert')
@@ -142,7 +167,7 @@ export function selectSourcePrimaryResult(
       return { kind: 'undefined' as const };
     }
     return {
-      kind: leaves.length || constants ? ('written' as const) : ('unchanged' as const),
+      kind: leaves.length || constants.length ? ('written' as const) : ('unchanged' as const),
       leaves,
       constants,
       self,
@@ -195,6 +220,8 @@ export function selectSourcePrimaryResult(
     sites.set(binding.value.id, { block: entry.id, index: -2 });
   const incoming = new Map<string, { readonly copies: ReadonlyMap<string, Value> }[]>();
   const successors = new Map<string, string[]>();
+  // Phi sources with the block whose transfer supplies each of them.
+  const phiEdges = new Map<string, { readonly value: Value; readonly from: string }[]>();
   for (const block of blocks.values()) {
     for (const parameter of block.parameters)
       sites.set(parameter.id, { block: block.id, index: block.id === entry.id ? -2 : -1 });
@@ -226,6 +253,11 @@ export function selectSourcePrimaryResult(
         copies: new Map(transfer.copies.map((copy) => [copy.destination.id, copy.source])),
       });
       incoming.set(transfer.target, row);
+      for (const copy of transfer.copies)
+        phiEdges.set(copy.destination.id, [
+          ...(phiEdges.get(copy.destination.id) ?? []),
+          { value: copy.source, from: block.id },
+        ]);
     }
   }
   let idom: Map<string, string> | undefined;
@@ -333,6 +365,203 @@ export function selectSourcePrimaryResult(
       result = order;
     }
     return result;
+  };
+  // Values some non-exit consumer observes as control or addressing: memory
+  // addresses, call and tail-call arguments (explicit, or argument-register
+  // inputs) and branch/switch operands, closed backward over expression
+  // operands and phi sources. A stored value is produced data like a result
+  // (`*p += d; return *p;`), so storing it observes nothing. A value outside
+  // this set is computed only for function exits and stores.
+  let observed: Set<string> | undefined;
+  const observedElsewhere = (value: Value): boolean => {
+    if (!observed) {
+      const marked = new Set<string>(),
+        pending: Value[] = [];
+      const mark = (item: Value): void => {
+        if (marked.has(item.id)) return;
+        marked.add(item.id);
+        pending.push(item);
+      };
+      const argumentInputs = (bindings: readonly RegisterBinding[]): void => {
+        for (const binding of bindings)
+          if (input.argumentRoots.has(binding.register.root)) mark(binding.value);
+      };
+      for (const block of blocks.values()) {
+        for (const node of block.statements) {
+          context.checkpoint(1);
+          if (node.kind === 'load' || node.kind === 'store') mark(node.address);
+          else if (node.kind === 'write_register') mark(node.value);
+          else if (node.kind === 'call') {
+            node.arguments.forEach(mark);
+            if (node.target.kind === 'indirect') mark(node.target.value);
+            argumentInputs(node.register_inputs);
+          }
+        }
+        const control = block.control;
+        if (control.kind === 'if') mark(control.condition);
+        else if (control.kind === 'switch') mark(control.value);
+        else if (control.kind === 'indirect') {
+          mark(control.target);
+          argumentInputs(block.register_exit);
+        }
+      }
+      while (pending.length) {
+        context.checkpoint(1);
+        const item = pending.pop()!;
+        const expression = expressions.get(item.id);
+        if (expression) expressionOperands(expression).forEach(mark);
+        else sources.get(item.id)?.forEach(mark);
+      }
+      observed = marked;
+    }
+    return observed.has(value.id);
+  };
+  let predecessors: Map<string, string[]> | undefined;
+  const predecessorsOf = (block: string): readonly string[] => {
+    if (!predecessors) {
+      predecessors = new Map();
+      for (const [from, targets] of successors)
+        for (const target of targets)
+          predecessors.set(target, [...(predecessors.get(target) ?? []), from]);
+    }
+    return predecessors.get(block) ?? [];
+  };
+  // Whether some statement matching `test` lies on a path from the definition
+  // of `value` to the end of `target`. Re-entering the defining block starts a
+  // new definition, so paths stop there.
+  const onPath = (
+    value: Value,
+    target: string,
+    test: (node: BlockRegion['statements'][number]) => boolean,
+  ): boolean | undefined => {
+    const site = siteOf(value)?.site;
+    const start = site && blocks.get(site.block);
+    if (!site || !start) return undefined;
+    if (start.statements.some((node, index) => index > site.index && test(node))) return true;
+    if (start.id === target) return false;
+    const reaching = new Set([target]),
+      backward = [target];
+    while (backward.length) {
+      context.checkpoint(1);
+      for (const from of predecessorsOf(backward.pop()!))
+        if (from !== start.id && !reaching.has(from)) {
+          reaching.add(from);
+          backward.push(from);
+        }
+    }
+    const visited = new Set([start.id]),
+      pending = [...(successors.get(start.id) ?? [])];
+    while (pending.length) {
+      context.checkpoint(1);
+      const id = pending.pop()!;
+      if (visited.has(id) || !reaching.has(id)) continue;
+      visited.add(id);
+      if (blocks.get(id)?.statements.some(test)) return true;
+      if (id !== target) pending.push(...(successors.get(id) ?? []));
+    }
+    return false;
+  };
+  // A call or unknown effect on some path clobbers the caller-saved result
+  // register: there the value was moved back into it after the clobber.
+  const restored = (value: Value, target: string): boolean =>
+    onPath(value, target, (node) => node.kind === 'call' || node.kind === 'unknown_effect') ===
+    true;
+  // A projected call result is the function's final action when no store,
+  // call, unknown effect or fence follows it on any path to the exit: the
+  // `return f(...)` a frame teardown kept from becoming a tail transfer.
+  const finalCall = (value: Value, target: string): boolean =>
+    onPath(
+      value,
+      target,
+      (node) =>
+        node.kind === 'store' ||
+        node.kind === 'call' ||
+        node.kind === 'unknown_effect' ||
+        node.kind === 'memory_fence',
+    ) === false;
+  // Phis of blocks outside a loop merge alternative paths into an exit: each
+  // incoming source must hold the register at the end of its own predecessor.
+  // A loop header phi carries one variable across iterations and stays whole.
+  // Cells merged separately are followed through their lowest-order component.
+  const exitPaths = (start: Value, exit: string): { value: Value; target: string }[] => {
+    const roots: { value: Value; target: string }[] = [],
+      pending = [{ value: start, target: exit }],
+      seen = new Set<string>();
+    while (pending.length) {
+      context.checkpoint(1);
+      const item = pending.pop()!,
+        value = item.value;
+      if (seen.has(`${value.id}:${item.target}`)) continue;
+      seen.add(`${value.id}:${item.target}`);
+      if (seen.size > 64) return [{ value: start, target: exit }];
+      const expression = expressions.get(value.id);
+      if (
+        (expression?.kind === 'cast' && transportCasts.includes(expression.op)) ||
+        ((expression?.kind === 'extract' || expression?.kind === 'insert') &&
+          expression.offset === 0)
+      ) {
+        pending.push({ value: expression.value, target: item.target });
+        continue;
+      }
+      if (expression?.kind === 'concat' && expression.values.length) {
+        pending.push({ value: expression.values[0]!, target: item.target });
+        continue;
+      }
+      const site = sites.get(value.id),
+        edges = expression ? undefined : phiEdges.get(value.id);
+      if (
+        edges?.length &&
+        site?.index === -1 &&
+        !predecessorsOf(site.block).some((from) => dominates(site.block, from))
+      )
+        for (const edge of edges) pending.push({ value: edge.value, target: edge.from });
+      else roots.push(item);
+    }
+    return roots;
+  };
+  // Reason the integer result register is incidental on every exit path, or
+  // undefined when some path establishes it deliberately: every slice leaf is
+  // moved back after a clobber, is another argument copied into the register,
+  // is a projected call result that is the path's final action (the callee's
+  // result contract passed through), or is a constant/load/computation
+  // consumed by nothing but function exits and stores. A call result left in
+  // place before later effects, an untouched argument and a value that also
+  // addresses memory or feeds calls or branches (an index, cursor or base
+  // pointer) fit a void function equally well; they never establish a result.
+  const incidentalInteger = (): string | undefined => {
+    const root = input.integer.register.root,
+      kinds = new Set<string>();
+    for (const block of exits) {
+      const cell = exitValue(block, input.integer);
+      if (!cell) {
+        kinds.add('its unchanged entry value');
+        continue;
+      }
+      for (const path of exitPaths(cell, block.id)) {
+        const walked = walk(path.value, root);
+        if (walked.kind !== 'written' && walked.kind !== 'unchanged') return undefined;
+        // The register holds the path root itself at the end of its target.
+        if (restored(path.value, path.target)) return undefined;
+        let established = false,
+          shared = false;
+        if (walked.self.length) kinds.add('its unchanged entry value');
+        for (const value of [...walked.leaves, ...walked.constants]) {
+          if (parameters.has(value.id)) established = true;
+          else if (callOutputs.has(value.id)) {
+            if (finalCall(value, path.target)) established = true;
+            else {
+              shared = true;
+              kinds.add('a call result left in place before later effects');
+            }
+          } else if (observedElsewhere(value)) {
+            shared = true;
+            kinds.add('a value that also addresses memory or feeds calls or branches');
+          } else established = true;
+        }
+        if (established && !shared) return undefined;
+      }
+    }
+    return `${root} holds only ${[...kinds].join(', ')} on its exit paths; no path moves it back after a clobber, copies another argument into it, passes through a final call's result, or computes a value consumed only by exits`;
   };
   const exitValue = (block: BlockRegion, location: RegisterLocation): Value | undefined =>
     block.register_exit.find(
@@ -460,7 +689,19 @@ export function selectSourcePrimaryResult(
         written,
         reason: `callers consume ${floatingName} while only ${integerName} qualifies`,
       };
-    return { kind: 'integer' };
+    // A tail transfer passes its callee's result through; its storage is not
+    // classified here, so only return-only functions become void-like.
+    const incidental =
+      !integerDemanded &&
+      ![...blocks.values()].some(
+        (block) => block.control.kind === 'indirect' && block.control.tail_call,
+      ) &&
+      floatingStates.every((item) => item.kind === 'unchanged' || item.kind === 'undefined')
+        ? incidentalInteger()
+        : undefined;
+    return incidental
+      ? { kind: 'none', written: true, reason: incidental, void_like: 'incidental_result' }
+      : { kind: 'integer' };
   } else
     return {
       kind: 'none',

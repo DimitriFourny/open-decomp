@@ -172,10 +172,11 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi]) {
             ?.sites.filter((site) => site.predicate_value_id).length,
           1,
         );
-        assert.equal(
-          emission.local_validation?.some((item) => item.rule === 'fp_environment_guard') ?? false,
-          !write,
+        const guard = emission.local_validation?.find(
+          (item) => item.rule === 'fp_environment_guard',
         );
+        assert.equal(guard !== undefined, !write);
+        if (guard) assert.equal(/MXCSR\[6:16\]/.test(guard.scope), abi.id === sysvAMD64Abi.id);
         const formal = emittedFormals(emission)[0]!;
         const result = execute(
           emission,

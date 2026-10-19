@@ -18,6 +18,8 @@ for (const language of ['c-like', 'python-like'] as const)
     'mutable',
     'wrong-scale',
     'wrap',
+    'mask',
+    'wide-mask',
     'volatile',
     'big-endian',
   ] as const)
@@ -68,7 +70,13 @@ for (const language of ['c-like', 'python-like'] as const)
       const index =
         scenario === 'wrap'
           ? argument
-          : block.cast('zero_extend', integer(64), block.cast('truncate', integer(16), argument));
+          : scenario === 'mask' || scenario === 'wide-mask'
+            ? block.int(
+                'and',
+                argument,
+                block.constant(integer(64), scenario === 'mask' ? 0xffn : 0xffffffffffffff00n),
+              )
+            : block.cast('zero_extend', integer(64), block.cast('truncate', integer(16), argument));
       const scaled =
         scenario === 'stride' ? block.int('mul', index, block.constant(integer(64), 4n)) : index;
       const pointer = block.int('add', block.address(address.address), scaled);
@@ -87,7 +95,9 @@ for (const language of ['c-like', 'python-like'] as const)
         },
       };
       const output = emit(ssa, extra, language);
-      const applied = !['wrong-scale', 'wrap', 'volatile', 'big-endian'].includes(scenario);
+      const applied = !['wrong-scale', 'wrap', 'wide-mask', 'volatile', 'big-endian'].includes(
+        scenario,
+      );
       assert.equal(
         output.emission.local_validation?.some(
           (record) => record.kind === 'presentation' && record.rule === 'indexed_data_load',
@@ -120,7 +130,9 @@ for (const language of ['c-like', 'python-like'] as const)
           new Map(formal.semantic_ids.map((id) => [id, index])),
           memory,
         );
-        assert.equal(actual.exit, index === 64n ? 'fault' : 'machine_return');
-        if (index !== 64n) assert.deepEqual(actual.values, [bits === 8 ? 0x35n : 0x3535n]);
+        // The wide mask clears every low index bit.
+        const faults = index === 64n && scenario !== 'wide-mask';
+        assert.equal(actual.exit, faults ? 'fault' : 'machine_return');
+        if (!faults) assert.deepEqual(actual.values, [bits === 8 ? 0x35n : 0x3535n]);
       }
     });

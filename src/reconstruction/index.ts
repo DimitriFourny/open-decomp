@@ -36,6 +36,7 @@ import {
   type SourceExpressionDemand,
 } from './source-expressions.js';
 import { normalizeSourceRanges } from './source-ranges.js';
+import { constantRotationOperands } from './source-shifts.js';
 import { projectSourceTypes } from './source-types.js';
 import {
   permitsVoidSourceSignature,
@@ -657,11 +658,17 @@ export function reconstruct(
     ];
     // Missing FP typing is not evidence for void: even an integer-typed write
     // to the low FP carrier must remain explicit until its result is resolved.
+    // A `void_like_result` rule makes every primary slice scratch of the
+    // void-like interface: `incidental_result` established the integer primary
+    // on no exit path and found the FP carrier unchanged or undefined on every
+    // exit; under `indirect_result` the aggregate returns through memory.
+    const voidLike = sourcePlan.presentation.void_like_result;
     const voidPrimary =
       permitsVoidSourceSignature(input, sourcePlan.presentation, returns, tails.size > 0) &&
       [...returns.values()].every((projection) =>
         projection.outputs.every(
           (binding) =>
+            voidLike !== undefined ||
             !voidPrimaryRegisters.some((register) => overlaps(register, binding.register)) ||
             scratch(binding.register.root, binding.value) !== null,
         ),
@@ -725,7 +732,7 @@ export function reconstruct(
       localValidation.requireAbi(
         'exit_scratch',
         [id],
-        `Moving these exit slices out of line assumes ABI conformance: ${voidPrimary ? 'the signature layer agrees to a void-like interface with no written primary or positive result-use evidence, and callers consume no result' : 'callers read only the established return storage, and other caller-saved slices hold no additional result'}. No result-use evidence gathered for the moved slices; callers not scanned. Exact slice values and sources remain in the exit metadata and checked view; this is not proof of non-consumption.`,
+        `Moving these exit slices out of line assumes ABI conformance: ${voidPrimary ? `the signature layer agrees to a void-like interface with no ${voidLike ? `primary result (${voidLike})` : 'written primary'} or positive result-use evidence, and callers consume no result` : 'callers read only the established return storage, and other caller-saved slices hold no additional result'}. No result-use evidence gathered for the moved slices; callers not scanned. Exact slice values and sources remain in the exit metadata and checked view; this is not proof of non-consumption.`,
       );
       returns.set(id, { ...projection, outputs, exit_scratch: exitScratch });
     }
@@ -749,7 +756,25 @@ export function reconstruct(
   const roots = new Map<string, Value[]>();
   const semanticRoots: Value[] = [],
     overlayOutputs: Value[] = [];
-  const deferredReloads: { node: Extract<Instruction, { kind: 'load' }>; block: string }[] = [];
+  const deferredReloads: {
+    node: Extract<Instruction, { kind: 'load' }>;
+    block: string;
+    table: boolean;
+  }[] = [];
+  // Source view: reads of proven jump-table bytes in their switch block are in
+  // bounds under the dominating guard, immutable and relocation-free.
+  const tableLoads = new Set<string>();
+  if (view === 'source')
+    for (const block of blocks.values()) {
+      const control = block.control;
+      if (control.kind !== 'switch' || !control.jump_table) continue;
+      for (const node of block.statements)
+        if (
+          node.kind === 'load' &&
+          node.provenance.instruction_ids.includes(control.jump_table.load_instruction)
+        )
+          tableLoads.add(node.id);
+    }
   for (const block of blocks.values()) {
     for (const node of block.statements) {
       context.checkpoint(1);
@@ -762,7 +787,11 @@ export function reconstruct(
       )
         continue;
       if (node.kind === 'load' && sourceStack?.deadReloadCandidates.has(node.id)) {
-        deferredReloads.push({ node, block: block.id });
+        deferredReloads.push({ node, block: block.id, table: false });
+        continue;
+      }
+      if (node.kind === 'load' && tableLoads.has(node.id)) {
+        deferredReloads.push({ node, block: block.id, table: true });
         continue;
       }
       retained.add(node.id);
@@ -860,16 +889,30 @@ export function reconstruct(
       );
       propagate();
     }
+    const frame = pending.filter((item) => !item.table),
+      table = pending.filter((item) => item.table);
     if (
-      pending.length &&
+      frame.length &&
       !localValidation.presentation(
         'dead_frame_reload',
         input.function.id,
         'dead non-volatile frame loads, each dominated by a store covering its bytes (so it cannot fault), are not printed',
-        pending.map((item) => item.node.id).slice(0, 64),
+        frame.map((item) => item.node.id).slice(0, 64),
       )
     ) {
-      pending.forEach(restore);
+      frame.forEach(restore);
+      propagate();
+    }
+    if (
+      table.length &&
+      !localValidation.presentation(
+        'dead_jump_table_load',
+        input.function.id,
+        'dead reads of a proven jump table in its switch block: the dominating unsigned guard bounds the index, so every read addresses immutable, file-backed, relocation-free table bytes, cannot fault and observes only constants; they are not printed',
+        table.map((item) => item.node.id).slice(0, 64),
+      )
+    ) {
+      table.forEach(restore);
       propagate();
     }
   }
@@ -938,6 +981,9 @@ export function reconstruct(
     expansion = new Map<string, { size: number; depth: number }>();
   if (sourceStack) for (const id of sourceStack.addresses.keys()) inline.add(id);
   const visiting = new Set<string>();
+  // Source view: a constant rotation of a variable prints as two shifts that
+  // read it twice, so its operand is a variable, never an inlined expression.
+  const rotated = sourcePlan ? constantRotationOperands(expressions) : new Set<string>();
   for (const id of assignments.keys()) {
     if (!live.has(id) || inline.has(id) || expansion.has(id)) continue;
     const work: { id: string; exit: boolean }[] = [{ id, exit: false }];
@@ -952,6 +998,7 @@ export function reconstruct(
         expression.kind === 'constant' ||
         expression.kind === 'address' ||
         (expression.kind !== 'indeterminate' &&
+          !rotated.has(item.id) &&
           row?.count === 1 &&
           row.blocks.size === 1 &&
           row.blocks.has(owner.get(item.id)!));

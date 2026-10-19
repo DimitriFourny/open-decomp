@@ -14,7 +14,7 @@ import {
   mergeProvenanceSources,
   syntheticProvenance,
 } from '../../ir/index.js';
-import type { BlockBuilder, RegisterIR } from '../../ir/index.js';
+import type { BlockBuilder, RegisterIR, Value } from '../../ir/index.js';
 import { Unsupported, X86Semantics, gpr, unknownClobbers } from './semantics.js';
 
 export interface X86LiftResult {
@@ -59,7 +59,7 @@ export interface X86LiftResult {
  */
 export class X86Lifter implements Lifter<RegisterIR> {
   readonly name = 'x86-64 typed semantic lifter';
-  readonly version = '3';
+  readonly version = '4';
   readonly architecture = 'x86_64';
   lift(graph: FunctionGraph, abi: AbiProfile, context: OperationContext): X86LiftResult {
     if (abi.architecture !== this.architecture)
@@ -140,6 +140,12 @@ export class X86Lifter implements Lifter<RegisterIR> {
     const diagnostics: Diagnostic[] = [...graph.diagnostics];
     const reasons = new Set<string>(graph.coverage.reasons);
     let completed = 0;
+    // A proven table's index, read just before its selecting load executes.
+    const tablesBySelector = new Map(
+      (graph.jump_tables ?? []).map((table) => [table.selector.instruction, table]),
+    );
+    const tablesByBranch = new Map((graph.jump_tables ?? []).map((table) => [table.branch, table]));
+    const selectors = new Map<string, { block: BlockBuilder; value: Value }>();
     const fpSeen = new Set<string>();
     const boundary = (
       block: BlockBuilder,
@@ -191,6 +197,42 @@ export class X86Lifter implements Lifter<RegisterIR> {
           }
         });
         try {
+          const selecting = tablesBySelector.get(instruction.id);
+          if (selecting) {
+            const raw = block.readRegister(selecting.selector.register);
+            selectors.set(selecting.branch, {
+              block,
+              value:
+                selecting.selector.register.width_bits === 64
+                  ? raw
+                  : block.cast('zero_extend', integer(64), raw),
+            });
+          }
+          const table = tablesByBranch.get(instruction.id);
+          const selector = table ? selectors.get(table.branch) : undefined;
+          if (table && selector?.block === block) {
+            const otherwise = byAddress.get(table.otherwise.value);
+            const cases = table.targets.map((target) => byAddress.get(target.value));
+            if (otherwise && cases.every((target) => target !== undefined)) {
+              // Exactly the proven targets; the dominating guard makes `otherwise` unreachable.
+              block.terminate({
+                kind: 'switch',
+                value: selector.value,
+                cases: cases.map((target, index) => ({
+                  bits: BigInt(index),
+                  edge: block.edge(target!),
+                })),
+                otherwise: block.edge(otherwise),
+                jump_table: {
+                  load_instruction: table.selector.instruction,
+                  ...(table.guard_exact ? { exact_guard_instruction: table.guard } : {}),
+                },
+              });
+              completed++;
+              terminated = true;
+              break;
+            }
+          }
           semantics.execute();
           block = semantics.block;
           const flow = instruction.flow,

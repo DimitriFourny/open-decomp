@@ -183,6 +183,27 @@ interference keep separate storage. The `phi_copy_coalescing` presentation recor
 names the affected values; simultaneous edge copies still pass the existing move
 validator.
 
+`copy_coalescing` then shares storage for in-place updates: a value defined from
+a printed variable that is not read after that definition (`y = f(x)`, the next
+version of `x`) prints as `x = f(x)`. Unrelated values never share storage.
+Interference is the SSA live-range check including loop-carried liveness, values
+defined together and block parameters bound simultaneously on an edge. Every
+member must have the same presented type and width, source name and role name,
+so a coalesced variable keeps a role name only when every member carries it. The
+pass is bounded work and gives up (keeping separate variables) when its graph
+exceeds its allowance.
+
+Loop role names (`index`, `count`, `remaining`, `limit`, `accumulator`) never
+describe a parameter by what the loop later does to it. A coalesced variable's
+initial-value exception (a member that only enters a loop header phi with the
+role) does not apply to a parameter or a conversion of one; a parameter that is
+itself the loop variable (the loop starts at function entry) keeps its neutral
+`argN` name unless it is a unit countdown ending at zero, whose start is the
+iteration count (`count`); a countdown stopping elsewhere, an up-counting or
+folded parameter stays neutral. A loop bound is `count` only for a unit step
+from 0 that stops strictly below it, tested where the variable has taken its
+steps so far; any other start or an inclusive test makes it a `limit`.
+
 Source presentation expands single-use pure integer and IEEE scalar computations
 at their dominated SSA uses, including pure synthesized pointer increments.
 FP-environment-dependent ones (arithmetic, compares, conversions) move only when
@@ -200,6 +221,15 @@ map to their consuming expression. `copy_propagation` reads a plain multi-use
 copy (same presented type) as its source variable at every use; liveness and
 phi coalescing treat each read as a read of the source.
 
+`local_load_reuse` prints a load of a private local that exactly one write to
+that local and one other same-block statement read as the local itself at both
+readers (`t = i; i = t + 1; out[t] = x` becomes `out[i] = x; i = i + 1`). The
+write must be a pure function of the loaded value alone with no register input,
+nothing else may touch the local between the load and its last reader, and a
+write that follows its reader prints right after that reader (private-local
+traffic cannot fault or alias, so no effect reorders); otherwise the temporary
+stays.
+
 `nested_condition_merge` prints `if (A) { if (B) S }` as `if (A && B) S` when
 nothing else prints in either `if` (no statements, definitions, labels, notes or
 edge copies) and neither has an `else`; short-circuit evaluation keeps B
@@ -211,6 +241,20 @@ the merged tests already read. Header notes: the ABI scratch comment is printed
 only when a scratch register name occurs in the text (`abi_scratch_note`), and
 the FP-environment assumption trails the signature with an unambiguous
 requirement ID prefix (`requirement_note`); full records stay in metadata.
+
+`short_circuit_flag` prints a condition that unoptimized code carries through a
+promoted private flag local (`flag = 0; if (a) { flag = 0; if (b) flag = c; }
+if (!(flag & 1)) ...`) as one test, `!(a && b && c)`: each stage writing 0
+contributes `continue && rest`, each writing 1 `leave || rest`, and a last stage
+copying a nested chain's flag contributes that chain in parentheses. The flag's
+only retained accesses are those stores, each ending its block, and one load read
+only by the merge test, which tests exactly its bit; later stages print nothing
+and are entered only from the previous one, the merge only from the chain, all
+edges copy-free, and the outermost head may print statements before its store.
+Operands keep their order and each is evaluated only when the earlier ones
+continue the chain, so guarded loads stay guarded. The merged test feeds loop
+forms (`while (a && b && c)`, `do { } while (...)`) and `nested_condition_merge`
+like any plain test; the dead flag storage is not declared.
 
 Source-only `private_stack_promotion` gives exact, initialized, nonvolatile
 negative entry-SP slots stable location names (`local_38` means offset -0x38),
@@ -280,7 +324,7 @@ A type inference record carries every `association_ids` member whose assertion d
 
 Parameter roles distinguish observed source inputs, physical-register inputs and explicit entry-storage environment inputs; an entry-SP formal is not evidence of authored arity. Interpretation widths describe reconstructed IR, not necessarily a decoder operand or source declaration. Call constants expose exact unsigned bit patterns with explicit widths, without inventing signedness. Partial fields retain unknown bounds and observed callback targets; local checks retain their bounded scope and counterexamples. Metadata uses the same operation/output budget and cancellation as rendering, and omits evidence IDs when evidence was not requested. Five focused regressions and 12 public both-dialect observations cover these boundaries; they do not establish whole-function equivalence.
 
-Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level `fp_environment` explanation names every affected guard/operation and its original state epoch. Source-only `fp_environment_guard` presentation selects the supported edge of an exact lifter guard when its state is an unchanged entry value or call clobber, there are no explicit environment writes, and the unsupported arm is exclusively owned. This is conditional on the recorded requirement at **each** epoch, not proof that calls preserve FP state. Omitted guard/failure provenance maps to the top requirement comment; checked guards and ordered effects remain intact. Computed, loaded, known unsupported, or opaque-written control state retains explicit guards.
+Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level `fp_environment` explanation names every affected guard/operation and its original state epoch. Source-only `fp_environment_guard` presentation selects the supported edge of an exact lifter guard when its state is an unchanged entry value or call clobber, there are no explicit environment writes, and the unsupported arm is exclusively owned. This is conditional on the recorded requirement at **each** epoch, not proof that calls preserve FP state. Omitted guard/failure provenance maps to the top requirement comment; checked guards and ordered effects remain intact. Computed, loaded, known unsupported, or opaque-written control state retains explicit guards. An opaque effect that is the last statement of a block ending in an unresolved exit changes no recorded epoch (no modeled operation follows it) and does not retain them (`fp_terminal_effect`); an opaque effect elsewhere, such as an unsupported encoding inside the function, still does.
 
 Source-only `fp_native_operations` prints scalar IEEE arithmetic, negation, absolute value, square root, comparisons and compatible conversions under the FP requirement plus the target IEEE representation, no-excess-precision and disabled-contraction (`-ffp-contract=off`) contract. Every operation the recorded `fp_environment` requirement covers prints natively unless a rule below keeps it explicit: C uses `-x`, `__builtin_fabs[f]`/`__builtin_sqrt[f]` (no header, so no clash with an analyzed libm callee) and `(intN_t)x`/`(uintN_t)x`; Python-like prints `-x` and `abs(x)` for binary64. Backwards consumer tracing retains helpers for operations whose arithmetic NaN payload escapes through integer operations, memory, calls or physical boundaries; a promoted local slot is private storage, so a store to it is exactly as observable as the loads that read it back. Comparisons and float-to-integer conversions never observe a payload (a NaN converts to an undefined value, as in the IR), and negation/absolute value change only the sign bit, so none of them forces helpers on their operands or their own result. Float-to-integer conversion truncates toward zero and is undefined for NaN, infinities and out-of-range values, exactly as the IR specifies. Helpers remain for fused and vector operations, payload-escaping arithmetic and square roots, whole functions whose environment is not a recorded default epoch (explicit environment writes or unknown environment effects keep every guard and every FP helper), Python binary32 arithmetic, Python division, square root and float-to-integer conversion (Python raises where the IR yields a value). Finite floating literals retain exact target bits, including integer constants that join an established FP value as a bitcast operand, phi copy or select arm. FP/integer copies preserve representation bitcasts, never numeric assignment conversions. Exhausted presentation records retain the explicit form.
 
@@ -401,7 +445,9 @@ slices keep their own phis. Every incoming edge must write the joined cells
 jointly. Accepted edges are: corresponding slices of one value; low slices of v
 with upper cells that slice `sign_extend(v)`/`zero_extend(v)`; low slices with
 literal-zero upper cells, i.e. a 32-bit or narrower write that zero-extends; all
-literal constants; or the unchanged cells of another recombined phi, which is
+literal constants; cells that are each an unknown (unavailable) value of the same
+reason (for example non-argument entry registers), which jointly form one unknown
+value of the full width; or the unchanged cells of another recombined phi, which is
 resolved as a fixpoint. Other register banks keep the complete-root rule with
 identical whole values. Original SSA cells and transfers remain immutable;
 source aliases extract slices from the new whole phi, preserving parallel copies
@@ -511,7 +557,9 @@ array views. Native (including local) symbols use their C spelling; otherwise a
 neutral `data_<VA>` identifies the exact base. Interior symbol displacements
 remain explicit in element units. Access width determines the element type, and
 the index stride must be an integral multiple of that width; unsigned range bounds
-must exclude address wrap. Volatile, big-endian, mis-scaled and ambiguous accesses
+must exclude address wrap, where the bound is the index width lowered by
+zero-extension/bitcast chains and constant `and` masks (`x & c <= c`), so a byte-masked
+index carried in a 64-bit register keeps the array view. Volatile, big-endian, mis-scaled and ambiguous accesses
 retain explicit memory syntax. C declarations are `extern` arrays of unknown
 bound (const only for immutable storage); Python-like `memory_view` declarations
 refer to the same image bytes without sequence bounds or negative-index rebasing.
@@ -533,6 +581,13 @@ view, never an allocation extent. `partial_struct_member` keeps the original
 access offset, width and ordering; `strided_struct_pointer` retains exact address
 bits across typed temporaries. A single offset-zero integer, float or pointer
 member (including a proven-stride scalar array) uses `natural_scalar_pointee`.
+Members that are all one integer or float type at contiguous element-aligned offsets,
+with no declared size and no proven record stride (for example the `p[0]..p[7]`
+accesses of an unrolled loop), are an array, not a structure:
+`scalar_array_pointee` prints a plain `T*` with subscripts. Differing widths or
+kinds, gaps, misaligned offsets, a stride or a size keep the structure. Typedefs of
+structures and opaque types without a printed body are written only when the
+finished text refers to their name.
 Checked output and the recovered type/shape facts are unchanged.
 
 Presentation validation is function-scoped: identical rule/scope/reason premises
@@ -681,6 +736,21 @@ They count as IEEE element accesses for `formal_pointer` and
 `abi_conformance` requirement (same IEEE bytes, unaligned access permitted by
 IR alignment 1) record the rewrite; failing to record it re-projects without
 memory typing. Checked view is unchanged.
+
+`fp_slot_type` treats a promoted frame-private slot (`private_stack_promotion`
+local) of 32/64 bits as storage between its stores and reloads, like a phi:
+when every stored value is a same-width IEEE value, closed FP carrier member or
+literal and every reload is a member of that carrier component, the local is
+declared `float`/`double` and its stores and reloads print as plain assignments
+without bitcasts. An integer consumer of any reload, or a stored integer value,
+keeps the integer local and every bitcast. FP-bank argument registers
+(vector/float bank, 32/64-bit) join the same components by consumer evidence only,
+like an ordinary memory read, so an O0 argument spilled to a slot and reloaded
+as IEEE data is a `double` formal. The rule records a presentation inference and
+an `abi_conformance` requirement (an assignment to a float/double local keeps the
+exact bits; no excess precision, no signaling-NaN quieting); failing to record it
+re-projects without slot typing. Raw (unpromoted) slots already use
+`fp_memory_access` lvalues. Checked view is unchanged.
 
 `primary_result` chooses between the ABI integer and FP primary result registers
 of an undeclared function whose returns carry no explicit IR values. A register

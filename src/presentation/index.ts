@@ -144,6 +144,7 @@ export function structureControlFlow(
               arm: { transfer: transfer(item.edge, scopes) },
             })),
             otherwise: { transfer: transfer(term.otherwise, scopes) },
+            ...(term.jump_table ? { jump_table: term.jump_table } : {}),
           };
           break;
         default:

@@ -234,6 +234,17 @@ export interface Edge {
   readonly arguments: readonly Value[];
   readonly effect: Effect;
 }
+/** Proof facts carried by a switch lifted from a proven jump table. Decoded
+ * instruction IDs, matched against node provenance by later stages. */
+export interface JumpTableOrigin {
+  /** The instruction whose memory read selects the table entry. Under the
+   * dominating guard every such read in the switch block addresses immutable,
+   * relocation-free table bytes, so it cannot fault and observes constants. */
+  readonly load_instruction: string;
+  /** Present only when that guard's out-of-range edge is taken exactly when the
+   * selector exceeds the largest case: guard and switch are one multi-way branch. */
+  readonly exact_guard_instruction?: string;
+}
 export type Terminator = Origin & { readonly effect: Effect } & (
     | { readonly kind: 'jump'; readonly edge: Edge }
     | {
@@ -247,6 +258,8 @@ export type Terminator = Origin & { readonly effect: Effect } & (
         readonly value: Value;
         readonly cases: readonly { readonly bits: bigint; readonly edge: Edge }[];
         readonly otherwise: Edge;
+        /** Lifted from a proven jump table (discovery ResolvedJumpTable). */
+        readonly jump_table?: JumpTableOrigin;
       }
     | { readonly kind: 'return'; readonly values: readonly Value[] }
     | {

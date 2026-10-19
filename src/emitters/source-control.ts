@@ -478,17 +478,164 @@ export function coalescePhiCopies(
   const formals = new Set(program.parameters.map((value) => value.id));
   for (const list of classes.values()) {
     if (list.length < 2) continue;
-    // Formals keep their name; otherwise choose the earliest widest declaration.
     const values = [...list].sort((a, b) => a - b).map((id) => liveness.values[id]!);
-    const representative =
-      values.find((value) => formals.has(value.id)) ??
-      values.reduce((best, value) =>
-        best.type.kind === 'integer' &&
-        value.type.kind === 'integer' &&
-        value.type.bits > best.type.bits
-          ? value
-          : best,
-      );
+    const representative = classRepresentative(values, formals);
+    for (const value of values) result.set(value.id, representative);
+  }
+  return result;
+}
+
+/** Formals keep their name; otherwise the earliest widest declaration. */
+function classRepresentative(values: readonly Value[], formals: ReadonlySet<string>): Value {
+  return (
+    values.find((value) => formals.has(value.id)) ??
+    values.reduce((best, value) =>
+      best.type.kind === 'integer' &&
+      value.type.kind === 'integer' &&
+      value.type.bits > best.type.bits
+        ? value
+        : best,
+    )
+  );
+}
+
+/** In-place update coalescing: a value defined from a printed variable that
+ * dies at that very definition (`y = f(x)`, no later read of `x`) shares its
+ * storage, so the statement prints as `x = f(x)`; candidates are `pairs`
+ * (destination, an operand leaf of its definition). Unrelated values never
+ * share. Two classes join only when no member of one is live where a member of
+ * the other is defined (including simultaneous block parameters and
+ * loop-carried liveness) and every member pair is `compatible`. `existing`
+ * classes (phi-copy coalescing) only grow. Returns the full value id ->
+ * representative map, or undefined when nothing merged or the interference
+ * graph is out of bounds. */
+export function coalesceValues(
+  program: Reconstruction,
+  liveness: VariableLiveness,
+  compatible: (a: Value, b: Value) => boolean,
+  context: OperationContext,
+  existing: ReadonlyMap<string, Value>,
+  pairs: readonly { readonly destination: Value; readonly source: Value }[],
+): Map<string, Value> | undefined {
+  if (!liveness.complete) return undefined;
+  const count = liveness.values.length,
+    words = (count + 31) >>> 5;
+  // The interference matrix is optional work: never starve the rest of the run.
+  const allowance = Math.floor((context.remainingWork?.() ?? 0) / 8);
+  let spent = 0;
+  const charge = (work: number): boolean => {
+    spent += work;
+    context.checkpoint(work);
+    return spent <= allowance;
+  };
+  // Row `i`: every value live where `i` is defined (or defined together with it).
+  const rows = new Uint32Array(count * words);
+  const mark = (a: number, b: number): void => {
+    rows[a * words + (b >>> 5)]! |= 1 << (b & 31);
+  };
+  for (const block of program.blocks.values()) {
+    const live = liveness.exit(block);
+    const events = liveness.events(block);
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i]!;
+      if (!charge(1 + (event.def ? event.ids.length * words : event.ids.length))) return undefined;
+      if (!event.def) {
+        for (const id of event.ids) live[id >>> 5]! |= 1 << (id & 31);
+        continue;
+      }
+      for (const id of event.ids) live[id >>> 5]! &= ~(1 << (id & 31));
+      for (const id of event.ids) {
+        for (let w = 0; w < words; w++) rows[id * words + w]! |= live[w]!;
+        for (const other of event.ids) if (other !== id) mark(id, other);
+      }
+    }
+    // Parameters (and formals) are bound simultaneously at entry, on every edge.
+    const entry = liveness.live(block.id)!,
+      here = liveness.bound(block);
+    if (!charge(1 + here.length * words)) return undefined;
+    for (const id of here) {
+      for (let w = 0; w < words; w++) rows[id * words + w]! |= entry[w]!;
+      for (const other of here) if (other !== id) mark(id, other);
+    }
+  }
+  const parent = Array.from({ length: count }, (_, index) => index),
+    members = new Map<number, number[]>(),
+    bits = new Map<number, Uint32Array>(),
+    conflicts = new Map<number, Uint32Array>();
+  for (let id = 0; id < count; id++) {
+    members.set(id, [id]);
+    const own = new Uint32Array(words);
+    own[id >>> 5]! |= 1 << (id & 31);
+    bits.set(id, own);
+    conflicts.set(id, rows.slice(id * words, (id + 1) * words));
+  }
+  const find = (id: number): number => {
+    while (parent[id] !== id) id = parent[id] = parent[parent[id]!]!;
+    return id;
+  };
+  const join = (a: number, b: number): void => {
+    parent[b] = a;
+    members.get(a)!.push(...members.get(b)!);
+    members.delete(b);
+    const bitsA = bits.get(a)!,
+      bitsB = bits.get(b)!,
+      rowA = conflicts.get(a)!,
+      rowB = conflicts.get(b)!;
+    for (let w = 0; w < words; w++) {
+      bitsA[w]! |= bitsB[w]!;
+      rowA[w]! |= rowB[w]!;
+    }
+    bits.delete(b);
+    conflicts.delete(b);
+  };
+  for (const [id, representative] of existing) {
+    const a = liveness.index.get(id),
+      b = liveness.index.get(representative.id);
+    if (a === undefined || b === undefined || find(a) === find(b)) continue;
+    join(find(b), find(a));
+  }
+  const before = members.size;
+  let exhausted = false;
+  /** Join two classes when they never interfere and every member pair is compatible. */
+  const attempt = (a: number, b: number): boolean => {
+    const bitsA = bits.get(a)!,
+      bitsB = bits.get(b)!,
+      rowA = conflicts.get(a)!,
+      rowB = conflicts.get(b)!;
+    if (!charge(words)) {
+      exhausted = true;
+      return false;
+    }
+    for (let w = 0; w < words; w++)
+      if (((rowA[w]! & bitsB[w]!) | (rowB[w]! & bitsA[w]!)) !== 0) return false;
+    const left = members.get(a)!,
+      right = members.get(b)!;
+    if (!charge(left.length * right.length)) {
+      exhausted = true;
+      return false;
+    }
+    for (const x of left)
+      for (const y of right)
+        if (!compatible(liveness.values[x]!, liveness.values[y]!)) return false;
+    join(a, b);
+    return true;
+  };
+  for (const pair of pairs) {
+    if (exhausted) break;
+    const d = liveness.index.get(pair.destination.id),
+      s = liveness.index.get(pair.source.id);
+    if (d === undefined || s === undefined) continue;
+    const a = find(d),
+      b = find(s);
+    if (a !== b) attempt(a, b);
+  }
+  const formals = new Set(program.parameters.map((value) => value.id));
+  if (members.size === before) return undefined;
+  const result = new Map<string, Value>();
+  for (const list of members.values()) {
+    if (list.length < 2) continue;
+    const values = [...list].sort((a, b) => a - b).map((id) => liveness.values[id]!);
+    const representative = classRepresentative(values, formals);
     for (const value of values) result.set(value.id, representative);
   }
   return result;
@@ -667,6 +814,9 @@ export interface LayoutPlan {
   readonly relocated: readonly { readonly block: string; readonly at: string }[];
   /** Tails whose every incoming edge now ends in an owned copy. */
   readonly hidden: readonly string[];
+  /** Exit blocks moved onto their only loop edge so the loop's other exits
+   * share one successor (`at`: the edge target the block was entered from). */
+  readonly merged: readonly { readonly block: string; readonly at: string }[];
 }
 
 /** Layout-only source-view rewrites. Every change keeps the original block and
@@ -923,6 +1073,160 @@ export function planLayout(
   for (const block of blocks.values())
     for (const transfer of controlTransfers(block.control))
       edges.set(transfer.target, (edges.get(transfer.target) ?? 0) + 1);
+  // 0. A loop's lexical successor is the exit most of its edges reach, so those
+  // edges become breaks instead of tail copies. Every other exit is either a
+  // tail (still copied) or a block entered by one loop edge only, which then
+  // moves onto that edge and ends in a break or a tail copy.
+  const merged: { block: string; at: string }[] = [];
+  const successors = (region: Region, owned: ReadonlySet<string>, counts: Map<string, number>) => {
+    context.checkpoint(1);
+    if (region.kind === 'sequence')
+      for (const child of region.regions) successors(child, owned, counts);
+    else if (region.kind === 'loop') successors(region.body, owned, counts);
+    else {
+      for (const transfer of controlTransfers(region.control))
+        if (!owned.has(transfer.target))
+          counts.set(transfer.target, (counts.get(transfer.target) ?? 0) + 1);
+      for (const arm of controlArms(region.control))
+        if (arm.body) successors(arm.body, owned, counts);
+    }
+  };
+  /** `home` placed where the only edge to `id` leaves the region. */
+  const embed = (region: Region, id: string, home: BlockRegion): Region | null => {
+    context.checkpoint(1);
+    if (region.kind === 'sequence') {
+      for (let index = 0; index < region.regions.length; index++) {
+        const changed = embed(region.regions[index]!, id, home);
+        if (changed)
+          return sequence(region.regions.map((child, i) => (i === index ? changed : child)));
+      }
+      return null;
+    }
+    if (region.kind === 'loop') {
+      const changed = embed(region.body, id, home);
+      return changed && { ...region, body: changed };
+    }
+    if (region.control.kind === 'jump')
+      return region.control.transfer.target === id ? sequence([region, home]) : null;
+    let found = false;
+    const control = mapArms(region.control, (arm) => {
+      if (found) return arm;
+      if (!arm.body && arm.transfer.target === id) {
+        found = true;
+        return { ...arm, body: home };
+      }
+      const changed = arm.body ? embed(arm.body, id, home) : null;
+      if (changed) {
+        found = true;
+        return { ...arm, body: changed };
+      }
+      return arm;
+    });
+    return found ? { ...region, control } : null;
+  };
+  const joinExits = (children: Region[], index: number): Region[] | null => {
+    const loop = children[index]!;
+    if (loop.kind !== 'loop') return null;
+    const owned = new Set<string>(),
+      counts = new Map<string, number>();
+    scan(loop.body, owned, new Set());
+    successors(loop.body, owned, counts);
+    let shared: string | null = null,
+      top = 1,
+      tie = false;
+    for (const [id, count] of counts) {
+      if (count > top) [shared, top, tie] = [id, count, false];
+      else if (count === top && shared !== null) tie = true;
+    }
+    if (shared === null || tie) return null;
+    const siblingBlock = (id: string): number =>
+      children.findIndex((child, at) => at > index && child.kind === 'block' && child.id === id);
+    const sharedIndex = siblingBlock(shared);
+    if (sharedIndex < 0) return null;
+    const sunk = new Map<number, BlockRegion>();
+    let inside: Region = loop;
+    for (const id of counts.keys()) {
+      if (id === shared) continue;
+      const at = siblingBlock(id),
+        sibling = at < 0 ? undefined : (children[at] as BlockRegion),
+        entries = incomingEdges.get(id) ?? [];
+      if (
+        sibling &&
+        id !== program.function.entry &&
+        entries.length === 1 &&
+        owned.has(entries[0]!.block) &&
+        (terminal(id) ||
+          (sibling.control.kind === 'jump' &&
+            (sibling.control.transfer.target === shared ||
+              isTail(sibling.control.transfer.target))))
+      ) {
+        const embedded = embed(inside, id, sibling);
+        if (!embedded) return null;
+        inside = embedded;
+        sunk.set(at, sibling);
+      } else if (!isTail(id)) return null;
+    }
+    if (!sunk.size) return null;
+    const result = children.flatMap((child, at) =>
+      at === index ? [inside] : sunk.has(at) ? [] : [child],
+    );
+    // Only the shared exit may follow the loop, and every edge of the loop
+    // (including the moved blocks') that reaches it must print as a break.
+    const next = result.findIndex((child, at) => at > index && firstBlock(child) !== null);
+    if (next < 0 || firstBlock(result[next]!) !== shared) return null;
+    let exact = true;
+    visitTransfers(sequence(result), language, context, (occurrence) => {
+      if (
+        occurrence.transfer.target === shared &&
+        (owned.has(occurrence.block) ||
+          [...sunk.values()].some((s) => s.id === occurrence.block)) &&
+        occurrenceAction(occurrence, language) !== 'break'
+      )
+        exact = false;
+    });
+    if (!exact) return null;
+    for (const block of sunk.values())
+      merged.push({
+        block: block.id,
+        at: incomingEdges.get(block.id)![0]!.transfer.target,
+      });
+    return result;
+  };
+  const consolidate = (region: Region): Region => {
+    context.checkpoint(1);
+    if (region.kind === 'loop') {
+      const inner = consolidate(region.body);
+      return inner === region.body ? region : { ...region, body: inner };
+    }
+    if (region.kind === 'block') {
+      let changed = false;
+      const control = mapArms(region.control, (arm) => {
+        if (!arm.body) return arm;
+        const inner = consolidate(arm.body);
+        if (inner === arm.body) return arm;
+        changed = true;
+        return { ...arm, body: inner };
+      });
+      return changed ? { ...region, control } : region;
+    }
+    const children = region.regions.map(consolidate);
+    const changed = children.some((child, index) => child !== region.regions[index]);
+    // A loop and the exit that follows it may sit in different nested
+    // sequences; sequences carry no layout of their own, so join on the flat list.
+    let flat = children.flatMap(function flatten(child): Region[] {
+      return child.kind === 'sequence' ? child.regions.flatMap(flatten) : [child];
+    });
+    let joinedAny = false;
+    for (let index = 0; index < flat.length; index++) {
+      const joined = joinExits(flat, index);
+      if (joined) {
+        flat = joined;
+        joinedAny = true;
+      }
+    }
+    return joinedAny ? sequence(flat) : changed ? sequence(children) : region;
+  };
+  body = consolidate(body);
   const sinks = new Map<ParallelTransfer, string>();
   visitTransfers(body, language, context, (occurrence) => {
     const id = occurrence.transfer.target;
@@ -1129,7 +1433,7 @@ export function planLayout(
     presented = prune(presented) ?? presented;
     for (const id of drop) hidden.add(id);
   }
-  return { body: presented, clones, duplicated, relocated, ordered, hidden: [...hidden] };
+  return { body: presented, clones, duplicated, relocated, merged, ordered, hidden: [...hidden] };
 }
 
 /** Facts the loop-form planner needs from the printed program. */
@@ -1144,6 +1448,9 @@ export interface LoopFacts {
   readonly plain: (control: Control) => boolean;
   /** Representative variable ids read when printing the condition. */
   readonly reads: (control: Extract<Control, { kind: 'if' }>) => readonly string[];
+  /** The block heads a flag-carried short-circuit test (see planFlagTests):
+   * the id of its merge block, whose `if` prints the whole test. */
+  readonly flag: (block: BlockRegion) => string | undefined;
   /** Any value of these variables is live entering the block. */
   readonly live: (block: string, variables: readonly string[]) => boolean;
   /** Restate a condition so it holds after the repeat copies ran; false when
@@ -1168,6 +1475,69 @@ export interface LoopFacts {
 export interface Guard {
   readonly control: Extract<Control, { kind: 'if' }>;
   readonly value: boolean;
+}
+
+/** Source view: the range guard of a proven jump table and its switch print as
+ * one switch. A guard block ends in an `if` built from the instruction the
+ * switch's `jump_table.exact_guard_instruction` names: discovery proved that
+ * instruction's out-of-range edge is taken exactly when the selector exceeds
+ * every case. One arm enters, copy-free, only the switch block, which prints
+ * nothing and is otherwise `eligible`, and owns no `otherwise` body; the other
+ * arm goes to the switch's own `otherwise` target. The switch then prints in the
+ * guard's place with that other arm as its `otherwise`, so no statement, copy
+ * or effect moves.
+ * Returns the folded guard `if` controls by switch control id. */
+export function foldSwitchGuards(
+  body: Region,
+  eligible: (guard: BlockRegion, target: BlockRegion) => boolean,
+  copies: (transfer: ParallelTransfer) => number,
+  context: OperationContext,
+): { readonly body: Region; readonly guards: ReadonlyMap<string, Control> } {
+  const guards = new Map<string, Control>();
+  const fold = (region: Region): Region => {
+    context.checkpoint(1);
+    if (region.kind === 'sequence') {
+      const regions = region.regions.map(fold);
+      return regions.every((child, index) => child === region.regions[index])
+        ? region
+        : sequence(regions);
+    }
+    if (region.kind === 'loop') {
+      const inner = fold(region.body);
+      return inner === region.body ? region : { ...region, body: inner };
+    }
+    let changed = false;
+    const control = mapArms(region.control, (arm) => {
+      if (!arm.body) return arm;
+      const inner = fold(arm.body);
+      if (inner === arm.body) return arm;
+      changed = true;
+      return { ...arm, body: inner };
+    });
+    if (control.kind === 'if')
+      for (const [inside, outside] of [
+        [control.when_true, control.when_false],
+        [control.when_false, control.when_true],
+      ] as const) {
+        const target = inside.body;
+        if (target?.kind !== 'block' || target.control.kind !== 'switch') continue;
+        const exact = target.control.jump_table?.exact_guard_instruction;
+        if (
+          exact !== undefined &&
+          control.provenance.instruction_ids.includes(exact) &&
+          inside.transfer.target === target.id &&
+          copies(inside.transfer) === 0 &&
+          !target.control.otherwise.body &&
+          outside.transfer.target === target.control.otherwise.transfer.target &&
+          eligible(region, target)
+        ) {
+          guards.set(target.control.id, region.control);
+          return { ...region, control: { ...target.control, otherwise: outside } };
+        }
+      }
+    return changed ? { ...region, control } : region;
+  };
+  return { body: fold(body), guards };
 }
 
 /** Choose `for (init; cond; step)`, `while (cond)` or `do { } while (cond)`
@@ -1242,53 +1612,81 @@ export function planLoopForms(
       }
       return region;
     };
+    // The leading lexical region of a pending list.
+    const unfold = (list: readonly Region[]): readonly Region[] => {
+      let rest = list;
+      while (rest[0]?.kind === 'sequence') {
+        context.checkpoint(1);
+        rest = [...rest[0].regions, ...rest.slice(1)];
+      }
+      return rest;
+    };
     // Follow only the initial straight-line chain. A stage has one lexical
     // entry and copy-free break/stay edges; later definitions
-    // never move ahead of the tests which guard them.
+    // never move ahead of the tests which guard them. The head of a
+    // flag-carried short circuit and its merge right after it form one stage
+    // that tests the merge's `if`.
     const chain: { block: string; test: string; enter: boolean }[] = [];
     let pending: readonly Region[] = regions;
     while (pending.length) {
       context.checkpoint(1);
+      pending = unfold(pending);
       const first = pending[0]!;
-      if (first.kind === 'sequence') {
-        pending = [...first.regions, ...pending.slice(1)];
-        continue;
+      if (first.kind !== 'block') break;
+      let rest: readonly Region[] = pending.slice(1),
+        tested: BlockRegion = first;
+      const merge = facts.flag(first);
+      if (merge !== undefined) {
+        rest = unfold(rest);
+        const next = rest[0];
+        if (next?.kind !== 'block' || next.id !== merge || !facts.silent(next)) break;
+        tested = next;
+        rest = rest.slice(1);
       }
       if (
-        first.kind !== 'block' ||
-        first.control.kind !== 'if' ||
-        !facts.plain(first.control) ||
+        tested.control.kind !== 'if' ||
+        !facts.plain(tested.control) ||
         !facts.silent(first) ||
         (!chain.length && first.id !== loop.header) ||
         (chain.length > 0 && (incoming.get(first.id)?.length ?? 0) !== 1)
       )
         break;
-      const control = first.control;
+      const control = tested.control;
       const enter = exit(control.when_false) ? true : exit(control.when_true) ? false : undefined;
       if (enter === undefined) break;
       const stay = enter ? control.when_true : control.when_false;
       if (facts.writes(stay.transfer).length) break;
       chain.push({ block: first.id, test: control.id, enter });
-      pending = stay.body ? [stay.body, ...pending.slice(1)] : pending.slice(1);
+      pending = stay.body ? [stay.body, ...rest] : rest;
       if (pending.length && firstBlock(pending[0]!) !== stay.transfer.target) break;
     }
     if (chain.length > 1)
       return { kind: 'while', test: chain[0]!.test, enter: chain[0]!.enter, chain };
     const head = edge('first');
-    if (
-      head?.kind === 'block' &&
-      head.id === loop.header &&
-      head.control.kind === 'if' &&
-      facts.plain(head.control) &&
-      facts.silent(head)
-    ) {
-      const control = head.control,
+    const headMerge = head?.kind === 'block' ? facts.flag(head) : undefined;
+    let headTest: Extract<Control, { kind: 'if' }> | undefined;
+    if (head?.kind === 'block' && head.id === loop.header && facts.silent(head)) {
+      if (headMerge === undefined) headTest = head.control.kind === 'if' ? head.control : undefined;
+      else {
+        const next = unfold(unfold([loop.body]).slice(1))[0];
+        if (
+          next?.kind === 'block' &&
+          next.id === headMerge &&
+          next.control.kind === 'if' &&
+          facts.silent(next)
+        )
+          headTest = next.control;
+      }
+    }
+    if (headTest && facts.plain(headTest)) {
+      const control = headTest,
         stayTrue = !exit(control.when_true, true),
         stayFalse = !exit(control.when_false, true);
       if (stayTrue !== stayFalse) {
         // The body's lexical end is the only repeat edge: it becomes the step.
         const repeats = entries.filter((occurrence) => inside.has(occurrence.block));
         if (
+          headMerge === undefined &&
           language === 'c-like' &&
           init &&
           repeats.length === 1 &&

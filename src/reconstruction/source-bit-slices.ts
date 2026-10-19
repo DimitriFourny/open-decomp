@@ -21,6 +21,52 @@ type Make = (
   contributors?: readonly Value[],
 ) => Value;
 
+/** A join of consecutive slices that together are exactly one value
+ * (`concat(x[0:a], x[a:b], ..., x[z:w])`), optionally followed by constant-zero
+ * upper parts, is that value (zero-extended). Pure wiring: every bit and every
+ * opaque dependency is the operand's own, so the operand may itself be
+ * arithmetic or unknown without being looked through. */
+export function wholeValueConcat(
+  result: Value,
+  expression: Expression,
+  observe: (id: string) => Expression | undefined,
+): Expression | null {
+  if (
+    result.type.kind !== 'integer' ||
+    expression.kind !== 'concat' ||
+    expression.values.length < 2
+  )
+    return null;
+  let base: Value | null = null,
+    offset = 0,
+    covered = 0,
+    sliced = 0;
+  for (const part of expression.values) {
+    const definition = observe(part.id);
+    if (base && offset === bitWidth(base.type)) {
+      // Everything above the whole value must be a constant zero.
+      if (definition?.kind !== 'constant' || BigInt.asUintN(bitWidth(part.type), definition.bits))
+        return null;
+    } else {
+      if (
+        definition?.kind !== 'extract' ||
+        definition.offset !== offset ||
+        (base && base.id !== definition.value.id)
+      )
+        return null;
+      base = definition.value;
+      sliced++;
+      covered += bitWidth(part.type);
+    }
+    offset += bitWidth(part.type);
+  }
+  if (!base || sliced < 2 || covered !== bitWidth(base.type) || offset !== bitWidth(result.type))
+    return null;
+  return sameType(result.type, base.type)
+    ? { kind: 'cast', op: 'bitcast', value: base }
+    : { kind: 'cast', op: 'zero_extend', value: base };
+}
+
 /** Exact, bounded wiring analysis, not arithmetic equivalence or ABI inference.
  * Opaque SSA leaves retain identity and ordered indeterminate dependencies. */
 export function recombineBitSlices(

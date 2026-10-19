@@ -457,6 +457,8 @@ const simplifications = {
     'xor with the all-ones constant of the result width is the bitwise complement of the other operand',
   negative_addend:
     'adding a constant in the upper half of the result width is subtracting its two-complement magnitude: the same value modulo 2^width',
+  rotate_inline:
+    'a rotation of a w-bit unsigned bare variable by a constant 0<k<w is (x << k) | (x >> (w-k)) reduced to w bits, printed in the direction with the smaller count; the variable is pure, so reading it twice in one expression is exact',
 } as const;
 
 /** Source-view syntax shared by expression and memory printing. */
@@ -1077,6 +1079,55 @@ export function expressionText(
           shifted = left.ctype!;
         }
         return printer.reduce(width, printer.binary('<<', left, amount, shifted));
+      }
+      // A constant rotation of a bare variable is the two shifts joined, in the
+      // direction with the smaller count. The variable is read at one program
+      // point, so printing it twice cannot observe a different value.
+      if (
+        (expression.op === 'rol' || expression.op === 'ror') &&
+        count !== undefined &&
+        count > 0n &&
+        count < BigInt(width) &&
+        type.kind === 'integer' &&
+        [8, 16, 32, 64].includes(width) &&
+        bitWidth(expression.left.type) === width
+      ) {
+        let rotated = operand(expression.left);
+        const known = range(rotated, width);
+        if (known.signed || known.bits > width || (!python && known.bits !== width))
+          rotated = printer.cast(width, false, rotated);
+        const right = expression.op === 'ror' ? Number(count) : width - Number(count),
+          left = width - right;
+        if (printer.sameVariable(rotated, rotated) && printer.simplify('rotate_inline')) {
+          const bits = range(rotated, width).bits;
+          const toLeft = printer.binary(
+              '<<',
+              rotated,
+              printer.literal(BigInt(left), 32),
+              python ? { bits: bits + left, signed: false } : promote(range(rotated, width)),
+            ),
+            toRight = printer.binary(
+              '>>',
+              rotated,
+              printer.literal(BigInt(right), 32),
+              python
+                ? { bits: Math.max(1, bits - right), signed: false }
+                : promote(range(rotated, width)),
+            );
+          const first = left < right || (left === right && expression.op === 'rol');
+          const [a, b] = first ? [toLeft, toRight] : [toRight, toLeft];
+          return printer.reduce(
+            width,
+            printer.binary(
+              '|',
+              a,
+              b,
+              python
+                ? { bits: Math.max(a.ctype!.bits, b.ctype!.bits), signed: false }
+                : usualArithmetic(a.ctype!, b.ctype!),
+            ),
+          );
+        }
       }
       return helper();
     }

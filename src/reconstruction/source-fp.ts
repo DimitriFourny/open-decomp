@@ -52,6 +52,15 @@ export function sourceFpPresentation(
       context.checkpoint(1);
       if (floating?.has(copy.destination.id)) literal(copy.source.id);
     }
+  // A literal stored to an FP slot local joins the component like a phi copy.
+  if (program.source.float_locals?.size)
+    for (const block of program.blocks.values())
+      for (const node of block.statements) {
+        context.checkpoint(1);
+        const local = node.kind === 'store' ? program.source.locals.get(node.id) : undefined;
+        if (node.kind === 'store' && local && program.source.float_locals.has(local.id))
+          literal(node.value.id);
+      }
   if (
     literals.size &&
     validation.presentation(
@@ -86,9 +95,13 @@ export function sourceFpPresentation(
   };
   for (const binding of program.blocks.get(program.function.entry)!.register_entry)
     if (environment(binding.register)) epochs.add(binding.value.id);
+  // The last effect of a block that ends in an unresolved exit cannot change the
+  // environment of any recorded operation: no modeled code executes after it.
+  const terminalEffects = new Set<string>(),
+    terminalBlocks = new Set<string>();
   for (const block of program.blocks.values()) {
     context.checkpoint(1);
-    for (const node of block.statements) {
+    for (const [index, node] of block.statements.entries()) {
       if (node.kind === 'write_register' && environment(node.register)) return unchanged;
       // Opaque instructions can write control state. Recognized guard failures
       // are the only opaque effects removed by the conditional presentation.
@@ -96,8 +109,12 @@ export function sourceFpPresentation(
         node.kind === 'unknown_effect' &&
         node.register_outputs.some((binding) => environment(binding.register)) &&
         !guardSubjects.has(node.id)
-      )
-        return unchanged;
+      ) {
+        if (block.control.kind !== 'unknown' || index !== block.statements.length - 1)
+          return unchanged;
+        terminalEffects.add(node.id);
+        terminalBlocks.add(block.id);
+      }
       if (node.kind === 'call')
         for (const binding of node.register_outputs)
           if (environment(binding.register)) epochs.add(binding.value.id);
@@ -134,9 +151,20 @@ export function sourceFpPresentation(
       if (
         environment(binding.register) &&
         !assumedEpoch(binding.value.id) &&
-        !guardSubjects.has(block.control.id)
+        !guardSubjects.has(block.control.id) &&
+        !terminalBlocks.has(block.id)
       )
         return unchanged;
+  if (
+    terminalEffects.size &&
+    !validation.presentation(
+      'fp_terminal_effect',
+      program.function.id,
+      'opaque effect that is the last statement of a block ending in an unresolved exit: no modeled operation or exit overlay executes after it, so its possible environment writes change no recorded epoch; the effect and the unresolved exit stay printed',
+      [...terminalEffects].slice(0, 64),
+    )
+  )
+    return unchanged;
   const failureOnly = (region: Region | undefined, id: string): boolean =>
     !region ||
     (region.kind === 'block'
@@ -149,11 +177,14 @@ export function sourceFpPresentation(
     const no = requirement.site.supported_predicate_value ? control.when_false : control.when_true;
     if (predecessors.get(no.transfer.target) !== 1 || !failureOnly(no.body, no.transfer.target))
       continue;
+    // Only the planner's exact MXCSR guard tests the unsupported state.
     if (
       !validation.presentation(
         'fp_environment_guard',
         control.id,
-        'exact lifter environment guard; unknown entry/call epoch, no explicit environment writer; unsupported arm is exclusively owned; supported edge and copies unchanged',
+        requirement.site.supported_predicate_value
+          ? 'exact lifter environment guard; unknown entry/call epoch, no explicit environment writer; unsupported arm is exclusively owned; supported edge and copies unchanged'
+          : 'exact lifter x86 MXCSR[6:16] guard (all exceptions masked, DAZ off, round to nearest, FTZ off); unknown entry/call epoch, no explicit MXCSR control writer (exception-status MXCSR[0:6] writes are disjoint); unsupported arm is exclusively owned; supported edge and copies unchanged',
         requirement.site.subject_ids,
         `Conditional on ${requirement.requirement.id} at ${requirement.site.id}, epoch ${requirement.site.state_epoch}; original guard and failure remain in checked view and requirement metadata`,
       )

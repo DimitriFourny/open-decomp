@@ -186,3 +186,104 @@ for (const scenario of [
     assert.equal(first.copies.length, 2, 'original machine transfer remains immutable');
   });
 }
+
+type Unavailable = Extract<Expression, { kind: 'indeterminate' }>;
+for (const scenario of ['same-reason', 'different-reason', 'undefined-state', 'mixed'] as const)
+  test(`register cell recombination of unavailable cells: ${scenario}`, () => {
+    const value = (id: string, bits = 32): Value => ({ id, type: integer(bits) });
+    const low = value('low'),
+      high = value('high'),
+      b = value('b', 64),
+      unknownLow = value('unknown-low'),
+      unknownHigh = value('unknown-high'),
+      bLow = value('b-low'),
+      bHigh = value('b-high');
+    const effect = { id: 'effect', type: effectType };
+    const block: BlockRegion = {
+      id: 'join',
+      kind: 'block',
+      provenance,
+      parameters: [low, high],
+      effect_parameter: effect,
+      dominator: null,
+      register_exit: [],
+      statements: [],
+      register_entry: [
+        { register: register('lo', 32), value: low },
+        { register: register('hi', 32, 32), value: high },
+      ],
+      control: { id: 'return', kind: 'return', provenance, values: [], effect },
+    };
+    const transfer = (lo: Value, hi: Value): ParallelTransfer => ({
+      kind: 'transfer',
+      target: block.id,
+      mode: 'next',
+      effect: { source: effect, destination: effect },
+      copies: [
+        { destination: low, source: lo },
+        { destination: high, source: hi },
+      ],
+    });
+    const first = transfer(unknownLow, unknownHigh),
+      second = transfer(bLow, bHigh);
+    const unavailable = (reason: string, state: Unavailable['state'] = 'unknown'): Expression => ({
+      kind: 'indeterminate',
+      state,
+      reason,
+    });
+    const definitions = new Map<string, Expression>([
+      [unknownLow.id, unavailable('non-argument entry register')],
+      [
+        unknownHigh.id,
+        unavailable(
+          scenario === 'different-reason' ? 'FPCR environment' : 'non-argument entry register',
+          scenario === 'undefined-state' ? 'undefined' : 'unknown',
+        ),
+      ],
+      [bLow.id, { kind: 'extract', value: b, offset: 0 }],
+      [bHigh.id, { kind: 'extract', value: b, offset: 32 }],
+    ]);
+    if (scenario === 'mixed') definitions.set(unknownHigh.id, { kind: 'constant', bits: 1n });
+    // The loop reads both cells as one 64-bit register.
+    definitions.set('read', { kind: 'concat', values: [low, high] });
+    const incoming = new Map([
+      [low.id, [unknownLow, bLow]],
+      [high.id, [unknownHigh, bHigh]],
+    ]);
+    const blocks = new Map([[block.id, block]]),
+      context = createOperationContext();
+    const validation = new LocalValidationSession(context);
+    const result = recombineSourceCells(
+      blocks,
+      [
+        { transfer: first, block },
+        { transfer: second, block },
+      ],
+      definitions,
+      incoming,
+      {
+        make: (key, type, _block, expression) => {
+          if (expression) definitions.set(key, expression);
+          return { id: key, type };
+        },
+        alias: (target, expression) => {
+          definitions.set(target.id, expression);
+        },
+      },
+      validation,
+      context,
+    );
+    if (scenario !== 'same-reason') {
+      assert.equal(result.size, 0);
+      assert.deepEqual(blocks.get(block.id)!.parameters, [low, high]);
+      return;
+    }
+    const whole = result.get(first)![0]!.destination;
+    const entered = result.get(first)![0]!.source;
+    assert.deepEqual(definitions.get(entered.id), unavailable('non-argument entry register'));
+    assert.equal(entered.type.kind === 'integer' && entered.type.bits, 64);
+    assert.deepEqual(result.get(second), [{ destination: whole, source: b }]);
+    assert.deepEqual(definitions.get(low.id), { kind: 'extract', value: whole, offset: 0 });
+    assert.deepEqual(definitions.get(high.id), { kind: 'extract', value: whole, offset: 32 });
+    assert.ok(validation.records.some((record) => record.rule === 'register_cell_recombination'));
+  });

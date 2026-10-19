@@ -634,7 +634,17 @@ class Parser {
         if (this.peek() === '_') {
           this.take('_');
           otherwise = this.ops.length;
-        } else cases.push({ value: this.expression(), start: this.ops.length });
+        } else {
+          // `case a | b:` is a literal alternative pattern, not a bitwise or.
+          const start = this.ops.length;
+          const alternatives = (value: Expr): void => {
+            if (value.kind === 'binary' && value.op === '|') {
+              alternatives(value.left);
+              alternatives(value.right);
+            } else cases.push({ value, start });
+          };
+          alternatives(this.expression());
+        }
         this.take(':');
         this.take('\n');
         this.pythonBlock();
@@ -652,8 +662,8 @@ class Parser {
         });
         this.ops.push({ kind: 'jump', target: item.start });
       }
-      assert.ok(otherwise >= 0);
-      this.ops.push({ kind: 'jump', target: otherwise });
+      // Without a wildcard, an unmatched value leaves the match.
+      this.ops.push({ kind: 'jump', target: otherwise >= 0 ? otherwise : this.ops.length + 1 });
       for (const end of ends) end.target = this.ops.length;
       return;
     }
@@ -871,7 +881,8 @@ class Parser {
           this.take(':');
           otherwise = this.ops.length;
         }
-        this.block(exits);
+        // Consecutive labels share the next label's statements.
+        if (this.peek() !== 'case' && this.peek() !== 'default') this.block(exits);
       }
       this.take('}');
       dispatch.target = this.ops.length;
@@ -883,8 +894,8 @@ class Parser {
         });
         this.ops.push({ kind: 'jump', target: item.start });
       }
-      assert.ok(otherwise >= 0);
-      this.ops.push({ kind: 'jump', target: otherwise });
+      // Without a default, an unmatched value leaves the switch.
+      this.ops.push({ kind: 'jump', target: otherwise >= 0 ? otherwise : this.ops.length + 1 });
       for (const index of exits) {
         const op = this.ops[index]!;
         if (op.kind === 'jump') op.target = this.ops.length;

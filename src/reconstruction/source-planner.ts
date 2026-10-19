@@ -628,6 +628,68 @@ export function planSource(
         !candidates.some((register) => register.root === location.register.root)
       )
         candidates.push({ ...location.register, width_bits: location.width_bits });
+  // A hidden-result pointer register outside the argument registers (AAPCS64
+  // x8) that is read at entry and addresses stores is the incoming indirect
+  // result location: a formal, not an unknown entry value. Such a function
+  // returns its aggregate through memory and no result register.
+  const hidden = abi.classifyCall({
+    returns: {
+      kind: 'aggregate',
+      size: 32n,
+      alignment: 8,
+      fields: [0n, 8n, 16n, 24n].map((offset) => ({ offset, type: word })),
+    },
+    parameters: [],
+    variadic: false,
+    fixed_parameter_count: 0,
+  }).hidden_result;
+  let indirectResult = false;
+  if (
+    view === 'source' &&
+    hidden?.kind === 'indirect' &&
+    'root' in hidden.pointer &&
+    !candidates.some(
+      (register) => 'root' in hidden.pointer && register.root === hidden.pointer.root,
+    )
+  ) {
+    const pointer = hidden.pointer;
+    const cells = new Set(
+      entry.register_entry
+        .filter((binding) => binding.register.root === pointer.root)
+        .map((binding) => binding.value.id),
+    );
+    const derived = (value: Value, depth: number): boolean => {
+      if (cells.has(value.id)) return true;
+      const expression = depth < 8 ? expressions.get(value.id) : undefined;
+      return (
+        expression !== undefined &&
+        expressionOperands(expression).some((operand) => derived(operand, depth + 1))
+      );
+    };
+    const stores: string[] = [];
+    for (const block of blocks.values())
+      for (const node of block.statements) {
+        context.checkpoint(1);
+        if (node.kind === 'store' && derived(node.address, 0)) stores.push(node.id);
+      }
+    if (
+      stores.length &&
+      validation.presentation(
+        'indirect_result',
+        input.function.id,
+        `${pointer.root} is the target ABI's hidden-result pointer register, outside its argument registers; it is read at entry and addresses stores, so it is presented as the incoming indirect result location formal, and the function as void-like: such a function returns through that memory and no result register`,
+        stores.slice(0, 64),
+      )
+    ) {
+      validation.requireAbi(
+        'indirect_result',
+        [input.function.id],
+        `Presenting ${pointer.root} as a formal and every exit register slice as scratch assumes ABI conformance: a register read before any write is an input only in its ABI role, here the caller-provided indirect result location, and callers of such a function read the result from that memory, not from registers. Exact exit slices remain in the exit metadata and checked view.`,
+      );
+      candidates.push(pointer);
+      indirectResult = true;
+    }
+  }
   for (const register of candidates) {
     const cells = entry.register_entry.filter(
       (binding) =>
@@ -742,30 +804,37 @@ export function planSource(
   const integerReturn = layout.returns[0],
     floatingReturn = floatLayout.returns[0];
   let primaryResult: SourcePrimaryResult | null =
-    view === 'source' &&
-    !functionSignature &&
-    integerReturn?.kind === 'register' &&
-    floatingReturn?.kind === 'register' &&
-    [...blocks.values()].every(
-      (block) => block.control.kind !== 'return' || block.control.values.length === 0,
-    )
-      ? selectSourcePrimaryResult({
-          blocks,
-          entry,
-          expressions,
-          sources: storageSources,
-          typed: typedSlices,
-          parameters: parameterRegisters,
-          callResults,
-          stack: input.types?.calls?.stack,
-          integer: integerReturn,
-          floating: floatingReturn,
-          argumentRoots: new Set(candidates.map((register) => register.root)),
-          demands: evidence.function_return_demands ?? [],
-          observed: evidence.function_returns?.registers ?? [],
-          context,
-        })
-      : null;
+    indirectResult && !functionSignature
+      ? {
+          kind: 'none',
+          written: true,
+          reason: 'returns through the incoming indirect result location',
+          void_like: 'indirect_result',
+        }
+      : view === 'source' &&
+          !functionSignature &&
+          integerReturn?.kind === 'register' &&
+          floatingReturn?.kind === 'register' &&
+          [...blocks.values()].every(
+            (block) => block.control.kind !== 'return' || block.control.values.length === 0,
+          )
+        ? selectSourcePrimaryResult({
+            blocks,
+            entry,
+            expressions,
+            sources: storageSources,
+            typed: typedSlices,
+            parameters: parameterRegisters,
+            callResults,
+            stack: input.types?.calls?.stack,
+            integer: integerReturn,
+            floating: floatingReturn,
+            argumentRoots: new Set(candidates.map((register) => register.root)),
+            demands: evidence.function_return_demands ?? [],
+            observed: evidence.function_returns?.registers ?? [],
+            context,
+          })
+        : null;
   const exitIds = [...blocks.values()].flatMap((block) =>
     block.control.kind === 'return' ? [block.control.id] : [],
   );
@@ -793,9 +862,26 @@ export function planSource(
         `Present the ABI ${floating ? 'floating-point' : 'integer'} return register as the single result; callers read no ${floating ? 'integer' : 'floating-point'} result register. The rejected register keeps its exact exit value in the exit metadata and checked view.`,
       );
     else primaryResult = { kind: 'explicit', written: true, reason: 'presentation record bound' };
+  } else if (primaryResult?.kind === 'none' && primaryResult.void_like === 'incidental_result') {
+    if (
+      validation.presentation(
+        'incidental_result',
+        input.function.id,
+        'void-like source interface: the integer result register qualifies on every exit, but no caller demands it, the FP result register is unchanged or undefined on every exit, no tail transfer exists, and no exit path establishes it deliberately (moved back after a call/unknown-effect clobber on some path, another argument copied in, a projected call result that is the final action, or a constant/load/computation consumed by nothing but function exits and stores); call results left in place before later effects, untouched arguments and values that also address memory or feed calls or branches stay in exit metadata',
+        exitIds,
+        primaryResult.reason,
+      )
+    )
+      validation.requireAbi(
+        'incidental_result',
+        exitIds,
+        'Presenting a void-like interface assumes callers read no result register; no caller was scanned and no result-use evidence exists. The integer result register keeps its exact exit value in the exit metadata and checked view.',
+      );
+    else primaryResult = { kind: 'integer' };
   } else if (
     (primaryResult?.kind === 'explicit' || primaryResult?.kind === 'none') &&
-    primaryResult.written
+    primaryResult.written &&
+    !primaryResult.void_like
   )
     validation.presentation(
       'primary_result',
@@ -808,8 +894,10 @@ export function planSource(
   // rejects it: it records which registers were written, not which one is read.
   const floatingRoot =
     floatingReturn?.kind === 'register' ? floatingReturn.register.root : undefined;
+  const voidLike = primaryResult?.kind === 'none' ? primaryResult.void_like : undefined;
   const observedRejected =
     primaryResult?.kind === 'explicit' ||
+    voidLike !== undefined ||
     (evidence.function_returns?.registers ?? []).some((register) =>
       primaryResult?.kind === 'float'
         ? register.root !== floatingRoot
@@ -1115,6 +1203,7 @@ export function planSource(
     ...(returnTypes ? { return_types: returnTypes } : {}),
     ...(returnPointer === undefined ? {} : { return_pointer: returnPointer }),
     ...(observedRejected ? { observed_result_rejected: true as const } : {}),
+    ...(voidLike ? { void_like_result: voidLike } : {}),
     requirements: planSourceRequirements(
       input,
       blocks,

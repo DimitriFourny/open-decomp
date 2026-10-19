@@ -76,6 +76,7 @@ function counted(
     unrolled?: boolean;
     untested?: boolean;
     seeded?: boolean;
+    inclusive?: boolean;
   } = {},
 ): Loop & { seed: Value } {
   const { step = 1n, op = 'add', float = false, merge = false, constantFold } = options;
@@ -93,7 +94,7 @@ function counted(
   const [index, fold] = head.parameters as [Value, Value];
   const condition = options.untested
     ? head.compare('ne', bound, head.constant(i32, 0n))
-    : head.compare('ult', index, bound);
+    : head.compare(options.inclusive ? 'ule' : 'ult', index, bound);
   head.branch(condition, head.edge(body), head.edge(exit, [fold]));
   const address = body.int(
     'add',
@@ -141,6 +142,13 @@ for (const language of ['c-like', 'python-like'] as const)
       assert.equal(stem(name(output, bound)), 'count');
       // The checked view never carries role names.
       assert.doesNotMatch(emit(input, language, 'checked').emission.text, /\bindex\b|\bcount\b/);
+    });
+
+    test('an inclusive test makes the bound the last index, a limit, not the count', () => {
+      const { input, bound, index } = counted('index-inclusive', { inclusive: true });
+      const output = emit(input, language);
+      assert.equal(stem(name(output, index)), 'index');
+      assert.equal(stem(name(output, bound)), 'limit');
     });
 
     test('a larger constant step is still index; its bound is limit, not count', () => {
@@ -480,17 +488,208 @@ for (const language of ['c-like', 'python-like'] as const)
       assert.match(text, /\blocal_/);
       assert.match(text, /\baccumulator\b/);
     });
-    test('a reload kept for a post-increment is a copy, not a second index', () => {
+    test('a reload kept for a post-increment reads the slot itself, which is updated after its reader', () => {
       const text = emitSlots(slotLoop('post-increment', { postIncrement: true }));
       assert.match(text, /\bindex\b/);
       assert.doesNotMatch(text, /\bindex_\d+\b/);
-      // The kept reload exists as its own neutral temporary.
-      assert.match(text, /\bvalue\d+ = index\b/);
+      // No temporary copy of the old index: the store through it prints first.
+      assert.doesNotMatch(text, /\bvalue\d+ = index\b/);
+      assert.match(text, /0x3000 \+ index[^\n]*\n[^\n]*\bindex = [^\n]*index \+ 1/);
     });
     test('a slot stored only on some iterations is not an index', () => {
       const text = emitSlots(slotLoop('counted', { counted: true }));
       assert.match(text, /\bindex\b/);
       assert.doesNotMatch(text, /\bindex_\d+\b/);
       assert.match(text, /\blocal_20\b/);
+    });
+  });
+
+/** The entry block is the loop header, so the parameter is itself the loop
+ * variable: `entry(n): while (n != stop) { element[n] = 7; n += step; }`, the shape
+ * of a length an optimizer turned into the counter. */
+function entryLoop(label: string, step: bigint, stop = 0n) {
+  const b = program(`source-names-entry-loop-${label}`),
+    entry = b.block('entry', [i32]),
+    body = b.block('body'),
+    exit = b.block('exit');
+  const [counter] = entry.parameters as [Value];
+  entry.branch(
+    entry.compare('ne', counter, entry.constant(i32, stop)),
+    entry.edge(body),
+    entry.edge(exit),
+  );
+  body.store(
+    body.int(
+      'add',
+      body.constant(i64, 0x1000n),
+      body.cast('zero_extend', i64, body.int('shl', counter, body.constant(i32, 2n))),
+    ),
+    body.constant(i32, 7n),
+  );
+  body.jump(entry, [body.int('add', counter, body.constant(i32, step))]);
+  exit.return([exit.constant(i32, 0n)]);
+  return { input: b.finish(entry, [i32]), counter };
+}
+
+/** `entry(start, bound): for (i = start; i < bound; i++) element[i] = 7;` or, with
+ * `countdown`, `entry(n): for (i = n; i != stop; i--) element[i] = 7;`. `keep`
+ * returns the parameter afterwards, so it stays a variable of its own instead of
+ * sharing storage with the loop variable. */
+function parameterLoop(
+  label: string,
+  options: { countdown?: boolean; keep?: boolean; stop?: bigint } = {},
+) {
+  const { countdown = false, keep = false } = options;
+  const b = program(`source-names-parameter-${label}`),
+    entry = b.block('entry', countdown ? [i32] : [i32, i32]),
+    head = b.block('head', [i32]),
+    body = b.block('body'),
+    exit = b.block('exit', [i32]);
+  const [start, bound] = entry.parameters as [Value, Value | undefined];
+  entry.jump(head, [start]);
+  const [counter] = head.parameters as [Value];
+  const test = countdown
+    ? head.compare('ne', counter, head.constant(i32, options.stop ?? 0n))
+    : head.compare('ult', counter, bound!);
+  head.branch(test, head.edge(body), head.edge(exit, [keep ? start : counter]));
+  body.store(
+    body.int(
+      'add',
+      body.constant(i64, 0x1000n),
+      body.cast('zero_extend', i64, body.int('shl', counter, body.constant(i32, 2n))),
+    ),
+    body.constant(i32, 7n),
+  );
+  body.jump(head, [body.int(countdown ? 'sub' : 'add', counter, body.constant(i32, 1n))]);
+  exit.return(exit.parameters);
+  return { input: b.finish(entry, [i32]), start, bound, counter };
+}
+
+/** `entry(n): do { element[h] = 7; } while (--h != 0)` with the test on the
+ * decremented value, or on the loop variable against 1 (`folded`, as a flag-setting
+ * subtract is lifted), or against `stop` before the decrement. */
+function bottomCountdown(label: string, test: 'updated' | 'folded' | 'stale') {
+  const b = program(`source-names-bottom-${label}`),
+    entry = b.block('entry', [i32]),
+    body = b.block('body', [i32]),
+    exit = b.block('exit', [i32]);
+  const [start] = entry.parameters as [Value];
+  entry.jump(body, [start]);
+  const [counter] = body.parameters as [Value];
+  body.store(
+    body.int(
+      'add',
+      body.constant(i64, 0x1000n),
+      body.cast('zero_extend', i64, body.int('shl', counter, body.constant(i32, 2n))),
+    ),
+    body.constant(i32, 7n),
+  );
+  const updated = body.int('sub', counter, body.constant(i32, 1n));
+  const condition =
+    test === 'updated'
+      ? body.compare('ne', updated, body.constant(i32, 0n))
+      : body.compare('ne', counter, body.constant(i32, test === 'folded' ? 1n : 0n));
+  body.branch(condition, body.edge(body, [updated]), body.edge(exit, [start]));
+  exit.return(exit.parameters);
+  return { input: b.finish(entry, [i32]), start, counter };
+}
+
+/** `entry(selector, amount): return (1 << (selector & 63)) & mask` (a bit-set test
+ * on an operation code), `loaded << (amount & 63)` (a real shift by a count), or
+ * both uses of one parameter. */
+function shiftUses(label: string, uses: { bitTest?: boolean; shifted?: boolean }) {
+  const b = program(`source-names-shift-${label}`),
+    entry = b.block('entry', [i64]);
+  const [parameter] = entry.parameters as [Value];
+  const amount = entry.int('and', parameter, entry.constant(i64, 63n));
+  const parts: Value[] = [];
+  if (uses.bitTest) parts.push(entry.int('shl', entry.constant(i64, 1n), amount));
+  if (uses.shifted)
+    parts.push(entry.int('shl', entry.load(i64, entry.constant(i64, 0x1000n)), amount));
+  entry.return([
+    entry.int(
+      'and',
+      parts.reduce((a, c) => entry.int('xor', a, c)),
+      entry.constant(i64, 0x1010000n),
+    ),
+  ]);
+  return { input: b.finish(entry, [i64]), parameter };
+}
+
+for (const language of ['c-like', 'python-like'] as const)
+  describe(`parameter roles (${language})`, () => {
+    const role = /^(?:index|remaining|accumulator|limit|count)(?:_\d+)?$/;
+    test('a length parameter that is itself an up-counting loop variable is not an index', () => {
+      const { input, counter } = entryLoop('up', 1n);
+      const output = emit(input, language);
+      assert.match(name(output, counter) ?? '', /^arg\d+$/);
+      assert.doesNotMatch(output.emission.text, /\bindex\b/);
+    });
+
+    test('a parameter stepped by something other than one is not a role either', () => {
+      const { input, counter } = entryLoop('step-four', 4n);
+      assert.match(name(emit(input, language), counter) ?? '', /^arg\d+$/);
+    });
+
+    test('a parameter counted down by one to zero is the count', () => {
+      const { input, counter } = entryLoop('down', 0xffffffffn);
+      assert.equal(name(emit(input, language), counter), 'count');
+    });
+
+    test('a parameter counted down by one to a nonzero stop is not the count', () => {
+      const { input, counter } = entryLoop('down-five', 0xffffffffn, 5n);
+      assert.doesNotMatch(name(emit(input, language), counter) ?? '', role);
+    });
+
+    test('the initial value of an up-counting loop variable keeps its neutral name', () => {
+      for (const keep of [false, true]) {
+        const { input, start, counter } = parameterLoop(`up-${keep}`, { keep });
+        const output = emit(input, language);
+        assert.match(name(output, start) ?? '', /^arg\d+$/, `keep ${keep}`);
+        if (keep) assert.equal(stem(name(output, counter)), 'index');
+      }
+    });
+
+    test('the initial value of a countdown to zero is the count; of a countdown to a stop it is not', () => {
+      const down = parameterLoop('down', { countdown: true, keep: true });
+      const output = emit(down.input, language);
+      assert.equal(name(output, down.start), 'count');
+      assert.equal(stem(name(output, down.counter)), 'remaining');
+      const stopped = parameterLoop('down-five', { countdown: true, keep: true, stop: 5n });
+      assert.doesNotMatch(name(emit(stopped.input, language), stopped.start) ?? '', role);
+      // Sharing storage with the loop variable leaves the neutral name too.
+      const shared = parameterLoop('down-shared', { countdown: true });
+      assert.doesNotMatch(name(emit(shared.input, language), shared.start) ?? '', /^index/);
+    });
+
+    test('a parameter selecting a bit of a constant is not a shift count', () => {
+      const bitTest = shiftUses('bit-test', { bitTest: true });
+      assert.match(name(emit(bitTest.input, language), bitTest.parameter) ?? '', /^arg\d+$/);
+      const both = shiftUses('both', { bitTest: true, shifted: true });
+      assert.match(name(emit(both.input, language), both.parameter) ?? '', /^arg\d+$/);
+    });
+
+    test('a parameter that is the amount of a real shift is a shift count', () => {
+      const { input, parameter } = shiftUses('shifted', { shifted: true });
+      assert.equal(name(emit(input, language), parameter), 'shift_count');
+    });
+
+    test('a bottom-tested countdown to zero starts from the count, however the test is lifted', () => {
+      for (const test of ['updated', 'folded'] as const) {
+        const { input, start, counter } = bottomCountdown(test, test);
+        const output = emit(input, language);
+        assert.equal(name(output, start), 'count', test);
+        assert.equal(stem(name(output, counter)), 'remaining', test);
+      }
+    });
+
+    test('a bottom-tested loop on the undecremented value runs one more time than the start', () => {
+      const { input, start } = bottomCountdown('stale', 'stale');
+      assert.doesNotMatch(name(emit(input, language), start) ?? '', role);
+    });
+
+    test('the bound of a loop that does not start at zero is a limit, not a count', () => {
+      const { input, bound } = parameterLoop('limit', { keep: true });
+      assert.equal(stem(name(emit(input, language), bound!)), 'limit');
     });
   });

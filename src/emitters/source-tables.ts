@@ -31,6 +31,31 @@ export function indexedDataAccesses(
     }
     return value;
   };
+  /** Greatest unsigned value the index can take: its width, lowered by any
+   * unsigned-extension chain and constant AND masks (`x & c <= c`). */
+  const limits = new Map<string, bigint>();
+  const maximum = (value: Value): bigint => {
+    const cached = limits.get(value.id);
+    if (cached !== undefined) return cached;
+    context.checkpoint(1);
+    let limit = (1n << BigInt(bitWidth(value.type))) - 1n;
+    const expression = program.expressions.get(value.id);
+    if (expression?.kind === 'integer' && expression.op === 'and') {
+      for (const operand of [expression.left, expression.right]) {
+        const bound = constant(operand) ?? maximum(operand);
+        if (bound < limit) limit = bound;
+      }
+    } else if (
+      expression?.kind === 'cast' &&
+      (expression.op === 'zero_extend' || expression.op === 'bitcast') &&
+      expression.value.type.kind === 'integer'
+    ) {
+      const bound = maximum(expression.value);
+      if (bound < limit) limit = bound;
+    }
+    limits.set(value.id, limit);
+    return limit;
+  };
   const candidate = (node: Extract<Instruction, { kind: 'load' }>): void => {
     const bits = bitWidth(node.result.type);
     if (
@@ -75,6 +100,7 @@ export function indexedDataAccesses(
       index = operand;
     }
     index = narrow(index);
+    const limit = maximum(index);
     const size = BigInt(bits / 8),
       object = base.object;
     if (
@@ -83,8 +109,7 @@ export function indexedDataAccesses(
       scale % size !== 0n ||
       object.offset % size !== 0n ||
       object.address.value % size !== 0n ||
-      object.address.value + object.offset + ((1n << BigInt(index.type.bits)) - 1n) * scale >=
-        1n << 64n
+      object.address.value + object.offset + limit * scale >= 1n << 64n
     )
       return;
     result.set(node.id, {

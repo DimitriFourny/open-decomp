@@ -29,7 +29,9 @@ type EdgeSource =
   | { readonly kind: 'value' | 'zero_extend'; readonly value: Value; readonly bits: number }
   | { readonly kind: 'constant'; readonly bits: bigint }
   /** The unchanged cells of another (or the same) candidate phi group. */
-  | { readonly kind: 'group'; readonly group: CellGroup };
+  | { readonly kind: 'group'; readonly group: CellGroup }
+  /** Every cell is an unknown (unavailable) value of the same reason. */
+  | { readonly kind: 'unknown'; readonly reason: string };
 
 interface CellGroup {
   readonly block: BlockRegion;
@@ -226,6 +228,20 @@ export function recombineSourceCells(
         bits |= lane! << BigInt(bindings[index]!.register.offset_bits);
       return { kind: 'constant', bits };
     }
+    // Cells that are each the same unavailable value are, jointly, that value.
+    const unknown = pieces.map((piece) => expressions.get(piece.id));
+    const first = unknown[0];
+    if (
+      first?.kind === 'indeterminate' &&
+      first.state === 'unknown' &&
+      unknown.every(
+        (expression) =>
+          expression?.kind === 'indeterminate' &&
+          expression.state === 'unknown' &&
+          expression.reason === first.reason,
+      )
+    )
+      return { kind: 'unknown', reason: first.reason };
     // Longest low prefix of corresponding slices of one value. Low slices of v
     // are also the low slices of an extension of v, so upper cells that slice
     // sign_extend(v) or zero_extend(v) extend the same whole.
@@ -314,7 +330,7 @@ export function recombineSourceCells(
       group.recorded = validation.presentation(
         'register_cell_recombination',
         group.bindings[0]!.value.id,
-        'complete contiguous integer root cells written jointly on every incoming edge: corresponding slices of one identical whole value, a zero extension of low slices of one value, one constant, or the unchanged cells of another recombined phi; preserves simultaneous transfers and full-width carries',
+        'complete contiguous integer root cells written jointly on every incoming edge: corresponding slices of one identical whole value, a zero extension of low slices of one value, one constant, unknown cells of one reason, or the unchanged cells of another recombined phi; preserves simultaneous transfers and full-width carries',
         group.bindings.map(({ value }) => value.id),
       );
       if (!group.recorded) {
@@ -348,6 +364,12 @@ export function recombineSourceCells(
       switch (source.kind) {
         case 'group':
           return wholes.get(source.group)!;
+        case 'unknown':
+          return plan.make(edge, integer(group.width), block, {
+            kind: 'indeterminate',
+            state: 'unknown',
+            reason: source.reason,
+          });
         case 'constant':
           return plan.make(edge, integer(group.width), block, {
             kind: 'constant',

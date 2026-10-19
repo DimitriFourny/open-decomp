@@ -16,10 +16,15 @@ import {
   type OperationContext,
   type ReferenceRecord,
   type FunctionRecord,
+  type ResolvedJumpTable,
 } from '../../core/index.js';
 import { buildCFG, instructionSuccessors } from '../cfg/index.js';
+import { proveJumpTable, type JumpTableProof } from './jump-tables.js';
 import { reconcileGraphs, type DiscoveryLineage } from './lineage.js';
 export type { DiscoveryLineage } from './lineage.js';
+
+/** Same entry cap as indirect-table target recovery; larger tables stay unresolved. */
+const MAX_JUMP_TABLE_ENTRIES = 256;
 
 /** Assertions remain labeled evidence, never binary facts. Ranges are boundary claims, not
  * permission to decode unreachable bytes. Retracted assertions do not seed discovery. */
@@ -200,6 +205,15 @@ export function discoverFunctions(
     seeds.get(value) ?? index.seeds.get(value);
   const decoded = new Map<bigint, DecodedInstruction>();
   const gaps = new Map<bigint, DecodeGap>();
+  // Decoded control predecessors, including proven table edges, for single-entry proofs.
+  const incoming = new Map<bigint, DecodedInstruction[]>();
+  const addIncoming = (target: bigint, from: DecodedInstruction): void => {
+    const list = incoming.get(target);
+    if (list) list.push(from);
+    else incoming.set(target, [from]);
+  };
+  // Provisional proofs by branch address; each graph re-validates them on its final members.
+  const tables = new Map<bigint, { readonly proof: JumpTableProof; readonly evidence: string }>();
   const queue: Address[] = selected ? [selected] : [...seeds.values()].map((item) => item.entry);
   const queued = new Set(queue.map((address) => address.value));
   const data = index.data;
@@ -356,7 +370,35 @@ export function discoverFunctions(
       seed(instruction.flow.target, 'direct call target', [flowEvidence], true);
       if (!selected) enqueue(instruction.flow.target);
     }
-    for (const successor of instructionSuccessors(instruction)) enqueue(successor);
+    for (const successor of instructionSuccessors(instruction)) {
+      addIncoming(successor.value, instruction);
+      enqueue(successor);
+    }
+    if (instruction.flow.kind === 'indirect_branch' && !instruction.flow.conditional) {
+      const proof = proveJumpTable(
+        {
+          image,
+          branch: instruction,
+          incoming,
+          is_entry: (value) => value === selected?.value || seedAt(value) !== undefined,
+          executable: (value) => executableEnd(value) > value,
+          max_entries: MAX_JUMP_TABLE_ENTRIES,
+        },
+        context,
+      );
+      if (proof) {
+        const evidenceId = derive(
+          'indirect branch targets from immutable table entries under a dominating unsigned index bound',
+          instruction.address,
+          proof.chain.flatMap((id) => instructionEvidence.get(id) ?? []),
+        );
+        tables.set(address.value, { proof, evidence: evidenceId });
+        for (const target of proof.targets) {
+          addIncoming(target.value, instruction);
+          enqueue(target);
+        }
+      }
+    }
     if (
       instruction.flow.kind === 'indirect_branch' &&
       instruction.payload?.architecture === 'x86_64'
@@ -427,12 +469,11 @@ export function discoverFunctions(
   const claimBoundaries = selected ? index.ordered_seeds : orderedSeeds;
   for (const item of orderedSeeds) {
     context.checkpoint(1);
-    const members: DecodedInstruction[] = [];
-    const localGaps: DecodeGap[] = [];
-    const localDiagnostics: Diagnostic[] = [];
-    const pending = [item.entry];
-    const visited = new Set<bigint>();
-    let conflict = false;
+    let members: DecodedInstruction[] = [];
+    let localGaps: DecodeGap[] = [];
+    let localDiagnostics: Diagnostic[] = [];
+    let visited = new Set<bigint>();
+    let claimConflict = false;
     for (const claim of item.claims) {
       let low = 0,
         high = claimBoundaries.length;
@@ -444,7 +485,7 @@ export function discoverFunctions(
       }
       if (claimBoundaries[low]?.entry.value === item.entry.value) low++;
       const other = claimBoundaries[low];
-      if (other && other.entry.value < claim.start.value + claim.size) conflict = true;
+      if (other && other.entry.value < claim.start.value + claim.size) claimConflict = true;
       if (selected)
         for (const candidate of seeds.values()) {
           context.checkpoint(1);
@@ -453,42 +494,104 @@ export function discoverFunctions(
             candidate.entry.value >= claim.start.value &&
             candidate.entry.value < claim.start.value + claim.size
           )
-            conflict = true;
+            claimConflict = true;
         }
     }
-    for (let cursor = 0; cursor < pending.length; cursor++) {
-      context.checkpoint(1);
-      const address = pending[cursor]!;
-      if (visited.has(address.value)) continue;
-      visited.add(address.value);
-      const instruction = decoded.get(address.value);
-      if (!instruction) {
-        const gap = gaps.get(address.value);
-        if (gap) {
-          localGaps.push(gap);
-          localDiagnostics.push(...gap.diagnostics);
-          if (gap.reason === 'data') conflict = true;
-        }
-        continue;
-      }
-      members.push(instruction);
-      localDiagnostics.push(...instruction.diagnostics);
-      for (const successor of instructionSuccessors(instruction)) {
-        if (successor.value !== item.entry.value && functionEntries.has(successor.value)) {
-          if (instruction.flow.kind !== 'branch' || instruction.flow.conditional) {
-            conflict = true;
-            localDiagnostics.push({
-              code: 'conflicting_evidence',
-              severity: 'warning',
-              message: 'Intraprocedural flow reaches another function entry',
-              address: successor,
-              evidence_ids: [...item.evidence, ...seedAt(successor.value)!.evidence],
-            });
+    let conflict = claimConflict;
+    // A table proof holds for this graph only if its chain stays single-entry and
+    // every target decodes inside it. Rejection only removes edges, so this ends.
+    const rejected = new Set<bigint>();
+    const tableAt = (instruction: DecodedInstruction) =>
+      instruction.flow.kind === 'indirect_branch' && !rejected.has(instruction.address.value)
+        ? tables.get(instruction.address.value)
+        : undefined;
+    for (;;) {
+      members = [];
+      localGaps = [];
+      localDiagnostics = [];
+      visited = new Set<bigint>();
+      conflict = claimConflict;
+      const pending = [item.entry];
+      for (let cursor = 0; cursor < pending.length; cursor++) {
+        context.checkpoint(1);
+        const address = pending[cursor]!;
+        if (visited.has(address.value)) continue;
+        visited.add(address.value);
+        const instruction = decoded.get(address.value);
+        if (!instruction) {
+          const gap = gaps.get(address.value);
+          if (gap) {
+            localGaps.push(gap);
+            localDiagnostics.push(...gap.diagnostics);
+            if (gap.reason === 'data') conflict = true;
           }
           continue;
         }
-        pending.push(successor);
+        members.push(instruction);
+        localDiagnostics.push(...instruction.diagnostics);
+        const table = tableAt(instruction);
+        for (const successor of table?.proof.targets ?? instructionSuccessors(instruction)) {
+          if (successor.value !== item.entry.value && functionEntries.has(successor.value)) {
+            // A table reaching another root is rejected below, not a boundary conflict.
+            if (!table && (instruction.flow.kind !== 'branch' || instruction.flow.conditional)) {
+              conflict = true;
+              localDiagnostics.push({
+                code: 'conflicting_evidence',
+                severity: 'warning',
+                message: 'Intraprocedural flow reaches another function entry',
+                address: successor,
+                evidence_ids: [...item.evidence, ...seedAt(successor.value)!.evidence],
+              });
+            }
+            continue;
+          }
+          pending.push(successor);
+        }
       }
+      const byId = new Map<string, DecodedInstruction>();
+      const predecessors = new Map<bigint, DecodedInstruction[]>();
+      for (const instruction of members) {
+        context.checkpoint(1);
+        byId.set(instruction.id, instruction);
+        for (const successor of tableAt(instruction)?.proof.targets ??
+          instructionSuccessors(instruction)) {
+          const list = predecessors.get(successor.value);
+          if (list) list.push(instruction);
+          else predecessors.set(successor.value, [instruction]);
+        }
+      }
+      const inside = (target: Address): boolean =>
+        byId.get(decoded.get(target.value)?.id ?? '') !== undefined &&
+        (target.value === item.entry.value || !functionEntries.has(target.value));
+      let changed = false;
+      for (const instruction of members) {
+        const table = tableAt(instruction);
+        if (!table) continue;
+        context.checkpoint(table.proof.chain.length + table.proof.targets.length);
+        const chain = table.proof.chain.map((id) => byId.get(id));
+        const selector = table.proof.chain.indexOf(table.proof.selector.instruction);
+        const valid =
+          selector >= 0 &&
+          chain.every((member, position) => {
+            if (!member) return false;
+            if (position === 0) return true;
+            const sources = predecessors.get(member.address.value) ?? [];
+            return (
+              member.address.value !== item.entry.value &&
+              sources.length === 1 &&
+              sources[0] === chain[position - 1] &&
+              // The selector read and the branch must share one basic block.
+              (position <= selector || chain[position - 1]!.flow.kind === 'fallthrough')
+            );
+          }) &&
+          inside(table.proof.otherwise) &&
+          table.proof.targets.every(inside);
+        if (!valid) {
+          rejected.add(instruction.address.value);
+          changed = true;
+        }
+      }
+      if (!changed) break;
     }
     members.sort((a, b) =>
       a.address.value < b.address.value ? -1 : a.address.value > b.address.value ? 1 : 0,
@@ -560,6 +663,14 @@ export function discoverFunctions(
         evidence_ids: [...item.evidence],
       });
     const id = entityIdentity(image.selected_slice_id, 'function', { entry: item.entry.value });
+    const resolved: ResolvedJumpTable[] = [];
+    const tableTargets = new Map<bigint, readonly Address[]>();
+    for (const instruction of members) {
+      const table = tableAt(instruction);
+      if (!table) continue;
+      resolved.push({ ...table.proof, evidence_ids: [table.evidence] });
+      tableTargets.set(instruction.address.value, table.proof.targets);
+    }
     const blocks = buildCFG(
       {
         slice_id: image.selected_slice_id,
@@ -568,6 +679,7 @@ export function discoverFunctions(
         instructions: members,
         function_entries: functionEntries,
         evidence: instructionEvidence,
+        jump_tables: tableTargets,
       },
       context,
     );
@@ -597,7 +709,8 @@ export function discoverFunctions(
           .filter(
             (instruction) =>
               instruction.flow.kind === 'unknown' ||
-              instruction.flow.kind === 'indirect_branch' ||
+              (instruction.flow.kind === 'indirect_branch' &&
+                !tableTargets.has(instruction.address.value)) ||
               (instruction.flow.kind === 'call' && instruction.flow.indirect),
           )
           .map(() => 'unresolved control flow'),
@@ -632,6 +745,7 @@ export function discoverFunctions(
         completed_units: members.length,
         reasons,
       },
+      ...(resolved.length ? { jump_tables: resolved } : {}),
     });
   }
   const reconciled = reconcileGraphs(
@@ -647,12 +761,40 @@ export function discoverFunctions(
   const references: ReferenceRecord[] = [];
   const owners = new Map<string, string[]>();
   for (const graph of reconciled.graphs) {
+    const resolvedBranches = new Map(graph.jump_tables?.map((table) => [table.branch, table]));
     for (const instruction of graph.instructions) {
       context.checkpoint(1);
       const ownership = owners.get(instruction.id);
       if (ownership) ownership.push(graph.function.id);
       else owners.set(instruction.id, [graph.function.id]);
       const flow = instruction.flow;
+      const table = resolvedBranches.get(instruction.id);
+      if (table) {
+        const seen = new Set<bigint>();
+        for (const target of table.targets) {
+          context.checkpoint(1);
+          if (seen.has(target.value)) continue;
+          seen.add(target.value);
+          references.push({
+            id: entityIdentity(image.selected_slice_id, 'reference', {
+              function: graph.function.id,
+              instruction: instruction.id,
+              kind: 'branch',
+              target: target.value,
+            }),
+            from: instruction.address,
+            from_function: graph.function.id,
+            from_instruction: instruction.id,
+            target_role: 'code',
+            to: target,
+            to_entity: null,
+            kind: 'branch',
+            status: 'established',
+            evidence_ids: table.evidence_ids,
+          });
+        }
+        continue;
+      }
       let kind: ReferenceRecord['kind'] | null = null;
       let target: Address | null = null;
       if (flow.kind === 'call') {
