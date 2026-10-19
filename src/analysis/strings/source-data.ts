@@ -356,9 +356,30 @@ export function recoverDataAddress(
   const names = new Set(objects.flatMap((item) => item.display_name ?? item.original_name ?? []));
   const name = !conflicting && names.size === 1 ? [...names][0] : undefined;
   const kind = conflicting ? 'unknown' : (hint?.encoding ?? 'bytes');
+  // A size-less immutable object ends no later than the next symbol, data
+  // record or relocation slot after its base, or its section's file-backed end.
+  let spanBound: bigint | undefined;
+  if (
+    !mutable &&
+    size === null &&
+    kind === 'bytes' &&
+    translated.kind === 'mapped' &&
+    section.file_range &&
+    base.value >= section.virtual_range.start.value
+  ) {
+    let spanEnd = section.virtual_range.start.value + section.virtual_range.size;
+    const fileEnd = section.virtual_range.start.value + section.file_range.size;
+    if (fileEnd < spanEnd) spanEnd = fileEnd;
+    if (base.value + STRING_WINDOW < spanEnd) spanEnd = base.value + STRING_WINDOW;
+    spanEnd = nearestStart(owned.pages, base, spanEnd, context);
+    spanEnd = nearestStart(indexed.hint_pages, base, spanEnd, context);
+    spanEnd = nearestStart(indexed.relocations, base, spanEnd, context);
+    if (spanEnd > base.value) spanBound = spanEnd - base.value;
+  }
   const object = {
     address: base,
     byte_length: size,
+    ...(spanBound === undefined ? {} : { span_bound: spanBound }),
     offset: va.value - base.value,
     mutable,
     kind,

@@ -44,16 +44,22 @@ test(
       const text = source.data.emission.text;
       assert.match(text, /__stack_chk_fail\(\);?\n/);
       assert.doesNotMatch(text, /trap_exit|unknown_exit|__unknown_effect/, text);
-      if (emitter === 'c-like') assert.match(text, /extern _Noreturn void __stack_chk_fail\(void\);/);
+      if (emitter === 'c-like')
+        assert.match(text, /extern _Noreturn void __stack_chk_fail\(void\);/);
       // The elided terminator keeps its presentation record.
       assert.match(JSON.stringify(source.data.emission), /noreturn_call_exit/);
       assert.ok(
-        !JSON.stringify(source.data).includes('Intraprocedural flow reaches another function entry'),
+        !JSON.stringify(source.data).includes(
+          'Intraprocedural flow reaches another function entry',
+        ),
       );
       // Checked view keeps the explicit trap terminator.
       const checked = await session.decompile({ name: '_guarded' }, { emitter, view: 'checked' });
       assert.ok('data' in checked && checked.data.delivery === 'inline');
-      assert.match(checked.data.emission.text, /trap_exit\("Call to a noreturn callee does not return"/);
+      assert.match(
+        checked.data.emission.text,
+        /trap_exit\("Call to a noreturn callee does not return"/,
+      );
     }
   },
 );

@@ -80,7 +80,7 @@ export function planSourceInlining(
   program: Reconstruction,
   context: OperationContext,
   preserve: (value: Value) => boolean,
-  alternateIndex: (node: Instruction) => Value | undefined,
+  alternateIndex: (node: Instruction) => readonly Value[] | undefined,
   /** The variable a multi-use pure definition merely re-presents, if any. */
   plainCopy: (destination: Value, expression: Expression) => Value | undefined = () => undefined,
   omitted: ReadonlySet<string> = new Set(),
@@ -207,8 +207,7 @@ export function planSourceInlining(
         } else if (node.kind === 'load' || node.kind === 'store') {
           if (!program.source?.locals.has(node.id)) use(node.address, at);
           if (node.kind === 'store') use(node.value, at);
-          const index = alternateIndex(node);
-          if (index) use(index, { ...at, alternative: true });
+          for (const index of alternateIndex(node) ?? []) use(index, { ...at, alternative: true });
         } else if (node.kind === 'write_register') use(node.value, at);
         else if (node.kind === 'call') {
           const projection = program.calls.get(node.id);

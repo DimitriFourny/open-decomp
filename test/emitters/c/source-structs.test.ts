@@ -329,10 +329,10 @@ for (const indexed of [false, true, 'shared', 'array'] as const)
     });
     const output = emit(ssa, { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } });
     assert.match(output.emission.text, /\/\* partial\b[^*]*\*\/\nstruct /);
-    assert.match(output.emission.text, /uint8_t f_4;/);
-    assert.match(output.emission.text, /uint32_t f_18(?:\[\])?;/);
-    assert.match(output.emission.text, indexed === true ? /\]\.f_18/ : /->f_18/);
-    if (indexed === 'array') assert.match(output.emission.text, /->f_18\[/);
+    assert.match(output.emission.text, /uint8_t field_0x4;/);
+    assert.match(output.emission.text, /uint32_t field_0x18(?:\[\])?;/);
+    assert.match(output.emission.text, indexed === true ? /\]\.field_0x18/ : /->field_0x18/);
+    if (indexed === 'array') assert.match(output.emission.text, /->field_0x18\[/);
     const compiled = spawnSync(
       'clang',
       ['-x', 'c', '-fsyntax-only', '-std=c11', '-include', 'stdint.h', '-include', 'stddef.h', '-'],
@@ -437,9 +437,9 @@ for (const mixed of [false, true])
     const text = output.emission.text;
     if (mixed) {
       assert.match(text, /\/\* partial\b[^*]*\*\/\nstruct /);
-      assert.match(text, /->f_8/);
+      assert.match(text, /->field_0x8/);
     } else {
-      assert.doesNotMatch(text, /struct_[0-9a-f]+|->f_/);
+      assert.doesNotMatch(text, /struct_[0-9a-f]+|->field_0x/);
       assert.match(text, /uint32_t\* \w+\)/);
       assert.match(text, /\[1\]/);
       assert.match(text, /\[2\]/);

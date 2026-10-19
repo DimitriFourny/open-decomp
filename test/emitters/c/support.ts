@@ -301,18 +301,21 @@ class Parser {
     this.voidResult = /^void [A-Za-z_]\w*\(/m.test(text) || /^def .*-> void:/m.test(text);
     // The VA comment is omitted where the printed `data_<hex>` name already states the address.
     const declarations = this.python
-      ? /^(?<name>\w+) = memory_view\((?<address>0x[\da-f]+), "uint(?<bits>\d+)_t", (?:True|False)\)(?:  # .*)?$/gm
-      : /extern (?:const )?uint(?<bits>\d+)_t (?<name>\w+)(?:\[\])?;(?: \/\* (?:VA (?<address>0x[\da-f]+))?[^*]*\*\/)?/g;
+      ? /^(?<name>\w+) = memory_view\((?<address>0x[\da-f]+), "uint(?<bits>\d+)_t", (?:True|False)\)(?:  # .*)?$|^# VA (?<tupleAddress>0x[\da-f]+), read-only; [^\n]*?uint(?<tupleBits>\d+)_t[^\n]*\n(?<tupleName>\w+) = \(\n/gm
+      : /extern (?:const )?uint(?<bits>\d+)_t (?<name>\w+)(?:\[\])?;(?: \/\* (?:VA (?<address>0x[\da-f]+))?[^*]*\*\/)?|\/\* VA (?<tableAddress>0x[\da-f]+), read-only; [^\n]* \*\/\nstatic const uint(?<tableBits>\d+)_t (?<tableName>\w+)\[\d*\] = \{/g;
     for (const match of text.matchAll(declarations)) {
-      const name = match.groups!['name']!,
-        width = match.groups!['bits']!,
-        stated = match.groups!['address'];
+      const found = match.groups!;
+      // `tuple*`/`table*`: a read-only table printed with its contents.
+      const contents = found['tableName'] !== undefined || found['tupleName'] !== undefined;
+      const name = (found['name'] ?? found['tableName'] ?? found['tupleName'])!,
+        width = (found['bits'] ?? found['tableBits'] ?? found['tupleBits'])!,
+        stated = found['address'] ?? found['tableAddress'] ?? found['tupleAddress'];
       const spelled = /^data_([\da-f]+)$/.exec(name)?.[1];
       assert.ok(stated !== undefined || spelled !== undefined, `No address for ${name}`);
       const address = BigInt(stated ?? `0x${spelled}`),
         bits = Number(width);
       this.tables.set(name, { address, bits });
-      if (!this.python && !match[0].includes('[];')) this.scalars.add(name);
+      if (!this.python && !contents && !match[0].includes('[];')) this.scalars.add(name);
       this.symbols.set(name, { kind: 'pointer', to: { kind: 'int', bits, signed: false } });
       this.ops.push({
         kind: 'assign',
@@ -394,6 +397,11 @@ class Parser {
         // Real helper bodies are independently compiled/executed in the C
         // support tests; this interpreter uses its existing bit-vector oracle.
         this.take('static');
+        if (this.peek() === 'const') {
+          // A table with contents: its VA binding is read from the preceding comment.
+          while (this.take() !== ';') assert.ok(this.position < this.tokens.length);
+          continue;
+        }
         this.take('inline');
         while (this.take() !== '{') assert.ok(this.position < this.tokens.length);
         let depth = 1;

@@ -71,10 +71,23 @@ export interface SourceAddress {
    * object, or a selector/class reference slot whose 64-bit load yields that
    * selector/class. Spelling only; memory ordering and faults are unchanged. */
   readonly objc?: { readonly kind: 'string' | 'selector_ref' | 'class_ref'; readonly text: string };
+  /** The address is the entry of a function of this image (a symbol or a
+   * discovered function). Identity only: it names the function wherever the
+   * constant is used as a value, never the bytes at the address. `self`: it
+   * is the function being presented. */
+  readonly function_entry?: { readonly self: boolean };
+  /** Immutable bytes of the object, from `object.address`: a bounded prefix of
+   * its known extent or of `object.span_bound`, with no relocation slot in it.
+   * Present only for the base of an indexed read-only table. */
+  readonly object_bytes?: readonly number[];
   /** Byte storage identity; an unknown extent is never inferred from a use. */
   readonly object?: {
     readonly address: Address;
     readonly byte_length: bigint | null;
+    /** An immutable object's bytes end no later than this many bytes after
+     * `address`: the distance to the next symbol, data record or relocation
+     * slot, or the end of its section (at most 4096). A bound, not a size. */
+    readonly span_bound?: bigint;
     readonly offset: bigint;
     readonly mutable: boolean;
     readonly kind: 'bytes' | 'jump_table' | 'literal_pool' | 'unknown';

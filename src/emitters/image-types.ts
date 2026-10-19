@@ -1,4 +1,5 @@
 import type { ImageTypeClass, ImageTypeField } from '../analysis/types/image-types.js';
+import { memberName, paddingName } from './source-structs.js';
 
 function scalar(field: ImageTypeField): string | null {
   if (field.kind === 'float' && (field.width_bits === 32 || field.width_bits === 64))
@@ -48,7 +49,7 @@ export function renderImageTypeDeclarations(
     for (const field of item.fields) {
       const type = scalar(field);
       if (!type || field.offset < end) continue;
-      if (field.offset > end) parts.push(`uint8_t gap_${end.toString(16)}[${field.offset - end}];`);
+      if (field.offset > end) parts.push(`uint8_t ${paddingName(end)}[${field.offset - end}];`);
       const pointee =
         field.kind === 'pointer'
           ? item.pointees.find(
@@ -60,7 +61,7 @@ export function renderImageTypeDeclarations(
         field.kind === 'pointer' && field.width_bits === 64 ? `${target ?? 'void'}*` : type;
       const array =
         field.offset === last && field.offset > 0n && field.stride === BigInt(field.width_bits / 8);
-      parts.push(`${spelling} f_${field.offset.toString(16)}${array ? '[]' : ''};`);
+      parts.push(`${spelling} ${memberName(field.offset)}${array ? '[]' : ''};`);
       packed ||= field.offset % BigInt(field.width_bits / 8) !== 0n;
       end = field.offset + BigInt(field.width_bits / 8);
     }

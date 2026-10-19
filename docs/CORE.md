@@ -685,11 +685,31 @@ Scalar/vector ABI projection tracks typed low lanes independently of integer ban
 
 Source-data recovery distinguishes exact storage identities from literal presentation. Globals, pools and tables retain their own base, byte offset, proven extent, mutability and evidence. Immutable bounded ASCII/UTF-8 strings may acquire character-pointer presentation; writable, conflicting, unterminated, relocated-slot and unsupported-encoding storage remains symbolic. Section ownership does not establish one source array, and memory addresses are never rebased onto a neighboring literal. Public Mach-O executable/dylib and PE outputs return the exact fixture literal in both dialects; table regressions retain ordered reads, writes and one-past faults.
 
+Value positions name what a pointer-width constant is: the exact entry of a
+function of the image (symbol or discovered; `function_entry`) prints as
+`(uintptr_t)name` with an `extern void name();` declaration of unknown prototype
+(`function_address("name")` in Python-like), a named data object as its address,
+and an immutable string literal added to a variable offset in a load/store address
+as `(uintptr_t)"create" + i`. Unnamed data addresses stay numbers.
+
+Indexed read-only tables (`indexed_data_load`) print their contents as
+`static const uintN_t name[N] = {...}` (16 bytes per line, decimal below 2^32). `N`
+is the smaller of the accessed range (width, masks and dominating unsigned
+comparisons bound the index) and the extent: symbol size, else the distance to the next
+symbol/data record/relocation or section end (`object.span_bound`, a bound rather
+than a size). Tables up to 512 bytes print in full; larger ones a 256-byte prefix and
+`/* ... K more */`; an unbounded index over an unsized object shows its first 16 elements
+(`extent not established`). Writable storage, storage with a relocation slot and
+a per-function budget of 1536 content bytes keep the `extern` view. Synthesized
+struct members are `field_0xOFFSET` and gaps `pad_0xOFFSET` (hexadecimal, never `f_36`).
+
 Source-only `constant_pool_literal` replaces exact-width, aligned, nonvolatile
 scalar reads when their constant address names available bytes in one read-only,
 file-backed image section and mapping. Overlapping relocations, mutable storage,
-ambiguous bounds, possible local writes, calls and exhausted presentation capacity
-retain the load. Each applied record includes the image/address, exact bytes and
+ambiguous bounds, a store to a constant overlapping address and exhausted
+presentation capacity retain the load. Calls and stores through unknown addresses
+do not: they cannot change bytes of a read-only mapping (the model assumes no
+`mprotect`-style remapping of immutable image data). Each applied record includes the image/address, exact bytes and
 load endianness; the original ordered load remains in checked view and metadata.
 Integer results use integer literals. Independently recorded `fp_literal` spelling
 uses round-tripping finite IEEE decimals (shortest binary32 decimals with a C `f`

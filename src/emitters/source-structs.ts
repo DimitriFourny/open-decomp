@@ -2,6 +2,11 @@ import type { ImageTypeBinding, MemoryShape, SuppliedTypeRecord } from '../analy
 import { fingerprint, type OperationContext } from '../core/index.js';
 import type { LocalValidationSession } from '../reconstruction/local-validation.js';
 
+/** Synthesized member and padding names carry the byte offset in unambiguous
+ * hexadecimal (`field_0x36` is offset 54): a bare `f_36` reads as decimal 36. */
+export const memberName = (offset: bigint): string => `field_0x${offset.toString(16)}`;
+export const paddingName = (offset: bigint): string => `pad_0x${offset.toString(16)}`;
+
 export interface ObservedMember {
   readonly offset: bigint;
   readonly typeId: string;
