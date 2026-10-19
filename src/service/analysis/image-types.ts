@@ -694,13 +694,8 @@ export function applyImageTypes(
         ? { ...field, type_id: memberType(item, merged, depth, proofIds, false) }
         : field;
     });
-    // A local member of unknown element count is a flexible tail: nothing is
-    // declared after it, and other unbounded arrays only as the last member.
-    let tail: bigint | undefined;
     const occupied = fields.map((field) => {
       const definition = byId.get(field.type_id)?.definition;
-      if (definition?.kind === 'array' && definition.count === null)
-        tail = tail === undefined || field.offset < tail ? field.offset : tail;
       const element =
         definition?.kind === 'array' ? byId.get(definition.element)?.definition : definition;
       const bits =
@@ -715,15 +710,18 @@ export function applyImageTypes(
     for (const field of item.fields) {
       context.checkpoint(1);
       const end = field.offset + BigInt(Math.ceil(field.width_bits / 8));
-      if (
-        (tail !== undefined && field.offset > tail) ||
-        occupied.some((range) => field.offset < range.end && range.start < end)
-      )
-        continue;
+      if (occupied.some((range) => field.offset < range.end && range.start < end)) continue;
       occupied.push({ start: field.offset, end });
       added.push(field);
     }
     const last = occupied.reduce((max, range) => (range.start > max ? range.start : max), 0n);
+    // C declares an unknown element count only as the last member: an earlier
+    // indexed member keeps its first element (indexed accesses stay explicit).
+    for (const [index, field] of fields.entries()) {
+      const definition = byId.get(field.type_id)?.definition;
+      if (definition?.kind === 'array' && definition.count === null && field.offset !== last)
+        fields[index] = { ...field, type_id: definition.element };
+    }
     for (const field of added)
       fields.push({
         id: entityIdentity(slice, 'image-type-field', [
