@@ -128,8 +128,12 @@ export function shedEmissionMetadata(
       result['range_refs'] = map(tables.ranges, record['range_refs'] as number[]);
     return result as R;
   };
-  const { inferences: _inferences, requirements: _requirements, omitted: _omitted, ...rest } =
-    emission;
+  const {
+    inferences: _inferences,
+    requirements: _requirements,
+    omitted: _omitted,
+    ...rest
+  } = emission;
   return {
     ...rest,
     ids,

@@ -138,7 +138,8 @@ function gatherInferences(
     context.checkpoint(1);
     const cached = resolved.get(id);
     if (cached) return cached;
-    if (active.has(id) || active.size >= 128) writer.limitMetadata('Inference origin graph limit exceeded');
+    if (active.has(id) || active.size >= 128)
+      writer.limitMetadata('Inference origin graph limit exceeded');
     active.add(id);
     const origins = program.source?.value_origins?.get(id);
     const result = new Set<string>();

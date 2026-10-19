@@ -509,7 +509,8 @@ export class Writer {
     a: readonly string[],
     b: readonly string[],
   ): readonly number[] {
-    if (a.length + b.length > 10000) this.limitMetadata('Pseudocode mapping reference limit exceeded');
+    if (a.length + b.length > 10000)
+      this.limitMetadata('Pseudocode mapping reference limit exceeded');
     if (b.length === 0) {
       const cached = cache.get(a);
       if (cached) {

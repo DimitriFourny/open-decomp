@@ -287,13 +287,7 @@ export class Renderer {
     private readonly inlineCalls = true,
     private readonly metadata: 'full' | 'omitted' = 'full',
   ) {
-    this.writer = new Writer(
-      context,
-      options.indent,
-      options.include_evidence,
-      language,
-      metadata,
-    );
+    this.writer = new Writer(context, options.indent, options.include_evidence, language, metadata);
     this.program = reconstruct(input, context, options.view === 'checked' ? 'checked' : 'source');
     this.inline = new Set(this.program.inline);
     this.bounds = new UnsignedBounds(this.program.expressions, context);
@@ -464,7 +458,10 @@ export class Renderer {
     this.context.checkpoint(1 + diagnostic.evidence_ids.length);
     // The wire list holds one entry less than its bound: the last is the omission summary.
     if (this.diagnostics.length >= MAX_RESULT_DIAGNOSTICS - 1) {
-      this.shedDiagnostics.set(diagnostic.code, (this.shedDiagnostics.get(diagnostic.code) ?? 0) + 1);
+      this.shedDiagnostics.set(
+        diagnostic.code,
+        (this.shedDiagnostics.get(diagnostic.code) ?? 0) + 1,
+      );
       return;
     }
     if (diagnostic.evidence_ids.length > 1000) {

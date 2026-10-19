@@ -17,8 +17,7 @@ export function withMetadataOmissions(result: StoredDecompilation): StoredDecomp
   const omitted = mergeOmissions(emission.omitted);
   const coverage = result.coverage.filter((item) => item.layer !== 'provenance');
   const capabilities = result.data.capabilities.filter((item) => item.layer !== 'provenance');
-  if (omitted.length === 0)
-    return { ...result, coverage, data: { ...result.data, capabilities } };
+  if (omitted.length === 0) return { ...result, coverage, data: { ...result.data, capabilities } };
   const entry = provenanceCoverage(omitted);
   const data = {
     ...result.data,
