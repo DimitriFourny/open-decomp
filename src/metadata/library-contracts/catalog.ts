@@ -1,15 +1,8 @@
-export type TypeSpec =
-  | 'void'
-  | 'char'
-  | 'wchar'
-  | 'int'
-  | 'uint'
-  | 'long'
-  | 'ulong'
-  | 'size_t'
-  | 'ssize_t'
-  | { readonly kind: 'pointer'; readonly to: TypeSpec }
-  | { readonly kind: 'opaque'; readonly name: string };
+import type { Target } from '../../core/index.js';
+import { generatedDeclaration } from './generated/index.js';
+import type { TypeSpec } from './spec.js';
+export { ABI_TYPEDEFS, type AbiTypedef, type ScalarSpec, type TypeSpec } from './spec.js';
+
 export interface ArgumentMemory {
   readonly argument: number;
   readonly access: 'read' | 'write' | 'read_write';
@@ -19,23 +12,30 @@ export interface ArgumentMemory {
     | { readonly kind: 'constant'; readonly bytes: bigint }
     | { readonly kind: 'argument'; readonly index: number };
 }
+export type LibraryKind =
+  | 'c'
+  | 'posix'
+  | 'darwin'
+  | 'glibc'
+  | 'cxx'
+  | 'objc'
+  | 'corefoundation'
+  | 'swift-core'
+  | 'swift-concurrency'
+  | 'windows-crt'
+  | 'windows-kernel'
+  | 'windows-user'
+  | 'windows-advapi'
+  | 'windows-winsock'
+  | 'windows-shell';
 export interface CatalogEntry {
-  readonly library:
-    | 'c'
-    | 'posix'
-    | 'darwin'
-    | 'cxx'
-    | 'objc'
-    | 'swift-core'
-    | 'swift-concurrency'
-    | 'windows-crt'
-    | 'windows-kernel';
+  readonly library: LibraryKind;
   readonly returns: TypeSpec;
   readonly parameters: readonly (readonly [string, TypeSpec])[];
   readonly noreturn?: boolean;
   readonly variadic?: boolean;
   readonly variadic_rule?: {
-    readonly kind: 'format' | 'open_flags' | 'fcntl_command' | 'ioctl_command';
+    readonly kind: 'format' | 'scanf_format' | 'open_flags' | 'fcntl_command' | 'ioctl_command';
     readonly argument: number;
   };
   readonly memory?: readonly ArgumentMemory[];
@@ -51,7 +51,7 @@ const V = ptr('void'),
   I = ptr('int'),
   U = ptr('uint');
 const FILE = ptr({ kind: 'opaque', name: 'FILE' }),
-  FN = ptr({ kind: 'opaque', name: 'function' }),
+  FN: TypeSpec = 'fnptr',
   OVERLAPPED = ptr({ kind: 'opaque', name: 'OVERLAPPED' });
 const footprint = (
   argument: number,
@@ -517,38 +517,127 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
   ),
 };
 
-export function identifiesLibrary(
+const WINDOWS_CRT =
+  /^(?:ucrtbase|msvcrt|msvcr\d+|vcruntime\d+(?:_\d+)?|api-ms-win-crt-[a-z0-9-]+)\.dll$/;
+const GLIBC = /^(?:libc|libm|libpthread|libdl|librt|libutil)\.so\.\d+$/;
+const DARWIN_SYSTEM =
+  /^\/usr\/lib\/(?:libSystem(?:\.B)?\.dylib|system\/lib[A-Za-z0-9_]+\.dylib)$/;
+
+/** Nominal library identity of an import's library path for one declaration family.
+ * Only explicit import attribution qualifies. An ELF DT_NEEDED list is not a
+ * symbol-to-library binding, and a Darwin library path is not ELF evidence. */
+export function identifiesLibraryKind(
   path: string,
-  entry: CatalogEntry,
-  format: 'macho' | 'pe' | 'elf',
+  library: LibraryKind,
+  format: Target['format'],
 ): boolean {
   if (format === 'pe') {
     const module = path.toLowerCase();
-    if (entry.library === 'windows-kernel')
-      return module === 'kernel32.dll' || module === 'kernelbase.dll';
-    return (
-      (entry.library === 'c' || entry.library === 'windows-crt') &&
-      (module === 'ucrtbase.dll' || module === 'msvcrt.dll')
-    );
+    switch (library) {
+      case 'windows-kernel':
+        return (
+          module === 'kernel32.dll' ||
+          module === 'kernelbase.dll' ||
+          /^api-ms-win-(?:core|eventing)-[a-z0-9-]+\.dll$/.test(module)
+        );
+      case 'windows-user':
+        return module === 'user32.dll';
+      case 'windows-advapi':
+        return module === 'advapi32.dll' || /^api-ms-win-security-[a-z0-9-]+\.dll$/.test(module);
+      case 'windows-winsock':
+        return module === 'ws2_32.dll' || module === 'wsock32.dll';
+      case 'windows-shell':
+        return module === 'shell32.dll';
+      case 'c':
+      case 'windows-crt':
+        return WINDOWS_CRT.test(module);
+      default:
+        return false;
+    }
   }
   if (format === 'elf') {
-    // Only explicit import attribution qualifies. A DT_NEEDED list is not a
-    // symbol-to-library binding, and a Darwin library path is not ELF evidence.
     const module = path.slice(path.lastIndexOf('/') + 1);
-    if (entry.library === 'c' || entry.library === 'posix') return module === 'libc.so.6';
-    if (entry.library === 'cxx') return module === 'libstdc++.so.6' || module === 'libc++abi.so.1';
+    if (library === 'c' || library === 'posix' || library === 'glibc') return GLIBC.test(module);
+    if (library === 'cxx') return module === 'libstdc++.so.6' || module === 'libc++abi.so.1';
     return false;
   }
-  if (entry.library === 'c' || entry.library === 'posix' || entry.library === 'darwin')
-    return (
-      path === '/usr/lib/libSystem.B.dylib' ||
-      path === '/usr/lib/libSystem.dylib' ||
-      /^\/usr\/lib\/system\/libsystem_[a-z0-9_]+\.dylib$/.test(path)
-    );
-  if (entry.library === 'cxx') return /^\/usr\/lib\/libc\+\+(abi)?(?:\.\d+)*\.dylib$/.test(path);
-  if (entry.library === 'objc') return /^\/usr\/lib\/libobjc(?:\.A|\.\d+)*\.dylib$/.test(path);
-  if (entry.library === 'swift-core') return path === '/usr/lib/swift/libswiftCore.dylib';
-  if (entry.library === 'swift-concurrency')
-    return path === '/usr/lib/swift/libswift_Concurrency.dylib';
-  return false;
+  switch (library) {
+    case 'c':
+    case 'posix':
+    case 'darwin':
+      return DARWIN_SYSTEM.test(path);
+    case 'cxx':
+      return /^\/usr\/lib\/libc\+\+(abi)?(?:\.\d+)*\.dylib$/.test(path);
+    case 'objc':
+      return /^\/usr\/lib\/libobjc(?:\.A|\.\d+)*\.dylib$/.test(path);
+    case 'corefoundation':
+      return /^\/System\/Library\/Frameworks\/CoreFoundation\.framework\/(?:Versions\/[A-Z]\/)?CoreFoundation$/.test(
+        path,
+      );
+    case 'swift-core':
+      return path === '/usr/lib/swift/libswiftCore.dylib';
+    case 'swift-concurrency':
+      return path === '/usr/lib/swift/libswift_Concurrency.dylib';
+    default:
+      return false;
+  }
+}
+
+export function identifiesLibrary(
+  path: string,
+  entry: CatalogEntry,
+  format: Target['format'],
+): boolean {
+  return identifiesLibraryKind(path, entry.library, format);
+}
+
+const LIBRARY_KINDS: readonly LibraryKind[] = [
+  'c',
+  'posix',
+  'darwin',
+  'glibc',
+  'cxx',
+  'objc',
+  'corefoundation',
+  'swift-core',
+  'swift-concurrency',
+  'windows-crt',
+  'windows-kernel',
+  'windows-user',
+  'windows-advapi',
+  'windows-winsock',
+  'windows-shell',
+];
+
+/** The declaration a native import of `name` from `importLibrary` (library path or DLL
+ * name) carries. Curated entries (effects, footprints, rules) win over generated header
+ * interfaces. Generated entries carry no `memory` footprint: their pointed-to memory
+ * effects stay unknown. `name` is the normalized C name (see `libraryLookupName`). */
+export function findDeclaration(
+  name: string,
+  importLibrary: string,
+  format: Target['format'],
+): CatalogEntry | undefined {
+  const curated = Object.hasOwn(catalog, name) ? catalog[name] : undefined;
+  if (curated && identifiesLibrary(importLibrary, curated, format)) return curated;
+  for (const library of LIBRARY_KINDS) {
+    if (!identifiesLibraryKind(importLibrary, library, format)) continue;
+    const generated = generatedDeclaration(library, name);
+    if (generated) return generated;
+  }
+  return undefined;
+}
+
+/** `findDeclaration` when only the evidence's library path is known: path syntax
+ * selects the executable format (PE DLL names, ELF sonames, Mach-O absolute paths). */
+export function findDeclarationByPath(
+  name: string,
+  importLibrary: string,
+): readonly CatalogEntry[] {
+  const found: CatalogEntry[] = [];
+  for (const format of ['macho', 'pe', 'elf'] as const) {
+    const entry = findDeclaration(name, importLibrary, format);
+    if (entry && !found.includes(entry)) found.push(entry);
+  }
+  return found;
 }
