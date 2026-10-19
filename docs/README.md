@@ -27,9 +27,10 @@ open-decomp functions ./app --name main
 open-decomp decompile ./app --function main
 open-decomp decompile ./app --address va:0x100000574 --language python-like
 open-decomp decompile ./app --function main --json --cache ./analysis-cache
+open-decomp types ./app > app-types.h
 ```
 
-`functions --name` is a case-insensitive substring search; `decompile --function` is exact and case-sensitive. Use discovered original/display names (including format-specific prefixes), a stable `--id`, or an explicit `--address va:0x...`, `rva:0x...` or `file:0x...`. Multiple indexed matches are an error, not a first-match selection. Both commands support `--help`, `--cache PATH`, and explicit `--slice ID`.
+`functions --name` is a case-insensitive substring search; `decompile --function` is exact and case-sensitive. Use discovered original/display names (including format-specific prefixes), a stable `--id`, or an explicit `--address va:0x...`, `rva:0x...` or `file:0x...`. Multiple indexed matches are an error, not a first-match selection. `types` prints the image-wide merged structure types as C declarations, the same names `decompile` uses (observed members only). All commands support `--help`, `--cache PATH`, and explicit `--slice ID`.
 
 The default sidecar is **`<canonical binary path>.open-decomp/`**, containing content-addressed SQLite project directories, immutable input snapshots, navigation indexes and analysis artifacts. Unchanged bytes resume the existing project; matching decompilations return cache hits. Each invocation still reads/hashes the binary to validate identity. Changed bytes select a new entry without overwriting earlier investigations. `--cache` overrides the cache root for read-only input locations or centralized storage. There is no silent fallback, automatic eviction or automatic replay of failed imports.
 
@@ -133,7 +134,7 @@ All 14 MCP tools expose concrete input/output JSON Schemas and structured conten
 | Tool                                             | Main purpose                                                                                                                                                             |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `project_open`, `project_close`                  | Import/resume, owner/job close policy and persistence.                                                                                                                   |
-| `binary_info`                                    | Summary, headers, sections, mappings, entries, relocations, hints and capabilities.                                                                                      |
+| `binary_info`                                    | Summary, headers, sections, mappings, entries, relocations, hints, capabilities, and merged image structure types as C declarations.                                    |
 | `symbols_find`, `strings_find`, `functions_find` | Snapshot-bound filtered/paged navigation. Matching is exact/prefix/contains, not arbitrary regex; Mach-O names also match their C spelling (leading underscore removed). |
 | `function_get`                                   | Metadata, structured disassembly with gaps, or CFG.                                                                                                                      |
 | `function_decompile`                             | Bounded homemade analysis and C-like or Python-like output with source/evidence mappings.                                                                                |
