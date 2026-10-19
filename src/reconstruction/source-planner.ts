@@ -31,7 +31,7 @@ import {
   unchangedStorage,
   type StorageCopy,
 } from './source-register-types.js';
-import { sourceStackArgumentParts } from './source-stack-arguments.js';
+import { sourceStackArgumentParts, type StackArgumentJoins } from './source-stack-arguments.js';
 import { planSourceRequirements } from './source-requirements.js';
 import { possibleAbiReturnStorage } from '../analysis/calls/return-storage.js';
 import { LocalValidationSession } from './local-validation.js';
@@ -270,6 +270,48 @@ export function planSource(
   const stores = new Map<string, Value>();
   for (const block of blocks.values())
     for (const node of block.statements) if (node.kind === 'store') stores.set(node.id, node.value);
+  const statementBlocks = new Map<string, string>(),
+    concats = new Map<string, readonly Value[]>(),
+    incomingEdges = new Map<
+      string,
+      { exit: string; copies: readonly { destination: Value; source: Value }[] }[]
+    >();
+  for (const block of blocks.values()) {
+    for (const node of block.statements) {
+      statementBlocks.set(node.id, block.id);
+      if (node.kind === 'assign' && node.expression.kind === 'concat')
+        concats.set(node.result.id, node.expression.values);
+    }
+    const control = block.control;
+    const outgoing =
+      control.kind === 'jump'
+        ? [control.transfer]
+        : control.kind === 'if'
+          ? [control.when_true.transfer, control.when_false.transfer]
+          : control.kind === 'switch'
+            ? [...control.cases.map((item) => item.arm.transfer), control.otherwise.transfer]
+            : [];
+    for (const transfer of outgoing) {
+      const edges = incomingEdges.get(transfer.target) ?? [];
+      edges.push({ exit: control.id, copies: transfer.copies });
+      incomingEdges.set(transfer.target, edges);
+    }
+  }
+  const stackJoins: StackArgumentJoins = {
+    block(boundary) {
+      const block = blocks.get(statementBlocks.get(boundary) ?? '');
+      if (!block || block.id === input.function.entry) return undefined;
+      const index = block.statements.findIndex((node) => node.id === boundary);
+      return {
+        statements: block.statements.slice(0, index + 1).map((node) => ({
+          id: node.id,
+          pure: node.kind !== 'store' && node.kind !== 'call' && node.kind !== 'unknown_effect',
+        })),
+        incoming: incomingEdges.get(block.id) ?? [],
+      };
+    },
+    concat: (value) => concats.get(value.id),
+  };
   const bindStack = (
     key: string,
     boundary: string,
@@ -286,6 +328,7 @@ export function planSource(
       offset,
       bitWidth(type),
       context,
+      stackJoins,
     );
     if (!parts) return null;
     const values = parts.map((part, index) =>
@@ -459,7 +502,7 @@ export function planSource(
               'arity_closure',
               node.id,
               formatSignature
-                ? 'library_format: established printf-family contract and exact immutable terminated format literal determine every promoted actual type; each ABI location is bound to original caller storage'
+                ? 'library_variadic_rule: established variadic library contract and its rule over every possible rule-argument value (an exact immutable terminated printf-family format literal, or Darwin open flags all setting O_CREAT) determine every promoted actual type; each ABI location is bound to original caller storage'
                 : 'library_contract: all established callable-entry/import observations agree on the complete ABI signature; each actual is bound to original caller storage',
               [node.id],
             );
@@ -483,7 +526,7 @@ export function planSource(
             validation.requireAbi(
               'arity_closure',
               [node.id],
-              'Library closure assumes the established contract and ABI-conforming arguments, including variadic default promotions when format-derived. Conflicting contracts, unsupported formats and unavailable argument storage remain explicit.',
+              'Library closure assumes the established contract and ABI-conforming arguments, including variadic default promotions when rule-derived. Conflicting contracts, unsupported formats, undecided open flags and unavailable argument storage remain explicit.',
             );
           if (valid) {
             const signatures =

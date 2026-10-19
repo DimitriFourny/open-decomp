@@ -81,9 +81,12 @@ export interface SourceEvidence {
   /** Explicit optional-dependency limitations; never substitutes a zero interface. */
   readonly diagnostics?: readonly Diagnostic[];
   readonly evidence?: readonly Evidence[];
-  /** Proven complete actual counts for contextual variadic calls. */
+  /** Proven complete actual counts for contextual variadic calls (`open`
+   * flags that take no mode on every possible value). */
   readonly call_argument_counts?: ReadonlyMap<string, number>;
-  /** Source-only actual types from a proven immutable printf-family format. */
+  /** Source-only actual types from an established variadic library rule over
+   * every possible rule-argument value: immutable printf-family format
+   * literals, or Darwin `open` flags that all set `O_CREAT`. */
   readonly call_argument_signatures?: ReadonlyMap<string, AbiSignature>;
   /** Bounded native parameter-associated shape constraints over original values. */
   readonly memory_transfers?: readonly MemoryShapeTransfer[];

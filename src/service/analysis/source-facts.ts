@@ -79,7 +79,7 @@ import {
 import { needsSourceFpEnvironment } from '../../reconstruction/source-requirements.js';
 import { nativeContextKey } from './native-context.js';
 import { prepareNativeContext } from './native-context-prepare.js';
-import { formatArgumentSignatures } from './source-variadic.js';
+import { variadicRuleCalls, variadicRuleFacts } from './source-variadic.js';
 import { nativeLibraryTails } from './native-library-tails.js';
 
 interface SourceFactsInput {
@@ -514,56 +514,10 @@ function observeParameters(
   };
 }
 
-/** Existing nominal library rules may close a variadic prefix. Zero open flags
- * require no mode on the supported POSIX/CRT ABIs; unknown/nonzero flags do not
- * acquire a guessed target-specific flag mask or invented trailing arguments. */
-function actualArgumentCounts(
-  analysis: CallAnalysisResult | null,
-  library: LibraryContracts,
-  context: OperationContext,
-): ReadonlyMap<string, number> {
-  const counts = new Map<string, number>();
-  for (const call of analysis?.calls ?? []) {
-    context.checkpoint(1);
-    if (call.status === 'conflicting') continue;
-    const observations = call.contracts.filter(
-      (observation) => observation.status === 'established',
-    );
-    if (!observations.length) continue;
-    const proven = new Set<number>();
-    let complete = true;
-    for (const observation of observations) {
-      const contract = library.contracts.find(
-        (item) =>
-          item.id === observation.contract.id || `${item.id}:entry` === observation.contract.id,
-      );
-      if (
-        !contract ||
-        contract.conflicts_with.length ||
-        contract.variadic_rule?.kind !== 'open_flags'
-      ) {
-        complete = false;
-        break;
-      }
-      const flags = observation.parameters.find(
-        (parameter) => parameter.index === contract.variadic_rule!.argument,
-      )?.locations;
-      if (
-        flags?.length !== 1 ||
-        flags[0]!.fact.value.kind !== 'constant' ||
-        flags[0]!.fact.value.bits !== 0n
-      ) {
-        complete = false;
-        break;
-      }
-      proven.add(contract.abi_signature.fixed_parameter_count);
-    }
-    if (complete && proven.size === 1) counts.set(call.node_id, [...proven][0]!);
-  }
-  return counts;
-}
-
-function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
+function sourceAddresses(
+  input: SourceFactsInput,
+  formatPointers: readonly bigint[],
+): readonly SourceAddress[] {
   const { image, scope, revision } = input,
     context = scope.context;
   const candidates = new Map<string, Address>();
@@ -638,6 +592,14 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
           ? { image_id: image.id, space: 'va', value: fact.value.bits }
           : undefined;
     if (address) candidates.set(addressKey(address), address);
+  }
+  // Every possible format pointer of an established format rule names a
+  // candidate literal; string facts still require exact immutable bytes.
+  for (const value of formatPointers) {
+    context.checkpoint(1);
+    if (value >= U64_LIMIT) continue;
+    const address: Address = { image_id: image.id, space: 'va', value };
+    candidates.set(addressKey(address), address);
   }
   for (const block of input.ir.blocks)
     for (const node of block.instructions)
@@ -1481,7 +1443,12 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         scope.dependencies.replay(unit.dependency_readset);
     }
   }
-  const addresses = sourceAddresses(input);
+  const ruleCalls = variadicRuleCalls(input.ir, input.types.calls, input.library, context);
+  const addresses = sourceAddresses(
+    input,
+    ruleCalls.flatMap((call) => (call.kind === 'format' ? call.values : [])),
+  );
+  const variadic = variadicRuleFacts(ruleCalls, addresses, abi, context);
   return {
     abi,
     callees: [...callees.values()],
@@ -1492,13 +1459,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     memory_transfers,
     function_return_demands: [...functionReturnDemands.values()],
     ...(function_returns === undefined ? {} : { function_returns }),
-    call_argument_counts: actualArgumentCounts(input.types.calls, input.library, context),
-    call_argument_signatures: formatArgumentSignatures(
-      input.types.calls,
-      input.library,
-      addresses,
-      abi,
-      context,
-    ),
+    call_argument_counts: variadic.counts,
+    call_argument_signatures: variadic.signatures,
   };
 }
