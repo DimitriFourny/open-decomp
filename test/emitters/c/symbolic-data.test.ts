@@ -83,7 +83,8 @@ for (const language of ['c-like', 'python-like'] as const)
           },
           language,
         );
-        assert.match(output.emission.text, /data_address\("lookup_/);
+        assert.match(output.emission.text, new RegExp(`\\blookup_${kind}\\b`));
+        assert.doesNotMatch(output.emission.text, /data_address/);
         assert.doesNotMatch(output.emission.text, /expand 32-byte k/);
         assert.ok(
           expandEmission(output.emission).mappings.some((mapping) =>
@@ -178,7 +179,8 @@ for (const language of ['c-like', 'python-like'] as const)
       { source: { abi: sysvAMD64Abi, callees: [], addresses } },
       language,
     );
-    assert.match(output.emission.text, /data_address\("messages"/);
+    assert.match(output.emission.text, /\bmessages\b/);
+    assert.doesNotMatch(output.emission.text, /data_address/);
     const parameter = emittedFormals(output.emission)[0];
     assert.ok(parameter);
     for (const [offset, expected] of [

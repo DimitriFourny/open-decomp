@@ -101,6 +101,10 @@ do {
 
 `findFunctions(options?, callOptions?)` accepts the shared `functions_find` query/paging/budget fields; it supplies the session's project, revision and image IDs. `callOptions` accepts `signal` and `onProgress`. Keep query filters unchanged across cursor pages. A terminal cursor under a partial index means the known index was exhausted, **not** that all functions are known.
 
+`findSymbols(options?, callOptions?)`, `findStrings(options?, callOptions?)` and `getReferences(options, callOptions?)` are the same pattern for `symbols_find`, `strings_find` and `xrefs_get` (the last takes the `target`, `direction` and `kinds` fields); `getFunction(functionId, options?, callOptions?)` returns `function_get` metadata, compact/full disassembly or CFG pages. `decompileFunction(functionId, options?)` decompiles a function ID already obtained from `findFunctions` without repeating selector resolution. The CLI `export` command is built from these methods.
+
+A recognized import stub/thunk/PLT entry has `kind: "import_stub"` (omitted otherwise) and the import's name; `decompile({ name })` selects it by that name.
+
 ## Decompile and handle results
 
 ```ts

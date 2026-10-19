@@ -101,7 +101,7 @@ export function functionsListing(result: ToolResult<'functions_find'>): string |
         first === undefined
           ? 'no range'
           : `size ${first.size}${item.ranges.length > 1 ? ` (+${item.ranges.length - 1} ranges)` : ''}`,
-        `${item.boundary}/${item.analysis}`,
+        `${item.boundary}/${item.analysis}${item.kind === 'import_stub' ? '/import-stub' : ''}`,
         item.signature === null ? 'no signature' : 'signature',
         short.get(item.id),
       ].join('  ');

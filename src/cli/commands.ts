@@ -2,8 +2,9 @@ import { openBinary, BinaryOpenError, FunctionSelectionError } from '../api/inde
 import type { BinarySession, FunctionSelector } from '../api/index.js';
 import { distinctDiagnostics, entityIdSchema, sliceIdSchema } from '../core/index.js';
 import type { ToolResult, WireDiagnostic, WireJob } from '../core/index.js';
+import { exportBinary } from './export.js';
 
-type Command = 'functions' | 'decompile';
+type Command = 'functions' | 'decompile' | 'export';
 interface Arguments {
   command: Command;
   binary: string;
@@ -14,6 +15,8 @@ interface Arguments {
   selector?: FunctionSelector;
   emitter?: 'c-like' | 'python-like';
   view?: 'source' | 'checked';
+  out?: string;
+  jobs?: number;
 }
 type ParsedArguments = Arguments | { help: Command };
 type FunctionsResult = ToolResult<'functions_find'>;
@@ -25,6 +28,8 @@ const usage = {
   functions: 'open-decomp functions BINARY [--name TEXT] [--json] [--cache PATH] [--slice ID]',
   decompile:
     'open-decomp decompile BINARY (--function NAME | --id ID | --address va:0x.../rva:0x.../file:0x...) [--language c-like|python-like] [--view source|checked] [--json] [--cache PATH] [--slice ID]',
+  export:
+    'open-decomp export BINARY --out DIR [--language c-like|python-like] [--jobs N] [--name SUBSTRING] [--cache PATH] [--slice ID]',
 } as const;
 
 class UsageError extends Error {}
@@ -73,12 +78,12 @@ function combineExit(current: number, next: number): number {
 }
 function row(item: FunctionRow): string {
   const name = item.display_name ?? item.original_name ?? '(unnamed)';
-  return `${terminal(item.id)}  ${terminal(item.entry.space)}:${terminal(item.entry.value)}  ${terminal(name)}  [${terminal(item.boundary)}, ${terminal(item.analysis)}]`;
+  return `${terminal(item.id)}  ${terminal(item.entry.space)}:${terminal(item.entry.value)}  ${terminal(name)}  [${terminal(item.boundary)}, ${terminal(item.analysis)}${item.kind === 'import_stub' ? ', import stub' : ''}]`;
 }
 function parse(args: readonly string[]): ParsedArguments {
   const command = args[0];
-  if (command !== 'functions' && command !== 'decompile')
-    throw new UsageError('Expected functions or decompile; see open-decomp --help');
+  if (command !== 'functions' && command !== 'decompile' && command !== 'export')
+    throw new UsageError('Expected functions, decompile or export; see open-decomp --help');
   const separator = args.indexOf('--');
   if (args.slice(1, separator < 0 ? undefined : separator).includes('--help'))
     return { help: command };
@@ -89,7 +94,9 @@ function parse(args: readonly string[]): ParsedArguments {
     '--slice',
     ...(command === 'functions'
       ? ['--name']
-      : ['--function', '--id', '--address', '--language', '--view']),
+      : command === 'export'
+        ? ['--name', '--out', '--language', '--jobs']
+        : ['--function', '--id', '--address', '--language', '--view']),
   ];
   let json = false,
     positionalOnly = false;
@@ -127,11 +134,27 @@ function parse(args: readonly string[]): ParsedArguments {
     if (!sliceIdSchema.safeParse(slice).success) throw new UsageError('--slice must be a slice ID');
     result.sliceId = slice;
   }
-  if (command === 'functions') {
+  if (command === 'functions' || command === 'export') {
     const name = values.get('--name');
     if (name !== undefined) {
       if (name.length > 4096) throw new UsageError('--name exceeds 4096 characters');
       result.name = name;
+    }
+    if (command === 'functions') return result;
+    const out = values.get('--out');
+    if (out === undefined) throw new UsageError('export requires --out DIR');
+    result.out = out;
+    const language = values.get('--language');
+    if (language !== undefined) {
+      if (language !== 'c-like' && language !== 'python-like')
+        throw new UsageError('--language must be c-like or python-like');
+      result.emitter = language;
+    }
+    const jobs = values.get('--jobs');
+    if (jobs !== undefined) {
+      if (!/^[1-9][0-9]{0,2}$/.test(jobs) || Number(jobs) > 32)
+        throw new UsageError('--jobs must be an integer from 1 to 32');
+      result.jobs = Number(jobs);
     }
     return result;
   }
@@ -174,8 +197,10 @@ function help(command: Command): void {
     `Usage: ${usage[command]}\n\n${
       command === 'functions'
         ? 'List every matching function; --name performs a case-insensitive substring search.\nJSON result is {pages:[...]} with the original schema envelope for each page.'
-        : 'Decompile one exact, unambiguous function name, entity ID or address.\nText stdout contains only pseudocode; JSON preserves the result envelope.'
-    }\n\n--cache PATH  Override the sidecar cache root (default: BINARY.open-decomp).\n--slice ID    Select a binary slice.\n--json        Write {project_path,reused,result} JSON to stdout.\n--help        Show this help.\nProgress, project reuse and diagnostics go to stderr. Work stays in the foreground.\nExit: 0 complete/empty; 2 semantic partial; 1 error/unsupported/cancelled; 130 SIGINT; 143 SIGTERM.\n`,
+        : command === 'export'
+          ? 'Decompile every function in one process into a directory an agent can grep:\n  OUT/functions/NAME@0xADDR.c|.py  header comment + the pseudocode `decompile` prints\n  OUT/functions/NAME@0xADDR.asm    compact disassembly where decompilation failed (reason in header)\n  OUT/index.tsv  OUT/strings.tsv  OUT/imports.tsv  OUT/exports.tsv  OUT/README.txt\n--out DIR      Output directory (created; generated files are overwritten on re-run).\n--language     c-like (default) or python-like.\n--jobs N       Parallel workers (default min(4, CPUs/2)); extra workers analyze private copies of the project.\n--name TEXT    Only functions whose name contains TEXT (case-insensitive).\nPartial and failed functions are recorded in index.tsv and do not change the exit status.'
+          : 'Decompile one exact, unambiguous function name, entity ID or address.\nText stdout contains only pseudocode; JSON preserves the result envelope.'
+    }\n\n--cache PATH  Override the sidecar cache root (default: BINARY.open-decomp).\n--slice ID    Select a binary slice.\n${command === 'export' ? '' : '--json        Write {project_path,reused,result} JSON to stdout.\n'}--help        Show this help.\nProgress, project reuse and diagnostics go to stderr. Work stays in the foreground.\nExit: ${command === 'export' ? '0 all files written (even if some functions are partial/failed); 1 error/cancelled' : '0 complete/empty; 2 semantic partial; 1 error/unsupported/cancelled'}; 130 SIGINT; 143 SIGTERM.\n`,
   );
 }
 
@@ -246,7 +271,7 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
     process.stderr.write(
       `error: ${terminal(error instanceof Error ? error.message : String(error))}\n`,
     );
-    if (args[0] === 'functions' || args[0] === 'decompile')
+    if (args[0] === 'functions' || args[0] === 'decompile' || args[0] === 'export')
       process.stderr.write(`Usage: ${usage[args[0]]}\n`);
     process.exitCode = 1;
     return;
@@ -289,7 +314,23 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
     report(session.opened, 'open');
     if (parsed.command === 'functions')
       code = await functions(session, parsed, controller.signal, onProgress);
-    else {
+    else if (parsed.command === 'export') {
+      const summary = await exportBinary(
+        session,
+        {
+          out: parsed.out!,
+          language: parsed.emitter ?? 'c-like',
+          jobs: parsed.jobs,
+          sliceId: parsed.sliceId,
+          name: parsed.name,
+        },
+        controller.signal,
+        (message) => process.stderr.write(`${terminal(message)}\n`),
+      );
+      process.stderr.write(
+        `export: wrote ${summary.files} files, ${summary.bytes} bytes to ${terminal(parsed.out!)}: ${summary.functions} functions (${summary.complete} complete, ${summary.partial} partial, ${summary.failed} failed)${summary.incompleteIndexes.length === 0 ? '' : `; incomplete indexes (lists are lower bounds): ${summary.incompleteIndexes.join(', ')}`}\n`,
+      );
+    } else {
       const result = await session.decompile(parsed.selector!, {
         ...(parsed.emitter === undefined ? {} : { emitter: parsed.emitter }),
         ...(parsed.view === undefined ? {} : { view: parsed.view }),

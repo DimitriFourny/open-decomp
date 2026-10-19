@@ -40,6 +40,53 @@ interface StructLayout {
   >;
 }
 const MATH: CType = { kind: 'math' };
+/** Decode the body of a C or Python-like string/character literal (octal and
+ * \\u/\\U escapes included). */
+export function unescapeLiteral(body: string): string {
+  const bytes: number[] = [];
+  const simple: Record<string, number> = {
+    a: 7,
+    b: 8,
+    t: 9,
+    n: 10,
+    v: 11,
+    f: 12,
+    r: 13,
+    '\\': 92,
+    '"': 34,
+    "'": 39,
+    '?': 63,
+  };
+  for (let index = 0; index < body.length;) {
+    const character = body[index]!;
+    if (character !== '\\') {
+      const code = body.codePointAt(index)!;
+      bytes.push(...Buffer.from(String.fromCodePoint(code)));
+      index += code > 0xffff ? 2 : 1;
+      continue;
+    }
+    const next = body[index + 1]!;
+    const octal = /^[0-7]{1,3}/.exec(body.slice(index + 1));
+    if (octal) {
+      bytes.push(parseInt(octal[0], 8));
+      index += 1 + octal[0].length;
+    } else if (next === 'u' || next === 'U') {
+      const width = next === 'u' ? 4 : 8;
+      bytes.push(
+        ...Buffer.from(
+          String.fromCodePoint(parseInt(body.slice(index + 2, index + 2 + width), 16)),
+        ),
+      );
+      index += 2 + width;
+    } else {
+      assert.ok(next in simple, `Unsupported escape \\${next}`);
+      bytes.push(simple[next]!);
+      index += 2;
+    }
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
 const INT: Extract<CType, { kind: 'int' }> = { kind: 'int', bits: 32, signed: true };
 const unsignedType = (bits: number): CType => ({ kind: 'int', bits, signed: false });
 type Expr =
@@ -235,6 +282,8 @@ class Parser {
   readonly symbols = new Map<string, CType>();
   readonly structs = new Map<string, StructLayout>();
   private readonly tables = new Map<string, { readonly address: bigint; readonly bits: number }>();
+  /** Declared scalar globals (`extern T name;`): the name is the object, not a pointer. */
+  private readonly scalars = new Set<string>();
   returnType: CType = MATH;
   private readonly types = new WeakMap<Expr, CType>();
   private position = 0;
@@ -246,13 +295,14 @@ class Parser {
   constructor(text: string) {
     this.python = /^def /m.test(text);
     const declarations = this.python
-      ? /^(\w+) = memory_view\((0x[\da-f]+), "uint(\d+)_t", (?:True|False)\)$/gm
-      : /\/\* (\w+): image VA (0x[\da-f]+); byte extent (?:unknown|\d+) \*\/\nextern (?:const )?uint(\d+)_t \1\[\];/g;
+      ? /^(\w+) = memory_view\((0x[\da-f]+), "uint(\d+)_t", (?:True|False)\)(?:  # .*)?$/gm
+      : /(?:\/\* (\w+): image VA (0x[\da-f]+); byte extent (?:unknown|\d+) \*\/\nextern (?:const )?uint(\d+)_t \1(?:\[\])?;|extern (?:const )?uint(\d+)_t (\w+)(?:\[\])?; \/\* VA (0x[\da-f]+)(?:, \d+ bytes)?(?:, [a-z ]+)? \*\/)/g;
     for (const match of text.matchAll(declarations)) {
-      const name = match[1]!,
-        address = BigInt(match[2]!),
-        bits = Number(match[3]);
+      const name = (match[1] ?? match[5])!,
+        address = BigInt((match[2] ?? match[6])!),
+        bits = Number((match[3] ?? match[4])!);
       this.tables.set(name, { address, bits });
+      if (!this.python && !match[0].includes('[];')) this.scalars.add(name);
       this.symbols.set(name, { kind: 'pointer', to: { kind: 'int', bits, signed: false } });
       this.ops.push({
         kind: 'assign',
@@ -281,7 +331,7 @@ class Parser {
       if (result) this.returnType = { kind: 'float', bits: result[1] === 'float' ? 32 : 64 };
       const indents = [0];
       const token =
-        /[ \t]+|#[^\n]*|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+\.[0-9]*(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|<<|>>|[.()[\],:=?<>+*/%&|^~!-]/gy;
+        /[ \t]+|#[^\n]*|ord\('(?:\\u[0-9a-f]{4}|\\[0-7]{1,3}|\\.|[^'\\])'\)|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+\.[0-9]*(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|<<|>>|[.()[\],:=?<>+*/%&|^~!-]/gy;
       for (const line of lines.slice(endHeader + 1)) {
         if (/^\s*(?:#|$)/.test(line)) continue;
         const indent = line.length - line.trimStart().length;
@@ -314,7 +364,7 @@ class Parser {
       return;
     }
     const token =
-      /\s+|#[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+\.[0-9]*(?:[eE][+-]?[0-9]+)?f?|[0-9]+[eE][+-]?[0-9]+f?|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|\.\.\.|->|==|!=|<=|>=|<<|>>|&&|\|\||[{}()[\],.;:=?<>@+*/%&|^~!-]/gy;
+      /\s+|#[^\n]*|\/\*[\s\S]*?\*\/|'(?:\\(?:[0-7]{1,3}|.)|[^'\\])'|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+\.[0-9]*(?:[eE][+-]?[0-9]+)?f?|[0-9]+[eE][+-]?[0-9]+f?|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|\.\.\.|->|==|!=|<=|>=|<<|>>|&&|\|\||[{}()[\],.;:=?<>@+*/%&|^~!-]/gy;
     let offset = 0;
     const offsets: number[] = [];
     while (offset < text.length) {
@@ -354,8 +404,10 @@ class Parser {
           continue;
         }
         assert.ok(this.tables.has(name), 'External table needs an exact image VA binding');
-        this.take('[');
-        this.take(']');
+        if (this.peek() === '[') {
+          this.take('[');
+          this.take(']');
+        }
         this.take(';');
       }
     }
@@ -1201,6 +1253,8 @@ class Parser {
 
   private primary(): Expr {
     const token = this.take();
+    if (token === '&' && this.scalars.has(this.peek()) && this.tokens[this.position + 1] !== '[')
+      return { kind: 'ref', name: this.take() };
     if (token === '&') {
       const name = this.take();
       this.take('[');
@@ -1338,7 +1392,16 @@ class Parser {
       this.take(close);
       return { kind: 'list', values };
     }
-    if (token.startsWith('"')) return { kind: 'literal', value: JSON.parse(token) as string };
+    if (token.startsWith('"'))
+      return { kind: 'literal', value: unescapeLiteral(token.slice(1, -1)) };
+    // A C character constant has type int; Python spells the code as ord('c').
+    if (token.startsWith("'") || token.startsWith("ord('")) {
+      const body = token.slice(token.indexOf("'") + 1, token.lastIndexOf("'"));
+      const code = unescapeLiteral(body).codePointAt(0)!;
+      return this.python
+        ? { kind: 'literal', value: BigInt(code) }
+        : { kind: 'literal', value: BigInt(code), ctype: INT };
+    }
     if (/^\d/.test(token)) {
       if (!token.startsWith('0x') && /[.eE]/.test(token)) {
         const bits = token.endsWith('f') ? 32 : 64;
@@ -1390,6 +1453,7 @@ class Parser {
       this.take(')');
       return { kind: 'call', name: token, args };
     }
+    if (this.scalars.has(token)) return this.dereference({ kind: 'ref', name: token });
     return { kind: 'ref', name: token };
   }
 }

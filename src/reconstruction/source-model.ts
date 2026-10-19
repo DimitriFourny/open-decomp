@@ -70,6 +70,20 @@ export interface SourceAddress {
     readonly kind: 'bytes' | 'jump_table' | 'literal_pool' | 'unknown';
     readonly evidence_ids: readonly string[];
   };
+  /** The address is the loader-bound slot of an imported symbol (Mach-O bind/GOT,
+   * ELF GLOB_DAT, PE IAT). The dynamic linker alone writes it: an exact
+   * pointer-width read yields the imported symbol's address, so one more
+   * dereference reaches the imported object. Type and extent stay unknown. */
+  readonly import?: {
+    readonly id: string;
+    /** Native linkage name of the symbol as the loader recorded it. */
+    readonly name: string;
+    /** C spelling of `name`; asserted names stay verbatim. */
+    readonly source_name: string;
+    readonly library: string | null;
+    /** Import/bind records that evidence this slot's binding. */
+    readonly evidence_ids: readonly string[];
+  };
 }
 /** Facts supplied by the native analysis pipeline; never selected by host ABI. */
 export interface SourceEvidence {
