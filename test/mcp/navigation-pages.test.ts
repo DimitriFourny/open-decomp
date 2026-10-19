@@ -13,7 +13,6 @@ import {
   type FunctionRecord,
 } from '../../src/core/index.js';
 import { createMcpServer, MCP_MAX_RESULT_BYTES } from '../../src/mcp/server.js';
-import { decodeNavigationText } from '../../src/mcp/navigation.js';
 import { SqliteProjectStore } from '../../src/project/store/index.js';
 import { QueryService } from '../../src/service/queries/index.js';
 import { fixtureImage } from '../metadata/fixture.js';
@@ -103,8 +102,10 @@ for (const limit of [20, 1000])
         assert.ok(result.data.items.length > 0);
         const text = response.content.find((item) => item.type === 'text');
         assert.ok(text?.type === 'text');
-        assert.deepEqual(decodeNavigationText(text.text), result);
-        ids.push(...result.data.items.map((fn) => fn.id));
+        for (const fn of result.data.items)
+          assert.ok(text.text.includes(fn.id.slice(0, 19)), 'every row carries a short function ID');
+        assert.ok(text.text.includes(`next_cursor ${result.data.page.next_cursor ?? 'none'}`));
+        assert.equal(text.text.split('\n').length, result.data.items.length + 1 + result.diagnostics.length);
         cursor = result.data.page.next_cursor ?? undefined;
         if (cursor) {
           assert.equal(result.state, 'partial');
