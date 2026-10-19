@@ -393,7 +393,9 @@ export const functionGetArgsSchema = z
 export const functionDecompileArgsSchema = z.strictObject({
   ...requestContext,
   function_id: entityIdSchema,
-  wait: z.boolean().default(false),
+  /** true awaits the terminal result; false returns the durable job at admission; 'auto' awaits a
+   * short bounded time and otherwise returns the job. */
+  wait: z.union([z.boolean(), z.literal('auto')]).default(false),
   delivery: z.enum(['auto', 'artifact']).default('auto'),
   options: analysisOptionsSchema.default(DEFAULT_ANALYSIS_OPTIONS),
 });
