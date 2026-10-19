@@ -1,5 +1,5 @@
 import type { ToolResult, WireArtifact } from '../core/index.js';
-import { diagnosticLine, distinctDiagnostics, shortIds } from './listing.js';
+import { bySeverity, diagnosticLine, shortIds } from './listing.js';
 
 /** The function a decompilation belongs to, as far as the function index could say. */
 export interface FunctionLabel {
@@ -32,7 +32,7 @@ export function decompileText(
         ? ('output_limit' as const)
         : undefined;
   const pseudocode = withheld === undefined ? inlineText : undefined;
-  const diagnostics = distinctDiagnostics(result.diagnostics);
+  const diagnostics = bySeverity(result.diagnostics);
   const state = result.state === 'complete' ? 'complete' : 'partial';
   const reason =
     result.state === 'partial' && result.reason !== 'output_limit' ? result.reason : undefined;

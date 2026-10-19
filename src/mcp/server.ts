@@ -288,7 +288,14 @@ export function createMcpServer(service: QueryService, policy: McpServerPolicy =
             };
       let releaseAuthorization: void | (() => void) = undefined;
       try {
-        releaseAuthorization = await policy.authorizeTool?.(name, args);
+        try {
+          releaseAuthorization = await policy.authorizeTool?.(name, args);
+        } catch {
+          return toolFailure({
+            code: 'not_authorized',
+            hint: 'The host policy rejected this request (quota, budget ceiling or path authorization).',
+          });
+        }
         let resolved: FunctionRecord | undefined;
         let imageHint: string | undefined;
         if (site !== undefined && 'revision' in args) {

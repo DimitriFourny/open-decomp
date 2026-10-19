@@ -1,4 +1,5 @@
-import type { ToolResult, WireDiagnostic } from '../core/index.js';
+import { distinctDiagnostics } from '../core/index.js';
+import type { DistinctDiagnostic, ToolResult, WireDiagnostic } from '../core/index.js';
 
 /** Compact, line-oriented text for the three search tools. A row keeps what a reader needs to
  * choose its next call (address, name, kind, status, short ID); per-record evidence IDs, ranges
@@ -21,38 +22,22 @@ export function shortIds(ids: readonly string[]): Map<string, string> {
   return result;
 }
 
-export interface DistinctDiagnostic {
-  readonly severity: WireDiagnostic['severity'];
-  readonly code: string;
-  readonly message: string;
-  readonly count: number;
-}
 const severityRank: Record<WireDiagnostic['severity'], number> = { error: 0, warning: 1, info: 2 };
 const MAX_MESSAGE = 240;
 
-/** Each distinct (severity, code, message) once, most severe first, with its occurrence count. */
-export function distinctDiagnostics(diagnostics: readonly WireDiagnostic[]): DistinctDiagnostic[] {
-  const distinct = new Map<string, { item: WireDiagnostic; count: number }>();
-  for (const item of diagnostics) {
-    const key = JSON.stringify([item.severity, item.code, item.message]);
-    const seen = distinct.get(key);
-    if (seen) seen.count++;
-    else distinct.set(key, { item, count: 1 });
-  }
-  return [...distinct.values()]
-    .map(({ item, count }) => ({
-      severity: item.severity,
-      code: item.code,
-      message: item.message,
-      count,
-    }))
-    .sort((a, b) => severityRank[a.severity] - severityRank[b.severity]);
+/** Distinct diagnostics, most severe first (stable within a severity). */
+export function bySeverity(diagnostics: readonly WireDiagnostic[]): DistinctDiagnostic[] {
+  return distinctDiagnostics(diagnostics).sort(
+    (a, b) => severityRank[a.diagnostic.severity] - severityRank[b.diagnostic.severity],
+  );
 }
 
-export function diagnosticLine(item: DistinctDiagnostic): string {
+export function diagnosticLine({ diagnostic, count }: DistinctDiagnostic): string {
   const message =
-    item.message.length > MAX_MESSAGE ? `${item.message.slice(0, MAX_MESSAGE)}…` : item.message;
-  return `${item.severity} ${item.code}${item.count > 1 ? ` ×${item.count}` : ''}: ${message}`;
+    diagnostic.message.length > MAX_MESSAGE
+      ? `${diagnostic.message.slice(0, MAX_MESSAGE)}…`
+      : diagnostic.message;
+  return `${diagnostic.severity} ${diagnostic.code}${count > 1 ? ` ×${count}` : ''}: ${message}`;
 }
 
 interface Named {
@@ -84,7 +69,7 @@ interface Page {
 function listing(tool: string, page: Page, rows: readonly string[]): string {
   return [
     `${tool} ${page.state}${page.reason === undefined ? '' : ` (${page.reason})`}; index ${page.index_state}; ${rows.length} rows; next_cursor ${page.next_cursor ?? 'none'}`,
-    ...distinctDiagnostics(page.diagnostics).map((item) => `! ${diagnosticLine(item)}`),
+    ...bySeverity(page.diagnostics).map((item) => `! ${diagnosticLine(item)}`),
     ...rows,
   ].join('\n');
 }
