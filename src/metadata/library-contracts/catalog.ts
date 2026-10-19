@@ -520,8 +520,7 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
 const WINDOWS_CRT =
   /^(?:ucrtbase|msvcrt|msvcr\d+|vcruntime\d+(?:_\d+)?|api-ms-win-crt-[a-z0-9-]+)\.dll$/;
 const GLIBC = /^(?:libc|libm|libpthread|libdl|librt|libutil)\.so\.\d+$/;
-const DARWIN_SYSTEM =
-  /^\/usr\/lib\/(?:libSystem(?:\.B)?\.dylib|system\/lib[A-Za-z0-9_]+\.dylib)$/;
+const DARWIN_SYSTEM = /^\/usr\/lib\/(?:libSystem(?:\.B)?\.dylib|system\/lib[A-Za-z0-9_]+\.dylib)$/;
 
 /** Nominal library identity of an import's library path for one declaration family.
  * Only explicit import attribution qualifies. An ELF DT_NEEDED list is not a

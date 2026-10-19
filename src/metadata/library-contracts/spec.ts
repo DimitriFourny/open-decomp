@@ -97,4 +97,3 @@ export const SCALAR_CODES = {
   p: 'fnptr',
   x: 'va_list',
 } as const satisfies Record<string, ScalarSpec>;
-

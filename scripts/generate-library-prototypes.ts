@@ -145,18 +145,23 @@ function collect(unit: Unit, text: string): Collected {
         if (!unit.roots.some((root) => file.startsWith(root))) break;
         const parameters = (node.inner ?? [])
           .filter((item: Ast) => item.kind === 'ParmVarDecl')
-          .map((item: Ast) => ({ name: (item.name as string | undefined) ?? null, type: item.type.qualType }));
+          .map((item: Ast) => ({
+            name: (item.name as string | undefined) ?? null,
+            type: item.type.qualType,
+          }));
         const attributes = (node.inner ?? []).filter((item: Ast) => /Attr$/.test(item.kind));
         const type = node.type.qualType as string;
         const open = type.indexOf('(');
-        const returnsFunction = /^\s*\(\s*[*^]\s*\(/.test(type.slice(type.indexOf(' (') + 1)) || type.includes('(*(');
+        const returnsFunction =
+          /^\s*\(\s*[*^]\s*\(/.test(type.slice(type.indexOf(' (') + 1)) || type.includes('(*(');
         const decl: Decl = {
           name: node.name,
           returns: returnsFunction ? 'void (*)(void)' : type.slice(0, open).trim(),
           parameters,
           variadic: /\.\.\.\)/.test(type),
           // `noreturn` is part of the function type, so clang prints it only in the type string.
-          noreturn: /\bnoreturn\b/.test(type) || attributes.some((item: Ast) => /NoReturn/.test(item.kind)),
+          noreturn:
+            /\bnoreturn\b/.test(type) || attributes.some((item: Ast) => /NoReturn/.test(item.kind)),
           formatted: attributes.some((item: Ast) => item.kind === 'FormatAttr' && !item.implicit),
           isStatic: node.storageClass === 'static',
           file,
@@ -224,7 +229,8 @@ class Resolver {
     const baseText = parts[0]!.replace(QUALIFIER, ' ').replace(/\s+/g, ' ').trim();
     let baseConst = /\bconst\b/.test(parts[0]!);
     let spec = this.base(baseText, depth);
-    if (typeof spec === 'object' && spec.kind === 'pointer' && parts.length === 1) baseConst = false;
+    if (typeof spec === 'object' && spec.kind === 'pointer' && parts.length === 1)
+      baseConst = false;
     for (let level = 1; level < parts.length; level++) {
       const pointee = spec;
       if (pointee === 'FUNCTION') {
@@ -233,7 +239,9 @@ class Resolver {
       }
       if (pointee === 'ARRAY') throw new Unsupported(`pointer to array: ${qual}`);
       const isConst = level === 1 ? baseConst : /\bconst\b/.test(parts[level - 1]!);
-      spec = isConst ? { kind: 'pointer', to: pointee, const: true } : { kind: 'pointer', to: pointee };
+      spec = isConst
+        ? { kind: 'pointer', to: pointee, const: true }
+        : { kind: 'pointer', to: pointee };
     }
     return spec;
   }
@@ -241,7 +249,12 @@ class Resolver {
   private base(name: string, depth: number): TypeSpec | 'FUNCTION' | 'ARRAY' {
     const words = name.split(' ').filter(Boolean);
     if (!words.length) throw new Unsupported('empty type');
-    if (/^(?:_Complex|__complex|_Float16|__fp16|__bf16|__int128|__uint128|__int128_t|__uint128_t)/.test(name) || words.includes('_Complex'))
+    if (
+      /^(?:_Complex|__complex|_Float16|__fp16|__bf16|__int128|__uint128|__int128_t|__uint128_t)/.test(
+        name,
+      ) ||
+      words.includes('_Complex')
+    )
       throw new Unsupported(`unsupported builtin: ${name}`);
     if (/vector|__attribute__|ext_vector/.test(name)) throw new Unsupported(`vector: ${name}`);
     const builtin = this.builtin(words);
@@ -287,7 +300,11 @@ class Resolver {
     if (fixed) {
       const width = Number(fixed[2]);
       const unsigned = fixed[1] === 'u';
-      return (unsigned ? { 8: 'uchar', 16: 'ushort', 32: 'uint', 64: 'uint64' } : { 8: 'schar', 16: 'short', 32: 'int', 64: 'int64' })[width as 8 | 16 | 32 | 64] as ScalarSpec;
+      return (
+        unsigned
+          ? { 8: 'uchar', 16: 'ushort', 32: 'uint', 64: 'uint64' }
+          : { 8: 'schar', 16: 'short', 32: 'int', 64: 'int64' }
+      )[width as 8 | 16 | 32 | 64] as ScalarSpec;
     }
     switch (name) {
       case 'size_t':
@@ -391,7 +408,9 @@ const BREW = sh('brew', ['--prefix']);
 const LLVM = `${BREW}/opt/llvm`;
 const MINGW = `${BREW}/opt/mingw-w64/toolchain-x86_64/x86_64-w64-mingw32`;
 const MINGW_VERSION =
-  /mingw-w64\/([^/]+)\//.exec(execFileSync('readlink', ['-f', `${BREW}/opt/mingw-w64`], { encoding: 'utf8' }))?.[1] ?? 'unknown';
+  /mingw-w64\/([^/]+)\//.exec(
+    execFileSync('readlink', ['-f', `${BREW}/opt/mingw-w64`], { encoding: 'utf8' }),
+  )?.[1] ?? 'unknown';
 const MINGW_INCLUDE = `${MINGW}/include/`;
 
 const include = (headers: readonly string[]): string =>
@@ -515,8 +534,7 @@ const units: Unit[] = [
     source: include([...C_HEADERS, ...POSIX_HEADERS]),
     roots: darwinRoots,
     provenance: darwinProvenance,
-    classify: (decl) =>
-      decl.isStatic ? null : isDarwinInternal(decl.name) ? 'darwin' : 'posix',
+    classify: (decl) => (decl.isStatic ? null : isDarwinInternal(decl.name) ? 'darwin' : 'posix'),
     target: 'darwin',
   },
   {
@@ -626,10 +644,34 @@ const windowsUnits = [
   ),
 ];
 
-const HAND_UNITS: readonly { id: string; file: string; library: LibraryKind; target: Unit['target']; provenance: string }[] = [
-  { id: 'glibc', file: 'glibc.h', library: 'glibc', target: 'hand', provenance: 'scripts/library-prototypes/glibc.h (glibc 2.39 ABI)' },
-  { id: 'cxx', file: 'cxx-abi.h', library: 'cxx', target: 'hand', provenance: 'scripts/library-prototypes/cxx-abi.h (Itanium C++ ABI)' },
-  { id: 'c-extras', file: 'c-extras.h', library: 'c', target: 'hand', provenance: 'scripts/library-prototypes/c-extras.h (libc runtime support)' },
+const HAND_UNITS: readonly {
+  id: string;
+  file: string;
+  library: LibraryKind;
+  target: Unit['target'];
+  provenance: string;
+}[] = [
+  {
+    id: 'glibc',
+    file: 'glibc.h',
+    library: 'glibc',
+    target: 'hand',
+    provenance: 'scripts/library-prototypes/glibc.h (glibc 2.39 ABI)',
+  },
+  {
+    id: 'cxx',
+    file: 'cxx-abi.h',
+    library: 'cxx',
+    target: 'hand',
+    provenance: 'scripts/library-prototypes/cxx-abi.h (Itanium C++ ABI)',
+  },
+  {
+    id: 'c-extras',
+    file: 'c-extras.h',
+    library: 'c',
+    target: 'hand',
+    provenance: 'scripts/library-prototypes/c-extras.h (libc runtime support)',
+  },
 ];
 
 function dump(unit: Unit): string {
@@ -642,10 +684,15 @@ function dump(unit: Unit): string {
       encoding: 'utf8',
       maxBuffer: 1 << 30,
     });
-    if (!result.stdout.includes('"inner"')) throw new Error(`${unit.id}: ${result.stderr.slice(0, 2000)}`);
+    if (!result.stdout.includes('"inner"'))
+      throw new Error(`${unit.id}: ${result.stderr.slice(0, 2000)}`);
     const errors = result.stderr.match(/error:/g)?.length ?? 0;
-    if (/fatal error:/.test(result.stderr)) throw new Error(`${unit.id}: ${result.stderr.slice(0, 1000)}`);
-    if (errors) console.log(`  ${errors} header error(s); first: ${result.stderr.split('\n').find((line) => /error:/.test(line))}`);
+    if (/fatal error:/.test(result.stderr))
+      throw new Error(`${unit.id}: ${result.stderr.slice(0, 1000)}`);
+    if (errors)
+      console.log(
+        `  ${errors} header error(s); first: ${result.stderr.split('\n').find((line) => /error:/.test(line))}`,
+      );
     return result.stdout;
   } finally {
     rmSync(source, { force: true });
@@ -697,7 +744,11 @@ const handNames = new Map<string, readonly string[]>();
 for (const line of readFileSync(join(HAND, 'parameter-names.txt'), 'utf8').split('\n')) {
   if (!line.trim() || line.startsWith('#')) continue;
   const colon = line.indexOf(':');
-  const names = line.slice(colon + 1).trim().split(/\s+/).filter(Boolean);
+  const names = line
+    .slice(colon + 1)
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
   for (const name of line.slice(0, colon).trim().split(/\s+/)) handNames.set(name, names);
 }
 /** Names for an unnamed declaration of `arity` parameters: the hand table (a trailing
@@ -718,7 +769,8 @@ const snake = (name: string): string =>
 
 function formatRule(decl: Decl, resolver: Resolver): { kind: 'f' | 's'; index: number } | null {
   if (!decl.variadic) return null;
-  const printf = /(?:^|_)(?:f|s|sn|d|as|v|w)?printf(?:_s)?$|^(?:err|warn|syslog|NSLog)x?$|^__.*printf_chk$|^__syslog_chk$/;
+  const printf =
+    /(?:^|_)(?:f|s|sn|d|as|v|w)?printf(?:_s)?$|^(?:err|warn|syslog|NSLog)x?$|^__.*printf_chk$|^__syslog_chk$/;
   const scanf = /scanf/;
   if (!decl.formatted && !printf.test(decl.name) && !scanf.test(decl.name)) return null;
   for (let index = decl.parameters.length - 1; index >= 0; index--) {
@@ -759,7 +811,9 @@ function addUnit(
     const module = moduleFor(library, unit.provenance);
     if (module.rows.has(decl.name)) continue;
     try {
-      const returns = resolver.value(decl.returns === 'void (*)(void)' ? 'void (*)(void)' : decl.returns);
+      const returns = resolver.value(
+        decl.returns === 'void (*)(void)' ? 'void (*)(void)' : decl.returns,
+      );
       const borrowed = decl.parameters.some((item) => !item.name)
         ? borrowedNames(decl.name, decl.parameters.length)
         : undefined;
@@ -788,7 +842,11 @@ function addUnit(
         parameters: unique.join(','),
         flags,
         header,
-        signature: [encode(returns), unique.map((item) => item.slice(item.indexOf(':'))).join(','), flags].join('|'),
+        signature: [
+          encode(returns),
+          unique.map((item) => item.slice(item.indexOf(':'))).join(','),
+          flags,
+        ].join('|'),
       };
       module.rows.set(decl.name, row);
     } catch (error) {
@@ -829,7 +887,10 @@ console.log('clang windows-crt (parameter names)');
 const crtData = collect(crtUnit, dump(crtUnit));
 for (const decl of crtData.decls.values())
   if (decl.parameters.length && decl.parameters.every((item) => item.name))
-    supplement.set(decl.name, decl.parameters.map((item) => snake(item.name!)));
+    supplement.set(
+      decl.name,
+      decl.parameters.map((item) => snake(item.name!)),
+    );
 
 const seenDarwin = new Set<string>();
 // Hand-written checked builtins first: they carry parameter names the SDK omits.
@@ -856,7 +917,8 @@ for (const unit of windowsUnits)
     true,
     (decl) => {
       if (unit.id === 'windows-crt') return crtNames.has(decl.name) ? 'windows-crt' : null;
-      for (const [library] of WINDOWS_DLLS) if (dllNames.get(library)!.has(decl.name)) return library;
+      for (const [library] of WINDOWS_DLLS)
+        if (dllNames.get(library)!.has(decl.name)) return library;
       return null;
     },
     undefined,
@@ -905,12 +967,15 @@ function writeModule(library: LibraryKind): void {
   const headers: string[] = [];
   const lines: string[] = [];
   const used = new Set<string>();
-  const rows = [...module.rows.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const rows = [...module.rows.values()].sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+  );
   for (const row of rows) {
     let index = headers.indexOf(row.header);
     if (index < 0) index = headers.push(row.header) - 1;
     lines.push(`${row.name}|${row.returns}|${row.parameters}|${row.flags}|${index.toString(36)}`);
-    for (const match of `${row.returns}${row.parameters}`.matchAll(/&([^;]+);/g)) used.add(match[1]!);
+    for (const match of `${row.returns}${row.parameters}`.matchAll(/&([^;]+);/g))
+      used.add(match[1]!);
   }
   const handleLines = [...used].sort().map((name) => `&${name}=${allHandles.get(name)!}`);
   const body = [...handleLines, ...lines].join('\n');
@@ -932,5 +997,10 @@ if (process.env.PROTOTYPES_TYPEDEFS) {
   const counts = new Map<string, number>();
   for (const resolver of resolvers)
     for (const [name, count] of resolver.stats) counts.set(name, (counts.get(name) ?? 0) + count);
-  console.log([...counts].sort().map(([name, count]) => `${name} ${count}`).join('\n'));
+  console.log(
+    [...counts]
+      .sort()
+      .map(([name, count]) => `${name} ${count}`)
+      .join('\n'),
+  );
 }

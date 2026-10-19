@@ -1,5 +1,11 @@
 import type { CatalogEntry, LibraryKind } from '../catalog.js';
-import { ABI_TYPEDEFS, SCALAR_CODES, type AbiTypedef, type ScalarSpec, type TypeSpec } from '../spec.js';
+import {
+  ABI_TYPEDEFS,
+  SCALAR_CODES,
+  type AbiTypedef,
+  type ScalarSpec,
+  type TypeSpec,
+} from '../spec.js';
 import * as c from './data/c.js';
 import * as corefoundation from './data/corefoundation.js';
 import * as cxx from './data/cxx.js';
@@ -85,7 +91,12 @@ class Table {
   }
 
   private decode(line: string): CatalogEntry {
-    const [returns, parameters, flags, header] = line.split('|') as [string, string, string, string];
+    const [returns, parameters, flags, header] = line.split('|') as [
+      string,
+      string,
+      string,
+      string,
+    ];
     let variadic_rule: CatalogEntry['variadic_rule'];
     for (const match of flags.matchAll(/([fso])(\d+)/g))
       variadic_rule = {
@@ -162,10 +173,7 @@ const tables = new Map<LibraryKind, Table | null>();
 
 /** The generated header interface of `name` in one library family, decoded on demand;
  * a family's module is indexed on first use. */
-export function generatedDeclaration(
-  library: LibraryKind,
-  name: string,
-): CatalogEntry | undefined {
+export function generatedDeclaration(library: LibraryKind, name: string): CatalogEntry | undefined {
   let table = tables.get(library);
   if (table === undefined) {
     const module = MODULES[library];

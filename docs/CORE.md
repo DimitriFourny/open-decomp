@@ -77,7 +77,7 @@ Existing ABIs have no such implicit inputs.
 
 Library prototypes: `catalog.ts` holds the hand-curated contracts (effects, argument
 footprints, captures, variadic rules, noreturn); they are authoritative. Behind them,
-`generated/data/*.ts` carries about 8,000 header-derived interfaces (ISO C, POSIX,
+`generated/data/*.ts` carries about 6,900 header-derived interfaces (ISO C, POSIX,
 Darwin libSystem incl. `dispatch_*`/`os_unfair_lock_*`/`malloc_zone_*`/`mach_*`/`CC_*`,
 CoreFoundation, glibc/Itanium-ABI support symbols, MSVC/UCRT CRT and
 kernel32/user32/advapi32/ws2_32/shell32), each with its library family, header

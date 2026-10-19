@@ -10,11 +10,11 @@ import {
 } from '../../src/core/index.js';
 import { DarwinArm64Abi } from '../../src/abi/darwin-arm64/index.js';
 import { WindowsX64Abi } from '../../src/abi/windows-x64/index.js';
+import { findDeclaration, type LibraryKind } from '../../src/metadata/library-contracts/catalog.js';
 import {
-  findDeclaration,
-  type LibraryKind,
-} from '../../src/metadata/library-contracts/catalog.js';
-import { generatedDeclaration, generatedNames } from '../../src/metadata/library-contracts/generated/index.js';
+  generatedDeclaration,
+  generatedNames,
+} from '../../src/metadata/library-contracts/generated/index.js';
 import { recoverLibraryContracts } from '../../src/metadata/library-contracts/index.js';
 import { libraryLookupName } from '../../src/metadata/symbols/c-names.js';
 import { loadBytes } from './fixture.js';
@@ -194,10 +194,10 @@ test('named pointer typedefs keep their name over an opaque pointee', () => {
   const type = (id: string) => result.types.find((item) => item.id === id)!;
   assert.equal(type(create.signature!.return_type).spelling, 'HANDLE');
   assert.equal(type(create.signature!.return_type).definition.kind, 'pointer');
-  assert.deepEqual(
-    create.signature!.parameters.map((parameter) => parameter.name).slice(0, 2),
-    ['lpFileName', 'dwDesiredAccess'],
-  );
+  assert.deepEqual(create.signature!.parameters.map((parameter) => parameter.name).slice(0, 2), [
+    'lpFileName',
+    'dwDesiredAccess',
+  ]);
 });
 
 test('every generated declaration decodes with parameter names and header provenance', () => {

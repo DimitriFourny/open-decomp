@@ -151,7 +151,12 @@ export function recoverLibraryContracts(
     const { layout } = abi;
     switch (spec) {
       case 'void':
-        return { definition: { kind: 'void' }, abi_type: { kind: 'void' }, name: spec, birth: spec };
+        return {
+          definition: { kind: 'void' },
+          abi_type: { kind: 'void' },
+          name: spec,
+          birth: spec,
+        };
       case 'char':
         return integer(layout.char_bits, true, spec);
       case 'schar':
@@ -184,7 +189,9 @@ export function recoverLibraryContracts(
       case 'ssize_t':
         return integer(layout.pointer_bits, true, spec);
       case 'wchar':
-        return abi.id === 'windows-x64' ? integer(16, false, 'wchar_t') : integer(32, true, 'wchar_t');
+        return abi.id === 'windows-x64'
+          ? integer(16, false, 'wchar_t')
+          : integer(32, true, 'wchar_t');
       case 'float':
         return float(layout.float_bits, spec);
       case 'double':

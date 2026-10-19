@@ -3,7 +3,10 @@ import test from 'node:test';
 import { darwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { windowsX64Abi } from '../../../src/abi/windows-x64/index.js';
-import { printfArgumentTypes, scanfArgumentTypes } from '../../../src/service/analysis/source-variadic.js';
+import {
+  printfArgumentTypes,
+  scanfArgumentTypes,
+} from '../../../src/service/analysis/source-variadic.js';
 
 for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
   test(`${abi.id}: printf actual types include width/precision and default promotions`, () => {
