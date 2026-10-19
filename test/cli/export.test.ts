@@ -283,9 +283,8 @@ test(
     const log: string[] = [];
     const summary = await exportBinary(
       failing(session, target.id, 'forced failure for the test'),
-      { binary: fixture, out, language: 'c-like', jobs: 1 },
+      { out, language: 'c-like', jobs: 1 },
       new AbortController().signal,
-      () => {},
       (message) => log.push(message),
     );
     assert.equal(summary.failed, 1);
@@ -319,12 +318,8 @@ test(
     t.after(() => session.close());
     const controller = new AbortController();
     await assert.rejects(
-      exportBinary(
-        session,
-        { binary: fixture, out, language: 'c-like', jobs: 1 },
-        controller.signal,
-        () => {},
-        () => controller.abort(),
+      exportBinary(session, { out, language: 'c-like', jobs: 1 }, controller.signal, () =>
+        controller.abort(),
       ),
       { name: 'AbortError' },
     );

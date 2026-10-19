@@ -316,16 +316,13 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
       const summary = await exportBinary(
         session,
         {
-          binary: parsed.binary,
           out: parsed.out!,
           language: parsed.emitter ?? 'c-like',
           jobs: parsed.jobs,
-          cachePath: parsed.cachePath,
           sliceId: parsed.sliceId,
           name: parsed.name,
         },
         controller.signal,
-        onProgress,
         (message) => process.stderr.write(`${terminal(message)}\n`),
       );
       process.stderr.write(

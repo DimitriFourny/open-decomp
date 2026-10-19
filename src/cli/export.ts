@@ -5,14 +5,12 @@ import { basename, join } from 'node:path';
 import { openBinary } from '../api/index.js';
 import type { BinaryFunction, BinarySession } from '../api/index.js';
 import { cSourceName } from '../metadata/symbols/c-names.js';
-import type { Target, ToolResult, WireJob } from '../core/index.js';
+import type { Target, ToolResult } from '../core/index.js';
 
 export interface ExportOptions {
-  readonly binary: string;
   readonly out: string;
   readonly language: 'c-like' | 'python-like';
   readonly jobs: number | undefined;
-  readonly cachePath?: string | undefined;
   readonly sliceId?: string | undefined;
   readonly name?: string | undefined;
 }
@@ -204,6 +202,7 @@ type CFormat = Target['format'];
 
 class Exporter {
   readonly #options: ExportOptions;
+  readonly #input: string;
   readonly #signal: AbortSignal;
   readonly #cFormat: CFormat;
   readonly #names = new Map<string, string>(); // entity id -> name
@@ -218,7 +217,8 @@ class Exporter {
   rows: Row[] = [];
   readonly #incomplete = new Set<string>();
 
-  constructor(options: ExportOptions, signal: AbortSignal, format: CFormat) {
+  constructor(options: ExportOptions, input: string, signal: AbortSignal, format: CFormat) {
+    this.#input = input;
     this.#options = options;
     this.#signal = signal;
     this.#cFormat = format;
@@ -574,7 +574,7 @@ class Exporter {
     ]);
     const extension = this.#options.language === 'python-like' ? 'py' : 'c';
     await write('README.txt', [
-      `Open Decomp export (${this.#options.language}) of ${escape(basename(this.#options.binary))}: ${summary.functions} functions (${summary.complete} complete, ${summary.partial} partial, ${summary.failed} failed).`,
+      `Open Decomp export (${this.#options.language}) of ${escape(basename(this.#input))}: ${summary.functions} functions (${summary.complete} complete, ${summary.partial} partial, ${summary.failed} failed).`,
       `index.tsv: one row per function: address, name, file, state, reason, code_bytes, callers, callees. Start here; grep it by name or state.`,
       `functions/NAME@0xADDR.${extension}: pseudocode exactly as 'open-decomp decompile' prints it, preceded by one header comment (state, size, callers, callees; '?' = unresolved indirect call).`,
       `functions/NAME@0xADDR.asm: only where pseudocode could not be produced; compact native disassembly and the reason in the header. state=partial files are real but incomplete pseudocode (reason in index.tsv).`,
@@ -598,58 +598,61 @@ class Exporter {
 export async function exportBinary(
   primary: BinarySession,
   options: ExportOptions,
-  signal: AbortSignal,
-  onProgress: (job: WireJob) => void,
+  outer: AbortSignal,
   log: (message: string) => void,
 ): Promise<ExportSummary> {
   const started = Date.now();
-  const exporter = new Exporter(options, signal, primary.image.target.format);
-  const data = await exporter.load(primary);
-  exporter.buildRows(data.functions);
-  const rows = exporter.rows;
-  const jobs = Math.max(
-    1,
-    Math.min(
-      options.jobs ?? Math.max(1, Math.min(4, availableParallelism() >> 1)),
-      rows.length || 1,
-    ),
-  );
-  await mkdir(options.out, { recursive: true });
-  await exporter.prepareDirectory();
-  log(
-    `export: ${rows.length} functions${options.name === undefined ? '' : ` matching "${options.name}"`}, ${jobs} worker${jobs === 1 ? '' : 's'}`,
-  );
-
+  // The first real error stops every worker; the caller's signal stops them all too.
+  const stop = new AbortController();
+  const signal = stop.signal;
+  const forward = (): void => stop.abort(outer.reason);
+  if (outer.aborted) forward();
+  else outer.addEventListener('abort', forward, { once: true });
+  const exporter = new Exporter(options, primary.inputPath, signal, primary.image.target.format);
   const sessions: BinarySession[] = [primary];
   let scratch: string | undefined;
   try {
+    const data = await exporter.load(primary);
+    exporter.buildRows(data.functions);
+    const rows = exporter.rows;
+    const jobs = Math.max(
+      1,
+      Math.min(
+        options.jobs ?? Math.max(1, Math.min(4, availableParallelism() >> 1)),
+        rows.length || 1,
+      ),
+    );
+    await mkdir(options.out, { recursive: true });
+    await exporter.prepareDirectory();
+    log(
+      `export: ${rows.length} functions${options.name === undefined ? '' : ` matching "${options.name}"`}, ${jobs} worker${jobs === 1 ? '' : 's'}`,
+    );
     if (jobs > 1) {
       // A project database has one owner. Extra workers analyze private copies of the
       // finished import (copy-on-write where the filesystem supports it).
       await primary.close();
-      scratch = join(primary.cachePath, `.export-${process.pid}-${Date.now()}`);
-      const reopen = (cachePath: string): Promise<BinarySession> =>
-        openBinary(options.binary, {
-          cachePath,
-          ...(options.sliceId === undefined ? {} : { sliceId: options.sliceId }),
-          signal,
-          onProgress,
-        });
-      const projectName = basename(primary.projectPath);
-      const roots = await Promise.all(
-        Array.from({ length: jobs - 1 }, async (_, index) => {
-          const root = join(scratch!, `w${index + 1}`);
-          await mkdir(root, { recursive: true, mode: 0o700 });
-          await cp(primary.projectPath, join(root, projectName), {
-            recursive: true,
-            mode: constants.COPYFILE_FICLONE,
-          });
-          return root;
-        }),
-      );
       sessions.length = 0;
-      sessions.push(
-        ...(await Promise.all([reopen(primary.cachePath), ...roots.map((root) => reopen(root))])),
+      scratch = join(primary.cachePath, `.export-${process.pid}-${Date.now()}`);
+      const projectName = basename(primary.projectPath);
+      await Promise.all(
+        Array.from({ length: jobs }, async (_, index) => {
+          let cachePath = primary.cachePath;
+          if (index > 0) {
+            cachePath = join(scratch!, `w${index}`);
+            await mkdir(cachePath, { recursive: true, mode: 0o700 });
+            await cp(primary.projectPath, join(cachePath, projectName), {
+              recursive: true,
+              mode: constants.COPYFILE_FICLONE,
+            });
+          }
+          sessions.push(
+            await openBinary(primary.inputPath, {
+              cachePath,
+              ...(options.sliceId === undefined ? {} : { sliceId: options.sliceId }),
+              signal,
+            }),
+          );
+        }),
       );
     }
 
@@ -657,37 +660,35 @@ export async function exportBinary(
       done = 0,
       lastReport = started;
     const counts = { complete: 0, partial: 0, failed: 0 };
+    let failure: { error: unknown } | undefined;
     const worker = async (session: BinarySession): Promise<void> => {
-      for (;;) {
-        signal.throwIfAborted();
-        const row = rows[next++];
-        if (row === undefined) return;
-        await exporter.process(session, row);
-        if (row.state === 'complete') counts.complete++;
-        else if (row.state === 'partial') counts.partial++;
-        else counts.failed++;
-        done++;
-        const now = Date.now();
-        if (now - lastReport >= 2000) {
-          lastReport = now;
-          log(
-            `export: ${done}/${rows.length} (${Math.floor((done * 100) / rows.length)}%), ${counts.complete} complete, ${counts.partial} partial, ${counts.failed} failed, ${Math.round((now - started) / 1000)}s`,
-          );
+      try {
+        for (;;) {
+          signal.throwIfAborted();
+          const row = rows[next++];
+          if (row === undefined) return;
+          await exporter.process(session, row);
+          if (row.state === 'complete') counts.complete++;
+          else if (row.state === 'partial') counts.partial++;
+          else counts.failed++;
+          done++;
+          const now = Date.now();
+          if (now - lastReport >= 2000) {
+            lastReport = now;
+            log(
+              `export: ${done}/${rows.length} (${Math.floor((done * 100) / rows.length)}%), ${counts.complete} complete, ${counts.partial} partial, ${counts.failed} failed, ${Math.round((now - started) / 1000)}s`,
+            );
+          }
         }
+      } catch (error) {
+        failure ??= { error };
+        stop.abort(error);
       }
     };
-    const outcomes = await Promise.allSettled(sessions.map((session) => worker(session)));
-    const failure = outcomes.find((outcome) => outcome.status === 'rejected');
-    if (failure) {
-      // Stop the others promptly; the first real error wins.
-      throw (failure as PromiseRejectedResult).reason;
-    }
+    await Promise.all(sessions.map((session) => worker(session)));
+    if (failure) throw failure.error;
     signal.throwIfAborted();
-    const indexBytes = await exporter.writeIndexes(data, {
-      functions: rows.length,
-      ...counts,
-    });
-    let bytes = indexBytes,
+    let bytes = await exporter.writeIndexes(data, { functions: rows.length, ...counts }),
       files = 5;
     for (const row of rows) {
       bytes += row.fileBytes;
@@ -701,6 +702,7 @@ export async function exportBinary(
       incompleteIndexes: exporter.incompleteIndexes,
     };
   } finally {
+    outer.removeEventListener('abort', forward);
     await Promise.allSettled(sessions.map((session) => session.close()));
     if (scratch !== undefined) await rm(scratch, { recursive: true, force: true });
   }
