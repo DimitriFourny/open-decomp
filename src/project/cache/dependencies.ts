@@ -376,35 +376,46 @@ export class AnalysisDependencyCollector {
     }
   }
 
-  /** Exact-snapshot native helper hits must replay every read, not just positive functions. */
+  /** Exact-snapshot native helper hits must replay every read, not just positive functions.
+   * A read this collector already captured at its revision is not re-read: the store is
+   * immutable per revision, so the re-read would equal the captured value. Work charges
+   * stay identical to re-reading (one unit per replayed read). */
   replay(readset: AnalysisReadset): void {
-    for (const read of analysisReadsetSchema.parse(readset).reads) {
-      const value = readSelector(
-        this.source,
-        this.revision,
-        read.selector,
-        this.context,
-        this.annotations,
-      );
-      if (digest(value) !== read.fingerprint)
+    const own = finishedReadsets.get(readset);
+    if (own === this) {
+      // A snapshot of this collector is a prefix of its (append-only) reads.
+      for (let index = 0; index < readset.reads.length; index++) this.context.checkpoint(1);
+      return;
+    }
+    for (const read of (own ? readset : analysisReadsetSchema.parse(readset)).reads) {
+      const captured = this.#reads.get(digest(read.selector));
+      const value = captured
+        ? undefined
+        : readSelector(this.source, this.revision, read.selector, this.context, this.annotations);
+      if (captured) this.context.checkpoint(1);
+      if ((captured ? captured.fingerprint : digest(value)) !== read.fingerprint)
         throw new OperationError({
           code: 'invalid_input',
           severity: 'error',
           message: 'Native helper dependency snapshot no longer matches its readset',
           evidence_ids: [],
         });
-      this.capture(read.selector, value);
+      if (!captured) this.capture(read.selector, value);
     }
   }
 
   finish(): AnalysisReadset {
-    return analysisReadsetSchema.parse({
+    const readset = analysisReadsetSchema.parse({
       version: 1,
       complete: true,
       reads: [...this.#reads.values()],
     });
+    finishedReadsets.set(readset, this);
+    return readset;
   }
 }
+/** Readsets produced by `finish()` (already validated) and the collector that produced them. */
+const finishedReadsets = new WeakMap<AnalysisReadset, AnalysisDependencyCollector>();
 export function createAnalysisReadset(
   store: ProjectStore,
   revision: number,

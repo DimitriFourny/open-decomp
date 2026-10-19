@@ -25,6 +25,11 @@ export function createOperationContext(
   const signal = options.signal ?? new AbortController().signal;
   const deadline = performance.now() + budget.deadline_ms;
   let consumed = 0;
+  // Reading the clock dominates a charge; analyses charge millions of times per
+  // request. Sample it every few charges (a deadline is detected at most a handful of
+  // charges late) and latch expiry so every later charge fails as before.
+  let clockCountdown = 0,
+    expired = false;
   const checkpoint = (work: number): void => {
     if (!Number.isSafeInteger(work) || work < 0)
       throw new RangeError('Work charge must be a nonnegative safe integer');
@@ -35,7 +40,11 @@ export function createOperationContext(
         message: 'Operation cancelled',
         evidence_ids: [],
       });
-    if (performance.now() >= deadline)
+    if (!expired && --clockCountdown < 0) {
+      clockCountdown = 31;
+      expired = performance.now() >= deadline;
+    }
+    if (expired)
       throw new OperationError({
         code: 'resource_limit',
         severity: 'error',
