@@ -228,9 +228,11 @@ export function prepareNativeUnit(
     ...context,
     budget: { ...context.budget, work: ssaLimit },
     remainingWork: () => Math.max(0, ssaLimit - ssaWork),
+    // Parent charges check cancellation/deadline first; the extra parent check is
+    // needed only before throwing the local limit (one parent call per charge).
     checkpoint(work) {
-      context.checkpoint(0);
-      if (ssaWork + work > ssaLimit)
+      if (ssaWork + work > ssaLimit) {
+        context.checkpoint(0);
         throw new OperationError({
           code: 'resource_limit',
           severity: 'warning',
@@ -238,6 +240,7 @@ export function prepareNativeUnit(
           evidence_ids: fn.evidence_ids,
           details: { kind: 'limit', resource: 'work', limit: ssaLimit, consumed: ssaWork + work },
         });
+      }
       context.checkpoint(work);
       ssaWork += work;
     },
@@ -312,8 +315,8 @@ export function prepareNativeUnit(
     budget: { ...context.budget, work: workLimit },
     remainingWork: () => Math.max(0, workLimit - used),
     checkpoint(work) {
-      context.checkpoint(0);
-      if (used + work > workLimit)
+      if (used + work > workLimit) {
+        context.checkpoint(0);
         throw new OperationError({
           code: 'resource_limit',
           severity: 'warning',
@@ -321,6 +324,7 @@ export function prepareNativeUnit(
           evidence_ids: fn.evidence_ids,
           details: { kind: 'limit', resource: 'work', limit: workLimit, consumed: used + work },
         });
+      }
       context.checkpoint(work);
       used += work;
     },

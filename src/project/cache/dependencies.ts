@@ -189,6 +189,10 @@ export class AnalysisDependencyCollector {
   readonly #reads = new Map<string, AnalysisReadset['reads'][number]>();
   #annotationDepth = 0;
   #trace: TracedRead[] | undefined;
+  // Proof/type values already read at this revision; traced walks revisit captured
+  // closures and must not re-read them from the store.
+  readonly #proofs = new Map<string, Evidence | null>();
+  readonly #types = new Map<string, DurableTypeDependency | null>();
   #annotations: AnnotationReadIndex | undefined;
   constructor(
     readonly source: ProjectStore,
@@ -330,10 +334,9 @@ export class AnalysisDependencyCollector {
       const selector = { kind: 'proof' as const, id: next };
       if (visited ? visited.has(next) : this.#reads.has(digest(selector))) continue;
       visited?.add(next);
-      const proof =
-        next === id && initial !== undefined
-          ? initial
-          : (this.source.readEvidence([next], this.revision)[0] ?? null);
+      let proof = next === id && initial !== undefined ? initial : this.#proofs.get(next);
+      if (proof === undefined) proof = this.source.readEvidence([next], this.revision)[0] ?? null;
+      this.#proofs.set(next, proof);
       this.capture(selector, proof);
       if (proof) pending.push(...proof.derived_from, ...proof.conflicts_with);
     }
@@ -347,8 +350,9 @@ export class AnalysisDependencyCollector {
       const selector = { kind: 'type' as const, id: next };
       if (visited ? visited.has(next) : this.#reads.has(digest(selector))) continue;
       visited?.add(next);
-      const type =
-        next === id && initial !== undefined ? initial : this.source.readType(next, this.revision);
+      let type = next === id && initial !== undefined ? initial : this.#types.get(next);
+      if (type === undefined) type = this.source.readType(next, this.revision);
+      this.#types.set(next, type);
       this.capture(selector, type);
       if (type) {
         pending.push(...typeReferences(type.definition));

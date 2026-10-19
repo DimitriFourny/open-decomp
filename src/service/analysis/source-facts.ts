@@ -886,8 +886,9 @@ const preparedUnits = new WeakMap<
     size: number;
   }
 >();
-/** Retained prepared size (instructions + IR nodes + evidence) per image. */
-const MAX_PREPARED_UNIT_SIZE = 1 << 20;
+/** Retained prepared size (instructions + IR nodes + evidence + traced reads) per
+ * image. Measured on SQLite at roughly 1 KiB of heap per unit, so ~256 MiB. */
+const MAX_PREPARED_UNIT_SIZE = 1 << 18;
 const preparedSize = (unit: PreparedNativeUnit): number =>
   unit.instructions + unit.nodes + unit.evidence.length;
 const reusablePreparation = (unit: PreparedNativeUnit): boolean =>
@@ -1156,9 +1157,12 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     ...context,
     budget: { ...context.budget, work: summaryWorkLimit },
     remainingWork: () => Math.max(0, summaryWorkLimit - summaryWork),
+    // Charging the parent checks cancellation/deadline before the charge, so the local
+    // limit needs a separate parent check only on the path that throws it; this keeps
+    // one parent call per charge instead of doubling at every nesting level.
     checkpoint(work) {
-      context.checkpoint(0);
-      if (summaryWork + work > summaryWorkLimit)
+      if (summaryWork + work > summaryWorkLimit) {
+        context.checkpoint(0);
         throw new OperationError({
           code: 'resource_limit',
           severity: 'warning',
@@ -1171,6 +1175,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
             consumed: Math.min(summaryWork + work, Number.MAX_SAFE_INTEGER),
           },
         });
+      }
       context.checkpoint(work);
       summaryWork += work;
     },
@@ -1184,8 +1189,8 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     budget: { ...summaryContext.budget, work: worklistWorkLimit },
     remainingWork: () => Math.max(0, worklistWorkLimit - worklistWork),
     checkpoint(work) {
-      summaryContext.checkpoint(0);
-      if (worklistWork + work > worklistWorkLimit)
+      if (worklistWork + work > worklistWorkLimit) {
+        summaryContext.checkpoint(0);
         throw new OperationError({
           code: 'resource_limit',
           severity: 'warning',
@@ -1198,6 +1203,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
             consumed: Math.min(worklistWork + work, Number.MAX_SAFE_INTEGER),
           },
         });
+      }
       summaryContext.checkpoint(work);
       worklistWork += work;
     },
