@@ -15,7 +15,11 @@ import { fingerprint, OperationError, U64_LIMIT, type CanonicalValue } from '../
 import type { CallAnalysisResult, SuppliedCallContract } from '../../analysis/calls/index.js';
 import { observePreparedCallInterfaces } from '../../analysis/calls/observed.js';
 import { createCallResultDemandIndex } from '../../analysis/calls/result-demands.js';
-import { recoverDataAddress, recoverDataBytes } from '../../analysis/strings/source-data.js';
+import {
+  recoverDataAddress,
+  recoverDataBytes,
+  recoverImportBindings,
+} from '../../analysis/strings/source-data.js';
 import { sourceConstantValues } from '../../reconstruction/source-data.js';
 import { cSourceName } from '../../metadata/symbols/c-names.js';
 import { inspectRegister, type StackFact } from '../../analysis/stack/index.js';
@@ -716,12 +720,58 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
     }
     return { ...symbol, original_name: name ?? null, display_name: null };
   });
+  const slotImports = recoverImportBindings(
+    image,
+    candidates,
+    (id) => {
+      const annotations = scope.store
+        .readAnnotations(id, revision)
+        .filter(
+          (annotation) => annotation.value.kind === 'name' && annotation.status !== 'retracted',
+        );
+      return {
+        asserted: annotations.flatMap((annotation) =>
+          annotation.status === 'asserted' && annotation.value.kind === 'name'
+            ? [annotation.value.value]
+            : [],
+        ),
+        annotated: annotations.length > 0,
+      };
+    },
+    context,
+  );
   const result: SourceAddress[] = [];
   for (const [key, address] of candidates) {
     context.checkpoint(1);
     const aliases = names.get(key),
       name = aliases?.size === 1 ? [...aliases][0] : undefined;
     const recovered = recoverDataAddress(image, address, context, symbols);
+    const imported = slotImports.get(key);
+    if (imported) {
+      // Slot bytes are loader inputs, never the values later read: neither a
+      // string nor constant bytes may be recovered from them.
+      const {
+        string: _s,
+        string_byte_length: _l,
+        string_encoding: _e,
+        string_start: _t,
+        ...slot
+      } = recovered ?? { address };
+      const object = recovered?.object;
+      result.push({
+        ...slot,
+        object: {
+          address,
+          byte_length: BigInt(image.target.address_bits / 8),
+          offset: 0n,
+          mutable: object?.mutable ?? true,
+          kind: 'bytes',
+          evidence_ids: [...new Set([...(object?.evidence_ids ?? []), ...imported.evidence_ids])],
+        },
+        import: imported,
+      });
+      continue;
+    }
     const byteLength = literalWidths.get(key);
     const constantBytes =
       !unknownWrite &&

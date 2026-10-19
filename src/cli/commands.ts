@@ -73,7 +73,7 @@ function combineExit(current: number, next: number): number {
 }
 function row(item: FunctionRow): string {
   const name = item.display_name ?? item.original_name ?? '(unnamed)';
-  return `${terminal(item.id)}  ${terminal(item.entry.space)}:${terminal(item.entry.value)}  ${terminal(name)}  [${terminal(item.boundary)}, ${terminal(item.analysis)}]`;
+  return `${terminal(item.id)}  ${terminal(item.entry.space)}:${terminal(item.entry.value)}  ${terminal(name)}  [${terminal(item.boundary)}, ${terminal(item.analysis)}${item.kind === 'import_stub' ? ', import stub' : ''}]`;
 }
 function parse(args: readonly string[]): ParsedArguments {
   const command = args[0];

@@ -618,6 +618,31 @@ Known byte extents are annotations, never inferred from the index. The bounded
 presentation record and target unaligned-access requirement preserve provenance;
 checked view does not apply the rewrite.
 
+Source-only `global_data_access` prints constant-address scalar accesses to image
+objects as declared globals instead of an address helper. Each global used by the
+function is declared once before it: C `extern T name;` (one element at offset 0),
+`extern T name[];` (one scalar type at element-multiple offsets, never a bound) or
+`extern uint8_t name[];` (anything else, accessed through explicit casts); Python-like
+uses `memory_view`. Native names use their C spelling (Mach-O drops one underscore;
+leading `__` is kept); otherwise a neutral `data_<VA>` names the object. The trailing
+comment carries the VA and any known byte extent or data kind; declarations are mapped
+with the object's evidence. Checked view still prints the explicit `data_address(...)`
+identity and declares nothing.
+
+Loader-bound import slots (Mach-O GOT/chained-fixup binds, ELF GLOB_DAT, PE IAT; not
+lazy-bound slots or stub entries) carry `SourceAddress.import`. In the source view a
+pointer-width read of such a slot is the imported symbol's address (`&sym`) and a
+read through it is the symbol itself (`sym`), declared as `import ___stderrp from
+<library>, slot 0x…` with the bind records as evidence. The declared type is the
+width of the accesses seen, never the symbol's real type; a function that writes the
+slot keeps explicit memory accesses. Python-like declares them with `import_view`.
+
+Import stubs (Mach-O `__stubs`, ELF PLT entries, PE thunks) are recognized from
+their decoded body (address materialization, slot read, one indirect branch) plus an
+established branch through a single non-weak import slot. They are published under the
+import's name with `kind: "import_stub"`, boundary `established` and analysis
+`complete`; `--function <import name>` selects them.
+
 Source type views interpret unchanged machine storage only when complete, compatible associations support them. Signed operation constraints alone do not declare signed inputs; hypotheses and conflicting layouts do not establish source declarations. Narrow fragments never discard observable high carrier bits. Typed pointer arithmetic and cyclic transfers retain exact target bits; field/array views preserve original access ordering, aliasing, faults and provenance without inventing object bounds or element counts. Dedicated C/Python regressions cover signed fields, unknown-count arrays, full-width pointer returns and typed phi swaps; public Mach-O/PE memory and loop cases retain their results and ordered accesses.
 
 Synthetic source structure views use deterministic `struct_N` names, unified by
@@ -885,7 +910,7 @@ MCP delivery is text-first and advertises no `outputSchema` (it was 316 KB of th
 - **`wait`** on `function_decompile` is `"auto" | true | false`. MCP defaults to `"auto"`: the call returns the finished result when the job completes within `QueryCallOptions.auto_wait_ms` (default 10 s), otherwise the durable `queued` job (admission ownership transfers exactly as for `wait: false`). The core/API default stays `false`. `true` awaits the terminal result; `false` returns the job at admission.
 - **Function handles.** `function_get.function_id`, `function_decompile.function_id` and `xrefs_get` `target: {kind: "entity", id}` accept, besides a full entity ID: an exact function name (`_main`; a Mach-O name also matches its C spelling), `va:0x…` / `rva:0x…` / `file:0x…`, or `entity_` plus at least 12 hex digits of a unique ID prefix. Handles are resolved after authorization by the shared `selectFunction` (`src/service/queries/selector.ts`, also used by `BinarySession.decompile`) against the function index of the project's sole image (multi-image projects need full IDs). Absence, ambiguity and an index too partial to prove either are distinct failures; none is guessed. `functions_find` accepts `id_prefix` (same ≥12-digit rule) for the same lookup.
 - **Failures** produced by the MCP layer (invalid arguments, unresolved/ambiguous function handle, host-policy rejection, oversized delivery) are `{code, path?, hint}` with `isError: true` in both the text and `structuredContent`; an ambiguous handle adds `candidates: [{id, name, entry}]` with short IDs. Core failures keep their `failed` envelope in `structuredContent` and a compact `{state, error, current_revision}` text.
-- **Search tools** (`functions_find`, `symbols_find`, `strings_find`): the text is a compact row listing, not a projection of the envelope: a header (state/reason, index state, row count, `next_cursor`), distinct diagnostics (`! warning code ×N: …`), then one row per record (`va:0x… name size boundary/analysis signature short-ID`; symbols/imports/exports with kind, library, ordinal; strings with encoding, length, status and JSON-escaped text). Per-record evidence IDs, ranges and image IDs are in `structuredContent` only. Short IDs are `entity_` + 12 hex digits (longer only to separate IDs in the same page) and are accepted as function handles.
+- **Search tools** (`functions_find`, `symbols_find`, `strings_find`): the text is a compact row listing, not a projection of the envelope: a header (state/reason, index state, row count, `next_cursor`), distinct diagnostics (`! warning code ×N: …`), then one row per record (`va:0x… name size boundary/analysis[/import-stub] signature short-ID`; symbols/imports/exports with kind, library, ordinal; strings with encoding, length, status and JSON-escaped text). Per-record evidence IDs, ranges and image IDs are in `structuredContent` only. Short IDs are `entity_` + 12 hex digits (longer only to separate IDs in the same page) and are accepted as function handles.
 - **Other navigation tools** (`binary_info`, `function_get`, `xrefs_get`, `evidence_get`): the text is a lossless, reversible projection of the structured result: a string of at least 24 characters that occurs two or more times is stored once in `refs` as `{"$ref": index}`, and an array of two or more identically keyed objects becomes `{"$table": [keys], "rows": [[values]]}`. `decodeNavigationText` (`src/mcp/navigation.ts`) restores the exact result; a result that would not shrink, or that already uses a `$ref`/`$table` key, is plain JSON. Other tools return the structured result as JSON text. Investigation text is a compact factual projection, not a duplicate of its full structured envelope; original graphs, declarations and helper definitions remain in the exact artifact. The emission's producer-recorded `declaration_span` lets body quotations exclude only the function header, preserving notes/effects outside it without parsing generated text. Large inline decompilations use `projectDecompilationArtifactResult`: original options/budgets and semantic state remain in the full artifact. Explicit artifact preference preserves semantic state; only overflow reports `output_limit`. Tool/resource wrappers remain bounded to 2 MiB; arbitrary non-analysis overflow is a delivery error, never silent truncation. Annotation responses are checked inside the transaction against the conservative escaped text-plus-structured ceiling, so oversized delivery rolls back the batch. Private `max_result_bytes` and requested artifact delivery do not alter analysis budgets/cache identity. After a lost acknowledgement, inspect the durable revision/job rather than replaying a mutation.
 
 Published handles have resource links and the template `open-decomp://artifact/{project_id}/{revision}/{artifact_id}?offset={offset}&length={length}`. Offset is hexadecimal; length is at most 524,288 bytes. Resource `_meta[\"open-decomp/artifact\"]` retains the exact handle, offset, consumed length, next offset/URI and encoding. JSON/text pages preserve UTF-8 scalar boundaries and never exceed the requested byte allowance; use length ≥4 to fit every scalar. Other media uses explicit base64. Resource access resolves IDs through the owning worker, never filesystem paths. Raw URI syntax, project, revision and stored hash are checked.
