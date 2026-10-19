@@ -47,7 +47,7 @@ import {
 } from '../../project/cache/index.js';
 import { loadFunctionGraph, loadFunctionIndex, loadFunctionScope } from '../queries/scope.js';
 import { MAX_FRAME_BYTES } from '../../workers/protocol.js';
-import { callDeclarations, resolveCalls } from './calls.js';
+import { callDeclarations, nativeCallIndex, resolveCalls } from './calls.js';
 import {
   closeEvidence,
   emissionEvidenceReferences,
