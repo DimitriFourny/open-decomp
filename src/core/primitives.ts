@@ -229,7 +229,7 @@ export const DEFAULT_BUDGET = Object.freeze({
   instructions: 10_000,
   blocks: 10_000,
   ir_nodes: 100_000,
-  work: 1_000_000,
+  work: 10_000_000,
   deadline_ms: 30_000,
   output_bytes: 1_048_576,
 });

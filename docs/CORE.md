@@ -119,16 +119,16 @@ Each result includes schema version, project/revision, backend/component version
 
 ## Defaults and bounds
 
-| Setting               |   Default |     Maximum |
-| --------------------- | --------: | ----------: |
-| Page items            |       100 |       1,000 |
-| Read bytes            |     4,096 |   1,048,576 |
-| Instructions          |    10,000 |   1,000,000 |
-| Blocks                |    10,000 |     100,000 |
-| IR nodes              |   100,000 |  10,000,000 |
-| Work units            | 1,000,000 | 100,000,000 |
-| Deadline milliseconds |    30,000 |     300,000 |
-| Output bytes          | 1,048,576 |  16,777,216 |
+| Setting               |    Default |     Maximum |
+| --------------------- | ---------: | ----------: |
+| Page items            |        100 |       1,000 |
+| Read bytes            |      4,096 |   1,048,576 |
+| Instructions          |     10,000 |   1,000,000 |
+| Blocks                |     10,000 |     100,000 |
+| IR nodes              |    100,000 |  10,000,000 |
+| Work units            | 10,000,000 | 100,000,000 |
+| Deadline milliseconds |     30,000 |     300,000 |
+| Output bytes          |  1,048,576 |  16,777,216 |
 
 Analysis defaults: conservative unknown calls, bounded indirect-target recovery, C-like emitter, evidence included, two-space indentation. String search defaults to all supported encodings and both candidates/referenced records. Search defaults to case-insensitive contains with empty query. Closing defaults to rejecting active jobs. Page ordering is explicit (`address_id`, `name_id`, or `id`) with stable identity as the final tie breaker.
 

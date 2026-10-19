@@ -11,6 +11,7 @@ import { connect as tlsConnect } from 'node:tls';
 import { once } from 'node:events';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import {
+  DEFAULT_BUDGET,
   newIdentity,
   toolNameSchema,
   validateToolRequest,
@@ -711,7 +712,7 @@ test(
     if (second.state === 'failed') assert.equal(second.error.code, 'resource_limit');
     const budget = await sdk.callTool({
       name: 'binary_info',
-      arguments: { ...scope, budget: { work: 1000001 } },
+      arguments: { ...scope, budget: { work: DEFAULT_BUDGET.work + 1 } },
     });
     assert.equal(budget.isError, true);
     assert.equal(budget.structuredContent, undefined);

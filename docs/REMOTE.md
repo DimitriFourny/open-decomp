@@ -42,7 +42,7 @@ Store only the lowercase SHA256 digest in the server configuration. Keep the act
         "instructions": 10000,
         "blocks": 10000,
         "ir_nodes": 100000,
-        "work": 1000000,
+        "work": 10000000,
         "deadline_ms": 30000,
         "output_bytes": 1048576
       }
