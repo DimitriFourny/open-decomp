@@ -39,6 +39,13 @@ export type FunctionQuery = Omit<
   ToolInput<'functions_find'>,
   'project_id' | 'revision' | 'image_id'
 >;
+export type SymbolQuery = Omit<ToolInput<'symbols_find'>, 'project_id' | 'revision' | 'image_id'>;
+export type StringQuery = Omit<ToolInput<'strings_find'>, 'project_id' | 'revision' | 'image_id'>;
+export type ReferenceQuery = Omit<ToolInput<'xrefs_get'>, 'project_id' | 'revision'>;
+export type FunctionViewQuery = Omit<
+  ToolInput<'function_get'>,
+  'project_id' | 'revision' | 'function_id'
+>;
 export type FunctionSelector =
   | { readonly name: string }
   | { readonly id: string }
@@ -255,6 +262,61 @@ export class BinarySession {
     );
   }
 
+  async findSymbols(
+    options: SymbolQuery = {},
+    call: QueryCallOptions = {},
+  ): Promise<ToolResult<'symbols_find'>> {
+    this.#requireOpen();
+    return this.service.execute(
+      'symbols_find',
+      { ...options, project_id: this.projectId, revision: this.revision, image_id: this.image.id },
+      call,
+    );
+  }
+
+  async findStrings(
+    options: StringQuery = {},
+    call: QueryCallOptions = {},
+  ): Promise<ToolResult<'strings_find'>> {
+    this.#requireOpen();
+    return this.service.execute(
+      'strings_find',
+      { ...options, project_id: this.projectId, revision: this.revision, image_id: this.image.id },
+      call,
+    );
+  }
+
+  async getReferences(
+    options: ReferenceQuery,
+    call: QueryCallOptions = {},
+  ): Promise<ToolResult<'xrefs_get'>> {
+    this.#requireOpen();
+    return this.service.execute(
+      'xrefs_get',
+      { ...options, project_id: this.projectId, revision: this.revision },
+      call,
+    );
+  }
+
+  /** Metadata, disassembly or CFG pages of one function (view defaults to metadata). */
+  async getFunction(
+    functionId: string,
+    options: FunctionViewQuery = {},
+    call: QueryCallOptions = {},
+  ): Promise<ToolResult<'function_get'>> {
+    this.#requireOpen();
+    return this.service.execute(
+      'function_get',
+      {
+        ...options,
+        project_id: this.projectId,
+        revision: this.revision,
+        function_id: functionId,
+      },
+      call,
+    );
+  }
+
   async decompile(
     input: FunctionSelector,
     options: DecompileOptions = {},
@@ -293,12 +355,25 @@ export class BinarySession {
       selected = await this.#selectByNativeName(selector.name, candidates, call);
     if (!selected)
       throw new FunctionSelectionError(found.state === 'partial' ? 'incomplete' : 'not_found', []);
+    return this.decompileFunction(selected.id, options);
+  }
+
+  /** Decompile an already identified function (entity ID from findFunctions). */
+  async decompileFunction(
+    functionId: string,
+    options: DecompileOptions = {},
+  ): Promise<ToolResult<'function_decompile'>> {
+    this.#requireOpen();
+    const call: QueryCallOptions = {
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
+    };
     const result = await this.service.execute(
       'function_decompile',
       {
         project_id: this.projectId,
         revision: this.revision,
-        function_id: selected.id,
+        function_id: functionId,
         wait: true,
         ...(options.emitter === undefined && options.view === undefined
           ? {}
