@@ -25,16 +25,23 @@ export interface StackArgumentJoins {
     | undefined;
   /** Low-bits-first components of a value defined by `concat`. */
   readonly concat: (value: Value) => readonly Value[] | undefined;
+  /** The operand an identity assignment (a register move) copies unchanged. */
+  readonly alias: (value: Value) => Value | undefined;
+  /** The bits of a value defined as a constant (rematerialized constants are
+   * distinct SSA values with equal bits). */
+  readonly constant: (value: Value) => bigint | undefined;
 }
 
 /** Recover existing stored SSA values, never add an observable memory load or
  * choose a dependency ID merely because it appears in a fact's provenance set.
  * Byte facts retain their exact owning store across snapshot copies. A byte
  * merged at the boundary's block entry (unchanged up to the boundary) resolves
- * to that block's parameter only when, on every incoming edge, the byte's
- * exact owning store wrote a value (or concat component) that the edge copies
- * into that same parameter at the same bit offset. A merged, aliased or absent
- * byte without that proof keeps the argument unresolved. */
+ * when, on every incoming edge, the byte's exact owning store wrote either the
+ * same value (or concat component) at the same bit offset — a single SSA
+ * definition reaching every predecessor dominates the join — or a value that
+ * the edge copies into one shared block parameter at the same bit offset. A
+ * merged, aliased or absent byte without that proof keeps the argument
+ * unresolved. */
 export function sourceStackArgumentParts(
   stack: StackRecoveryResult,
   stores: ReadonlyMap<string, Value>,
@@ -55,9 +62,21 @@ export function sourceStackArgumentParts(
     const value = stores.get(access.node_id);
     if (value) owners.set(access.value, value);
   }
-  // The component of `value` holding bit `bit`, with its bit offset.
+  // The value an identity-move chain copies unchanged.
+  const unaliased = (value: Value): Value => {
+    let current = value;
+    for (let depth = 0; depth < 8; depth++) {
+      context.checkpoint(1);
+      const alias = joins?.alias(current);
+      if (!alias) break;
+      current = alias;
+    }
+    return current;
+  };
+  // The component of `value` holding bit `bit`, with its bit offset, through
+  // identity moves and concats.
   const component = (value: Value, bit: number): { value: Value; offset: number } => {
-    let current = { value, offset: bit };
+    let current = { value: unaliased(value), offset: bit };
     for (let depth = 0; depth < 8; depth++) {
       context.checkpoint(1);
       const parts = joins?.concat(current.value);
@@ -70,7 +89,7 @@ export function sourceStackArgumentParts(
         return false;
       });
       if (!next) return current;
-      current = { value: next, offset: current.offset - base };
+      current = { value: unaliased(next), offset: current.offset - base };
     }
     return current;
   };
@@ -89,23 +108,45 @@ export function sourceStackArgumentParts(
     }
     const entry = first === undefined ? undefined : stack.snapshots.get(first)?.memory.get(address);
     if (!entry || entry.fact !== snapshot.memory.get(address)?.fact) return null;
-    let destination: Value | undefined, bit: number | undefined;
+    let destination: Value | undefined,
+      bit: number | undefined,
+      shared: { value: Value; offset: number } | null | undefined,
+      carried = true;
     for (const edge of block.incoming) {
       context.checkpoint(1);
       const cell = stack.snapshots.get(edge.exit)?.memory.get(address);
       const stored = cell && owners.get(cell.fact);
       if (!cell || !stored || cell.fact.initialization === 'uninitialized') return null;
       const source = component(stored, cell.value_offset_bits);
-      const copies = edge.copies.filter(
-        (copy) =>
-          copy.source.id === source.value.id &&
-          (destination === undefined || copy.destination.id === destination.id),
-      );
-      if (copies.length !== 1 || (bit !== undefined && bit !== source.offset)) return null;
-      destination = copies[0]!.destination;
-      bit = source.offset;
+      shared =
+        shared === undefined ||
+        (shared && shared.value.id === source.value.id && shared.offset === source.offset)
+          ? source
+          : null;
+      // A carrier copies the stored value itself or an equal rematerialized
+      // constant of the same width (only `shared` needs one dominating value).
+      const bits = joins?.constant(source.value);
+      const copies = edge.copies.filter((copy) => {
+        const carried = unaliased(copy.source);
+        return (
+          (carried.id === source.value.id ||
+            (bits !== undefined &&
+              joins?.constant(carried) === bits &&
+              bitWidth(carried.type) === bitWidth(source.value.type))) &&
+          (destination === undefined || copy.destination.id === destination.id)
+        );
+      });
+      if (copies.length !== 1 || (bit !== undefined && bit !== source.offset)) carried = false;
+      else {
+        destination = copies[0]!.destination;
+        bit = source.offset;
+      }
+      if (!shared && !carried) return null;
     }
-    return destination && bit !== undefined ? { value: destination, value_offset_bits: bit } : null;
+    if (shared) return { value: shared.value, value_offset_bits: shared.offset };
+    return carried && destination && bit !== undefined
+      ? { value: destination, value_offset_bits: bit }
+      : null;
   };
   const parts: StackArgumentPart[] = [];
   for (let byte = 0; byte < width / 8; byte++) {

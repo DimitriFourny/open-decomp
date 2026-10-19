@@ -56,6 +56,7 @@ import {
   type PreparedNativeUnit,
 } from './native-prepare.js';
 import {
+  budgetReason,
   nativeDependencyWorklist,
   type NativeInterface,
   type NativeSummary,
@@ -529,36 +530,40 @@ function observeParameters(
   const stack_parameters = nativeStackParameters(ir, analysis, context, interfaceIndex);
   // Complete by callee reads: nothing outside the observed register prefix can
   // be read, directly or through a callee/tail target whose own list is closed.
-  // Recursive groups never close: their seeds are open and closure needs every
-  // dependency closed. Complete reads, not caller-written extent, bound arity.
+  // Only calls an unobserved entry argument may reach (and tail transfers) rely
+  // on their callee's closure; the worklist inherits arity completeness from
+  // exactly those. Recursive groups close only by the worklist's coinductive
+  // check. Complete reads, not caller-written extent, bound arity.
   const closedCallee = (callee: NativeInterface | undefined): boolean =>
     callee?.argument_list_closure !== undefined &&
     callee.parameter_state !== 'ambiguous' &&
     !callee.variadic_stack;
+  const reaching: string[] = [];
+  for (const block of ir.blocks) {
+    for (const node of block.instructions) {
+      context.checkpoint(1);
+      if (
+        node.kind !== 'call' ||
+        calls
+          .get(node.id)
+          ?.contracts.some(
+            (contract) =>
+              contract.status === 'established' &&
+              contract.layout.state === 'complete' &&
+              contract.layout.argument_count !== null,
+          ) === true ||
+        (callNodes.has(node.id) && !passesUnobserved(callNodes.get(node.id)!))
+      )
+        continue;
+      reaching.push(node.id);
+    }
+    if (block.terminator.kind === 'indirect') reaching.push(block.terminator.id);
+  }
   const closure =
     !ambiguous &&
     !variadicStack &&
     !stack_parameters.length &&
-    ir.blocks.every((block) => {
-      context.checkpoint(1);
-      return (
-        block.instructions.every(
-          (node) =>
-            node.kind !== 'call' ||
-            calls
-              .get(node.id)
-              ?.contracts.some(
-                (contract) =>
-                  contract.status === 'established' &&
-                  contract.layout.state === 'complete' &&
-                  contract.layout.argument_count !== null,
-              ) === true ||
-            closedCallee(interfaces.get(node.id)) ||
-            (callNodes.has(node.id) && !passesUnobserved(callNodes.get(node.id)!)),
-        ) &&
-        (block.terminator.kind !== 'indirect' || closedCallee(interfaces.get(block.terminator.id)))
-      );
-    });
+    reaching.every((id) => closedCallee(interfaces.get(id)));
   return {
     parameters,
     parameter_types: parameters.map(
@@ -572,6 +577,7 @@ function observeParameters(
     argument_list_complete: false,
     stack_parameters,
     ...(closure ? { argument_list_closure: 'callee_reads' as const } : {}),
+    ...(reaching.length ? { argument_reaching_calls: reaching } : {}),
     ...(variadicStack ? { variadic_stack: true as const } : {}),
     requirements: [
       ...new Set([
@@ -1382,6 +1388,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       const {
         parameter_shapes,
         written_result: _written,
+        argument_reaching_calls: _reaching,
         argument_list_closure,
         source_interface,
         ...interface_
@@ -1428,19 +1435,22 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         ...(argument_list_closure && summary?.arity_complete ? { argument_list_closure } : {}),
         evidence_ids: proofIds,
       });
-      if (source_interface && summary?.arity_complete)
+      if (source_interface && summary?.arity_complete) {
+        const { argument_reaching_calls: _sourceReaching, ...sourceInterface } = source_interface;
         sourceCallees.set(dependency.call_id, {
-          ...source_interface,
+          ...sourceInterface,
           call_id: dependency.call_id,
           target: dependency.target.entry,
           target_subject_id: dependency.target.id,
           evidence_ids: proofIds,
         });
+      }
       summarized.add(dependency.call_id);
       for (const shape of parameter_shapes ?? []) evidence.push(...shape.evidence);
       if (summary?.reasons.length)
         diagnostics.push({
-          code: 'unavailable_semantics',
+          // A callee cut by a bounded share is a budget limit, not unsupported semantics.
+          code: summary.reasons.some(budgetReason) ? 'resource_limit' : 'unavailable_semantics',
           severity: 'warning',
           message: `Native callee ${dependency.target.original_name ?? dependency.target.id} remains partial: ${summary.reasons.join('; ')}`,
           entity_id: dependency.target.id,
@@ -1574,6 +1584,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         parameter_shapes: _shapes,
         written_result: _written,
         argument_list_closure: _closure,
+        argument_reaching_calls: _reaching,
         source_interface: _sourceInterface,
         ...interface_
       } = observed;

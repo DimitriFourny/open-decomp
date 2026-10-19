@@ -36,6 +36,7 @@ import { planSourceRequirements } from './source-requirements.js';
 import { possibleAbiReturnStorage } from '../analysis/calls/return-storage.js';
 import { LocalValidationSession } from './local-validation.js';
 import { selectSourcePrimaryResult, type SourcePrimaryResult } from './source-results.js';
+import { identityOperand } from './expressions.js';
 
 /** Source ABI abstraction: architectural snapshots are retained in the input,
  * not treated as extra source arguments or memory-fault observables. */
@@ -272,6 +273,8 @@ export function planSource(
     for (const node of block.statements) if (node.kind === 'store') stores.set(node.id, node.value);
   const statementBlocks = new Map<string, string>(),
     concats = new Map<string, readonly Value[]>(),
+    aliases = new Map<string, Value>(),
+    constants = new Map<string, bigint>(),
     incomingEdges = new Map<
       string,
       { exit: string; copies: readonly { destination: Value; source: Value }[] }[]
@@ -279,8 +282,12 @@ export function planSource(
   for (const block of blocks.values()) {
     for (const node of block.statements) {
       statementBlocks.set(node.id, block.id);
-      if (node.kind === 'assign' && node.expression.kind === 'concat')
-        concats.set(node.result.id, node.expression.values);
+      if (node.kind !== 'assign') continue;
+      if (node.expression.kind === 'constant')
+        constants.set(node.result.id, node.expression.bits);
+      if (node.expression.kind === 'concat') concats.set(node.result.id, node.expression.values);
+      const alias = identityOperand(node.result.type, node.expression);
+      if (alias) aliases.set(node.result.id, alias);
     }
     const control = block.control;
     const outgoing =
@@ -311,6 +318,8 @@ export function planSource(
       };
     },
     concat: (value) => concats.get(value.id),
+    alias: (value) => aliases.get(value.id),
+    constant: (value) => constants.get(value.id),
   };
   const bindStack = (
     key: string,

@@ -20,6 +20,11 @@ export type NativeInterface = Omit<InferredCallee, 'call_id' | 'evidence_ids'> &
     readonly registers: readonly RegisterDescriptor[];
     readonly types: readonly DataType[];
   };
+  /** Call/tail ids (in this body) that an unobserved entry argument may reach.
+   * A closed argument list relies on exactly these callees' closures, so arity
+   * completeness is inherited from them only. Worklist bookkeeping, never a
+   * source fact. */
+  readonly argument_reaching_calls?: readonly string[];
 };
 export interface NativeDependency {
   readonly call_id: string;
@@ -69,18 +74,26 @@ const unresolved = (): NativeInterface => ({
   argument_list_complete: false,
 });
 
-/** Recursive dependency groups among loaded units (strongly connected
- * components with more than one member or a self edge), callees first. */
-function recursiveGroups<U extends NativeSummaryUnit>(
+/** A reason produced by a bounded resource (work shares and reserves,
+ * capacities, function/context/refinement limits, truncated budgets) rather
+ * than by unsupported semantics: more budget may resolve it. Matches the limit
+ * vocabulary of this worklist and the native unit preparation. */
+export const budgetReason = (reason: string): boolean =>
+  /\b(?:limit|capacity|reserve|budget)\b/.test(reason);
+
+/** Strongly connected dependency components among loaded units, callees first
+ * (Tarjan emits a component only after every component it reaches). A component
+ * is recursive when it has more than one member or a self edge. */
+function dependencyComponents<U extends NativeSummaryUnit>(
   units: ReadonlyMap<string, U>,
   key: (dependency: NativeDependency) => string,
   context: OperationContext,
-): string[][] {
+): { readonly members: readonly string[]; readonly recursive: boolean }[] {
   const index = new Map<string, number>(),
     low = new Map<string, number>(),
     onStack = new Set<string>(),
     stack: string[] = [],
-    groups: string[][] = [];
+    groups: { members: string[]; recursive: boolean }[] = [];
   const edges = (id: string): string[] =>
     [...new Set(units.get(id)!.dependencies.map(key))].filter((target) => units.has(target));
   for (const root of units.keys()) {
@@ -115,7 +128,10 @@ function recursiveGroups<U extends NativeSummaryUnit>(
         onStack.delete(member);
         group.push(member);
       } while (member !== frame.id);
-      if (group.length > 1 || edges(frame.id).includes(frame.id)) groups.push(group);
+      groups.push({
+        members: group,
+        recursive: group.length > 1 || edges(frame.id).includes(frame.id),
+      });
     }
   }
   return groups;
@@ -374,38 +390,39 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
       demand(dependencyKey, dependency.return_demand ?? []);
     }
   }
-  for (const [id, unit] of units)
-    summaries.set(id, {
-      observed: options.initialize(unit, context, [...(demands.get(id)?.values() ?? [])]),
-      evidence_ids: unit.evidence_ids,
-      reasons: unit.reasons,
-      complete: false,
-    });
-  options.on_partial?.(units, summaries);
 
   const dependencyKey = (dependency: NativeDependency): string =>
     contextKeys.get(nativeContextKey(dependency.target.id, dependency.assumptions)) ??
     dependency.target.id;
+  // Memory shapes are not transferred along recursive edges: shape evidence
+  // is content-addressed over its provenance, so a shape derived from a group
+  // member's shape derived from this body's is a fresh record every round and
+  // the group would never reach a fixed point. Group members still exchange
+  // registers, returns and types; shapes cross only into later components.
   const dependenciesOf = (
     unit: U,
+    group: ReadonlySet<string>,
     assumed?: ReadonlyMap<string, NativeInterface>,
   ): Map<string, NativeInterface> => {
     const dependencies = new Map<string, NativeInterface>();
     for (const dependency of unit.dependencies) {
       context.checkpoint(1);
       const key = dependencyKey(dependency);
-      dependencies.set(
-        dependency.call_id,
-        assumed?.get(key) ?? summaries.get(key)?.observed ?? unresolved(),
-      );
+      const known = assumed?.get(key) ?? summaries.get(key)?.observed ?? unresolved();
+      if (group.has(key) && known.parameter_shapes) {
+        const { parameter_shapes: _cyclic, ...acyclic } = known;
+        dependencies.set(dependency.call_id, acyclic);
+      } else dependencies.set(dependency.call_id, known);
     }
     return dependencies;
   };
   // Refinement runs in three quarters of what loading left, so limit and
-  // reason propagation below always finish. When it stops, every summary whose
-  // observation is still pending, or that transitively depends on one, is cut
-  // with an explicit refinement limit; all others are already at their fixed
-  // point and keep their established facts.
+  // reason propagation below always finish. Components are refined callees
+  // first: a non-recursive body is observed once, against final callee
+  // interfaces, and only recursive groups iterate. When the share runs out,
+  // every component not yet finished (the current one and its transitive
+  // callers, which all come later) is cut with an explicit refinement limit;
+  // finished components are at their fixed point and keep their facts.
   const refineLimit =
     context.remainingWork === undefined ? undefined : Math.floor((context.remainingWork() * 3) / 4);
   let refineUsed = 0;
@@ -434,43 +451,7 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
             refineUsed += work;
           },
         };
-  const unsettled = new Set<string>();
-  // A changed callee schedules only its direct callers. Self/mutual recursion use
-  // the same finite queue and the same shared operation/work clock as all roots.
-  const refine = (initial: readonly string[]): void => {
-    const queue = [...initial],
-      queued = new Set(queue);
-    for (const id of queue) unsettled.add(id);
-    for (let cursor = 0; cursor < queue.length; cursor++) {
-      refineContext.checkpoint(1);
-      const id = queue[cursor]!;
-      queued.delete(id);
-      const unit = units.get(id)!;
-      const visits = (refinements.get(id) ?? 0) + 1;
-      if (visits > options.max_refinements) {
-        refinementLimits.set(id, `native interface refinement limit (${options.max_refinements})`);
-        unsettled.delete(id);
-        continue;
-      }
-      refinements.set(id, visits);
-      const observed = options.observe(unit, dependenciesOf(unit), refineContext, [
-          ...(demands.get(id)?.values() ?? []),
-        ]),
-        previous = summaries.get(id)!;
-      if (!queued.has(id)) unsettled.delete(id);
-      if (options.equal(previous.observed, observed)) continue;
-      summaries.set(id, { ...previous, observed });
-      options.on_partial?.(units, summaries);
-      for (const caller of parents.get(id) ?? []) {
-        refineContext.checkpoint(1);
-        if (queued.has(caller) || !units.has(caller)) continue;
-        queued.add(caller);
-        queue.push(caller);
-        unsettled.add(caller);
-      }
-    }
-  };
-
+  const unsettled = new Set(units.keys());
   // Least-fixpoint refinement starts every recursive member open, so a group
   // whose members wait only on each other never closes its argument lists.
   // Coinductive check: assume every member closed with its current observed
@@ -483,56 +464,106 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
     observed.parameters
       .map((register) => `${register.root}:${register.offset_bits}:${register.width_bits}`)
       .join(',');
-  try {
-    refine([...units.keys()]);
-    for (const group of recursiveGroups(units, dependencyKey, refineContext)) {
-      const members = group.map((id) => [id, summaries.get(id)!] as const);
-      if (
-        members.every(([, summary]) => summary.observed.argument_list_closure !== undefined) ||
-        members.some(
-          ([id, summary]) =>
-            summary.observed.parameter_state === 'ambiguous' ||
-            summary.observed.variadic_stack ||
-            summary.observed.stack_parameters?.length ||
-            refinementLimits.has(id),
-        )
+  const closeRecursive = (group: readonly string[]): void => {
+    const members = group.map((id) => [id, summaries.get(id)!] as const);
+    if (
+      members.every(([, summary]) => summary.observed.argument_list_closure !== undefined) ||
+      members.some(
+        ([id, summary]) =>
+          summary.observed.parameter_state === 'ambiguous' ||
+          summary.observed.variadic_stack ||
+          summary.observed.stack_parameters?.length ||
+          refinementLimits.has(id),
       )
-        continue;
-      const assumed = new Map(
-        members.map(([id, summary]) => [
-          id,
-          {
-            ...summary.observed,
-            argument_list_closure: summary.observed.argument_list_closure ?? 'callee_reads',
-          } satisfies NativeInterface,
+    )
+      return;
+    const assumed = new Map(
+      members.map(([id, summary]) => [
+        id,
+        {
+          ...summary.observed,
+          argument_list_closure: summary.observed.argument_list_closure ?? 'callee_reads',
+        } satisfies NativeInterface,
+      ]),
+    );
+    const results = members.map(([id]) => {
+      const unit = units.get(id)!;
+      return [
+        id,
+        options.observe(unit, dependenciesOf(unit, new Set(group), assumed), refineContext, [
+          ...(demands.get(id)?.values() ?? []),
         ]),
-      );
-      const results = members.map(([id]) => {
+      ] as const;
+    });
+    if (
+      !results.every(
+        ([id, observed]) =>
+          observed.argument_list_closure !== undefined &&
+          observed.parameter_state !== 'ambiguous' &&
+          parameterKey(observed) === parameterKey(assumed.get(id)!),
+      )
+    )
+      return;
+    for (const [id, observed] of results) summaries.set(id, { ...summaries.get(id)!, observed });
+    options.on_partial?.(units, summaries);
+  };
+  const summarize = (id: string, observed: NativeInterface): void => {
+    const unit = units.get(id)!;
+    summaries.set(id, {
+      observed,
+      evidence_ids: unit.evidence_ids,
+      reasons: unit.reasons,
+      complete: false,
+    });
+    options.on_partial?.(units, summaries);
+  };
+  try {
+    for (const component of dependencyComponents(units, dependencyKey, refineContext)) {
+      // Only a recursive group needs seeds (its members read each other before
+      // any is observed); a non-recursive body is observed once, directly
+      // against its finished callees. Seeds are local return witnesses.
+      if (component.recursive)
+        for (const id of component.members)
+          summarize(
+            id,
+            options.initialize(units.get(id)!, refineContext, [
+              ...(demands.get(id)?.values() ?? []),
+            ]),
+          );
+      // A changed member schedules only its direct callers inside the group;
+      // callers outside it are later components and observe the final result.
+      const members = new Set(component.members),
+        queue = [...component.members],
+        queued = new Set(queue);
+      for (let cursor = 0; cursor < queue.length; cursor++) {
+        refineContext.checkpoint(1);
+        const id = queue[cursor]!;
+        queued.delete(id);
         const unit = units.get(id)!;
-        return [
-          id,
-          options.observe(unit, dependenciesOf(unit, assumed), refineContext, [
+        const visits = (refinements.get(id) ?? 0) + 1;
+        if (visits > options.max_refinements) {
+          refinementLimits.set(
+            id,
+            `native interface refinement limit (${options.max_refinements})`,
+          );
+          continue;
+        }
+        refinements.set(id, visits);
+        const observed = options.observe(unit, dependenciesOf(unit, members), refineContext, [
             ...(demands.get(id)?.values() ?? []),
           ]),
-        ] as const;
-      });
-      if (
-        !results.every(
-          ([id, observed]) =>
-            observed.argument_list_closure !== undefined &&
-            observed.parameter_state !== 'ambiguous' &&
-            parameterKey(observed) === parameterKey(assumed.get(id)!),
-        )
-      )
-        continue;
-      const outside = new Set<string>();
-      for (const [id, observed] of results) {
-        summaries.set(id, { ...summaries.get(id)!, observed });
-        for (const caller of parents.get(id) ?? [])
-          if (!group.includes(caller)) outside.add(caller);
+          previous = summaries.get(id);
+        if (previous && options.equal(previous.observed, observed)) continue;
+        summarize(id, observed);
+        for (const caller of parents.get(id) ?? []) {
+          refineContext.checkpoint(1);
+          if (!members.has(caller) || queued.has(caller)) continue;
+          queued.add(caller);
+          queue.push(caller);
+        }
       }
-      options.on_partial?.(units, summaries);
-      refine([...outside]);
+      if (component.recursive) closeRecursive(component.members);
+      for (const id of component.members) unsettled.delete(id);
     }
   } catch (error) {
     const details = error instanceof OperationError ? error.diagnostic.details : undefined;
@@ -546,22 +577,29 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
     )
       throw error;
     context.checkpoint(0);
-    const cut = [...unsettled];
-    for (let cursor = 0; cursor < cut.length; cursor++)
-      for (const caller of parents.get(cut[cursor]!) ?? []) {
-        context.checkpoint(1);
-        if (!units.has(caller) || unsettled.has(caller)) continue;
-        unsettled.add(caller);
-        cut.push(caller);
-      }
     for (const id of unsettled)
       refinementLimits.set(id, `native interface refinement work limit (${refineLimit})`);
   }
+  // An unfinished body keeps whatever it already established (a seed or an
+  // earlier round); one never observed is unresolved, not zero-argument.
+  for (const id of units.keys()) if (!summaries.has(id)) summarize(id, unresolved());
 
   // Limit/reason propagation is itself a bounded fixed point. SCCs with no open
   // dependencies are closed; recursion alone is not an unavailable-semantics gap.
+  // Arity completeness is inherited only through calls the closure relies on
+  // (an unobserved entry argument may reach them): a callee that sees only
+  // observed parameters or computed values cannot widen this argument list.
   const reasons = new Map<string, Set<string>>();
   const arityComplete = new Map<string, boolean>();
+  const reaching = new Map<string, ReadonlySet<string>>();
+  for (const [id, summary] of summaries)
+    reaching.set(
+      id,
+      new Set([
+        ...(summary.observed.argument_reaching_calls ?? []),
+        ...(summary.observed.source_interface?.argument_reaching_calls ?? []),
+      ]),
+    );
   for (const [id, unit] of units) {
     arityComplete.set(
       id,
@@ -593,7 +631,11 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
       const key =
         contextKeys.get(nativeContextKey(dependency.target.id, dependency.assumptions)) ??
         dependency.target.id;
-      if (arityComplete.get(id) && !arityComplete.get(key)) {
+      if (
+        arityComplete.get(id) &&
+        !arityComplete.get(key) &&
+        reaching.get(id)?.has(dependency.call_id)
+      ) {
         arityComplete.set(id, false);
         changed = true;
       }
