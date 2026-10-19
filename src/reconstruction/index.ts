@@ -1223,6 +1223,7 @@ export function reconstruct(
     expressions,
     inline,
     live,
+    use_counts: new Map([...uses].map(([id, row]) => [id, row.count])),
     retained,
     transfers,
     origins,
