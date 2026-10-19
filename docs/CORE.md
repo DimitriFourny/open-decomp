@@ -724,12 +724,22 @@ bound `_OBJC_CLASS_$_X` slot) prints as the class name, a selector-slot read as
 (`NSString("…")`). `objc_alloc`, `objc_alloc_init`, `objc_opt_new/class/self/
 isKindOfClass/respondsToSelector` print as the equivalent messages (`[[cls alloc] init]`).
 Tail transfers render `return [recv sel]` when their selector has a type encoding (or no
-keywords). Known Foundation variadic selectors (`stringWithFormat:` …) keep their explicit
-`unknown_argument_remainder()`. Unresolved selectors, `objc_msgSendSuper2` (shown with
+keywords). Known Foundation variadic selectors (`stringWithFormat:`, `predicateWithFormat:`,
+`raise:format:` …) whose format argument is an exact `__cfstring` constant take their
+printf actuals (`%@` = object pointer) from Darwin's anonymous-argument stack slots and
+print complete (`[NSString stringWithFormat:@"%@=%ld", a, b]`); otherwise they keep an
+explicit `unknown_argument_remainder()`. Unresolved selectors, `objc_msgSendSuper2` (shown with
 `@selector(...)`) and ARC calls (`objc_retain`/`objc_release`/`objc_storeStrong`/…,
 catalogued libobjc contracts) remain explicit calls; nothing is dropped. A function that is
 a method implementation is headed `-[Class sel](… self, … _cmd, …)` (Python-like
-`def Class.sel_(self, _cmd, …)`, `@classmethod` for class methods).
+`def Class.sel_(self, _cmd, …)`, `@classmethod` for class methods). Its unique method type
+encoding is an established `runtime`-source signature (unless debug info or a durable
+signature declares one): `id`/`Class`/`SEL`/`char*`/scalar formals and result, `void` for
+`v`. `self` of an instance method points to `struct Class`, declared from the class's (and
+in-image superclasses') ivars at their static offset-variable values, so accesses print as
+`self->_ivar`; the isa word and unrepresentable ivars stay gaps and no size is claimed. A
+tail call into a proven-void callee (library contract, `v` encoding, or any tail of a void
+method) prints as `f(…); return;`.
 
 Source type views interpret unchanged machine storage only when complete, compatible associations support them. Signed operation constraints alone do not declare signed inputs; hypotheses and conflicting layouts do not establish source declarations. Narrow fragments never discard observable high carrier bits. Typed pointer arithmetic and cyclic transfers retain exact target bits; field/array views preserve original access ordering, aliasing, faults and provenance without inventing object bounds or element counts. Dedicated C/Python regressions cover signed fields, unknown-count arrays, full-width pointer returns and typed phi swaps; public Mach-O/PE memory and loop cases retain their results and ordered accesses.
 

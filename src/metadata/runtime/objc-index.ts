@@ -82,7 +82,8 @@ export function objcImageIndex(
     ) {
       // A class's own superclass field is not a code-visible reference slot.
       if (record.owner === null) class_refs.set(at, fact);
-      else if (record.kind === 'objc_superclass_reference') superclasses.set(record.owner, record.name);
+      else if (record.kind === 'objc_superclass_reference')
+        superclasses.set(record.owner, record.name);
     } else if (record.kind === 'objc_ivar' && record.owner && record.ivar) {
       const list = ivars.get(record.owner) ?? [];
       list.push({ ...fact, ...record.ivar, type: record.type_name });

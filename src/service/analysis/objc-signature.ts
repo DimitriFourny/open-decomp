@@ -110,7 +110,7 @@ export function objcMethodSignature(
   if (method.kind === 'instance' && /^[A-Za-z_$][\w$]*$/.test(owner)) {
     const ivars: ObjCIvarFact[] = [];
     const seen = new Set<string>();
-    for (let name: string | undefined = owner; name && !seen.has(name) && seen.size < 64; ) {
+    for (let name: string | undefined = owner; name && !seen.has(name) && seen.size < 64;) {
       context.checkpoint(1);
       seen.add(name);
       ivars.push(...(index.ivars.get(name) ?? []));
@@ -149,7 +149,12 @@ export function objcMethodSignature(
     const layout = record(
       { kind: 'structure', size: null, alignment: null, fields },
       { spelling: owner, member_names: true },
-      [...new Set([...proof, ...ivars.flatMap((ivar) => ivar.evidence.slice(0, 1).map((e) => e.id))])],
+      [
+        ...new Set([
+          ...proof,
+          ...ivars.flatMap((ivar) => ivar.evidence.slice(0, 1).map((e) => e.id)),
+        ]),
+      ],
     );
     self = record({ kind: 'pointer', bits: 64, to: layout });
   }

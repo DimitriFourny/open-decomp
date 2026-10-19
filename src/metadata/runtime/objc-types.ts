@@ -2,7 +2,8 @@ import type { AbiType } from '../../core/index.js';
 
 /** Source role of one Objective-C type-encoding element; `object`, `class` and
  * `selector` are pointer-width references (`id`, `Class`, `SEL`). */
-export type ObjCTypeRole = 'object' | 'class' | 'selector' | 'string' | 'pointer' | 'bool' | 'scalar' | 'void';
+export type ObjCTypeRole =
+  'object' | 'class' | 'selector' | 'string' | 'pointer' | 'bool' | 'scalar' | 'void';
 export interface ObjCEncodedType {
   readonly abi: AbiType;
   readonly role: ObjCTypeRole;
@@ -130,22 +131,27 @@ export function selectorArity(selector: string): number {
   return count;
 }
 
-/** Foundation/AppKit selectors declared with a trailing C variadic list. Only
- * these acquire an open variadic tail; every other selector is fixed-arity. */
-export const variadicSelectors: Readonly<Record<string, true>> = {
-  'stringWithFormat:': true,
-  'initWithFormat:': true,
-  'localizedStringWithFormat:': true,
-  'appendFormat:': true,
-  'stringByAppendingFormat:': true,
-  'predicateWithFormat:': true,
-  'arrayWithObjects:': true,
-  'initWithObjects:': true,
-  'setWithObjects:': true,
-  'orderedSetWithObjects:': true,
-  'dictionaryWithObjectsAndKeys:': true,
-  'initWithObjectsAndKeys:': true,
-  'raise:format:': true,
-  'handleFailureInMethod:object:file:lineNumber:description:': true,
-  'handleFailureInFunction:file:lineNumber:description:': true,
+/** Foundation selectors declared with a trailing C variadic list (Apple SDK
+ * headers). Only these acquire a variadic tail; every other selector is
+ * fixed-arity. `format` is the keyword index of an NSString format argument
+ * (`%@` is an object), `null` for nil-terminated object lists; `returns` is the
+ * declared result (`id`/`instancetype`, or `void`). */
+export const variadicSelectors: Readonly<
+  Record<string, { readonly format: number | null; readonly returns: 'object' | 'void' }>
+> = {
+  'stringWithFormat:': { format: 0, returns: 'object' },
+  'initWithFormat:': { format: 0, returns: 'object' },
+  'localizedStringWithFormat:': { format: 0, returns: 'object' },
+  'appendFormat:': { format: 0, returns: 'void' },
+  'stringByAppendingFormat:': { format: 0, returns: 'object' },
+  'predicateWithFormat:': { format: 0, returns: 'object' },
+  'arrayWithObjects:': { format: null, returns: 'object' },
+  'initWithObjects:': { format: null, returns: 'object' },
+  'setWithObjects:': { format: null, returns: 'object' },
+  'orderedSetWithObjects:': { format: null, returns: 'object' },
+  'dictionaryWithObjectsAndKeys:': { format: null, returns: 'object' },
+  'initWithObjectsAndKeys:': { format: null, returns: 'object' },
+  'raise:format:': { format: 1, returns: 'void' },
+  'handleFailureInMethod:object:file:lineNumber:description:': { format: 4, returns: 'void' },
+  'handleFailureInFunction:file:lineNumber:description:': { format: 3, returns: 'void' },
 };

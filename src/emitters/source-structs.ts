@@ -202,7 +202,9 @@ export class SourceStructs {
     if (previous) return previous;
     const record = this.records.get(id);
     const tag =
-      record?.definition.kind === 'structure' && record.spelling && /^[A-Za-z_$][\w$]*$/.test(record.spelling)
+      record?.definition.kind === 'structure' &&
+      record.spelling &&
+      /^[A-Za-z_$][\w$]*$/.test(record.spelling)
         ? record.spelling
         : undefined;
     const image = this.images.get(id)?.name;
@@ -281,7 +283,9 @@ export class SourceStructs {
         bits: storage.bits,
         size,
         ...(array ? { count: array.count } : {}),
-        ...(record.member_names && /^[A-Za-z_$][\w$]*$/.test(field.name) ? { name: field.name } : {}),
+        ...(record.member_names && /^[A-Za-z_$][\w$]*$/.test(field.name)
+          ? { name: field.name }
+          : {}),
       });
       end = field.offset + size;
     }

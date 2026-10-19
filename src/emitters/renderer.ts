@@ -3283,7 +3283,8 @@ export class Renderer {
           : undefined;
       if (loaded?.kind === 'load' && this.inline.has(operandValue.id)) {
         const storage = this.storage(loaded);
-        if (this.memberPointers.has(loaded.id) || this.typedPointerGlobal(loaded.id)) return storage;
+        if (this.memberPointers.has(loaded.id) || this.typedPointerGlobal(loaded.id))
+          return storage;
       }
       const text = pointer
         ? (literal ?? this.sourceAddressValue(value, !this.sourceView))
@@ -6003,6 +6004,17 @@ export class Renderer {
           let values: string[];
           try {
             values = this.writer.list(projection.results, (value) => {
+              const nsString = this.objcLiteral(value);
+              if (
+                nsString !== undefined &&
+                this.localValidation.presentation(
+                  'objc_string_literal',
+                  control.id,
+                  'pointer-width constant result addressing an exact __cfstring constant object, printed as that NSString literal',
+                  [value.id],
+                )
+              )
+                return nsString;
               const scalar = this.sourceView && this.program.source?.return_scalar;
               if (scalar) return this.scalarReturn(value, scalar.bits, scalar.signed).text;
               if (this.program.source?.return_pointer && !this.program.source.return_source_type)
@@ -6083,6 +6095,25 @@ export class Renderer {
           ) {
             const printed = tail.boundary.arguments.map((value) => {
               ids.push(value.id);
+              // Message syntax has no C conversion: a declared pointer local
+              // (possibly through inline same-width bitcasts) prints as itself.
+              let operand = value;
+              for (let step = 0; step < 4 && this.inline.has(operand.id); step++) {
+                const alias = this.program.expressions.get(operand.id);
+                if (
+                  alias?.kind !== 'cast' ||
+                  alias.op !== 'bitcast' ||
+                  bitWidth(alias.value.type) !== bitWidth(operand.type)
+                )
+                  break;
+                operand = alias.value;
+              }
+              if (
+                this.language === 'c-like' &&
+                !this.inline.has(operand.id) &&
+                this.declaredSpelling(operand).endsWith('*')
+              )
+                return this.local(operand);
               return this.objcLiteral(value) ?? this.valueLiteral(value)?.text ?? this.value(value);
             });
             ids.push(control.target.id);
