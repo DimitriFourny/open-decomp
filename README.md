@@ -21,6 +21,9 @@ bun run cli functions ./app --name main
 
 # Decompile using the exact name shown above
 bun run cli decompile ./app --function main
+
+# Decompile every function into a directory an LLM agent can grep
+bun run cli export ./app --out ./app-decompiled
 ```
 
 Names may include a prefix such as `_main`; use the name shown in the function list. You can also select a listed function with `--id ID` or `--address va:0x...` when symbols are stripped. Add `--language python-like` to change the output dialect, or `--json` for structured results.
