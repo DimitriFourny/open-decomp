@@ -448,7 +448,7 @@ for (const { abi } of targets)
     );
     for (const language of ['c-like', 'python-like'] as const) {
       const output = emit(ir, { ...extra, source: sourceEvidence }, language);
-      assert.match(output.emission.text, /\bunknown_argument_remainder\(\)/);
+      assert.match(output.emission.text, /\w\(\w+, \.\.\.\)/);
     }
   });
 

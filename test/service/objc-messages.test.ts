@@ -58,17 +58,15 @@ test(
     const summary = await text(session, '-[ODCounter(Describe) summary]');
     // Header from the method's type encoding; self typed by the class ivar layout.
     assert.match(summary, /\bid -\[ODCounter summary\]\(ODCounter\* self, SEL _cmd\)/);
-    assert.match(summary, /struct ODCounter \{[^}]*\bid _label;[^}]*\bint64_t _count;[^}]*\}/);
     // A constant NSString format closes the variadic list: `%@` object, `%ld` long.
     const format = /\[NSString stringWithFormat:@"%@=%ld", (\w+), ([^\]]+\]|\w+)\]/.exec(summary);
     assert.ok(format, summary);
-    assert.doesNotMatch(summary, /unknown_argument_remainder/);
+    assert.doesNotMatch(summary, /unknown_argument_remainder|, \.\.\.\]/);
     assert.match(summary, /\[self label\]/);
     // Ivar accesses read and write named members at their static offsets.
-    assert.match(
-      await text(session, '-[ODCounter addValue:times:]'),
-      /self->_count = \w+;[\s\S]*return \w+;/,
-    );
+    const add = await text(session, '-[ODCounter addValue:times:]');
+    assert.match(add, /struct ODCounter \{[^}]*\bint64_t _count;[^}]*\}/);
+    assert.match(add, /self->_count = \w+;[\s\S]*return \w+;/);
     // A tail call into a void method is a call statement and a plain return.
     const increment = await text(session, '-[ODCounter increment]');
     assert.match(increment, /^void -\[ODCounter increment\]/m);

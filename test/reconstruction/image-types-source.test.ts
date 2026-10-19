@@ -70,12 +70,15 @@ test(
     };
 
     // context_set writes +0; context_get reads +8 and +16. context_drive passes
-    // its own argument to both, so both declare one merged layout under one name.
+    // its own argument to both, so both name one merged type; each function
+    // declares only the members its own text accesses.
     const set = formalStruct((await decompile('context_set')).text);
     const get = formalStruct((await decompile('context_get')).text);
     assert.equal(set.name, get.name);
-    assert.equal(set.declaration, get.declaration);
-    assert.deepEqual(set.members, ['f_0', 'f_8', 'f_10']);
+    assert.deepEqual(set.members, ['f_0']);
+    assert.deepEqual(get.members, ['f_8', 'f_10']);
+    assert.match(set.declaration, /gap_0\[|f_0;/);
+    assert.match(get.declaration, /gap_0\[8\]/);
 
     // The whole-image header declares the same name with the same layout and
     // is valid C on its own.
@@ -90,7 +93,13 @@ test(
       1 << 20,
     );
     assert.equal(dump.analyzed, dump.total);
-    assert.ok(dump.text.includes(set.declaration), dump.text);
+    // ...and the whole-image header holds the complete merged layout.
+    const merged = new RegExp(`^struct ${set.name} \\{.*\\};$`, 'm').exec(dump.text)?.[0];
+    assert.ok(merged, dump.text);
+    assert.deepEqual(
+      [...merged.matchAll(/ (f_[0-9a-f]+)/g)].map((m) => m[1]),
+      ['f_0', 'f_8', 'f_10'],
+    );
     const header = spawnSync('/usr/bin/clang', ['-x', 'c', '-fsyntax-only', '-std=c11', '-'], {
       input: dump.text,
       encoding: 'utf8',
@@ -101,10 +110,12 @@ test(
     // but incompatible overlapping views never share a name or a layout.
     const high = (await decompile('views_high')).text;
     const wide = (await decompile('views_wide')).text;
-    const highName = /^typedef struct (\w+) \1;$/m.exec(high)?.[1];
-    assert.ok(highName, high);
-    assert.match(high, /conflicts with \w+/);
+    const conflict = /conflicts with (\w+) \*\/\nstruct (\w+) /.exec(dump.text);
+    assert.ok(conflict, dump.text);
+    const [, otherName, highName] = conflict;
+    assert.notEqual(otherName, highName);
     assert.doesNotMatch(wide, new RegExp(`\\b${highName}\\b`));
+    assert.doesNotMatch(high, new RegExp(`\\b${otherName}\\b`));
 
     // db->slots[i].node: the slot array is reloaded after each call, so the
     // compiler keeps a byte offset (+32 per iteration) beside the counter i.

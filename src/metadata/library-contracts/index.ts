@@ -83,27 +83,22 @@ export interface LibraryContracts {
  * Global memory effects remain conservative even for an empty argument footprint.
  * Swift runtime declarations retain unknown calling convention instead of silently
  * borrowing C preservation rules. ABI-specific long/size_t/wchar widths are explicit.
+ * One contract per declared import: the loader-bounded import table bounds the work,
+ * and every import is charged to the operation budget (no separate count cap that
+ * would fail images with many declared imports).
  */
 export function recoverLibraryContracts(
   input: {
     readonly image: LoadedImage;
     readonly abi: AbiProfile;
     readonly revision: number;
-    readonly max_contracts?: number;
   },
   context: OperationContext,
 ): LibraryContracts {
-  const { image, abi, revision } = input,
-    limit = input.max_contracts ?? 256;
+  const { image, abi, revision } = input;
   if (abi.id !== image.target.abi || abi.architecture !== image.target.architecture)
     throw new TypeError('Library contract ABI does not match the loaded target');
-  if (
-    !Number.isSafeInteger(revision) ||
-    revision < 0 ||
-    !Number.isSafeInteger(limit) ||
-    limit < 0 ||
-    limit > 1000
-  )
+  if (!Number.isSafeInteger(revision) || revision < 0)
     throw new RangeError('Invalid library contract bounds');
   context.checkpoint(0);
   // ABI-dependent typedefs (`mode_t`, `time_t`...) pick their column by target ABI.
@@ -230,16 +225,6 @@ export function recoverLibraryContracts(
           evidence_ids: [...imported.evidence_ids],
         });
       continue;
-    }
-    if (contracts.length >= limit) {
-      partial = true;
-      diagnostics.push({
-        code: 'resource_limit',
-        severity: 'warning',
-        message: 'Library contract bound reached',
-        evidence_ids: [],
-      });
-      break;
     }
     const id = entityIdentity(image.selected_slice_id, 'library-contract', [
       imported.id,
