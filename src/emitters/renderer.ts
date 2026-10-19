@@ -4537,6 +4537,20 @@ export class Renderer {
       list.push(occurrence);
       occurrences.set(occurrence.transfer, list);
     });
+    // A tail every printed entry of which is a fallthrough into a printed copy of
+    // it (never a goto, break or continue) is entered at each copy by exactly one
+    // edge, its home included: each copy is an owned copy of the tail for its edge.
+    const entered = new Map<string, boolean>();
+    for (const [transfer, list] of occurrences)
+      for (const occurrence of list)
+        entered.set(
+          transfer.target,
+          (entered.get(transfer.target) ?? true) &&
+            occurrence.destination?.kind === 'block' &&
+            occurrence.destination.id === transfer.target &&
+            occurrenceAction(occurrence, this.language) === 'fallthrough',
+        );
+    const substituted = new Set<string>();
     for (const [transfer, list] of occurrences) {
       this.context.checkpoint(list.length);
       const tail = program.blocks.get(transfer.target),
@@ -4545,11 +4559,12 @@ export class Renderer {
       const projection = program.returns.get(control.id);
       if (!projection || projection.kind === 'physical' || projection.outputs.length) continue;
       const copies: BlockRegion[] = [];
+      const sole = entered.get(transfer.target) === true;
       for (const occurrence of list) {
         const destination = occurrence.destination;
         if (
           destination?.kind === 'block' &&
-          layout.clones.has(destination) &&
+          (layout.clones.has(destination) || sole) &&
           destination.id === transfer.target &&
           occurrenceAction(occurrence, this.language) === 'fallthrough'
         )
@@ -4603,9 +4618,10 @@ export class Renderer {
         const dropped = this.forwardedCopies.get(transfer) ?? new Set<string>();
         dropped.add(carrier.id);
         this.forwardedCopies.set(transfer, dropped);
+        substituted.add(tail.id);
       }
     }
-    const hidden = new Set(layout.hidden);
+    const hidden = new Set([...layout.hidden, ...substituted]);
     for (const id of hidden) {
       const home = program.blocks.get(id);
       if (!home) continue;
