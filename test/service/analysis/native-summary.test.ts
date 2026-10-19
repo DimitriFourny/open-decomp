@@ -109,10 +109,11 @@ test(
     // Source view: every other callee here is fully analyzed and register-only, so
     // it closes with a recorded arity_closure inference, even when the caller also
     // writes its own frame (fp_caller): a callee that reads no incoming stack cannot
-    // observe those bytes. Recursive groups and stack arguments stay open.
+    // observe those bytes. Self and mutual recursion close coinductively (each
+    // member re-observed under the group's own parameters); stack arguments stay open.
     let view: 'source' | 'checked' = 'source';
     let closures = 0;
-    const open = new Set(['recursive', 'mutual_a', 'mutual_b', 'stack_leaf']);
+    const open = new Set(['stack_leaf']);
     const register = (
       name: string,
       arity: number,

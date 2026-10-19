@@ -431,18 +431,50 @@ liveness roots, but potentially faulting loads and other ordered effects remain;
 checked output retains the full overlay.
 
 Source-only `arity_closure` records its per-call basis before stack promotion.
-Complete native machine call/stack summaries close register-only, nonrecursive
-callees even when optional debug/type metadata is unavailable; those metadata
-diagnostics remain visible. Machine coverage gaps, work/refinement limits and
-incomplete dependencies propagate separately and prevent closure. A closed
-callee cannot read additional caller spills, so those private slots are eligible
-for ordinary validated promotion and an unused `entry_sp` disappears. Unknown
-indirect calls, escaping incoming-stack addresses and variadic native callees
-remain open; written stack extent is never interpreted as an argument count.
+Complete native machine call/stack summaries close register-only callees even
+when optional debug/type metadata is unavailable; those metadata diagnostics
+remain visible. A body's argument list closes when nothing outside its observed
+register prefix can be read: every call (and tail transfer) that an unobserved
+entry argument may reach — through registers, phis, private spills or a stack
+pointer at or above entry SP — must target a closed callee or carry a complete
+library contract. Calls reached only by observed parameters and computed values
+(for example an indirect call after another call clobbered the argument
+registers) add no input and do not block closure. Machine arity completeness is
+inherited only through those reaching calls; coverage gaps, work/refinement
+limits and incomplete dependencies of other callees stay in the reasons but do
+not reopen the list. Recursive groups close coinductively: every member is
+re-observed once assuming the group closed with its current parameters, and
+the assumption is kept only if every member then closes with exactly those
+parameters (a tail-call chain such as an append/grow pair forwarding its
+arguments closes this way when the grow path's other callees are closed).
+A closed callee cannot read additional caller spills, so those private slots are
+eligible for ordinary validated promotion and an unused `entry_sp` disappears.
+Indirect calls an unobserved argument reaches, escaping incoming-stack addresses
+and variadic native callees remain open; written stack extent is never
+interpreted as an argument count.
 Proven invocation constants and identity aliases remain actual ABI inputs before
 the source-only prefix-gap check. Substitution therefore cannot manufacture a
 missing leading argument. These refinements use the existing work budget and
 leave the original checked summary unchanged.
+
+The native dependency worklist loads bodies breadth-first (each load at most a
+quarter of the remaining optional work; no new body once half of the initial
+allowance is spent) and then refines strongly connected components callees
+first: a non-recursive body is observed once against its finished callees, and
+only recursive groups are seeded and iterated. Memory shapes are not transferred
+along recursive edges (content-addressed shape evidence derived around a cycle
+would be new every round and never converge). When the refinement share runs
+out, finished components keep their facts and only unfinished ones (and their
+callers) are cut with a `native interface refinement work limit` reason. A callee
+summary cut by any bounded share is reported as a `resource_limit` diagnostic,
+and a selected function left partial with such a diagnostic reports reason
+`budget` instead of `unsupported_subset`.
+
+Darwin variadic stack arguments stored in different predecessors of one shared
+call resolve when, on every incoming edge, the owning store wrote the same SSA
+value (it dominates the join) or a value — through identity moves, concat
+components, or an equal rematerialized constant — that the edge copies into one
+block parameter of the join.
 Discovery-established tails to uniquely resolved imported callable entries may
 use complete nonvariadic register-only library contracts. Their interfaces
 propagate through the same bounded native dependency worklist as source-only
@@ -667,7 +699,34 @@ Import stubs (Mach-O `__stubs`, ELF PLT entries, PE thunks) are recognized from
 their decoded body (address materialization, slot read, one indirect branch) plus an
 established branch through a single non-weak import slot. They are published under the
 import's name with `kind: "import_stub"`, boundary `established` and analysis
-`complete`; `--function <import name>` selects them.
+`complete`; `--function <import name>` selects them. Every Mach-O import with a
+loader-established stub entry is also a discovery root named after the import, so a
+tail branch into a stub is a tail call to the import, not stub code merged into its caller.
+
+Objective-C (Mach-O ARM64, static metadata only): method implementations are named
+`-[Class selector]` / `+[Class selector]` (category methods under their class; stripped
+images keep these names). `__objc_stubs` entries are published as `_objc_msgSend$sel`
+only when their selector slot lies in `__objc_selrefs` and their transfer reaches the
+bound `_objc_msgSend` import; `__cfstring` objects with a bound
+`___CFConstantStringClassReference` isa yield their decoded contents. In the source view:
+a call to a selector stub, or to `objc_msgSend` with an exact 64-bit `__objc_selrefs` load
+in x1, takes the selector's colon count as its keyword arity, argument classes from the
+image's single type encoding for that selector (integer/pointer otherwise; results narrower
+than 32 bits keep their observed storage), and closes its argument list
+(`objc_selector`, an `abi_conformance` requirement) only when the caller prepares no
+further argument register. It prints as `[recv kw:a kw2:b]` (Python-like
+`recv.kw_kw2_(a, b)`); a receiver read from a class reference (`__objc_classrefs` or a
+bound `_OBJC_CLASS_$_X` slot) prints as the class name, a selector-slot read as
+`@selector(x)`, a class-slot read as `[X class]`, a constant string as `@"…"`
+(`NSString("…")`). `objc_alloc`, `objc_alloc_init`, `objc_opt_new/class/self/
+isKindOfClass/respondsToSelector` print as the equivalent messages (`[[cls alloc] init]`).
+Tail transfers render `return [recv sel]` when their selector has a type encoding (or no
+keywords). Known Foundation variadic selectors (`stringWithFormat:` …) keep their explicit
+`unknown_argument_remainder()`. Unresolved selectors, `objc_msgSendSuper2` (shown with
+`@selector(...)`) and ARC calls (`objc_retain`/`objc_release`/`objc_storeStrong`/…,
+catalogued libobjc contracts) remain explicit calls; nothing is dropped. A function that is
+a method implementation is headed `-[Class sel](… self, … _cmd, …)` (Python-like
+`def Class.sel_(self, _cmd, …)`, `@classmethod` for class methods).
 
 Source type views interpret unchanged machine storage only when complete, compatible associations support them. Signed operation constraints alone do not declare signed inputs; hypotheses and conflicting layouts do not establish source declarations. Narrow fragments never discard observable high carrier bits. Typed pointer arithmetic and cyclic transfers retain exact target bits; field/array views preserve original access ordering, aliasing, faults and provenance without inventing object bounds or element counts. Dedicated C/Python regressions cover signed fields, unknown-count arrays, full-width pointer returns and typed phi swaps; public Mach-O/PE memory and loop cases retain their results and ordered accesses.
 

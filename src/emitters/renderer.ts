@@ -42,7 +42,11 @@ import type { BoundaryProjection, Reconstruction } from '../reconstruction/model
 import { validateReconstruction, validateRenderedTransfers } from '../reconstruction/validate.js';
 import { foldSourceCondition } from '../reconstruction/source-conditions.js';
 import { constantRotationOperands } from '../reconstruction/source-shifts.js';
-import type { ObjCMessage, SourceAddress, SourceFormalType } from '../reconstruction/source-model.js';
+import type {
+  ObjCMessage,
+  SourceAddress,
+  SourceFormalType,
+} from '../reconstruction/source-model.js';
 import { selectorArity } from '../metadata/runtime/objc-types.js';
 import { objcMessageText, objcStringLiteral } from './objc.js';
 import { sourceDataValues } from '../reconstruction/source-data.js';
@@ -1879,7 +1883,8 @@ export class Renderer {
   /** Source view: `@"..."` for an exact pointer-width value addressing a
    * compiler-emitted constant NSString object. */
   private objcLiteral(value: Value): string | undefined {
-    if (!this.sourceView || value.type.kind !== 'integer' || value.type.bits !== 64) return undefined;
+    if (!this.sourceView || value.type.kind !== 'integer' || value.type.bits !== 64)
+      return undefined;
     const address = this.sourceAddressOf(value),
       objc = address && this.sourceAddresses.get(this.addressKey(address))?.objc;
     return objc?.kind === 'string'
@@ -6444,10 +6449,7 @@ export class Renderer {
         offset += length + 2;
       }
     } else if (parameters.length) {
-      w.line(
-        0,
-        this.language === 'c-like' ? `${returnType} ${headerName}(` : `def ${headerName}(`,
-      );
+      w.line(0, this.language === 'c-like' ? `${returnType} ${headerName}(` : `def ${headerName}(`);
       for (let i = 0; i < parameters.length; i++) {
         const parameter = parameters[i]!;
         const start = w.offset;

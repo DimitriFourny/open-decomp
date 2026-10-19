@@ -60,7 +60,7 @@ export function parseObjCMethodType(encoding: string): ObjCMethodType | null {
     }
     const close = OPEN[head];
     if (close === undefined) return true;
-    for (let depth = 1; depth > 0; ) {
+    for (let depth = 1; depth > 0;) {
       const next = encoding[at++];
       if (next === undefined) return false;
       if (next === '"') {
@@ -78,7 +78,8 @@ export function parseObjCMethodType(encoding: string): ObjCMethodType | null {
     let result: ObjCEncodedType | null = null;
     if (head === undefined) return null;
     if (head === 'v') result = { abi: { kind: 'void' }, role: 'void' };
-    else if (head === 'B') result = { abi: { kind: 'integer', bits: 8, signed: false }, role: 'bool' };
+    else if (head === 'B')
+      result = { abi: { kind: 'integer', bits: 8, signed: false }, role: 'bool' };
     else if (head === '@') {
       // `@?` is a block; `@"Name"` records the static class, still an object reference.
       at--;

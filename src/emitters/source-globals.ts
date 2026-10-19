@@ -163,7 +163,12 @@ export function planGlobals(
       continue;
     const item = options.data(node.address);
     // Objective-C class/selector reference slots print as their class/selector.
-    if (!item?.import || item.objc || item.object?.offset !== 0n || written.has(keyOf(item.address)))
+    if (
+      !item?.import ||
+      item.objc ||
+      item.object?.offset !== 0n ||
+      written.has(keyOf(item.address))
+    )
       continue;
     const found = imported(item);
     if (!found) continue;

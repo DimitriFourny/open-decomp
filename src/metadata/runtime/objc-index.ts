@@ -65,7 +65,10 @@ export function objcImageIndex(
     const at = record.address.value,
       fact = { name: record.name, evidence: proof(record) };
     if (record.kind === 'objc_selector') selector_refs.set(at, fact);
-    else if (record.kind === 'objc_class_reference' || record.kind === 'objc_superclass_reference') {
+    else if (
+      record.kind === 'objc_class_reference' ||
+      record.kind === 'objc_superclass_reference'
+    ) {
       // A class's own superclass field is not a code-visible reference slot.
       if (record.owner === null) class_refs.set(at, fact);
     } else if (record.kind === 'objc_selector_stub') stubs.set(at, fact);

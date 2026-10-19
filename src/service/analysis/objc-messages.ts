@@ -222,7 +222,8 @@ export function objcSourceFacts(input: {
     // such results keep their observed storage instead of a narrowed type.
     if (returns === null || (returns.kind === 'integer' && returns.bits < 32))
       return { parameters, parameter_types, returns: null, return_types: null };
-    if (returns.kind === 'void') return { parameters, parameter_types, returns: [], return_types: [] };
+    if (returns.kind === 'void')
+      return { parameters, parameter_types, returns: [], return_types: [] };
     const type = scalar(returns),
       location = classified.returns.length === 1 ? classified.returns[0] : undefined;
     if (
@@ -381,8 +382,7 @@ export function objcSourceFacts(input: {
   if (
     first &&
     records.every(
-      (item) =>
-        item.owner === first.owner && item.name === first.name && item.kind === first.kind,
+      (item) => item.owner === first.owner && item.name === first.name && item.kind === first.kind,
     )
   ) {
     cite(first);
@@ -391,9 +391,7 @@ export function objcSourceFacts(input: {
   return {
     callees,
     addresses,
-    ...(messages.size || method
-      ? { facts: { messages, ...(method ? { method } : {}) } }
-      : {}),
+    ...(messages.size || method ? { facts: { messages, ...(method ? { method } : {}) } } : {}),
     evidence: [...evidence.values()],
   };
 }

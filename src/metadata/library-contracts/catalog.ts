@@ -326,6 +326,25 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
       variadic_rule: { kind: 'format', argument: 1 },
     },
   ),
+  fopen: entry(
+    'c',
+    FILE,
+    [
+      ['path', C],
+      ['mode', C],
+    ],
+    { memory: [footprint(0, 'read'), footprint(1, 'read')] },
+  ),
+  fdopen: entry(
+    'posix',
+    FILE,
+    [
+      ['descriptor', 'int'],
+      ['mode', C],
+    ],
+    { memory: [footprint(1, 'read')] },
+  ),
+  fclose: entry('c', 'int', [['stream', FILE]], { memory: [footprint(0, 'read_write')] }),
   snprintf: entry(
     'c',
     'int',

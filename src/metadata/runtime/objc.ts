@@ -76,16 +76,22 @@ export class ObjCRecovery {
         if (selector === null)
           throw new RuntimeIssue('malformed_image', 'Missing Objective-C method selector', entry);
         const name = r.text(selector);
-        r.add(declaration ? 'objc_method_declaration' : 'objc_method', name, entry, BigInt(stride), {
-          owner,
-          target: implementation,
-          target_role: declaration ? 'unresolved' : 'code',
-          method_kind: classMethod ? 'class' : 'instance',
-          type: type === null ? null : r.text(type, false, true),
-          encoding: 'objc',
-          flags: BigInt(flags),
-          symbol: `${classMethod ? '+' : '-'}[${owner} ${name}]`,
-        });
+        r.add(
+          declaration ? 'objc_method_declaration' : 'objc_method',
+          name,
+          entry,
+          BigInt(stride),
+          {
+            owner,
+            target: implementation,
+            target_role: declaration ? 'unresolved' : 'code',
+            method_kind: classMethod ? 'class' : 'instance',
+            type: type === null ? null : r.text(type, false, true),
+            encoding: 'objc',
+            flags: BigInt(flags),
+            symbol: `${classMethod ? '+' : '-'}[${owner} ${name}]`,
+          },
+        );
       });
   }
 
@@ -320,7 +326,7 @@ export class ObjCRecovery {
     let cursor = start;
     while (cursor < end) {
       r.context.checkpoint(1);
-      if (((r.u32(cursor) & 0xffe0001f) >>> 0) === 0xd4200000) {
+      if ((r.u32(cursor) & 0xffe0001f) >>> 0 === 0xd4200000) {
         cursor += 4n; // BRK padding between stubs
         continue;
       }

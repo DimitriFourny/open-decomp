@@ -32,8 +32,10 @@ import {
 } from '../../analysis/types/index.js';
 import {
   bitWidth,
+  expressionOperands,
   type DataType,
   type Expression,
+  type Instruction,
   type RegisterIR,
   type SSAForm,
   type Value,
@@ -54,6 +56,7 @@ import {
   type PreparedNativeUnit,
 } from './native-prepare.js';
 import {
+  budgetReason,
   nativeDependencyWorklist,
   type NativeInterface,
   type NativeSummary,
@@ -83,7 +86,7 @@ import {
 import { needsSourceFpEnvironment } from '../../reconstruction/source-requirements.js';
 import { nativeContextKey } from './native-context.js';
 import { prepareNativeContext } from './native-context-prepare.js';
-import { formatArgumentSignatures } from './source-variadic.js';
+import { variadicRuleCalls, variadicRuleFacts } from './source-variadic.js';
 import { nativeLibraryTails } from './native-library-tails.js';
 import { objcSourceFacts } from './objc-messages.js';
 
@@ -374,6 +377,62 @@ function observeParameters(
   const use = (value: Value): void => note(analysis.stack.values.get(value.id));
   const spills: StackFact[] = [];
   const calls = new Map(analysis.calls.map((call) => [call.node_id, call]));
+  // A call whose callee interface is unresolved, open or recursive may read any
+  // argument storage. It can observe this function's own incoming arguments only
+  // through a path from an entry argument register that no semantic use has
+  // already made a parameter: an argument register at the call whose value may
+  // depend on such an entry value (directly, through phis or computed), a
+  // missing binding, a private spill of such a value, or a stack pointer that is
+  // not below entry SP (the callee's stack arguments would be our incoming
+  // ones). Without such a path the callee sees only observed parameters and
+  // values this body computed, so it adds no input; ABI conformance is assumed.
+  const opaque = new Set<string>();
+  const entryRoots = new Map(
+    entryBindings
+      .filter((binding) => byRoot.has(binding.register.root))
+      .map((binding) => [binding.value.id, binding.register.root]),
+  );
+  const phiSources = new Map<string, Value[]>();
+  for (const copy of storageCopies) {
+    const list = phiSources.get(copy.destination.id) ?? [];
+    list.push(copy.source);
+    phiSources.set(copy.destination.id, list);
+  }
+  const mayHoldUnobserved = (start: Value): boolean => {
+    const pending = [start],
+      seen = new Set<string>();
+    while (pending.length) {
+      context.checkpoint(1);
+      const value = pending.pop()!;
+      if (seen.has(value.id)) continue;
+      seen.add(value.id);
+      const root = entryRoots.get(value.id);
+      if ((root !== undefined && !observed.has(root)) || seen.size > 256) return true;
+      const expression = definitions.get(value.id);
+      if (expression) pending.push(...expressionOperands(expression));
+      else pending.push(...(phiSources.get(value.id) ?? []));
+    }
+    return false;
+  };
+  const passesUnobserved = (node: Extract<Instruction, { kind: 'call' }>): boolean => {
+    const sp = analysis.stack.snapshots.get(node.id)?.stack_pointer.value;
+    if (sp?.kind !== 'stack' || sp.offset >= 0n) return true;
+    if (
+      spills.some((fact) =>
+        fact.incoming_registers.some(
+          (register) => byRoot.has(register.root) && !observed.has(register.root),
+        ),
+      )
+    )
+      return true;
+    return candidates.some((candidate) => {
+      const cells = node.register_inputs.filter(
+        (binding) => binding.register.root === candidate.root,
+      );
+      return !cells.length || cells.some((binding) => mayHoldUnobserved(binding.value));
+    });
+  };
+  const callNodes = new Map<string, Extract<Instruction, { kind: 'call' }>>();
   for (const block of ir.blocks) {
     if (!analysis.stack.snapshots.has(block.terminator.id)) continue;
     if (conditionalFpFailures.has(block.id)) continue;
@@ -394,8 +453,12 @@ function observeParameters(
           call?.contracts.filter(
             (contract) => contract.status === 'established' && contract.layout.state === 'complete',
           ) ?? [];
-        if ((!contracts.length && !interfaces.has(node.id)) || call?.status === 'conflicting')
-          ambiguous = true;
+        callNodes.set(node.id, node);
+        if (call?.status === 'conflicting') ambiguous = true;
+        else if (!contracts.length && !interfaces.has(node.id)) {
+          if (node.target.kind === 'indirect') opaque.add(node.id);
+          else ambiguous = true;
+        }
         for (const contract of contracts) {
           for (const parameter of contract.parameters)
             for (const location of parameter.locations) note(location.fact);
@@ -413,6 +476,7 @@ function observeParameters(
     else if (terminator.kind === 'return') for (const value of terminator.values) use(value);
   }
   for (const fact of nativeCallInputs(analysis, interfaces, context)) note(fact);
+  for (const id of opaque) if (passesUnobserved(callNodes.get(id)!)) ambiguous = true;
   const { returns, return_types, written_result } = nativeReturnInterface(
     ir,
     abi,
@@ -467,35 +531,40 @@ function observeParameters(
   const stack_parameters = nativeStackParameters(ir, analysis, context, interfaceIndex);
   // Complete by callee reads: nothing outside the observed register prefix can
   // be read, directly or through a callee/tail target whose own list is closed.
-  // Recursive groups never close: their seeds are open and closure needs every
-  // dependency closed. Complete reads, not caller-written extent, bound arity.
+  // Only calls an unobserved entry argument may reach (and tail transfers) rely
+  // on their callee's closure; the worklist inherits arity completeness from
+  // exactly those. Recursive groups close only by the worklist's coinductive
+  // check. Complete reads, not caller-written extent, bound arity.
   const closedCallee = (callee: NativeInterface | undefined): boolean =>
     callee?.argument_list_closure !== undefined &&
     callee.parameter_state !== 'ambiguous' &&
     !callee.variadic_stack;
+  const reaching: string[] = [];
+  for (const block of ir.blocks) {
+    for (const node of block.instructions) {
+      context.checkpoint(1);
+      if (
+        node.kind !== 'call' ||
+        calls
+          .get(node.id)
+          ?.contracts.some(
+            (contract) =>
+              contract.status === 'established' &&
+              contract.layout.state === 'complete' &&
+              contract.layout.argument_count !== null,
+          ) === true ||
+        (callNodes.has(node.id) && !passesUnobserved(callNodes.get(node.id)!))
+      )
+        continue;
+      reaching.push(node.id);
+    }
+    if (block.terminator.kind === 'indirect') reaching.push(block.terminator.id);
+  }
   const closure =
     !ambiguous &&
     !variadicStack &&
     !stack_parameters.length &&
-    ir.blocks.every((block) => {
-      context.checkpoint(1);
-      return (
-        block.instructions.every(
-          (node) =>
-            node.kind !== 'call' ||
-            calls
-              .get(node.id)
-              ?.contracts.some(
-                (contract) =>
-                  contract.status === 'established' &&
-                  contract.layout.state === 'complete' &&
-                  contract.layout.argument_count !== null,
-              ) === true ||
-            closedCallee(interfaces.get(node.id)),
-        ) &&
-        (block.terminator.kind !== 'indirect' || closedCallee(interfaces.get(block.terminator.id)))
-      );
-    });
+    reaching.every((id) => closedCallee(interfaces.get(id)));
   return {
     parameters,
     parameter_types: parameters.map(
@@ -509,6 +578,7 @@ function observeParameters(
     argument_list_complete: false,
     stack_parameters,
     ...(closure ? { argument_list_closure: 'callee_reads' as const } : {}),
+    ...(reaching.length ? { argument_reaching_calls: reaching } : {}),
     ...(variadicStack ? { variadic_stack: true as const } : {}),
     requirements: [
       ...new Set([
@@ -519,56 +589,10 @@ function observeParameters(
   };
 }
 
-/** Existing nominal library rules may close a variadic prefix. Zero open flags
- * require no mode on the supported POSIX/CRT ABIs; unknown/nonzero flags do not
- * acquire a guessed target-specific flag mask or invented trailing arguments. */
-function actualArgumentCounts(
-  analysis: CallAnalysisResult | null,
-  library: LibraryContracts,
-  context: OperationContext,
-): ReadonlyMap<string, number> {
-  const counts = new Map<string, number>();
-  for (const call of analysis?.calls ?? []) {
-    context.checkpoint(1);
-    if (call.status === 'conflicting') continue;
-    const observations = call.contracts.filter(
-      (observation) => observation.status === 'established',
-    );
-    if (!observations.length) continue;
-    const proven = new Set<number>();
-    let complete = true;
-    for (const observation of observations) {
-      const contract = library.contracts.find(
-        (item) =>
-          item.id === observation.contract.id || `${item.id}:entry` === observation.contract.id,
-      );
-      if (
-        !contract ||
-        contract.conflicts_with.length ||
-        contract.variadic_rule?.kind !== 'open_flags'
-      ) {
-        complete = false;
-        break;
-      }
-      const flags = observation.parameters.find(
-        (parameter) => parameter.index === contract.variadic_rule!.argument,
-      )?.locations;
-      if (
-        flags?.length !== 1 ||
-        flags[0]!.fact.value.kind !== 'constant' ||
-        flags[0]!.fact.value.bits !== 0n
-      ) {
-        complete = false;
-        break;
-      }
-      proven.add(contract.abi_signature.fixed_parameter_count);
-    }
-    if (complete && proven.size === 1) counts.set(call.node_id, [...proven][0]!);
-  }
-  return counts;
-}
-
-function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
+function sourceAddresses(
+  input: SourceFactsInput,
+  formatPointers: readonly bigint[],
+): readonly SourceAddress[] {
   const { image, scope, revision } = input,
     context = scope.context;
   const candidates = new Map<string, Address>();
@@ -643,6 +667,14 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
           ? { image_id: image.id, space: 'va', value: fact.value.bits }
           : undefined;
     if (address) candidates.set(addressKey(address), address);
+  }
+  // Every possible format pointer of an established format rule names a
+  // candidate literal; string facts still require exact immutable bytes.
+  for (const value of formatPointers) {
+    context.checkpoint(1);
+    if (value >= U64_LIMIT) continue;
+    const address: Address = { image_id: image.id, space: 'va', value };
+    candidates.set(addressKey(address), address);
   }
   // Any call's observed argument registers and stack values, whatever its
   // contract: a constant that addresses a string is a literal wherever it is
@@ -1357,6 +1389,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       const {
         parameter_shapes,
         written_result: _written,
+        argument_reaching_calls: _reaching,
         argument_list_closure,
         source_interface,
         ...interface_
@@ -1403,19 +1436,22 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         ...(argument_list_closure && summary?.arity_complete ? { argument_list_closure } : {}),
         evidence_ids: proofIds,
       });
-      if (source_interface && summary?.arity_complete)
+      if (source_interface && summary?.arity_complete) {
+        const { argument_reaching_calls: _sourceReaching, ...sourceInterface } = source_interface;
         sourceCallees.set(dependency.call_id, {
-          ...source_interface,
+          ...sourceInterface,
           call_id: dependency.call_id,
           target: dependency.target.entry,
           target_subject_id: dependency.target.id,
           evidence_ids: proofIds,
         });
+      }
       summarized.add(dependency.call_id);
       for (const shape of parameter_shapes ?? []) evidence.push(...shape.evidence);
       if (summary?.reasons.length)
         diagnostics.push({
-          code: 'unavailable_semantics',
+          // A callee cut by a bounded share is a budget limit, not unsupported semantics.
+          code: summary.reasons.some(budgetReason) ? 'resource_limit' : 'unavailable_semantics',
           severity: 'warning',
           message: `Native callee ${dependency.target.original_name ?? dependency.target.id} remains partial: ${summary.reasons.join('; ')}`,
           entity_id: dependency.target.id,
@@ -1549,6 +1585,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         parameter_shapes: _shapes,
         written_result: _written,
         argument_list_closure: _closure,
+        argument_reaching_calls: _reaching,
         source_interface: _sourceInterface,
         ...interface_
       } = observed;
@@ -1579,6 +1616,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         scope.dependencies.replay(unit.dependency_readset);
     }
   }
+  const ruleCalls = variadicRuleCalls(input.ir, input.types.calls, input.library, context);
   const objc = objcSourceFacts({
     ir: input.ir,
     image,
@@ -1588,11 +1626,15 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     abi,
     context,
     callees,
-    addresses: sourceAddresses(input),
+    addresses: sourceAddresses(
+      input,
+      ruleCalls.flatMap((call) => (call.kind === 'open_flags' ? [] : call.values)),
+    ),
   });
   for (const callee of objc.callees) sourceCallees.set(callee.call_id, callee);
   evidence.push(...objc.evidence);
   const addresses = objc.addresses;
+  const variadic = variadicRuleFacts(ruleCalls, addresses, abi, context);
   return {
     abi,
     callees: [...callees.values()],
@@ -1604,13 +1646,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     memory_transfers,
     function_return_demands: [...functionReturnDemands.values()],
     ...(function_returns === undefined ? {} : { function_returns }),
-    call_argument_counts: actualArgumentCounts(input.types.calls, input.library, context),
-    call_argument_signatures: formatArgumentSignatures(
-      input.types.calls,
-      input.library,
-      addresses,
-      abi,
-      context,
-    ),
+    call_argument_counts: variadic.counts,
+    call_argument_signatures: variadic.signatures,
   };
 }

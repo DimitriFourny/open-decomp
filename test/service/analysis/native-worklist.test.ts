@@ -107,11 +107,17 @@ const initialize = (unit: Unit): NativeInterface => ({
   parameter_state: 'observed',
   argument_list_complete: false,
 });
+// Every dependency call forwards the caller's unobserved argument registers,
+// so the closure relies on each callee (argument_reaching_calls).
 function observe(unit: Unit, dependencies: ReadonlyMap<string, NativeInterface>): NativeInterface {
   const requirements = new Map(unit.local.map((register) => [register.root, register]));
   for (const dependency of dependencies.values())
     for (const register of dependency.parameters) requirements.set(register.root, register);
-  return { ...initialize(unit), parameters: [...requirements.values()] };
+  return {
+    ...initialize(unit),
+    parameters: [...requirements.values()],
+    ...(dependencies.size ? { argument_reaching_calls: [...dependencies.keys()] } : {}),
+  };
 }
 
 test('native dependency worklist visits required closure once and refines a recursive SCC', () => {
@@ -170,6 +176,67 @@ test('machine arity completeness propagates independently of optional metadata g
       );
     }
   }
+});
+
+test('arity completeness is inherited only through calls an unobserved argument reaches', () => {
+  for (const reached of [false, true]) {
+    const result = nativeDependencyWorklist({
+      roots: [a],
+      context: createOperationContext(),
+      capacity: { instructions: 6, blocks: 3, nodes: 20 },
+      max_functions: 64,
+      max_refinements: 64,
+      load(target) {
+        const unit = units.get(target.id)!;
+        return target.id === c.id ? { ...unit, arity_complete: false, reasons: ['gap'] } : unit;
+      },
+      initialize,
+      observe: (unit, dependencies) => ({
+        ...observe(unit, dependencies),
+        // b's call to c passes only observed or computed values unless reached.
+        argument_reaching_calls: [...dependencies.keys()].filter(
+          (call) => reached || call !== 'b-c',
+        ),
+      }),
+      equal,
+    });
+    assert.equal(result.summaries.get(c.id)?.arity_complete, false);
+    for (const target of [a, b])
+      assert.equal(result.summaries.get(target.id)?.arity_complete, !reached);
+  }
+});
+
+test('recursive groups converge although memory shapes would grow along recursive edges', () => {
+  let observations = 0;
+  const result = nativeDependencyWorklist({
+    roots: [a],
+    context: createOperationContext(),
+    capacity: { instructions: 6, blocks: 3, nodes: 20 },
+    max_functions: 64,
+    max_refinements: 64,
+    load: (target) => units.get(target.id)!,
+    initialize,
+    // Each body derives a fresh shape record from every callee shape it sees:
+    // transferred along the a<->b cycle this would never reach a fixed point.
+    observe: (unit, dependencies) => {
+      observations++;
+      const inherited = [...dependencies.values()].flatMap(
+        (callee) => callee.parameter_shapes ?? [],
+      );
+      return {
+        ...observe(unit, dependencies),
+        parameter_shapes: [
+          { parameter_index: 0, depth: 1 + inherited.length } as unknown as NonNullable<
+            NativeInterface['parameter_shapes']
+          >[number],
+        ],
+      };
+    },
+    equal,
+  });
+  assert.equal(result.complete, true);
+  assert.ok(observations < 10, `${observations} observations`);
+  assert.ok(![...result.summaries.values()].some((summary) => summary.reasons.length));
 });
 
 test('native dependency limits preserve observed prefix and name actual unresolved leaf capacity', () => {

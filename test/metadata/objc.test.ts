@@ -37,22 +37,19 @@ test('selector stubs, constant strings and method symbols come from static metad
       .map((record) => [record.name, record]),
   );
   // Every selector the program sends through __objc_stubs, and no other record.
-  assert.deepEqual(
-    [...stubs.keys()].sort(),
-    [
-      'addValue:times:',
-      'copy',
-      'count',
-      'counterWithLabel:',
-      'greeting',
-      'increment',
-      'initWithLabel:',
-      'label',
-      'setCount:',
-      'stringWithFormat:',
-      'summary',
-    ],
-  );
+  assert.deepEqual([...stubs.keys()].sort(), [
+    'addValue:times:',
+    'copy',
+    'count',
+    'counterWithLabel:',
+    'greeting',
+    'increment',
+    'initWithLabel:',
+    'label',
+    'setCount:',
+    'stringWithFormat:',
+    'summary',
+  ]);
   const stub = stubs.get('addValue:times:')!;
   assert.equal(stub.target_role, 'code');
   assert.equal(stub.target?.value, stub.address.value);
@@ -99,9 +96,15 @@ test('stripped images keep runtime method names; classic sends have no selector 
   const classic = recover('objc-foundation-classic');
   assert.equal(classic.state, 'complete');
   assert.equal(classic.records.filter((record) => record.kind === 'objc_selector_stub').length, 0);
-  const index = objcImageIndex(fixtureImage('objc-foundation-classic'), 1, createOperationContext())!;
+  const index = objcImageIndex(
+    fixtureImage('objc-foundation-classic'),
+    1,
+    createOperationContext(),
+  )!;
   assert.deepEqual(
-    [...index.selector_refs.values()].map((fact) => fact.name).filter((name) => name === 'addValue:times:'),
+    [...index.selector_refs.values()]
+      .map((fact) => fact.name)
+      .filter((name) => name === 'addValue:times:'),
     ['addValue:times:'],
   );
   const classes = new Set([...index.class_refs.values()].map((fact) => fact.name));
@@ -116,10 +119,13 @@ test('an unrecognized selector stub publishes no selector for it or after it', (
     .filter((record) => record.kind === 'objc_selector_stub')
     .sort((a, b) => (a.address.value < b.address.value ? -1 : 1))[0]!;
   bytes.writeUInt32LE(0xd503201f, fileAt(image, first.address.value) + 8); // adrp x16 -> nop
-  const after = recoverRuntimeMetadata({ image: loadBytes(bytes), revision: 1 }, createOperationContext());
+  const after = recoverRuntimeMetadata(
+    { image: loadBytes(bytes), revision: 1 },
+    createOperationContext(),
+  );
   assert.equal(after.state, 'partial');
   assert.equal(after.records.filter((record) => record.kind === 'objc_selector_stub').length, 0);
-  assert.ok(!after.symbols.some((symbol) => symbol.original_name.startsWith('_objc_msgSend$')));
+  assert.ok(!after.symbols.some((symbol) => symbol.original_name?.startsWith('_objc_msgSend$')));
 });
 
 test('method type encodings yield ABI classes only for supported scalar and pointer elements', () => {
