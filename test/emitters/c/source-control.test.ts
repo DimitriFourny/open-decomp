@@ -5,7 +5,13 @@ import {
   DEFAULT_ANALYSIS_OPTIONS,
   entityIdentity,
 } from '../../../src/core/index.js';
-import { IRBuilder, integer, type SSAForm, type Value } from '../../../src/ir/index.js';
+import {
+  IRBuilder,
+  integer,
+  type BlockBuilder,
+  type SSAForm,
+  type Value,
+} from '../../../src/ir/index.js';
 import { structureControlFlow } from '../../../src/presentation/index.js';
 import { emitC } from '../../../src/emitters/c/index.js';
 import { emitPythonLike } from '../../../src/emitters/python-like/index.js';
@@ -1106,5 +1112,160 @@ for (const language of ['c-like', 'python-like'] as const)
       other.return([other.constant(i32, 9n)]);
       const text = emit(b.finish(entry, [i32]), language, 'source', true).emission.text;
       if (c) assert.match(text, /case 1: \{/);
+    });
+
+    /** Source and checked views agree on every input: values, events, memory. */
+    const agree = (
+      source: EmissionResult,
+      checked: EmissionResult,
+      inputs: readonly ReadonlyMap<string, bigint>[],
+      words: readonly number[] = [],
+    ): void => {
+      for (const args of inputs) {
+        const actual = execute(source.emission, args, memory(words));
+        const expected = execute(checked.emission, args, memory(words));
+        assert.deepEqual(actual.values, expected.values, source.emission.text);
+        assert.deepEqual(actual.events, expected.events);
+        assert.deepEqual(actual.memory, expected.memory);
+      }
+    };
+    /** A continuation too large to copy: six stores of its parameter. */
+    const continuation = (block: BlockBuilder): void => {
+      for (let index = 0; index < 6; index++)
+        block.store(block.constant(i64, 0x1010n + BigInt(index * 4)), block.parameters[0]!);
+      block.return(block.parameters);
+    };
+
+    test('a shared return between a goto and its target is copied onto every edge', () => {
+      const b = program('source-goto-path-tail'),
+        entry = b.block('entry', [i32, i32]),
+        first = b.block('first'),
+        second = b.block('second'),
+        fail = b.block('fail', [i32]),
+        join = b.block('join', [i32]);
+      const [a, d] = entry.parameters as [Value, Value];
+      entry.branch(
+        entry.compare('eq', a, entry.constant(i32, 0n)),
+        entry.edge(join, [d]),
+        entry.edge(first),
+      );
+      first.branch(
+        first.compare('eq', a, first.constant(i32, 1n)),
+        first.edge(second),
+        first.edge(fail, [first.constant(i32, 2n)]),
+      );
+      second.store(second.constant(i64, 0x1000n), a);
+      second.branch(
+        second.compare('eq', d, second.constant(i32, 2n)),
+        second.edge(join, [a]),
+        second.edge(fail, [second.constant(i32, 3n)]),
+      );
+      fail.store(fail.constant(i64, 0x1004n), fail.parameters[0]!);
+      fail.return(fail.parameters);
+      continuation(join);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      assert.doesNotMatch(source.emission.text, /\bgoto\b|while \(0\)|while True/);
+      assert.ok(rules(source).includes('goto_path_tail_duplication'), source.emission.text);
+      assert.match(checked.emission.text, /\bgoto\b/);
+      assert.equal(source.emission.text.match(/\breturn\b/g)?.length, 3, source.emission.text);
+      agree(
+        source,
+        checked,
+        [0n, 1n, 5n].flatMap((x) =>
+          [2n, 4n].map(
+            (y) =>
+              new Map([
+                [a.id, x],
+                [d.id, y],
+              ]),
+          ),
+        ),
+      );
+    });
+
+    test('a goto past code its short-circuit test skips breaks out of a block run once', () => {
+      const b = program('source-breakable-block'),
+        entry = b.block('entry', [i32, i32]),
+        second = b.block('second'),
+        other = b.block('other'),
+        join = b.block('join', [i32]);
+      const [a, d] = entry.parameters as [Value, Value];
+      entry.branch(
+        entry.compare('eq', a, entry.constant(i32, 0n)),
+        entry.edge(second),
+        entry.edge(other),
+      );
+      second.branch(
+        second.compare('eq', d, second.constant(i32, 0n)),
+        second.edge(join, [second.constant(i32, 7n)]),
+        second.edge(other),
+      );
+      other.store(other.constant(i64, 0x1000n), a);
+      other.jump(join, [d]);
+      continuation(join);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked'),
+        text = source.emission.text;
+      assert.doesNotMatch(text, /\bgoto\b|\blabel\b/);
+      assert.match(checked.emission.text, /\bgoto\b/);
+      assert.ok(rules(source).includes('breakable_block'), text);
+      assert.ok(!rules(checked).includes('breakable_block'));
+      if (c) assert.match(text, /do \{\n[^]*\bbreak;\n[^]*\} while \(0\);/);
+      else assert.match(text, /while True:\n[^]*\bbreak\n[^]*\n {4}break\n/);
+      agree(
+        source,
+        checked,
+        [0n, 3n].flatMap((x) =>
+          [0n, 5n].map(
+            (y) =>
+              new Map([
+                [a.id, x],
+                [d.id, y],
+              ]),
+          ),
+        ),
+      );
+    });
+
+    test('a loop whose two exits each have one edge follows the exit that cannot move', () => {
+      const b = program('source-exit-tie'),
+        entry = b.block('entry', [i32]),
+        head = b.block('head', [i32, i64]),
+        step = b.block('step'),
+        missing = b.block('missing'),
+        found = b.block('found', [i32]);
+      const count = entry.parameters[0]!;
+      entry.jump(head, [count, entry.constant(i64, 0x1000n)]);
+      const [remaining, pointer] = head.parameters as [Value, Value];
+      const loaded = head.load(i32, pointer);
+      head.branch(
+        head.compare('eq', loaded, head.constant(i32, 0n)),
+        head.edge(found, [remaining]),
+        head.edge(step),
+      );
+      step.branch(
+        step.compare('eq', remaining, step.constant(i32, 1n)),
+        step.edge(missing),
+        step.edge(head, [
+          step.int('sub', remaining, step.constant(i32, 1n)),
+          step.int('add', pointer, step.constant(i64, 4n)),
+        ]),
+      );
+      missing.return([missing.constant(i32, 12n)]);
+      continuation(found);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      assert.doesNotMatch(source.emission.text, /\bgoto\b/);
+      assert.ok(rules(source).includes('loop_exit_merge'), source.emission.text);
+      agree(
+        source,
+        checked,
+        [1n, 2n, 3n].map((n) => new Map([[count.id, n]])),
+        [5, 0, 7],
+      );
     });
   });

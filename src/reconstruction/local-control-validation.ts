@@ -23,8 +23,15 @@ export function validateEmittedControl(
   validation: LocalValidationSession,
   exits?: EmittedLoopExits,
 ): void {
-  /** `test`: a do-while's test control, the only site whose `continue` repeats. */
-  type Scope = { loop: string | null; after: string | null; test?: string; id: string };
+  /** `test`: a do-while's test control, the only site whose `continue` repeats.
+   * `once`: a block run once, which `continue` never targets. */
+  type Scope = {
+    loop: string | null;
+    after: string | null;
+    test?: string;
+    once?: true;
+    id: string;
+  };
   let work = 0;
   const entry = (region: Region, fallback: string | null): string | null => {
     while (region.kind === 'sequence') {
@@ -56,7 +63,10 @@ export function validateEmittedControl(
       if (action.kind === 'break') actual = scopes.at(-1)?.after ?? null;
       if (action.kind === 'continue') {
         const scope = [...scopes].reverse().find((item) => item.loop !== null);
-        actual = scope && (scope.test === undefined || scope.test === subject) ? scope.loop : null;
+        actual =
+          scope && !scope.once && (scope.test === undefined || scope.test === subject)
+            ? scope.loop
+            : null;
       }
       if (action.kind === 'loop-exit') {
         const outer = scopes.findIndex((scope) => scope.loop === action.loop);
@@ -107,15 +117,17 @@ export function validateEmittedControl(
         walk(region.regions[i]!, next, scopes);
       }
     } else if (region.kind === 'loop') {
-      // Falling off a do-while body reaches its test, never the header directly.
+      // A block run once falls through to its follow; falling off a do-while
+      // body reaches its test, never the header directly.
       const test = region.form?.kind === 'do_while' ? region.form.test : undefined;
-      walk(region.body, test === undefined ? region.header : null, [
+      walk(region.body, region.once ? follow : test === undefined ? region.header : null, [
         ...scopes,
         {
           loop: region.header,
           id: region.header,
           after: follow,
           ...(test === undefined ? {} : { test }),
+          ...(region.once ? { once: true as const } : {}),
         },
       ]);
     } else {

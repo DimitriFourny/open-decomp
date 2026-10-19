@@ -7,14 +7,41 @@ import type {
   LoopForm,
   ParallelTransfer,
   Region,
+  SequenceRegion,
 } from '../presentation/index.js';
 import type { Reconstruction } from '../reconstruction/model.js';
 import type { InlineSite } from './source-inlining.js';
 
 export type TransferAction = 'goto' | 'fallthrough' | 'break' | 'continue' | 'loop-exit';
 type Nest =
-  | { readonly kind: 'loop'; readonly header: string; readonly follow: string | null }
+  | {
+      readonly kind: 'loop';
+      readonly header: string;
+      readonly follow: string | null;
+      /** A breakable block run once: `break` leaves it, nothing continues it. */
+      readonly once?: true;
+    }
   | { readonly kind: 'switch'; readonly id: string };
+
+/** A presentation search ran out of its share of the remaining work. */
+class OptionalWorkExhausted extends Error {}
+
+/** Optional presentation searches never starve the rest of the run: they
+ * charge the shared budget and stop at `1/share` of the work remaining. */
+function optionalWork(context: OperationContext, share: number): OperationContext {
+  const limit = Math.floor((context.remainingWork?.() ?? 0) / share);
+  let used = 0;
+  return {
+    ...context,
+    budget: { ...context.budget, work: limit },
+    remainingWork: () => Math.max(0, limit - used),
+    checkpoint(work) {
+      context.checkpoint(work);
+      used += work;
+      if (used > limit) throw new OptionalWorkExhausted();
+    },
+  };
+}
 
 export function controlArms(control: Control): readonly ControlArm[] {
   return control.kind === 'if'
@@ -58,7 +85,7 @@ export function transferAction(
   if (sourceView && normalizeLoopTargets) {
     const loop = [...nesting].reverse().find((item) => item.kind === 'loop');
     if (loop?.kind === 'loop') {
-      if (transfer.target === loop.header) return 'continue';
+      if (transfer.target === loop.header && !loop.once) return 'continue';
       if (
         transfer.target === loop.follow &&
         (language === 'python-like' || nesting.at(-1)?.kind === 'loop')
@@ -75,7 +102,8 @@ export function transferAction(
     if (transfer.loop !== item.header) return 'goto';
     // A loop may have several exits. Only its actual lexical successor can
     // use break; other destinations must keep their explicit labeled edge.
-    if (transfer.mode === 'continue') return transfer.target === item.header ? 'continue' : 'goto';
+    if (transfer.mode === 'continue')
+      return transfer.target === item.header && !item.once ? 'continue' : 'goto';
     return transfer.target === item.follow &&
       (language === 'python-like' || nesting[nesting.length - 1]?.kind === 'loop')
       ? 'break'
@@ -646,6 +674,8 @@ export interface Occurrence {
   readonly control: Control;
   /** Block owning the control; a duplicated tail reports its home identity. */
   readonly block: string;
+  /** The printed block region itself (a copy for a duplicated tail). */
+  readonly owner: BlockRegion;
   /** Region reached when the transfer prints nothing; null at the function end. */
   readonly destination: Region | null;
   readonly nesting: readonly Nest[];
@@ -660,12 +690,14 @@ function leaf(region: Region | null): Region | null {
   return region;
 }
 
-/** Visit every printed transfer occurrence with its lexical destination. */
+/** Visit every printed transfer occurrence with its lexical destination;
+ * `follow` is the region the body falls into. */
 export function visitTransfers(
   body: Region,
   language: 'c-like' | 'python-like',
   context: OperationContext,
   visit: (occurrence: Occurrence) => void,
+  follow: Region | null = null,
 ): void {
   const walk = (region: Region, follow: Region | null, nesting: readonly Nest[]): void => {
     context.checkpoint(1);
@@ -683,9 +715,14 @@ export function visitTransfers(
     }
     if (region.kind === 'loop') {
       const after = leaf(follow);
-      walk(region.body, region, [
+      walk(region.body, region.once ? follow : region, [
         ...nesting,
-        { kind: 'loop', header: region.header, follow: after ? firstBlock(after) : null },
+        {
+          kind: 'loop',
+          header: region.header,
+          follow: after ? firstBlock(after) : null,
+          ...(region.once ? { once: true as const } : {}),
+        },
       ]);
       return;
     }
@@ -695,6 +732,7 @@ export function visitTransfers(
         transfer: control.transfer,
         control,
         block: region.id,
+        owner: region,
         destination: leaf(follow),
         nesting,
       });
@@ -707,13 +745,14 @@ export function visitTransfers(
         transfer: arm.transfer,
         control,
         block: region.id,
+        owner: region,
         destination: leaf(arm.body ?? follow),
         nesting: nested,
       });
       if (arm.body) walk(arm.body, follow, nested);
     }
   };
-  walk(body, null, []);
+  walk(body, follow, []);
 }
 
 export function occurrenceAction(
@@ -728,6 +767,48 @@ export function occurrenceAction(
     language,
     true,
   );
+}
+
+/** Printed goto occurrences of a layout. */
+export function gotoOccurrences(
+  body: Region,
+  language: 'c-like' | 'python-like',
+  context: OperationContext,
+): Occurrence[] {
+  const gotos: Occurrence[] = [];
+  visitTransfers(body, language, context, (occurrence) => {
+    if (occurrenceAction(occurrence, language) === 'goto') gotos.push(occurrence);
+  });
+  return gotos;
+}
+
+/** The region each block region falls into (its lexical follow); a loop
+ * body's end falls into its loop, null is the function end. */
+function lexicalFollows(body: Region, context: OperationContext): Map<Region, Region | null> {
+  const follows = new Map<Region, Region | null>();
+  const walk = (region: Region, follow: Region | null): void => {
+    context.checkpoint(1);
+    if (region.kind === 'sequence') {
+      for (let i = 0; i < region.regions.length; i++) {
+        let next = follow;
+        for (let j = i + 1; j < region.regions.length; j++)
+          if (firstBlock(region.regions[j]!) !== null) {
+            next = region.regions[j]!;
+            break;
+          }
+        walk(region.regions[i]!, next);
+      }
+      return;
+    }
+    if (region.kind === 'loop') {
+      walk(region.body, region.once ? follow : region);
+      return;
+    }
+    follows.set(region, leaf(follow));
+    for (const arm of controlArms(region.control)) if (arm.body) walk(arm.body, follow);
+  };
+  walk(body, null);
+  return follows;
 }
 
 export interface LoopExitRoute {
@@ -817,6 +898,9 @@ export interface LayoutPlan {
   /** Exit blocks moved onto their only loop edge so the loop's other exits
    * share one successor (`at`: the edge target the block was entered from). */
   readonly merged: readonly { readonly block: string; readonly at: string }[];
+  /** Tails lexically between a goto and its target, copied onto every
+   * incoming edge (fallthroughs included) so the goto falls through. */
+  readonly forced: readonly string[];
 }
 
 /** Layout-only source-view rewrites. Every change keeps the original block and
@@ -834,8 +918,10 @@ export function planLayout(
   context: OperationContext,
   small: (block: BlockRegion) => boolean = silent,
 ): LayoutPlan {
-  const clones = new Set<BlockRegion>();
-  const duplicated: { transfer: ParallelTransfer; tail: string }[] = [];
+  let clones = new Set<BlockRegion>();
+  let duplicated: { transfer: ParallelTransfer; tail: string }[] = [];
+  // Optional searches charge a bounded share of the remaining work (see step 4).
+  let active = context;
   const relocated: { block: string; at: string }[] = [];
   const blocks = program.blocks;
   const ordered: string[] = [];
@@ -1017,7 +1103,8 @@ export function planLayout(
     let size = 0;
     if (silent(block) || small(block)) {
       const control = block.control;
-      if (control.kind === 'return') size = 1;
+      if (control.kind === 'return' || control.kind === 'indirect' || control.kind === 'trap')
+        size = 1;
       else if (control.kind === 'jump' && copies(control.transfer) <= 4) {
         const next = tailSize(control.transfer.target, path);
         if (next > 0 && next < 4) size = next + 1;
@@ -1124,92 +1211,117 @@ export function planLayout(
     });
     return found ? { ...region, control } : null;
   };
-  const joinExits = (children: Region[], index: number): Region[] | null => {
+  const joinExits = (children: Region[], index: number, follow: Region | null): Region[] | null => {
     const loop = children[index]!;
     if (loop.kind !== 'loop') return null;
     const owned = new Set<string>(),
       counts = new Map<string, number>();
     scan(loop.body, owned, new Set());
     successors(loop.body, owned, counts);
-    let shared: string | null = null,
-      top = 1,
-      tie = false;
-    for (const [id, count] of counts) {
-      if (count > top) [shared, top, tie] = [id, count, false];
-      else if (count === top && shared !== null) tie = true;
-    }
-    if (shared === null || tie) return null;
+    const after = leaf(follow);
+    const continuation = after ? firstBlock(after) : null;
     const siblingBlock = (id: string): number =>
       children.findIndex((child, at) => at > index && child.kind === 'block' && child.id === id);
-    const sharedIndex = siblingBlock(shared);
-    if (sharedIndex < 0) return null;
-    const sunk = new Map<number, BlockRegion>();
-    let inside: Region = loop;
-    for (const id of counts.keys()) {
-      if (id === shared) continue;
-      const at = siblingBlock(id),
-        sibling = at < 0 ? undefined : (children[at] as BlockRegion),
-        entries = incomingEdges.get(id) ?? [];
-      if (
-        sibling &&
-        id !== program.function.entry &&
-        entries.length === 1 &&
-        owned.has(entries[0]!.block) &&
-        (terminal(id) ||
-          (sibling.control.kind === 'jump' &&
-            (sibling.control.transfer.target === shared ||
-              isTail(sibling.control.transfer.target))))
-      ) {
-        const embedded = embed(inside, id, sibling);
-        if (!embedded) return null;
-        inside = embedded;
-        sunk.set(at, sibling);
-      } else if (!isTail(id)) return null;
+    // The exit most edges reach follows the loop. Without one, a loop with an
+    // exit that is no duplicable tail tries each exit in turn: whichever lets
+    // the others move onto their edges.
+    const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    const [first, second] = sorted;
+    const candidates =
+      first && first[1] > 1 && (!second || second[1] < first[1])
+        ? [first[0]]
+        : sorted.some(([id]) => !isTail(id))
+          ? sorted.map(([id]) => id)
+          : [];
+    for (const shared of candidates) {
+      context.checkpoint(1);
+      if (siblingBlock(shared) < 0 && shared !== continuation) continue;
+      const sunk = new Map<number, BlockRegion>();
+      let inside: Region | null = loop;
+      for (const id of counts.keys()) {
+        if (id === shared) continue;
+        const at = siblingBlock(id),
+          sibling = at < 0 ? undefined : (children[at] as BlockRegion),
+          entries = incomingEdges.get(id) ?? [];
+        if (
+          sibling &&
+          id !== program.function.entry &&
+          entries.length === 1 &&
+          owned.has(entries[0]!.block) &&
+          (terminal(id) ||
+            (sibling.control.kind === 'jump' &&
+              (sibling.control.transfer.target === shared ||
+                isTail(sibling.control.transfer.target))))
+        ) {
+          inside = embed(inside, id, sibling);
+          if (!inside) break;
+          sunk.set(at, sibling);
+        } else if (!isTail(id)) {
+          inside = null;
+          break;
+        }
+      }
+      if (!inside || !sunk.size) continue;
+      const moved = inside;
+      const result = children.flatMap((child, at) =>
+        at === index ? [moved] : sunk.has(at) ? [] : [child],
+      );
+      // Only the shared exit may follow the loop, and every edge of the loop
+      // (including the moved blocks') that reaches it must print as a break.
+      const next = result.findIndex((child, at) => at > index && firstBlock(child) !== null);
+      if ((next < 0 ? continuation : firstBlock(result[next]!)) !== shared) continue;
+      let exact = true;
+      visitTransfers(
+        sequence(result),
+        language,
+        context,
+        (occurrence) => {
+          if (
+            occurrence.transfer.target === shared &&
+            (owned.has(occurrence.block) ||
+              [...sunk.values()].some((s) => s.id === occurrence.block)) &&
+            occurrenceAction(occurrence, language) !== 'break'
+          )
+            exact = false;
+        },
+        follow,
+      );
+      if (!exact) continue;
+      for (const block of sunk.values())
+        merged.push({
+          block: block.id,
+          at: incomingEdges.get(block.id)![0]!.transfer.target,
+        });
+      return result;
     }
-    if (!sunk.size) return null;
-    const result = children.flatMap((child, at) =>
-      at === index ? [inside] : sunk.has(at) ? [] : [child],
-    );
-    // Only the shared exit may follow the loop, and every edge of the loop
-    // (including the moved blocks') that reaches it must print as a break.
-    const next = result.findIndex((child, at) => at > index && firstBlock(child) !== null);
-    if (next < 0 || firstBlock(result[next]!) !== shared) return null;
-    let exact = true;
-    visitTransfers(sequence(result), language, context, (occurrence) => {
-      if (
-        occurrence.transfer.target === shared &&
-        (owned.has(occurrence.block) ||
-          [...sunk.values()].some((s) => s.id === occurrence.block)) &&
-        occurrenceAction(occurrence, language) !== 'break'
-      )
-        exact = false;
-    });
-    if (!exact) return null;
-    for (const block of sunk.values())
-      merged.push({
-        block: block.id,
-        at: incomingEdges.get(block.id)![0]!.transfer.target,
-      });
-    return result;
+    return null;
   };
-  const consolidate = (region: Region): Region => {
+  const consolidate = (region: Region, follow: Region | null): Region => {
     context.checkpoint(1);
     if (region.kind === 'loop') {
-      const inner = consolidate(region.body);
+      const inner = consolidate(region.body, region);
       return inner === region.body ? region : { ...region, body: inner };
     }
     if (region.kind === 'block') {
       let changed = false;
       const control = mapArms(region.control, (arm) => {
         if (!arm.body) return arm;
-        const inner = consolidate(arm.body);
+        const inner = consolidate(arm.body, follow);
         if (inner === arm.body) return arm;
         changed = true;
         return { ...arm, body: inner };
       });
       return changed ? { ...region, control } : region;
     }
-    const children = region.regions.map(consolidate);
+    const children = region.regions.map((child, index) => {
+      let next = follow;
+      for (let j = index + 1; j < region.regions.length; j++)
+        if (firstBlock(region.regions[j]!) !== null) {
+          next = region.regions[j]!;
+          break;
+        }
+      return consolidate(child, next);
+    });
     const changed = children.some((child, index) => child !== region.regions[index]);
     // A loop and the exit that follows it may sit in different nested
     // sequences; sequences carry no layout of their own, so join on the flat list.
@@ -1218,7 +1330,7 @@ export function planLayout(
     });
     let joinedAny = false;
     for (let index = 0; index < flat.length; index++) {
-      const joined = joinExits(flat, index);
+      const joined = joinExits(flat, index, follow);
       if (joined) {
         flat = joined;
         joinedAny = true;
@@ -1226,7 +1338,7 @@ export function planLayout(
     }
     return joinedAny ? sequence(flat) : changed ? sequence(children) : region;
   };
-  body = consolidate(body);
+  body = consolidate(body, null);
   const sinks = new Map<ParallelTransfer, string>();
   visitTransfers(body, language, context, (occurrence) => {
     const id = occurrence.transfer.target;
@@ -1337,10 +1449,12 @@ export function planLayout(
   // 2. Each labeled edge into a tail ends in an owned copy of the tail instead.
   // A jump and the copied continuation it owns are removed together if the
   // jump's home becomes unreachable. Otherwise its orphan return would remain
-  // after another terminal block, despite having no incoming edge.
-  const expansions = new Map<Region, BlockRegion>();
+  // after another terminal block, despite having no incoming edge. `forced`
+  // tails are copied onto every incoming edge, labeled or not.
+  let expansions = new Map<Region, BlockRegion>();
+  let forced: ReadonlySet<string> = new Set<string>();
   const duplicate = (region: Region, follow: string | null, nesting: readonly Nest[]): Region => {
-    context.checkpoint(1);
+    active.checkpoint(1);
     if (region.kind === 'sequence')
       return sequence(
         region.regions.map((child, index) =>
@@ -1363,7 +1477,8 @@ export function planLayout(
     ): boolean =>
       tailSize(transfer.target) > 0 &&
       budget >= tailSize(transfer.target) &&
-      transferAction(transfer, nested, destination, language, true) === 'goto';
+      (forced.has(transfer.target) ||
+        transferAction(transfer, nested, destination, language, true) === 'goto');
     if (control.kind === 'jump') {
       if (!labeled(control.transfer, follow, nesting)) return region;
       const expanded = sequence([region, clone(control.transfer.target, control.transfer)]);
@@ -1385,55 +1500,128 @@ export function planLayout(
       ),
     };
   };
-  presented = duplicate(presented, null, []);
-
   // 3. A tail no longer reached lexically at home is printed only as its copies.
-  const hidden = new Set<string>();
-  for (let round = 0; clones.size && round <= tails.size; round++) {
-    const reached = new Set<string>();
-    visitTransfers(presented, language, context, (occurrence) => {
-      const destination = occurrence.destination;
-      if (
-        occurrenceAction(occurrence, language) !== 'fallthrough' ||
-        destination?.kind !== 'block' ||
-        !clones.has(destination)
-      )
-        reached.add(occurrence.transfer.target);
-    });
-    const drop = new Set<string>();
-    for (const [id, tail] of tails) if (tail && !reached.has(id) && !hidden.has(id)) drop.add(id);
-    if (!drop.size) break;
-    const prune = (region: Region): Region | null => {
-      context.checkpoint(1);
-      const owner = expansions.get(region);
-      if (owner && drop.has(owner.id)) return null;
-      if (region.kind === 'block') {
-        // Clones contain only jumps/returns, so have no owned arms to rebuild.
-        // Keep their identity for subsequent pruning rounds and label planning.
-        if (clones.has(region)) return region;
-        if (drop.has(region.id)) return null;
-        return {
-          ...region,
-          control: mapArms(region.control, (item) =>
-            item.body ? { ...item, body: prune(item.body) ?? item.body } : item,
-          ),
-        };
+  let hidden = new Set<string>();
+  const expand = (base: Region): Region => {
+    clones = new Set();
+    duplicated = [];
+    expansions = new Map();
+    hidden = new Set();
+    budget = 128;
+    let result = duplicate(base, null, []);
+    for (let round = 0; clones.size && round <= tails.size; round++) {
+      const reached = new Set<string>();
+      visitTransfers(result, language, active, (occurrence) => {
+        const destination = occurrence.destination;
+        if (
+          occurrenceAction(occurrence, language) !== 'fallthrough' ||
+          destination?.kind !== 'block' ||
+          !clones.has(destination)
+        )
+          reached.add(occurrence.transfer.target);
+      });
+      const drop = new Set<string>();
+      for (const [id, tail] of tails) if (tail && !reached.has(id) && !hidden.has(id)) drop.add(id);
+      if (!drop.size) break;
+      const prune = (region: Region): Region | null => {
+        active.checkpoint(1);
+        const owner = expansions.get(region);
+        if (owner && drop.has(owner.id)) return null;
+        if (region.kind === 'block') {
+          // Clones contain only jumps/returns, so have no owned arms to rebuild.
+          // Keep their identity for subsequent pruning rounds and label planning.
+          if (clones.has(region)) return region;
+          if (drop.has(region.id)) return null;
+          return {
+            ...region,
+            control: mapArms(region.control, (item) =>
+              item.body ? { ...item, body: prune(item.body) ?? item.body } : item,
+            ),
+          };
+        }
+        if (region.kind === 'loop') return { ...region, body: prune(region.body) ?? region.body };
+        const children: Region[] = [];
+        for (const child of region.regions) {
+          const next = prune(child);
+          if (next) children.push(next);
+        }
+        if (!children.length) return null;
+        const next = sequence(children);
+        if (owner) expansions.set(next, owner);
+        return next;
+      };
+      result = prune(result) ?? result;
+      for (const id of drop) hidden.add(id);
+    }
+    return result;
+  };
+  const base = presented;
+  presented = expand(base);
+
+  // 4. A goto whose lexical path to its target crosses only tail homes falls
+  // through once those tails are copied onto every incoming edge instead.
+  // This search is optional work: exhausting its share keeps step 3's layout.
+  const kept = { presented, clones, duplicated, expansions, hidden };
+  const restore = (): void => {
+    forced = new Set();
+    ({ presented, clones, duplicated, expansions, hidden } = kept);
+  };
+  try {
+    active = optionalWork(context, 16);
+    const gotos = gotoOccurrences(presented, language, active);
+    const follows = gotos.length ? lexicalFollows(presented, active) : new Map();
+    // A copy appended to a jump is removed together with that jump's home.
+    const owners = new Map<Region, string>();
+    for (const [expanded, owner] of gotos.length ? expansions : [])
+      if (expanded.kind === 'sequence')
+        for (const part of expanded.regions.slice(1)) {
+          const walk = (region: Region): void => {
+            active.checkpoint(1);
+            if (region.kind === 'sequence') region.regions.forEach(walk);
+            else owners.set(region, owner.id);
+          };
+          walk(part);
+        }
+    const wanted = new Set<string>();
+    for (const occurrence of gotos) {
+      const path: string[] = [];
+      let at = occurrence.destination;
+      while (at?.kind === 'block' && at.id !== occurrence.transfer.target && path.length < 8) {
+        active.checkpoint(1);
+        if (clones.has(at)) {
+          if (!path.includes(owners.get(at) ?? '')) break;
+        } else if (isTail(at.id)) path.push(at.id);
+        else break;
+        at = follows.get(at) ?? null;
       }
-      if (region.kind === 'loop') return { ...region, body: prune(region.body) ?? region.body };
-      const children: Region[] = [];
-      for (const child of region.regions) {
-        const next = prune(child);
-        if (next) children.push(next);
-      }
-      if (!children.length) return null;
-      const next = sequence(children);
-      if (owner) expansions.set(next, owner);
-      return next;
-    };
-    presented = prune(presented) ?? presented;
-    for (const id of drop) hidden.add(id);
+      if (path.length && at && firstBlock(at) === occurrence.transfer.target)
+        for (const id of path) wanted.add(id);
+    }
+    // Every incoming edge of a wanted tail takes one copy of its whole chain.
+    let cost = 0;
+    for (const id of wanted) cost += (edges.get(id) ?? 0) * tailSize(id);
+    if (wanted.size && cost <= 64) {
+      forced = wanted;
+      const retried = expand(base);
+      if (gotoOccurrences(retried, language, active).length < gotos.length) presented = retried;
+      else restore();
+    }
+  } catch (error) {
+    if (!(error instanceof OptionalWorkExhausted)) throw error;
+    restore();
+  } finally {
+    active = context;
   }
-  return { body: presented, clones, duplicated, relocated, merged, ordered, hidden: [...hidden] };
+  return {
+    body: presented,
+    clones,
+    duplicated,
+    relocated,
+    merged,
+    ordered,
+    hidden: [...hidden],
+    forced: [...forced],
+  };
 }
 
 /** Facts the loop-form planner needs from the printed program. */
@@ -1772,6 +1960,7 @@ export function planLoopForms(
         ),
       };
     if (region.kind === 'loop') {
+      if (region.once) return { ...region, body: rebuild(region.body, follow, guards) };
       const inner = rebuild(region.body, region.header, guards);
       const form = choose(region, follow, guards);
       return form ? { ...region, body: inner, form } : { ...region, body: inner };
@@ -1800,4 +1989,129 @@ export function planLoopForms(
     };
   };
   return rebuild(body, null, []);
+}
+
+/** Source view, after loop forms: a forward goto to a later element of an
+ * enclosing sequence becomes `break` out of a block run once (`do { } while
+ * (0)`) holding the elements from the goto's own up to its target. Every
+ * statement, edge copy and effect stays in place and order; the block starts
+ * at a plain block that no edge inside it re-enters. A wrap is kept only when
+ * it lowers the number of printed gotos (an edge that would newly cross it to
+ * an outer loop counts as one), so continues and outer breaks are never lost.
+ * Returns the new layout and the header of every block introduced. The
+ * search is optional work; exhausting its share keeps the wraps found so far. */
+export function planBreakableBlocks(
+  body: Region,
+  language: 'c-like' | 'python-like',
+  shared: OperationContext,
+): { readonly body: Region; readonly blocks: readonly string[] } {
+  type Step = { readonly region: Region; readonly index: number };
+  const blocks: string[] = [];
+  const refused = new Set<string>();
+  const context = optionalWork(shared, 16);
+  try {
+    search(context);
+  } catch (error) {
+    if (!(error instanceof OptionalWorkExhausted)) throw error;
+  }
+  return { body, blocks };
+
+  function search(context: OperationContext): void {
+    let gotos = gotoOccurrences(body, language, context);
+    for (let attempts = 0; gotos.length && attempts < 32;) {
+      const chains = new Map<BlockRegion, readonly Step[]>();
+      const headers = new Set<string>();
+      const walk = (region: Region, chain: readonly Step[]): void => {
+        context.checkpoint(1);
+        if (region.kind === 'sequence')
+          region.regions.forEach((child, index) => walk(child, [...chain, { region, index }]));
+        else if (region.kind === 'loop') {
+          headers.add(region.header);
+          walk(region.body, [...chain, { region, index: 0 }]);
+        } else {
+          chains.set(region, chain);
+          controlArms(region.control).forEach((arm, index) => {
+            if (arm.body) walk(arm.body, [...chain, { region, index }]);
+          });
+        }
+      };
+      walk(body, []);
+      // The innermost enclosing sequence holding the target after the goto.
+      const candidates: { sequence: SequenceRegion; from: number; to: number }[] = [];
+      for (const occurrence of gotos) {
+        const chain = chains.get(occurrence.owner) ?? [];
+        for (let at = chain.length - 1; at >= 0; at--) {
+          const { region, index } = chain[at]!;
+          if (region.kind !== 'sequence') continue;
+          const to = region.regions.findIndex(
+            (child, position) =>
+              position > index && firstBlock(child) === occurrence.transfer.target,
+          );
+          if (to < 0) continue;
+          const known = candidates.find((item) => item.sequence === region && item.to === to);
+          if (known) known.from = Math.min(known.from, index);
+          else candidates.push({ sequence: region, from: index, to });
+          break;
+        }
+      }
+      let accepted = false;
+      for (const { sequence: parent, from, to } of candidates) {
+        const head = leaf(parent.regions[from]!);
+        // Scope identities (exit flags, guards) are headers: never share one.
+        if (head?.kind !== 'block' || headers.has(head.id)) continue;
+        const key = `${head.id}:${firstBlock(parent.regions[to]!)}`;
+        if (refused.has(key) || attempts >= 32) continue;
+        attempts++;
+        const inner = sequence(parent.regions.slice(from, to));
+        let reentered = false;
+        visitTransfers(inner, language, context, (occurrence) => {
+          if (occurrence.transfer.target === head.id) reentered = true;
+        });
+        if (reentered) {
+          refused.add(key);
+          continue;
+        }
+        const once: Region = { kind: 'loop', header: head.id, body: inner, once: true };
+        const replaced = sequence([
+          ...parent.regions.slice(0, from),
+          once,
+          ...parent.regions.slice(to),
+        ]);
+        const replace = (region: Region): Region => {
+          context.checkpoint(1);
+          if (region === parent) return replaced;
+          if (region.kind === 'sequence') {
+            const children = region.regions.map(replace);
+            return children.some((child, index) => child !== region.regions[index])
+              ? sequence(children)
+              : region;
+          }
+          if (region.kind === 'loop') {
+            const inner = replace(region.body);
+            return inner === region.body ? region : { ...region, body: inner };
+          }
+          let changed = false;
+          const control = mapArms(region.control, (arm) => {
+            if (!arm.body) return arm;
+            const inner = replace(arm.body);
+            if (inner === arm.body) return arm;
+            changed = true;
+            return { ...arm, body: inner };
+          });
+          return changed ? { ...region, control } : region;
+        };
+        const next = replace(body);
+        const remaining = gotoOccurrences(next, language, context);
+        if (remaining.length < gotos.length) {
+          body = next;
+          gotos = remaining;
+          blocks.push(head.id);
+          accepted = true;
+          break;
+        }
+        refused.add(key);
+      }
+      if (!accepted) break;
+    }
+  }
 }

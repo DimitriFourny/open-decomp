@@ -95,6 +95,7 @@ import {
   formArm,
   foldSwitchGuards,
   planLayout,
+  planBreakableBlocks,
   planLoopForms,
   planLoopExits,
   visitTransfers,
@@ -118,7 +119,12 @@ type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
 /** Element kind of a declared scalar pointer: integer or IEEE. */
 type PointeeKind = Extract<SourceFormalType, { kind: 'pointer' }>['pointee'];
 type Nest =
-  | { readonly kind: 'loop'; readonly header: string; readonly follow: string | null }
+  | {
+      readonly kind: 'loop';
+      readonly header: string;
+      readonly follow: string | null;
+      readonly once?: true;
+    }
   | { readonly kind: 'switch'; readonly id: string };
 /** One test of a merged `if` chain: its printed form and the value it tests. */
 interface ConditionTerm {
@@ -3128,9 +3134,17 @@ export class Renderer {
       }
       this.findLabels(
         region.body,
-        [...nesting, { kind: 'loop', header: region.header, follow }],
+        [
+          ...nesting,
+          {
+            kind: 'loop',
+            header: region.header,
+            follow,
+            ...(region.once ? { once: true as const } : {}),
+          },
+        ],
         depth + 1,
-        region.header,
+        region.once ? follow : region.header,
       );
       return;
     }
@@ -4476,7 +4490,8 @@ export class Renderer {
             !program.retained.has(node.id) ||
             node.kind === 'assign' ||
             node.kind === 'load' ||
-            node.kind === 'store',
+            node.kind === 'store' ||
+            node.kind === 'call',
         ) &&
         (block.control.kind !== 'return' ||
           (program.returns.get(block.control.id)?.outputs.length ?? 9) <= 8),
@@ -4494,8 +4509,15 @@ export class Renderer {
         this.localValidation.presentation(
           'return_tail_duplication',
           subject,
-          'a labeled edge into an acyclic return tail of at most four blocks, each with at most four assignments/loads/stores and four edge copies, ends in an owned copy; effects execute once on the same path in the same order, and copies retain original identities',
+          'a labeled edge into an acyclic return, tail-call or trap tail of at most four blocks, each with at most four assignments/loads/stores/calls and four edge copies, ends in an owned copy; effects execute once on the same path in the same order, and copies retain original identities',
           [...new Set(layout.duplicated.map((item) => item.tail))],
+        )) &&
+      (!layout.forced.length ||
+        this.localValidation.presentation(
+          'goto_path_tail_duplication',
+          subject,
+          'a bounded tail lexically between a goto and its target is copied onto every incoming edge, fallthroughs included, so its home is no longer printed and the goto falls through; each path still runs the same effects once in the same order before the same exit',
+          layout.forced,
         )) &&
       (!layout.relocated.length ||
         this.localValidation.presentation(
@@ -4642,6 +4664,17 @@ export class Renderer {
       this.hoisted.clear();
       this.forLoops.clear();
     }
+    const breakable = planBreakableBlocks(this.body, this.language, this.context);
+    if (
+      breakable.blocks.length &&
+      this.localValidation.presentation(
+        'breakable_block',
+        subject,
+        'a forward goto to a later element of an enclosing statement list becomes break out of a do { } while (0) block (Python-like: while True: ending in break) holding the elements from the goto up to its target; nothing continues the block, no edge re-enters its first block, every statement, edge copy and effect keeps its place and order, and the block is kept only when fewer gotos remain',
+        breakable.blocks,
+      )
+    )
+      this.body = breakable.body;
     const normalized: string[] = [];
     visitTransfers(this.body, this.language, this.context, (occurrence) => {
       const target = occurrence.destination ? firstBlock(occurrence.destination) : null;
@@ -5175,6 +5208,16 @@ export class Renderer {
       if (flag) {
         this.writer.statement(depth, this.writer.declaration('uint8_t', flag, ' = 0'));
         this.initializedExitFlags.add(region.header);
+      }
+      // A block run once is `do { } while (0)`, or `while True:` ending in a
+      // break wherever its body can fall off the end.
+      if (region.once) {
+        this.writer.line(depth, c ? 'do {' : 'while True:');
+        this.region(region.body, depth + 1);
+        if (c) this.writer.line(depth, '} while (0);');
+        else if (!this.regionTerminates(region.body)) this.writer.statement(depth + 1, 'break');
+        this.propagateLoopExit(region.header, depth);
+        return;
       }
       // A while/for test prints its own header line from inside the body (its
       // block's control); a do-while test prints the closing `} while (...)` line.
