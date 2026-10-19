@@ -755,12 +755,34 @@ export function applyImageTypes(
       byId.set(type_id, records[at]!);
     }
   for (const class_id of pendingClasses) {
+    const item = classes.get(class_id)!,
+      proofIds = [proof(item)];
+    // One scalar member at offset zero stays a scalar pointee (`uint8_t*`).
+    const only = item.fields.length === 1 ? item.fields[0]! : undefined;
+    const scalar =
+      only?.offset === 0n &&
+      only.kind !== 'pointer' &&
+      (only.stride === null || only.stride === BigInt(only.width_bits / 8));
     const record: SuppliedTypeRecord = {
       id: typeIds.get(class_id)!,
-      definition: { kind: 'structure', size: null, alignment: null, fields: [] },
+      definition: {
+        kind: 'structure',
+        size: null,
+        alignment: null,
+        fields: scalar
+          ? [
+              {
+                id: entityIdentity(slice, 'image-type-field', [item.id, 0n, only.width_bits, null]),
+                name: 'field_0',
+                offset: 0n,
+                type_id: memberType(item, { ...only, stride: null }, proofIds, false),
+              },
+            ]
+          : [],
+      },
       source: 'analysis',
       status: 'candidate',
-      evidence_ids: [proof(classes.get(class_id)!)],
+      evidence_ids: proofIds,
     };
     records.push(record);
     byId.set(record.id, record);
