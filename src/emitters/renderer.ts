@@ -292,6 +292,10 @@ export class Renderer {
   private readonly callParameterSpellings = new Map<string, string | null>();
   /** C integer type of each printed struct-member lvalue, by its text. */
   private readonly memberTypes = new Map<string, IntegerCType>();
+  /** Offsets of each structure's members this function's text accesses, by structure name. */
+  private readonly usedMembers = new Map<string, Set<bigint>>();
+  /** Where the structure bodies are inserted once the accessed members are known. */
+  private structureSlot: { readonly at: number; readonly ids: readonly string[] } | null = null;
   private readonly sourceStructs: SourceStructs;
   private readonly sourceEvidence = new Map<string, { ids: Set<string>; evidence: Set<string> }>();
   private readonly expanding = new Set<string>();
@@ -2673,6 +2677,10 @@ export class Renderer {
       if (!node) return null;
       this.memberPointers.set(node, member.typeId);
     }
+    const used = this.sourceStructs.name(pointer.to);
+    const offsets = this.usedMembers.get(used) ?? new Set<bigint>();
+    offsets.add(member.offset);
+    this.usedMembers.set(used, offsets);
     let access = indexedStruct
       ? `${baseText}[${this.value(index!)}].f_${member.offset.toString(16)}`
       : `${baseText}->f_${member.offset.toString(16)}`;
@@ -2727,11 +2735,8 @@ export class Renderer {
         for (const field of type.fields) pending.push(field.type_id);
       }
     }
-    for (const id of structures) {
-      const name = this.sourceStructs.name(id);
-      if (this.partialLayout(id)) this.writer.line(0, `typedef struct ${name} ${name};`);
-      else this.deferredTypedefs.push(name);
-    }
+    // Every structure name is typedef'd only where the finished text mentions it.
+    for (const id of structures) this.deferredTypedefs.push(this.sourceStructs.name(id));
     this.deferredTypedefs.push(...this.sourceOpaqueTypes.values());
     for (const id of pending) {
       const record = this.typeRecords.get(id);
@@ -2774,14 +2779,27 @@ export class Renderer {
       );
     };
     for (const id of pending) declareArray(id);
-    for (const id of structures) {
+    this.structureSlot = { at: this.writer.offset, ids: structures };
+  }
+
+  /** The declarations of the structures the finished text accesses: only the
+   * members it prints (byte gaps keep every offset), never the image-wide layout,
+   * which stays in the types view / types.h. A structure the text never indexes
+   * stays an incomplete type. */
+  private structureLines(): string[] {
+    const lines: string[] = [];
+    for (const id of this.structureSlot?.ids ?? []) {
+      this.context.checkpoint(1);
       const members = this.partialLayout(id);
       if (!members) continue;
       const name = this.sourceStructs.name(id),
-        parts: string[] = [];
+        used = this.usedMembers.get(name);
+      if (!used) continue;
+      const parts: string[] = [];
       let end = 0n,
         packed = false;
       for (const member of members) {
+        if (!used.has(member.offset)) continue;
         if (member.offset > end)
           parts.push(`uint8_t gap_${end.toString(16)}[${member.offset - end}];`);
         const definition = this.typeRecords.get(member.typeId)?.definition;
@@ -2804,22 +2822,19 @@ export class Renderer {
       if (stride) {
         if (stride > end) parts.push(`uint8_t gap_${end.toString(16)}[${stride - end}];`);
         packed ||= members.some((member) => stride % BigInt(member.bits / 8) !== 0n);
-        this.writer.comment(0, `observed access stride ${stride}; not an allocation extent`);
+        lines.push(`/* observed access stride ${stride}; not an allocation extent */`);
       }
       const image = this.sourceStructs.image(id);
-      this.writer.comment(
-        0,
-        `observed members only; size unknown${
+      lines.push(
+        `/* members used here; size unknown; full layout in the types view${
           image && image.functions > 1
             ? `; merged from ${image.functions} functions${image.state === 'bounded' ? ' (flows partly explored)' : ''}`
             : ''
-        }${image?.conflicts.length ? `; conflicts with ${image.conflicts.join(', ')}` : ''}`,
-      );
-      this.writer.line(
-        0,
+        }${image?.conflicts.length ? `; conflicts with ${image.conflicts.join(', ')}` : ''} */`,
         `struct ${name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
       );
     }
+    return lines;
   }
 
   private unalignedRecorded = false;
@@ -6985,6 +7000,7 @@ export class Renderer {
       return delta;
     };
     this.declareGlobals(globalsAt, insert);
+    if (this.structureSlot) insert(this.structureSlot.at, this.structureLines());
     let support = supportAt;
     if (this.ellipsisUsed) {
       const comment =
