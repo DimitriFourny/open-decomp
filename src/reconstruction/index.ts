@@ -231,13 +231,16 @@ export function reconstruct(
   if (sourcePlan && view === 'source')
     for (const callee of input.source?.source_callees ?? [])
       if (
-        callee.argument_list_closure === 'library_contract' &&
+        (callee.argument_list_closure === 'library_contract' ||
+          callee.argument_list_closure === 'objc_selector') &&
         sourcePlan.tails.get(callee.call_id)?.boundary.argument_list_complete
       )
         localValidation.requireAbi(
           'arity_closure',
           [callee.call_id],
-          'Library-tail closure and its native propagation assume the established imported contract and ABI-conforming register arguments and results; unresolved or variadic targets retain their physical interface.',
+          callee.argument_list_closure === 'objc_selector'
+            ? 'Objective-C selector tail closure assumes the receiver implements a non-variadic method for the selector with its image type-encoding argument classes; unresolved selectors retain their physical interface.'
+            : 'Library-tail closure and its native propagation assume the established imported contract and ABI-conforming register arguments and results; unresolved or variadic targets retain their physical interface.',
         );
   // Source view only: Darwin variadic outgoing stores become trailing arguments
   // of the one call that consumes them (store id -> call id).

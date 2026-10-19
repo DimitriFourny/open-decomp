@@ -18,6 +18,15 @@
       "mkdir -p .local/metadata",
       "/opt/homebrew/opt/llvm/bin/clang++ --target=x86_64-pc-windows-msvc -O2 -g -gcodeview -fno-exceptions -fno-rtti -fno-stack-protector -ffile-prefix-map=${PWD}=. -c test/metadata/fixtures/cxx.cpp -o .local/metadata/cxx.obj",
       "/opt/homebrew/bin/lld-link /dll /noentry /nodefaultlib /debug:full /Brepro /pdb:.local/metadata/metadata.pdb /pdbaltpath:metadata.pdb /implib:.local/metadata/metadata.lib /out:test/metadata/fixtures/metadata.dll .local/metadata/cxx.obj"
+    ],
+    "objc-foundation": [
+      "xcrun clang -arch arm64 -mmacosx-version-min=13.0 -fobjc-arc -O1 -g0 test/metadata/fixtures/objc-foundation.m -framework Foundation -o test/metadata/fixtures/objc-foundation"
+    ],
+    "objc-foundation-classic": [
+      "xcrun clang -arch arm64 -mmacosx-version-min=13.0 -fobjc-arc -O1 -g0 -fno-objc-msgsend-selector-stubs test/metadata/fixtures/objc-foundation.m -framework Foundation -o test/metadata/fixtures/objc-foundation-classic"
+    ],
+    "objc-foundation-stripped": [
+      "strip -o test/metadata/fixtures/objc-foundation-stripped test/metadata/fixtures/objc-foundation"
     ]
   },
   "independent_oracle": {
@@ -33,7 +42,8 @@
     "The Objective-C linker merges category methods into their class metadata; synthetic byte fixtures separately exercise unmerged category records.",
     "Swift reflection contains relative symbolic type references with embedded NUL bytes; these remain escaped opaque mangled text, not recovered source types.",
     "The generated PDB is an ignored build intermediate; only its embedded CodeView identity reference is tested. No PDB type recovery or automatic PDB access is implied.",
-    "Compiler/SDK/linker changes can change hashes and identities. Hashes identify the checked-in inputs, not a universal reproducible-build guarantee."
+    "Compiler/SDK/linker changes can change hashes and identities. Hashes identify the checked-in inputs, not a universal reproducible-build guarantee.",
+    "objc-foundation* are ARC Foundation executables (macOS SDK 27.0): the default build calls Xcode 14+ __objc_stubs selector stubs; -classic calls objc_msgSend with __objc_selrefs loads; -stripped removes the local method symbols so names come only from runtime metadata. They are statically analyzed and never executed."
   ],
   "sha256": {
     "objc.m": "c8600e0b896412b16b6eb692bd0d622006b39ae14eb586b0a4e7fcaf2fcb6113",
@@ -41,6 +51,10 @@
     "metadata.swift": "17eba6f03e2cdcd8785a3c92477f105a14a90b6a95cfea2c2e556515980af8f7",
     "objc-cxx.dylib": "a3b72688394c83979f35516c3aa876a80c1f1e3608989da9d9a38eaf5394e171",
     "swift.dylib": "aeb3107c002d1e5f4ed581a721b353f9ef7df833193cc9c92ebb8236074b8587",
-    "metadata.dll": "eb1918a534819ac11809c1b8b73c1107cf2c31221c4e18c353669d6725ecdaf0"
+    "metadata.dll": "eb1918a534819ac11809c1b8b73c1107cf2c31221c4e18c353669d6725ecdaf0",
+    "objc-foundation.m": "27662c2686364edb7619971c48dc1302a78f5c34d0bad3de01f110037e4b8c5f",
+    "objc-foundation": "217b2031a5d84186147511aa6ca92df8928b81c173e5d0337d336d9efc5c0995",
+    "objc-foundation-classic": "a025d517c3b538d76a9c67c1968dca1d9f8660c29bcdf39f6a29b5defb6918ee",
+    "objc-foundation-stripped": "339cd261fce1cc1274b3a4233c71d5b51e82160ad9329c45981286d48f5791ed"
   }
 }

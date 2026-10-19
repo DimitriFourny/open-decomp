@@ -27,8 +27,10 @@ export interface InferredCallee {
    * nonrecursive callee reads no register outside `parameters`, no incoming stack
    * and no escaping incoming-stack address. Caller-private writes do not reopen
    * a callee-proven register-only argument list. `library_contract` additionally
-   * relies on an established imported ABI contract, directly or through native tails. */
-  readonly argument_list_closure?: 'callee_reads' | 'library_contract';
+   * relies on an established imported ABI contract, directly or through native tails.
+   * `objc_selector`: a statically resolved Objective-C selector fixes the keyword
+   * argument count, and the caller prepares no further argument registers. */
+  readonly argument_list_closure?: 'callee_reads' | 'library_contract' | 'objc_selector';
   /** Observed incoming slots in callee-entry SP coordinates, not a full arity. */
   readonly stack_parameters?: readonly {
     readonly offset: bigint;
@@ -62,6 +64,10 @@ export interface SourceAddress {
   /** The string begins at a section start or right after a NUL byte: it is not
    * the interior suffix of a neighbouring terminated string. */
   readonly string_start?: true;
+  /** Static Objective-C identity of this exact address: a constant NSString
+   * object, or a selector/class reference slot whose 64-bit load yields that
+   * selector/class. Spelling only; memory ordering and faults are unchanged. */
+  readonly objc?: { readonly kind: 'string' | 'selector_ref' | 'class_ref'; readonly text: string };
   /** Byte storage identity; an unknown extent is never inferred from a use. */
   readonly object?: {
     readonly address: Address;
@@ -120,6 +126,29 @@ export interface SourceEvidence {
   readonly function_returns?: {
     readonly registers: readonly RegisterDescriptor[];
     readonly types: readonly DataType[];
+  };
+  readonly objc?: ObjCSourceFacts;
+}
+/** Objective-C message form of a call whose selector is statically resolved.
+ * `send`: projected arguments are (receiver, selector, keyword arguments...);
+ * `stub`: an `__objc_stubs` call, (receiver, keyword arguments...);
+ * `runtime`: a libobjc entry point equivalent to a message, (receiver,
+ * keyword arguments...), with `inner` naming a nested message (`objc_alloc_init`
+ * is `[[cls alloc] init]`). Keyword argument count is the selector's colon
+ * count; `variadic` marks a known trailing C variadic list. */
+export interface ObjCMessage {
+  readonly selector: string;
+  readonly form: 'send' | 'stub' | 'runtime';
+  readonly inner?: string;
+  readonly variadic: boolean;
+}
+export interface ObjCSourceFacts {
+  readonly messages: ReadonlyMap<string, ObjCMessage>;
+  /** Method record(s) whose implementation is the selected function. */
+  readonly method?: {
+    readonly owner: string;
+    readonly selector: string;
+    readonly kind: 'instance' | 'class';
   };
 }
 export interface SourceLocal {

@@ -88,6 +88,7 @@ import { nativeContextKey } from './native-context.js';
 import { prepareNativeContext } from './native-context-prepare.js';
 import { variadicRuleCalls, variadicRuleFacts } from './source-variadic.js';
 import { nativeLibraryTails } from './native-library-tails.js';
+import { objcSourceFacts } from './objc-messages.js';
 
 interface SourceFactsInput {
   readonly scope: AnalysisScope;
@@ -1616,10 +1617,23 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     }
   }
   const ruleCalls = variadicRuleCalls(input.ir, input.types.calls, input.library, context);
-  const addresses = sourceAddresses(
-    input,
-    ruleCalls.flatMap((call) => (call.kind === 'open_flags' ? [] : call.values)),
-  );
+  const objc = objcSourceFacts({
+    ir: input.ir,
+    image,
+    revision,
+    functions: input.functions,
+    references: input.references,
+    abi,
+    context,
+    callees,
+    addresses: sourceAddresses(
+      input,
+      ruleCalls.flatMap((call) => (call.kind === 'open_flags' ? [] : call.values)),
+    ),
+  });
+  for (const callee of objc.callees) sourceCallees.set(callee.call_id, callee);
+  evidence.push(...objc.evidence);
+  const addresses = objc.addresses;
   const variadic = variadicRuleFacts(ruleCalls, addresses, abi, context);
   return {
     abi,
@@ -1628,6 +1642,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     diagnostics,
     evidence,
     addresses,
+    ...(objc.facts ? { objc: objc.facts } : {}),
     memory_transfers,
     function_return_demands: [...functionReturnDemands.values()],
     ...(function_returns === undefined ? {} : { function_returns }),

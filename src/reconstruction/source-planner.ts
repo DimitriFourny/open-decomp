@@ -283,8 +283,7 @@ export function planSource(
     for (const node of block.statements) {
       statementBlocks.set(node.id, block.id);
       if (node.kind !== 'assign') continue;
-      if (node.expression.kind === 'constant')
-        constants.set(node.result.id, node.expression.bits);
+      if (node.expression.kind === 'constant') constants.set(node.result.id, node.expression.bits);
       if (node.expression.kind === 'concat') concats.set(node.result.id, node.expression.values);
       const alias = identityOperand(node.result.type, node.expression);
       if (alias) aliases.set(node.result.id, alias);

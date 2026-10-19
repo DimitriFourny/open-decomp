@@ -51,6 +51,9 @@ export class RuntimeReader {
     }
   >();
   readonly externalClasses = new Map<bigint, string | null>();
+  /** Bound import slots and loader-established import stub entries, by VA. */
+  readonly importSlots = new Map<bigint, string | null>();
+  readonly importEntries = new Map<bigint, string | null>();
   readonly requireFixup: boolean;
   readonly seen = new Set<string>();
   stringBytes = 0;
@@ -118,21 +121,31 @@ export class RuntimeReader {
         evidence_ids,
       });
     }
+    const remember = (map: Map<bigint, string | null>, at: bigint, name: string): void => {
+      const prior = map.get(at);
+      map.set(at, prior === undefined || prior === name ? name : null);
+    };
     for (const imported of image.imports) {
       context.checkpoint(1);
-      if (!imported.slot || !imported.original_name) continue;
+      if (!imported.original_name) continue;
+      if (imported.callable_entry) {
+        const entry = image.address_map.translate(imported.callable_entry, 'va');
+        if (entry.kind === 'mapped')
+          remember(this.importEntries, entry.address.value, imported.original_name);
+      }
+      if (!imported.slot) continue;
+      const location = image.address_map.translate(imported.slot, 'va');
+      if (location.kind !== 'mapped') continue;
+      remember(this.importSlots, location.address.value, imported.original_name);
       const prefix = ['_OBJC_CLASS_$_', '_OBJC_METACLASS_$_'].find((value) =>
         imported.original_name!.startsWith(value),
       );
-      if (!prefix) continue;
-      const location = image.address_map.translate(imported.slot, 'va');
-      if (location.kind !== 'mapped') continue;
-      const name = imported.original_name.slice(prefix.length),
-        prior = this.externalClasses.get(location.address.value);
-      this.externalClasses.set(
-        location.address.value,
-        prior === undefined || prior === name ? name : null,
-      );
+      if (prefix)
+        remember(
+          this.externalClasses,
+          location.address.value,
+          imported.original_name.slice(prefix.length),
+        );
     }
     this.requireFixup =
       image.headers.some((header) => header.name === 'LC_DYLD_CHAINED_FIXUPS') ||
@@ -417,6 +430,9 @@ export class RuntimeReader {
       type?: string | null;
       encoding?: RuntimeRecord['type_encoding'];
       flags?: bigint;
+      /** Linker-style symbol name for an established code target; `false`
+       * publishes the record without any symbol. */
+      symbol?: string | false;
     } = {},
   ): void {
     this.context.checkpoint(1);
@@ -495,12 +511,13 @@ export class RuntimeReader {
         revision: this.revision,
       },
     );
-    const display = options.owner ? `${options.owner}.${name}` : name;
+    if (options.symbol === false) return;
     const code = target_role === 'code' && target !== null;
+    const named = code && options.symbol !== undefined ? options.symbol : undefined;
     this.symbols.push({
       id: entityIdentity(this.image.selected_slice_id, 'runtime-symbol', id),
-      original_name: name,
-      display_name: display,
+      original_name: named ?? name,
+      display_name: named ?? (options.owner ? `${options.owner}.${name}` : name),
       kind: code ? 'function' : 'object',
       address: code ? target : this.address(address),
       size: code ? null : size,

@@ -184,7 +184,12 @@ test(
       const memory = new Map<bigint, number>();
       for (let byte = 0n; byte < 16n; byte++) memory.set(0x6000n + byte, byte === 8n ? 0x34 : 0);
       assert.deepEqual(
-        run(releaseCaller, [0x6000n], oracle('native_release', 1, true, () => 0xdeadn), memory),
+        run(
+          releaseCaller,
+          [0x6000n],
+          oracle('native_release', 1, true, () => 0xdeadn),
+          memory,
+        ),
         [0x34n],
       );
       // Darwin variadic stack arguments stored in both predecessors of one
