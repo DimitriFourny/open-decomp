@@ -3823,7 +3823,8 @@ export class Renderer {
             transfer.copies.flatMap((copy) => {
               this.localValidation.allowance.charge();
               return this.program.live.has(copy.destination.id) &&
-                !this.inline.has(copy.destination.id)
+                !this.inline.has(copy.destination.id) &&
+                !this.forwardedCopies.get(transfer)?.has(copy.destination.id)
                 ? [
                     {
                       ...copy,
