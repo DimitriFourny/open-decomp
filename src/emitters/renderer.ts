@@ -259,6 +259,8 @@ export class Renderer {
   private readonly dataTables = new Map<string, IndexedDataAccess & { readonly name: string }>();
   private indexedData: ReadonlyMap<string, IndexedDataAccess> = new Map();
   private readonly sourceValueTypes = new Map<string, string>();
+  /** Load/store nodes accessing a declared pointer member: that pointer type. */
+  private readonly memberPointers = new Map<string, string>();
   private readonly sourceRoleNames: ReadonlyMap<string, string | null>;
   /** Loop header phis: each is its own loop-carried variable (see planSourceNames). */
   private readonly sourceCarried: ReadonlySet<string>;
@@ -1250,7 +1252,7 @@ export class Renderer {
         this.writer.fail('Reconstructed expression expansion exceeds its budget');
       this.expanding.add(value.id);
       const storage = this.storage(load);
-      if (this.language === 'c-like' && this.slotType(load.id)) {
+      if (this.language === 'c-like' && (this.slotType(load.id) || this.memberPointers.has(load.id))) {
         // A typed pointer slot read in integer context yields its address bits.
         this.expanding.delete(value.id);
         return {
@@ -2068,13 +2070,61 @@ export class Renderer {
     return load?.kind === 'load' && this.slotType(load.id) ? this.storage(load) : this.local(value);
   }
 
+  /** A stored value converted to a declared pointer member's type: the same
+   * declared pointer, a null constant, or the exact address bits. */
+  private memberPointerValue(value: Value, typeId: string): string {
+    const spelling = this.sourceType(typeId);
+    if (this.constantOf(value) === 0n) return '0';
+    if (!this.inline.has(value.id) && this.declaredSpelling(value) === spelling)
+      return this.local(value);
+    return `(${spelling})(uintptr_t)${this.printer.group(this.printed(value), UNARY)}`;
+  }
+
+  /** Exact whole value behind same-width casts, low extracts and a
+   * concatenation of consecutive extracts of one value. */
+  private wholeValue(value: Value): Value {
+    for (let depth = 0; depth < 8; depth++) {
+      const expression = this.program.expressions.get(value.id);
+      if (
+        ((expression?.kind === 'cast' && expression.op === 'bitcast') ||
+          (expression?.kind === 'extract' && expression.offset === 0)) &&
+        bitWidth(expression.value.type) === bitWidth(value.type)
+      ) {
+        value = expression.value;
+        continue;
+      }
+      if (expression?.kind !== 'concat') break;
+      let whole: Value | undefined,
+        offset = 0;
+      for (const part of expression.values) {
+        const fragment = this.program.expressions.get(part.id);
+        if (
+          fragment?.kind !== 'extract' ||
+          fragment.offset !== offset ||
+          (whole && whole.id !== fragment.value.id)
+        )
+          return value;
+        whole = fragment.value;
+        offset += bitWidth(part.type);
+      }
+      if (!whole || offset !== bitWidth(value.type) || bitWidth(whole.type) !== offset) break;
+      value = whole;
+    }
+    return value;
+  }
+
   /** `p->f_<offset>` for an access at `p + offset` through a declared pointer to
-   * a declared partial structure with a member of exactly that offset and width. */
-  private memberAccess(address: Value, bits: number): string | null {
+   * a declared partial structure with a member of exactly that offset and width.
+   * The base may itself be an inline pointer member read (`p->f_20->f_8`), and
+   * a loop counter proven by shape analysis indexes a strided element view. */
+  private memberAccess(address: Value, bits: number, node?: string): string | null {
     let base = address,
       offset = 0n;
     let index: Value | undefined,
       stride = 0n;
+    const view = node ? this.program.memory.get(node) : undefined;
+    const counter = view?.field.indices?.find((item) => item.node_id === node)?.value_id;
+    const shapeBase = view?.shape.base.kind === 'value' ? view.shape.base.value_id : undefined;
     for (let depth = 0; this.inline.has(base.id) && depth < 16; depth++) {
       const expression = this.program.expressions.get(base.id);
       if (
@@ -2086,6 +2136,10 @@ export class Renderer {
       ) {
         if (bitWidth(base.type) !== bitWidth(expression.value.type)) return null;
         base = expression.value;
+        continue;
+      }
+      if (expression?.kind === 'concat' && this.wholeValue(base) !== base) {
+        base = this.wholeValue(base);
         continue;
       }
       if (expression?.kind !== 'integer' || expression.op !== 'add') return null;
@@ -2114,21 +2168,51 @@ export class Renderer {
           base = other;
           break;
         }
-        if (!index) return null;
+        if (index) continue;
+        // Shape analysis proved this whole address is `shapeBase + field
+        // offset + k * stride` for the loop counter `k` (a strength-reduced
+        // byte offset moving in lockstep with it).
+        const element = counter ? this.program.values.get(counter) : undefined;
+        const whole = [expression.left, expression.right]
+          .map((item) => this.wholeValue(item))
+          .find((item) => item.id === shapeBase);
+        if (!element || !whole || !view?.field.stride) return null;
+        base = whole;
+        index = element;
+        stride = view.field.stride;
+        offset = view.field.offset;
+        break;
       }
     }
-    if (this.inline.has(base.id) || base.type.kind !== 'integer') return null;
+    let baseText: string, id: string | undefined;
+    const load = this.inlined.get(base.id)?.node;
+    if (this.inline.has(base.id)) {
+      // An inline read of a declared pointer member is itself the base lvalue.
+      if (load?.kind !== 'load' || base.type.kind !== 'integer' || base.type.bits !== 64)
+        return null;
+      baseText = this.storage(load);
+      id = this.memberPointers.get(load.id);
+      if (!id) return null;
+    } else {
+      if (base.type.kind !== 'integer') return null;
+      id =
+        this.sourceValueTypes.get(base.id) ??
+        this.program.source?.value_types?.get(base.id)?.type_id;
+      if (!id || this.declaredSpelling(base) !== this.sourceType(id)) return null;
+      baseText = this.local(base);
+    }
     offset = BigInt.asIntN(base.type.bits, offset);
-    const id =
-      this.sourceValueTypes.get(base.id) ?? this.program.source?.value_types?.get(base.id)?.type_id;
-    const pointer = id ? this.typeRecords.get(id)?.definition : undefined;
-    if (pointer?.kind !== 'pointer' || this.declaredSpelling(base) !== this.sourceType(id!))
-      return null;
+    const pointer = this.typeRecords.get(id)?.definition;
+    if (pointer?.kind !== 'pointer') return null;
     const members = this.partialLayout(pointer.to);
     const elementStride = this.sourceStructs.strides.get(pointer.to);
     const indexedStruct = !!index && stride === elementStride;
     const member = members?.find((item) => {
-      if (item.bits !== bits || this.typeRecords.get(item.typeId)?.definition.kind !== 'integer')
+      const kind = this.typeRecords.get(item.typeId)?.definition.kind;
+      if (
+        item.bits !== bits ||
+        !(kind === 'integer' || (kind === 'pointer' && item.count === undefined))
+      )
         return false;
       if (item.count === undefined) return (!index || indexedStruct) && item.offset === offset;
       const displacement = offset - item.offset,
@@ -2149,9 +2233,14 @@ export class Renderer {
       )
     )
       return null;
+    if (this.typeRecords.get(member.typeId)?.definition.kind === 'pointer') {
+      // Declared pointer members convert explicitly at integer/pointer uses.
+      if (!node) return null;
+      this.memberPointers.set(node, member.typeId);
+    }
     let access = indexedStruct
-      ? `${this.local(base)}[${this.value(index!)}].f_${member.offset.toString(16)}`
-      : `${this.local(base)}->f_${member.offset.toString(16)}`;
+      ? `${baseText}[${this.value(index!)}].f_${member.offset.toString(16)}`
+      : `${baseText}->f_${member.offset.toString(16)}`;
     if (member.count !== undefined) {
       const displacement = (offset - member.offset) / BigInt(member.bits / 8);
       const subscript = index
@@ -2509,7 +2598,7 @@ export class Renderer {
         return indexed;
     }
     if (this.language === 'c-like' && plain) {
-      const member = this.memberAccess(node.address, bitWidth(type));
+      const member = this.memberAccess(node.address, bitWidth(type), node.id);
       if (member && this.permitUnaligned(node)) return member;
     }
     let address = this.sourceAddressPrinted(node.address);
@@ -2828,6 +2917,17 @@ export class Renderer {
       )}`;
     }
     storage ??= this.storage(node);
+    const member = this.memberPointers.get(node.id);
+    if (member && this.program.live.has(node.result.id)) {
+      const spelling = this.declaredSpelling(node.result);
+      return `${this.local(node.result)} = ${
+        spelling === this.sourceType(member)
+          ? storage
+          : spelling.endsWith('*')
+            ? `(${spelling})${storage}`
+            : `(uintptr_t)${storage}`
+      }`;
+    }
     const typed = this.language === 'c-like' ? this.slotType(node.id) : undefined;
     if (typed && this.program.live.has(node.result.id)) {
       const spelling = this.declaredSpelling(node.result);
@@ -2924,8 +3024,10 @@ export class Renderer {
             const typed = this.language === 'c-like' ? this.slotType(node.id) : undefined;
             const floating = this.floatSlot(node.id);
             const pointer = typed && this.pointerText(node.value, typed);
+            const member = this.memberPointers.get(node.id);
             text = `${storage} = ${
               pointer ??
+              (member && this.memberPointerValue(node.value, member)) ??
               (floating
                 ? this.floatingValue(node.value, floating).text
                 : typed

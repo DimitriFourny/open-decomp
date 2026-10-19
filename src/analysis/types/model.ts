@@ -76,6 +76,9 @@ export interface ObservedField {
   /** Exact calls whose indirect target was read from this field. No prototype
    * or complete argument count is implied by observing a callable address. */
   readonly call_target_ids?: readonly string[];
+  /** Accesses whose address is exactly `base + offset + k * stride` for one
+   * same-loop counter value `k`; the element count remains unknown. */
+  readonly indices?: readonly { readonly node_id: string; readonly value_id: string }[];
 }
 export interface MemoryShape {
   readonly id: string;
