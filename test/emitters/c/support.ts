@@ -287,6 +287,8 @@ class Parser {
   /** Declared scalar globals (`extern T name;`): the name is the object, not a pointer. */
   private readonly scalars = new Set<string>();
   returnType: CType = MATH;
+  /** A `void` function: control falling off its end returns (C11 6.9.1p12). */
+  readonly voidResult: boolean;
   private readonly types = new WeakMap<Expr, CType>();
   private position = 0;
   private switchId = 0;
@@ -296,6 +298,7 @@ class Parser {
   private readonly loops: { start: number; breaks: number[]; continues?: number[] }[] = [];
   constructor(text: string) {
     this.python = /^def /m.test(text);
+    this.voidResult = /^void [A-Za-z_]\w*\(/m.test(text) || /^def .*-> void:/m.test(text);
     const declarations = this.python
       ? /^(\w+) = memory_view\((0x[\da-f]+), "uint(\d+)_t", (?:True|False)\)(?:  # .*)?$/gm
       : /(?:\/\* (\w+): image VA (0x[\da-f]+); byte extent (?:unknown|\d+) \*\/\nextern (?:const )?uint(\d+)_t \1(?:\[\])?;|extern (?:const )?uint(\d+)_t (\w+)(?:\[\])?; \/\* VA (0x[\da-f]+)(?:, \d+ bytes)?(?:, [a-z ]+)? \*\/)/g;
@@ -333,7 +336,7 @@ class Parser {
       if (result) this.returnType = { kind: 'float', bits: result[1] === 'float' ? 32 : 64 };
       const indents = [0];
       const token =
-        /[ \t]+|#[^\n]*|ord\('(?:\\u[0-9a-f]{4}|\\[0-7]{1,3}|\\.|[^'\\])'\)|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+\.[0-9]*(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|==|!=|<=|>=|<<|>>|[.()[\],:=?<>+*/%&|^~!-]/gy;
+        /[ \t]+|#[^\n]*|ord\('(?:\\u[0-9a-f]{4}|\\[0-7]{1,3}|\\.|[^'\\])'\)|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+\.[0-9]*(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|\.\.\.|==|!=|<=|>=|<<|>>|[.()[\],:=?<>+*/%&|^~!-]/gy;
       for (const line of lines.slice(endHeader + 1)) {
         if (/^\s*(?:#|$)/.test(line)) continue;
         const indent = line.length - line.trimStart().length;
@@ -2358,7 +2361,9 @@ export function execute(
   try {
     let pc = 0;
     for (let steps = 0; steps < 20000; steps++) {
-      const op = parser.ops[pc++];
+      const op =
+        parser.ops[pc++] ??
+        (parser.voidResult ? { kind: 'return' as const, expression: { kind: 'list' as const, values: [] } } : undefined);
       assert.ok(op, 'Emitted control fell out of function');
       switch (op.kind) {
         case 'assign':

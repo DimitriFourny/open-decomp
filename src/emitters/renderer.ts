@@ -4538,18 +4538,23 @@ export class Renderer {
       occurrences.set(occurrence.transfer, list);
     });
     // A tail every printed entry of which is a fallthrough into a printed copy of
-    // it (never a goto, break or continue) is entered at each copy by exactly one
-    // edge, its home included: each copy is an owned copy of the tail for its edge.
+    // it (never a goto, break or continue) and every copy of which (its home
+    // included) is entered by exactly one printed edge is, for that edge, an
+    // owned copy; a join entered by several arms is not.
     const entered = new Map<string, boolean>();
+    const entries = new Map<BlockRegion, number>();
     for (const [transfer, list] of occurrences)
-      for (const occurrence of list)
+      for (const occurrence of list) {
+        const destination = occurrence.destination;
+        if (destination?.kind === 'block') entries.set(destination, (entries.get(destination) ?? 0) + 1);
         entered.set(
           transfer.target,
           (entered.get(transfer.target) ?? true) &&
-            occurrence.destination?.kind === 'block' &&
-            occurrence.destination.id === transfer.target &&
+            destination?.kind === 'block' &&
+            destination.id === transfer.target &&
             occurrenceAction(occurrence, this.language) === 'fallthrough',
         );
+      }
     const substituted = new Set<string>();
     for (const [transfer, list] of occurrences) {
       this.context.checkpoint(list.length);
@@ -4564,7 +4569,7 @@ export class Renderer {
         const destination = occurrence.destination;
         if (
           destination?.kind === 'block' &&
-          (layout.clones.has(destination) || sole) &&
+          (layout.clones.has(destination) || (sole && entries.get(destination) === 1)) &&
           destination.id === transfer.target &&
           occurrenceAction(occurrence, this.language) === 'fallthrough'
         )
