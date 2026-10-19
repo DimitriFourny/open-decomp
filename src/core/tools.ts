@@ -310,6 +310,11 @@ export const functionsFindArgsSchema = z.strictObject({
   ...requestContext,
   image_id: imageIdSchema,
   id: entityIdSchema.optional(),
+  /** Unique-prefix lookup (at least 12 hex digits); an ambiguous prefix returns every match. */
+  id_prefix: z
+    .string()
+    .regex(/^entity_[0-9a-f]{12,63}$/)
+    .optional(),
   query: querySchema.default(defaultQuery),
   address: addressSchema.optional(),
   boundary: z.enum(['candidate', 'established', 'conflicting']).optional(),

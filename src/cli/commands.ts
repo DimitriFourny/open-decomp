@@ -37,9 +37,9 @@ function terminal(value: string, limit = 8192): string {
   );
   return escaped.length > limit ? `${escaped.slice(0, limit)}…` : escaped;
 }
-function diagnostic(item: WireDiagnostic): void {
+function diagnostic(item: WireDiagnostic, count = 1): void {
   process.stderr.write(
-    `${terminal(item.severity)}: ${terminal(item.code)}: ${terminal(item.message)}\n`,
+    `${terminal(item.severity)}: ${terminal(item.code)}: ${terminal(item.message)}${count > 1 ? ` (×${count})` : ''}\n`,
   );
   if (item.details?.kind === 'slice_selection') {
     for (const slice of item.details.slices)
@@ -48,15 +48,24 @@ function diagnostic(item: WireDiagnostic): void {
       );
   }
 }
+/** One line per distinct diagnostic, in first-seen order, with its occurrence count. */
 function report(result: AnalysisResult, operation: string): void {
-  for (const item of result.diagnostics) diagnostic(item);
+  const distinct = new Map<string, { item: WireDiagnostic; count: number }>();
+  const add = (item: WireDiagnostic): void => {
+    const key = JSON.stringify([item.severity, item.code, item.message, item.details ?? null]);
+    const seen = distinct.get(key);
+    if (seen) seen.count++;
+    else distinct.set(key, { item, count: 1 });
+  };
+  for (const item of result.diagnostics) add(item);
   if (
     'error' in result &&
     !result.diagnostics.some(
       (item) => item.code === result.error.code && item.message === result.error.message,
     )
   )
-    diagnostic(result.error);
+    add(result.error);
+  for (const { item, count } of distinct.values()) diagnostic(item, count);
   if (result.state === 'partial')
     process.stderr.write(`warning: ${operation}: partial (${result.reason})\n`);
   else if (result.state !== 'complete' && result.state !== 'empty')
