@@ -52,7 +52,7 @@ function shape(fields: readonly [bigint, string][]): RecoveredType {
   };
 }
 
-test('observed structure names unify equal layouts without field names or hashes', () => {
+test('observed structure names unify equal layouts and separate different ones', () => {
   const structs = planner({
     word,
     otherWord: word,
@@ -66,9 +66,9 @@ test('observed structure names unify equal layouts without field names or hashes
     ]),
     different: shape([[8n, 'word']]),
   });
-  assert.equal(structs.name('first'), 'struct_1');
-  assert.equal(structs.name('second'), 'struct_1');
-  assert.equal(structs.name('different'), 'struct_2');
+  assert.equal(structs.name('second'), structs.name('first'));
+  assert.notEqual(structs.name('different'), structs.name('first'));
+  assert.match(structs.name('first'), /^struct_[0-9a-f]{6}$/);
   assert.deepEqual(
     structs.layout('first')?.map((member) => member.offset),
     [4n, 24n],
@@ -193,7 +193,7 @@ test('contiguous same-type members collapse to a scalar array pointee; struct ev
   assert.equal(structs.layout('unrolled'), null);
   assert.ok(structs.layout('mixedWidth'));
   assert.ok(structs.layout('gap'));
-  assert.equal(structs.name('mixedWidth'), 'struct_1');
+  assert.match(structs.name('mixedWidth'), /^struct_[0-9a-f]{6}$/);
 
   // A proven record period is struct evidence.
   const periodic = planner(
@@ -399,9 +399,11 @@ test('a bodyless structure typedef appears once, before the text that uses it', 
   });
   const text = emit(ssa, { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } })
     .emission.text;
-  assert.equal(text.match(/^typedef struct struct_1 struct_1;$/gm)?.length, 1);
-  assert.doesNotMatch(text, /^struct struct_1 \{/m);
-  assert.ok(text.indexOf('typedef struct struct_1') < text.indexOf('struct_1* '));
+  const name = /^typedef struct (struct_[0-9a-f]{6}) \1;$/m.exec(text)?.[1];
+  assert.ok(name, text);
+  assert.equal(text.match(new RegExp(`^typedef struct ${name} ${name};$`, 'gm'))?.length, 1);
+  assert.doesNotMatch(text, new RegExp(`^struct ${name} \\{`, 'm'));
+  assert.ok(text.indexOf(`typedef struct ${name}`) < text.indexOf(`${name}* `));
   const compiled = spawnSync(
     'clang',
     ['-x', 'c', '-fsyntax-only', '-std=c11', '-include', 'stdint.h', '-include', 'stddef.h', '-'],
@@ -437,7 +439,7 @@ for (const mixed of [false, true])
       assert.match(text, /observed members only; size unknown/);
       assert.match(text, /->f_8/);
     } else {
-      assert.doesNotMatch(text, /struct_\d+|->f_/);
+      assert.doesNotMatch(text, /struct_[0-9a-f]+|->f_/);
       assert.match(text, /uint32_t\* \w+\)/);
       assert.match(text, /\[1\]/);
       assert.match(text, /\[2\]/);

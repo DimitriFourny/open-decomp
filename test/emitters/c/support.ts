@@ -281,6 +281,8 @@ class Parser {
   /** C declarations in scope: formals, body locals and partial struct layouts. */
   readonly symbols = new Map<string, CType>();
   readonly structs = new Map<string, StructLayout>();
+  /** Typedef-declared structure names whose bodies may follow. */
+  private readonly structNames = new Set<string>();
   private readonly tables = new Map<string, { readonly address: bigint; readonly bits: number }>();
   /** Declared scalar globals (`extern T name;`): the name is the object, not a pointer. */
   private readonly scalars = new Set<string>();
@@ -438,6 +440,7 @@ class Parser {
     if (this.peek() === name) {
       this.take(name);
       this.take(';');
+      this.structNames.add(name);
       return;
     }
     let offset = 0n,
@@ -519,7 +522,8 @@ class Parser {
     if (floating) return { kind: 'pointer', to: floating };
     return {
       kind: 'pointer',
-      to: this.structs.has(name) ? { kind: 'struct', name } : null,
+      // A member may point to a structure whose body is declared later.
+      to: this.structs.has(name) || this.structNames.has(name) ? { kind: 'struct', name } : null,
     };
   }
 
@@ -1148,17 +1152,25 @@ class Parser {
           type.kind === 'pointer' && type.to?.kind === 'struct',
           `${field}: not a struct pointer`,
         );
-        const member = this.structs.get(type.to.name)!.fields.get(field);
-        assert.ok(member?.type.kind === 'int', `Undeclared struct member ${field}`);
+        const member = this.structs.get(type.to.name)?.fields.get(field);
+        assert.ok(
+          member?.type.kind === 'int' || (member?.type.kind === 'pointer' && !member.array),
+          `Undeclared struct member ${field}`,
+        );
         const address: Expr = {
           kind: 'binary',
           op: '+',
           left: { kind: 'cast', type: unsignedType(64), value: expression },
           right: { kind: 'literal', value: member.offset, ctype: unsignedType(64) },
         };
-        expression = member.array
-          ? { kind: 'cast', type: { kind: 'pointer', to: member.type }, value: address }
-          : this.read(address, member.type);
+        const memberType = member.type;
+        expression =
+          memberType.kind !== 'int'
+            ? // A pointer member is its 64-bit target address.
+              { ...this.read(address, { kind: 'int', bits: 64, signed: false }), ctype: memberType }
+            : member.array
+              ? { kind: 'cast', type: { kind: 'pointer', to: memberType }, value: address }
+              : this.read(address, memberType);
       } else return expression;
     }
   }
@@ -1174,7 +1186,10 @@ class Parser {
     return this.read(pointer, type.to);
   }
 
-  private read(address: Expr, type: Extract<CType, { kind: 'int' | 'float' }>): Expr {
+  private read(
+    address: Expr,
+    type: Extract<CType, { kind: 'int' | 'float' }>,
+  ): Extract<Expr, { kind: 'call' }> {
     assert.ok(type.bits % 8 === 0 && (type.kind === 'float' || !type.bool));
     return {
       kind: 'call',

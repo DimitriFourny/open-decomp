@@ -286,6 +286,7 @@ export const binaryInfoArgsSchema = z.strictObject({
       'relocations',
       'hints',
       'capabilities',
+      'types',
     ])
     .default('summary'),
   ...paging,
@@ -692,6 +693,16 @@ const binaryInfoDataSchema = z.discriminatedUnion('view', [
     view: z.literal('capabilities'),
     items: z.array(capabilitySchema).max(1000),
     page: pageInfoSchema,
+  }),
+  z.strictObject({
+    view: z.literal('types'),
+    /** C declarations of merged image structure types (observed members only). */
+    text: z.string().max(16 * 1024 * 1024),
+    functions: z.strictObject({
+      analyzed: z.number().int().nonnegative(),
+      total: z.number().int().nonnegative(),
+    }),
+    types: z.number().int().nonnegative(),
   }),
 ]);
 const symbolItemSchema = z.discriminatedUnion('kind', [
