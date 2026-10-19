@@ -44,6 +44,12 @@ import {
   type SourceFpPresentation,
 } from '../reconstruction/source-fp.js';
 import { indexedDataAccesses, type IndexedDataAccess } from './source-tables.js';
+import {
+  planGlobals,
+  type GlobalAccess,
+  type GlobalObject,
+  type GlobalPlan,
+} from './source-globals.js';
 import { cScalarSupport } from './source-c-support.js';
 import { UnsignedBounds } from './source-bounds.js';
 import { cSourceName } from '../metadata/symbols/c-names.js';
@@ -258,6 +264,11 @@ export class Renderer {
   private readonly sourceDataValue: (value: Value) => SourceAddress | undefined;
   private readonly dataTables = new Map<string, IndexedDataAccess & { readonly name: string }>();
   private indexedData: ReadonlyMap<string, IndexedDataAccess> = new Map();
+  private readonly globals: GlobalPlan;
+  private readonly usedGlobals = new Map<
+    string,
+    { readonly object: GlobalObject; readonly name: string }
+  >();
   private readonly sourceValueTypes = new Map<string, string>();
   private readonly sourceRoleNames: ReadonlyMap<string, string | null>;
   /** Loop header phis: each is its own loop-carried variable (see planSourceNames). */
@@ -402,6 +413,13 @@ export class Renderer {
       else if (previous && (previous.name !== item.name || previous.string !== item.string))
         this.sourceAddresses.set(key, null);
     }
+    this.globals = planGlobals(this.program, context, {
+      data: this.sourceDataValue,
+      uncast: (value) => this.bitcastSource(value),
+      access_type: (node) => this.accessType(node),
+      pretty: this.sourceView && this.program.source !== undefined,
+      pointer_bits: this.input.source?.abi.layout.pointer_bits,
+    });
     for (const projection of this.program.calls.values()) {
       if (!projection.signature) continue;
       const declaration = projection.signature.signature;
@@ -480,14 +498,14 @@ export class Renderer {
     return identifier;
   }
 
-  private sourceIdentifier(id: string, preferred: string): string {
+  private sourceIdentifier(id: string, preferred: string, linkage = false): string {
     const previous = this.identifiers.get(id);
     if (previous) return previous.identifier;
     const stack = this.program.source?.stack;
     const entryStack =
       (stack?.kind === 'entry' && stack.base.id === id) ||
       this.program.parameter_registers.get(id)?.role === 'stack_pointer';
-    const stem = entryStack ? 'entry_sp' : sourceIdentifierStem(preferred);
+    const stem = entryStack ? 'entry_sp' : sourceIdentifierStem(preferred, linkage);
     let name = stem,
       suffix = 1;
     while (this.usedSourceNames.has(name)) {
@@ -1245,6 +1263,8 @@ export class Renderer {
     }
     const load = this.inlined.get(value.id)?.node;
     if (load?.kind === 'load') {
+      const imported = this.globals.import_loads.get(load.id);
+      if (imported) return this.importAddress(imported);
       if (this.expanding.has(value.id)) this.invalid('Cyclic inlined load');
       if (this.expanding.size >= 128 || ++this.expansionWork > this.context.budget.ir_nodes * 64)
         this.writer.fail('Reconstructed expression expansion exceeds its budget');
@@ -1530,6 +1550,8 @@ export class Renderer {
         .replace(/\\u000d/g, '\\r')
         .replace(/\\u0009/g, '\\t')
         .replace(/\\u0000/g, '\\0');
+    if (item?.object && this.sourceView) return this.globalAddress(item);
+    // Checked view: exact storage identity as an explicit helper, never a declaration.
     if (item?.object) {
       const object = item.object;
       return this.call(
@@ -1568,6 +1590,79 @@ export class Renderer {
     if (address.space === 'va') return `0x${address.value.toString(16)}`;
     return this.address(address);
   };
+  /** Value-preserving bitcast chain of an address value. */
+  private bitcastSource(value: Value): Value {
+    for (let depth = 0; depth < 16; depth++) {
+      const expression = this.program.expressions.get(value.id);
+      if (expression?.kind !== 'cast' || expression.op !== 'bitcast') break;
+      value = expression.value;
+    }
+    return value;
+  }
+
+  private globalName(global: GlobalObject): string {
+    const used = this.usedGlobals.get(global.key);
+    if (used) return used.name;
+    if (global.native_name !== undefined) this.names.set(global.key, global.native_name);
+    const name = this.sourceIdentifier(global.key, global.stem, global.native_name !== undefined);
+    this.usedGlobals.set(global.key, { object: global, name });
+    return name;
+  }
+
+  /** Integer address of an image object (or of an imported object, offset 0). */
+  private globalAddress(item: SourceAddress): string {
+    const global = this.globals.object(item)!;
+    const name = this.globalName(global),
+      offset = item.object!.offset;
+    if (this.language === 'python-like') return `address_of(${name}, 0x${offset.toString(16)})`;
+    const base = `(uintptr_t)${global.shape === 'scalar' ? '&' : ''}${name}`;
+    return offset === 0n ? base : `(${base} + 0x${offset.toString(16)})`;
+  }
+
+  /** The imported object's address: what a read of its binding slot returns. */
+  private importAddress(global: GlobalObject): Printed {
+    const name = this.globalName(global);
+    return this.language === 'python-like'
+      ? this.printer.primary(`address_of(${name}, 0x0)`, { bits: 64, signed: false })
+      : {
+          text: `(uintptr_t)${global.shape === 'scalar' ? '&' : ''}${name}`,
+          precedence: UNARY,
+          ctype: { bits: 64, signed: false },
+        };
+  }
+
+  /** Byte-addressed C pointer to a constant address inside a declared global. */
+  private globalPointer(value: Value): string | undefined {
+    const item = this.sourceDataValue(value);
+    if (!item?.object) return undefined;
+    const global = this.globals.object(item);
+    if (!global) return undefined;
+    const name = this.globalName(global),
+      offset = item.object.offset;
+    const first = global.shape === 'scalar' ? `&${name}` : name;
+    if (offset === 0n) return first;
+    return `(${global.shape === 'bytes' ? name : `(uint8_t *)${first}`} + 0x${offset.toString(16)})`;
+  }
+
+  /** `name` / `name[i]` for an access the plan bound to a declared global. */
+  private globalStorage(
+    node: Extract<Instruction, { kind: 'load' | 'store' }>,
+    access: GlobalAccess,
+  ): string | undefined {
+    if (
+      !this.permitUnaligned(node) ||
+      !this.localValidation.presentation(
+        'global_data_access',
+        this.input.function.id,
+        'scalar access to an image or import-bound global at a displacement that is a multiple of its width, every access in the function agreeing on one element type; the declaration states no array bound and the object keeps its native name or a neutral data_<VA> name',
+      )
+    )
+      return undefined;
+    const name = this.globalName(access.object);
+    if (this.language === 'c-like' && access.object.shape === 'scalar') return name;
+    return `${name}[${access.offset / BigInt(access.object.element.bits / 8)}]`;
+  }
+
   private sourceAddressValue(value: Value, literal = false): string {
     return this.sourceAddressPrinted(value, literal).text;
   }
@@ -1582,7 +1677,10 @@ export class Renderer {
     const text = this.sourceAddress(address, literal);
     return /^0x[0-9a-f]+$/.test(text)
       ? { ...this.printer.literal(address.value, 64), text }
-      : this.printer.primary(text, { bits: 64, signed: false });
+      : // A bare `(uintptr_t)object` cast binds like any unary operator.
+        /^\(uintptr_t\)&?\w+$/.test(text)
+        ? { text, precedence: UNARY, ctype: { bits: 64, signed: false } }
+        : this.printer.primary(text, { bits: 64, signed: false });
   }
 
   private sourceAddressOf(value: Value): Address | undefined {
@@ -1679,7 +1777,11 @@ export class Renderer {
       this.sourceNames.set(key, own);
       return own;
     }
-    const name = this.sourceIdentifier(node.id, preferred);
+    const name = this.sourceIdentifier(
+      node.id,
+      preferred,
+      this.presentedName(node.id) !== undefined,
+    );
     this.sourceNames.set(key, name);
     return name;
   }
@@ -2408,6 +2510,66 @@ export class Renderer {
     }
   }
 
+  /** Declarations of every global the finished body names, inserted before the
+   * function so the text refers only to declared names. Each is mapped to its
+   * first planned access with the image/import evidence of the object. */
+  private declareGlobals(at: number, insert: (at: number, lines: readonly string[]) => number): void {
+    if (!this.usedGlobals.size) return;
+    const python = this.language === 'python-like';
+    const lines: string[] = [],
+      spans: { readonly object: GlobalObject; readonly start: number; readonly end: number }[] = [];
+    let offset = at;
+    for (const { object: global, name } of this.usedGlobals.values()) {
+      this.context.checkpoint(1);
+      const type = global.element.float
+          ? global.element.bits === 32
+            ? 'float'
+            : 'double'
+          : `uint${global.element.bits}_t`,
+        first = lines.length;
+      const q = (text: string): string => this.writer.quote(text);
+      // Comment text only: names stay readable, a comment terminator cannot occur.
+      const plain = (text: string): string => text.replace(/\*\//g, '* /');
+      const where = global.import
+        ? `import ${plain(global.import.name)}${global.import.library === null ? '' : ` from ${plain(global.import.library)}`}, bound at slot VA 0x${global.address.value.toString(16)}`
+        : `image VA 0x${global.address.value.toString(16)}; byte extent ${global.object.byte_length ?? 'unknown'}${global.object.kind === 'bytes' ? '' : `; ${global.object.kind.replace('_', ' ')}`}`;
+      if (python) {
+        lines.push(`# ${name}: ${where}`);
+        lines.push(
+          global.import
+            ? `${name} = import_view(${q(global.import.library ?? '')}, ${q(global.import.name)}, "${type}")`
+            : `${name} = memory_view(0x${global.address.value.toString(16)}, "${type}", ${global.object.mutable ? 'True' : 'False'})`,
+        );
+        this.writer.helper(
+          global.import ? 'import_view' : 'memory_view',
+          global.import
+            ? 'Storage view of an imported symbol: arguments are its library, native name and element type. Its address is bound by the dynamic linker, not an image VA; no allocation, extent or bound is implied, and element indices count elements.'
+            : 'Image-backed storage view at the declared VA; no allocation or invented extent. Index units are the declared scalar width. Reads retain original byte order, aliasing and faults; no Python sequence bounds or negative-index rebasing.',
+        );
+      } else {
+        lines.push(`/* ${name}: ${where} */`);
+        lines.push(
+          `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'};`,
+        );
+      }
+      const length = lines.slice(first).reduce((sum, line) => sum + line.length + 1, 0);
+      spans.push({ object: global, start: offset, end: offset + length });
+      offset += length;
+    }
+    const delta = insert(at, lines);
+    for (const span of spans) {
+      const origin = this.origins.get(span.object.first ?? '') ?? this.input.function;
+      this.mapped(
+        origin,
+        span.start,
+        [],
+        [...new Set([...span.object.object.evidence_ids, ...(span.object.import?.evidence_ids ?? [])])],
+        span.end,
+      );
+    }
+    void delta;
+  }
+
   private declareDataTables(): void {
     if (!this.sourceView) return;
     const declared = new Set<string>();
@@ -2513,6 +2675,9 @@ export class Renderer {
       if (member && this.permitUnaligned(node)) return member;
     }
     let address = this.sourceAddressPrinted(node.address);
+    // A constant address inside a declared global is that object's own pointer.
+    const pointer = this.language === 'c-like' ? this.globalPointer(node.address) : undefined;
+    if (pointer !== undefined) address = this.printer.primary(pointer, { bits: 64, signed: false });
     if (this.language === 'python-like') {
       const sum =
         kind && this.inline.has(pointerAddress.id)
@@ -2546,7 +2711,7 @@ export class Renderer {
         ? ''
         : this.declaredSpelling(node.address);
     if (spelling.endsWith('*')) address = this.printer.primary(this.local(node.address));
-    else if (address.ctype?.bits !== 64 || address.ctype.signed)
+    else if (pointer === undefined && (address.ctype?.bits !== 64 || address.ctype.signed))
       address = {
         text: `(uintptr_t)${this.printer.group(address, UNARY)}`,
         precedence: UNARY,
@@ -2581,6 +2746,11 @@ export class Renderer {
               : `local${this.sourceLocal++}`),
         )
       );
+    const global = this.globals.accesses.get(node.id);
+    if (global) {
+      const text = this.globalStorage(node, global);
+      if (text !== undefined) return text;
+    }
     if (this.sourceView) return this.sourceStorage(node);
     let address = this.sourceAddressValue(node.address);
     const type = node.kind === 'load' ? node.result.type : node.value.type,
@@ -2916,6 +3086,17 @@ export class Renderer {
         break;
       case 'load':
       case 'store': {
+        const imported = node.kind === 'load' ? this.globals.import_loads.get(node.id) : undefined;
+        if (node.kind === 'load' && imported) {
+          // The binding slot is not read: the load is the imported symbol's address.
+          if (!this.program.live.has(node.result.id)) {
+            this.map(node, start);
+            this.mapMemory(node, start);
+            return;
+          }
+          text = `${this.local(node.result)} = ${this.importAddress(imported).text}`;
+          break;
+        }
         if (this.program.source) {
           const storage = this.storage(node);
           if (node.kind === 'store') {
@@ -5504,6 +5685,7 @@ export class Renderer {
           this.sourceView
             ? (this.presentedName(this.input.function.id) ?? 'fn_function')
             : `fn_${displayName ?? 'function'}`,
+          this.sourceView && this.presentedName(this.input.function.id) !== undefined,
         )
       : this.identifier(this.input.function.id, 'fn');
     if (displayName && !this.program.source) w.comment(0, `function: ${w.quote(displayName)}`);
@@ -5593,6 +5775,7 @@ export class Renderer {
     }
     this.declareDataTables();
     this.declareSourceCallees();
+    const globalsAt = w.offset;
     this.headerStart = w.offset;
     let noteSpan: { start: number; end: number } | undefined;
     const closing = (text: string): void => {
@@ -5741,6 +5924,7 @@ export class Renderer {
           this.inferenceSites.set(id, { start: site.start + delta, end: site.end + delta });
       return delta;
     };
+    this.declareGlobals(globalsAt, insert);
     let support = supportAt;
     if (scratch.size) {
       const text = w.text().slice(scratchAt);

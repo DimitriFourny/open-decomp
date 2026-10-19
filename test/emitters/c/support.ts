@@ -235,6 +235,8 @@ class Parser {
   readonly symbols = new Map<string, CType>();
   readonly structs = new Map<string, StructLayout>();
   private readonly tables = new Map<string, { readonly address: bigint; readonly bits: number }>();
+  /** Declared scalar globals (`extern T name;`): the name is the object, not a pointer. */
+  private readonly scalars = new Set<string>();
   returnType: CType = MATH;
   private readonly types = new WeakMap<Expr, CType>();
   private position = 0;
@@ -247,12 +249,13 @@ class Parser {
     this.python = /^def /m.test(text);
     const declarations = this.python
       ? /^(\w+) = memory_view\((0x[\da-f]+), "uint(\d+)_t", (?:True|False)\)$/gm
-      : /\/\* (\w+): image VA (0x[\da-f]+); byte extent (?:unknown|\d+) \*\/\nextern (?:const )?uint(\d+)_t \1\[\];/g;
+      : /\/\* (\w+): image VA (0x[\da-f]+); byte extent (?:unknown|\d+)(?:; [a-z ]+)? \*\/\nextern (?:const )?uint(\d+)_t \1(?:\[\])?;/g;
     for (const match of text.matchAll(declarations)) {
       const name = match[1]!,
         address = BigInt(match[2]!),
         bits = Number(match[3]);
       this.tables.set(name, { address, bits });
+      if (!this.python && !match[0].endsWith('[];')) this.scalars.add(name);
       this.symbols.set(name, { kind: 'pointer', to: { kind: 'int', bits, signed: false } });
       this.ops.push({
         kind: 'assign',
@@ -354,8 +357,10 @@ class Parser {
           continue;
         }
         assert.ok(this.tables.has(name), 'External table needs an exact image VA binding');
-        this.take('[');
-        this.take(']');
+        if (this.peek() === '[') {
+          this.take('[');
+          this.take(']');
+        }
         this.take(';');
       }
     }
@@ -1201,6 +1206,8 @@ class Parser {
 
   private primary(): Expr {
     const token = this.take();
+    if (token === '&' && this.scalars.has(this.peek()) && this.tokens[this.position + 1] !== '[')
+      return { kind: 'ref', name: this.take() };
     if (token === '&') {
       const name = this.take();
       this.take('[');
@@ -1390,6 +1397,7 @@ class Parser {
       this.take(')');
       return { kind: 'call', name: token, args };
     }
+    if (this.scalars.has(token)) return this.dereference({ kind: 'ref', name: token });
     return { kind: 'ref', name: token };
   }
 }
