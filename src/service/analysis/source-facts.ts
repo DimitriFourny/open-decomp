@@ -592,6 +592,10 @@ function observeParameters(
   };
 }
 
+/** Most bytes of an indexed read-only table the source facts carry: enough for
+ * the complete small tables and the printed prefix of larger ones. */
+const TABLE_BYTES_READ = 512n;
+
 function sourceAddresses(
   input: SourceFactsInput,
   formatPointers: readonly bigint[],
@@ -608,23 +612,29 @@ function sourceAddresses(
   );
   const constant = sourceConstantValues(expressions, context, image.id);
   const literalWidths = new Map<string, number>();
+  const tableBases = new Set<string>();
   const writes: { address: bigint; size: bigint }[] = [];
-  let unknownWrite = false;
   for (const block of input.ir.blocks)
     for (const node of block.instructions) {
       context.checkpoint(1);
-      if (
-        node.kind === 'call' ||
-        (node.kind === 'unknown_effect' &&
-          ((block.terminator.kind !== 'unknown' && block.terminator.kind !== 'trap') ||
-            block.instructions.some((item) => item.kind === 'load')))
-      )
-        unknownWrite = true;
       if (node.kind === 'store') {
         const address = constant(node.address);
         if (address !== undefined)
           writes.push({ address, size: BigInt(Math.ceil(bitWidth(node.value.type) / 8)) });
-        else unknownWrite = true;
+      }
+      if (node.kind === 'load' || node.kind === 'store') {
+        // A constant plus a variable addresses indexed storage: the constant is a table base.
+        const sum = expressions.get(node.address.id);
+        if (sum?.kind === 'integer' && sum.op === 'add')
+          for (const operand of [sum.left, sum.right]) {
+            const base = constant(operand);
+            if (
+              base !== undefined &&
+              base < U64_LIMIT &&
+              constant(sum.left === operand ? sum.right : sum.left) === undefined
+            )
+              tableBases.add(addressKey({ image_id: image.id, space: 'va', value: base }));
+          }
       }
       if (
         node.kind !== 'load' ||
@@ -803,6 +813,42 @@ function sourceAddresses(
     }
     return { ...symbol, original_name: name ?? null, display_name: null };
   });
+  // Entries of the image's functions: a constant equal to one names the function.
+  // A symbol's name (above) wins; otherwise the function's own name, under the
+  // same annotation rules, and nothing when annotations leave it unresolved.
+  const functionEntries = new Map<string, boolean>();
+  for (const fn of input.functions) {
+    context.checkpoint(1);
+    if (fn.boundary === 'conflicting') continue;
+    const key = addressKey(fn.entry);
+    if (!candidates.has(key)) continue;
+    functionEntries.set(key, fn.id === input.ir.id);
+    if (names.has(key)) continue;
+    const annotations = scope.store
+      .readAnnotations(fn.id, revision)
+      .filter(
+        (annotation) => annotation.value.kind === 'name' && annotation.status !== 'retracted',
+      );
+    const asserted = new Set(
+      annotations.flatMap((annotation) =>
+        annotation.status === 'asserted' && annotation.value.kind === 'name'
+          ? [annotation.value.value]
+          : [],
+      ),
+    );
+    const name =
+      asserted.size === 1
+        ? [...asserted][0]
+        : annotations.length
+          ? undefined
+          : (fn.display_name ?? fn.original_name ?? undefined);
+    if (!name) continue;
+    sourceNames.set(
+      `${key}:${name}`,
+      annotations.length ? name : cSourceName(image.target.format, name),
+    );
+    names.set(key, new Set([name]));
+  }
   const slotImports = recoverImportBindings(
     image,
     candidates,
@@ -857,7 +903,6 @@ function sourceAddresses(
     }
     const byteLength = literalWidths.get(key);
     const constantBytes =
-      !unknownWrite &&
       byteLength !== undefined &&
       !writes.some(
         (write) =>
@@ -872,14 +917,40 @@ function sourceAddresses(
             `${addressKey(recovered.object?.address ?? address)}:${name ?? recovered.name}`,
           )
         : undefined;
+    const entry = functionEntries.get(key);
+    const object = recovered?.object;
+    const extent = object && (object.byte_length ?? object.span_bound);
+    const objectBytes =
+      !entry &&
+      object &&
+      !object.mutable &&
+      object.kind === 'bytes' &&
+      tableBases.has(key) &&
+      extent
+        ? recoverDataBytes(
+            image,
+            object.address,
+            Number(extent < TABLE_BYTES_READ ? extent : TABLE_BYTES_READ),
+            context,
+          )
+        : undefined;
     if (recovered)
       result.push({
         ...recovered,
         ...(constantBytes === undefined ? {} : { constant_bytes: constantBytes }),
+        ...(objectBytes === undefined ? {} : { object_bytes: objectBytes }),
         ...(name === undefined ? {} : { name }),
         ...(spelling === undefined ? {} : { source_name: spelling }),
       });
-    else if (name !== undefined) result.push({ address, name });
+    else if (entry !== undefined || name !== undefined) {
+      const functionSpelling = name === undefined ? undefined : sourceNames.get(`${key}:${name}`);
+      result.push({
+        address,
+        ...(name === undefined ? {} : { name }),
+        ...(functionSpelling === undefined ? {} : { source_name: functionSpelling }),
+        ...(entry === undefined ? {} : { function_entry: { self: entry } }),
+      });
+    }
   }
   return result;
 }

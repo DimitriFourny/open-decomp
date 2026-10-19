@@ -141,7 +141,7 @@ import {
   type InlineStore,
   type InlineSite,
 } from './source-inlining.js';
-import { SourceStructs, type ObservedMember } from './source-structs.js';
+import { memberName, paddingName, SourceStructs, type ObservedMember } from './source-structs.js';
 import { planFlagTests, type FlagTest } from './source-flags.js';
 import { planLocalTypes, type Fact, type PointerFact } from './source-local-types.js';
 
@@ -166,6 +166,12 @@ interface ConditionTerm {
   /** `value` is not the printed test (a flag-carried short circuit): never fold it. */
   readonly opaque?: true;
 }
+/** A table's contents print in full up to this many bytes; larger tables show
+ * a prefix of TABLE_PREFIX_BYTES, and an unsized one with unbounded indices
+ * its first TABLE_UNKNOWN_ELEMENTS elements. */
+const TABLE_FULL_BYTES = 512n;
+const TABLE_PREFIX_BYTES = 256;
+const TABLE_UNKNOWN_ELEMENTS = 16;
 const STRING_LITERAL_SCOPE =
   'pointer-width constants addressing an immutable NUL-terminated string with established encoding (an interior address denotes its suffix bytes), printed as that string literal where the constant is a value: argument, store, return, copy, select arm or identity comparison';
 
@@ -1761,6 +1767,19 @@ export class Renderer {
     )
       return this.stringLiteralText(item);
     if (item?.object && this.sourceView) return this.globalAddress(item);
+    if (
+      item?.function_entry &&
+      this.sourceView &&
+      address.space === 'va' &&
+      this.localValidation.presentation(
+        'function_address',
+        this.input.function.id,
+        'a constant equal to the exact entry of a function of this image prints as that function; no prototype is stated',
+        undefined,
+        `${this.addressKey(address)}`,
+      )
+    )
+      return this.functionAddress(address, item);
     // Checked view: exact storage identity as an explicit helper, never a declaration.
     if (item?.object) {
       const object = item.object;
@@ -1800,6 +1819,36 @@ export class Renderer {
     if (address.space === 'va') return `0x${address.value.toString(16)}`;
     return this.address(address);
   };
+  /** Functions of this image the text names as values, by entry key. */
+  private readonly functionValues = new Map<string, { readonly name: string }>();
+
+  /** The integer address of a function named by identifier: `(uintptr_t)name`
+   * (C) or `function_address("name")`. The function is never called here. */
+  private functionAddress(address: Address, item: SourceAddress): string {
+    const key = this.addressKey(address),
+      own = item.function_entry?.self
+        ? this.identifiers.get(this.input.function.id)?.identifier
+        : undefined;
+    let name = own ?? this.sourceNames.get(key);
+    if (name === undefined) {
+      if (item.name !== undefined) this.names.set(key, item.name);
+      name = this.sourceIdentifier(
+        key,
+        item.source_name ?? item.name ?? `sub_${address.value.toString(16)}`,
+        item.name !== undefined,
+      );
+      this.sourceNames.set(key, name);
+    }
+    if (own === undefined) this.functionValues.set(key, { name });
+    return this.language === 'c-like'
+      ? `(uintptr_t)${name}`
+      : this.call(
+          'function_address',
+          'Entry address of the named function, as an integer address; the function is not called and no prototype is implied.',
+          [this.writer.quote(name)],
+        );
+  }
+
   /** Value-preserving bitcast chain of an address value. */
   private bitcastSource(value: Value): Value {
     for (let depth = 0; depth < 16; depth++) {
@@ -1953,8 +2002,8 @@ export class Renderer {
    * pointer conversion to the receiving assignment's own interpretation. */
   private valueLiteral = (value: Value, spelling?: string, cast = true): Printed | undefined => {
     const text = this.sourceLiteral(value);
+    if (text === undefined) return this.symbolicValue(value, spelling, cast);
     if (
-      text === undefined ||
       !this.localValidation.presentation('string_literal', value.id, STRING_LITERAL_SCOPE, [
         value.id,
       ])
@@ -1986,6 +2035,33 @@ export class Renderer {
     }
     return { text: `(uintptr_t)${text}`, precedence: UNARY, ctype: integerAddress };
   };
+
+  /** A pointer-width constant in a value position that is the exact entry of a
+   * function, or the address of a named data object: it prints as that name
+   * (`(uintptr_t)name`, `(uintptr_t)&name`), so a stored or compared callback or
+   * table pointer is identified instead of shown as a bare number. Strings are
+   * literals (`sourceLiteral`); an unnamed data address stays a number. */
+  private symbolicValue(value: Value, spelling?: string, cast = true): Printed | undefined {
+    if (
+      !this.sourceView ||
+      value.type.kind !== 'integer' ||
+      value.type.bits !== this.input.source?.abi.layout.pointer_bits
+    )
+      return undefined;
+    const address = this.sourceAddressOf(value),
+      item = address && this.sourceAddresses.get(this.addressKey(address));
+    if (!address || !item || address.space !== 'va') return undefined;
+    if (!item.function_entry && !(item.object && item.name !== undefined)) return undefined;
+    const text = this.sourceAddress(address);
+    if (/^0x[0-9a-f]+$/.test(text)) return undefined;
+    const integerAddress = { bits: 64, signed: false };
+    if (this.language === 'python-like') return this.printer.primary(text, integerAddress);
+    if (spelling?.endsWith('*') && cast)
+      return { text: `(${spelling})${text}`, precedence: UNARY, ctype: integerAddress };
+    return /^\(uintptr_t\)&?\w+$/.test(text)
+      ? { text, precedence: UNARY, ctype: integerAddress }
+      : this.printer.primary(text, integerAddress);
+  }
 
   /** Library-declared character parameter of a source call. Every library
    * declaration the signature rests on must agree. */
@@ -2700,8 +2776,8 @@ export class Renderer {
     offsets.add(member.offset);
     this.usedMembers.set(used, offsets);
     let access = indexedStruct
-      ? `${baseText}[${this.value(index!)}].f_${member.offset.toString(16)}`
-      : `${baseText}->f_${member.offset.toString(16)}`;
+      ? `${baseText}[${this.value(index!)}].${memberName(member.offset)}`
+      : `${baseText}->${memberName(member.offset)}`;
     if (member.count !== undefined) {
       const displacement = (offset - member.offset) / BigInt(member.bits / 8);
       const subscript = index
@@ -2818,8 +2894,7 @@ export class Renderer {
         packed = false;
       for (const member of members) {
         if (!used.has(member.offset)) continue;
-        if (member.offset > end)
-          parts.push(`uint8_t gap_${end.toString(16)}[${member.offset - end}];`);
+        if (member.offset > end) parts.push(`uint8_t ${paddingName(end)}[${member.offset - end}];`);
         const definition = this.typeRecords.get(member.typeId)?.definition;
         const spelling =
           definition?.kind === 'float'
@@ -2832,13 +2907,13 @@ export class Renderer {
                 : '__uint128_t'
               : this.sourceType(member.typeId);
         const array = member.count === undefined ? '' : `[${member.count ?? ''}]`;
-        parts.push(`${spelling} f_${member.offset.toString(16)}${array};`);
+        parts.push(`${spelling} ${memberName(member.offset)}${array};`);
         packed ||= member.offset % BigInt(member.bits / 8) !== 0n;
         end = member.offset + member.size;
       }
       const stride = this.sourceStructs.strides.get(id);
       if (stride) {
-        if (stride > end) parts.push(`uint8_t gap_${end.toString(16)}[${stride - end}];`);
+        if (stride > end) parts.push(`uint8_t ${paddingName(end)}[${stride - end}];`);
         packed ||= members.some((member) => stride % BigInt(member.bits / 8) !== 0n);
         lines.push(`/* observed access stride ${stride}; not an allocation extent */`);
       }
@@ -3072,8 +3147,9 @@ export class Renderer {
         previous === null || (previous && previous.text !== text) ? null : { text, node },
       );
     }
-    for (const declaration of declarations.values()) {
+    for (const [name, declaration] of declarations) {
       if (!declaration) continue;
+      this.declaredFunctions.add(name);
       const { text, node } = declaration;
       const signature = this.program.calls.get(node.id)!.signature;
       if (
@@ -3098,6 +3174,22 @@ export class Renderer {
       this.writer.line(0, text);
       this.mapped(node, start, [], signature?.evidence_ids ?? []);
     }
+  }
+
+  /** Functions with a call-site declaration in the header. */
+  private readonly declaredFunctions = new Set<string>();
+
+  /** C: functions the finished text names only as values (callback and function
+   * pointer constants) need a declaration to be valid; the prototype is unknown. */
+  private declareFunctionValues(
+    at: number,
+    insert: (at: number, lines: readonly string[]) => number,
+  ): void {
+    if (this.language !== 'c-like') return;
+    const lines = [...this.functionValues.values()]
+      .filter(({ name }) => !this.declaredFunctions.has(name))
+      .map(({ name }) => `extern void ${name}(); /* used as a value; prototype unknown */`);
+    if (lines.length) insert(at, lines);
   }
 
   /** The opaque tags and pointer typedefs a header-declared global's C type mentions. */
@@ -3197,9 +3289,22 @@ export class Renderer {
     void delta;
   }
 
+  /** Contents bytes a function's table declarations may print in total. */
+  private tableBudget = 1536;
+
+  /** One declaration per (object, element width) the function indexes. A
+   * read-only table whose extent is established prints its contents (a bounded
+   * prefix when large); otherwise it stays an extern view of unknown extent. */
   private declareDataTables(): void {
     if (!this.sourceView) return;
-    const declared = new Set<string>();
+    interface Group {
+      readonly key: string;
+      readonly name: string;
+      readonly first: string;
+      readonly table: IndexedDataAccess;
+      reach: bigint;
+    }
+    const groups = new Map<string, Group>();
     for (const [id, table] of this.indexedData) {
       const node = this.statements.get(id);
       if (node?.kind !== 'load' || !this.permitUnaligned(node)) continue;
@@ -3219,29 +3324,135 @@ export class Renderer {
       if (table.data.name !== undefined) this.names.set(key, table.data.name);
       const name = this.sourceIdentifier(key, stem);
       this.dataTables.set(id, { ...table, name });
-      if (declared.has(key)) continue;
-      declared.add(key);
+      const group = groups.get(key);
+      if (group) group.reach = group.reach > table.last + 1n ? group.reach : table.last + 1n;
+      else groups.set(key, { key, name, first: id, table, reach: table.last + 1n });
+    }
+    for (const group of groups.values()) {
+      const { table } = group,
+        object = table.data.object,
+        node = this.statements.get(group.first)!;
       const start = this.writer.offset;
-      this.writer.comment(
-        0,
-        `${name}: image VA 0x${object.address.value.toString(16)}; byte extent ${object.byte_length ?? 'unknown'}`,
-      );
-      if (this.language === 'c-like')
-        this.writer.line(
-          0,
-          `extern ${object.mutable ? '' : 'const '}uint${table.bits}_t ${name}[];`,
+      const contents = this.tableContents(group.name, table, group.reach);
+      if (contents) {
+        for (const line of contents.lines) this.writer.line(0, line);
+        this.writer.helper(
+          this.language === 'c-like' ? group.name : 'memory_view',
+          'Immutable image bytes of the table at the declared VA, read from a file-backed read-only section with no relocation slot inside. Index units are the declared scalar width; the shown extent is the one the comment names.',
         );
-      else
-        this.writer.line(
+      } else {
+        this.writer.comment(
           0,
-          `${name} = memory_view(0x${object.address.value.toString(16)}, "uint${table.bits}_t", ${object.mutable ? 'True' : 'False'})`,
+          `${group.name}: image VA 0x${object.address.value.toString(16)}; byte extent unknown`,
         );
-      this.writer.helper(
-        this.language === 'c-like' ? name : 'memory_view',
-        'Image-backed indexed storage view at the declared VA; no allocation or invented extent. Index units are the declared scalar width. Reads retain original byte order, aliasing and faults; no Python sequence bounds or negative-index rebasing.',
-      );
+        if (this.language === 'c-like')
+          this.writer.line(
+            0,
+            `extern ${object.mutable ? '' : 'const '}uint${table.bits}_t ${group.name}[];`,
+          );
+        else
+          this.writer.line(
+            0,
+            `${group.name} = memory_view(0x${object.address.value.toString(16)}, "uint${table.bits}_t", ${object.mutable ? 'True' : 'False'})`,
+          );
+        this.writer.helper(
+          this.language === 'c-like' ? group.name : 'memory_view',
+          'Image-backed indexed storage view at the declared VA; no allocation or invented extent. Index units are the declared scalar width. Reads retain original byte order, aliasing and faults; no Python sequence bounds or negative-index rebasing.',
+        );
+      }
       this.mapped(node, start, [node.address.id], object.evidence_ids);
     }
+  }
+
+  /** Declaration lines of a read-only table with its contents, or undefined when
+   * its bytes or extent are not established. The element count is the smaller of
+   * the accessed range (`reach`: the greatest index every access can take, plus
+   * one) and the object's extent (symbol size, else the distance to the next
+   * symbol, data record, relocation or section end); an unbounded index over an
+   * unsized object shows only the first elements, never an invented extent. */
+  private tableContents(
+    name: string,
+    table: IndexedDataAccess,
+    reach: bigint,
+  ): { readonly lines: readonly string[] } | undefined {
+    const object = table.data.object,
+      bytes = table.data.object_bytes,
+      width = table.bits / 8;
+    if (
+      object.mutable ||
+      !bytes?.length ||
+      table.data.address.value !== object.address.value + object.offset
+    )
+      return undefined;
+    const size = BigInt(width);
+    const extent = object.byte_length ?? object.span_bound;
+    const bySize = extent === undefined || extent === null ? undefined : extent / size;
+    const proven = bySize === undefined ? (reach <= 4096n ? reach : undefined) : undefined;
+    const total = bySize !== undefined ? (reach < bySize ? reach : bySize) : proven;
+    const full = total !== undefined && total * size <= TABLE_FULL_BYTES;
+    let shown = full
+      ? total
+      : BigInt(
+          Math.min(
+            total === undefined ? TABLE_UNKNOWN_ELEMENTS : Number(total),
+            TABLE_PREFIX_BYTES / width,
+          ),
+        );
+    shown =
+      shown! < BigInt(Math.floor(bytes.length / width))
+        ? shown!
+        : BigInt(Math.floor(bytes.length / width));
+    if (shown <= 0n || Number(shown) * width > this.tableBudget) return undefined;
+    this.tableBudget -= Number(shown) * width;
+    const values: string[] = [];
+    for (let index = 0; index < Number(shown); index++) {
+      let value = 0n;
+      for (let byte = width - 1; byte >= 0; byte--)
+        value = (value << 8n) | BigInt(bytes[index * width + byte]!);
+      values.push(value < 1n << 32n ? String(value) : `0x${value.toString(16)}`);
+    }
+    const hex = object.address.value.toString(16);
+    const basis =
+      object.byte_length != null && bySize !== undefined && total === bySize
+        ? 'symbol size'
+        : total === undefined
+          ? 'extent not established'
+          : bySize !== undefined && total === bySize
+            ? 'bounded by the next symbol or section end'
+            : 'accessed range';
+    const rest = total === undefined ? undefined : total - shown;
+    const more =
+      rest === undefined ? 'further elements not shown' : rest > 0n ? `${rest} more` : undefined;
+    const note = `${name}: image VA 0x${hex}, read-only; ${total === undefined ? `first ${shown}` : `${total}`} elements (${basis})`;
+    const per = Math.max(1, Math.floor(16 / width));
+    const rows: string[] = [];
+    for (let at = 0; at < values.length; at += per)
+      rows.push(
+        `${values.slice(at, at + per).join(', ')}${at + per < values.length || more ? ',' : ''}`,
+      );
+    const length = total === undefined ? '' : String(total);
+    if (this.language === 'c-like')
+      return {
+        lines: [
+          `/* ${note} */`,
+          `static const uint${table.bits}_t ${name}[${length}] = {`,
+          ...rows.map((row) => `  ${row}`),
+          ...(more ? [`  /* ... ${more} */`] : []),
+          '};',
+        ],
+      };
+    const open = `${name} = (`;
+    return {
+      lines: [
+        `# ${note}`,
+        ...(more
+          ? [
+              `${name} = memory_view(0x${hex}, "uint${table.bits}_t", False)`,
+              `# first ${shown} elements: ${values.join(', ')}; ${more}`,
+            ]
+          : [open, ...rows.map((row) => `    ${row}`), ')']),
+      ],
+    };
   }
 
   /** Source-view memory access: `*p` through a declared scalar pointer of the
@@ -7042,6 +7253,7 @@ export class Renderer {
       return delta;
     };
     this.declareGlobals(globalsAt, insert);
+    this.declareFunctionValues(globalsAt, insert);
     if (this.structureSlot) insert(this.structureSlot.at, this.structureLines());
     let support = supportAt;
     if (this.ellipsisUsed) {

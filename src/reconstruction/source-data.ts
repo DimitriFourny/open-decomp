@@ -152,23 +152,17 @@ export function projectSourceConstants(
     context,
     addresses.length ? addresses[0]!.address.image_id : undefined,
   );
+  // Read-only image bytes cannot be changed by a call or a store through an
+  // unknown address (that store would fault), so only a store to a constant
+  // address that overlaps the bytes read keeps the load.
   const writes: { address: bigint; size: bigint }[] = [];
   for (const block of blocks.values())
     for (const node of block.statements) {
       context.checkpoint(1);
-      if (
-        node.kind === 'call' ||
-        (node.kind === 'unknown_effect' &&
-          ((block.control.kind !== 'unknown' && block.control.kind !== 'trap') ||
-            block.statements.some((item) => item.kind === 'load')))
-      )
-        return hidden;
-      if (node.kind === 'store') {
-        const address = constant(node.address);
-        if (address !== undefined)
-          writes.push({ address, size: BigInt(Math.ceil(bitWidth(node.value.type) / 8)) });
-        else return hidden;
-      }
+      if (node.kind !== 'store') continue;
+      const address = constant(node.address);
+      if (address !== undefined)
+        writes.push({ address, size: BigInt(Math.ceil(bitWidth(node.value.type) / 8)) });
     }
   for (const block of blocks.values())
     for (const node of block.statements) {

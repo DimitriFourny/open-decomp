@@ -1,5 +1,6 @@
 import type { OperationContext } from '../core/index.js';
 import { bitWidth, type Instruction, type Value } from '../ir/index.js';
+import type { BlockRegion, ControlArm } from '../presentation/index.js';
 import type { Reconstruction } from '../reconstruction/model.js';
 import type { SourceAddress } from '../reconstruction/source-model.js';
 import { sourceConstantValues, sourceDataValues } from '../reconstruction/source-data.js';
@@ -10,6 +11,10 @@ export interface IndexedDataAccess {
   readonly stride: bigint;
   readonly offset: bigint;
   readonly bits: number;
+  /** Greatest element index the access reaches from the object base, counted in
+   * elements: `offset + stride * (greatest value of index)`. The index's width,
+   * masks and the comparisons dominating the access bound it. */
+  readonly last: bigint;
 }
 
 /** Match only exact, nonwrapping integer address arithmetic. The declaration is
@@ -56,7 +61,100 @@ export function indexedDataAccesses(
     limits.set(value.id, limit);
     return limit;
   };
-  const candidate = (node: Extract<Instruction, { kind: 'load' }>): void => {
+  // Unsigned upper bounds on values from the comparisons that dominate a block:
+  // an edge into a block whose only predecessor is the branching block holds in
+  // every block that block dominates.
+  const predecessors = new Map<string, number>();
+  const arms = (block: BlockRegion): readonly ControlArm[] =>
+    block.control.kind === 'jump'
+      ? [{ transfer: block.control.transfer }]
+      : block.control.kind === 'if'
+        ? [block.control.when_true, block.control.when_false]
+        : block.control.kind === 'switch'
+          ? [...block.control.cases.map((item) => item.arm), block.control.otherwise]
+          : [];
+  for (const block of program.blocks.values())
+    for (const arm of arms(block))
+      predecessors.set(arm.transfer.target, (predecessors.get(arm.transfer.target) ?? 0) + 1);
+  const guards = new Map<string, ReadonlyMap<string, bigint>>();
+  const guardsAt = (id: string, depth = 0): ReadonlyMap<string, bigint> => {
+    const known = guards.get(id);
+    if (known) return known;
+    context.checkpoint(1);
+    const block = program.blocks.get(id),
+      parent = block?.dominator ? program.blocks.get(block.dominator) : undefined;
+    let facts: ReadonlyMap<string, bigint> = new Map();
+    if (block && parent && depth < 256) {
+      facts = guardsAt(parent.id, depth + 1);
+      const control = parent.control;
+      if (control.kind === 'if' && predecessors.get(id) === 1) {
+        const through = [control.when_true, control.when_false].filter(
+          (arm) => arm.transfer.target === id,
+        );
+        const condition = program.expressions.get(control.condition.id);
+        if (through.length === 1 && condition?.kind === 'compare') {
+          const taken = through[0] === control.when_true;
+          const left = constant(condition.left),
+            right = constant(condition.right);
+          // Normalize to `value op bound` with the constant on the right.
+          const swap = {
+            ult: 'ugt',
+            ule: 'uge',
+            ugt: 'ult',
+            uge: 'ule',
+            eq: 'eq',
+            ne: 'ne',
+          } as const;
+          const subject = right !== undefined ? condition.left : condition.right,
+            bound = right ?? left,
+            op =
+              right !== undefined
+                ? condition.op
+                : condition.op in swap
+                  ? swap[condition.op as keyof typeof swap]
+                  : undefined;
+          const flip = {
+            ult: 'uge',
+            ule: 'ugt',
+            ugt: 'ule',
+            uge: 'ult',
+            eq: 'ne',
+            ne: 'eq',
+          } as const;
+          const effective =
+            op && op in flip ? (taken ? op : flip[op as keyof typeof flip]) : undefined;
+          let limit: bigint | undefined;
+          if (bound !== undefined && subject.type.kind === 'integer')
+            if (effective === 'ult' && bound > 0n) limit = bound - 1n;
+            else if (effective === 'ule' || effective === 'eq') limit = bound;
+          if (limit !== undefined) {
+            const next = new Map(facts);
+            const previous = next.get(subject.id);
+            next.set(subject.id, previous === undefined || limit < previous ? limit : previous);
+            facts = next;
+          }
+        }
+      }
+    }
+    guards.set(id, facts);
+    return facts;
+  };
+  /** Greatest value the guards bound `value` to, through zero extensions. */
+  const guarded = (value: Value, block: string): bigint | undefined => {
+    const facts = guardsAt(block);
+    let best: bigint | undefined;
+    const seen = new Set<string>();
+    while (!seen.has(value.id)) {
+      seen.add(value.id);
+      const fact = facts.get(value.id);
+      if (fact !== undefined && (best === undefined || fact < best)) best = fact;
+      const expression = program.expressions.get(value.id);
+      if (expression?.kind !== 'cast' || expression.op !== 'zero_extend') break;
+      value = expression.value;
+    }
+    return best;
+  };
+  const candidate = (node: Extract<Instruction, { kind: 'load' }>, block: string): void => {
     const bits = bitWidth(node.result.type);
     if (
       node.result.type.kind !== 'integer' ||
@@ -99,8 +197,11 @@ export function indexedDataAccesses(
       scale = scaled.op === 'shl' ? 1n << amount : amount;
       index = operand;
     }
+    const widest = index;
     index = narrow(index);
-    const limit = maximum(index);
+    let limit = maximum(index);
+    const guard = guarded(widest, block);
+    if (guard !== undefined && guard < limit) limit = guard;
     const size = BigInt(bits / 8),
       object = base.object;
     if (
@@ -118,6 +219,7 @@ export function indexedDataAccesses(
       stride: scale / size,
       offset: object.offset / size,
       bits,
+      last: object.offset / size + (limit * scale) / size,
     });
   };
   for (const block of program.blocks.values())
@@ -128,7 +230,7 @@ export function indexedDataAccesses(
         program.retained.has(node.id) &&
         !program.source?.locals.has(node.id)
       )
-        candidate(node);
+        candidate(node, block.id);
     }
   return result;
 }
