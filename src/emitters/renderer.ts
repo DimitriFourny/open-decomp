@@ -905,6 +905,8 @@ export class Renderer {
           : this.printer.reduce(type.bits, printed);
       const step = assigned && this.pointerStep(id!, assigned, type.bits);
       if (step) return step;
+      if (printed.pointer?.type === this.sourceType(id!))
+        return { text: printed.pointer.text, precedence: PRIMARY, ctype: null };
       // Integer-to-pointer conversion of the exact address bits; a narrower
       // integer goes through uintptr_t (no implicit widening warning).
       const address =
@@ -1298,13 +1300,15 @@ export class Renderer {
         this.writer.fail('Reconstructed expression expansion exceeds its budget');
       this.expanding.add(value.id);
       const storage = this.storage(load);
-      if (this.language === 'c-like' && (this.slotType(load.id) || this.memberPointers.has(load.id))) {
+      const member = this.memberPointers.get(load.id);
+      if (this.language === 'c-like' && (this.slotType(load.id) || member)) {
         // A typed pointer slot read in integer context yields its address bits.
         this.expanding.delete(value.id);
         return {
           text: `(uintptr_t)${storage}`,
           precedence: UNARY,
           ctype: { bits: bitWidth(value.type), signed: false },
+          ...(member ? { pointer: { text: storage, type: this.sourceType(member) } } : {}),
         };
       }
       if (this.sourceView && this.program.source?.float_accesses?.has(load.id)) {

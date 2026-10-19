@@ -61,6 +61,8 @@ export interface ImageTypeClass {
   readonly state: 'complete' | 'bounded';
   /** Classes a flow connected to this one whose layouts overlap incompatibly. */
   readonly conflicts: readonly string[];
+  /** No flow or holder identifies this class: one function's private view. */
+  readonly local: boolean;
 }
 
 export interface ImageTypeSolution {
@@ -306,6 +308,7 @@ export function solveImageTypes(
     members: string[];
     bounded: boolean;
     name?: string;
+    local?: boolean;
   }
   const classes: Pending[] = [];
   for (const [root, members] of groups)
@@ -362,21 +365,23 @@ export function solveImageTypes(
       const object = byKey.get(member)!;
       for (const { anchor, own } of object.anchors) {
         budget.charge();
-        // Arguments/results are named after the callee that receives the value.
-        if (anchor.kind !== 'stack' && !own && !confirmed.has(imageAnchorKey(anchor))) continue;
+        // Arguments/results name a class only through the callee's own view
+        // in it: a caller's use may have been refused as a conflict.
+        if (anchor.kind !== 'stack' && !own) continue;
         const fn = functionName(anchor.function_id),
           order = functionOrder(anchor.function_id);
+        // Interface roles name a type before a caller's stack slot does.
         const candidate: Candidate =
           anchor.kind === 'stack'
             ? {
-                rank: 0,
+                rank: 2,
                 order,
                 tie: `${anchor.offset}`,
                 name: `${fn}_local_${(anchor.offset < 0n ? -anchor.offset : anchor.offset).toString(16)}`,
               }
             : anchor.kind === 'argument'
-              ? { rank: 1, order, tie: `${anchor.index}`, name: `${fn}_arg${anchor.index}` }
-              : { rank: 2, order, tie: '', name: `${fn}_ret` };
+              ? { rank: 0, order, tie: `${anchor.index}`, name: `${fn}_arg${anchor.index}` }
+              : { rank: 1, order, tie: '', name: `${fn}_ret` };
         if (better(candidate, best)) best = candidate;
       }
     }
@@ -415,6 +420,7 @@ export function solveImageTypes(
     })[0]!;
     const object = byKey.get(first)!;
     item.name = `${functionName(object.function_id)}_obj${ordinals.get(object.key)}`;
+    item.local = item.members.length === 1;
   }
   const result: ImageTypeClass[] = [];
   const class_of = new Map<string, string>();
@@ -434,6 +440,7 @@ export function solveImageTypes(
       })),
       state: item.bounded ? 'bounded' : 'complete',
       conflicts: [...(conflicts.get(item.id) ?? [])].sort(),
+      local: item.local === true,
     });
   }
   // A bounded member set may differ by exploration root: its name carries a

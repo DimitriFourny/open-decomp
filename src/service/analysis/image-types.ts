@@ -753,6 +753,8 @@ export function applyImageTypes(
   }
   for (const [class_id, type_id] of typeIds) {
     const item = classes.get(class_id)!;
+    // A private single view keeps its layout-digest name, shared by equal layouts.
+    if (item.local) continue;
     bindings.push({
       type_id,
       name: item.name,
