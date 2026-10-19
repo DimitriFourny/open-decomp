@@ -2556,7 +2556,7 @@ export class Renderer {
         lines.push(`# ${name}: ${where}`);
         lines.push(
           global.import
-            ? `${name} = import_view(${q(global.import.library ?? '')}, ${q(global.import.name)}, "${type}")`
+            ? `${name} = import_view(${JSON.stringify(global.import.library ?? '')}, ${JSON.stringify(global.import.name)}, "${type}")`
             : `${name} = memory_view(0x${global.address.value.toString(16)}, "${type}", ${global.object.mutable ? 'True' : 'False'})`,
         );
         this.writer.helper(
