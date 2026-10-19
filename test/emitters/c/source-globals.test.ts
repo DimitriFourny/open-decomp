@@ -57,7 +57,7 @@ for (const language of ['c-like', 'python-like'] as const) {
     const text = output.emission.text;
     assert.doesNotMatch(text, /data_address/);
     if (language === 'c-like') {
-      assert.match(text, /\/\* __stderrp: import ___stderrp from \/usr\/lib\/libSystem\.B\.dylib, bound at slot VA 0x2010 \*\/\nextern uint64_t __stderrp;\n/);
+      assert.match(text, /extern uint64_t __stderrp; \/\* import ___stderrp from \/usr\/lib\/libSystem\.B\.dylib, slot 0x2010 \*\//);
       assert.match(text, /return __stderrp;/);
     } else {
       assert.match(text, /__stderrp = import_view\("\/usr\/lib\/libSystem\.B\.dylib", "___stderrp", "uint64_t"\)/);
@@ -137,7 +137,7 @@ for (const language of ['c-like', 'python-like'] as const) {
     );
     assert.doesNotMatch(output.emission.text, /data_address/);
     if (language === 'c-like') {
-      assert.match(output.emission.text, /\/\* counters: image VA 0x3000; byte extent unknown \*\/\nextern uint32_t counters;\n/);
+      assert.match(output.emission.text, /extern uint32_t counters; \/\* VA 0x3000 \*\//);
       assert.match(output.emission.text, /return counters;/);
     } else assert.match(output.emission.text, /counters = memory_view\(0x3000, "uint32_t", True\)/);
     const result = execute(output.emission, new Map(), memoryOf([1, 2, 3, 4, 5, 6, 7, 8]));

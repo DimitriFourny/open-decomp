@@ -248,14 +248,14 @@ class Parser {
   constructor(text: string) {
     this.python = /^def /m.test(text);
     const declarations = this.python
-      ? /^(\w+) = memory_view\((0x[\da-f]+), "uint(\d+)_t", (?:True|False)\)$/gm
-      : /\/\* (\w+): image VA (0x[\da-f]+); byte extent (?:unknown|\d+)(?:; [a-z ]+)? \*\/\nextern (?:const )?uint(\d+)_t \1(?:\[\])?;/g;
+      ? /^(\w+) = memory_view\((0x[\da-f]+), "uint(\d+)_t", (?:True|False)\)(?:  # .*)?$/gm
+      : /(?:\/\* (\w+): image VA (0x[\da-f]+); byte extent (?:unknown|\d+) \*\/\nextern (?:const )?uint(\d+)_t \1(?:\[\])?;|extern (?:const )?uint(\d+)_t (\w+)(?:\[\])?; \/\* VA (0x[\da-f]+)(?:, \d+ bytes)?(?:, [a-z ]+)? \*\/)/g;
     for (const match of text.matchAll(declarations)) {
-      const name = match[1]!,
-        address = BigInt(match[2]!),
-        bits = Number(match[3]);
+      const name = (match[1] ?? match[5])!,
+        address = BigInt((match[2] ?? match[6])!),
+        bits = Number((match[3] ?? match[4])!);
       this.tables.set(name, { address, bits });
-      if (!this.python && !match[0].endsWith('[];')) this.scalars.add(name);
+      if (!this.python && !match[0].includes('[];')) this.scalars.add(name);
       this.symbols.set(name, { kind: 'pointer', to: { kind: 'int', bits, signed: false } });
       this.ops.push({
         kind: 'assign',

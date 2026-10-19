@@ -2546,18 +2546,18 @@ export class Renderer {
             : 'double'
           : `uint${global.element.bits}_t`,
         first = lines.length;
-      const q = (text: string): string => this.writer.quote(text);
       // Comment text only: names stay readable, a comment terminator cannot occur.
       const plain = (text: string): string => text.replace(/\*\//g, '* /');
       const where = global.import
-        ? `import ${plain(global.import.name)}${global.import.library === null ? '' : ` from ${plain(global.import.library)}`}, bound at slot VA 0x${global.address.value.toString(16)}`
-        : `image VA 0x${global.address.value.toString(16)}; byte extent ${global.object.byte_length ?? 'unknown'}${global.object.kind === 'bytes' ? '' : `; ${global.object.kind.replace('_', ' ')}`}`;
+        ? `import ${plain(global.import.name)}${global.import.library === null ? '' : ` from ${plain(global.import.library)}`}, slot 0x${global.address.value.toString(16)}`
+        : `VA 0x${global.address.value.toString(16)}${global.object.byte_length === null ? '' : `, ${global.object.byte_length} bytes`}${global.object.kind === 'bytes' ? '' : `, ${global.object.kind.replace('_', ' ')}`}`;
       if (python) {
-        lines.push(`# ${name}: ${where}`);
         lines.push(
-          global.import
-            ? `${name} = import_view(${JSON.stringify(global.import.library ?? '')}, ${JSON.stringify(global.import.name)}, "${type}")`
-            : `${name} = memory_view(0x${global.address.value.toString(16)}, "${type}", ${global.object.mutable ? 'True' : 'False'})`,
+          `${
+            global.import
+              ? `${name} = import_view(${JSON.stringify(global.import.library ?? '')}, ${JSON.stringify(global.import.name)}, "${type}")`
+              : `${name} = memory_view(0x${global.address.value.toString(16)}, "${type}", ${global.object.mutable ? 'True' : 'False'})`
+          }  # ${where}`,
         );
         this.writer.helper(
           global.import ? 'import_view' : 'memory_view',
@@ -2565,12 +2565,10 @@ export class Renderer {
             ? 'Storage view of an imported symbol: arguments are its library, native name and element type. Its address is bound by the dynamic linker, not an image VA; no allocation, extent or bound is implied, and element indices count elements.'
             : 'Image-backed storage view at the declared VA; no allocation or invented extent. Index units are the declared scalar width. Reads retain original byte order, aliasing and faults; no Python sequence bounds or negative-index rebasing.',
         );
-      } else {
-        lines.push(`/* ${name}: ${where} */`);
+      } else
         lines.push(
-          `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'};`,
+          `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'}; /* ${where} */`,
         );
-      }
       const length = lines.slice(first).reduce((sum, line) => sum + line.length + 1, 0);
       spans.push({ object: global, start: offset, end: offset + length });
       offset += length;
