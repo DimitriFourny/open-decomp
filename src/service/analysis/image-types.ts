@@ -376,13 +376,6 @@ function callerIndex(
   );
 }
 
-export interface ImageTypeExploration {
-  readonly objects: readonly ImageTypeObject[];
-  readonly solution: ImageTypeSolution;
-  readonly loaded: number;
-  readonly limited: boolean;
-}
-
 /** Load facts for one body: cached facts (replaying their reads) or a bounded
  * native preparation. Null when the body has no complete local recovery. */
 function loadFacts(
@@ -425,7 +418,7 @@ export function exploreImageTypes(
   rootObjects: readonly ImageTypeObject[],
   context: OperationContext,
   limits: { readonly max_functions: number } = { max_functions: MAX_NEIGHBOR_FUNCTIONS },
-): ImageTypeExploration {
+): ImageTypeSolution {
   const capacity = nativeCapacity(input, context);
   const units = nativeUnitCache(input, capacity, context);
   const contracts = nativeLibraryContracts(input);
@@ -480,8 +473,7 @@ export function exploreImageTypes(
   };
   index(root);
   for (const object of rootObjects) mark(object, 0);
-  let loads = 0,
-    limited = false;
+  let loads = 0;
   // Pointee views held by marked objects carry the layout further; their own
   // flows are followed to a small depth.
   const markPointees = (object: ImageTypeObject, depth: number): void => {
@@ -526,10 +518,7 @@ export function exploreImageTypes(
     if (list.length > MAX_CALLERS_PER_FLOW) complete = false;
     for (const caller of list.slice(0, MAX_CALLERS_PER_FLOW))
       if (!visit(caller, key, depth)) complete = false;
-    if (!complete) {
-      open.add(key);
-      if (loads >= limits.max_functions) limited = true;
-    }
+    if (!complete) open.add(key);
   }
   const objects = [...facts.values()].flatMap((item) => item?.objects ?? []);
   const unloaded = new Set<string>();
@@ -556,7 +545,7 @@ export function exploreImageTypes(
     max_work: context.remainingWork?.() ?? context.budget.work,
     checkpoint: (work) => context.checkpoint(work),
   });
-  const solution = solveImageTypes(
+  return solveImageTypes(
     objects,
     {
       functions: typeFunctions(
@@ -573,7 +562,6 @@ export function exploreImageTypes(
     },
     budget,
   );
-  return { objects, solution, loaded: loads, limited };
 }
 
 /** Image type records for the classes reachable from the selected function's
@@ -581,11 +569,10 @@ export function exploreImageTypes(
  * other functions are added only where they do not overlap a local member. */
 export function applyImageTypes(
   input: SourceFactsInput,
-  exploration: ImageTypeExploration,
+  solution: ImageTypeSolution,
   types: TypeRecoveryResult,
   context: OperationContext,
 ): TypeRecoveryResult {
-  const { solution } = exploration;
   const slice = input.image.selected_slice_id;
   const classes = new Map(solution.classes.map((item) => [item.id, item]));
   const records = [...types.types];
@@ -636,14 +623,18 @@ export function applyImageTypes(
     return id;
   };
   // Local shape types per class: their records receive the merged layout.
-  const localTypes = new Map<string, string>();
+  const localTypes = new Map<string, string[]>();
   for (const shape of types.shapes) {
     context.checkpoint(1);
     if (shape.base.kind !== 'value' || shape.base_offset !== 0n) continue;
     const class_id = solution.class_of.get(`${input.ir.id}|${shape.base.value_id}|0`);
-    if (class_id && !localTypes.has(class_id)) localTypes.set(class_id, shape.type_id);
+    if (class_id)
+      (localTypes.get(class_id) ?? localTypes.set(class_id, []).get(class_id)!).push(shape.type_id);
   }
-  const typeIds = new Map<string, string>(localTypes);
+  // Pointer members to a class refer to its first local view, if any.
+  const typeIds = new Map<string, string>(
+    [...localTypes].map(([class_id, list]) => [class_id, list[0]!]),
+  );
   const bindings: ImageTypeBinding[] = [];
   const pendingClasses: { class_id: string; depth: number }[] = [];
   const typeOf = (class_id: string, depth: number): string | null => {
@@ -748,22 +739,24 @@ export function applyImageTypes(
     fields.sort((a, b) => (a.offset < b.offset ? -1 : a.offset > b.offset ? 1 : 0));
     return { kind: 'structure', size: null, alignment: null, fields };
   };
-  for (const [class_id, type_id] of localTypes) {
-    const item = classes.get(class_id)!;
-    const at = records.findIndex((record) => record.id === type_id && record.source === 'analysis');
-    if (at < 0) continue;
-    const record = records[at]!;
-    const proofIds =
-      item.functions.length > 1
-        ? [...new Set([...record.evidence_ids, proof(item)])].sort()
-        : record.evidence_ids;
-    const definition =
-      item.functions.length > 1 && record.definition.kind === 'structure'
-        ? layout(item, record.definition, 0, proofIds)
-        : record.definition;
-    records[at] = { ...record, definition, evidence_ids: proofIds };
-    byId.set(type_id, records[at]!);
-  }
+  const declared: [string, string][] = [];
+  for (const [class_id, list] of localTypes)
+    for (const type_id of list) {
+      declared.push([class_id, type_id]);
+      const item = classes.get(class_id)!;
+      const at = records.findIndex(
+        (record) => record.id === type_id && record.source === 'analysis',
+      );
+      if (at < 0 || item.members.length < 2) continue;
+      const record = records[at]!;
+      const proofIds = [...new Set([...record.evidence_ids, proof(item)])].sort();
+      const definition =
+        record.definition.kind === 'structure'
+          ? layout(item, record.definition, 0, proofIds)
+          : record.definition;
+      records[at] = { ...record, definition, evidence_ids: proofIds };
+      byId.set(type_id, records[at]!);
+    }
   for (let cursor = 0; cursor < pendingClasses.length; cursor++) {
     const { class_id, depth } = pendingClasses[cursor]!;
     const item = classes.get(class_id)!;
@@ -778,7 +771,8 @@ export function applyImageTypes(
     records.push(record);
     byId.set(record.id, record);
   }
-  for (const [class_id, type_id] of typeIds) {
+  for (const { class_id } of pendingClasses) declared.push([class_id, typeIds.get(class_id)!]);
+  for (const [class_id, type_id] of declared) {
     const item = classes.get(class_id)!;
     // A private single view keeps its layout-digest name, shared by equal layouts.
     if (item.local) continue;
@@ -847,8 +841,8 @@ export function recoverImageTypes(
       bounded,
     );
     if (!rootObjects.length) return { types, diagnostics: [] };
-    const exploration = exploreImageTypes(input, rootObjects, bounded);
-    return { types: applyImageTypes(input, exploration, types, bounded), diagnostics: [] };
+    const solution = exploreImageTypes(input, rootObjects, bounded);
+    return { types: applyImageTypes(input, solution, types, bounded), diagnostics: [] };
   } catch (error) {
     const details = error instanceof OperationError ? error.diagnostic.details : undefined;
     if (
