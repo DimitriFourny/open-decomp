@@ -81,6 +81,7 @@ import { nativeContextKey } from './native-context.js';
 import { prepareNativeContext } from './native-context-prepare.js';
 import { formatArgumentSignatures } from './source-variadic.js';
 import { nativeLibraryTails } from './native-library-tails.js';
+import { objcSourceFacts } from './objc-messages.js';
 
 interface SourceFactsInput {
   readonly scope: AnalysisScope;
@@ -1481,7 +1482,20 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         scope.dependencies.replay(unit.dependency_readset);
     }
   }
-  const addresses = sourceAddresses(input);
+  const objc = objcSourceFacts({
+    ir: input.ir,
+    image,
+    revision,
+    functions: input.functions,
+    references: input.references,
+    abi,
+    context,
+    callees,
+    addresses: sourceAddresses(input),
+  });
+  for (const callee of objc.callees) sourceCallees.set(callee.call_id, callee);
+  evidence.push(...objc.evidence);
+  const addresses = objc.addresses;
   return {
     abi,
     callees: [...callees.values()],
@@ -1489,6 +1503,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     diagnostics,
     evidence,
     addresses,
+    ...(objc.facts ? { objc: objc.facts } : {}),
     memory_transfers,
     function_return_demands: [...functionReturnDemands.values()],
     ...(function_returns === undefined ? {} : { function_returns }),

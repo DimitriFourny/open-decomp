@@ -452,6 +452,28 @@ export async function executeDecompilation(
         }
         names.push(candidates.explicit ? { entity_id, name } : nativeName(entity_id, name));
       }
+      // A discovered tail transfer names its grounded target function (including
+      // an import stub root) exactly as a call to that target would be named.
+      const callIndex = nativeCallIndex(image, functions, references, context);
+      const tailReferences = callIndex.references_by_function.get(ir.id);
+      for (const block of ir.blocks) {
+        const control = block.terminator;
+        if (control.kind !== 'indirect' || !control.tail_call || named.has(control.id)) continue;
+        const targets = new Set<string>();
+        for (const instruction of control.provenance.instruction_ids)
+          for (const reference of tailReferences?.get(instruction) ?? []) {
+            context.checkpoint(1);
+            if (reference.kind !== 'tail_call' || reference.status !== 'established') continue;
+            if (!reference.to) continue;
+            for (const fn of callIndex.functions_by_address.get(
+              `${reference.to.image_id}:${reference.to.space}:${reference.to.value}`,
+            ) ?? []) {
+              const name = fn.display_name ?? fn.original_name;
+              if (name) targets.add(name);
+            }
+          }
+        if (targets.size === 1) names.push(nativeName(control.id, [...targets][0]!));
+      }
       const source = recoverSourceEvidence({
         scope,
         identity,

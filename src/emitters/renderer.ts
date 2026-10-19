@@ -36,7 +36,9 @@ import type { BoundaryProjection, Reconstruction } from '../reconstruction/model
 import { validateReconstruction, validateRenderedTransfers } from '../reconstruction/validate.js';
 import { foldSourceCondition } from '../reconstruction/source-conditions.js';
 import { constantRotationOperands } from '../reconstruction/source-shifts.js';
-import type { SourceAddress, SourceFormalType } from '../reconstruction/source-model.js';
+import type { ObjCMessage, SourceAddress, SourceFormalType } from '../reconstruction/source-model.js';
+import { selectorArity } from '../metadata/runtime/objc-types.js';
+import { objcMessageText, objcStringLiteral } from './objc.js';
 import { sourceDataValues } from '../reconstruction/source-data.js';
 import {
   sourceFpPresentation,
@@ -117,6 +119,8 @@ import { SourceStructs, type ObservedMember } from './source-structs.js';
 import { planFlagTests, type FlagTest } from './source-flags.js';
 
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
+/** Objective-C selector syntax: `name`, or keyword parts each ending in `:`. */
+const OBJC_SELECTOR = /^(?:[A-Za-z_$][\w$]*|(?:[A-Za-z_$][\w$]*)?:(?:(?:[A-Za-z_$][\w$]*)?:)*)$/;
 /** Element kind of a declared scalar pointer: integer or IEEE. */
 type PointeeKind = Extract<SourceFormalType, { kind: 'pointer' }>['pointee'];
 type Nest =
@@ -1519,6 +1523,8 @@ export class Renderer {
   private sourceAddress = (address: Address, literal = false): string => {
     const key = this.addressKey(address),
       item = this.sourceAddresses.get(key);
+    if (this.sourceView && item?.objc?.kind === 'string')
+      return this.guarded(objcStringLiteral(item.objc.text, this.language));
     if (
       literal &&
       item?.string !== undefined &&
@@ -1630,6 +1636,74 @@ export class Renderer {
     )
       return undefined;
     return this.sourceAddress(address, true);
+  }
+
+  /** Source view: `@"..."` for an exact pointer-width value addressing a
+   * compiler-emitted constant NSString object. */
+  private objcLiteral(value: Value): string | undefined {
+    if (!this.sourceView || value.type.kind !== 'integer' || value.type.bits !== 64) return undefined;
+    const address = this.sourceAddressOf(value),
+      objc = address && this.sourceAddresses.get(this.addressKey(address))?.objc;
+    return objc?.kind === 'string'
+      ? this.guarded(objcStringLiteral(objc.text, this.language))
+      : undefined;
+  }
+
+  private guarded(text: string): string {
+    this.writer.guard(Buffer.byteLength(text));
+    return text;
+  }
+
+  /** Source view: the selector/class reference slot an exact 64-bit load reads. */
+  private objcReference(
+    node: Extract<Instruction, { kind: 'load' | 'store' }>,
+  ): SourceAddress['objc'] | undefined {
+    if (!this.sourceView || node.kind !== 'load' || bitWidth(node.result.type) !== 64)
+      return undefined;
+    const address = this.sourceAddressOf(node.address),
+      objc = address && this.sourceAddresses.get(this.addressKey(address))?.objc;
+    return objc && objc.kind !== 'string' ? objc : undefined;
+  }
+
+  /** `@selector(name)` / `[Name class]` for a reference-slot load; a message
+   * receiver (and Python) spells an identifier-shaped class by its name. */
+  private objcReferenceText(
+    reference: NonNullable<SourceAddress['objc']>,
+    receiver = false,
+  ): string {
+    if (reference.kind === 'selector_ref')
+      return this.language === 'c-like' && OBJC_SELECTOR.test(reference.text)
+        ? `@selector(${reference.text})`
+        : this.call('selector', 'Objective-C selector read from its __objc_selrefs slot.', [
+            this.writer.quote(reference.text),
+          ]);
+    if (!/^[A-Za-z_$][\w$]*$/.test(reference.text))
+      return this.call('objc_class', 'Objective-C class read from its class-reference slot.', [
+        this.writer.quote(reference.text),
+      ]);
+    return receiver || this.language === 'python-like'
+      ? reference.text
+      : `[${reference.text} class]`;
+  }
+
+  /** Message form of a call whose projected arguments exactly match its
+   * resolved selector's keyword count (a known variadic tail may follow). */
+  private objcSend(
+    node: Extract<Instruction, { kind: 'call' }>,
+  ): { readonly message: ObjCMessage; readonly skip: number; readonly arity: number } | undefined {
+    const message = this.sourceView ? this.input.source?.objc?.messages.get(node.id) : undefined,
+      projection = message && this.program.calls.get(node.id);
+    if (!message || !projection || projection.kind === 'physical') return undefined;
+    if (!OBJC_SELECTOR.test(message.selector)) return undefined;
+    const skip = message.form === 'send' ? 2 : 1,
+      arity = selectorArity(message.selector),
+      complete = projection.kind === 'source' || projection.argument_list_complete === true;
+    if (
+      projection.arguments.length < skip + arity ||
+      (!message.variadic && (!complete || projection.arguments.length !== skip + arity))
+    )
+      return undefined;
+    return { message, skip, arity };
   }
 
   private sourceCallee(node: Extract<Instruction, { kind: 'call' }>): string {
@@ -2352,7 +2426,7 @@ export class Renderer {
     const declarations = new Map<string, { text: string; node: Instruction } | null>();
     for (const [id, projection] of this.program.calls) {
       const node = this.statements.get(id);
-      if (node?.kind !== 'call' || node.target.kind !== 'direct') continue;
+      if (node?.kind !== 'call' || node.target.kind !== 'direct' || this.objcSend(node)) continue;
       const name = this.sourceCallee(node);
       if (name === this.identifiers.get(this.input.function.id)?.identifier) continue;
       const signature = projection.signature?.signature;
@@ -2581,6 +2655,8 @@ export class Renderer {
               : `local${this.sourceLocal++}`),
         )
       );
+    const reference = this.objcReference(node);
+    if (reference) return this.objcReferenceText(reference);
     if (this.sourceView) return this.sourceStorage(node);
     let address = this.sourceAddressValue(node.address);
     const type = node.kind === 'load' ? node.result.type : node.value.type,
@@ -2624,7 +2700,8 @@ export class Renderer {
     operand = false,
   ): string {
     const projection = this.program.calls.get(node.id)!;
-    const literals: string[] = [];
+    const literals: string[] = [],
+      objcLiterals: string[] = [];
     const args = projection.arguments.map((value, index) => {
       this.context.checkpoint(1);
       const parameter = projection.signature?.signature.parameters[index];
@@ -2633,9 +2710,12 @@ export class Renderer {
       const pointee = pointer ? this.typeRecords.get(parameterType.to)?.definition : undefined;
       const bytePointer =
         pointee?.kind === 'void' || (pointee?.kind === 'integer' && pointee.bits === 8);
+      const objcLiteral = literalsAllowed ? this.objcLiteral(value) : undefined;
       const literal =
-        !literalsAllowed || (pointer && !bytePointer) ? undefined : this.sourceLiteral(value);
-      if (literal !== undefined) literals.push(value.id);
+        objcLiteral ??
+        (!literalsAllowed || (pointer && !bytePointer) ? undefined : this.sourceLiteral(value));
+      if (objcLiteral !== undefined) objcLiterals.push(value.id);
+      else if (literal !== undefined) literals.push(value.id);
       const text = pointer
         ? (literal ?? this.sourceAddressValue(value, !this.sourceView))
         : (literal ?? this.value(value));
@@ -2657,13 +2737,20 @@ export class Renderer {
       return text;
     });
     if (
-      literals.length &&
-      !this.localValidation.presentation(
-        'string_literal',
-        node.id,
-        'pointer-width constant call arguments addressing the exact start of an immutable NUL-terminated string with established encoding, printed as that string literal',
-        literals,
-      )
+      (literals.length &&
+        !this.localValidation.presentation(
+          'string_literal',
+          node.id,
+          'pointer-width constant call arguments addressing the exact start of an immutable NUL-terminated string with established encoding, printed as that string literal',
+          literals,
+        )) ||
+      (objcLiterals.length &&
+        !this.localValidation.presentation(
+          'objc_string_literal',
+          node.id,
+          'pointer-width constant call arguments addressing an exact __cfstring constant object (isa bound to ___CFConstantStringClassReference, explicit length), printed as that NSString literal',
+          objcLiterals,
+        ))
     )
       return this.sourceCall(node, depth, false, operand);
     if (this.sourceView) {
@@ -2689,12 +2776,26 @@ export class Renderer {
           [],
         ),
       );
-    let target = this.sourceCallee(node);
-    this.writer.helper(
-      target,
-      `${projection.kind === 'source' ? 'Established' : 'Inferred or incomplete'} source call. Original target: ${node.target.kind === 'direct' ? this.writer.quote(this.addressKey(node.target.address)) : 'indirect'}. Original memory effect: ${node.clobbers.memory}. Calls remain ordered; unused machine clobbers are not source results.`,
-    );
+    // Source view: a resolved selector prints the message instead of the dispatcher.
+    const candidate = this.objcSend(node);
+    const send =
+      candidate &&
+      this.localValidation.presentation(
+        'objc_message',
+        node.id,
+        `${candidate.message.form} call presented as an Objective-C message: receiver, statically resolved selector ${this.writer.quote(candidate.message.selector)} and one keyword per selector colon${candidate.message.variadic ? ', then the variadic actuals' : ''}; the dispatcher target and selector argument stay in this record`,
+        [node.id],
+      )
+        ? candidate
+        : undefined;
+    let target = send ? '' : this.sourceCallee(node);
+    if (!send)
+      this.writer.helper(
+        target,
+        `${projection.kind === 'source' ? 'Established' : 'Inferred or incomplete'} source call. Original target: ${node.target.kind === 'direct' ? this.writer.quote(this.addressKey(node.target.address)) : 'indirect'}. Original memory effect: ${node.clobbers.memory}. Calls remain ordered; unused machine clobbers are not source results.`,
+      );
     if (
+      !send &&
       this.sourceView &&
       node.target.kind === 'indirect' &&
       this.localValidation.presentation(
@@ -2711,7 +2812,26 @@ export class Renderer {
         depth,
         `last ${variadic} argument${variadic === 1 ? '' : 's'} observed in Darwin variadic outgoing stack slots (a lower bound; the source arity stays open)${projection.kind === 'physical' ? '; the register arguments before them are an observed, possibly incomplete prefix' : ''}`,
       );
-    const operation = `${target}(${this.writer.join(args)})`;
+    let operation: string;
+    if (send) {
+      const { message, skip, arity } = send,
+        receiver = projection.arguments[0]!,
+        load = this.inlined.get(receiver.id)?.node,
+        reference = load?.kind === 'load' ? this.objcReference(load) : undefined;
+      let receiverText =
+        reference?.kind === 'class_ref' ? this.objcReferenceText(reference, true) : args[0]!;
+      if (this.language === 'python-like' && !/^[A-Za-z_$][\w$.]*$/.test(receiverText))
+        receiverText = `(${receiverText})`;
+      operation = this.guarded(
+        objcMessageText(
+          this.language,
+          message,
+          receiverText,
+          args.slice(skip, skip + arity),
+          args.slice(skip + arity),
+        ),
+      );
+    } else operation = `${target}(${this.writer.join(args)})`;
     if (operand) return operation;
     const results = projection.results.filter((value) => this.program.live.has(value.id));
     const result = results.length === 1 ? results[0] : undefined;
