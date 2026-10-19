@@ -2063,6 +2063,30 @@ export class Renderer {
       : this.printer.primary(text, integerAddress);
   }
 
+  /** An address that adds a variable offset to the address of an immutable
+   * string literal (an inlined `strncmp(p, "create", 6)` indexing its keyword):
+   * the literal is shown at its position in the sum, `(uintptr_t)"create" + i`.
+   * The sum is the same modular address; this is a memory address operand, so
+   * the constant is a pointer and not an arithmetic integer. */
+  private stringBaseSum(value: Value): Printed | undefined {
+    if (!this.sourceView || !this.inline.has(value.id)) return undefined;
+    const expression = this.program.expressions.get(value.id);
+    if (expression?.kind !== 'integer' || expression.op !== 'add') return undefined;
+    for (const [base, other] of [
+      [expression.left, expression.right],
+      [expression.right, expression.left],
+    ] as const) {
+      if (this.constantOf(other) !== undefined) continue;
+      const literal = this.valueLiteral(base);
+      if (!literal) continue;
+      return this.printer.binary('+', literal, this.printer.reduce(64, this.printed(other)), {
+        bits: 64,
+        signed: false,
+      });
+    }
+    return undefined;
+  }
+
   /** Library-declared character parameter of a source call. Every library
    * declaration the signature rests on must agree. */
   private characterParameter(projection: BoundaryProjection, index: number): boolean {
@@ -3525,7 +3549,7 @@ export class Renderer {
       const member = this.memberAccess(node.address, bitWidth(type), node.id);
       if (member && this.permitUnaligned(node)) return member;
     }
-    let address = this.sourceAddressPrinted(node.address);
+    let address = this.stringBaseSum(node.address) ?? this.sourceAddressPrinted(node.address);
     // A constant address inside a declared global is that object's own pointer.
     const pointer = this.language === 'c-like' ? this.globalPointer(node.address) : undefined;
     if (pointer !== undefined) address = this.printer.primary(pointer, { bits: 64, signed: false });
