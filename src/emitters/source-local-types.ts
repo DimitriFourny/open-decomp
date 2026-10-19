@@ -1,4 +1,3 @@
-import { appendFileSync } from 'node:fs';
 import type { OperationContext } from '../core/index.js';
 import { bitWidth, type Expression, type Value } from '../ir/index.js';
 import type { BoundaryProjection, Reconstruction } from '../reconstruction/model.js';
@@ -423,8 +422,6 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
       uses.push(...row.uses);
       definitions.push(...row.definitions);
     }
-    if (process.env['OD_DEBUG_TYPES'])
-      appendFileSync('/tmp/od-printer/types.log', ['SET', members.join(','), JSON.stringify({facts, uses: uses.map((u) => u.kind + (u.kind === 'pointer' ? ':' + u.fact.spelling : '')), defs: definitions.map((d) => d.kind + (d.kind === 'pointer' ? ':' + d.fact.spelling : ''))})].join(' ') + '\n');
     // A member that already has a scalar declaration keeps the set integer.
     if (facts.includes('scalar')) continue;
     const known = facts.filter((fact): fact is PointerFact => fact !== 'scalar');
