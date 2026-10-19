@@ -824,4 +824,8 @@ node --import tsx scripts/bench/llm-tasks/run.ts build --repo CHECKOUT --out OUT
 node --import tsx scripts/bench/llm-tasks/run.ts score --packets OUT --answers ANSWERS_DIR
 ```
 
+**Variant.** `--variant sqlite3-dylib` runs the same SQLite questions over `libsqlite3.3.54.0.dylib` (SHA-256 `cbd373e6…0205`, same function bodies, addresses in `questions.json` `variants`); there is no archived Ghidra output for it, so Ghidra comparisons use the executable.
+
+**Dry run (packet sizes only, no answers; checkout `6e45fa01`, 42 questions, material bytes of the 21 distinct functions repeated per question).** Per config over all 42 questions on the executable: `mcp-default` 418,317 B (median 2,823, max 66,093; ~116.2 k est. tokens), `export-file` 379,149 B (median 2,147, max 65,375; ~105.3 k), `disasm` 546,271 B (median 2,622, max 105,307; ~151.7 k), `ghidra` 9,041 B over its 16 questions (median 607, max 892; ~2.5 k). On those same 16 questions: `mcp-default` 39,060 B, `export-file` 27,007 B, `disasm` 31,892 B, `ghidra` 9,041 B. Open Decomp states: 4 complete, 38 partial (no failures) for both MCP and export. The large packets are `main` (brotli, inlined option parser, 66 KB), `renameColumnFunc` and `sqlite3_incomplete`; the Ghidra archive covers only small functions, so size ratios from the common subset do not generalise to large functions. Accuracy is not measured yet.
+
 `build` writes `OUT/packets/<config>/<id>.md` and `OUT/manifest.json` (checkout git HEAD and dirty flag, dist build time, node/bun/clang versions, binary and question-file hashes, function addresses, per-packet material bytes/tokens/SHA-256, tool state and call provenance). Use a fresh `OUT` per build. Run it as one heavy process; the SQLite import dominates.
