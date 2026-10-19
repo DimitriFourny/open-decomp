@@ -299,13 +299,18 @@ class Parser {
   constructor(text: string) {
     this.python = /^def /m.test(text);
     this.voidResult = /^void [A-Za-z_]\w*\(/m.test(text) || /^def .*-> void:/m.test(text);
+    // The VA comment is omitted where the printed `data_<hex>` name already states the address.
     const declarations = this.python
-      ? /^(\w+) = memory_view\((0x[\da-f]+), "uint(\d+)_t", (?:True|False)\)(?:  # .*)?$/gm
-      : /(?:\/\* (\w+): image VA (0x[\da-f]+); byte extent (?:unknown|\d+) \*\/\nextern (?:const )?uint(\d+)_t \1(?:\[\])?;|extern (?:const )?uint(\d+)_t (\w+)(?:\[\])?; \/\* VA (0x[\da-f]+)(?:, \d+ bytes)?(?:, [a-z ]+)? \*\/)/g;
+      ? /^(?<name>\w+) = memory_view\((?<address>0x[\da-f]+), "uint(?<bits>\d+)_t", (?:True|False)\)(?:  # .*)?$/gm
+      : /extern (?:const )?uint(?<bits>\d+)_t (?<name>\w+)(?:\[\])?;(?: \/\* (?:VA (?<address>0x[\da-f]+))?[^*]*\*\/)?/g;
     for (const match of text.matchAll(declarations)) {
-      const name = (match[1] ?? match[5])!,
-        address = BigInt((match[2] ?? match[6])!),
-        bits = Number((match[3] ?? match[4])!);
+      const name = match.groups!['name']!,
+        width = match.groups!['bits']!,
+        stated = match.groups!['address'];
+      const spelled = /^data_([\da-f]+)$/.exec(name)?.[1];
+      assert.ok(stated !== undefined || spelled !== undefined, `No address for ${name}`);
+      const address = BigInt(stated ?? `0x${spelled}`),
+        bits = Number(width);
       this.tables.set(name, { address, bits });
       if (!this.python && !match[0].includes('[];')) this.scalars.add(name);
       this.symbols.set(name, { kind: 'pointer', to: { kind: 'int', bits, signed: false } });

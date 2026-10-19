@@ -118,15 +118,14 @@ for (const language of ['c-like', 'python-like'] as const) {
   });
 }
 
-test('an open argument list prints `...` in both dialects with its meaning stated once in the header', () => {
+test('an open argument list prints `...` in both dialects with a one-line legend', () => {
   for (const language of ['c-like', 'python-like'] as const) {
     const { emission } = emit(voidFunction(), { source }, language);
     assert.match(emission.text, /sub_4000\(\.\.\.\)/, emission.text);
     assert.doesNotMatch(emission.text, /unknown_argument/, emission.text);
-    const note = emission.text
-      .split('\n')
-      .filter((line) => line.includes('`...` as a call argument'));
+    const note = emission.text.split('\n').filter((line) => line.includes('...: more args'));
     assert.equal(note.length, 1, 'one header line states the meaning');
+    assert.ok(note[0]!.length < 40, note[0]);
     assert.ok(emission.helpers.some((helper) => helper.name === 'unknown_arguments'));
   }
   // A function with no open argument list has no such header line.

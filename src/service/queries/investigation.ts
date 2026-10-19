@@ -105,9 +105,9 @@ function tableIndex(scope: Scope, table: readonly string[], id: string): number 
   return table.indexOf(id);
 }
 
-/** Select only a published handle indexed under this original function. The cache
- * reader verifies the complete file hash, catalog, identity and proof closure.
- * No graph reconstruction, emitter dispatch or generated-text inference occurs. */
+/** Select only a published handle indexed under this original function; `artifact_id` is its full
+ * ID or a unique prefix. The cache reader verifies the complete file hash, catalog, identity and
+ * proof closure. No graph reconstruction, emitter dispatch or generated-text inference occurs. */
 export function investigationArtifact(
   scope: Scope,
   args: Args,
@@ -118,6 +118,7 @@ export function investigationArtifact(
     queryFailure('stale_revision', 'Investigation requires the current exact project revision');
   let cursor: string | undefined;
   let inspected = 0;
+  let artifact: SelectedInvestigationArtifact['artifact'] | undefined;
   do {
     scope.context.checkpoint(1);
     const page = scope.store.findAnalysisArtifacts({
@@ -126,34 +127,41 @@ export function investigationArtifact(
       limit: 100,
       ...(cursor ? { cursor } : {}),
     });
-    for (const artifact of page.items) {
+    for (const candidate of page.items) {
       scope.context.checkpoint(1);
       if (++inspected > 1000)
         queryFailure('resource_limit', 'Function artifact selection exceeds 1000 handles');
-      if (artifact.id !== args.artifact_id) continue;
-      const payload = readAnalysisArtifact(scope.store, artifact, scope.context);
-      const identity = payload.identity;
-      if (
-        identity.function_id !== args.function_id ||
-        identity.annotation_revision !== args.revision ||
-        identity.evidence_revision !== args.revision ||
-        identity.image_sha256 !== loaded.image.sha256 ||
-        identity.slice_id !== loaded.image.selected_slice_id ||
-        fingerprint(identity.target) !== fingerprint(loaded.image.target) ||
-        !acceptsAnalysisIdentity(identity)
-      )
+      if (!candidate.id.startsWith(args.artifact_id)) continue;
+      if (artifact)
         queryFailure(
           'invalid_input',
-          'Analysis artifact function, image, target, revision or component scope does not match',
+          'Artifact ID prefix matches several artifacts of this function; give more hex digits',
         );
-      return { artifact, payload };
+      artifact = candidate;
     }
     cursor = page.next_cursor ?? undefined;
   } while (cursor);
-  return queryFailure(
-    'not_found',
-    'Published artifact is absent from this exact function snapshot',
-  );
+  if (!artifact)
+    return queryFailure(
+      'not_found',
+      'Published artifact is absent from this exact function snapshot',
+    );
+  const payload = readAnalysisArtifact(scope.store, artifact, scope.context);
+  const identity = payload.identity;
+  if (
+    identity.function_id !== args.function_id ||
+    identity.annotation_revision !== args.revision ||
+    identity.evidence_revision !== args.revision ||
+    identity.image_sha256 !== loaded.image.sha256 ||
+    identity.slice_id !== loaded.image.selected_slice_id ||
+    fingerprint(identity.target) !== fingerprint(loaded.image.target) ||
+    !acceptsAnalysisIdentity(identity)
+  )
+    queryFailure(
+      'invalid_input',
+      'Analysis artifact function, image, target, revision or component scope does not match',
+    );
+  return { artifact, payload };
 }
 
 /** Review the requested original identity, never a rewritten display successor.

@@ -2695,13 +2695,14 @@ export class Renderer {
       if (!node) return null;
       this.memberPointers.set(node, member.typeId);
     }
+    const field = member.name ?? `f_${member.offset.toString(16)}`;
     const used = this.sourceStructs.name(pointer.to);
     const offsets = this.usedMembers.get(used) ?? new Set<bigint>();
     offsets.add(member.offset);
     this.usedMembers.set(used, offsets);
     let access = indexedStruct
-      ? `${baseText}[${this.value(index!)}].f_${member.offset.toString(16)}`
-      : `${baseText}->f_${member.offset.toString(16)}`;
+      ? `${baseText}[${this.value(index!)}].${field}`
+      : `${baseText}->${field}`;
     if (member.count !== undefined) {
       const displacement = (offset - member.offset) / BigInt(member.bits / 8);
       const subscript = index
@@ -2832,7 +2833,7 @@ export class Renderer {
                 : '__uint128_t'
               : this.sourceType(member.typeId);
         const array = member.count === undefined ? '' : `[${member.count ?? ''}]`;
-        parts.push(`${spelling} f_${member.offset.toString(16)}${array};`);
+        parts.push(`${spelling} ${member.name ?? `f_${member.offset.toString(16)}`}${array};`);
         packed ||= member.offset % BigInt(member.bits / 8) !== 0n;
         end = member.offset + member.size;
       }
@@ -2840,15 +2841,16 @@ export class Renderer {
       if (stride) {
         if (stride > end) parts.push(`uint8_t gap_${end.toString(16)}[${stride - end}];`);
         packed ||= members.some((member) => stride % BigInt(member.bits / 8) !== 0n);
-        lines.push(`/* observed access stride ${stride}; not an allocation extent */`);
+        lines.push(`/* access stride ${stride}, not size */`);
       }
       const image = this.sourceStructs.image(id);
+      const runtime = this.typeRecords.get(id)?.source === 'runtime';
       lines.push(
-        `/* members used here; size unknown; full layout in the types view${
-          image && image.functions > 1
-            ? `; merged from ${image.functions} functions${image.state === 'bounded' ? ' (flows partly explored)' : ''}`
-            : ''
-        }${image?.conflicts.length ? `; conflicts with ${image.conflicts.join(', ')}` : ''} */`,
+        runtime
+          ? '/* ObjC ivars at static class-metadata offsets; partial */'
+          : `/* partial${image && image.functions > 1 ? `; ${image.functions} fns` : ''}${
+              image?.conflicts.length ? `; conflicts with ${image.conflicts.join(', ')}` : ''
+            } */`,
         `struct ${name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
       );
     }
@@ -3086,16 +3088,15 @@ export class Renderer {
         )
       )
         continue;
-      if (!signature) {
+      if (!signature)
         this.localValidation.requireAbi(
           'call_declaration',
           [node.id],
           'The declaration describes the observed native call interface under the target ABI, not a proven authored prototype; unresolved trailing arguments remain explicit.',
         );
-        this.writer.comment(0, 'unknown prototype; observed call interface only');
-      }
       const start = this.writer.offset;
-      this.writer.line(0, text);
+      // An open argument list already prints `...`; a closed observed one is marked inferred.
+      this.writer.line(0, signature || text.includes('...') ? text : `${text} /* inferred */`);
       this.mapped(node, start, [], signature?.evidence_ids ?? []);
     }
   }
@@ -3149,18 +3150,25 @@ export class Renderer {
       const plain = (text: string): string => text.replace(/\*\//g, '* /');
       // Compact for readers: the library basename, plus the native name only when it is
       // not the printed name or its Mach-O `_`-prefixed form. Slot VA, binding records
-      // and the declaration's source stay in the mapped evidence.
+      // and the declaration's source stay in the mapped evidence. An image VA is stated only
+      // where the text does not already carry it (the printed name or a python memory_view).
       const native = global.import?.name;
+      const hex = global.address.value.toString(16);
       const where = global.import
         ? `import${native === name || native === `_${name}` ? '' : ` ${plain(native!)}`}${global.import.library === null ? '' : ` from ${plain(global.import.library.slice(global.import.library.lastIndexOf('/') + 1))}`}`
-        : `VA 0x${global.address.value.toString(16)}${global.object.byte_length === null ? '' : `, ${global.object.byte_length} bytes`}${global.object.kind === 'bytes' ? '' : `, ${global.object.kind.replace('_', ' ')}`}`;
+        : [
+            ...(python || name.split('_').includes(hex) ? [] : [`VA 0x${hex}`]),
+            ...(global.object.byte_length === null ? [] : [`${global.object.byte_length} bytes`]),
+            ...(global.object.kind === 'bytes' ? [] : [global.object.kind.replace('_', ' ')]),
+          ].join(', ');
+      const comment = where === '' ? '' : python ? `  # ${where}` : ` /* ${where} */`;
       if (python) {
         lines.push(
           `${
             global.import
               ? `${name} = import_view(${JSON.stringify(global.import.library ?? '')}, ${JSON.stringify(global.import.name)}, "${type}")`
-              : `${name} = memory_view(0x${global.address.value.toString(16)}, "${type}", ${global.object.mutable ? 'True' : 'False'})`
-          }  # ${where}`,
+              : `${name} = memory_view(0x${hex}, "${type}", ${global.object.mutable ? 'True' : 'False'})`
+          }${comment}`,
         );
         this.writer.helper(
           global.import ? 'import_view' : 'memory_view',
@@ -3171,8 +3179,8 @@ export class Renderer {
       } else
         lines.push(
           declared
-            ? `extern ${type}${declared.constant ? ' const' : ''} ${name}; /* ${where} */`
-            : `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'}; /* ${where} */`,
+            ? `extern ${type}${declared.constant ? ' const' : ''} ${name};${comment}`
+            : `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'};${comment}`,
         );
       const length = lines.slice(first).reduce((sum, line) => sum + line.length + 1, 0);
       spans.push({ object: global, start: offset, end: offset + length });
@@ -3222,19 +3230,17 @@ export class Renderer {
       if (declared.has(key)) continue;
       declared.add(key);
       const start = this.writer.offset;
-      this.writer.comment(
-        0,
-        `${name}: image VA 0x${object.address.value.toString(16)}; byte extent ${object.byte_length ?? 'unknown'}`,
-      );
+      const hex = object.address.value.toString(16);
+      const extent = object.byte_length === null ? 'extent unknown' : `${object.byte_length} bytes`;
       if (this.language === 'c-like')
         this.writer.line(
           0,
-          `extern ${object.mutable ? '' : 'const '}uint${table.bits}_t ${name}[];`,
+          `extern ${object.mutable ? '' : 'const '}uint${table.bits}_t ${name}[]; /* VA 0x${hex}, ${extent} */`,
         );
       else
         this.writer.line(
           0,
-          `${name} = memory_view(0x${object.address.value.toString(16)}, "uint${table.bits}_t", ${object.mutable ? 'True' : 'False'})`,
+          `${name} = memory_view(0x${hex}, "uint${table.bits}_t", ${object.mutable ? 'True' : 'False'})  # ${extent}`,
         );
       this.writer.helper(
         this.language === 'c-like' ? name : 'memory_view',
@@ -3476,6 +3482,17 @@ export class Renderer {
           : objcCandidate !== undefined)
       )
         return this.local(operandValue);
+      // A message operand read from a declared pointer member or typed global is
+      // that lvalue itself: message syntax needs no integer conversion.
+      const loaded =
+        objcCandidate && literal === undefined && this.sourceView
+          ? this.inlined.get(operandValue.id)?.node
+          : undefined;
+      if (loaded?.kind === 'load' && this.inline.has(operandValue.id)) {
+        const storage = this.storage(loaded);
+        if (this.memberPointers.has(loaded.id) || this.typedPointerGlobal(loaded.id))
+          return storage;
+      }
       const printed = pointer
         ? literal === undefined
           ? this.sourceAddressPrinted(value, !this.sourceView)
@@ -3582,12 +3599,6 @@ export class Renderer {
       )
     )
       target = this.functionPointer(node, projection, target, open);
-    const variadic = projection.variadic_stack_arguments ?? 0;
-    if (variadic)
-      this.writer.comment(
-        depth,
-        `last ${variadic} argument${variadic === 1 ? '' : 's'} observed in Darwin variadic outgoing stack slots (a lower bound; the source arity stays open)${projection.kind === 'physical' ? '; the register arguments before them are an observed, possibly incomplete prefix' : ''}`,
-      );
     let operation: string;
     if (send) {
       const { message, skip, arity } = send;
@@ -3613,6 +3624,14 @@ export class Renderer {
     return results.length
       ? `${results.length === 1 ? this.local(results[0]!) : `(${this.writer.join(results.map((value) => this.local(value)))})`} = ${operation}`
       : operation;
+  }
+
+  /** A tail transfer returns its callee's result; a proven-void callee is a
+   * call statement followed by a plain return. */
+  private tailStatement(depth: number, call: string, empty: boolean): void {
+    if (!empty) return this.writer.statement(depth, `return ${call}`);
+    this.writer.statement(depth, call);
+    this.writer.statement(depth, 'return');
   }
 
   /** Message receiver text: a class-reference load (through same-width bitcasts,
@@ -6337,6 +6356,17 @@ export class Renderer {
           let values: string[];
           try {
             values = this.writer.list(projection.results, (value) => {
+              const nsString = this.objcLiteral(value);
+              if (
+                nsString !== undefined &&
+                this.localValidation.presentation(
+                  'objc_string_literal',
+                  control.id,
+                  'pointer-width constant result addressing an exact __cfstring constant object, printed as that NSString literal',
+                  [value.id],
+                )
+              )
+                return nsString;
               const scalar = this.sourceView && this.program.source?.return_scalar;
               if (scalar) return this.scalarReturn(value, scalar.bits, scalar.signed).text;
               if (this.program.source?.return_pointer && !this.program.source.return_source_type)
@@ -6418,21 +6448,38 @@ export class Renderer {
           ) {
             const printed = tail.boundary.arguments.map((value) => {
               ids.push(value.id);
+              // Message syntax has no C conversion: a declared pointer local
+              // (possibly through inline same-width bitcasts) prints as itself.
+              let operand = value;
+              for (let step = 0; step < 4 && this.inline.has(operand.id); step++) {
+                const alias = this.program.expressions.get(operand.id);
+                if (
+                  alias?.kind !== 'cast' ||
+                  alias.op !== 'bitcast' ||
+                  bitWidth(alias.value.type) !== bitWidth(operand.type)
+                )
+                  break;
+                operand = alias.value;
+              }
+              if (
+                this.language === 'c-like' &&
+                !this.inline.has(operand.id) &&
+                this.declaredSpelling(operand).endsWith('*')
+              )
+                return this.local(operand);
               return this.objcLiteral(value) ?? this.valueLiteral(value)?.text ?? this.value(value);
             });
             ids.push(control.target.id);
-            this.writer.statement(
-              depth,
-              `return ${this.guarded(
-                objcMessageText(
-                  this.language,
-                  message,
-                  this.objcReceiver(tail.boundary.arguments[0]!, printed[0]!),
-                  printed.slice(skip),
-                  [],
-                ),
-              )}`,
+            const sent = this.guarded(
+              objcMessageText(
+                this.language,
+                message,
+                this.objcReceiver(tail.boundary.arguments[0]!, printed[0]!),
+                printed.slice(skip),
+                [],
+              ),
             );
+            this.tailStatement(depth, sent, tail.result_void === true);
             break;
           }
           const key = this.addressKey(tail.target),
@@ -6467,7 +6514,11 @@ export class Renderer {
             `Native tail transfer to ${this.writer.quote(key)} using observed ${this.input.source!.abi.id} storage. Preserve unknown target effects and forward its actual results. An absent observed result layout is unknown, not void.`,
           );
           ids.push(control.target.id);
-          this.writer.statement(depth, `return ${name}(${this.writer.join(arguments_)})`);
+          this.tailStatement(
+            depth,
+            `${name}(${this.writer.join(arguments_)})`,
+            tail.result_void === true,
+          );
           break;
         }
         const args: string[] = [];
@@ -6678,7 +6729,7 @@ export class Renderer {
     w.comment(
       0,
       this.program.source
-        ? `${this.language === 'c-like' ? 'C-like' : 'Python-like'} pseudocode; ${this.program.source.inferred ? 'inferred ABI interface' : 'recovered source interface'}.`
+        ? `${this.language === 'c-like' ? 'C-like' : 'Python-like'}${this.program.source.inferred ? '' : ', source interface'}`
         : `${this.language === 'c-like' ? 'C-like' : 'Python-like'} reconstruction; explicit widths and ordered memory, not original source.`,
     );
     // Source view: the ABI scratch note is inserted after rendering, and only
@@ -6831,11 +6882,19 @@ export class Renderer {
       this.declaredTypes.set(value.id, type);
       parameters.push({ value, type, name });
     }
-    let hasTailCall = false;
+    // A tail into a proven-void callee yields no result: with no returned value
+    // on any other path the function is void, not of unknown result.
+    let hasTailCall = false,
+      voidTail = false;
     for (const block of this.program.blocks.values()) {
       this.context.checkpoint(1);
-      if (block.control.kind === 'indirect' && block.control.tail_call) hasTailCall = true;
+      if (block.control.kind !== 'indirect' || !block.control.tail_call) continue;
+      if (this.program.tails.get(block.control.id)?.result_void) voidTail = true;
+      else hasTailCall = true;
     }
+    if (voidTail)
+      for (const projection of this.program.returns.values())
+        if (projection.results.length || projection.kind === 'physical') hasTailCall = true;
     let returnType = signature
       ? this.sourceType(signature.signature.return_type)
       : this.program.source
@@ -7045,8 +7104,7 @@ export class Renderer {
     if (this.structureSlot) insert(this.structureSlot.at, this.structureLines());
     let support = supportAt;
     if (this.ellipsisUsed) {
-      const comment =
-        '`...` as a call argument: the argument list is open (arguments after those shown are not established); not zero arguments, not a purity claim.';
+      const comment = '...: more args possible';
       const delta = insert(scratchAt, [
         this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
       ]);
@@ -7063,7 +7121,7 @@ export class Renderer {
           [...this.program.returns.keys()].slice(0, 64),
         )
       ) {
-        const comment = `ABI scratch at return: ${[...scratch].join(', ')}; exact slices and values retained in exit metadata, not additional results.`;
+        const comment = `ABI scratch at return, not results: ${[...scratch].join(', ')}`;
         const delta = insert(scratchAt, [
           this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
         ]);

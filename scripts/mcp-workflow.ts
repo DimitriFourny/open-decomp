@@ -706,7 +706,11 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
           const body = textFirst.content[0];
           assert.ok(body?.type === 'text');
           assert.ok(body.text.includes(baselineData.emission.text), selector);
-          assert.ok(body.text.includes(handle.id), 'the header names the artifact');
+          assert.ok(
+            body.text.includes(handle.id.slice(0, 'artifact_'.length + 12)),
+            'the header names the artifact by its short handle',
+          );
+          assert.ok(!body.text.includes(handle.id), 'the full artifact ID stays in the envelope');
           assert.ok(Buffer.byteLength(body.text) < baselineData.emission.text.length + 4096);
         }
         const ambiguous = await client.callTool({

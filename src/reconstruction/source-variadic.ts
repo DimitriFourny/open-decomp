@@ -219,7 +219,6 @@ export function planVariadicStackArguments(
         ...projection,
         arguments: [...projection.arguments, ...values],
         argument_list_complete: false,
-        variadic_stack_arguments: values.length,
       });
     }
   return consumed;
