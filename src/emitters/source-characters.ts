@@ -79,7 +79,7 @@ export function characterEvidence(
       incoming.set(copy.destination.id, sources);
     }
   const known = (value: Value): boolean => pointers.has(value.id);
-  for (let changed = true; changed; ) {
+  for (let changed = true; changed;) {
     changed = false;
     const add = (id: string): void => {
       if (pointers.has(id)) return;
@@ -125,7 +125,7 @@ export function characterEvidence(
       characters.add(load.result.id);
   }
   // A code widened (or joined with zero bytes) is still that code.
-  for (let changed = true; changed; ) {
+  for (let changed = true; changed;) {
     changed = false;
     for (const [id, expression] of program.expressions) {
       context.checkpoint(1);

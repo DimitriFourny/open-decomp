@@ -676,7 +676,11 @@ function sourceAddresses(input: SourceFactsInput): readonly SourceAddress[] {
       context.checkpoint(1);
       if (fact.value.kind === 'address')
         candidates.set(addressKey(fact.value.address), fact.value.address);
-      else if (fact.value.kind === 'constant' && fact.value.bits >= 0n && fact.value.bits < U64_LIMIT) {
+      else if (
+        fact.value.kind === 'constant' &&
+        fact.value.bits >= 0n &&
+        fact.value.bits < U64_LIMIT
+      ) {
         const address: Address = { image_id: image.id, space: 'va', value: fact.value.bits };
         candidates.set(addressKey(address), address);
       }

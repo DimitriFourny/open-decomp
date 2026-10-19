@@ -1560,6 +1560,7 @@ export class Renderer {
   private addressKey(address: Address): string {
     return `${address.image_id}:${address.space}:${address.value}`;
   }
+
   /** String literal text of an item; a string past STRING_LITERAL_LIMIT shows
    * its prefix and an explicit marker keeping the address and omitted length. */
   private stringLiteralText(item: SourceAddress): string {
@@ -1698,20 +1699,13 @@ export class Renderer {
    * an integer (or an expression operand) the address of the string, so no
    * pointer is ever silently converted to an integer. `cast` false leaves a
    * pointer conversion to the receiving assignment's own interpretation. */
-  private valueLiteral = (
-    value: Value,
-    spelling?: string,
-    cast = true,
-  ): Printed | undefined => {
+  private valueLiteral = (value: Value, spelling?: string, cast = true): Printed | undefined => {
     const text = this.sourceLiteral(value);
     if (
       text === undefined ||
-      !this.localValidation.presentation(
-        'string_literal',
+      !this.localValidation.presentation('string_literal', value.id, STRING_LITERAL_SCOPE, [
         value.id,
-        STRING_LITERAL_SCOPE,
-        [value.id],
-      )
+      ])
     )
       return undefined;
     const integerAddress = { bits: 64, signed: false };
@@ -2855,12 +2849,7 @@ export class Renderer {
     });
     if (
       literals.length &&
-      !this.localValidation.presentation(
-        'string_literal',
-        node.id,
-        STRING_LITERAL_SCOPE,
-        literals,
-      )
+      !this.localValidation.presentation('string_literal', node.id, STRING_LITERAL_SCOPE, literals)
     )
       return this.sourceCall(node, depth, false, operand);
     if (this.sourceView) {

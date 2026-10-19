@@ -57,7 +57,7 @@ export function unescapeLiteral(body: string): string {
     "'": 39,
     '?': 63,
   };
-  for (let index = 0; index < body.length; ) {
+  for (let index = 0; index < body.length;) {
     const character = body[index]!;
     if (character !== '\\') {
       const code = body.codePointAt(index)!;
@@ -73,7 +73,9 @@ export function unescapeLiteral(body: string): string {
     } else if (next === 'u' || next === 'U') {
       const width = next === 'u' ? 4 : 8;
       bytes.push(
-        ...Buffer.from(String.fromCodePoint(parseInt(body.slice(index + 2, index + 2 + width), 16))),
+        ...Buffer.from(
+          String.fromCodePoint(parseInt(body.slice(index + 2, index + 2 + width), 16)),
+        ),
       );
       index += 2 + width;
     } else {

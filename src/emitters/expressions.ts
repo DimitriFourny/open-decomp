@@ -1057,11 +1057,8 @@ export function expressionText(
           subtrahend === undefined ? operand(expression.right) : printer.literal(subtrahend, width);
         if (op !== '*')
           right =
-            characterOf(
-              leftValue,
-              subtrahend ?? options.constant?.(expression.right),
-              false,
-            ) ?? right;
+            characterOf(leftValue, subtrahend ?? options.constant?.(expression.right), false) ??
+            right;
         if (python) {
           const l = range(left, width).bits,
             r = range(right, width).bits;

@@ -674,6 +674,26 @@ literals pass directly to character/void pointers, and use one pointer cast
 only for incompatible byte-pointer types; no pointer-to-integer round trip is
 inserted. Failed literal proof or exhausted presentation capacity retains the
 original image-backed address.
+Source-view `string_literal` (recorded per site) prints any pointer-width
+constant that addresses the start or an interior of an immutable, NUL-terminated
+string as that literal in value positions: call arguments, stores, returns,
+copies, select arms and equality comparisons, whatever the callee type
+(`fopen(path, "rb")`, `value == 0 ? "con" : value`). The receiving type decides
+the spelling: a character/void pointer takes the bare literal, another pointer a
+cast, an integer destination or operand `(uintptr_t)"..."` (Python-like:
+`string_address("...")`), so a pointer is never silently converted. Arithmetic
+operands keep the integer. Strings longer than 200 characters show their prefix
+and a marker keeping the address and the omitted byte count. Escapes follow each
+dialect (control, format and bidirectional characters are never printed raw).
+`character_literal` prints a constant as `'/'`, `'\\'`, `'.'` or `'\0'` (Python-like
+`ord('/')`) only with character evidence: a byte loaded through a pointer to
+bytes (inferred formal, declared `char`/`uint8_t` pointer, library `char*`
+parameter or result, offsets of those), widened or narrowed; or a library
+parameter marked `character` in the contract catalog (`strchr`, `strrchr`,
+`memchr`, ctype and `putc` families; not `memset`'s fill byte). Equality
+comparisons and call arguments also admit `'\n'`-style escapes and NUL; ordered
+comparisons and add/subtract keep to printable codes. Arbitrary integers are never
+character-ified.
 Named image addresses without an established C object/function type retain their
 exact VA and display name under `symbolic_address`; the renderer does not invent
 a global's source type just to declare its symbol.

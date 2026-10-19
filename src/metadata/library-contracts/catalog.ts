@@ -221,8 +221,8 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
     'c',
     C,
     [
-      ['string', C],
-      ['character', 'int'],
+      ['s', C],
+      ['c', 'int'],
     ],
     { memory: [footprint(0, 'read')], captures: [], character: [1] },
   ),
@@ -230,8 +230,8 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
     'c',
     C,
     [
-      ['string', C],
-      ['character', 'int'],
+      ['s', C],
+      ['c', 'int'],
     ],
     { memory: [footprint(0, 'read')], captures: [], character: [1] },
   ),
@@ -239,9 +239,9 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
     'c',
     V,
     [
-      ['buffer', V],
-      ['character', 'int'],
-      ['size', 'size_t'],
+      ['s', V],
+      ['c', 'int'],
+      ['n', 'size_t'],
     ],
     { memory: [footprint(0, 'read', count(2))], captures: [], character: [1] },
   ),
@@ -261,17 +261,14 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
       'isxdigit',
       'tolower',
       'toupper',
-    ].map((name) => [
-      name,
-      entry('c', 'int', [['character', 'int']], { captures: [], character: [0] }),
-    ]),
+    ].map((name) => [name, entry('c', 'int', [['c', 'int']], { captures: [], character: [0] })]),
   ),
-  putchar: entry('c', 'int', [['character', 'int']], { character: [0] }),
+  putchar: entry('c', 'int', [['c', 'int']], { character: [0] }),
   fputc: entry(
     'c',
     'int',
     [
-      ['character', 'int'],
+      ['c', 'int'],
       ['stream', FILE],
     ],
     { memory: [footprint(1, 'read_write')], character: [0] },
@@ -280,7 +277,7 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
     'c',
     'int',
     [
-      ['character', 'int'],
+      ['c', 'int'],
       ['stream', FILE],
     ],
     { memory: [footprint(1, 'read_write')], character: [0] },
@@ -289,7 +286,7 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
     'c',
     'int',
     [
-      ['character', 'int'],
+      ['c', 'int'],
       ['stream', FILE],
     ],
     { memory: [footprint(1, 'read_write')], character: [0] },

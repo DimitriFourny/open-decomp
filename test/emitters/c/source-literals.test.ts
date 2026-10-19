@@ -22,12 +22,7 @@ const at = (value: bigint): Address => ({ image_id: image, space: 'va', value })
 const rdi = register('rdi', 64, 0, 'replace_root', 'x86_64:rdi');
 const rsi = register('rsi', 64, 0, 'replace_root', 'x86_64:rsi');
 
-function stringAt(
-  value: bigint,
-  text: string,
-  mutable = false,
-  start = true,
-): SourceAddress {
+function stringAt(value: bigint, text: string, mutable = false, start = true): SourceAddress {
   return {
     address: at(value),
     string: text,
@@ -178,7 +173,11 @@ function loaded(viaPointer: boolean) {
     const wide = entry.cast('zero_extend', i32, byte);
     const slash = entry.compare('eq', wide, entry.constant(i32, 0x2fn));
     const digit = entry.int('sub', wide, entry.constant(i32, 0x30n));
-    const choice = entry.select(slash, digit, entry.cast('zero_extend', i32, entry.compare('eq', wide, entry.constant(i32, 0x5cn))));
+    const choice = entry.select(
+      slash,
+      digit,
+      entry.cast('zero_extend', i32, entry.compare('eq', wide, entry.constant(i32, 0x5cn))),
+    );
     entry.return([choice]);
     return b.finish(entry, [i32]);
   }, `char-${viaPointer}`);
