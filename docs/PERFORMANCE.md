@@ -629,6 +629,25 @@ Results by function against Ghidra (round 6 in parentheses):
 
 One reviewer flagged a conditionally incremented change counter named `index` in O0 `saturate`. An audit of the 12-cell development matrix against source then found 294 wrong role names in the round-7 output, 278 of them `accumulator`. Commit `f690362` fixes this: a role prints only when it holds on every iteration and for every coalesced member, and copies and unrolled intermediates stay neutral. The same audit then finds 0 wrong names. The round-7 numbers above were measured before this fix.
 
+## Development comparison loop
+
+`scripts/bench/quality-dev-loop.py` compares the Open Decomp source view with the archived Ghidra 12.1.4 texts on the 24-cell, 12-function broader matrix (`.local/performance/quality-matrix-reviewed/`, up to 288 pairs) so a change can be measured in minutes instead of once per frozen-suite round. **This matrix is a development set, not held-out:** its source (`source/`, zlib 1.3.1 plus `quality-matrix-corpus.c`) is known and it has been inspected while tuning. Use it to steer work; claim nothing from it as independent evidence. The frozen suite above remains the reporting benchmark. No analyzed binary is executed.
+
+```sh
+# 1. Ghidra texts from the archived recording (hash-checks the archive and all 24 binaries; refuses on mismatch; no Ghidra re-run)
+python3 scripts/bench/quality-dev-loop.py ghidra --output .local/quality-dev/ghidra
+# 2. Open Decomp texts, C source view, default budget; any checkout's dist works (baseline: git archive HEAD | tar -x -C /tmp/snap, link node_modules, bun run build)
+python3 scripts/bench/quality-dev-loop.py run --entry dist/src/cli/entry.js --label r8 [--jobs 4]
+# 3. Blind packets: same --seed gives the same pairs across labels, stratified by function x O0/O2
+python3 scripts/bench/quality-dev-loop.py packets --label r8 --sample 60 --seed 8 --output .local/quality-dev/review-r8
+mv .local/quality-dev/review-r8/private .local/quality-dev/sealed-review-r8 && chmod 700 .local/quality-dev/sealed-review-r8
+# 4. After the reviewers write submissions (schema in review-r8/instructions.md):
+python3 scripts/bench/quality-dev-loop.py aggregate --packets .local/quality-dev/review-r8 \
+  --mapping .local/quality-dev/sealed-review-r8 --review submissions/review-A.json [--review submissions/review-B.json]
+```
+
+`run` writes `.local/quality-dev/runs/<label>/<cell>/<function>.c` and `summary.json` (status `complete`/`partial`/`failed`, exit code, seconds, failure diagnostics); each cell uses one throwaway cache under `/tmp`, deleted afterwards. `packets` reuses the frozen six-dimension 0–4 rubric and instruction wording, writes `case-NNN/{X.c,Y.c,question.json}` with a seeded random X/Y assignment, and keeps the mapping in `private/` for sealing; add `--require-label OTHER` to restrict a round to pairs that also have text in an earlier run. `aggregate` decodes preferences and dimension means per tool, function, O0/O2, target and symbol state into `aggregate.json` and `aggregate.md`.
+
 ## Normalized four-lane performance (2026-10-17, commit `901602b`)
 
 Exclusive serialized slot (`.local/performance/quality.measurement.lock`), `dist/` aggregate `dd0ea263…` unchanged before/after, Node **v26.11.1** (not the historical 24.22.0 host), Ghidra 12.1.4, bridge `73ea1c8e…`. Protocol `scripts/bench/quality-persistent.py` unchanged: same MCP client for all four lanes (Open Decomp unobserved/observed, pinned Ghidra MCP bridge, persistent Ghidra `DecompInterface`), 11 equal requests in 156/156 matched cells, 3 fresh runs, 10 warm, 30 pings, balanced order. 1,716/1,716 observer/control pairs and 6/6 import controls equivalent. Raw evidence: `~/Documents/open-decomp-perf-2026-10-17-final/p25-normalized/comparison.json`.
@@ -683,3 +702,53 @@ Counterevidence is retained: Ghidra already shows mode constants, shared pointer
 The focused consumers additionally exercised four hypothesis/assertion/retraction context scopes and complete 256-selector native-cache replay, including absent-subject invalidation and real ledgerless re-lifting. Only separately compiled trusted oracle code executes; analyzed images never execute. The recording used historical pipeline8/reconstruction21/emitter21 labels. The later pipeline9/stack5/types6/reconstruction22 identity and final compiled evaluation are distinct; no normalized timing, held-out, general parity or superiority claim follows.
 
 Retained before-fix archive: `$EVIDENCE/scripts/bench/quality-context-prefx-2026-10-17.tar.gz`, SHA256 `ee8355e8971621648ae8a6b12d418bcf2e401270a2c35b22ec7e892eac8dcde7`. After-fix archive: `$EVIDENCE/scripts/bench/quality-context-afterfix-2026-10-17.tar.gz`, SHA256 `2e6cd9f4430748eb5913bac09433810b988e226a8cfded48db4171c9b695bcec`. Both digests were independently checked by the coordinator. The tracked sibling JSON files retain all findings, commands, source checkpoints, proof/text bindings and member hashes. Replay uses `scripts/bench/quality-context.py` and the exact archived analyzed image, never an independently rebuilt replacement or the trusted-oracle executable.
+
+## Second held-out suite (sealed)
+
+The frozen published suite is public and has been inspected, so it can no longer test generalisation. A second suite of eight fresh plain-C11 functions covers a struct-field update loop, a switch-based tokenizer state machine, delimiter scanning with early returns, a bounded binary search, a clipped floating-point mean with a conditional, bit manipulation without builtins, a libc `strlen`/`memcpy` caller with a computed size, and nested loops over a 2-D array. The names are `h2_step`, `h2_count`, `h2_locate`, `h2_probe`, `h2_level`, `h2_mask`, `h2_emit` and `h2_survey`. Nothing about their behaviour is tracked.
+
+**Sealing rule.** Development workers MUST NOT read anything under `.local/quality-heldout2/` (`source/`, `inputs/`, `gold/`, later outputs), and MUST NOT run Open Decomp, Ghidra or angr on its inputs outside a measurement round. Do not paste its source, vectors or decompiler output into prompts, tests, fixtures or commit messages. A breach marks the suite contaminated and retires it; do not rename or reselect functions to recover. The `.local/` tree is gitignored: back it up yourself, because the suite cannot be rebuilt if `source/` is lost. Any restored copy must match the pins below.
+
+**What is tracked.** Only `scripts/bench/quality-heldout2-selection.json` (function names, positional signatures, one generic review question, the 24 cell ids, source/model hashes and compiler/linker/SDK pins), the scripts, and this section. The C source (`heldout2-corpus.c`) and the Python reference models, valid-input contract, vector generator and ctypes bindings (`heldout2-models.py`) live in `.local/quality-heldout2/source/` (mode 700) and are bound by hash.
+
+| Pin                                                                                            | SHA256                                                             |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Private C source                                                                               | `7b1bef655d1b91d4d488d397da15e554f405a9b10e2b72c8c9ded2fbb616857c` |
+| Private oracle models                                                                          | `addd9c804a0b910fe1c9161fac2aa1570fcaf1ba7674ebe5e2ff4a4e41be4005` |
+| `quality-heldout2-selection.json`                                                              | `26ca36302e24218874378884ae07b4ce155182d8e753837d77dc22850189c3bb` |
+| Gold vectors `gold/source-oracle-cases.json` (472: 46/64/62/63/58/60/60/59 in the order above) | `06b26e0db44ababe802043b8fde3d0453272ead129732fa9d9dc0b03743636a7` |
+| 24 input images (sorted `<cell id> <sha256>` lines, one hash)                                  | `b34644743b102ba7ec95f42400f9e742897454825b72472a10ec6da605dda436` |
+
+The toolchain pins are those of the frozen suite: Apple clang 21.0.0 (`/usr/bin/clang`), Homebrew LLVM clang 23.1.3, LLD 23.1.3, `llvm-nm`/`objcopy`/`readobj`/`objdump`, and the CommandLineTools SDK. `build` refuses to run if any hash or the SDK path differs. `oracle-results.json` embeds dylib hashes that are not reproducible, so only the case hash is pinned. The gold passed 472/472 under Apple clang 21 and LLVM clang 23 at `-O0` and `-O2`, and under an Apple clang 21 `-O1 -fsanitize=undefined -fsanitize-trap=undefined` build, so none of the vectors reaches undefined behaviour in the source.
+
+**Build.** The 24 cells are the frozen matrix: Mach-O arm64, ELF x86-64 and PE x86-64; Apple clang 21 and LLVM clang 23; `-O0`/`-O2`; symbol-bearing and `llvm-objcopy`/`strip`-stripped. All 24 built, with identical text hashes between each symbol-bearing/stripped pair. Mach-O links `-lSystem`. The freestanding ELF and PE images link a second object from the same source (`-DH2_STUBS_ONLY`, `-O0`) that defines `memcpy` and `strlen` as ordinary callees; the analyzed function still calls them in every cell. No source or sidecar is copied next to the inputs.
+
+**Measurement procedure** (mirrors round 7; `R` is a new round root, `IN` the sealed inputs, and the usual `GHIDRA_HOME`, `JAVA_HOME` and `BRIDGE` variables are as in the staging procedure above). Run `bun run build` first. The Ghidra-recording step cannot write beneath `.local/`: record into `$HOME/open-decomp-stage/` and `mv` it into place.
+
+```sh
+R=.local/quality-rounds/heldout2-<date>; IN=.local/quality-heldout2/inputs; mkdir -p "$R"
+python3 scripts/bench/quality-heldout2-oracle.py --output "$R/gold"   # must report cases_sha256 06b26e0d… and 472/472 on all five runs
+python3 scripts/bench/quality-heldout2.py run --inputs "$IN" --output "$HOME/open-decomp-stage/heldout2" \
+  --entry dist/src/cli/entry.js --bridge "$BRIDGE" --ghidra "$GHIDRA_HOME" --java-home "$JAVA_HOME"
+mv "$HOME/open-decomp-stage/heldout2" "$R/heldout2" && rmdir "$HOME/open-decomp-stage"
+.local/angr-venv/bin/python scripts/bench/quality-heldout2-angr.py run --inputs "$IN" --output "$R/angr"
+python3 scripts/bench/quality-heldout2-evaluate.py run --results "$R/heldout2" --results "$R/angr" --output "$R/correctness"
+python3 scripts/bench/quality-heldout2-packets.py --results "$R/heldout2" --oracle "$R/gold" --output "$R/review"
+python3 scripts/bench/quality-heldout2-packets.py --results "$R/heldout2" --extra-results "$R/angr" \
+  --tools open-decomp angr --oracle "$R/gold" --output "$R/review-angr"
+python3 scripts/bench/quality-heldout-instructions.py --packets "$R/review" --submissions "$R/submissions" \
+  --output "$R/review-instructions/reviewer-instructions.md"
+python3 scripts/bench/quality-heldout-instructions.py --packets "$R/review-angr" --submissions "$R/submissions-angr" \
+  --output "$R/review-instructions-angr/reviewer-instructions.md"
+# after both blind submissions per set exist (give reviewers only "$R/review/reviewer" or "$R/review-angr/reviewer"):
+python3 scripts/bench/quality-heldout-review-results.py --packets "$R/review" \
+  --review-a "$R/submissions/review-A.json" --review-b "$R/submissions/review-B.json" --output "$R/readability"
+python3 scripts/bench/quality-heldout-review-results.py --packets "$R/review-angr" --tools open-decomp angr \
+  --review-a "$R/submissions-angr/review-A.json" --review-b "$R/submissions-angr/review-B.json" --output "$R/readability-angr"
+```
+
+A complete recording has 48 OD/Ghidra tool cells and 192 matched function pairs (24 cells × 8); angr has 24 cells and 192 pairs. Rebuild the inputs only from the pinned source: `python3 scripts/bench/quality-heldout2.py build --output <new dir>` must reproduce the aggregate image hash above.
+
+The new wrappers reuse the frozen harness unchanged. `quality-heldout2-evaluate.py`, `quality-heldout2-packets.py` and `quality-heldout2-angr.py` load the frozen script text through `quality_heldout2_wrap.py`, apply a few counted substitutions (selection file, oracle file, completeness count) and fail loudly if a substitution no longer applies. `quality-heldout-instructions.py` and `quality-heldout-review-results.py` read only the packet tree and are used as is. The evaluator differs from the frozen policy in one respect: its header also includes `<string.h>`, so the real libc prototypes for `h2_emit`'s callee are declared for every tool. The oracle script in `scripts/bench/quality-heldout2-oracle.py` loads the hash-pinned private models, so the evaluator's per-function executable checks and the packets' sealed oracle copy use the same 472 vectors.
+
+Results from this suite stay separate from the frozen-suite rounds. Report them with the same availability, exact-executable-subset and blind-readability lanes, and do not tune any pass against the outputs, the questions or the source. After a measurement round the suite has been seen: record who saw what, and treat the next round as a new suite.
