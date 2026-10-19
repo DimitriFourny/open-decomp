@@ -431,18 +431,50 @@ liveness roots, but potentially faulting loads and other ordered effects remain;
 checked output retains the full overlay.
 
 Source-only `arity_closure` records its per-call basis before stack promotion.
-Complete native machine call/stack summaries close register-only, nonrecursive
-callees even when optional debug/type metadata is unavailable; those metadata
-diagnostics remain visible. Machine coverage gaps, work/refinement limits and
-incomplete dependencies propagate separately and prevent closure. A closed
-callee cannot read additional caller spills, so those private slots are eligible
-for ordinary validated promotion and an unused `entry_sp` disappears. Unknown
-indirect calls, escaping incoming-stack addresses and variadic native callees
-remain open; written stack extent is never interpreted as an argument count.
+Complete native machine call/stack summaries close register-only callees even
+when optional debug/type metadata is unavailable; those metadata diagnostics
+remain visible. A body's argument list closes when nothing outside its observed
+register prefix can be read: every call (and tail transfer) that an unobserved
+entry argument may reach — through registers, phis, private spills or a stack
+pointer at or above entry SP — must target a closed callee or carry a complete
+library contract. Calls reached only by observed parameters and computed values
+(for example an indirect call after another call clobbered the argument
+registers) add no input and do not block closure. Machine arity completeness is
+inherited only through those reaching calls; coverage gaps, work/refinement
+limits and incomplete dependencies of other callees stay in the reasons but do
+not reopen the list. Recursive groups close coinductively: every member is
+re-observed once assuming the group closed with its current parameters, and
+the assumption is kept only if every member then closes with exactly those
+parameters (a tail-call chain such as an append/grow pair forwarding its
+arguments closes this way when the grow path's other callees are closed).
+A closed callee cannot read additional caller spills, so those private slots are
+eligible for ordinary validated promotion and an unused `entry_sp` disappears.
+Indirect calls an unobserved argument reaches, escaping incoming-stack addresses
+and variadic native callees remain open; written stack extent is never
+interpreted as an argument count.
 Proven invocation constants and identity aliases remain actual ABI inputs before
 the source-only prefix-gap check. Substitution therefore cannot manufacture a
 missing leading argument. These refinements use the existing work budget and
 leave the original checked summary unchanged.
+
+The native dependency worklist loads bodies breadth-first (each load at most a
+quarter of the remaining optional work; no new body once half of the initial
+allowance is spent) and then refines strongly connected components callees
+first: a non-recursive body is observed once against its finished callees, and
+only recursive groups are seeded and iterated. Memory shapes are not transferred
+along recursive edges (content-addressed shape evidence derived around a cycle
+would be new every round and never converge). When the refinement share runs
+out, finished components keep their facts and only unfinished ones (and their
+callers) are cut with a `native interface refinement work limit` reason. A callee
+summary cut by any bounded share is reported as a `resource_limit` diagnostic,
+and a selected function left partial with such a diagnostic reports reason
+`budget` instead of `unsupported_subset`.
+
+Darwin variadic stack arguments stored in different predecessors of one shared
+call resolve when, on every incoming edge, the owning store wrote the same SSA
+value (it dominates the join) or a value — through identity moves, concat
+components, or an equal rematerialized constant — that the edge copies into one
+block parameter of the join.
 Discovery-established tails to uniquely resolved imported callable entries may
 use complete nonvariadic register-only library contracts. Their interfaces
 propagate through the same bounded native dependency worklist as source-only
