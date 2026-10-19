@@ -1,11 +1,16 @@
 import {
   fingerprint,
+  MAX_RESULT_DIAGNOSTICS,
+  omittedDiagnosticsSummary,
   OperationError,
   type Address,
   type Annotation,
   type CallClobbers,
   type Diagnostic,
   type Emitter,
+  type EmissionOmission,
+  type EmissionRequirement,
+  type Inference,
   type OperationContext,
   type RegisterDescriptor,
   type Requirement,
@@ -84,7 +89,7 @@ import {
   type Printed,
   type SimplificationRecorder,
 } from './expressions.js';
-import { Writer } from './writer.js';
+import { MetadataLimitError, Writer } from './writer.js';
 import type { EmissionInput, EmissionResult } from './model.js';
 import { collectInferences } from './inference.js';
 import {
@@ -159,6 +164,9 @@ export class Renderer {
   private readonly names = new Map<string, string | null>();
   private readonly identifiers = new Map<string, EmissionResult['identifiers'][number]>();
   private readonly diagnostics: Diagnostic[] = [];
+  /** Diagnostics and citations beyond the wire list bound, counted for the summary. */
+  private readonly shedDiagnostics = new Map<Diagnostic['code'], number>();
+  private shedCitations = 0;
   private readonly origins = new Map<string, Origin>();
   private readonly statements = new Map<string, Instruction>();
   private readonly controls = new Map<string, Control>();
@@ -277,8 +285,9 @@ export class Renderer {
     private readonly language: 'c-like' | 'python-like',
     private readonly version: string,
     private readonly inlineCalls = true,
+    private readonly metadata: 'full' | 'omitted' = 'full',
   ) {
-    this.writer = new Writer(context, options.indent, options.include_evidence, language);
+    this.writer = new Writer(context, options.indent, options.include_evidence, language, metadata);
     this.program = reconstruct(input, context, options.view === 'checked' ? 'checked' : 'source');
     this.inline = new Set(this.program.inline);
     this.bounds = new UnsignedBounds(this.program.expressions, context);
@@ -447,8 +456,18 @@ export class Renderer {
 
   private report(diagnostic: Diagnostic): void {
     this.context.checkpoint(1 + diagnostic.evidence_ids.length);
-    if (this.diagnostics.length >= 1000 || diagnostic.evidence_ids.length > 1000)
-      this.writer.fail('Pseudocode diagnostic limit exceeded');
+    // The wire list holds one entry less than its bound: the last is the omission summary.
+    if (this.diagnostics.length >= MAX_RESULT_DIAGNOSTICS - 1) {
+      this.shedDiagnostics.set(
+        diagnostic.code,
+        (this.shedDiagnostics.get(diagnostic.code) ?? 0) + 1,
+      );
+      return;
+    }
+    if (diagnostic.evidence_ids.length > 1000) {
+      this.shedCitations += diagnostic.evidence_ids.length - 1000;
+      diagnostic = { ...diagnostic, evidence_ids: diagnostic.evidence_ids.slice(0, 1000) };
+    }
     this.writer.metadata(
       Buffer.byteLength(diagnostic.message) +
         (diagnostic.entity_id?.length ?? 0) +
@@ -5798,33 +5817,56 @@ export class Renderer {
     for (const record of this.localValidation.records)
       if (record.kind === 'control' && record.status === 'rejected')
         rejectTranslation(record, this.controls.get(record.subject) ?? this.input.function);
-    const requirements = sourceRequirementProofs(
-      this.program,
-      w.mappings,
-      { ids: w.ids.items, ranges: w.ranges.items },
-      this.context,
-      abiConformanceRequirements(
-        this.input.function.id,
-        this.localValidation.abiConformance,
-        (id) => this.origins.get(id),
+    const omitted: EmissionOmission[] = [];
+    let requirements: EmissionRequirement[] = [],
+      inferences: readonly Inference[] = [];
+    if (w.metadataMode === 'omitted') {
+      // Provenance exceeded a bound during the full render: the text is complete and
+      // identical, and the shed metadata classes are named in the emission.
+      omitted.push(
+        { kind: 'mappings', reason: 'output_limit', omitted: w.omittedMappings },
+        { kind: 'inferences', reason: 'output_limit', omitted: null },
+        { kind: 'requirements', reason: 'output_limit', omitted: null },
+      );
+    } else {
+      try {
+        requirements = sourceRequirementProofs(
+          this.program,
+          w.mappings,
+          { ids: w.ids.items, ranges: w.ranges.items },
+          this.context,
+          abiConformanceRequirements(
+            this.input.function.id,
+            this.localValidation.abiConformance,
+            (id) => this.origins.get(id),
+            this.context,
+          ),
+        ).map((record) =>
+          w.requirement(
+            this.fpPresentation.guards.size && record.kind === 'fp_environment'
+              ? { ...record, explanation: SOURCE_FP_ENVIRONMENT }
+              : record,
+          ),
+        );
+      } catch (error) {
+        if (!(error instanceof MetadataLimitError)) throw error;
+        requirements = [];
+        omitted.push({ kind: 'requirements', reason: 'output_limit', omitted: null });
+      }
+      const collected = collectInferences(
+        this.input,
+        this.program,
+        this.localValidation.records,
+        w,
         this.context,
-      ),
-    ).map((record) =>
-      w.requirement(
-        this.fpPresentation.guards.size && record.kind === 'fp_environment'
-          ? { ...record, explanation: SOURCE_FP_ENVIRONMENT }
-          : record,
-      ),
-    );
-    const inferences = collectInferences(
-      this.input,
-      this.program,
-      this.localValidation.records,
-      w,
-      this.context,
-      this.inferenceSites,
-      this.sourceDataValue,
-    );
+        this.inferenceSites,
+        this.sourceDataValue,
+      );
+      inferences = collected.records;
+      if (collected.omitted !== 0)
+        omitted.push({ kind: 'inferences', reason: 'output_limit', omitted: collected.omitted });
+    }
+    const summary = omittedDiagnosticsSummary(this.shedDiagnostics, this.shedCitations);
     const declarationSpan = { start: this.headerStart, end: this.headerEnd };
     const review = {
       operation: 'function_get',
@@ -5848,9 +5890,10 @@ export class Renderer {
         local_validation: this.localValidation.records,
         inferences,
         requirements,
+        ...(omitted.length ? { omitted } : {}),
         review,
       },
-      diagnostics: this.diagnostics,
+      diagnostics: [...this.diagnostics, ...(summary ? [summary] : [])],
       coverage: {
         statements: this.statements.size,
         controls: this.controls.size,
@@ -5871,10 +5914,20 @@ export function renderSource(
   language: 'c-like' | 'python-like',
   version: string,
 ): EmissionResult {
+  const attempt = (metadata: 'full' | 'omitted'): EmissionResult => {
+    try {
+      return new Renderer(input, options, context, language, version, true, metadata).render();
+    } catch (error) {
+      if (!(error instanceof CallInliningRetry)) throw error;
+      return new Renderer(input, options, context, language, version, false, metadata).render();
+    }
+  };
   try {
-    return new Renderer(input, options, context, language, version).render();
+    return attempt('full');
   } catch (error) {
-    if (!(error instanceof CallInliningRetry)) throw error;
-    return new Renderer(input, options, context, language, version, false).render();
+    // Provenance metadata is bounded separately from the text. When it cannot be
+    // held, render the same text without it and say so; never fail the pseudocode.
+    if (!(error instanceof MetadataLimitError)) throw error;
+    return attempt('omitted');
   }
 }

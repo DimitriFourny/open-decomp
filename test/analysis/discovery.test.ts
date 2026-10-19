@@ -23,6 +23,7 @@ import { MachOLoader } from '../../src/loaders/macho/index.js';
 import { PELoader } from '../../src/loaders/pe/index.js';
 import {
   discoverFunctions,
+  prepareDiscoveryIndex,
   type DiscoveryInput,
   type FunctionAssertion,
 } from '../../src/analysis/discovery/index.js';
@@ -675,6 +676,44 @@ test('overlapping instruction streams and fallthrough boundary conflicts are not
     discover(fallthrough, { assertions: [assertion(fallthrough, 1)] }).graphs[0]!.function.boundary,
     'conflicting',
   );
+});
+
+test("selected discovery publishes every proof its diagnostics cite, including another root's seed proofs", () => {
+  // A (entry, +0): jz +4 -> B (+4, asserted root). Conditional flow into a foreign
+  // root is a boundary conflict whose diagnostic cites B's seed proof, not A's.
+  const image = raw([0x74, 0x02, 0x90, 0xc3, 0xc3]);
+  const decoder = new X86Decoder({ formatting: false });
+  try {
+    const context = createOperationContext();
+    const input = { image, decoder, revision: 0, assertions: [assertion(image, 4)] };
+    const index = prepareDiscoveryIndex(input, context);
+    const result = discoverFunctions(
+      { ...input, index, selected_entry: address(image, 0) },
+      context,
+    );
+    const conflict = result.graphs[0]!.diagnostics.find(
+      (item) => item.message === 'Intraprocedural flow reaches another function entry',
+    );
+    assert.ok(conflict, 'fixture must reach another function entry');
+    const foreign = [...index.seeds.get(0x1004n)!.evidence];
+    assert.ok(foreign.length > 0);
+    const published = new Map(result.evidence.map((item) => [item.id, item]));
+    const closed = new Set<string>();
+    const pending = [
+      ...result.graphs[0]!.function.evidence_ids,
+      ...result.graphs.flatMap((graph) => graph.diagnostics.flatMap((item) => item.evidence_ids)),
+    ];
+    for (const id of pending) {
+      if (closed.has(id)) continue;
+      closed.add(id);
+      const proof = published.get(id);
+      assert.ok(proof, `cited proof ${id} must be published with the selected discovery`);
+      pending.push(...proof.derived_from, ...proof.conflicts_with);
+    }
+    for (const id of foreign) assert.ok(published.has(id));
+  } finally {
+    decoder.dispose();
+  }
 });
 
 test('invalid encodings, truncation and unbacked direct targets stop without synthetic traps', () => {

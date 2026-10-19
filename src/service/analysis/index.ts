@@ -4,6 +4,7 @@ import {
   encodeDiagnostic,
   encodeEmission,
   encodeEvidence,
+  boundDiagnostics,
   fingerprint,
   signatureSchema,
   toolSchemas,
@@ -45,6 +46,7 @@ import {
   type AnalysisDependencyCollector,
   type StoredDecompilation,
 } from '../../project/cache/index.js';
+import { withMetadataOmissions } from '../../project/cache/limits.js';
 import { loadFunctionGraph, loadFunctionIndex, loadFunctionScope } from '../queries/scope.js';
 import { MAX_FRAME_BYTES } from '../../workers/protocol.js';
 import { callDeclarations, resolveCalls } from './calls.js';
@@ -515,14 +517,14 @@ export async function executeDecompilation(
         ...emitted.diagnostics,
         ...(source.diagnostics ?? []),
       ];
-      const uniqueDiagnostics = [
+      const uniqueDiagnostics = boundDiagnostics([
         ...new Map(
           diagnostics.map((diagnostic) => [
             fingerprint(encodeDiagnostic(diagnostic) as unknown as CanonicalValue),
             diagnostic,
           ]),
         ).values(),
-      ];
+      ]);
       const reconstructionReasons = [
         ...new Set(
           emitted.diagnostics
@@ -684,7 +686,7 @@ export async function executeDecompilation(
         cache: 'computed' as const,
       };
       const partial = coverage.some((item) => item.state !== 'complete');
-      const result: StoredDecompilation = partial
+      const semantic: StoredDecompilation = partial
         ? {
             ...metadata,
             state: 'partial',
@@ -693,6 +695,8 @@ export async function executeDecompilation(
             data,
           }
         : { ...metadata, state: 'complete', data };
+      // Provenance metadata bounded out of the emission is a named, separate limitation.
+      const result = withMetadataOmissions(semantic);
       toolSchemas.function_decompile.output.parse(result);
       context.checkpoint(0);
       return { result, catalog: { ...catalog, evidence } };

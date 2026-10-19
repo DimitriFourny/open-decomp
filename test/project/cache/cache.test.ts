@@ -765,6 +765,66 @@ test('original response and full-artifact byte boundaries reject before creating
   assert.equal(readdirSync(join(p.state.path, 'artifacts')).length, 0);
 });
 
+test('an oversized artifact sheds provenance metadata, never the pseudocode, and says so', async (t) => {
+  const p = await project(t);
+  const base = p.computation();
+  const slice = p.state.store.snapshot().images[0]!.selected_slice_id;
+  const ids = Array.from({ length: 260_000 }, (_, index) =>
+    entityIdentity(slice, 'instruction', BigInt(index)),
+  );
+  const mappings = Array.from({ length: 100_000 }, (_, index) => ({
+    start: 0,
+    end: 0,
+    semantic_refs: [index, index + 100_000],
+    instruction_refs: [index + 160_000],
+    range_refs: [],
+    evidence_refs: [],
+  }));
+  const text = '/* storage payload */'.padEnd(256, ' ');
+  const bulky = (): AnalysisComputation => {
+    const {
+      reason: _reason,
+      continuation: _continuation,
+      ...rest
+    } = base.result as never as Record<string, unknown>;
+    return {
+      ...base,
+      result: {
+        ...rest,
+        state: 'complete',
+        coverage: [],
+        data: {
+          ...base.result.data,
+          emission: { ...base.result.data.emission, text, ids, mappings },
+        },
+      } as never,
+    };
+  };
+  const { result } = await p.run(p.identity, 1 << 30, bulky);
+  assert.ok('data' in result && result.data.delivery === 'inline');
+  const emission = result.data.emission;
+  assert.equal(emission.text, text);
+  assert.equal(emission.mappings.length, 0);
+  assert.equal(emission.ids.length, 0);
+  assert.deepEqual(emission.omitted, [
+    { kind: 'mappings', reason: 'output_limit', omitted: 100_000 },
+  ]);
+  assert.equal(result.state, 'partial');
+  assert.equal(result.state === 'partial' && result.reason, 'output_limit');
+  const provenance = result.coverage.find((item) => item.layer === 'provenance');
+  assert.equal(provenance?.state, 'partial');
+  assert.match(provenance!.reasons[0]!, /output_limit.*100000 source mappings omitted/);
+  const artifact = p.state.store.findArtifact(p.identity);
+  assert.ok(artifact && artifact.size <= BigInt(16 * 1024 * 1024));
+  // The shed artifact is a normal cache hit with the same stated limitation.
+  const again = await p.run(p.identity, 1 << 30, () => {
+    throw new Error('must not recompute');
+  });
+  assert.ok('data' in again.result && again.result.data.delivery === 'inline');
+  assert.deepEqual(again.result.data.emission.omitted, emission.omitted);
+  assert.equal(again.result.state, 'partial');
+});
+
 test('schema-2 migration preserves artifacts, jobs, revisions and removal actors without inventing an old catalog index', async (t) => {
   const p = await project(t),
     published = await p.run();
