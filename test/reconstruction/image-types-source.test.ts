@@ -122,7 +122,8 @@ test(
     const [expected] = lines.slice(2);
     for (const emitter of ['c-like', 'python-like'] as const) {
       const emission = await decompile('release_all', emitter);
-      if (emitter === 'c-like') assert.match(emission.text, /->field_0x20\[\w+\]\.field_0x8\b/, emission.text);
+      if (emitter === 'c-like')
+        assert.match(emission.text, /->field_0x20\[\w+\]\.field_0x8\b/, emission.text);
       const memory = new Map<bigint, number>();
       const db = 0x3000n,
         slots = 0x4000n,
