@@ -111,7 +111,7 @@ try {
       facts.memory_transfers?.flatMap((transfer) => transfer.parameter_shape.fields) ?? [];
     assert.ok(fields.some((field) => field.offset === 0n && field.width_bits === 64));
     assert.ok(fields.some((field) => field.offset === 8n && field.width_bits === 64));
-    return { facts, readset: dependencies?.finish(), stages, remaining: context.remainingWork() };
+    return { facts, readset: dependencies?.finish(), stages, remaining: context.remainingWork?.() };
   };
   run(2, false); // Cache a valid immutable body, intentionally without a ledger.
   const before = lifts.get(callee.id) ?? 0;
