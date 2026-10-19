@@ -286,11 +286,14 @@ export function validateRenderedTransfers(
       region = first;
     }
   };
+  /** `shared`: entry of the shared arm body an operand of the chain being
+   * walked may enter (`shared-arm`); null off an operand chain. */
   const edge = (
     transfer: ParallelTransfer,
     follow: string | null,
     nesting: readonly Nest[],
     origin: Origin,
+    shared: string | null = null,
   ): void => {
     context.checkpoint(1);
     const action = emitted?.get(transfer);
@@ -299,6 +302,7 @@ export function validateRenderedTransfers(
     if (action?.kind === 'goto' || (!action && gotos.has(transfer)))
       actual = action?.kind === 'goto' ? action.target : transfer.target;
     else if (mode === 'fallthrough' || (!action && fallthrough.has(transfer))) actual = follow;
+    else if (mode === 'shared-arm') actual = shared;
     else if (mode === 'continue') {
       actual = null;
       for (let i = nesting.length - 1; i >= 0; i--) {
@@ -342,11 +346,20 @@ export function validateRenderedTransfers(
     follow: string | null,
     nesting: readonly Nest[],
     origin: Origin,
+    shared: string | null = null,
+    chain: string | null = null,
   ): void => {
-    edge(value.transfer, value.body ? entry(value.body, follow) : follow, nesting, origin);
-    if (value.body) walk(value.body, follow, nesting);
+    edge(value.transfer, value.body ? entry(value.body, follow) : follow, nesting, origin, shared);
+    if (value.body) walk(value.body, follow, nesting, chain);
   };
-  const walk = (region: Region, follow: string | null, nesting: readonly Nest[]): void => {
+  /** `chain`: the region is an operand chain position of a shared-arm head
+   * (jumps then the next operand); its operands may enter that arm. */
+  const walk = (
+    region: Region,
+    follow: string | null,
+    nesting: readonly Nest[],
+    chain: string | null = null,
+  ): void => {
     context.checkpoint(1);
     if (region.kind === 'sequence') {
       for (let i = 0; i < region.regions.length; i++) {
@@ -358,7 +371,12 @@ export function validateRenderedTransfers(
             break;
           }
         }
-        walk(region.regions[i]!, next, nesting);
+        const link =
+          i === region.regions.length - 1 &&
+          region.regions
+            .slice(0, -1)
+            .every((item) => item.kind === 'block' && item.control.kind === 'jump');
+        walk(region.regions[i]!, next, nesting, link ? chain : null);
       }
       return;
     }
@@ -381,8 +399,17 @@ export function validateRenderedTransfers(
     const control = region.control;
     if (control.kind === 'jump') edge(control.transfer, follow, nesting, control);
     else if (control.kind === 'if') {
-      arm(control.when_true, follow, nesting, control);
-      arm(control.when_false, follow, nesting, control);
+      const head = [control.when_true, control.when_false].find((item) => item.shared);
+      const operand = control.when_true.joins || control.when_false.joins ? chain : null;
+      for (const item of [control.when_true, control.when_false])
+        arm(
+          item,
+          follow,
+          nesting,
+          control,
+          item.joins ? operand : null,
+          head && item !== head ? entry(head.body!, null) : item.shared ? null : operand,
+        );
     } else if (control.kind === 'switch') {
       const scopes: readonly Nest[] =
         language === 'c-like' ? [...nesting, { kind: 'switch', id: control.id, follow }] : nesting;

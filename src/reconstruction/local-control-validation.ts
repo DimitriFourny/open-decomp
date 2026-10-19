@@ -9,6 +9,8 @@ import { LocalValidationSession, validateControlTarget } from './local-validatio
 export type EmittedEdge =
   | { readonly kind: 'goto'; readonly target: string }
   | { readonly kind: 'loop-exit'; readonly loop: string; readonly through: readonly string[] }
+  /** A short-circuit operand edge entering the shared arm body of its head. */
+  | { readonly kind: 'shared-arm' }
   | { readonly kind: 'fallthrough' | 'break' | 'continue' };
 export interface EmittedLoopExits {
   readonly initialized: ReadonlySet<string>;
@@ -41,11 +43,14 @@ export function validateEmittedControl(
     }
     return region.kind === 'loop' ? region.header : region.id;
   };
+  /** `shared`: entry of the shared arm body an operand of the chain being
+   * walked may enter (`shared-arm`); null off an operand chain. */
   const edge = (
     transfer: ParallelTransfer,
     follow: string | null,
     scopes: readonly Scope[],
     subject: string,
+    shared: string | null = null,
   ): void => {
     validation.check('control', subject, 'rendered edge target', () => {
       validation.allowance.charge();
@@ -60,6 +65,7 @@ export function validateEmittedControl(
         };
       let actual = follow;
       if (action.kind === 'goto') actual = action.target;
+      if (action.kind === 'shared-arm') actual = shared;
       if (action.kind === 'break') actual = scopes.at(-1)?.after ?? null;
       if (action.kind === 'continue') {
         const scope = [...scopes].reverse().find((item) => item.loop !== null);
@@ -88,11 +94,20 @@ export function validateEmittedControl(
     follow: string | null,
     scopes: readonly Scope[],
     subject: string,
+    shared: string | null = null,
+    chain: string | null = null,
   ): void => {
-    edge(arm.transfer, arm.body ? entry(arm.body, follow) : follow, scopes, subject);
-    if (arm.body) walk(arm.body, follow, scopes);
+    edge(arm.transfer, arm.body ? entry(arm.body, follow) : follow, scopes, subject, shared);
+    if (arm.body) walk(arm.body, follow, scopes, chain);
   };
-  const walk = (region: Region, follow: string | null, scopes: readonly Scope[]): void => {
+  /** `chain`: the region is an operand chain position of a shared-arm head
+   * (silent jumps then the next operand); its operands may enter that arm. */
+  const walk = (
+    region: Region,
+    follow: string | null,
+    scopes: readonly Scope[],
+    chain: string | null = null,
+  ): void => {
     validation.allowance.charge();
     if (++work > 1024) {
       validation.check('control', fn.id, 'rendered control layout', () => ({
@@ -114,7 +129,13 @@ export function validateEmittedControl(
             break;
           }
         }
-        walk(region.regions[i]!, next, scopes);
+        // Only the last element, after jumps alone, continues an operand chain.
+        const link =
+          i === region.regions.length - 1 &&
+          region.regions
+            .slice(0, -1)
+            .every((item) => item.kind === 'block' && item.control.kind === 'jump');
+        walk(region.regions[i]!, next, scopes, link ? chain : null);
       }
     } else if (region.kind === 'loop') {
       // A block run once falls through to its follow; falling off a do-while
@@ -134,8 +155,19 @@ export function validateEmittedControl(
       const control = region.control;
       if (control.kind === 'jump') edge(control.transfer, follow, scopes, control.id);
       if (control.kind === 'if') {
-        arm(control.when_true, follow, scopes, control.id);
-        arm(control.when_false, follow, scopes, control.id);
+        // A head's other arm starts an operand chain entering its shared arm;
+        // an operand's staying arm continues the chain it belongs to.
+        const head = [control.when_true, control.when_false].find((item) => item.shared);
+        const operand = control.when_true.joins || control.when_false.joins ? chain : null;
+        for (const item of [control.when_true, control.when_false])
+          arm(
+            item,
+            follow,
+            scopes,
+            control.id,
+            item.joins ? operand : null,
+            head && item !== head ? entry(head.body!, null) : item.shared ? null : operand,
+          );
       }
       if (control.kind === 'switch') {
         const nested =

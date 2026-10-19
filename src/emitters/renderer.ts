@@ -96,6 +96,7 @@ import {
   foldSwitchGuards,
   planLayout,
   planBreakableBlocks,
+  planSharedArms,
   planLoopForms,
   planLoopExits,
   visitTransfers,
@@ -214,6 +215,15 @@ export class Renderer {
   private readonly loopExitCopies = new Map<string, ParallelTransfer>();
   /** Tests of enclosing `if`s merged into the next printed `if` (nestedIf). */
   private conjunct: readonly ConditionTerm[] | undefined;
+  /** Operands of a shared-arm condition printed so far (see planSharedArms). */
+  private sharedPlan:
+    | {
+        readonly arm: ControlArm;
+        readonly origin: Control;
+        readonly form: 'all' | 'any';
+        readonly terms: readonly ConditionTerm[];
+      }
+    | undefined;
   /** Flag-carried short-circuit tests by merge control id (planFlagTests). */
   private readonly flagTests = new Map<string, FlagTest>();
   /** Their stage controls (printed inside the merge test). */
@@ -3186,7 +3196,7 @@ export class Renderer {
         item.transfer,
         nested,
         item.body ? this.firstBlock(item.body) : follow,
-        performed.find((entry) => entry.arm === item)?.action,
+        item.joins ? 'shared-arm' : performed.find((entry) => entry.arm === item)?.action,
       );
       if (item.body) this.findLabels(item.body, nested, depth + 1, follow);
     };
@@ -3762,6 +3772,57 @@ export class Renderer {
     };
     const yes = control.when_true,
       no = control.when_false;
+    // A short-circuit head or operand whose leaving edges share one arm body
+    // (planSharedArms): the last operand prints the whole `if`/`else`.
+    const own = [yes, no].find((arm) => arm.shared),
+      joined = [yes, no].find((arm) => arm.joins);
+    if (own || joined) {
+      if (pending) this.invalid('A shared-arm test was merged into an enclosing condition');
+      const plan = own
+        ? { arm: own, origin: control, form: own.shared!, terms: [] as ConditionTerm[] }
+        : this.sharedPlan;
+      if (!plan) this.invalid('A joined condition operand has no shared arm');
+      this.sharedPlan = undefined;
+      const exit = (own ?? joined)!,
+        stay = exit === yes ? no : yes;
+      const terms = [...plan.terms, term(plan.form === 'any' ? exit === yes : stay === yes)];
+      const flat = (region: Region): Region[] =>
+        region.kind === 'sequence' ? region.regions.flatMap(flat) : [region];
+      const last = stay.body ? flat(stay.body).at(-1) : undefined;
+      if (
+        last?.kind === 'block' &&
+        last.control.kind === 'if' &&
+        (last.control.when_true.joins || last.control.when_false.joins)
+      ) {
+        // The next operand continues this condition.
+        this.sharedPlan = { ...plan, terms };
+        if (!own) this.transfer(exit.transfer, depth, control);
+        this.arm(stay, depth, control);
+        if (this.sharedPlan) this.invalid('A shared-arm condition was not printed');
+        return;
+      }
+      const text =
+        plan.form === 'any'
+          ? terms
+              .slice(1)
+              .reduce(
+                (all, item) => this.printer.logical('or', all, item.printed),
+                terms[0]!.printed,
+              ).text
+          : this.conjunction(terms);
+      this.writer.line(depth, c ? `if (${text}) {` : `if ${text}:`);
+      if (!own) this.transfer(exit.transfer, depth + 1, control);
+      const branches: [ControlArm, Control][] = [
+        [stay, control],
+        [plan.arm, plan.origin],
+      ];
+      if (plan.form === 'any') branches.reverse();
+      this.arm(branches[0]![0], depth + 1, branches[0]![1]);
+      this.writer.line(depth, c ? '} else {' : 'else:');
+      this.arm(branches[1]![0], depth + 1, branches[1]![1]);
+      close();
+      return;
+    }
     const shaped =
       (this.emptyArm(yes) || this.emptyArm(no) || this.terminates(yes) || this.terminates(no)) &&
       this.localValidation.presentation(
@@ -4664,6 +4725,43 @@ export class Renderer {
       this.hoisted.clear();
       this.forLoops.clear();
     }
+    // Short-circuit tests sharing one arm print as if/else (before breakable blocks).
+    const loopTests = new Set(this.body === body ? [] : tests);
+    const sharedArms = planSharedArms(
+      this.body,
+      program,
+      this.language,
+      (block, head) => {
+        const control = block.control;
+        if (
+          this.flagHeads.has(block.id) ||
+          this.flagTests.has(control.id) ||
+          this.flagStages.has(control.id) ||
+          loopTests.has(control.id) ||
+          this.requirementPredicates.has(control.id)
+        )
+          return false;
+        return (
+          head ||
+          (silent(block) &&
+            !this.notes.has(block.id) &&
+            !anchored(control.id) &&
+            block.statements.every((node) => !anchored(node.id)))
+        );
+      },
+      (transfer) => this.printedCopies(transfer).length,
+      this.context,
+    );
+    if (
+      sharedArms.heads.length &&
+      this.localValidation.presentation(
+        'shared_condition_arm',
+        subject,
+        'a short-circuit test whose operands are copy-free tests printing nothing but their condition (with only silent copy-free jumps between them) and all leave for one statement, entered by those edges only, prints as if/else: that statement becomes the arm body every leaving operand enters (else of the && of staying tests, or then of the || of leaving tests), and the remaining branch falls into the statement after it; operands are still evaluated left to right only while the condition is undecided, and no statement, edge copy or effect moves',
+        sharedArms.heads,
+      )
+    )
+      this.body = sharedArms.body;
     const breakable = planBreakableBlocks(this.body, this.language, this.context);
     if (
       breakable.blocks.length &&

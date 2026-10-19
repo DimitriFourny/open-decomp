@@ -1185,8 +1185,17 @@ for (const language of ['c-like', 'python-like'] as const)
       );
     });
 
-    test('a goto past code its short-circuit test skips breaks out of a block run once', () => {
-      const b = program('source-breakable-block'),
+    /** Every combination of the given argument values. */
+    const grid = (values: readonly Value[], choices: readonly bigint[]): Map<string, bigint>[] =>
+      values.reduce<Map<string, bigint>[]>(
+        (rows, value) =>
+          rows.flatMap((row) => choices.map((bits) => new Map([...row, [value.id, bits]]))),
+        [new Map()],
+      );
+    const choices = [0n, 1n, 2n, 5n];
+
+    test('&& operands leaving for one statement print as if/else', () => {
+      const b = program('source-shared-and'),
         entry = b.block('entry', [i32, i32]),
         second = b.block('second'),
         other = b.block('other'),
@@ -1209,25 +1218,175 @@ for (const language of ['c-like', 'python-like'] as const)
         source = emit(input, language),
         checked = emit(input, language, 'checked'),
         text = source.emission.text;
+      assert.doesNotMatch(text, /\bgoto\b|\blabel\b|while \(0\)|while True/);
+      assert.match(checked.emission.text, /\bgoto\b/);
+      assert.ok(rules(source).includes('shared_condition_arm'), text);
+      assert.ok(!rules(source).includes('breakable_block'));
+      assert.ok(!rules(checked).includes('shared_condition_arm'));
+      assert.match(
+        text,
+        c ? /if \(.+ && .+\) \{\n[^]*\} else \{\n/ : /if .+ and .+:\n[^]*\n {2}else:\n/,
+      );
+      agree(source, checked, grid([a, d], choices));
+    });
+
+    test('|| operands entering one statement print as if/else', () => {
+      const b = program('source-shared-or'),
+        entry = b.block('entry', [i32, i32]),
+        second = b.block('second'),
+        then = b.block('then'),
+        otherwise = b.block('otherwise'),
+        join = b.block('join', [i32]);
+      const [a, d] = entry.parameters as [Value, Value];
+      entry.branch(
+        entry.compare('eq', a, entry.constant(i32, 0n)),
+        entry.edge(then),
+        entry.edge(second),
+      );
+      second.branch(
+        second.compare('eq', d, second.constant(i32, 0n)),
+        second.edge(then),
+        second.edge(otherwise),
+      );
+      then.store(then.constant(i64, 0x1000n), a);
+      then.jump(join, [a]);
+      otherwise.store(otherwise.constant(i64, 0x1004n), d);
+      otherwise.jump(join, [d]);
+      continuation(join);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked'),
+        text = source.emission.text;
+      assert.doesNotMatch(text, /\bgoto\b|\blabel\b|while \(0\)|while True/);
+      assert.ok(rules(source).includes('shared_condition_arm'), text);
+      assert.match(
+        text,
+        c ? /if \(.+ \|\| .+\) \{\n[^]*\} else \{\n/ : /if .+ or .+:\n[^]*\n {2}else:\n/,
+      );
+      agree(source, checked, grid([a, d], choices));
+    });
+
+    test('a shared arm may hold another shared-arm condition', () => {
+      const b = program('source-shared-nested'),
+        entry = b.block('entry', [i32, i32, i32]),
+        s2 = b.block('s2'),
+        f1 = b.block('f1'),
+        x = b.block('x'),
+        s3 = b.block('s3'),
+        f2 = b.block('f2'),
+        y = b.block('y'),
+        join = b.block('join', [i32]);
+      const [a, d, e] = entry.parameters as [Value, Value, Value];
+      entry.branch(entry.compare('eq', a, entry.constant(i32, 0n)), entry.edge(s2), entry.edge(x));
+      s2.branch(s2.compare('eq', d, s2.constant(i32, 0n)), s2.edge(f1), s2.edge(x));
+      f1.store(f1.constant(i64, 0x1000n), a);
+      f1.jump(join, [a]);
+      x.branch(x.compare('eq', e, x.constant(i32, 0n)), x.edge(s3), x.edge(y));
+      s3.branch(s3.compare('eq', a, s3.constant(i32, 1n)), s3.edge(f2), s3.edge(y));
+      f2.store(f2.constant(i64, 0x1004n), d);
+      f2.jump(join, [d]);
+      y.store(y.constant(i64, 0x1008n), e);
+      y.jump(join, [e]);
+      continuation(join);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked'),
+        text = source.emission.text;
+      assert.doesNotMatch(text, /\bgoto\b|\blabel\b|while \(0\)|while True/);
+      assert.equal(text.match(c ? /\} else \{/g : /\belse:/g)?.length, 2, text);
+      agree(source, checked, grid([a, d, e], choices));
+    });
+
+    test('a shared else arm may end in a return', () => {
+      const b = program('source-shared-return'),
+        entry = b.block('entry', [i32, i32, i32]),
+        s2 = b.block('s2'),
+        f = b.block('f'),
+        x = b.block('x'),
+        early = b.block('early', [i32]),
+        join = b.block('join', [i32]);
+      const [a, d, e] = entry.parameters as [Value, Value, Value];
+      entry.branch(entry.compare('eq', a, entry.constant(i32, 0n)), entry.edge(s2), entry.edge(x));
+      s2.branch(s2.compare('eq', d, s2.constant(i32, 0n)), s2.edge(f), s2.edge(x));
+      f.store(f.constant(i64, 0x1000n), a);
+      f.jump(join, [d]);
+      x.branch(x.compare('eq', e, x.constant(i32, 0n)), x.edge(early, [a]), x.edge(join, [e]));
+      continuation(early);
+      continuation(join);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked'),
+        text = source.emission.text;
+      assert.doesNotMatch(text, /\bgoto\b|\blabel\b|while \(0\)|while True/);
+      assert.ok(rules(source).includes('shared_condition_arm'), text);
+      assert.match(text, c ? /\} else \{\n(?:.*\n)*? +return\b/ : /\belse:\n(?:.*\n)*? +return\b/);
+      agree(source, checked, grid([a, d, e], choices));
+    });
+
+    test('operands leaving for different statements keep no shared arm', () => {
+      const b = program('source-shared-diverge'),
+        entry = b.block('entry', [i32, i32]),
+        second = b.block('second'),
+        first = b.block('first'),
+        other = b.block('other'),
+        join = b.block('join', [i32]);
+      const [a, d] = entry.parameters as [Value, Value];
+      entry.branch(
+        entry.compare('eq', a, entry.constant(i32, 0n)),
+        entry.edge(second),
+        entry.edge(first),
+      );
+      second.branch(
+        second.compare('eq', d, second.constant(i32, 0n)),
+        second.edge(join, [second.constant(i32, 7n)]),
+        second.edge(other),
+      );
+      first.store(first.constant(i64, 0x1000n), a);
+      first.jump(join, [a]);
+      other.store(other.constant(i64, 0x1004n), d);
+      other.jump(join, [d]);
+      continuation(join);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      assert.ok(!rules(source).includes('shared_condition_arm'), source.emission.text);
+      agree(source, checked, grid([a, d], choices));
+    });
+
+    test('a goto past code an operand prints breaks out of a block run once', () => {
+      const b = program('source-breakable-block'),
+        entry = b.block('entry', [i32, i32]),
+        second = b.block('second'),
+        other = b.block('other'),
+        join = b.block('join', [i32]);
+      const [a, d] = entry.parameters as [Value, Value];
+      entry.branch(
+        entry.compare('eq', a, entry.constant(i32, 0n)),
+        entry.edge(second),
+        entry.edge(other),
+      );
+      // A printed statement before the second test: no shared-arm operand.
+      second.store(second.constant(i64, 0x1008n), d);
+      second.branch(
+        second.compare('eq', d, second.constant(i32, 0n)),
+        second.edge(join, [second.constant(i32, 7n)]),
+        second.edge(other),
+      );
+      other.store(other.constant(i64, 0x1000n), a);
+      other.jump(join, [d]);
+      continuation(join);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked'),
+        text = source.emission.text;
       assert.doesNotMatch(text, /\bgoto\b|\blabel\b/);
       assert.match(checked.emission.text, /\bgoto\b/);
       assert.ok(rules(source).includes('breakable_block'), text);
+      assert.ok(!rules(source).includes('shared_condition_arm'));
       assert.ok(!rules(checked).includes('breakable_block'));
       if (c) assert.match(text, /do \{\n[^]*\bbreak;\n[^]*\} while \(0\);/);
-      else assert.match(text, /while True:\n[^]*\bbreak\n[^]*\n {4}break\n/);
-      agree(
-        source,
-        checked,
-        [0n, 3n].flatMap((x) =>
-          [0n, 5n].map(
-            (y) =>
-              new Map([
-                [a.id, x],
-                [d.id, y],
-              ]),
-          ),
-        ),
-      );
+      else assert.match(text, /while True:\n[^]*\bbreak\n/);
+      agree(source, checked, grid([a, d], choices));
     });
 
     test('a loop whose two exits each have one edge follows the exit that cannot move', () => {

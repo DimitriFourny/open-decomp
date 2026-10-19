@@ -24,6 +24,14 @@ export interface ControlArm {
   readonly transfer: ParallelTransfer;
   /** Owned region entered after the simultaneous transfer; never an implicit copy. */
   readonly body?: Region;
+  /** Source view only: this arm of a short-circuit head owns a body that the
+   * `joins` arms of the operand chain in its other arm enter as well; the
+   * head prints as `if (stay && …) {…} else {body}` (`all`) or
+   * `if (exit || …) {body} else {…}` (`any`). */
+  readonly shared?: 'all' | 'any';
+  /** Source view only: a bodiless operand edge entering the `shared` arm body
+   * of the head whose operand chain holds this test. */
+  readonly joins?: true;
 }
 export type Control =
   | (Origin & {

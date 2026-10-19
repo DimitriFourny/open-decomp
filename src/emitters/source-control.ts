@@ -12,7 +12,9 @@ import type {
 import type { Reconstruction } from '../reconstruction/model.js';
 import type { InlineSite } from './source-inlining.js';
 
-export type TransferAction = 'goto' | 'fallthrough' | 'break' | 'continue' | 'loop-exit';
+/** `shared-arm`: a short-circuit operand edge entering its head's shared arm. */
+export type TransferAction =
+  'goto' | 'fallthrough' | 'break' | 'continue' | 'loop-exit' | 'shared-arm';
 type Nest =
   | {
       readonly kind: 'loop';
@@ -699,7 +701,13 @@ export function visitTransfers(
   visit: (occurrence: Occurrence) => void,
   follow: Region | null = null,
 ): void {
-  const walk = (region: Region, follow: Region | null, nesting: readonly Nest[]): void => {
+  /** `shared`: the body a `joins` arm of the operand chain being walked enters. */
+  const walk = (
+    region: Region,
+    follow: Region | null,
+    nesting: readonly Nest[],
+    shared: Region | null = null,
+  ): void => {
     context.checkpoint(1);
     if (region.kind === 'sequence') {
       for (let i = 0; i < region.regions.length; i++) {
@@ -709,7 +717,7 @@ export function visitTransfers(
             next = region.regions[j]!;
             break;
           }
-        walk(region.regions[i]!, next, nesting);
+        walk(region.regions[i]!, next, nesting, shared);
       }
       return;
     }
@@ -740,16 +748,29 @@ export function visitTransfers(
       control.kind === 'switch' && language === 'c-like'
         ? [...nesting, { kind: 'switch', id: control.id }]
         : nesting;
+    const head = controlArms(control).find((arm) => arm.shared);
     for (const arm of controlArms(control)) {
       visit({
         transfer: arm.transfer,
         control,
         block: region.id,
         owner: region,
-        destination: leaf(arm.body ?? follow),
+        destination: leaf(arm.joins ? shared : (arm.body ?? follow)),
         nesting: nested,
       });
-      if (arm.body) walk(arm.body, follow, nested);
+      if (arm.body)
+        walk(
+          arm.body,
+          follow,
+          nested,
+          head && arm !== head
+            ? head.body!
+            : arm.shared
+              ? null
+              : controlArms(control).some((item) => item.joins)
+                ? shared
+                : null,
+        );
     }
   };
   walk(body, follow, []);
@@ -2113,5 +2134,188 @@ export function planBreakableBlocks(
       }
       if (!accepted) break;
     }
+  }
+}
+
+/** Source view, after loop forms and before breakable blocks: a short-circuit
+ * test `if (a && b) { F } X` whose operands all leave for the next statement X,
+ * X entered by those edges only, while F leaves for the statement after X,
+ * prints as `if (a && b) { F } else { X }` (or `if (a || b) { X } else { F }`
+ * when every operand leaves on its true arm). X becomes the `shared` body of the
+ * head's leaving arm; the other operands' leaving arms `join` it. Operands are
+ * copy-free tests the condition prints (`operand`, with only copy-free silent
+ * jumps between them); no statement, edge copy or effect moves, and a rewrite
+ * is kept only when an edge leaving F now falls through. Returns the new layout
+ * and the head control ids. Optional work, like planBreakableBlocks. */
+export function planSharedArms(
+  body: Region,
+  program: Reconstruction,
+  language: 'c-like' | 'python-like',
+  operand: (block: BlockRegion, head: boolean) => boolean,
+  copies: (transfer: ParallelTransfer) => number,
+  shared: OperationContext,
+): { readonly body: Region; readonly heads: readonly string[] } {
+  const heads: string[] = [];
+  const context = optionalWork(shared, 16);
+  const incoming = new Map<string, number>();
+  for (const block of program.blocks.values())
+    for (const transfer of controlTransfers(block.control))
+      incoming.set(transfer.target, (incoming.get(transfer.target) ?? 0) + 1);
+  const flatten = (region: Region): Region[] =>
+    region.kind === 'sequence' ? region.regions.flatMap(flatten) : [region];
+  const leaves = (arm: ControlArm, target: string): boolean =>
+    !arm.body && arm.transfer.target === target && copies(arm.transfer) === 0;
+  /** The operand chain from `head` whose leaving arms all reach `target`. */
+  const chain = (head: BlockRegion, target: string): Map<ControlArm, BlockRegion> | null => {
+    const members = new Map<ControlArm, BlockRegion>();
+    let block: BlockRegion | undefined = head;
+    while (block) {
+      context.checkpoint(1);
+      const control: Control = block.control;
+      if (control.kind !== 'if' || !operand(block, block === head)) return null;
+      const exit: ControlArm | undefined = leaves(control.when_true, target)
+        ? control.when_true
+        : leaves(control.when_false, target)
+          ? control.when_false
+          : undefined;
+      const stay: ControlArm = exit === control.when_true ? control.when_false : control.when_true;
+      if (!exit || stay.transfer.target === target) return null;
+      members.set(exit, block);
+      // The last operand's staying edge may carry copies and own no body.
+      const parts = stay.body ? flatten(stay.body) : [],
+        last = parts.at(-1);
+      block =
+        copies(stay.transfer) === 0 &&
+        last?.kind === 'block' &&
+        last.control.kind === 'if' &&
+        controlArms(last.control).some((arm) => !arm.body && arm.transfer.target === target) &&
+        parts
+          .slice(0, -1)
+          .every(
+            (part, index) =>
+              part.kind === 'block' &&
+              part.control.kind === 'jump' &&
+              part.control.transfer.target === firstBlock(parts[index + 1]!) &&
+              copies(part.control.transfer) === 0 &&
+              operand(part, false),
+          )
+          ? last
+          : undefined;
+    }
+    return members.size >= 2 && incoming.get(target) === members.size ? members : null;
+  };
+  /** Mark the chain's leaving arms; the head's own owns `owned`. */
+  const mark = (
+    region: Region,
+    members: ReadonlyMap<ControlArm, BlockRegion>,
+    head: ControlArm,
+    owned: Region,
+    form: 'all' | 'any',
+  ): Region => {
+    context.checkpoint(1);
+    if (region.kind === 'sequence')
+      return sequence(region.regions.map((child) => mark(child, members, head, owned, form)));
+    if (region.kind === 'loop') return region;
+    return {
+      ...region,
+      control: mapArms(region.control, (arm) =>
+        arm === head
+          ? { ...arm, body: owned, shared: form }
+          : members.has(arm)
+            ? { ...arm, joins: true }
+            : arm.body
+              ? { ...arm, body: mark(arm.body, members, head, owned, form) }
+              : arm,
+      ),
+    };
+  };
+  const gotos = (region: Region, follow: Region | null): number => {
+    let count = 0;
+    visitTransfers(
+      region,
+      language,
+      context,
+      (occurrence) => {
+        if (occurrenceAction(occurrence, language) === 'goto') count++;
+      },
+      follow,
+    );
+    return count;
+  };
+  const rewrite = (region: Region, follow: Region | null): Region => {
+    context.checkpoint(1);
+    if (region.kind === 'loop')
+      return { ...region, body: rewrite(region.body, region.once ? follow : region) };
+    if (region.kind === 'block')
+      return {
+        ...region,
+        control: mapArms(region.control, (arm) =>
+          arm.body ? { ...arm, body: rewrite(arm.body, follow) } : arm,
+        ),
+      };
+    const next = (list: readonly Region[], index: number): Region | null =>
+      list.slice(index + 1).find((child) => firstBlock(child) !== null) ?? follow;
+    let list = region.regions.map((child, index) => rewrite(child, next(region.regions, index)));
+    // Each rewrite exposes the head to the statement list again (nesting).
+    for (let changed = true; changed;) {
+      changed = false;
+      for (let index = 0; index + 1 < list.length; index++) {
+        const head = list[index]!,
+          owned = list[index + 1]!,
+          target = firstBlock(owned);
+        if (head.kind !== 'block' || head.control.kind !== 'if' || target === null) continue;
+        if (target === program.function.entry) continue;
+        const members = chain(head, target);
+        if (!members) continue;
+        const exits = [...members.keys()];
+        const own = exits.find((arm) => members.get(arm) === head)!;
+        const stay =
+          own === head.control.when_true ? head.control.when_false : head.control.when_true;
+        // F's leaving edges then fall into the statement after X.
+        const after = next(list, index + 1);
+        const final = (arm: ControlArm): ControlArm => {
+          if (!arm.body) return arm;
+          const parts = flatten(arm.body),
+            last = parts.at(-1)!;
+          const inner =
+            last.kind === 'block' && last.control.kind === 'if'
+              ? controlArms(last.control).find((item) => members.has(item))
+              : undefined;
+          if (!inner || last.kind !== 'block' || last.control.kind !== 'if') return arm;
+          return final(
+            inner === last.control.when_true ? last.control.when_false : last.control.when_true,
+          );
+        };
+        const branch = final(stay),
+          land = leaf(after);
+        if (
+          branch.body
+            ? gotos(branch.body, owned) <= gotos(branch.body, after)
+            : !land || branch.transfer.target !== firstBlock(land)
+        )
+          continue;
+        const form = exits.every((arm) => {
+          const block = members.get(arm)!;
+          return block.control.kind === 'if' && block.control.when_true === arm;
+        })
+          ? 'any'
+          : 'all';
+        list = [
+          ...list.slice(0, index),
+          mark(head, members, own, owned, form),
+          ...list.slice(index + 2),
+        ];
+        heads.push(head.control.id);
+        changed = true;
+        break;
+      }
+    }
+    return sequence(list);
+  };
+  try {
+    return { body: rewrite(body, null), heads };
+  } catch (error) {
+    if (!(error instanceof OptionalWorkExhausted)) throw error;
+    return { body, heads: [] };
   }
 }
