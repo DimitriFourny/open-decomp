@@ -172,22 +172,36 @@ export function planSourceStack(
   let escaped = false,
     unknownCallStorage = false,
     // Frame saves rest on ABI conformance: an unresolved callee reads only
-    // argument registers/stack and never writes its caller's frame. Only an
-    // actual stack address in possible argument/result storage escapes them.
-    saveEscaped = view !== 'source';
+    // argument registers/stack and never writes its caller's frame. Any stack
+    // address in possible argument/result storage escapes private promotion
+    // (`saveEscaped`). For frame saves only an address of unknown offset exposes
+    // the whole frame (`frameExposed`); an escaped address of known offset
+    // designates its own object, never a compiler-owned save slot elsewhere.
+    saveEscaped = view !== 'source',
+    frameExposed = saveEscaped;
+  const exposedOffsets = new Set<bigint>();
+  const expose = (value: Value): void => {
+    if (!tainted.has(value.id)) return;
+    saveEscaped = true;
+    const offset = addresses.get(value.id);
+    if (offset === undefined) frameExposed = true;
+    else exposedOffsets.add(offset);
+  };
   const abi = input.source!.abi;
   const preservedRoot = (root: string): boolean =>
     abi.preserved.some((register) => register.root === root);
   // Condition flags are never argument or result storage under any supported
   // ABI; flags computed from frame arithmetic do not hand a callee an address.
-  const argumentTainted = (bindings: readonly RegisterBinding[]): boolean =>
-    bindings.some(
+  const argumentBindings = (bindings: readonly RegisterBinding[]): RegisterBinding[] =>
+    bindings.filter(
       (binding) =>
         binding.register.root !== abi.stack_pointer.root &&
         binding.register.bank !== 'flags' &&
         !preservedRoot(binding.register.root) &&
         tainted.has(binding.value.id),
     );
+  const argumentTainted = (bindings: readonly RegisterBinding[]): boolean =>
+    argumentBindings(bindings).length > 0;
   // Validate closure before classifying outgoing storage: a fully analyzed
   // register-only callee cannot observe private spills merely because the caller
   // wrote them. Refused presentation records keep the conservative open area.
@@ -254,11 +268,9 @@ export function planSourceStack(
       if (node.kind === 'call') {
         callNodes.push(node);
         const projection = calls.get(node.id)!;
-        if (
-          projection.arguments.some((value) => tainted.has(value.id)) ||
-          (openArguments(projection) && argumentTainted(node.register_inputs))
-        )
-          saveEscaped = true;
+        for (const value of projection.arguments) expose(value);
+        if (openArguments(projection))
+          for (const binding of argumentBindings(node.register_inputs)) expose(binding.value);
       }
       if (node.kind === 'call' && openArguments(calls.get(node.id)!)) unknownCallStorage = true;
       if (
@@ -270,7 +282,7 @@ export function planSourceStack(
       if (node.kind === 'unknown_effect') {
         escaped = true;
         if (fpFailureArms.has(block.id)) guardEffects.add(block.id);
-        else saveEscaped = true;
+        else saveEscaped = frameExposed = true;
       }
       if (node.kind !== 'load' && node.kind !== 'store') continue;
       const offset = addresses.get(node.address.id),
@@ -279,9 +291,12 @@ export function planSourceStack(
         node.kind === 'store' &&
         tainted.has(node.value.id) &&
         (offset === undefined || offset >= 0n)
-      )
-        escaped = saveEscaped = true;
-      if (offset === undefined && tainted.has(node.address.id)) escaped = saveEscaped = true;
+      ) {
+        escaped = true;
+        expose(node.value);
+      }
+      if (offset === undefined && tainted.has(node.address.id))
+        escaped = saveEscaped = frameExposed = true;
       if (offset === undefined || width % 8) continue;
       const end = offset + BigInt(width / 8);
       accesses.push({ node, block: block.id, offset, end, key: `${offset}:${end}` });
@@ -289,14 +304,16 @@ export function planSourceStack(
     if (
       block.control.kind === 'return' &&
       returns.get(block.control.id)!.results.some((value) => tainted.has(value.id))
-    )
-      escaped = saveEscaped = true;
+    ) {
+      escaped = true;
+      for (const value of returns.get(block.control.id)!.results) expose(value);
+    }
     // Like private promotion, unmodeled exits do not observe frame-private
     // bytes; an indirect target may still receive a stack address as argument.
-    if (block.control.kind === 'indirect' && argumentTainted(block.register_exit))
-      saveEscaped = true;
+    if (block.control.kind === 'indirect')
+      for (const binding of argumentBindings(block.register_exit)) expose(binding.value);
   }
-  for (const id of saveEscaped ? [] : guardEffects)
+  for (const id of frameExposed ? [] : guardEffects)
     if (
       !validation.presentation(
         'fp_guard_frame',
@@ -305,7 +322,7 @@ export function planSourceStack(
         [id],
       )
     )
-      saveEscaped = true;
+      saveEscaped = frameExposed = true;
   // Established ABI stack locations are outgoing argument storage at a call,
   // even when their entry-SP offsets are negative. They are not private spills.
   const outgoingRanges = (input.types?.calls?.calls ?? []).flatMap((call) =>
@@ -540,7 +557,7 @@ export function planSourceStack(
     }
     return false;
   };
-  if (!saveEscaped && exits.length) {
+  if (!frameExposed && exits.length) {
     const entryCells = new Map(
       entry.register_entry.map((binding) => [binding.value.id, binding.register]),
     );
@@ -660,6 +677,7 @@ export function planSourceStack(
         accesses.some(
           (access) => access.key !== key && access.offset < first.end && access.end > first.offset,
         ) ||
+        [...exposedOffsets].some((offset) => offset >= first.offset && offset < first.end) ||
         outgoingRanges.some((range) => range.start < first.end && range.end > first.offset)
       )
         continue;
