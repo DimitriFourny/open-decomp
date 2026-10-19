@@ -30,9 +30,10 @@ function declared(name: string, index: number): string | undefined {
 
 /** One block calling the imported ucrtbase functions in order; each call's first
  * argument is the formal `rcx` unless `chain` feeds it the previous call's result. */
-function libraryProgram(
-  calls: readonly { name: string; chain?: boolean; second?: bigint }[],
-): { text: string; python: string } {
+function libraryProgram(calls: readonly { name: string; chain?: boolean; second?: bigint }[]): {
+  text: string;
+  python: string;
+} {
   const base = navigationBytes(Uint8Array.of(0xc3), Buffer.alloc(16));
   const loaded = {
     ...base,
@@ -43,7 +44,11 @@ function libraryProgram(
       library: 'ucrtbase.dll',
       ordinal: null,
       slot: null,
-      callable_entry: { image_id: base.id, space: 'va' as const, value: 0x1000n + BigInt(index) * 16n },
+      callable_entry: {
+        image_id: base.id,
+        space: 'va' as const,
+        value: 0x1000n + BigInt(index) * 16n,
+      },
       delayed: false,
       weak: false,
       evidence_ids: [`${call.name}-binding`],
@@ -61,7 +66,11 @@ function libraryProgram(
   calls.forEach((call, index) => {
     block.writeRegister(rcx, call.chain ? previous : formal);
     block.writeRegister(rdx, block.constant(i64, call.second ?? 0n));
-    const target: Address = { image_id: base.id, space: 'va', value: 0x1000n + BigInt(index) * 16n };
+    const target: Address = {
+      image_id: base.id,
+      space: 'va',
+      value: 0x1000n + BigInt(index) * 16n,
+    };
     block.call({ kind: 'direct', address: target }, [], [], windowsX64Abi.unknown_call_clobbers);
     ids.push(call.name);
     previous = block.readRegister(register('rax', 64, 0, 'replace_root', 'x86_64:rax'));
@@ -75,9 +84,9 @@ function libraryProgram(
     revision: 0,
     library,
   });
-  const names = ir.blocks[0]!.instructions
-    .filter((node) => node.kind === 'call')
-    .map((node, index) => ({ entity_id: node.id, name: calls[index]!.name }));
+  const names = ir.blocks[0]!.instructions.filter((node) => node.kind === 'call').map(
+    (node, index) => ({ entity_id: node.id, name: calls[index]!.name }),
+  );
   const run = (language: 'c-like' | 'python-like') =>
     emit(ir, { types, source: { abi: windowsX64Abi, callees: [], addresses: [] }, names }, language)
       .emission.text;
@@ -238,7 +247,11 @@ for (const language of ['c-like', 'python-like'] as const) {
       { source: { abi: sysvAMD64Abi, callees: [], addresses: [] } },
       language,
     ).emission.text;
-    assert.match(text, /return 1\b/, 'the exit followed by its own return copy returns the constant');
+    assert.match(
+      text,
+      /return 1\b/,
+      'the exit followed by its own return copy returns the constant',
+    );
     assert.doesNotMatch(text, /result = 1\b/);
     // The loop exit that still reaches the shared return keeps its carrier copy.
     assert.match(text, /result = 0\b/);

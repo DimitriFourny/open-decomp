@@ -21,12 +21,7 @@ import {
   type CatalogEntry,
   type TypeSpec,
 } from './catalog.js';
-import {
-  abiTypedefColumn,
-  isAbiTypedef,
-  libraryScalar,
-  type PlainScalar,
-} from './variables.js';
+import { abiTypedefColumn, isAbiTypedef, libraryScalar, type PlainScalar } from './variables.js';
 export type { ArgumentMemory } from './catalog.js';
 
 interface TypeSpecResolution {

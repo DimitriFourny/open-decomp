@@ -532,8 +532,7 @@ export function recoverImportBindings(
     const libraries = new Set(entries.map((entry) => entry.item.library));
     const library = libraries.size === 1 ? first.item.library : null;
     const declared =
-      library !== null &&
-      entries.every((entry) => !entry.item.weak && !adjusted.has(entry.item.id))
+      library !== null && entries.every((entry) => !entry.item.weak && !adjusted.has(entry.item.id))
         ? findVariable(
             libraryLookupName(image.target.format, first.item.original_name!),
             library,

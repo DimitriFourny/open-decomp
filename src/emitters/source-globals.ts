@@ -1,5 +1,8 @@
 import type { AbiProfile, Address, OperationContext } from '../core/index.js';
-import { describeVariableType, type VariableType } from '../metadata/library-contracts/variables.js';
+import {
+  describeVariableType,
+  type VariableType,
+} from '../metadata/library-contracts/variables.js';
 import { bitWidth, type DataType, type Instruction, type Value } from '../ir/index.js';
 import type { Reconstruction } from '../reconstruction/model.js';
 import type { SourceAddress } from '../reconstruction/source-model.js';
@@ -222,10 +225,7 @@ export function planGlobals(
         : 'array';
     for (const item of list) accesses.set(item.node.id, { object: target, offset: item.offset });
     const variable = target.import?.variable,
-      type =
-        variable && options.abi
-          ? describeVariableType(variable.type, options.abi)
-          : undefined;
+      type = variable && options.abi ? describeVariableType(variable.type, options.abi) : undefined;
     const reads = list.every((item) => item.node.kind === 'load');
     if (
       variable &&

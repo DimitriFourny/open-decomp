@@ -74,7 +74,8 @@ export function libraryScalar(spec: PlainScalar, abi: AbiProfile): LibraryScalar
 export const abiTypedefColumn = (abi: AbiProfile): 0 | 1 | 2 =>
   abi.id === 'darwin-arm64' ? 0 : abi.id === 'sysv-amd64' ? 1 : 2;
 
-export const isAbiTypedef = (spec: ScalarSpec): spec is AbiTypedef => Object.hasOwn(ABI_TYPEDEFS, spec);
+export const isAbiTypedef = (spec: ScalarSpec): spec is AbiTypedef =>
+  Object.hasOwn(ABI_TYPEDEFS, spec);
 
 /** The declared type of a library data object as the source view spells it. */
 export interface VariableType {

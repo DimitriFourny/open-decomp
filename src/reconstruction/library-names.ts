@@ -26,7 +26,8 @@ export interface LibraryResultName {
  * return is a sentinel of the same kind: `fd == -1`, `stream == NULL`). */
 const RESULT_ROLES: Readonly<Record<string, string>> = Object.fromEntries(
   Object.entries({
-    stream: 'fopen fopen64 fdopen freopen freopen64 tmpfile tmpfile64 popen fmemopen open_memstream',
+    stream:
+      'fopen fopen64 fdopen freopen freopen64 tmpfile tmpfile64 popen fmemopen open_memstream',
     fd: 'open open64 openat creat creat64 socket accept accept4 dup dup2 dup3 eventfd epoll_create epoll_create1 timerfd_create inotify_init inotify_init1 memfd_create',
     buffer: 'malloc calloc realloc reallocf aligned_alloc valloc memalign',
     length: 'strlen strnlen wcslen wcsnlen',

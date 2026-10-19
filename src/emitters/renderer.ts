@@ -4067,7 +4067,9 @@ export class Renderer {
             carrier = value;
             break;
           }
-          const expression = this.inline.has(value.id) ? program.expressions.get(value.id) : undefined;
+          const expression = this.inline.has(value.id)
+            ? program.expressions.get(value.id)
+            : undefined;
           if (
             expression?.kind !== 'cast' ||
             !['zero_extend', 'sign_extend', 'truncate', 'bitcast'].includes(expression.op)
@@ -5680,26 +5682,26 @@ export class Renderer {
           let values: string[];
           try {
             values = this.writer.list(projection.results, (value) => {
-            const scalar = this.sourceView && this.program.source?.return_scalar;
-            if (scalar) return this.scalarReturn(value, scalar.bits, scalar.signed).text;
-            if (this.program.source?.return_pointer && !this.program.source.return_source_type)
-              return this.sourceAddressValue(value, true);
-            const literal = this.valueLiteral(value, this.returnSpelling);
-            if (literal) return literal.text;
-            const returned = this.sourceInterpretation(
-              value,
-              this.printed(value),
-              this.program.signature?.signature.return_type ??
-                this.program.source?.return_source_type,
-            );
-            // `return` converts to the declared result type like assignment.
-            const bits = bitWidth(value.type);
-            return this.converted(
-              returned,
-              projection.results.length === 1 && this.returnSpelling === `uint${bits}_t`
-                ? bits
-                : null,
-            );
+              const scalar = this.sourceView && this.program.source?.return_scalar;
+              if (scalar) return this.scalarReturn(value, scalar.bits, scalar.signed).text;
+              if (this.program.source?.return_pointer && !this.program.source.return_source_type)
+                return this.sourceAddressValue(value, true);
+              const literal = this.valueLiteral(value, this.returnSpelling);
+              if (literal) return literal.text;
+              const returned = this.sourceInterpretation(
+                value,
+                this.printed(value),
+                this.program.signature?.signature.return_type ??
+                  this.program.source?.return_source_type,
+              );
+              // `return` converts to the declared result type like assignment.
+              const bits = bitWidth(value.type);
+              return this.converted(
+                returned,
+                projection.results.length === 1 && this.returnSpelling === `uint${bits}_t`
+                  ? bits
+                  : null,
+              );
             });
           } finally {
             this.substituted = null;
