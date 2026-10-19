@@ -1,3 +1,4 @@
+import type { VariableType } from '../metadata/library-contracts/variables.js';
 import {
   fingerprint,
   MAX_RESULT_DIAGNOSTICS,
@@ -122,6 +123,9 @@ import {
   transferAction,
   type LoopFacts,
   type TransferAction,
+  type LayoutPlan,
+  type Occurrence,
+  occurrenceAction,
 } from './source-control.js';
 import {
   planSourceInlining,
@@ -203,6 +207,15 @@ export class Renderer {
   private readonly sourceView: boolean;
   private readonly nativeIntegerStorage: boolean;
   private readonly actions = new Map<ParallelTransfer, TransferAction>();
+  /** Source view: constants an owned copy of a return tail receives on its one
+   * edge, by the block parameter they would be copied into (see planReturnConstants). */
+  private readonly returnConstants = new Map<BlockRegion, Map<string, Value>>();
+  /** The edge copies those constants replace, by destination value id. */
+  private readonly forwardedCopies = new Map<ParallelTransfer, Set<string>>();
+  /** Block parameters no printed edge writes and no printed return reads. */
+  private readonly vanished = new Set<string>();
+  /** Block parameters read as these constants while a return prints (see planReturnConstants). */
+  private substituted: ReadonlyMap<string, Value> | null = null;
   /** Loop-test arms whose action the loop syntax itself performs. */
   private readonly consumed = new Set<ParallelTransfer>();
   private readonly fallthrough = new Set<ParallelTransfer>();
@@ -441,6 +454,7 @@ export class Renderer {
       access_type: (node) => this.accessType(node),
       pretty: this.sourceView && this.program.source !== undefined,
       pointer_bits: this.input.source?.abi.layout.pointer_bits,
+      abi: this.input.source?.abi,
     });
     for (const projection of this.program.calls.values()) {
       if (!projection.signature) continue;
@@ -847,6 +861,7 @@ export class Renderer {
 
   /** Signed result context changes literal spelling, not the underlying bits. */
   private scalarReturn(value: Value, bits: number, signed: boolean, depth = 0): Printed {
+    value = this.substituted?.get(value.id) ?? value;
     const expression = this.inline.has(value.id)
       ? this.program.expressions.get(value.id)
       : undefined;
@@ -1257,6 +1272,8 @@ export class Renderer {
   private value = (value: Value): string => this.printed(value).text;
   private printed = (value: Value): Printed => {
     this.context.checkpoint(1);
+    const replacement = this.substituted?.get(value.id);
+    if (replacement) value = replacement;
     const source = this.sourceView,
       python = this.language === 'python-like';
     const stack = this.program.source?.stack,
@@ -1314,7 +1331,10 @@ export class Renderer {
         this.writer.fail('Reconstructed expression expansion exceeds its budget');
       this.expanding.add(value.id);
       const storage = this.storage(load);
-      if (this.language === 'c-like' && this.slotType(load.id)) {
+      if (
+        this.language === 'c-like' &&
+        (this.slotType(load.id) || this.typedPointerGlobal(load.id))
+      ) {
         // A typed pointer slot read in integer context yields its address bits.
         this.expanding.delete(value.id);
         return {
@@ -2694,6 +2714,25 @@ export class Renderer {
     }
   }
 
+  /** The opaque tags and pointer typedefs a header-declared global's C type mentions. */
+  private registerTypedefs(type: VariableType): void {
+    for (const name of type.opaque)
+      if (!this.deferredTypedefs.includes(name)) this.deferredTypedefs.push(name);
+    for (const handle of type.handles)
+      if (!this.handleTypedefs.has(handle.name)) {
+        this.handleTypedefs.set(handle.name, `typedef ${handle.target}* ${handle.name};`);
+        this.deferredTypedefs.push(handle.name);
+      }
+  }
+
+  /** C only: the header-declared pointer type of the imported object a load reads.
+   * Its value is a pointer; integer context reads its address bits. */
+  private typedPointerGlobal(node: string): VariableType | undefined {
+    if (this.language !== 'c-like') return undefined;
+    const declared = this.globals.accesses.get(node)?.object.declared?.type;
+    return declared?.kind === 'pointer' ? declared : undefined;
+  }
+
   /** Declarations of every global the finished body names, inserted before the
    * function so the text refers only to declared names. Each is mapped to its
    * first planned access with the image/import evidence of the object. */
@@ -2708,16 +2747,22 @@ export class Renderer {
     let offset = at;
     for (const { object: global, name } of this.usedGlobals.values()) {
       this.context.checkpoint(1);
-      const type = global.element.float
-          ? global.element.bits === 32
-            ? 'float'
-            : 'double'
-          : `uint${global.element.bits}_t`,
+      const declared = global.declared;
+      if (declared && !python) this.registerTypedefs(declared.type);
+      const type = declared
+          ? python
+            ? declared.type.python
+            : declared.type.c
+          : global.element.float
+            ? global.element.bits === 32
+              ? 'float'
+              : 'double'
+            : `uint${global.element.bits}_t`,
         first = lines.length;
       // Comment text only: names stay readable, a comment terminator cannot occur.
       const plain = (text: string): string => text.replace(/\*\//g, '* /');
       const where = global.import
-        ? `import ${plain(global.import.name)}${global.import.library === null ? '' : ` from ${plain(global.import.library)}`}, slot 0x${global.address.value.toString(16)}`
+        ? `import ${plain(global.import.name)}${global.import.library === null ? '' : ` from ${plain(global.import.library)}`}, slot 0x${global.address.value.toString(16)}${declared ? `, type from ${plain(declared.source)}` : ''}`
         : `VA 0x${global.address.value.toString(16)}${global.object.byte_length === null ? '' : `, ${global.object.byte_length} bytes`}${global.object.kind === 'bytes' ? '' : `, ${global.object.kind.replace('_', ' ')}`}`;
       if (python) {
         lines.push(
@@ -2735,7 +2780,9 @@ export class Renderer {
         );
       } else
         lines.push(
-          `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'}; /* ${where} */`,
+          declared
+            ? `extern ${type}${declared.constant ? ' const' : ''} ${name}; /* ${where} */`
+            : `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'}; /* ${where} */`,
         );
       const length = lines.slice(first).reduce((sum, line) => sum + line.length + 1, 0);
       spans.push({ object: global, start: offset, end: offset + length });
@@ -3012,6 +3059,9 @@ export class Renderer {
           return /^(?:const )?(?:char|void)\s*\*$/.test(spelling)
             ? literal
             : `(${spelling})${literal}`;
+        const loaded = this.inlined.get(value.id)?.node;
+        if (loaded?.kind === 'load' && this.typedPointerGlobal(loaded.id)?.c === spelling)
+          return this.storage(loaded);
         return `((${spelling})(uintptr_t)(${text}))`;
       }
       const type = parameter && this.typeRecords.get(parameter.type_id)?.definition;
@@ -3199,6 +3249,17 @@ export class Renderer {
       const spelling = this.declaredSpelling(node.result);
       return `${this.local(node.result)} = ${
         spelling.replace(/^const /, '') === this.formalSpelling(typed).replace(/^const /, '')
+          ? storage
+          : spelling.endsWith('*')
+            ? `(${spelling})${storage}`
+            : `(uintptr_t)${storage}`
+      }`;
+    }
+    const global = this.typedPointerGlobal(node.id);
+    if (global && this.program.live.has(node.result.id)) {
+      const spelling = this.declaredSpelling(node.result);
+      return `${this.local(node.result)} = ${
+        spelling === global.c
           ? storage
           : spelling.endsWith('*')
             ? `(${spelling})${storage}`
@@ -3762,7 +3823,8 @@ export class Renderer {
             transfer.copies.flatMap((copy) => {
               this.localValidation.allowance.charge();
               return this.program.live.has(copy.destination.id) &&
-                !this.inline.has(copy.destination.id)
+                !this.inline.has(copy.destination.id) &&
+                !this.forwardedCopies.get(transfer)?.has(copy.destination.id)
                 ? [
                     {
                       ...copy,
@@ -3950,11 +4012,121 @@ export class Renderer {
     return false;
   }
 
+  /** No member of the printed variable `value` belongs to is ever written or read. */
+  private vanishedVariable(value: Value): boolean {
+    if (!this.vanished.has(value.id)) return false;
+    const representative = this.variables.get(value.id)?.id ?? value.id;
+    for (const [id, other] of this.variables)
+      if (other.id === representative && !this.vanished.has(id)) return false;
+    return true;
+  }
+
+  /** Source view: a return tail printed as owned copies has no other way in
+   * than the edge each copy follows. A block parameter such a tail returns,
+   * written from a constant by an edge every printed occurrence of which is
+   * followed by such a copy, read nowhere else and used by nothing but that
+   * return, is the constant: the edge copy and the carrier are dropped and
+   * each `return` prints the constant. An edge that still reaches the tail's
+   * home (a goto or fallthrough) keeps its copy, and with it the carrier. A
+   * parameter written this way by every edge of a fully duplicated tail is
+   * never printed at all. */
+  private planReturnConstants(layout: LayoutPlan): void {
+    const program = this.program;
+    const occurrences = new Map<ParallelTransfer, Occurrence[]>();
+    visitTransfers(layout.body, this.language, this.context, (occurrence) => {
+      const list = occurrences.get(occurrence.transfer) ?? [];
+      list.push(occurrence);
+      occurrences.set(occurrence.transfer, list);
+    });
+    for (const [transfer, list] of occurrences) {
+      this.context.checkpoint(list.length);
+      const tail = program.blocks.get(transfer.target),
+        control = tail?.control;
+      if (!tail || control?.kind !== 'return') continue;
+      const projection = program.returns.get(control.id);
+      if (!projection || projection.kind === 'physical' || projection.outputs.length) continue;
+      const copies: BlockRegion[] = [];
+      for (const occurrence of list) {
+        const destination = occurrence.destination;
+        if (
+          destination?.kind === 'block' &&
+          layout.clones.has(destination) &&
+          destination.id === transfer.target &&
+          occurrenceAction(occurrence, this.language) === 'fallthrough'
+        )
+          copies.push(destination);
+      }
+      if (copies.length !== list.length) continue;
+      for (const result of projection.results) {
+        // The returned value is the carrier itself or an inline conversion of it.
+        const chain: Value[] = [result];
+        let carrier: Value | undefined;
+        while (chain.length <= 8) {
+          const value = chain[chain.length - 1]!;
+          if (tail.parameters.some((parameter) => parameter.id === value.id)) {
+            carrier = value;
+            break;
+          }
+          const expression = this.inline.has(value.id)
+            ? program.expressions.get(value.id)
+            : undefined;
+          if (
+            expression?.kind !== 'cast' ||
+            !['zero_extend', 'sign_extend', 'truncate', 'bitcast'].includes(expression.op)
+          )
+            break;
+          chain.push(expression.value);
+        }
+        if (!carrier || chain.some((value) => program.use_counts.get(value.id) !== 1)) continue;
+        const move = (program.transfers.get(transfer) ?? []).find(
+            (candidate) => candidate.destination.id === carrier.id,
+          ),
+          constant = move && program.expressions.get(move.source.id);
+        if (
+          !move ||
+          constant?.kind !== 'constant' ||
+          !this.inline.has(move.source.id) ||
+          bitWidth(move.source.type) !== bitWidth(carrier.type) ||
+          move.source.type.kind !== carrier.type.kind ||
+          !this.localValidation.presentation(
+            'return_constant',
+            control.id,
+            'a block parameter written from a constant by an edge that every printed occurrence of which is followed by its own copy of the return tail, read only through the conversions that form that return\u2019s value, is that constant on every path through the copy: the edge copy and the carrier are dropped and the return states the constant',
+            [carrier.id, move.source.id],
+          )
+        )
+          continue;
+        for (const copy of copies) {
+          const values = this.returnConstants.get(copy) ?? new Map<string, Value>();
+          values.set(carrier.id, move.source);
+          this.returnConstants.set(copy, values);
+        }
+        const dropped = this.forwardedCopies.get(transfer) ?? new Set<string>();
+        dropped.add(carrier.id);
+        this.forwardedCopies.set(transfer, dropped);
+      }
+    }
+    const hidden = new Set(layout.hidden);
+    for (const id of hidden) {
+      const home = program.blocks.get(id);
+      if (!home) continue;
+      const edges = [...program.transfers.keys()].filter((transfer) => transfer.target === id);
+      for (const parameter of home.parameters)
+        if (
+          edges.length &&
+          edges.every((transfer) => this.forwardedCopies.get(transfer)?.has(parameter.id))
+        )
+          this.vanished.add(parameter.id);
+    }
+  }
+
   /** Edge copies actually printed: a coalesced class's self-copy is no move. */
   private printedCopies(
     transfer: ParallelTransfer,
   ): readonly { readonly destination: Value; readonly source: Value }[] {
-    const copies = this.program.transfers.get(transfer) ?? [];
+    const all = this.program.transfers.get(transfer) ?? [];
+    const forwarded = this.forwardedCopies.get(transfer);
+    const copies = forwarded ? all.filter((copy) => !forwarded.has(copy.destination.id)) : all;
     if (!this.variables.size) return copies;
     return copies.filter((copy) => {
       const destination = this.variables.get(copy.destination.id);
@@ -4981,6 +5153,7 @@ export class Renderer {
     ) {
       body = layout.body;
       this.clones = layout.clones;
+      this.planReturnConstants(layout);
     }
     // Short-circuit tests carried by a promoted flag local (typical O0 `&&`).
     const anchored = (id: string): boolean =>
@@ -5505,28 +5678,34 @@ export class Renderer {
         for (const value of control.values) ids.push(value.id);
         for (const binding of block.register_exit) ids.push(binding.value.id);
         if (projection && projection.kind !== 'physical' && projection.outputs.length === 0) {
-          const values = this.writer.list(projection.results, (value) => {
-            const scalar = this.sourceView && this.program.source?.return_scalar;
-            if (scalar) return this.scalarReturn(value, scalar.bits, scalar.signed).text;
-            if (this.program.source?.return_pointer && !this.program.source.return_source_type)
-              return this.sourceAddressValue(value, true);
-            const literal = this.valueLiteral(value, this.returnSpelling);
-            if (literal) return literal.text;
-            const returned = this.sourceInterpretation(
-              value,
-              this.printed(value),
-              this.program.signature?.signature.return_type ??
-                this.program.source?.return_source_type,
-            );
-            // `return` converts to the declared result type like assignment.
-            const bits = bitWidth(value.type);
-            return this.converted(
-              returned,
-              projection.results.length === 1 && this.returnSpelling === `uint${bits}_t`
-                ? bits
-                : null,
-            );
-          });
+          this.substituted = this.returnConstants.get(block) ?? null;
+          let values: string[];
+          try {
+            values = this.writer.list(projection.results, (value) => {
+              const scalar = this.sourceView && this.program.source?.return_scalar;
+              if (scalar) return this.scalarReturn(value, scalar.bits, scalar.signed).text;
+              if (this.program.source?.return_pointer && !this.program.source.return_source_type)
+                return this.sourceAddressValue(value, true);
+              const literal = this.valueLiteral(value, this.returnSpelling);
+              if (literal) return literal.text;
+              const returned = this.sourceInterpretation(
+                value,
+                this.printed(value),
+                this.program.signature?.signature.return_type ??
+                  this.program.source?.return_source_type,
+              );
+              // `return` converts to the declared result type like assignment.
+              const bits = bitWidth(value.type);
+              return this.converted(
+                returned,
+                projection.results.length === 1 && this.returnSpelling === `uint${bits}_t`
+                  ? bits
+                  : null,
+              );
+            });
+          } finally {
+            this.substituted = null;
+          }
           this.writer.statement(
             depth,
             values.length
@@ -6103,7 +6282,8 @@ export class Renderer {
         this.inline.has(value.id) ||
         this.inlinedCalls.has(value.id) ||
         formals.has(value.id) ||
-        this.program.source?.stack_addresses.has(value.id)
+        this.program.source?.stack_addresses.has(value.id) ||
+        this.vanishedVariable(value)
       )
         continue;
       const start = w.offset,

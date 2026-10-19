@@ -1,5 +1,6 @@
 import type { Address, LoadedImage, OperationContext, SymbolRecord } from '../../core/index.js';
-import { cSourceName } from '../../metadata/symbols/c-names.js';
+import { findVariable } from '../../metadata/library-contracts/catalog.js';
+import { cSourceName, libraryLookupName } from '../../metadata/symbols/c-names.js';
 import type { SourceAddress } from '../../reconstruction/source-model.js';
 
 const contains = (start: Address, size: bigint, address: Address): boolean =>
@@ -496,6 +497,14 @@ export function recoverImportBindings(
     if (list) list.push(item);
     else bound.set(slot, [item]);
   }
+  // A relocation addend makes the slot hold the symbol's address plus an offset:
+  // the header declaration then describes a different object than the slot reads.
+  const adjusted = new Set<string>();
+  for (const relocation of image.relocations) {
+    context.checkpoint(1);
+    if (relocation.symbol_id !== null && relocation.addend !== 0n)
+      adjusted.add(relocation.symbol_id);
+  }
   const result = new Map<string, NonNullable<SourceAddress['import']>>();
   for (const [slot, items] of bound) {
     context.checkpoint(1);
@@ -521,12 +530,30 @@ export function recoverImportBindings(
     )
       continue;
     const libraries = new Set(entries.map((entry) => entry.item.library));
+    const library = libraries.size === 1 ? first.item.library : null;
+    const declared =
+      library !== null && entries.every((entry) => !entry.item.weak && !adjusted.has(entry.item.id))
+        ? findVariable(
+            libraryLookupName(image.target.format, first.item.original_name!),
+            library,
+            image.target.format,
+          )
+        : undefined;
     result.set(slot, {
       id: first.item.id,
       name: first.name,
       source_name: first.source,
-      library: libraries.size === 1 ? first.item.library : null,
+      library,
       evidence_ids: [...new Set(entries.flatMap((entry) => entry.item.evidence_ids))],
+      ...(declared
+        ? {
+            variable: {
+              type: declared.type,
+              constant: declared.constant,
+              source: declared.source,
+            },
+          }
+        : {}),
     });
   }
   return result;
