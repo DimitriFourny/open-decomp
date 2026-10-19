@@ -615,6 +615,12 @@ export function planSource(
       target: callee.target,
       result_types:
         callee.return_types ?? callee.returns.map((register) => integer(register.width_bits)),
+      ...(view === 'source' &&
+      callee.returns_void &&
+      !callee.returns.length &&
+      callee.parameter_state !== 'ambiguous'
+        ? { result_void: true as const }
+        : {}),
       boundary: {
         kind: callee.parameter_state === 'ambiguous' || args.missing ? 'physical' : 'inferred',
         signature: null,
@@ -807,6 +813,10 @@ export function planSource(
   const physicalEntry = new Set(entry.register_entry.map((binding) => binding.value.id));
   parameters.push(...entry.parameters.filter((value) => !physicalEntry.has(value.id)));
   const declaredFunction = signatureFor(input.function.id);
+  // An established void interface returns nothing on any path: a tail transfer
+  // forwards no result even when its callee's interface is unresolved.
+  if (view === 'source' && declaredFunction?.declaration.returns.kind === 'void')
+    for (const [id, tail] of tails) tails.set(id, { ...tail, result_void: true });
   const declaredLayout = declaredFunction ? abi.classifyCall(declaredFunction.declaration) : null;
   let functionSignature: { signature: SignatureAssociation; declaration: AbiSignature } | null =
     null;
@@ -1228,7 +1238,11 @@ export function planSource(
         });
     }
   }
-  if (!functionSignature && tails.size) {
+  // Tails into proven-void callees contribute no result; the renderer declares
+  // the function void only when no return path yields one either.
+  if (!functionSignature && tails.size && [...tails.values()].every((tail) => tail.result_void))
+    returnType = null;
+  else if (!functionSignature && tails.size) {
     const types = [...tails.values()].map((tail) =>
       tail.result_types.length === 1 ? tail.result_types[0]! : null,
     );

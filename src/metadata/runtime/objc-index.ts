@@ -12,6 +12,11 @@ export interface ObjCMethodFact extends ObjCFact {
   readonly kind: 'instance' | 'class';
   readonly type: string | null;
 }
+export interface ObjCIvarFact extends ObjCFact {
+  readonly offset: bigint;
+  readonly size: bigint;
+  readonly type: string | null;
+}
 /** Address-keyed static Objective-C facts of one image (VA values). */
 export interface ObjCImageIndex {
   /** `__objc_selrefs` slot -> selector name. */
@@ -27,6 +32,10 @@ export interface ObjCImageIndex {
   /** Selector -> its single type encoding among this image's method records
    * and protocol declarations, or null when they disagree. */
   readonly selector_types: ReadonlyMap<string, string | null>;
+  /** In-image class -> its ivars with static offsets. */
+  readonly ivars: ReadonlyMap<string, readonly ObjCIvarFact[]>;
+  /** In-image class -> its superclass name (in-image or external). */
+  readonly superclasses: ReadonlyMap<string, string>;
 }
 
 const indexes = new WeakMap<LoadedImage, { revision: number; index: ObjCImageIndex | null }>();
@@ -59,7 +68,9 @@ export function objcImageIndex(
     stubs = new Map<bigint, ObjCFact>(),
     strings = new Map<bigint, ObjCFact>(),
     methods = new Map<bigint, ObjCMethodFact[]>(),
-    selector_types = new Map<string, string | null>();
+    selector_types = new Map<string, string | null>(),
+    ivars = new Map<string, ObjCIvarFact[]>(),
+    superclasses = new Map<string, string>();
   for (const record of metadata.records) {
     context.checkpoint(1);
     const at = record.address.value,
@@ -71,6 +82,12 @@ export function objcImageIndex(
     ) {
       // A class's own superclass field is not a code-visible reference slot.
       if (record.owner === null) class_refs.set(at, fact);
+      else if (record.kind === 'objc_superclass_reference')
+        superclasses.set(record.owner, record.name);
+    } else if (record.kind === 'objc_ivar' && record.owner && record.ivar) {
+      const list = ivars.get(record.owner) ?? [];
+      list.push({ ...fact, ...record.ivar, type: record.type_name });
+      ivars.set(record.owner, list);
     } else if (record.kind === 'objc_selector_stub') stubs.set(at, fact);
     else if (record.kind === 'objc_string') strings.set(at, fact);
     if (
@@ -117,7 +134,16 @@ export function objcImageIndex(
   const index =
     metadata.state === 'absent'
       ? null
-      : { selector_refs, class_refs, stubs, strings, methods, selector_types };
+      : {
+          selector_refs,
+          class_refs,
+          stubs,
+          strings,
+          methods,
+          selector_types,
+          ivars,
+          superclasses,
+        };
   indexes.set(image, { revision, index });
   return index;
 }

@@ -109,6 +109,15 @@ test('stripped images keep runtime method names; classic sends have no selector 
   );
   const classes = new Set([...index.class_refs.values()].map((fact) => fact.name));
   assert.ok(classes.has('NSString') && classes.has('ODCounter'));
+  // Ivars carry their static offset-variable values and declared sizes.
+  assert.deepEqual(
+    index.ivars.get('ODCounter')?.map((ivar) => [ivar.name, ivar.offset, ivar.size, ivar.type]),
+    [
+      ['_label', 8n, 8n, '@"NSString"'],
+      ['_count', 16n, 8n, 'q'],
+    ],
+  );
+  assert.equal(index.superclasses.get('ODCounter'), 'NSObject');
 });
 
 test('an unrecognized selector stub publishes no selector for it or after it', () => {

@@ -15,7 +15,9 @@ import type {
   ContractObservation,
 } from '../calls/index.js';
 
-export type TypeSource = 'analysis' | 'debug' | 'library' | 'user' | 'llm';
+/** `runtime`: static language-runtime metadata (Objective-C type encodings and
+ * ivar lists), declared by the compiler for the exact image. */
+export type TypeSource = 'analysis' | 'debug' | 'library' | 'runtime' | 'user' | 'llm';
 export type TypeStatus = 'candidate' | 'established' | 'asserted' | 'hypothesis' | 'conflicting';
 export interface SuppliedTypeRecord {
   readonly id: string;
@@ -23,8 +25,12 @@ export interface SuppliedTypeRecord {
   readonly source: TypeSource;
   readonly status: TypeStatus;
   readonly evidence_ids: readonly string[];
-  /** Declared C name printed for an opaque or named-pointer library type. */
+  /** Declared C name printed for an opaque or named-pointer library type, or the
+   * tag of a named structure (an Objective-C class instance layout). */
   readonly spelling?: string;
+  /** Structure only: field names are declared source names (Objective-C ivars),
+   * printed instead of offset-derived member names. */
+  readonly member_names?: true;
 }
 /** Exact semantic IDs only. Names, register spellings and demangled text are not keys. */
 export interface TypeBinding {

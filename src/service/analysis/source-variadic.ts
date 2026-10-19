@@ -13,9 +13,14 @@ import {
 import type { LibraryContracts } from '../../metadata/library-contracts/index.js';
 import type { SourceAddress } from '../../reconstruction/source-model.js';
 
-/** Standard printf conversions only. Unsupported extensions, positional syntax,
- * malformed directives and long double retain an open argument list. */
-export function printfArgumentTypes(format: string, abi: AbiProfile): readonly AbiType[] | null {
+/** Standard printf conversions only (plus NSString's `%@` object conversion
+ * when `objects` is set). Unsupported extensions, positional syntax, malformed
+ * directives and long double retain an open argument list. */
+export function printfArgumentTypes(
+  format: string,
+  abi: AbiProfile,
+  objects = false,
+): readonly AbiType[] | null {
   const types: AbiType[] = [];
   const integer = (bits: number, signed = true): AbiType => ({ kind: 'integer', bits, signed });
   for (let cursor = 0; cursor < format.length; cursor++) {
@@ -58,6 +63,7 @@ export function printfArgumentTypes(format: string, abi: AbiProfile): readonly A
     else if ((conversion === 's' || conversion === 'p') && length === '')
       types.push({ kind: 'pointer' });
     else if (conversion === 'n' && length !== 'L') types.push({ kind: 'pointer' });
+    else if (objects && conversion === '@' && length === '') types.push({ kind: 'pointer' });
     else return null;
     if (types.length > 64) return null;
   }

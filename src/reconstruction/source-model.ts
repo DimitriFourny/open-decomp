@@ -42,6 +42,9 @@ export interface InferredCallee {
    * observed stack parameter. Never a count of those bytes or arguments. */
   readonly variadic_stack?: true;
   readonly returns: readonly RegisterDescriptor[];
+  /** An established contract or method type encoding declares a void result:
+   * empty `returns` is then proven no result, not an unknown result interface. */
+  readonly returns_void?: true;
   /** Lane types observed independently of architectural register capacity. */
   readonly parameter_types?: readonly DataType[];
   readonly return_types?: readonly DataType[];

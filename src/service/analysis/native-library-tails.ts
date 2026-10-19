@@ -137,6 +137,7 @@ export function nativeLibraryTails(
           ? [{ ...location.register, width_bits: bitWidth(returned) }]
           : [],
       return_types: returned ? [returned] : [],
+      ...(signature.returns.kind === 'void' ? { returns_void: true as const } : {}),
       parameter_state: 'observed',
       argument_list_complete: false,
       argument_list_closure: 'library_contract',
