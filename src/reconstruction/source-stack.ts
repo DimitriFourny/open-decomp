@@ -580,30 +580,41 @@ export function planSourceStack(
       return null;
     };
     // Bit offset within a reload of `members` on every incoming path, or null.
+    // An unmodified entry value of the saved register equals the reload at the
+    // same bit position (the slot holds exactly the saved entry bits), so a
+    // shrink-wrapped save that some path never executes still restores.
     const reloadBits = (
       value: Value,
       members: ReadonlySet<string>,
       active: Set<string>,
+      saved: Bits,
       depth = 0,
     ): number | null => {
       context.checkpoint(1);
       const load = loadsByResult.get(value.id);
       if (load !== undefined) return members.has(load) ? 0 : null;
+      const unmodified = entryBits(value);
+      if (unmodified)
+        return unmodified.root === saved.root &&
+          unmodified.low >= saved.low &&
+          unmodified.low + unmodified.width <= saved.low + saved.width
+          ? unmodified.low - saved.low
+          : null;
       if (depth >= 32 || active.has(value.id)) return null;
       const expression = expressions.get(value.id);
       if (expression?.kind === 'cast' && expression.op === 'bitcast')
         return bitWidth(expression.value.type) === bitWidth(value.type)
-          ? reloadBits(expression.value, members, active, depth + 1)
+          ? reloadBits(expression.value, members, active, saved, depth + 1)
           : null;
       if (expression?.kind === 'extract') {
-        const inner = reloadBits(expression.value, members, active, depth + 1);
+        const inner = reloadBits(expression.value, members, active, saved, depth + 1);
         return inner === null ? null : inner + expression.offset;
       }
       if (expression?.kind === 'concat') {
         let start: number | null = null,
           width = 0;
         for (const part of expression.values) {
-          const offset = reloadBits(part, members, active, depth + 1);
+          const offset = reloadBits(part, members, active, saved, depth + 1);
           if (offset === null) return null;
           if (start === null) start = offset;
           else if (offset !== start + width) return null;
@@ -616,7 +627,7 @@ export function planSourceStack(
       active.add(value.id);
       let result: number | null | undefined;
       for (const source of sources) {
-        const bits = reloadBits(source, members, active, depth + 1);
+        const bits = reloadBits(source, members, active, saved, depth + 1);
         if (bits === null || (result !== undefined && result !== bits)) {
           result = null;
           break;
@@ -682,7 +693,7 @@ export function planSourceStack(
           if (
             register.offset_bits < bits.low ||
             register.offset_bits + register.width_bits > bits.low + bits.width ||
-            reloadBits(binding.value, members, new Set()) !== register.offset_bits - bits.low
+            reloadBits(binding.value, members, new Set(), bits) !== register.offset_bits - bits.low
           )
             return false;
           covered += register.width_bits;
