@@ -1,4 +1,5 @@
 import type { Address, LoadedImage, OperationContext, SymbolRecord } from '../../core/index.js';
+import { cSourceName } from '../../metadata/symbols/c-names.js';
 import type { SourceAddress } from '../../reconstruction/source-model.js';
 
 const contains = (start: Address, size: bigint, address: Address): boolean =>
@@ -468,4 +469,65 @@ export function recoverDataAddress(
   } catch {
     return result;
   }
+}
+
+/** Loader-bound import slots among `candidates` (keyed `image:space:value`). A
+ * slot bound to conflicting symbols, a lazily bound slot (its pointer changes
+ * when first called) or a stub entry is no data binding. Asserted name
+ * annotations rename the symbol; any other annotation leaves it unnamed. */
+export function recoverImportBindings(
+  image: LoadedImage,
+  candidates: ReadonlyMap<string, Address>,
+  annotations: (importId: string) => {
+    readonly asserted: readonly string[];
+    readonly annotated: boolean;
+  },
+  context: OperationContext,
+): ReadonlyMap<string, NonNullable<SourceAddress['import']>> {
+  const key = (address: Address): string => `${address.image_id}:${address.space}:${address.value}`;
+  const width = BigInt(image.target.address_bits / 8);
+  const bound = new Map<string, LoadedImage['imports'][number][]>();
+  for (const item of image.imports) {
+    context.checkpoint(1);
+    if (!item.slot || item.delayed || item.callable_entry || item.original_name === null) continue;
+    const slot = key(item.slot);
+    if (!candidates.has(slot) || item.slot.value % width !== 0n) continue;
+    const list = bound.get(slot);
+    if (list) list.push(item);
+    else bound.set(slot, [item]);
+  }
+  const result = new Map<string, NonNullable<SourceAddress['import']>>();
+  for (const [slot, items] of bound) {
+    context.checkpoint(1);
+    const entries: { item: (typeof items)[number]; name: string; source: string }[] = [];
+    let ambiguous = false;
+    for (const item of items) {
+      const { asserted, annotated } = annotations(item.id);
+      const names = new Set(asserted);
+      if (names.size === 1) {
+        const name = [...names][0]!;
+        entries.push({ item, name, source: name });
+      } else if (annotated) ambiguous = true;
+      else {
+        const name = item.original_name!;
+        entries.push({ item, name, source: cSourceName(image.target.format, name) });
+      }
+    }
+    const first = entries[0];
+    if (
+      ambiguous ||
+      !first ||
+      entries.some((entry) => entry.name !== first.name || entry.source !== first.source)
+    )
+      continue;
+    const libraries = new Set(entries.map((entry) => entry.item.library));
+    result.set(slot, {
+      id: first.item.id,
+      name: first.name,
+      source_name: first.source,
+      library: libraries.size === 1 ? first.item.library : null,
+      evidence_ids: [...new Set(entries.flatMap((entry) => entry.item.evidence_ids))],
+    });
+  }
+  return result;
 }

@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import {
   OperationError,
   artifactReadArgsSchema,
@@ -24,7 +25,10 @@ export interface QueryCallOptions {
   readonly onProgress?: (job: WireJob) => void;
   /** Trusted transport delivery ceiling; never changes the requested budget/cache identity. */
   readonly max_result_bytes?: number;
+  /** How long wait:'auto' awaits a result before returning the durable job. */
+  readonly auto_wait_ms?: number;
 }
+export const DEFAULT_AUTO_WAIT_MS = 10_000;
 /** The host facade for project navigation, analysis and annotation jobs. All image
  * parsing, decoding, semantic work and store access stays in persistent children.
  * Paths are host-authorized before admission; target-selected names are never paths.
@@ -83,8 +87,10 @@ export class QueryService {
           'source' in args &&
           args.source.kind === 'import' &&
           !args.wait) ||
-        (operation === 'function_decompile' && 'wait' in args && !args.wait);
-      if (asynchronous && (options.signal || options.onProgress)) {
+        (operation === 'function_decompile' && 'wait' in args && args.wait === false);
+      const automatic =
+        operation === 'function_decompile' && 'wait' in args && args.wait === 'auto';
+      if ((asynchronous || automatic) && (options.signal || options.onProgress)) {
         const { signal, onProgress } = options;
         const controller = new AbortController();
         let active = true;
@@ -255,7 +261,22 @@ export class QueryService {
           args as ToolInput<WorkerOperation>,
           options,
         );
-        if (asynchronous) {
+        let outcome: JobOutcome | undefined;
+        if (automatic) {
+          const timer = new AbortController();
+          try {
+            outcome = await Promise.race([
+              ticket.result,
+              delay(options.auto_wait_ms ?? DEFAULT_AUTO_WAIT_MS, undefined, {
+                signal: timer.signal,
+              }).catch(() => undefined),
+            ]);
+          } finally {
+            timer.abort();
+          }
+        } else if (!asynchronous) outcome = await ticket.result;
+        if (outcome === undefined) {
+          // Admission transfers ownership to the project; a late failure stays in job status.
           result = queryAdmission(
             await ticket.accepted,
             args.budget,
@@ -263,7 +284,6 @@ export class QueryService {
           );
           void ticket.result.catch(() => {});
         } else {
-          const outcome = await ticket.result;
           if (outcome.result === undefined) {
             requireCompleted(outcome);
             queryFailure(

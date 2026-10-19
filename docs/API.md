@@ -103,6 +103,8 @@ do {
 
 `findSymbols(options?, callOptions?)`, `findStrings(options?, callOptions?)` and `getReferences(options, callOptions?)` are the same pattern for `symbols_find`, `strings_find` and `xrefs_get` (the last takes the `target`, `direction` and `kinds` fields); `getFunction(functionId, options?, callOptions?)` returns `function_get` metadata, compact/full disassembly or CFG pages. `decompileFunction(functionId, options?)` decompiles a function ID already obtained from `findFunctions` without repeating selector resolution. The CLI `export` command is built from these methods.
 
+A recognized import stub/thunk/PLT entry has `kind: "import_stub"` (omitted otherwise) and the import's name; `decompile({ name })` selects it by that name.
+
 ## Decompile and handle results
 
 ```ts
@@ -110,7 +112,7 @@ binary.decompile(selector: FunctionSelector, options?: DecompileOptions)
   : Promise<ToolResult<'function_decompile'>>
 ```
 
-Choose exactly one selector: `{name}`, `{id}`, or `{address: {space, value}}`. Options are `emitter: 'c-like' | 'python-like'`, a partial shared `budget`, `signal`, and `onProgress`. Function resolution is a separate bounded navigation query; the supplied decompilation budget applies to analysis, not to that query.
+Choose exactly one selector: `{name}`, `{id}`, or `{address: {space, value}}`. Options are `emitter: 'c-like' | 'python-like'`, a partial shared `budget`, `signal`, and `onProgress`. Function resolution (shared with the MCP function handles, `src/service/queries/selector.ts`) is a separate bounded navigation query; the supplied decompilation budget applies to analysis, not to that query.
 
 The method waits for the operation and assembles artifact-backed output automatically. It validates page metadata, size, SHA-256 and the stored result's request binding. The returned inline result retains the **semantic** state, diagnostics, coverage and source mappings. Consequently, a returned object can exceed `budget.output_bytes`: that field bounds individual service delivery, not the assembled artifact. The existing 16 MiB analysis-artifact limit still applies. Output is C-like or Python-like **pseudocode**, not recovered original source or necessarily executable code.
 

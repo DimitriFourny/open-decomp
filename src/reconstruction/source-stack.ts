@@ -58,6 +58,23 @@ export function planSourceStack(
       row.push(copy.source);
       incoming.set(copy.destination.id, row);
     }
+  // The value whose low-to-high extracts `parts` tile exactly, or null.
+  const recombined = (parts: readonly Value[]): Value | null => {
+    let base: Value | null = null,
+      width = 0;
+    for (const part of parts) {
+      const expression = expressions.get(part.id);
+      if (
+        expression?.kind !== 'extract' ||
+        expression.offset !== width ||
+        (base !== null && base.id !== expression.value.id)
+      )
+        return null;
+      base = expression.value;
+      width += bitWidth(part.type);
+    }
+    return base && width === bitWidth(base.type) ? base : null;
+  };
   let changed = true;
   while (changed) {
     changed = false;
@@ -67,7 +84,11 @@ export function planSourceStack(
       let offset: bigint | undefined;
       if (expression.kind === 'cast' && expression.op === 'bitcast')
         offset = addresses.get(expression.value.id);
-      else if (
+      else if (expression.kind === 'concat') {
+        // Register-cell halves of one value, recombined in order, are that value.
+        const whole = recombined(expression.values);
+        if (whole) offset = addresses.get(whole.id);
+      } else if (
         expression.kind === 'integer' &&
         (expression.op === 'add' || expression.op === 'sub')
       ) {
@@ -172,16 +193,55 @@ export function planSourceStack(
   let escaped = false,
     unknownCallStorage = false,
     // Frame saves rest on ABI conformance: an unresolved callee reads only
-    // argument registers/stack and never writes its caller's frame. Only an
-    // actual stack address in possible argument/result storage escapes them.
-    saveEscaped = view !== 'source';
+    // argument registers/stack and never writes its caller's frame. Any stack
+    // address in possible argument/result storage escapes private promotion
+    // (`saveEscaped`). For frame saves only an address of unknown offset exposes
+    // the whole frame (`frameExposed`); an escaped address of known offset
+    // designates its own object, never a compiler-owned save slot elsewhere.
+    saveEscaped = view !== 'source',
+    frameExposed = saveEscaped;
+  const exposedOffsets = new Set<bigint>();
+  // Known frame offsets of every address a tainted value is derived from (cell
+  // halves, indexed/phi'd pointers, pointers spilled to the frame and reloaded),
+  // or null when some tainted leaf has no known origin.
+  const baseOffsets = (start: Value): bigint[] | null => {
+    const bases = new Set<bigint>(),
+      seen = new Set<string>(),
+      pending = [start];
+    while (pending.length) {
+      context.checkpoint(1);
+      const value = pending.pop()!;
+      if (seen.has(value.id) || !tainted.has(value.id)) continue;
+      seen.add(value.id);
+      const offset = addresses.get(value.id);
+      if (offset !== undefined) {
+        bases.add(offset);
+        continue;
+      }
+      const expression = expressions.get(value.id);
+      if (expression) pending.push(...expressionOperands(expression));
+      else {
+        const sources = incoming.get(value.id) ?? memoryDependencies.get(value.id);
+        if (!sources?.length) return null;
+        pending.push(...sources);
+      }
+    }
+    return [...bases];
+  };
+  const expose = (value: Value): void => {
+    if (!tainted.has(value.id)) return;
+    saveEscaped = true;
+    const bases = baseOffsets(value);
+    if (bases) for (const offset of bases) exposedOffsets.add(offset);
+    else frameExposed = true;
+  };
   const abi = input.source!.abi;
   const preservedRoot = (root: string): boolean =>
     abi.preserved.some((register) => register.root === root);
   // Condition flags are never argument or result storage under any supported
   // ABI; flags computed from frame arithmetic do not hand a callee an address.
-  const argumentTainted = (bindings: readonly RegisterBinding[]): boolean =>
-    bindings.some(
+  const argumentBindings = (bindings: readonly RegisterBinding[]): RegisterBinding[] =>
+    bindings.filter(
       (binding) =>
         binding.register.root !== abi.stack_pointer.root &&
         binding.register.bank !== 'flags' &&
@@ -254,11 +314,9 @@ export function planSourceStack(
       if (node.kind === 'call') {
         callNodes.push(node);
         const projection = calls.get(node.id)!;
-        if (
-          projection.arguments.some((value) => tainted.has(value.id)) ||
-          (openArguments(projection) && argumentTainted(node.register_inputs))
-        )
-          saveEscaped = true;
+        for (const value of projection.arguments) expose(value);
+        if (openArguments(projection))
+          for (const binding of argumentBindings(node.register_inputs)) expose(binding.value);
       }
       if (node.kind === 'call' && openArguments(calls.get(node.id)!)) unknownCallStorage = true;
       if (
@@ -270,7 +328,7 @@ export function planSourceStack(
       if (node.kind === 'unknown_effect') {
         escaped = true;
         if (fpFailureArms.has(block.id)) guardEffects.add(block.id);
-        else saveEscaped = true;
+        else saveEscaped = frameExposed = true;
       }
       if (node.kind !== 'load' && node.kind !== 'store') continue;
       const offset = addresses.get(node.address.id),
@@ -279,9 +337,14 @@ export function planSourceStack(
         node.kind === 'store' &&
         tainted.has(node.value.id) &&
         (offset === undefined || offset >= 0n)
-      )
-        escaped = saveEscaped = true;
-      if (offset === undefined && tainted.has(node.address.id)) escaped = saveEscaped = true;
+      ) {
+        escaped = true;
+        expose(node.value);
+      }
+      if (offset === undefined && tainted.has(node.address.id)) {
+        escaped = true;
+        expose(node.address);
+      }
       if (offset === undefined || width % 8) continue;
       const end = offset + BigInt(width / 8);
       accesses.push({ node, block: block.id, offset, end, key: `${offset}:${end}` });
@@ -289,14 +352,16 @@ export function planSourceStack(
     if (
       block.control.kind === 'return' &&
       returns.get(block.control.id)!.results.some((value) => tainted.has(value.id))
-    )
-      escaped = saveEscaped = true;
+    ) {
+      escaped = true;
+      for (const value of returns.get(block.control.id)!.results) expose(value);
+    }
     // Like private promotion, unmodeled exits do not observe frame-private
     // bytes; an indirect target may still receive a stack address as argument.
-    if (block.control.kind === 'indirect' && argumentTainted(block.register_exit))
-      saveEscaped = true;
+    if (block.control.kind === 'indirect')
+      for (const binding of argumentBindings(block.register_exit)) expose(binding.value);
   }
-  for (const id of saveEscaped ? [] : guardEffects)
+  for (const id of frameExposed ? [] : guardEffects)
     if (
       !validation.presentation(
         'fp_guard_frame',
@@ -305,7 +370,7 @@ export function planSourceStack(
         [id],
       )
     )
-      saveEscaped = true;
+      saveEscaped = frameExposed = true;
   // Established ABI stack locations are outgoing argument storage at a call,
   // even when their entry-SP offsets are negative. They are not private spills.
   const outgoingRanges = (input.types?.calls?.calls ?? []).flatMap((call) =>
@@ -540,7 +605,7 @@ export function planSourceStack(
     }
     return false;
   };
-  if (!saveEscaped && exits.length) {
+  if (!frameExposed && exits.length) {
     const entryCells = new Map(
       entry.register_entry.map((binding) => [binding.value.id, binding.register]),
     );
@@ -580,30 +645,41 @@ export function planSourceStack(
       return null;
     };
     // Bit offset within a reload of `members` on every incoming path, or null.
+    // An unmodified entry value of the saved register equals the reload at the
+    // same bit position (the slot holds exactly the saved entry bits), so a
+    // shrink-wrapped save that some path never executes still restores.
     const reloadBits = (
       value: Value,
       members: ReadonlySet<string>,
       active: Set<string>,
+      saved: Bits,
       depth = 0,
     ): number | null => {
       context.checkpoint(1);
       const load = loadsByResult.get(value.id);
       if (load !== undefined) return members.has(load) ? 0 : null;
+      const unmodified = entryBits(value);
+      if (unmodified)
+        return unmodified.root === saved.root &&
+          unmodified.low >= saved.low &&
+          unmodified.low + unmodified.width <= saved.low + saved.width
+          ? unmodified.low - saved.low
+          : null;
       if (depth >= 32 || active.has(value.id)) return null;
       const expression = expressions.get(value.id);
       if (expression?.kind === 'cast' && expression.op === 'bitcast')
         return bitWidth(expression.value.type) === bitWidth(value.type)
-          ? reloadBits(expression.value, members, active, depth + 1)
+          ? reloadBits(expression.value, members, active, saved, depth + 1)
           : null;
       if (expression?.kind === 'extract') {
-        const inner = reloadBits(expression.value, members, active, depth + 1);
+        const inner = reloadBits(expression.value, members, active, saved, depth + 1);
         return inner === null ? null : inner + expression.offset;
       }
       if (expression?.kind === 'concat') {
         let start: number | null = null,
           width = 0;
         for (const part of expression.values) {
-          const offset = reloadBits(part, members, active, depth + 1);
+          const offset = reloadBits(part, members, active, saved, depth + 1);
           if (offset === null) return null;
           if (start === null) start = offset;
           else if (offset !== start + width) return null;
@@ -616,7 +692,7 @@ export function planSourceStack(
       active.add(value.id);
       let result: number | null | undefined;
       for (const source of sources) {
-        const bits = reloadBits(source, members, active, depth + 1);
+        const bits = reloadBits(source, members, active, saved, depth + 1);
         if (bits === null || (result !== undefined && result !== bits)) {
           result = null;
           break;
@@ -649,6 +725,7 @@ export function planSourceStack(
         accesses.some(
           (access) => access.key !== key && access.offset < first.end && access.end > first.offset,
         ) ||
+        [...exposedOffsets].some((offset) => offset >= first.offset && offset < first.end) ||
         outgoingRanges.some((range) => range.start < first.end && range.end > first.offset)
       )
         continue;
@@ -682,7 +759,7 @@ export function planSourceStack(
           if (
             register.offset_bits < bits.low ||
             register.offset_bits + register.width_bits > bits.low + bits.width ||
-            reloadBits(binding.value, members, new Set()) !== register.offset_bits - bits.low
+            reloadBits(binding.value, members, new Set(), bits) !== register.offset_bits - bits.low
           )
             return false;
           covered += register.width_bits;
@@ -714,7 +791,7 @@ export function planSourceStack(
       validation.requireAbi(
         'frame_save',
         [exits[0]!.control.id, ...saveStores],
-        'Frame save/restore elision assumes ABI conformance: callees preserve callee-saved registers and never write their caller’s frame outside outgoing argument storage, and the saved slots are not stack arguments. Each hidden store and reload remains in the checked view and the original mappings.',
+        'Frame save/restore elision assumes ABI conformance: callees preserve callee-saved registers and never write their caller’s frame outside outgoing argument storage, the saved slots are not stack arguments, and a frame address handed to a callee (or indexed from) designates its own object, never a save slot. Each hidden store and reload remains in the checked view and the original mappings.',
       );
   }
   // Source view: a non-volatile frame load dominated by a store covering its
