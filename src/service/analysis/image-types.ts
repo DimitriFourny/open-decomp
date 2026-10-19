@@ -63,9 +63,9 @@ import {
 import { pipelineVersions } from './versions.js';
 
 /** Bounded neighborhood: at most this many other function bodies per request. */
-const MAX_NEIGHBOR_FUNCTIONS = 24;
+const MAX_NEIGHBOR_FUNCTIONS = 12;
 /** Callers visited per callee flow before the flow counts as unexplored. */
-const MAX_CALLERS_PER_FLOW = 16;
+const MAX_CALLERS_PER_FLOW = 4;
 /** Pointee hops followed from the requested function's own objects. */
 const MAX_POINTEE_DEPTH = 2;
 
