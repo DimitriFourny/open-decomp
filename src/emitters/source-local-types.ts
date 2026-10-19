@@ -18,7 +18,6 @@ export interface LocalTypeHost {
   readonly program: Reconstruction;
   readonly context: OperationContext;
   readonly language: 'c-like' | 'python-like';
-  readonly pointer_bits: number;
   readonly inline: ReadonlySet<string>;
   readonly inlined: ReadonlyMap<string, InlineSite>;
   readonly inlined_calls: ReadonlyMap<string, InlineCallSite>;
@@ -41,13 +40,10 @@ export interface LocalTypeHost {
   variable(value: Value): boolean;
 }
 
-/** The chosen declared type of every member of one connected set of values. */
+/** The chosen pointer type of one connected set of locals (formals excluded). */
 export interface LocalTypeChoice {
   readonly fact: PointerFact;
   readonly members: readonly string[];
-  /** Why: counts of the evidence the choice rests on. */
-  readonly typed_uses: number;
-  readonly typed_definitions: number;
 }
 
 type Use =
@@ -71,12 +67,13 @@ interface Evidence {
 
 /** Choose a pointer type for sets of integer locals connected by phi copies,
  * from every definition AND every use of the set's members: typed call
- * parameters, typed globals and results, identity tests, dereferences. Sets
- * whose uses need integer arithmetic, conflict, or would cost more conversions
- * than they save keep their integer declaration. Only the choice is made here;
- * every conversion a typed local needs is still printed exactly at its uses
- * and definitions (a pointer read as an integer is `(uintptr_t)p`), so a
- * choice never changes semantics, only how many conversions are printed. */
+ * parameters, typed globals, slots and results, identity tests, dereferences.
+ * Sets with conflicting pointee types, a scalar-typed member, or whose integer
+ * uses and untyped definitions cost more printed conversions than the typed ones
+ * save keep their integer declaration. Only the choice is made here; every
+ * conversion a typed local needs is still printed exactly at its uses and
+ * definitions (a pointer read as an integer is `(uintptr_t)p`), so a choice never
+ * changes semantics, only how many conversions are printed. */
 export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice> {
   const program = host.program,
     context = host.context;
@@ -516,8 +513,6 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
     chosen.set(assignable[0]!, {
       fact: { ...(typeId === undefined ? {} : { type_id: typeId }), spelling },
       members: assignable,
-      typed_uses: typedUses.length,
-      typed_definitions: typedDefinitions.length,
     });
   }
   return chosen;

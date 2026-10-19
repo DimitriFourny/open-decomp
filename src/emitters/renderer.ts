@@ -5400,7 +5400,6 @@ export class Renderer {
       program,
       context: this.context,
       language: this.language,
-      pointer_bits: bits,
       inline: this.inline,
       inlined: this.inlined,
       inlined_calls: this.inlinedCalls,
