@@ -71,7 +71,11 @@ export async function loadQuestions(path = QUESTIONS_PATH): Promise<QuestionSet>
     seen.add(question.id);
     assert.ok(set.binaries[question.binary], `${question.id}: unknown binary ${question.binary}`);
     assert.ok(set.sources[question.source.file], `${question.id}: unknown source file`);
-    assert.match(question.address, /^0x[0-9a-f]+$/, `${question.id}: address must be lowercase hex`);
+    assert.match(
+      question.address,
+      /^0x[0-9a-f]+$/,
+      `${question.id}: address must be lowercase hex`,
+    );
     const scoring = question.scoring;
     if (scoring.type === 'regex') {
       new RegExp(scoring.pattern, scoring.flags ?? 'i');
