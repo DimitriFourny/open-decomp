@@ -75,6 +75,25 @@ evidence, and satisfied/violated/unknown conformance; partial layouts cannot
 establish satisfaction. Both emitters render these facts only as inert metadata.
 Existing ABIs have no such implicit inputs.
 
+Library prototypes: `catalog.ts` holds the hand-curated contracts (effects, argument
+footprints, captures, variadic rules, noreturn); they are authoritative. Behind them,
+`generated/data/*.ts` carries about 6,900 header-derived interfaces (ISO C, POSIX,
+Darwin libSystem incl. `dispatch_*`/`os_unfair_lock_*`/`malloc_zone_*`/`mach_*`/`CC_*`,
+CoreFoundation, glibc/Itanium-ABI support symbols, MSVC/UCRT CRT and
+kernel32/user32/advapi32/ws2_32/shell32), each with its library family, header
+provenance and parameter names. They are loaded lazily per family and have no memory
+footprint, so pointed-to memory and global effects stay `unknown_read_write`; they never
+imply purity. Types cover fixed-width and ABI-dependent integers (`long`, `size_t`,
+`mode_t`, `time_t`...), `float`/`double`/`long double` (FP register bank), named opaque
+types (`FILE`) and named pointer typedefs (`HANDLE`, `CFStringRef`); function pointers
+stay opaque. Functions that pass or return structs by value are not declared. Lookup
+removes loader decoration: Mach-O `_` and `$INODE64`/`$UNIX2003`/`$DARWIN_EXTSN`/
+`$NOCANCEL`, ELF `@VERSION`, PE `__imp_`; Windows `A`/`W` names are distinct. printf-family
+`format`, scanf-family `scanf_format` and `open`/`openat` `open_flags` rules close
+variadic tails from literal formats. Header `const` and `char` identity are printed in
+extern prototypes (`FILE* fopen(const char*, const char*)`). Regenerate with
+`bun run prototypes`.
+
 ELF library contracts require explicit recognized ELF library attribution; a
 needed-library list or Darwin path is not symbol attribution. ELF DWARF recovery
 is explicitly unavailable (partial diagnostic, no recovered debug declarations),
