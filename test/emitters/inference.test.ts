@@ -232,7 +232,7 @@ function fixture() {
   const collect = (selected = program, evidence = true) => {
     const ctx = createOperationContext();
     const owner = writer(ctx, evidence);
-    const records = collectInferences(input, selected, validations, owner, ctx, sites);
+    const records = collectInferences(input, selected, validations, owner, ctx, sites).records;
     return { records, expanded: expand(owner, records) };
   };
   return {
@@ -348,21 +348,32 @@ test('a proven stack-pointer input remains entry storage without a fixed stack v
   assert.equal(namedRecord.details.role, 'observed_input');
 });
 
-test('inference metadata bounds and cancellation fail explicitly instead of dropping claims', () => {
+test('inference metadata bounds shed and count records instead of failing or truncating them', () => {
   const f = fixture();
-  const bounded = createOperationContext({ budget: { output_bytes: 1024 } });
-  assert.throws(
-    () =>
-      collectInferences(
-        f.input,
-        f.program,
-        f.validations,
-        f.writer(bounded, true),
-        bounded,
-        f.sites,
-      ),
-    { code: 'resource_limit' },
+  const full = collectInferences(
+    f.input,
+    f.program,
+    f.validations,
+    f.writer(createOperationContext(), true),
+    createOperationContext(),
+    f.sites,
   );
+  assert.ok(full.records.length > 1);
+  assert.equal(full.omitted, 0);
+  // A metadata budget that cannot hold every record ends collection with a prefix of
+  // intact records; the omission is reported, never raised and never silent.
+  const bounded = createOperationContext({ budget: { output_bytes: 1024 } });
+  const shed = collectInferences(
+    f.input,
+    f.program,
+    f.validations,
+    f.writer(bounded, true),
+    bounded,
+    f.sites,
+  );
+  assert.ok(shed.records.length < full.records.length);
+  assert.equal(shed.omitted, null);
+  assert.deepEqual(shed.records, full.records.slice(0, shed.records.length));
   const abort = new AbortController();
   const cancelled = createOperationContext({ signal: abort.signal });
   abort.abort();
@@ -388,7 +399,14 @@ test('aggregated presentation subjects all remain traceable through inference re
   session.presentation('observed_view', f.value.id, 'same view', [f.fieldId]);
   session.presentation('observed_view', f.display.id, 'same view', [f.input.function.id]);
   assert.equal(session.records.length, 1);
-  const records = collectInferences(f.input, f.program, session.records, owner, context, f.sites);
+  const records = collectInferences(
+    f.input,
+    f.program,
+    session.records,
+    owner,
+    context,
+    f.sites,
+  ).records;
   const rewrite = records.find(
     (record) => record.details.kind === 'rewrite' && record.details.rule === 'observed_view',
   );
@@ -441,7 +459,7 @@ test('identical type assertions share one record without losing any member fact'
       owner = f.writer(context, true);
     const input = { ...f.input, types: { ...types, associations } };
     return collectInferences(input, f.program, [], owner, context, f.sites)
-      .filter(
+      .records.filter(
         (record) => record.details.kind === 'type' && record.details.type_status === 'asserted',
       )
       .map((record) => ({

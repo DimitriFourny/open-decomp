@@ -12,3 +12,4 @@ export * from './diagnostic-summary.js';
 export * from './validation.js';
 export * from './serialization.js';
 export * from './operation.js';
+export * from './emission-limits.js';

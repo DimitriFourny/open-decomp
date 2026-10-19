@@ -34,13 +34,24 @@ export function decompileText(
   const pseudocode = withheld === undefined ? inlineText : undefined;
   const diagnostics = bySeverity(result.diagnostics);
   const state = result.state === 'complete' ? 'complete' : 'partial';
+  // For an artifact-delivered result, output_limit names the delivery wrapper (stated below),
+  // not the analysis; for inline pseudocode it is a real provenance bound.
   const reason =
-    result.state === 'partial' && result.reason !== 'output_limit' ? result.reason : undefined;
+    result.state === 'partial' && (result.reason !== 'output_limit' || inlineText !== undefined)
+      ? result.reason
+      : undefined;
+  const omitted =
+    data.delivery === 'inline' && data.emission.omitted?.length
+      ? data.emission.omitted.map((item) => item.kind).join(', ')
+      : undefined;
   const entry = label.entry === null ? null : `${label.entry.space}:${label.entry.value}`;
   const id = shortIds([label.id]).get(label.id)!;
   const lines = [
     `${comment} ${label.name ?? '(unnamed)'}${entry === null ? '' : ` @ ${entry}`}  ${id}  ${dialect}`,
     `${comment} ${state}${reason === undefined ? '' : ` (${reason})`}; cache ${data.cache}${withheld === undefined ? '' : `; pseudocode not inlined (${withheld === 'requested' ? 'delivery:artifact requested' : 'exceeds the MCP delivery bound'})`}`,
+    ...(omitted === undefined
+      ? []
+      : [`${comment} provenance bounded out (output_limit): ${omitted}; pseudocode is complete`]),
     ...diagnostics.map((item) => `${comment} ! ${diagnosticLine(item)}`),
   ];
   if (artifact)

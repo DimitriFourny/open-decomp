@@ -72,7 +72,9 @@ export async function materializeDecompilation(
     !('data' in stored) ||
     stored.data.delivery !== 'inline' ||
     (stored.state !== 'complete' && stored.state !== 'partial') ||
-    (stored.state === 'partial' && stored.reason === 'output_limit') ||
+    (stored.state === 'partial' &&
+      stored.reason === 'output_limit' &&
+      !stored.data.emission.omitted?.length) ||
     stored.project_id !== scope.project_id ||
     stored.revision !== scope.revision ||
     stored.data.function_id !== result.data.function_id ||

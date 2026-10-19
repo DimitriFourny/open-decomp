@@ -910,9 +910,21 @@ export function discoverFunctions(
   ];
   context.progress('discovery', finalGraphs.length, finalGraphs.length);
   if (selected) {
+    // Diagnostics may cite other roots' seed proofs (e.g. flow reaching another function
+    // entry), so their citations are closure seeds just like function and reference proofs.
     const pending = [
-      ...finalGraphs.flatMap((graph) => graph.function.evidence_ids),
+      ...finalGraphs.flatMap((graph) => [
+        ...graph.function.evidence_ids,
+        ...graph.diagnostics.flatMap((diagnostic) => diagnostic.evidence_ids),
+        ...graph.instructions.flatMap((instruction) =>
+          instruction.diagnostics.flatMap((diagnostic) => diagnostic.evidence_ids),
+        ),
+        ...graph.gaps.flatMap((gap) =>
+          gap.diagnostics.flatMap((diagnostic) => diagnostic.evidence_ids),
+        ),
+      ]),
       ...references.flatMap((reference) => reference.evidence_ids),
+      ...diagnostics.flatMap((diagnostic) => diagnostic.evidence_ids),
     ];
     const visited = new Set<string>();
     for (let cursor = 0; cursor < pending.length; cursor++) {

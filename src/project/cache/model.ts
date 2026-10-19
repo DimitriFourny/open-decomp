@@ -18,7 +18,9 @@ export type StoredDecompilation = ResultMetadata &
     | { readonly state: 'complete'; readonly data: InlineDecompileData }
     | {
         readonly state: 'partial';
-        readonly reason: 'budget' | 'incomplete_index' | 'unsupported_subset';
+        /** `output_limit` here means only provenance metadata was bounded out of the
+         * emission (named by `emission.omitted`); the text is whole. */
+        readonly reason: 'budget' | 'incomplete_index' | 'unsupported_subset' | 'output_limit';
         readonly continuation: null;
         readonly data: InlineDecompileData;
       }
