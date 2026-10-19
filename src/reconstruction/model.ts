@@ -57,6 +57,8 @@ export interface Reconstruction {
   /** Values whose definitions may be expanded by the renderer; bounded depth/size. */
   readonly inline: ReadonlySet<string>;
   readonly live: ReadonlySet<string>;
+  /** Liveness demand count per live value: roots, live expression operands and live phi sources. */
+  readonly use_counts: ReadonlyMap<string, number>;
   readonly retained: ReadonlySet<string>;
   /** Keyed by original transfer object, preserving simultaneous assignment. */
   readonly transfers: ReadonlyMap<
