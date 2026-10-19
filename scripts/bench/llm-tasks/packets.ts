@@ -90,6 +90,18 @@ type ToolCall = (
   blocks: number;
 }>;
 
+/** Default text carries `// <state> (<reason>); ...` on its second line; failures are a JSON envelope. */
+function decompileState(
+  text: string,
+  structured: Record<string, unknown> | undefined,
+  isError: boolean,
+): string {
+  const header = /^\/\/ (complete|partial|failed|unsupported|cancelled)\b/m.exec(text);
+  if (header !== null) return header[1]!;
+  const fromEnvelope = structured?.state ?? /"state":"(\w+)"/.exec(text)?.[1];
+  return typeof fromEnvelope === 'string' ? fromEnvelope : isError ? 'error' : 'unknown';
+}
+
 /** One MCP stdio server from the given checkout, owned for the whole build. */
 export class McpBench {
   readonly #client: Client;
@@ -169,7 +181,7 @@ export class McpBench {
     return {
       config: 'mcp-default',
       text: result.text,
-      state: String(result.structured?.state ?? (result.isError ? 'error' : 'unknown')),
+      state: decompileState(result.text, result.structured, result.isError),
       source: {
         tool: 'function_decompile',
         arguments: { function_id: `va:${address}`, wait: true },

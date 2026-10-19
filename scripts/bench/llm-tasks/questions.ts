@@ -9,14 +9,19 @@ export const QUESTIONS_PATH = fileURLToPath(new URL('./questions.json', import.m
 export const INPUTS_ENV = 'OPEN_DECOMP_BENCH_INPUTS';
 
 export type Scoring =
-  | { type: 'exact'; accept: string[] }
-  | { type: 'numeric'; value: number }
-  | { type: 'set'; items: string[]; ordered?: boolean }
-  | { type: 'regex'; pattern: string; flags?: string; forbid?: string }
+  | { readonly type: 'exact'; readonly accept: readonly string[] }
+  | { readonly type: 'numeric'; readonly value: number }
+  | { readonly type: 'set'; readonly items: readonly string[]; readonly ordered?: boolean }
   | {
-      type: 'rubric';
-      facts: { id: string; pattern: string; flags?: string }[];
-      forbid?: string[];
+      readonly type: 'regex';
+      readonly pattern: string;
+      readonly flags?: string;
+      readonly forbid?: string;
+    }
+  | {
+      readonly type: 'rubric';
+      readonly facts: readonly { id: string; pattern: string; flags?: string }[];
+      readonly forbid?: readonly string[];
     };
 
 export interface Question {
@@ -45,6 +50,14 @@ export interface SourceSpec {
   origin: string;
   url?: string;
 }
+/** The same questions over a different build of a binary: same gold, other file and function addresses. */
+export interface Variant {
+  binary: string;
+  file: string;
+  sha256: string;
+  description: string;
+  addresses: Record<string, string>;
+}
 export interface QuestionSet {
   schema: 1;
   name: string;
@@ -52,9 +65,35 @@ export interface QuestionSet {
   method: string;
   disclosure: string;
   binaries: Record<string, BinarySpec>;
+  variants?: Record<string, Variant>;
   sources: Record<string, SourceSpec>;
   build_config: Record<string, string>;
   questions: Question[];
+}
+
+/** Swaps in a variant build: the binary pin and every affected question's address. Gold is unchanged. */
+export function applyVariant(set: QuestionSet, id: string): QuestionSet {
+  const variant = set.variants?.[id];
+  assert.ok(variant, `Unknown variant ${id}`);
+  const base = set.binaries[variant.binary]!;
+  return {
+    ...set,
+    binaries: {
+      ...set.binaries,
+      [variant.binary]: {
+        ...base,
+        file: variant.file,
+        sha256: variant.sha256,
+        description: variant.description,
+      },
+    },
+    questions: set.questions.map((question) => {
+      if (question.binary !== variant.binary) return question;
+      const address = variant.addresses[question.function];
+      assert.ok(address, `Variant ${id} has no address for ${question.function}`);
+      return { ...question, address };
+    }),
+  };
 }
 
 export function sha256(bytes: Buffer | string): string {
@@ -111,8 +150,12 @@ export async function resolveInputs(
   const binaries: Record<string, string> = {};
   for (const id of needed.binaries) {
     const spec = set.binaries[id]!;
-    assert.ok(inputsDir, `Binary ${spec.file} needs --inputs DIR or $${INPUTS_ENV}`);
-    const path = isAbsolute(spec.file) ? spec.file : resolve(inputsDir, spec.file);
+    if (!isAbsolute(spec.file))
+      assert.ok(
+        inputsDir,
+        `Binary ${spec.file} needs --inputs DIR, $${INPUTS_ENV} or --binary ${id}=PATH`,
+      );
+    const path = isAbsolute(spec.file) ? spec.file : resolve(inputsDir!, spec.file);
     const digest = sha256(await readFile(path));
     assert.equal(digest, spec.sha256, `${path}: SHA-256 ${digest} differs from the frozen pin`);
     binaries[id] = path;

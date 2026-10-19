@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import {
+  applyVariant,
   loadQuestions,
   QUESTIONS_PATH,
   INPUTS_ENV,
@@ -31,6 +32,7 @@ const USAGE = `Usage: node --import tsx scripts/bench/llm-tasks/run.ts COMMAND [
   build   --repo PATH --out DIR [--inputs DIR] [--binary ID=PATH]... [--sources DIR]
           [--ghidra DIR] [--configs mcp-default,export-file,ghidra,disasm] [--only ID,ID]
           Build packets/<config>/<question>.md and manifest.json from the checkout PATH (needs dist/).
+          [--variant sqlite3-dylib]: same questions over libsqlite3.3.54.0.dylib (no Ghidra packets).
           Use a fresh --out per build (project caches under DIR/work are version specific).
   score   --packets DIR (--answers DIR | --answer-cmd CMD) [--out DIR]
           Score answers (DIR/<config>/<id>.json {"answer": "..."} or .txt). --answer-cmd runs CMD per
@@ -76,7 +78,9 @@ async function toolVersions(): Promise<Record<string, string | null>> {
 
 async function build(flags: Map<string, string[]>): Promise<void> {
   const out = resolve(required(flags, '--out'));
-  const set = await loadQuestions(one(flags, '--questions') ?? QUESTIONS_PATH);
+  const frozen = await loadQuestions(one(flags, '--questions') ?? QUESTIONS_PATH);
+  const variant = one(flags, '--variant');
+  const set = variant === undefined ? frozen : applyVariant(frozen, variant);
   const only = one(flags, '--only')?.split(',');
   const configs = (one(flags, '--configs')?.split(',') ?? [...CONFIGS]) as Config[];
   for (const config of configs) assert.ok(CONFIGS.includes(config), `Unknown config ${config}`);
@@ -149,7 +153,12 @@ async function build(flags: Map<string, string[]>): Promise<void> {
             item.address,
           ),
         );
-      if (configs.includes('ghidra') && ghidraDir !== undefined && item.binary === 'sqlite3-arm64')
+      if (
+        configs.includes('ghidra') &&
+        ghidraDir !== undefined &&
+        variant === undefined &&
+        item.binary === 'sqlite3-arm64'
+      )
         found.ghidra = await ghidraMaterial(ghidraDir, item);
       materials.set(key, found);
       console.error(
@@ -216,6 +225,7 @@ async function build(flags: Map<string, string[]>): Promise<void> {
     schema: 1,
     built_at: new Date().toISOString(),
     questions_sha256: sha256(await readFile(one(flags, '--questions') ?? QUESTIONS_PATH)),
+    variant: variant ?? null,
     question_count: questions.length,
     estimator: `ceil(UTF-8 bytes / ${BYTES_PER_TOKEN}) approximate tokens; no tokenizer is available offline`,
     repo,

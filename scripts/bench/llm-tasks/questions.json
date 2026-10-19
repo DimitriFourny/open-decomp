@@ -947,5 +947,29 @@
       },
       "gold_note": "ParseParams (source line 267) has no symbol and is inlined into main in this binary."
     }
-  ]
+  ],
+  "variants": {
+    "sqlite3-dylib": {
+      "binary": "sqlite3-arm64",
+      "file": "libsqlite3.3.54.0.dylib",
+      "sha256": "cbd373e61913b2990f6e5eb2cf06a9ad7e33b8192948297152dbf1a10bcc0205",
+      "description": "SQLite 3.54.0 libsqlite3.dylib, macOS arm64 (Homebrew-style build, /tmp/odtest). Same function bodies and sizes as sqlite3-arm64 for these 14 functions; its compile-option list lacks only STMTVTAB, BYTECODE_VTAB, DBPAGE_VTAB, OFFSET_SQL_FUNC, EXPLAIN_COMMENTS, UNKNOWN_SQL_FUNC, STRICT_SUBTYPE, DQS=0, USE_URI. Gold struct offsets and constants were spot-checked against its disassembly (0x78, 0x80, 0x50/0x58, 0x88 and limit id 0xe, 0x1a01, 0x36). No archived Ghidra output exists for it.",
+      "addresses": {
+        "sqlite3_libversion_number": "0x12ea4",
+        "sqlite3_threadsafe": "0x12eb0",
+        "sqlite3_changes64": "0x14128",
+        "sqlite3_total_changes64": "0x141d8",
+        "sqlite3_errcode": "0x16238",
+        "sqlite3_limit": "0x16474",
+        "sqlite3_stricmp": "0x5d3c",
+        "sqlite3_strnicmp": "0x5d98",
+        "sqlite3_complete": "0x12dc4",
+        "sqlite3_initialize": "0x1d68",
+        "sqlite3_incomplete": "0x12918",
+        "btreeLeaveAll": "0x2633c",
+        "sqlite3_result_pointer": "0xb0c4",
+        "renameColumnFunc": "0xaa5b8"
+      }
+    }
+  }
 }
