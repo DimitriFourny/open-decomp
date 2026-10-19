@@ -1,4 +1,4 @@
-import { cSourceName } from '../symbols/c-names.js';
+import { libraryLookupName } from '../symbols/c-names.js';
 import {
   entityIdentity,
   fingerprint,
@@ -6,6 +6,7 @@ import {
   type AbiSignature,
   type AbiType,
   type Address,
+  type CanonicalValue,
   type Diagnostic,
   type Evidence,
   type LoadedImage,
@@ -14,13 +15,25 @@ import {
   type Signature,
 } from '../../core/index.js';
 import {
-  catalog,
-  identifiesLibrary,
+  ABI_TYPEDEFS,
+  findDeclaration,
   type ArgumentMemory,
   type CatalogEntry,
   type TypeSpec,
 } from './catalog.js';
 export type { ArgumentMemory } from './catalog.js';
+
+interface TypeSpecResolution {
+  readonly definition: RecoveredType;
+  readonly abi_type: AbiType;
+  readonly name: string;
+  readonly birth: CanonicalValue;
+}
+/** Code pointers are opaque: the pointee is never spelled and never callable evidence. */
+const FUNCTION_POINTER: TypeSpec = {
+  kind: 'pointer',
+  to: { kind: 'opaque', name: 'function', spelled: false },
+};
 
 export interface LibraryType {
   readonly id: string;
@@ -28,6 +41,8 @@ export interface LibraryType {
   readonly definition: RecoveredType;
   readonly abi_type: AbiType;
   readonly evidence_ids: readonly string[];
+  /** Declared C name of an opaque or handle type, printed instead of an anonymous name. */
+  readonly spelling?: string;
 }
 export interface LibraryContract {
   readonly id: string;
@@ -90,6 +105,8 @@ export function recoverLibraryContracts(
   )
     throw new RangeError('Invalid library contract bounds');
   context.checkpoint(0);
+  // ABI-dependent typedefs (`mode_t`, `time_t`...) pick their column by target ABI.
+  const abiColumn = abi.id === 'darwin-arm64' ? 0 : abi.id === 'sysv-amd64' ? 1 : 2;
   const contracts: LibraryContract[] = [],
     evidence: Evidence[] = [],
     diagnostics: Diagnostic[] = [],
@@ -118,53 +135,109 @@ export function recoverLibraryContracts(
       adjustedNames.add(fingerprint([imported.library, imported.original_name]));
     }
   }
+  const integer = (bits: number, signed: boolean, name: string): TypeSpecResolution => ({
+    definition: { kind: 'integer', bits, signed },
+    abi_type: { kind: 'integer', bits, signed },
+    name,
+    birth: ['integer', bits, signed],
+  });
+  const float = (bits: 32 | 64 | 80 | 128, name: string): TypeSpecResolution => ({
+    definition: { kind: 'float', bits },
+    abi_type: { kind: 'float', bits },
+    name,
+    birth: ['float', bits],
+  });
+  const scalar = (spec: Exclude<TypeSpec, object>): TypeSpecResolution => {
+    const { layout } = abi;
+    switch (spec) {
+      case 'void':
+        return {
+          definition: { kind: 'void' },
+          abi_type: { kind: 'void' },
+          name: spec,
+          birth: spec,
+        };
+      case 'char':
+        return integer(layout.char_bits, true, spec);
+      case 'schar':
+        return integer(layout.char_bits, true, spec);
+      case 'uchar':
+      case 'bool':
+        return integer(layout.char_bits, false, spec);
+      case 'short':
+        return integer(layout.short_bits, true, spec);
+      case 'ushort':
+        return integer(layout.short_bits, false, spec);
+      case 'int':
+        return integer(layout.int_bits, true, spec);
+      case 'uint':
+        return integer(layout.int_bits, false, spec);
+      case 'long':
+        return integer(layout.long_bits, true, spec);
+      case 'ulong':
+        return integer(layout.long_bits, false, spec);
+      case 'longlong':
+        return integer(layout.long_long_bits, true, spec);
+      case 'ulonglong':
+        return integer(layout.long_long_bits, false, spec);
+      case 'int64':
+        return integer(64, true, spec);
+      case 'uint64':
+        return integer(64, false, spec);
+      case 'size_t':
+        return integer(layout.pointer_bits, false, spec);
+      case 'ssize_t':
+        return integer(layout.pointer_bits, true, spec);
+      case 'wchar':
+        return abi.id === 'windows-x64'
+          ? integer(16, false, 'wchar_t')
+          : integer(32, true, 'wchar_t');
+      case 'float':
+        return float(layout.float_bits, spec);
+      case 'double':
+        return float(layout.double_bits, spec);
+      case 'longdouble':
+        return float(layout.long_double_bits, spec);
+      default:
+        throw new TypeError(`Unresolved library scalar ${spec}`);
+    }
+  };
   function resolve(spec: TypeSpec, proof: string): LibraryType {
     context.checkpoint(1);
-    let definition: RecoveredType,
-      abi_type: AbiType,
-      name: string,
-      birth: string | readonly string[];
-    if (typeof spec !== 'string') {
-      if (spec.kind === 'pointer') {
-        const target = resolve(spec.to, proof);
-        definition = { kind: 'pointer', to: target.id, bits: 64 };
-        abi_type = { kind: 'pointer' };
-        name = `pointer to ${target.name}`;
-        birth = ['pointer', target.id];
-      } else {
-        definition = { kind: 'unknown', size: null };
-        abi_type = { kind: 'unknown', size: null };
-        name = spec.name;
-        birth = ['opaque', name];
-      }
-    } else if (spec === 'void') {
-      name = spec;
-      birth = spec;
-      definition = { kind: 'void' };
-      abi_type = { kind: 'void' };
+    let resolved: TypeSpecResolution, spelling: string | undefined;
+    if (typeof spec === 'string') {
+      if (Object.hasOwn(ABI_TYPEDEFS, spec))
+        return resolve(ABI_TYPEDEFS[spec as keyof typeof ABI_TYPEDEFS][abiColumn], proof);
+      if (spec === 'fnptr') return resolve(FUNCTION_POINTER, proof);
+      if (spec === 'va_list') return resolve({ kind: 'pointer', to: 'void' }, proof);
+      resolved = scalar(spec);
+    } else if (spec.kind === 'pointer') {
+      const target = resolve(spec.to, proof);
+      resolved = {
+        definition: { kind: 'pointer', to: target.id, bits: 64 },
+        abi_type: { kind: 'pointer' },
+        name: `pointer to ${target.name}`,
+        birth: ['pointer', target.id],
+      };
+    } else if (spec.kind === 'opaque') {
+      resolved = {
+        definition: { kind: 'unknown', size: null },
+        abi_type: { kind: 'unknown', size: null },
+        name: spec.name,
+        birth: ['opaque', spec.name],
+      };
+      if (spec.spelled !== false) spelling = spec.name;
     } else {
-      const bits =
-        spec === 'char'
-          ? abi.layout.char_bits
-          : spec === 'wchar'
-            ? abi.id === 'windows-x64'
-              ? 16
-              : 32
-            : spec === 'long' || spec === 'ulong'
-              ? abi.layout.long_bits
-              : spec === 'size_t' || spec === 'ssize_t'
-                ? abi.layout.pointer_bits
-                : abi.layout.int_bits;
-      const signed =
-        spec !== 'uint' &&
-        spec !== 'ulong' &&
-        spec !== 'size_t' &&
-        !(spec === 'wchar' && abi.id === 'windows-x64');
-      definition = { kind: 'integer', bits, signed };
-      abi_type = definition;
-      name = spec === 'wchar' ? 'wchar_t' : spec;
-      birth = spec;
+      const target = resolve(spec.to, proof);
+      resolved = {
+        definition: { kind: 'pointer', to: target.id, bits: 64 },
+        abi_type: { kind: 'pointer' },
+        name: spec.name,
+        birth: ['handle', spec.name, target.id],
+      };
+      spelling = spec.name;
     }
+    const { definition, abi_type, name, birth } = resolved;
     const id = entityIdentity(image.selected_slice_id, 'library-type', [abi.id, birth]),
       prior = types.get(id);
     if (prior) {
@@ -172,17 +245,23 @@ export function recoverLibraryContracts(
         types.set(id, { ...prior, evidence_ids: [...prior.evidence_ids, proof] });
       return prior;
     }
-    const value: LibraryType = { id, name, definition, abi_type, evidence_ids: [proof] };
+    const value: LibraryType = {
+      id,
+      name,
+      definition,
+      abi_type,
+      evidence_ids: [proof],
+      ...(spelling === undefined ? {} : { spelling }),
+    };
     types.set(id, value);
     return value;
   }
   for (const imported of image.imports) {
     context.checkpoint(1);
     if (imported.original_name === null || imported.library === null) continue;
-    const name = cSourceName(image.target.format, imported.original_name);
-    const declaration = Object.hasOwn(catalog, name) ? catalog[name] : undefined;
-    if (!declaration || !identifiesLibrary(imported.library, declaration, image.target.format))
-      continue;
+    const name = libraryLookupName(image.target.format, imported.original_name);
+    const declaration = findDeclaration(name, imported.library, image.target.format);
+    if (!declaration) continue;
     if (
       imported.weak ||
       adjustedNames.has(fingerprint([imported.library, imported.original_name]))
