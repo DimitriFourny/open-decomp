@@ -500,7 +500,11 @@ weak, addend-adjusted and Swift-runtime imports excluded). The return address is
 not followed — after a final `bl ___stack_chk_fail` it is the next function's
 entry, formerly a `conflicting boundaries` gap — and the call block ends with a
 `trap` edge whose derived evidence cites the import binding; lifters terminate it
-as a trap instead of an unresolved continuation.
+as a trap instead of an unresolved continuation. The source view prints only the
+call (C declares the callee `extern _Noreturn …`) when the call analysis
+establishes the callee noreturn; the trap keeps a `noreturn_call_exit`
+presentation record and header mapping, still terminates its region for
+structuring, and the checked view prints the explicit `trap_exit`.
 
 Darwin variadic stack arguments stored in different predecessors of one shared
 call resolve when, on every incoming edge, the owning store wrote the same SSA
