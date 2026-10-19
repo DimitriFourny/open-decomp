@@ -21,6 +21,12 @@ import {
   type CatalogEntry,
   type TypeSpec,
 } from './catalog.js';
+import {
+  abiTypedefColumn,
+  isAbiTypedef,
+  libraryScalar,
+  type PlainScalar,
+} from './variables.js';
 export type { ArgumentMemory } from './catalog.js';
 
 interface TypeSpecResolution {
@@ -106,7 +112,7 @@ export function recoverLibraryContracts(
     throw new RangeError('Invalid library contract bounds');
   context.checkpoint(0);
   // ABI-dependent typedefs (`mode_t`, `time_t`...) pick their column by target ABI.
-  const abiColumn = abi.id === 'darwin-arm64' ? 0 : abi.id === 'sysv-amd64' ? 1 : 2;
+  const abiColumn = abiTypedefColumn(abi);
   const contracts: LibraryContract[] = [],
     evidence: Evidence[] = [],
     diagnostics: Diagnostic[] = [],
@@ -147,67 +153,19 @@ export function recoverLibraryContracts(
     name,
     birth: ['float', bits],
   });
-  const scalar = (spec: Exclude<TypeSpec, object>): TypeSpecResolution => {
-    const { layout } = abi;
-    switch (spec) {
-      case 'void':
-        return {
-          definition: { kind: 'void' },
-          abi_type: { kind: 'void' },
-          name: spec,
-          birth: spec,
-        };
-      case 'char':
-        return integer(layout.char_bits, true, spec);
-      case 'schar':
-        return integer(layout.char_bits, true, spec);
-      case 'uchar':
-      case 'bool':
-        return integer(layout.char_bits, false, spec);
-      case 'short':
-        return integer(layout.short_bits, true, spec);
-      case 'ushort':
-        return integer(layout.short_bits, false, spec);
-      case 'int':
-        return integer(layout.int_bits, true, spec);
-      case 'uint':
-        return integer(layout.int_bits, false, spec);
-      case 'long':
-        return integer(layout.long_bits, true, spec);
-      case 'ulong':
-        return integer(layout.long_bits, false, spec);
-      case 'longlong':
-        return integer(layout.long_long_bits, true, spec);
-      case 'ulonglong':
-        return integer(layout.long_long_bits, false, spec);
-      case 'int64':
-        return integer(64, true, spec);
-      case 'uint64':
-        return integer(64, false, spec);
-      case 'size_t':
-        return integer(layout.pointer_bits, false, spec);
-      case 'ssize_t':
-        return integer(layout.pointer_bits, true, spec);
-      case 'wchar':
-        return abi.id === 'windows-x64'
-          ? integer(16, false, 'wchar_t')
-          : integer(32, true, 'wchar_t');
-      case 'float':
-        return float(layout.float_bits, spec);
-      case 'double':
-        return float(layout.double_bits, spec);
-      case 'longdouble':
-        return float(layout.long_double_bits, spec);
-      default:
-        throw new TypeError(`Unresolved library scalar ${spec}`);
-    }
+  const scalar = (spec: PlainScalar): TypeSpecResolution => {
+    const shape = libraryScalar(spec, abi);
+    if (shape.kind === 'void')
+      return { definition: { kind: 'void' }, abi_type: { kind: 'void' }, name: spec, birth: spec };
+    return shape.kind === 'integer'
+      ? integer(shape.bits, shape.signed, shape.name)
+      : float(shape.bits, shape.name);
   };
   function resolve(spec: TypeSpec, proof: string): LibraryType {
     context.checkpoint(1);
     let resolved: TypeSpecResolution, spelling: string | undefined;
     if (typeof spec === 'string') {
-      if (Object.hasOwn(ABI_TYPEDEFS, spec))
-        return resolve(ABI_TYPEDEFS[spec as keyof typeof ABI_TYPEDEFS][abiColumn], proof);
+      if (isAbiTypedef(spec)) return resolve(ABI_TYPEDEFS[spec][abiColumn], proof);
       if (spec === 'fnptr') return resolve(FUNCTION_POINTER, proof);
       if (spec === 'va_list') return resolve({ kind: 'pointer', to: 'void' }, proof);
       resolved = scalar(spec);

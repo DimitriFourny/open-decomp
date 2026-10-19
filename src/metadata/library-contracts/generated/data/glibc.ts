@@ -112,4 +112,16 @@ syscall|l|number:l|v|0
 timerfd_create|i|clockid:i,flags:i||0
 timerfd_gettime|i|fd:i,curr_value:*v||0
 timerfd_settime|i|fd:i,flags:i,new_value:^v,old_value:*v||0
+=daylight|i||0
+=environ|**c||0
+=optarg|*c||0
+=opterr|i||0
+=optind|i||0
+=optopt|i||0
+=program_invocation_name|*c||0
+=program_invocation_short_name|*c||0
+=stderr|*@FILE;||0
+=stdin|*@FILE;||0
+=stdout|*@FILE;||0
+=timezone|l||0
 `;

@@ -1,3 +1,4 @@
+import type { VariableType } from '../metadata/library-contracts/variables.js';
 import {
   fingerprint,
   MAX_RESULT_DIAGNOSTICS,
@@ -453,6 +454,7 @@ export class Renderer {
       access_type: (node) => this.accessType(node),
       pretty: this.sourceView && this.program.source !== undefined,
       pointer_bits: this.input.source?.abi.layout.pointer_bits,
+      abi: this.input.source?.abi,
     });
     for (const projection of this.program.calls.values()) {
       if (!projection.signature) continue;
@@ -1329,7 +1331,10 @@ export class Renderer {
         this.writer.fail('Reconstructed expression expansion exceeds its budget');
       this.expanding.add(value.id);
       const storage = this.storage(load);
-      if (this.language === 'c-like' && this.slotType(load.id)) {
+      if (
+        this.language === 'c-like' &&
+        (this.slotType(load.id) || this.typedPointerGlobal(load.id))
+      ) {
         // A typed pointer slot read in integer context yields its address bits.
         this.expanding.delete(value.id);
         return {
@@ -2709,6 +2714,25 @@ export class Renderer {
     }
   }
 
+  /** The opaque tags and pointer typedefs a header-declared global's C type mentions. */
+  private registerTypedefs(type: VariableType): void {
+    for (const name of type.opaque)
+      if (!this.deferredTypedefs.includes(name)) this.deferredTypedefs.push(name);
+    for (const handle of type.handles)
+      if (!this.handleTypedefs.has(handle.name)) {
+        this.handleTypedefs.set(handle.name, `typedef ${handle.target}* ${handle.name};`);
+        this.deferredTypedefs.push(handle.name);
+      }
+  }
+
+  /** C only: the header-declared pointer type of the imported object a load reads.
+   * Its value is a pointer; integer context reads its address bits. */
+  private typedPointerGlobal(node: string): VariableType | undefined {
+    if (this.language !== 'c-like') return undefined;
+    const declared = this.globals.accesses.get(node)?.object.declared?.type;
+    return declared?.kind === 'pointer' ? declared : undefined;
+  }
+
   /** Declarations of every global the finished body names, inserted before the
    * function so the text refers only to declared names. Each is mapped to its
    * first planned access with the image/import evidence of the object. */
@@ -2723,16 +2747,22 @@ export class Renderer {
     let offset = at;
     for (const { object: global, name } of this.usedGlobals.values()) {
       this.context.checkpoint(1);
-      const type = global.element.float
-          ? global.element.bits === 32
-            ? 'float'
-            : 'double'
-          : `uint${global.element.bits}_t`,
+      const declared = global.declared;
+      if (declared && !python) this.registerTypedefs(declared.type);
+      const type = declared
+          ? python
+            ? declared.type.python
+            : declared.type.c
+          : global.element.float
+            ? global.element.bits === 32
+              ? 'float'
+              : 'double'
+            : `uint${global.element.bits}_t`,
         first = lines.length;
       // Comment text only: names stay readable, a comment terminator cannot occur.
       const plain = (text: string): string => text.replace(/\*\//g, '* /');
       const where = global.import
-        ? `import ${plain(global.import.name)}${global.import.library === null ? '' : ` from ${plain(global.import.library)}`}, slot 0x${global.address.value.toString(16)}`
+        ? `import ${plain(global.import.name)}${global.import.library === null ? '' : ` from ${plain(global.import.library)}`}, slot 0x${global.address.value.toString(16)}${declared ? `, type from ${plain(declared.source)}` : ''}`
         : `VA 0x${global.address.value.toString(16)}${global.object.byte_length === null ? '' : `, ${global.object.byte_length} bytes`}${global.object.kind === 'bytes' ? '' : `, ${global.object.kind.replace('_', ' ')}`}`;
       if (python) {
         lines.push(
@@ -2750,7 +2780,9 @@ export class Renderer {
         );
       } else
         lines.push(
-          `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'}; /* ${where} */`,
+          declared
+            ? `extern ${type}${declared.constant ? ' const' : ''} ${name}; /* ${where} */`
+            : `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'}; /* ${where} */`,
         );
       const length = lines.slice(first).reduce((sum, line) => sum + line.length + 1, 0);
       spans.push({ object: global, start: offset, end: offset + length });
@@ -3027,6 +3059,9 @@ export class Renderer {
           return /^(?:const )?(?:char|void)\s*\*$/.test(spelling)
             ? literal
             : `(${spelling})${literal}`;
+        const loaded = this.inlined.get(value.id)?.node;
+        if (loaded?.kind === 'load' && this.typedPointerGlobal(loaded.id)?.c === spelling)
+          return this.storage(loaded);
         return `((${spelling})(uintptr_t)(${text}))`;
       }
       const type = parameter && this.typeRecords.get(parameter.type_id)?.definition;
@@ -3214,6 +3249,17 @@ export class Renderer {
       const spelling = this.declaredSpelling(node.result);
       return `${this.local(node.result)} = ${
         spelling.replace(/^const /, '') === this.formalSpelling(typed).replace(/^const /, '')
+          ? storage
+          : spelling.endsWith('*')
+            ? `(${spelling})${storage}`
+            : `(uintptr_t)${storage}`
+      }`;
+    }
+    const global = this.typedPointerGlobal(node.id);
+    if (global && this.program.live.has(node.result.id)) {
+      const spelling = this.declaredSpelling(node.result);
+      return `${this.local(node.result)} = ${
+        spelling === global.c
           ? storage
           : spelling.endsWith('*')
             ? `(${spelling})${storage}`

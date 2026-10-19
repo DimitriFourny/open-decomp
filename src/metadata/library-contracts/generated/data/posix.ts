@@ -518,4 +518,11 @@ writev|y|fd:i,iov:^@struct iovec;,iovcnt:i||16
 y0|d|a1:d||w
 y1|d|a1:d||w
 yn|d|a1:i,a2:d||w
+=_libiconv_version|i||s
+=h_errno|i||i
+=optarg|*c||1
+=opterr|i||1
+=optind|i||1
+=optopt|i||1
+=signgam|i||w
 `;

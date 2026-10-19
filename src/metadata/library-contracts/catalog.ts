@@ -1,5 +1,5 @@
 import type { Target } from '../../core/index.js';
-import { generatedDeclaration } from './generated/index.js';
+import { generatedDeclaration, generatedVariable } from './generated/index.js';
 import type { TypeSpec } from './spec.js';
 export { ABI_TYPEDEFS, type AbiTypedef, type ScalarSpec, type TypeSpec } from './spec.js';
 
@@ -700,6 +700,31 @@ export function findDeclaration(
   for (const library of LIBRARY_KINDS) {
     if (!identifiesLibraryKind(importLibrary, library, format)) continue;
     const generated = generatedDeclaration(library, name);
+    if (generated) return generated;
+  }
+  return undefined;
+}
+
+/** A header-declared extern data object. Only its type is recorded: never a size, an
+ * array extent or a layout, and no write or alias fact. */
+export interface CatalogVariable {
+  readonly library: LibraryKind;
+  readonly type: TypeSpec;
+  /** The object itself is const-qualified (`const CFStringRef`, `char *const`). */
+  readonly constant: boolean;
+  readonly source: string;
+}
+
+/** The extern data declaration a native import of `name` from `importLibrary` carries
+ * (`__stderrp` -> `FILE *`). `name` is the normalized C name (see `libraryLookupName`). */
+export function findVariable(
+  name: string,
+  importLibrary: string,
+  format: Target['format'],
+): CatalogVariable | undefined {
+  for (const library of LIBRARY_KINDS) {
+    if (!identifiesLibraryKind(importLibrary, library, format)) continue;
+    const generated = generatedVariable(library, name);
     if (generated) return generated;
   }
   return undefined;

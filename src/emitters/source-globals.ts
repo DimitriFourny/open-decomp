@@ -1,4 +1,5 @@
-import type { Address, OperationContext } from '../core/index.js';
+import type { AbiProfile, Address, OperationContext } from '../core/index.js';
+import { describeVariableType, type VariableType } from '../metadata/library-contracts/variables.js';
 import { bitWidth, type DataType, type Instruction, type Value } from '../ir/index.js';
 import type { Reconstruction } from '../reconstruction/model.js';
 import type { SourceAddress } from '../reconstruction/source-model.js';
@@ -22,6 +23,14 @@ export interface GlobalObject {
   element: { readonly bits: 8 | 16 | 32 | 64; readonly float: boolean };
   /** First planned access, for provenance of the declaration. */
   first?: string;
+  /** Header-declared type of an imported data object, when every observed access
+   * agrees with it: one scalar element at offset 0 of exactly its width and kind
+   * (a pointer object is only read). Otherwise the object keeps its access type. */
+  declared?: {
+    readonly type: VariableType;
+    readonly constant: boolean;
+    readonly source: string;
+  };
 }
 export interface GlobalAccess {
   readonly object: GlobalObject;
@@ -55,6 +64,8 @@ export function planGlobals(
     /** Source view only: pretty accesses and import-slot folding. */
     readonly pretty: boolean;
     readonly pointer_bits: number | undefined;
+    /** Target ABI that sizes header-declared library types. */
+    readonly abi: AbiProfile | undefined;
   },
 ): GlobalPlan {
   const objects = new Map<string, GlobalObject>();
@@ -210,6 +221,21 @@ export function planGlobals(
         ? 'scalar'
         : 'array';
     for (const item of list) accesses.set(item.node.id, { object: target, offset: item.offset });
+    const variable = target.import?.variable,
+      type =
+        variable && options.abi
+          ? describeVariableType(variable.type, options.abi)
+          : undefined;
+    const reads = list.every((item) => item.node.kind === 'load');
+    if (
+      variable &&
+      type &&
+      target.shape === 'scalar' &&
+      type.bits === first.bits &&
+      (type.kind === 'float') === first.float &&
+      (reads || (type.kind !== 'pointer' && !variable.constant))
+    )
+      target.declared = { type, constant: variable.constant, source: variable.source };
   }
   return plan;
 }
