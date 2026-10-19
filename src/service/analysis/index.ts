@@ -60,6 +60,7 @@ import {
 import { pipelineComponents, pipelineVersions } from './versions.js';
 import { boundIR, requirePass } from './passes.js';
 import { recoverSourceEvidence } from './source-facts.js';
+import { objcMethodSignature } from './objc-signature.js';
 import { imageTypeDump, recoverImageTypes, type ImageTypeDump } from './image-types.js';
 export type { ImageTypeDump } from './image-types.js';
 export { executeAnnotations } from './annotations.js';
@@ -222,6 +223,19 @@ export async function executeDecompilation(
           pending.push(...typeReferences(type.definition));
         }
       }
+      // A method implementation's compiler type encoding declares its interface
+      // unless a durable or debug signature already does.
+      const objcSignature =
+        durableSignature ||
+        debug.functions.some(
+          (fn) => fn.signature && fn.dwarf.address === loaded.function.entry.value,
+        )
+          ? null
+          : objcMethodSignature(image, args.revision, loaded.function, components.abi.id, context);
+      if (objcSignature) {
+        nativeSignatures.push({ ...objcSignature.signature, subject_id: ir.id });
+        nativeTypes.push(...objcSignature.types);
+      }
       const nativeCalls = callDeclarations(
         ir,
         image,
@@ -258,7 +272,14 @@ export async function executeDecompilation(
       const trusted = createTrustedSemanticCatalog(
         store,
         args.revision,
-        { ...baselineCatalog, evidence: [...baseline.evidence, ...nativeCalls.evidence] },
+        {
+          ...baselineCatalog,
+          evidence: [
+            ...baseline.evidence,
+            ...nativeCalls.evidence,
+            ...(objcSignature?.evidence ?? []),
+          ],
+        },
         fullContext,
       );
       const selected = new Set([

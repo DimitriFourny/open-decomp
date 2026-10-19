@@ -2695,13 +2695,14 @@ export class Renderer {
       if (!node) return null;
       this.memberPointers.set(node, member.typeId);
     }
+    const field = member.name ?? `f_${member.offset.toString(16)}`;
     const used = this.sourceStructs.name(pointer.to);
     const offsets = this.usedMembers.get(used) ?? new Set<bigint>();
     offsets.add(member.offset);
     this.usedMembers.set(used, offsets);
     let access = indexedStruct
-      ? `${baseText}[${this.value(index!)}].f_${member.offset.toString(16)}`
-      : `${baseText}->f_${member.offset.toString(16)}`;
+      ? `${baseText}[${this.value(index!)}].${field}`
+      : `${baseText}->${field}`;
     if (member.count !== undefined) {
       const displacement = (offset - member.offset) / BigInt(member.bits / 8);
       const subscript = index
@@ -2832,7 +2833,7 @@ export class Renderer {
                 : '__uint128_t'
               : this.sourceType(member.typeId);
         const array = member.count === undefined ? '' : `[${member.count ?? ''}]`;
-        parts.push(`${spelling} f_${member.offset.toString(16)}${array};`);
+        parts.push(`${spelling} ${member.name ?? `f_${member.offset.toString(16)}`}${array};`);
         packed ||= member.offset % BigInt(member.bits / 8) !== 0n;
         end = member.offset + member.size;
       }
@@ -2843,12 +2844,15 @@ export class Renderer {
         lines.push(`/* observed access stride ${stride}; not an allocation extent */`);
       }
       const image = this.sourceStructs.image(id);
+      const runtime = this.typeRecords.get(id)?.source === 'runtime';
       lines.push(
-        `/* members used here; size unknown; full layout in the types view${
-          image && image.functions > 1
-            ? `; merged from ${image.functions} functions${image.state === 'bounded' ? ' (flows partly explored)' : ''}`
-            : ''
-        }${image?.conflicts.length ? `; conflicts with ${image.conflicts.join(', ')}` : ''} */`,
+        runtime
+          ? '/* Objective-C ivars used here, at their static offsets (class metadata); size unknown */'
+          : `/* members used here; size unknown; full layout in the types view${
+              image && image.functions > 1
+                ? `; merged from ${image.functions} functions${image.state === 'bounded' ? ' (flows partly explored)' : ''}`
+                : ''
+            }${image?.conflicts.length ? `; conflicts with ${image.conflicts.join(', ')}` : ''} */`,
         `struct ${name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
       );
     }
@@ -3476,6 +3480,17 @@ export class Renderer {
           : objcCandidate !== undefined)
       )
         return this.local(operandValue);
+      // A message operand read from a declared pointer member or typed global is
+      // that lvalue itself: message syntax needs no integer conversion.
+      const loaded =
+        objcCandidate && literal === undefined && this.sourceView
+          ? this.inlined.get(operandValue.id)?.node
+          : undefined;
+      if (loaded?.kind === 'load' && this.inline.has(operandValue.id)) {
+        const storage = this.storage(loaded);
+        if (this.memberPointers.has(loaded.id) || this.typedPointerGlobal(loaded.id))
+          return storage;
+      }
       const printed = pointer
         ? literal === undefined
           ? this.sourceAddressPrinted(value, !this.sourceView)
@@ -3613,6 +3628,14 @@ export class Renderer {
     return results.length
       ? `${results.length === 1 ? this.local(results[0]!) : `(${this.writer.join(results.map((value) => this.local(value)))})`} = ${operation}`
       : operation;
+  }
+
+  /** A tail transfer returns its callee's result; a proven-void callee is a
+   * call statement followed by a plain return. */
+  private tailStatement(depth: number, call: string, empty: boolean): void {
+    if (!empty) return this.writer.statement(depth, `return ${call}`);
+    this.writer.statement(depth, call);
+    this.writer.statement(depth, 'return');
   }
 
   /** Message receiver text: a class-reference load (through same-width bitcasts,
@@ -6337,6 +6360,17 @@ export class Renderer {
           let values: string[];
           try {
             values = this.writer.list(projection.results, (value) => {
+              const nsString = this.objcLiteral(value);
+              if (
+                nsString !== undefined &&
+                this.localValidation.presentation(
+                  'objc_string_literal',
+                  control.id,
+                  'pointer-width constant result addressing an exact __cfstring constant object, printed as that NSString literal',
+                  [value.id],
+                )
+              )
+                return nsString;
               const scalar = this.sourceView && this.program.source?.return_scalar;
               if (scalar) return this.scalarReturn(value, scalar.bits, scalar.signed).text;
               if (this.program.source?.return_pointer && !this.program.source.return_source_type)
@@ -6418,21 +6452,38 @@ export class Renderer {
           ) {
             const printed = tail.boundary.arguments.map((value) => {
               ids.push(value.id);
+              // Message syntax has no C conversion: a declared pointer local
+              // (possibly through inline same-width bitcasts) prints as itself.
+              let operand = value;
+              for (let step = 0; step < 4 && this.inline.has(operand.id); step++) {
+                const alias = this.program.expressions.get(operand.id);
+                if (
+                  alias?.kind !== 'cast' ||
+                  alias.op !== 'bitcast' ||
+                  bitWidth(alias.value.type) !== bitWidth(operand.type)
+                )
+                  break;
+                operand = alias.value;
+              }
+              if (
+                this.language === 'c-like' &&
+                !this.inline.has(operand.id) &&
+                this.declaredSpelling(operand).endsWith('*')
+              )
+                return this.local(operand);
               return this.objcLiteral(value) ?? this.valueLiteral(value)?.text ?? this.value(value);
             });
             ids.push(control.target.id);
-            this.writer.statement(
-              depth,
-              `return ${this.guarded(
-                objcMessageText(
-                  this.language,
-                  message,
-                  this.objcReceiver(tail.boundary.arguments[0]!, printed[0]!),
-                  printed.slice(skip),
-                  [],
-                ),
-              )}`,
+            const sent = this.guarded(
+              objcMessageText(
+                this.language,
+                message,
+                this.objcReceiver(tail.boundary.arguments[0]!, printed[0]!),
+                printed.slice(skip),
+                [],
+              ),
             );
+            this.tailStatement(depth, sent, tail.result_void === true);
             break;
           }
           const key = this.addressKey(tail.target),
@@ -6467,7 +6518,11 @@ export class Renderer {
             `Native tail transfer to ${this.writer.quote(key)} using observed ${this.input.source!.abi.id} storage. Preserve unknown target effects and forward its actual results. An absent observed result layout is unknown, not void.`,
           );
           ids.push(control.target.id);
-          this.writer.statement(depth, `return ${name}(${this.writer.join(arguments_)})`);
+          this.tailStatement(
+            depth,
+            `${name}(${this.writer.join(arguments_)})`,
+            tail.result_void === true,
+          );
           break;
         }
         const args: string[] = [];
@@ -6831,11 +6886,19 @@ export class Renderer {
       this.declaredTypes.set(value.id, type);
       parameters.push({ value, type, name });
     }
-    let hasTailCall = false;
+    // A tail into a proven-void callee yields no result: with no returned value
+    // on any other path the function is void, not of unknown result.
+    let hasTailCall = false,
+      voidTail = false;
     for (const block of this.program.blocks.values()) {
       this.context.checkpoint(1);
-      if (block.control.kind === 'indirect' && block.control.tail_call) hasTailCall = true;
+      if (block.control.kind !== 'indirect' || !block.control.tail_call) continue;
+      if (this.program.tails.get(block.control.id)?.result_void) voidTail = true;
+      else hasTailCall = true;
     }
+    if (voidTail)
+      for (const projection of this.program.returns.values())
+        if (projection.results.length || projection.kind === 'physical') hasTailCall = true;
     let returnType = signature
       ? this.sourceType(signature.signature.return_type)
       : this.program.source

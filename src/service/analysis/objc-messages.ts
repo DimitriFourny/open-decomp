@@ -32,6 +32,7 @@ import type {
 } from '../../reconstruction/source-model.js';
 import { sourceConstantValues } from '../../reconstruction/source-data.js';
 import { nativeCallIndex } from './calls.js';
+import { printfArgumentTypes } from './source-variadic.js';
 
 type CallNode = Extract<Instruction, { kind: 'call' }>;
 
@@ -175,7 +176,11 @@ export function objcSourceFacts(input: {
   const selectorRegister = integerArguments[1],
     receiverRegister = integerArguments[0];
   if (!selectorRegister || !receiverRegister)
-    return { callees: [], addresses, evidence: [...evidence.values()] };
+    return {
+      callees: [],
+      addresses,
+      evidence: [...evidence.values()],
+    };
   const prepared = preparedCallArguments(ir, context);
   const scalar = (type: AbiType): DataType | null =>
     type.kind === 'pointer'
@@ -301,7 +306,61 @@ export function objcSourceFacts(input: {
     if (!fact) continue;
     const selector = fact.name,
       arity = selectorArity(selector),
-      variadic = variadicSelectors[selector] === true;
+      declared = variadicSelectors[selector],
+      variadic = declared !== undefined;
+    // A known NSString format argument that is an exact constant string fixes
+    // the complete actual list: the promoted printf/`%@` actuals occupy Darwin's
+    // anonymous-argument stack slots, read as stack parameters of the send.
+    let formatted: InferredCallee['stack_parameters'] | undefined;
+    if (
+      declared?.format !== null &&
+      declared !== undefined &&
+      site.call &&
+      dispatcher !== 'super'
+    ) {
+      const register = integerArguments[2 + declared.format];
+      const cells = register
+        ? site.call.register_inputs.filter((binding) => binding.register.root === register.root)
+        : [];
+      let bits = 0n,
+        width = 0;
+      for (const cell of cells) {
+        const value = constant(cell.value);
+        if (value === undefined) {
+          width = -1;
+          break;
+        }
+        bits |= value << BigInt(cell.register.offset_bits);
+        width += cell.register.width_bits;
+      }
+      const literal = width === 64 ? index.strings.get(bits) : undefined;
+      const actuals = literal ? printfArgumentTypes(literal.name, abi, true) : null;
+      const fixed: AbiType[] = Array.from({ length: arity + 2 }, () => ({ kind: 'pointer' }));
+      const classified = actuals
+        ? abi.classifyCall({
+            returns: { kind: 'pointer' },
+            parameters: [...fixed, ...actuals],
+            variadic: true,
+            fixed_parameter_count: fixed.length,
+            argument_list_complete: true,
+          })
+        : null;
+      const slots: { offset: bigint; width_bits: number; type: DataType }[] | null =
+        classified?.state === 'complete' ? [] : null;
+      for (const parameter of classified?.parameters.slice(fixed.length) ?? []) {
+        const location = parameter.locations.length === 1 ? parameter.locations[0] : undefined;
+        const type = scalar(actuals![parameter.index - fixed.length]!);
+        if (!slots || location?.kind !== 'stack' || location.value_offset_bits !== 0 || !type) {
+          slots?.splice(0);
+          break;
+        }
+        slots.push({ offset: location.offset, width_bits: bitWidth(type), type });
+      }
+      if (literal && slots && slots.length === actuals!.length) {
+        formatted = slots;
+        cite(literal);
+      }
+    }
     const encoding = index.selector_types.get(selector);
     const parsed = encoding ? parseObjCMethodType(encoding) : null;
     const typed =
@@ -344,7 +403,11 @@ export function objcSourceFacts(input: {
     const observed = input.callees.get(site.id);
     let returns = interface_.returns,
       return_types = interface_.return_types;
-    if (returns === null || return_types === null) {
+    const declaredVoid = (typed && parsed?.returns.role === 'void') || declared?.returns === 'void';
+    if (declaredVoid) {
+      returns = [];
+      return_types = [];
+    } else if (returns === null || return_types === null) {
       // Unknown result class: keep observed result storage and the integer
       // result register a message returns its id/integer result in.
       returns = [...(observed?.returns ?? [])];
@@ -366,9 +429,12 @@ export function objcSourceFacts(input: {
       parameter_types,
       returns,
       return_types,
+      ...(declaredVoid ? { returns_void: true as const } : {}),
       parameter_state: 'observed',
       argument_list_complete: false,
-      ...(variadic
+      ...(formatted ? { stack_parameters: formatted } : {}),
+      // A variadic selector closes only through its proven format actuals.
+      ...(variadic && !formatted
         ? { variadic_stack: true as const }
         : { argument_list_closure: 'objc_selector' as const }),
       evidence_ids: [...cite(fact), ...site.evidence_ids],
