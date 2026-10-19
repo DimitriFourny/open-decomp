@@ -431,14 +431,11 @@ export function prepareNativeUnit(
     arity_complete:
       optionalWorkComplete &&
       // Discovery reports an indirect call as unresolved control flow, but the
-      // call returns and the lifted graph is still complete: only an unknown or
-      // non-tail indirect terminator leaves machine control flow unresolved.
+      // call returns and the lifted graph is still complete. Unknown and
+      // non-tail indirect terminators (other than the lifter's conditional FP
+      // environment guard failures) make the observed interface ambiguous, so
+      // they never close an argument list.
       graph.coverage.reasons.every((reason) => reason === 'unresolved control flow') &&
-      ir.blocks.every(
-        (block) =>
-          block.terminator.kind !== 'unknown' &&
-          (block.terminator.kind !== 'indirect' || block.terminator.tail_call === true),
-      ) &&
       analysis?.state === 'complete' &&
       analysis.stack.state === 'complete',
     demand_index,
