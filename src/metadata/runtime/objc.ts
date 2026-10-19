@@ -108,10 +108,19 @@ export class ObjCRecovery {
         const entry = address + 8n + BigInt(index * stride),
           name = this.name(entry + 8n),
           type = this.name(entry + 16n, true);
+        // ivar_t: int32_t *offset; name; type; uint32_t alignment_raw; uint32_t size.
+        // The offset variable's static value is the layout this image's code was
+        // linked against; the runtime may slide non-fragile ivars.
+        const slot = r.pointer(entry);
+        const offset = slot === null ? null : r.u32(slot) | 0,
+          size = r.u32(entry + 28n);
         r.add('objc_ivar', name, entry, BigInt(stride), {
           owner,
           type: type || null,
           encoding: 'objc',
+          ...(offset !== null && offset >= 0
+            ? { ivar: { offset: BigInt(offset), size: BigInt(size) } }
+            : {}),
         });
       });
   }

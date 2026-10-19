@@ -2,7 +2,8 @@ import type { AbiType } from '../../core/index.js';
 
 /** Source role of one Objective-C type-encoding element; `object`, `class` and
  * `selector` are pointer-width references (`id`, `Class`, `SEL`). */
-export type ObjCTypeRole = 'object' | 'class' | 'selector' | 'pointer' | 'bool' | 'scalar' | 'void';
+export type ObjCTypeRole =
+  'object' | 'class' | 'selector' | 'string' | 'pointer' | 'bool' | 'scalar' | 'void';
 export interface ObjCEncodedType {
   readonly abi: AbiType;
   readonly role: ObjCTypeRole;
@@ -35,6 +36,27 @@ const OPEN: Record<string, string> = { '{': '}', '(': ')', '[': ']' };
  * and unknown elements return null rather than a guessed layout; the encoding
  * cannot express variadic methods, so callers decide arity separately. */
 export function parseObjCMethodType(encoding: string): ObjCMethodType | null {
+  const elements = parseObjCElements(encoding);
+  const returns = elements?.[0];
+  const parameters = elements?.slice(1) ?? [];
+  if (
+    !returns ||
+    parameters.some((parameter) => parameter.role === 'void') ||
+    parameters.length < 2 ||
+    parameters[0]!.abi.kind !== 'pointer' ||
+    parameters[1]!.role !== 'selector'
+  )
+    return null;
+  return { returns, parameters };
+}
+
+/** One supported scalar/pointer element (an ivar type encoding), or null. */
+export function parseObjCType(encoding: string): ObjCEncodedType | null {
+  const elements = parseObjCElements(encoding);
+  return elements?.length === 1 && elements[0]!.role !== 'void' ? elements[0]! : null;
+}
+
+function parseObjCElements(encoding: string): ObjCEncodedType[] | null {
   let at = 0;
   const skipDigits = (): void => {
     while (at < encoding.length && /[0-9-]/.test(encoding[at]!)) at++;
@@ -87,27 +109,19 @@ export function parseObjCMethodType(encoding: string): ObjCMethodType | null {
       result = { abi: { kind: 'pointer' }, role: 'object' };
     } else if (head === '#') result = { abi: { kind: 'pointer' }, role: 'class' };
     else if (head === ':') result = { abi: { kind: 'pointer' }, role: 'selector' };
-    else if (head === '*') result = { abi: { kind: 'pointer' }, role: 'pointer' };
+    else if (head === '*') result = { abi: { kind: 'pointer' }, role: 'string' };
     else if (head === '^') result = skip() ? { abi: { kind: 'pointer' }, role: 'pointer' } : null;
     else if (SCALARS[head]) result = { abi: SCALARS[head], role: 'scalar' };
     if (result) skipDigits();
     return result;
   };
-  const returns = element();
-  if (!returns) return null;
-  const parameters: ObjCEncodedType[] = [];
+  const elements: ObjCEncodedType[] = [];
   while (at < encoding.length) {
-    const parameter = element();
-    if (!parameter || parameter.role === 'void') return null;
-    parameters.push(parameter);
+    const item = element();
+    if (!item) return null;
+    elements.push(item);
   }
-  if (
-    parameters.length < 2 ||
-    parameters[0]!.abi.kind !== 'pointer' ||
-    parameters[1]!.role !== 'selector'
-  )
-    return null;
-  return { returns, parameters };
+  return elements;
 }
 
 /** Number of keyword arguments a selector names (its colon count). */
@@ -117,22 +131,27 @@ export function selectorArity(selector: string): number {
   return count;
 }
 
-/** Foundation/AppKit selectors declared with a trailing C variadic list. Only
- * these acquire an open variadic tail; every other selector is fixed-arity. */
-export const variadicSelectors: Readonly<Record<string, true>> = {
-  'stringWithFormat:': true,
-  'initWithFormat:': true,
-  'localizedStringWithFormat:': true,
-  'appendFormat:': true,
-  'stringByAppendingFormat:': true,
-  'predicateWithFormat:': true,
-  'arrayWithObjects:': true,
-  'initWithObjects:': true,
-  'setWithObjects:': true,
-  'orderedSetWithObjects:': true,
-  'dictionaryWithObjectsAndKeys:': true,
-  'initWithObjectsAndKeys:': true,
-  'raise:format:': true,
-  'handleFailureInMethod:object:file:lineNumber:description:': true,
-  'handleFailureInFunction:file:lineNumber:description:': true,
+/** Foundation selectors declared with a trailing C variadic list (Apple SDK
+ * headers). Only these acquire a variadic tail; every other selector is
+ * fixed-arity. `format` is the keyword index of an NSString format argument
+ * (`%@` is an object), `null` for nil-terminated object lists; `returns` is the
+ * declared result (`id`/`instancetype`, or `void`). */
+export const variadicSelectors: Readonly<
+  Record<string, { readonly format: number | null; readonly returns: 'object' | 'void' }>
+> = {
+  'stringWithFormat:': { format: 0, returns: 'object' },
+  'initWithFormat:': { format: 0, returns: 'object' },
+  'localizedStringWithFormat:': { format: 0, returns: 'object' },
+  'appendFormat:': { format: 0, returns: 'void' },
+  'stringByAppendingFormat:': { format: 0, returns: 'object' },
+  'predicateWithFormat:': { format: 0, returns: 'object' },
+  'arrayWithObjects:': { format: null, returns: 'object' },
+  'initWithObjects:': { format: null, returns: 'object' },
+  'setWithObjects:': { format: null, returns: 'object' },
+  'orderedSetWithObjects:': { format: null, returns: 'object' },
+  'dictionaryWithObjectsAndKeys:': { format: null, returns: 'object' },
+  'initWithObjectsAndKeys:': { format: null, returns: 'object' },
+  'raise:format:': { format: 1, returns: 'void' },
+  'handleFailureInMethod:object:file:lineNumber:description:': { format: 4, returns: 'void' },
+  'handleFailureInFunction:file:lineNumber:description:': { format: 3, returns: 'void' },
 };

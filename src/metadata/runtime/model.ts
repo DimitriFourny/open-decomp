@@ -43,6 +43,8 @@ export interface RuntimeRecord {
   readonly type_encoding: 'objc' | 'swift-mangled' | null;
   readonly flags: bigint | null;
   readonly evidence_ids: readonly string[];
+  /** `objc_ivar` only: static offset-variable value and declared byte size. */
+  readonly ivar?: { readonly offset: bigint; readonly size: bigint };
 }
 export interface RuntimeMetadata {
   /** Complete covers only the documented static section/record families. */

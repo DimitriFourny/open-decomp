@@ -36,6 +36,8 @@ export interface TailProjection {
   readonly target: Address;
   readonly boundary: BoundaryProjection;
   readonly result_types: readonly DataType[];
+  /** Source view: the established callee interface returns nothing. */
+  readonly result_void?: true;
 }
 export interface MemoryView {
   readonly shape: MemoryShape;

@@ -85,7 +85,7 @@ const catalogSchema = z.strictObject({
       z.strictObject({
         id: entityIdSchema,
         definition: typeDefinitionSchema,
-        source: z.enum(['analysis', 'debug', 'library', 'user', 'llm']),
+        source: z.enum(['analysis', 'debug', 'library', 'runtime', 'user', 'llm']),
         status: z.enum(['candidate', 'established', 'asserted', 'hypothesis', 'conflicting']),
         evidence_ids: z.array(evidenceIdSchema).max(1000),
       }),

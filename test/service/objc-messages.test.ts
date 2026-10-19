@@ -56,10 +56,21 @@ test(
   async (t) => {
     const session = await open(t, 'objc-foundation');
     const summary = await text(session, '-[ODCounter(Describe) summary]');
-    assert.match(summary, /-\[ODCounter summary\]\(\w+ self\b/);
-    // A known variadic selector keeps its explicit open remainder.
-    assert.match(summary, /\[NSString stringWithFormat:@"%@=%ld", [^\]]*\.\.\.\]/);
+    // Header from the method's type encoding; self typed by the class ivar layout.
+    assert.match(summary, /\bid -\[ODCounter summary\]\(ODCounter\* self, SEL _cmd\)/);
+    // A constant NSString format closes the variadic list: `%@` object, `%ld` long.
+    const format = /\[NSString stringWithFormat:@"%@=%ld", (\w+), ([^\]]+\]|\w+)\]/.exec(summary);
+    assert.ok(format, summary);
+    assert.doesNotMatch(summary, /unknown_argument_remainder|, \.\.\.\]/);
     assert.match(summary, /\[self label\]/);
+    // Ivar accesses read and write named members at their static offsets.
+    const add = await text(session, '-[ODCounter addValue:times:]');
+    assert.match(add, /struct ODCounter \{[^}]*\bint64_t _count;[^}]*\}/);
+    assert.match(add, /self->_count = \w+;[\s\S]*return \w+;/);
+    // A tail call into a void method is a call statement and a plain return.
+    const increment = await text(session, '-[ODCounter increment]');
+    assert.match(increment, /^void -\[ODCounter increment\]/m);
+    assert.match(increment, /\[self setCount:\w+\];\n\s*return;/);
     assert.match(await text(session, '+[ODCounter greeting]'), /return @"hello, fixture";/);
     // Super sends stay explicit dispatcher calls with their selector.
     const init = await text(session, '-[ODCounter initWithLabel:]');

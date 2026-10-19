@@ -115,7 +115,7 @@ export const inferenceDetailsByKind = {
     association_ids: ids,
     type_id: entityIdSchema,
     type_status: z.enum(['candidate', 'established', 'asserted', 'hypothesis', 'conflicting']),
-    source: z.enum(['analysis', 'debug', 'library', 'user', 'llm']),
+    source: z.enum(['analysis', 'debug', 'library', 'runtime', 'user', 'llm']),
     type_kind: z
       .enum(['void', 'unknown', 'integer', 'float', 'pointer', 'array', 'vector', 'structure'])
       .nullable(),

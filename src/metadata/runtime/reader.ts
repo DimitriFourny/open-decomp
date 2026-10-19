@@ -430,6 +430,7 @@ export class RuntimeReader {
       type?: string | null;
       encoding?: RuntimeRecord['type_encoding'];
       flags?: bigint;
+      ivar?: RuntimeRecord['ivar'];
       /** Linker-style symbol name for an established code target; `false`
        * publishes the record without any symbol. */
       symbol?: string | false;
@@ -487,6 +488,7 @@ export class RuntimeReader {
       type_name: options.type ?? null,
       type_encoding: options.encoding ?? null,
       flags: options.flags ?? null,
+      ...(options.ivar ? { ivar: options.ivar } : {}),
       evidence_ids: [proof],
     });
     this.evidence.push(
