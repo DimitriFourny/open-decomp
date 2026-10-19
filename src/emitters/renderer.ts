@@ -846,6 +846,22 @@ export class Renderer {
   private readonly declaredTypes = new Map<string, string>();
   /** Declared function result type spelling (set before the body prints). */
   private returnSpelling = '';
+  /** Source view: the function's lexically last block when it is a bare `return`
+   * of no value, which falling off the end of the function expresses unprinted. */
+  private fallOffBlock: BlockRegion | null = null;
+
+  /** The block whose `return` ends the printed function: the last block of the
+   * top-level sequence. A void `return` there is the end of the function body. */
+  private fallOffReturn(region: Region): BlockRegion | null {
+    for (;;) {
+      this.context.checkpoint(1);
+      if (region.kind === 'loop') return null;
+      if (region.kind === 'block') return region.control.kind === 'return' ? region : null;
+      const last = region.regions.at(-1);
+      if (!last) return null;
+      region = last;
+    }
+  }
 
   /** The C/Python integer type a local is declared with, read from its actual
    * declaration; pointers and non-integer source types have none. */
@@ -1454,6 +1470,18 @@ export class Renderer {
   private call(helper: string, explanation: string, args: readonly string[]): string {
     this.writer.helper(helper, explanation);
     return `${helper}(${this.writer.join(args)})`;
+  }
+
+  /** Whether the file prints `...` for an open argument list (see openArguments). */
+  private ellipsisUsed = false;
+  /** The open remainder of a call's argument list. The source view prints it as
+   * `...` in both dialects (the file header states its meaning once); the checked
+   * view keeps the named helper. Either way the helper stays in the metadata. */
+  private openArguments(helper: string, explanation: string): string {
+    if (!this.sourceView) return this.call(helper, explanation, []);
+    this.writer.helper(helper, explanation);
+    this.ellipsisUsed = true;
+    return '...';
   }
 
   private dataOrigin(id: string): Origin {
@@ -3095,10 +3123,9 @@ export class Renderer {
     const open = projection.argument_list_complete === false || projection.kind === 'physical';
     if (open)
       args.push(
-        this.call(
+        this.openArguments(
           projection.arguments.length ? 'unknown_argument_remainder' : 'unknown_arguments',
           'Unresolved remainder of a call interface; not zero arguments or a purity claim.',
-          [],
         ),
       );
     let target = this.sourceCallee(node);
@@ -5706,12 +5733,13 @@ export class Renderer {
           } finally {
             this.substituted = null;
           }
-          this.writer.statement(
-            depth,
-            values.length
-              ? `return ${values.length === 1 ? values[0] : `(${this.writer.join(values)})`}`
-              : 'return',
-          );
+          if (values.length || block !== this.fallOffBlock)
+            this.writer.statement(
+              depth,
+              values.length
+                ? `return ${values.length === 1 ? values[0] : `(${this.writer.join(values)})`}`
+                : 'return',
+            );
         } else {
           this.writer.statement(
             depth,
@@ -5763,10 +5791,9 @@ export class Renderer {
           });
           if (tail.boundary.argument_list_complete === false)
             arguments_.push(
-              this.call(
+              this.openArguments(
                 arguments_.length ? 'unknown_argument_remainder' : 'unknown_arguments',
                 'Unresolved trailing native tail-call arguments; observed prefix is retained, not a complete prototype.',
-                [],
               ),
             );
           this.writer.helper(
@@ -6296,7 +6323,11 @@ export class Renderer {
       this.mapped(this.dataOrigin(value.id), start, [value.id]);
       this.emitNotes(value.id, 1);
     }
+    this.fallOffBlock = this.sourceView ? this.fallOffReturn(this.body) : null;
+    const bodyLines = this.writer.codeLines;
     this.region(this.body, 1);
+    if (this.language === 'python-like' && this.writer.codeLines === bodyLines)
+      w.statement(1, 'pass');
     if (this.pendingCalls.size) throw new CallInliningRetry();
     if (this.language === 'c-like') w.line(0, '}');
     // Hidden subjects retain annotations without resurrecting dead declarations.
@@ -6312,6 +6343,14 @@ export class Renderer {
     };
     this.declareGlobals(globalsAt, insert);
     let support = supportAt;
+    if (this.ellipsisUsed) {
+      const comment =
+        '`...` as a call argument: the argument list is open (arguments after those shown are not established); not zero arguments, not a purity claim.';
+      const delta = insert(scratchAt, [
+        this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
+      ]);
+      if (support !== undefined) support += delta;
+    }
     if (scratch.size) {
       const text = w.text().slice(scratchAt);
       if (

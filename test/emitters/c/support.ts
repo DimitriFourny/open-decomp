@@ -1253,6 +1253,8 @@ class Parser {
 
   private primary(): Expr {
     const token = this.take();
+    // The open-arity marker printed in call position: the same unresolved remainder.
+    if (token === '...') return { kind: 'call', name: 'unknown_argument_remainder', args: [] };
     if (token === '&' && this.scalars.has(this.peek()) && this.tokens[this.position + 1] !== '[')
       return { kind: 'ref', name: this.take() };
     if (token === '&') {
