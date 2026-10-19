@@ -18,6 +18,8 @@ import {
 } from '../project/cache/model.js';
 import { QueryService } from '../service/queries/index.js';
 import type { QueryCallOptions } from '../service/queries/index.js';
+import { FunctionSelectionError, selectFunction } from '../service/queries/selector.js';
+export { FunctionSelectionError } from '../service/queries/selector.js';
 
 export type { ToolInput, ToolResult, WireJob } from '../core/index.js';
 export { expandEmission } from '../core/index.js';
@@ -73,22 +75,6 @@ export class BinaryOpenError extends Error {
     this.name = 'BinaryOpenError';
   }
 }
-export class FunctionSelectionError extends Error {
-  constructor(
-    readonly reason: 'not_found' | 'ambiguous' | 'incomplete',
-    readonly candidates: readonly BinaryFunction[],
-  ) {
-    super(
-      reason === 'ambiguous'
-        ? 'Function selector is ambiguous; use a function ID or address.'
-        : reason === 'incomplete'
-          ? 'Function search is incomplete; uniqueness or absence cannot be established.'
-          : 'No function matches the selector.',
-    );
-    this.name = 'FunctionSelectionError';
-  }
-}
-
 function invalid(message: string): never {
   throw new OperationError({ code: 'invalid_input', severity: 'error', message, evidence_ids: [] });
 }
@@ -266,33 +252,12 @@ export class BinarySession {
       ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
     };
     options.signal?.throwIfAborted();
-    const found = await this.findFunctions(
-      {
-        ...('name' in selector
-          ? { query: { text: selector.name, match: 'exact', case_sensitive: true } }
-          : 'id' in selector
-            ? { id: selector.id }
-            : { address: { ...selector.address, image_id: this.image.id } }),
-        page: { limit: 2 },
-      },
+    const selected = await selectFunction(
+      this.service,
+      { project_id: this.projectId, revision: this.revision, image_id: this.image.id },
+      selector,
       call,
     );
-    if (!('data' in found)) {
-      if (found.state === 'failed' || found.state === 'unsupported')
-        throw new OperationError(decodeDiagnostic(found.error));
-      options.signal?.throwIfAborted();
-      throw new FunctionSelectionError('incomplete', []);
-    }
-    const candidates = found.data.items;
-    if (candidates.length > 1) throw new FunctionSelectionError('ambiguous', candidates);
-    if (found.data.page.next_cursor !== null) {
-      throw new FunctionSelectionError('incomplete', candidates);
-    }
-    let selected: BinaryFunction | undefined = candidates[0];
-    if ('name' in selector && found.data.page.index_state !== 'complete')
-      selected = await this.#selectByNativeName(selector.name, candidates, call);
-    if (!selected)
-      throw new FunctionSelectionError(found.state === 'partial' ? 'incomplete' : 'not_found', []);
     const result = await this.service.execute(
       'function_decompile',
       {
@@ -313,73 +278,6 @@ export class BinarySession {
       call,
     );
     return this.#materialize(result, options.signal);
-  }
-
-  /** A partial function index cannot prove that a name is unique. The complete native symbol and
-   * export tables can: they define the name (Mach-O underscore convention applied by the query
-   * layer) at distinct addresses, and the index only supplies the function entity at that address.
-   * Anything the authoritative tables cannot settle stays incomplete or ambiguous, never guessed. */
-  async #selectByNativeName(
-    name: string,
-    indexed: readonly BinaryFunction[],
-    call: QueryCallOptions,
-  ): Promise<BinaryFunction> {
-    const unsettled = (page: ToolResult<'symbols_find'> | ToolResult<'functions_find'>): never => {
-      if (page.state === 'failed' || page.state === 'unsupported')
-        throw new OperationError(decodeDiagnostic(page.error));
-      throw new FunctionSelectionError('incomplete', indexed);
-    };
-    const definitions = new Map<string, BinaryFunction['entry']>();
-    let authoritative = true,
-      cursor: string | undefined;
-    do {
-      const page = await this.service.execute(
-        'symbols_find',
-        {
-          project_id: this.projectId,
-          revision: this.revision,
-          image_id: this.image.id,
-          kinds: ['symbol', 'export'],
-          query: { text: name, match: 'exact', case_sensitive: true },
-          page: { limit: 100, ...(cursor === undefined ? {} : { cursor }) },
-        },
-        call,
-      );
-      if (!('data' in page)) return unsettled(page);
-      if (page.data.page.index_state !== 'complete') authoritative = false;
-      for (const item of page.data.items) {
-        const address =
-          item.kind === 'symbol'
-            ? item.symbol.kind === 'function'
-              ? item.symbol.address
-              : null
-            : item.kind === 'export'
-              ? item.export.address
-              : null;
-        if (address === null) continue;
-        if (address.space === 'va') definitions.set(BigInt(address.value).toString(16), address);
-        else authoritative = false;
-      }
-      cursor = page.data.page.next_cursor ?? undefined;
-    } while (cursor !== undefined && definitions.size < 2);
-    if (!authoritative) throw new FunctionSelectionError('incomplete', indexed);
-    const functions = new Map(indexed.map((item) => [item.id, item] as const));
-    const defined = new Map<string, number>();
-    for (const [key, address] of [...definitions].slice(0, 16)) {
-      const page = await this.findFunctions({ address, page: { limit: 3 } }, call);
-      if (!('data' in page)) return unsettled(page);
-      const entries = page.data.items.filter(
-        (item) => item.entry.space === 'va' && BigInt(item.entry.value) === BigInt(address.value),
-      );
-      for (const item of entries) functions.set(item.id, item);
-      defined.set(key, entries.length);
-    }
-    const candidates = [...functions.values()];
-    if (definitions.size > 1 || candidates.length > 1)
-      throw new FunctionSelectionError('ambiguous', candidates);
-    const [only] = candidates;
-    if (only && definitions.size === 1 && [...defined.values()][0] === 1) return only;
-    throw new FunctionSelectionError('incomplete', candidates);
   }
 
   async #materialize(
