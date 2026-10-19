@@ -2942,8 +2942,12 @@ export class Renderer {
         first = lines.length;
       // Comment text only: names stay readable, a comment terminator cannot occur.
       const plain = (text: string): string => text.replace(/\*\//g, '* /');
+      // Compact for readers: the library basename, plus the native name only when it is
+      // not the printed name or its Mach-O `_`-prefixed form. Slot VA, binding records
+      // and the declaration's source stay in the mapped evidence.
+      const native = global.import?.name;
       const where = global.import
-        ? `import ${plain(global.import.name)}${global.import.library === null ? '' : ` from ${plain(global.import.library)}`}, slot 0x${global.address.value.toString(16)}${declared ? `, type from ${plain(declared.source)}` : ''}`
+        ? `import${native === name || native === `_${name}` ? '' : ` ${plain(native!)}`}${global.import.library === null ? '' : ` from ${plain(global.import.library.slice(global.import.library.lastIndexOf('/') + 1))}`}`
         : `VA 0x${global.address.value.toString(16)}${global.object.byte_length === null ? '' : `, ${global.object.byte_length} bytes`}${global.object.kind === 'bytes' ? '' : `, ${global.object.kind.replace('_', ' ')}`}`;
       if (python) {
         lines.push(

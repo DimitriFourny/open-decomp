@@ -61,10 +61,7 @@ for (const language of ['c-like', 'python-like'] as const) {
     const text = output.emission.text;
     assert.doesNotMatch(text, /data_address/);
     if (language === 'c-like') {
-      assert.match(
-        text,
-        /extern uint64_t __stderrp; \/\* import ___stderrp from \/usr\/lib\/libSystem\.B\.dylib, slot 0x2010 \*\//,
-      );
+      assert.match(text, /^extern uint64_t __stderrp;/m);
       assert.match(text, /return __stderrp;/);
     } else {
       assert.match(

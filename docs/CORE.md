@@ -692,9 +692,10 @@ identity and declares nothing.
 Loader-bound import slots (Mach-O GOT/chained-fixup binds, ELF GLOB_DAT, PE IAT; not
 lazy-bound slots or stub entries) carry `SourceAddress.import`. In the source view a
 pointer-width read of such a slot is the imported symbol's address (`&sym`) and a
-read through it is the symbol itself (`sym`), declared as `import ___stderrp from
-<library>, slot 0x…` with the bind records as evidence. The declared type is the
-width of the accesses seen, never the symbol's real type; a function that writes the
+read through it is the symbol itself (`sym`), declared once with a compact comment
+(`import from <library basename>`) and the bind records as evidence. The declared type is
+the header-declared type when the library catalog knows the variable, otherwise the
+width of the accesses seen; a function that writes the
 slot keeps explicit memory accesses. Python-like declares them with `import_view`.
 
 Import stubs (Mach-O `__stubs`, ELF PLT entries, PE thunks) are recognized from
