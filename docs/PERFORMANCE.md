@@ -690,6 +690,54 @@ Category-level reasons in the second-suite reviews were:
 
 **Correctness:** Open Decomp's source view was wrong for `h2_level` in six x86-64 cells. FP argument registers were declared as integers, an O0 FP result was returned through the integer register, and Win64 stack doubles were typed as integers. Round 7 had the same defect. Commit `41b9dee` fixes it (all 24 cells pass 58/58 in a re-evaluation). That triage read `h2_level`'s source and outputs, so `h2_level` is no longer blind for correctness. The other seven functions were not read.
 
+## Readability roadmap round (2026-10-20, dev loop, not held out)
+
+Scope: TODO.md items R1–R5 (per-slot stack promotion, region-collapse structuring, expression rule pool, pointer and type inference, opt-in `likely` inference). **Everything below is development-set evidence.** The 24-cell matrix and the structure sample were inspected while tuning, no reviewer preference or Ghidra/angr comparison was collected this round, and the sealed third suite (see "Third held-out suite (sealed)") has not been measured: no decompiler has run on its inputs. The static counts are regex-based (see "Development comparison loop") and show whether a defect class moved, not whether text became more readable. The LLM task benchmark was not re-run for this round.
+
+Builds: `base-de95fa4` (main before the round) and `int-112527d` (integrate, equal to main: R1–R5 rounds, including the R2 forward-label round, `structure/6`). Both are `quality-dev-loop.py run` outputs in default `proven` mode, C source view, default budget, 288 (cell, function) pairs. Table: `python3 scripts/bench/quality-dev-loop.py metrics --label base-de95fa4 --label int-112527d` (only pairs with text in both).
+
+| metric (200 texts: 100 O0 + 100 O2) | all before | all after | O0 before |  O0 after | O2 before |  O2 after |
+| ----------------------------------- | ---------: | --------: | --------: | --------: | --------: | --------: |
+| est. tokens (bytes / 4)             |     78,527 |    69,776 |    39,811 |    35,437 |    38,716 |    34,339 |
+| lines                               |      8,605 |     8,295 |     4,148 |     3,868 |     4,457 |     4,427 |
+| casts to scalar/pointer types       |      3,077 |     1,901 |     1,746 |     1,318 |     1,331 |       583 |
+| helper preamble lines               |        104 |        34 |        64 |        14 |        40 |        20 |
+| helper calls                        |        144 |        30 |       112 |        14 |        32 |        16 |
+| `entry_sp` frame references         |        617 |       329 |       468 |       208 |       149 |       121 |
+| local declarations                  |      1,357 |     1,323 |       592 |       550 |       765 |       773 |
+| open `...` arities                  |        132 |       132 |        68 |        68 |        64 |        64 |
+| `goto` / labels / `type_N` names    |  0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 |
+
+Reading it, including what did not move:
+
+- Tokens −11.1 % (O0 −11.0 %, O2 −11.3 %), casts −38 % (O2 −56 %), helper preamble lines −67 % and helper calls −79 % (O0 112 → 14), `entry_sp` −47 % (O0 468 → 208, O2 149 → 121). Per-item steps (R1 `entry_sp` 617 → 329 and casts 3,077 → 2,757; R3 helpers 48 → 34 / 46 → 30 on its own baseline; R4 casts) are in the TODO.md R1/R3/R4 notes.
+- Open arities are unchanged (132) in the default mode (no `proven` rule closed an additional one). `--inference likely` closes 12 of them (132 → 120) in this set; see "Likely-inference precision", which also records that its markers and legend cost more tokens than they remove here (78,527 → 78,579).
+- Local declarations fell only 2.5 % (1,357 → 1,323) and rose in O2 (765 → 773) and PE (307 → 323). Dev-loop `goto` is 0 before and after (no printed goto on this set), so this set cannot show the structuring work; the sample below does.
+- The R2 forward-label round (`int-717fa5d` → `r2c-65fa781` labels) added lines on this set, 8,227 → 8,299, and est. tokens 69,703 → 69,733 with no goto anywhere; the cause was not investigated.
+- Remaining `entry_sp` is escaped objects below optimized frames' scalars (SQLite `renameColumnFunc`, brotli `main`: R1 gained nothing there, no fact bounds an escaped object's extent), O0 possible open-call argument storage never read back, incoming/aggregate stack bytes and the SysV `va_list` save area (TODO.md R1).
+- Run status is identical in both builds: 54 complete, 146 partial, 88 failed. All 88 are the eight stripped ELF/PE cells (11 functions each): the O0 cells fail with `No function matches the selector` and the O2 cells with `Function search is incomplete; uniqueness or absence cannot be established` (exit 2, no text). These selector/discovery failures predate the round and are unchanged; the dev loop never measures stripped ELF/PE output.
+
+Structuring sample (`scripts/bench/structure-gotos.py`, `open-decomp export` c-like source view; brotli 1.2.0 CLI, SQLite 3.54.0 `btree`/`vdbemem`/`exprcode` name filters, Mach-O and ELF fixture libraries; 214 functions printed by every build compared here, 213 for the `structure/4` build, whose `sqlite3ExprCodeTarget` output is not source text; analyzed binaries are never executed). Counts are printed text, never a readability verdict.
+
+| build                                       | printed gotos | backward gotos | `for` loops | loops with a test |
+| ------------------------------------------- | ------------: | -------------: | ----------: | ----------------: |
+| pre-R2 (SCC / unique-entry structurer)      |           214 |              0 |           3 |                41 |
+| `structure/4` (first region-collapse round) | 189 (213 fns) |              — |           0 |      49 (213 fns) |
+| `structure/5` (`717fa5d`)                   |           193 |             54 |           3 |                52 |
+| `structure/6` (`112527d`, forward labels)   |           200 |              2 |           3 |                52 |
+
+Gotos on the 213 functions every build prints: pre-R2 196, `structure/4` 189, `structure/5` 178 (`structure/6` was only measured against `structure/5` on 214). The `for` loops disappeared at `structure/4` (a body ending in an omitted FP-guard block, and a branch sequencing its exit path after itself, hid the bottom test) and returned at `structure/5`.
+
+Losses. The total did drop against pre-R2 (214 → 200) but not per function, and `structure/6` is 7 above `structure/5` in total (193 → 200) because forward-only labels trade backward jumps for more labels:
+
+- Against pre-R2, `structure/5` printed more gotos in `sqlite3BtreeInsert` (7 → 16), `ParseBase64` (2 → 5), `sqlite3BtreeTripAllCursors` (1 → 3), `sqlite3BtreeOpen` (31 → 32), `sqlite3ExprCodeExprList` (5 → 6), `sqlite3ExprCodeGeneratedColumn` (0 → 1) and `sqlite3VdbeMemStringify` (2 → 3); it printed fewer in `allocateBtreePage` (34 → 18), `btreeBeginTrans` (41 → 36), `CloseFiles` (3 → 0), `sqlite3ExprCodeTarget` (18 → 15) and others (pre-R2 and `structure/5` outputs re-counted with `structure-gotos.py metrics`).
+- `structure/6` against `structure/5`: `whereLoopAddBtree` 14 → 26, `allocateBtreePage` 18 → 24 and `CloseFiles` 0 → 2 got worse; `btreeBeginTrans` 36 → 32, `sqlite3BtreeInsert` 16 → 14, `sqlite3ExprCodeTarget` 15 → 13 and `ParseBase64` 5 → 3 got better. Both remaining backward gotos jump to a loop header from inside an irreducible or nested loop. Complete per-function lists and the rejected variants are in TODO.md R2 and docs/CORE.md.
+- The source-view repairs still earn their keep: on `structure/6`, removing breakable blocks (`do { } while (0)`) would raise gotos 200 → 333 and removing return-tail copies 200 → 362; forced goto-path tail copies changed nothing (200 → 200) and were deleted.
+- What remains (`structure/5` sample, 178 gotos): 156 acyclic within one loop scope (mostly SQLite's own `goto` error paths and joins entered from arms of different branches), 21 loop exits to a non-follow target, 1 multi-level continue, 1 entry into a loop at its header. A fourth round (`wt/r2d`, reaching-condition guarded regions) reduced the `structure/6` total only 200 → 195 at a large model and validator cost and is unmerged; see TODO.md R2.
+- Property tests cover 300 random reducible programs without labels and 300 random acyclic graphs with every labeled transfer forward (`test/presentation/structuring.test.ts`); they are not a measure of readability.
+
+Related per-item evidence recorded elsewhere in this document: likely-mode precision and the R5 type heuristics ("Likely-inference precision", including the dev-loop `r5-likely-c` comparison and byte-identical `proven` output), cache and latency work ("Persistent analysis cache" and "Per-function latency and cross-request callee reuse"), and the LLM task protocol ("LLM task success per token").
+
 ## Normalized four-lane performance (2026-10-17, commit `901602b`)
 
 Exclusive serialized slot (`.local/performance/quality.measurement.lock`), `dist/` aggregate `dd0ea263…` unchanged before/after, Node **v26.11.1** (not the historical 24.22.0 host), Ghidra 12.1.4, bridge `73ea1c8e…`. Protocol `scripts/bench/quality-persistent.py` unchanged: same MCP client for all four lanes (Open Decomp unobserved/observed, pinned Ghidra MCP bridge, persistent Ghidra `DecompInterface`), 11 equal requests in 156/156 matched cells, 3 fresh runs, 10 warm, 30 pings, balanced order. 1,716/1,716 observer/control pairs and 6/6 import controls equivalent. Raw evidence: `~/Documents/open-decomp-perf-2026-10-17-final/p25-normalized/comparison.json`.
