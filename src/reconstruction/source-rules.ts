@@ -599,9 +599,9 @@ const compareCanonical: ExpressionRule = {
 /** The single expression rule pool, in priority order: the first rule that
  * applies at a site rewrites it, and the site is revisited to a fixpoint. */
 export const EXPRESSION_RULES: readonly ExpressionRule[] = [
-  constantFold,
   conditionFlags,
   cellRecombination,
+  constantFold,
   castWiring,
   packingShift,
   checkedShiftProduct,
