@@ -13,13 +13,51 @@ export class OperationError extends Error {
   }
 }
 
-/** `context` with every work charge dropped: still cancellable and deadline-bound
- * (a zero charge checks both), but nothing is consumed. Image-scoped indexes are built
- * once per process and reused by every later request, so charging the request that
- * happened to build one would make its work, and every budget-dependent decision
- * after it, depend on which requests ran earlier. */
-export function uncharged(context: OperationContext): OperationContext {
-  return { ...context, checkpoint: () => context.checkpoint(0) };
+const buildCosts = new WeakMap<object, number>();
+const paidBuilds = new WeakMap<OperationContext, WeakSet<object>>();
+
+/** The work building `value` cost, charged on `context`'s whole operation the first
+ * time the operation uses it. */
+function payBuild(context: OperationContext, value: object): void {
+  const operation = context.root ?? context;
+  let paid = paidBuilds.get(operation);
+  if (!paid) paidBuilds.set(operation, (paid = new WeakSet()));
+  if (paid.has(value)) {
+    context.checkpoint(0);
+    return;
+  }
+  paid.add(value);
+  operation.checkpoint(buildCosts.get(value) ?? 0);
+}
+
+/** Build a per-process, image-scoped structure (an index kept for every later request).
+ * The build itself charges nothing; its measured cost is recorded on the result, and
+ * every operation that uses the result pays exactly that cost once, through `useBuilt`
+ * (this call pays it for the building operation). An operation's work, and every
+ * budget-dependent decision it makes, is therefore the same whether it built the
+ * structure or found it built, and the shared work limit still bounds it. Cancellation
+ * and deadlines are checked throughout the build. */
+export function buildOnce<T extends object>(
+  context: OperationContext,
+  build: (context: OperationContext) => T,
+): T {
+  let cost = 0;
+  const value = build({
+    ...context,
+    checkpoint(work) {
+      context.checkpoint(0);
+      cost += work;
+    },
+  });
+  buildCosts.set(value, cost);
+  payBuild(context, value);
+  return value;
+}
+
+/** Charge the recorded build cost of an existing `buildOnce` result, once per operation. */
+export function useBuilt<T extends object>(context: OperationContext, value: T): T {
+  payBuild(context, value);
+  return value;
 }
 
 /** One context per operation; counters and monotonic deadline are never reset by a pass. */
@@ -81,7 +119,7 @@ export function createOperationContext(
         },
       });
   };
-  return {
+  const context: { -readonly [K in keyof OperationContext]: OperationContext[K] } = {
     signal,
     budget,
     checkpoint,
@@ -97,4 +135,6 @@ export function createOperationContext(
       options.onProgress?.(phase, completed, total);
     },
   };
+  context.root = context;
+  return context;
 }

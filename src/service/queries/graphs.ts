@@ -1,4 +1,4 @@
-import { fingerprint, uncharged } from '../../core/index.js';
+import { buildOnce, fingerprint, useBuilt } from '../../core/index.js';
 import type {
   FunctionGraph,
   FunctionRecord,
@@ -61,6 +61,20 @@ export function reconstructFunctionGraph(
   const { image, revision } = input,
     fn = input.function;
   const key = `${input.project_id}:${revision}:${image.selected_slice_id}:${fn.id}:${context.budget.instructions}:${context.budget.blocks}:${input.formatting ? 'formatted' : 'structured'}`;
+  // The discovery index is per image: every operation pays its recorded build cost once,
+  // before and apart from the graph's own work, whether or not the graph is cached.
+  let prepared = indexes.get(image);
+  if (prepared && prepared.revision === revision && prepared.functions === input.functions)
+    useBuilt(context, prepared);
+  else {
+    prepared = buildOnce(context, (quiet) => ({
+      revision,
+      functions: input.functions,
+      index: prepareDiscoveryIndex({ image, revision, functions: input.functions }, quiet),
+      noreturn_calls: libraryNoreturnCalls(image, quiet),
+    }));
+    indexes.set(image, prepared);
+  }
   const cached = cache.get(key);
   if (cached) {
     context.checkpoint(cached.work);
@@ -68,19 +82,6 @@ export function reconstructFunctionGraph(
     cache.delete(key);
     cache.set(key, cached);
     return cached.graph;
-  }
-  let prepared = indexes.get(image);
-  if (!prepared || prepared.revision !== revision || prepared.functions !== input.functions) {
-    // Built once per image for every later request: see `uncharged`.
-    const quiet = uncharged(context);
-    const index = prepareDiscoveryIndex({ image, revision, functions: input.functions }, quiet);
-    prepared = {
-      revision,
-      functions: input.functions,
-      index,
-      noreturn_calls: libraryNoreturnCalls(image, quiet),
-    };
-    indexes.set(image, prepared);
   }
   let work = 0;
   const measured: OperationContext = {

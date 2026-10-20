@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createOperationContext, OperationError, uncharged } from '../../src/core/index.js';
+import {
+  buildOnce,
+  createOperationContext,
+  OperationError,
+  useBuilt,
+  type OperationContext,
+} from '../../src/core/index.js';
 
 test('work accounting survives phase changes and rejects work beyond the shared limit', () => {
   const context = createOperationContext({ budget: { work: 3 } });
@@ -44,12 +50,42 @@ test('remaining work observes the cumulative counter through context wrappers', 
   assert.equal(original.remainingWork?.(), 1);
 });
 
-test('an uncharged view consumes no work but still honors cancellation and deadlines', () => {
+test('a per-process build costs every operation that uses it the same, once, within its limit', () => {
+  let builds = 0;
+  const build = (context: OperationContext): { readonly value: number } => {
+    builds++;
+    for (let index = 0; index < 10; index++) context.checkpoint(3);
+    return { value: 1 };
+  };
+  const first = createOperationContext({ budget: { work: 100 } });
+  const built = buildOnce(first, build);
+  assert.equal(first.remainingWork?.(), 70);
+  // Further uses by the same operation, through derived contexts, are free.
+  assert.equal(useBuilt({ ...first, budget: { ...first.budget, work: 5 } }, built), built);
+  assert.equal(first.remainingWork?.(), 70);
+  // Another operation finding it built pays the same, even through a wrapper.
+  const second = createOperationContext({ budget: { work: 100 } });
+  useBuilt({ ...second, checkpoint: () => assert.fail('wrapper charged') }, built);
+  assert.equal(second.remainingWork?.(), 70);
+  assert.equal(builds, 1);
+  // The recorded cost still counts against the shared limit.
+  assert.throws(() => useBuilt(createOperationContext({ budget: { work: 29 } }), built), {
+    code: 'resource_limit',
+  });
+});
+
+test('a build is cancellable without being charged during the build', () => {
   const controller = new AbortController();
-  const original = createOperationContext({ signal: controller.signal, budget: { work: 5 } });
-  const quiet = uncharged(original);
-  quiet.checkpoint(1_000_000);
-  assert.equal(original.remainingWork?.(), 5);
-  controller.abort();
-  assert.throws(() => quiet.checkpoint(1_000_000), { code: 'cancelled' });
+  const context = createOperationContext({ signal: controller.signal, budget: { work: 5 } });
+  assert.throws(
+    () =>
+      buildOnce(context, (quiet) => {
+        quiet.checkpoint(1_000_000);
+        controller.abort();
+        quiet.checkpoint(1);
+        return {};
+      }),
+    { code: 'cancelled' },
+  );
+  assert.equal(context.remainingWork?.(), 5);
 });

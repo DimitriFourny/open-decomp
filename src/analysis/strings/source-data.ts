@@ -1,4 +1,4 @@
-import { uncharged } from '../../core/index.js';
+import { buildOnce, useBuilt } from '../../core/index.js';
 import type { Address, LoadedImage, OperationContext, SymbolRecord } from '../../core/index.js';
 import { findVariable } from '../../metadata/library-contracts/catalog.js';
 import { cSourceName, libraryLookupName } from '../../metadata/symbols/c-names.js';
@@ -151,13 +151,19 @@ const symbolIndexes = new WeakMap<readonly SymbolRecord[], SymbolIndex>();
 const imageIndexes = new WeakMap<LoadedImage, ImageDataIndex>();
 function symbolIndex(symbols: readonly SymbolRecord[], context: OperationContext): SymbolIndex {
   const cached = symbolIndexes.get(symbols);
-  if (cached) return cached;
-  // Built once per image for every later request: see `uncharged`.
-  const quiet = uncharged(context);
+  if (cached) return useBuilt(context, cached);
+  const indexed = buildOnce(context, (quiet) => buildSymbolIndex(symbols, quiet));
+  symbolIndexes.set(symbols, indexed);
+  return indexed;
+}
+function buildSymbolIndex(
+  symbols: readonly SymbolRecord[],
+  context: OperationContext,
+): SymbolIndex {
   const objects = new Map<string, Interval<SymbolRecord>[]>(),
     pages = new Map<string, { start: bigint }[]>();
   symbols.forEach((symbol, order) => {
-    quiet.checkpoint(1);
+    context.checkpoint(1);
     if (!symbol.address) return;
     const page = pageKey(symbol.address),
       starts = pages.get(page);
@@ -176,17 +182,17 @@ function symbolIndex(symbols: readonly SymbolRecord[], context: OperationContext
     if (group) group.push(item);
     else objects.set(key, [item]);
   });
-  const indexed: SymbolIndex = { objects: treesByCoordinate(objects, quiet), pages };
-  symbolIndexes.set(symbols, indexed);
-  return indexed;
+  return { objects: treesByCoordinate(objects, context), pages };
 }
 function imageDataIndex(image: LoadedImage, context: OperationContext): ImageDataIndex {
   const cached = imageIndexes.get(image);
-  if (cached) return cached;
-  // Built once per image for every later request: see `uncharged`.
-  const quiet = uncharged(context);
+  if (cached) return useBuilt(context, cached);
+  const indexed = buildOnce(context, (quiet) => buildImageDataIndex(image, quiet));
+  return indexed;
+}
+function buildImageDataIndex(image: LoadedImage, context: OperationContext): ImageDataIndex {
   const data = image.hints.filter((hint): hint is DataHint => {
-    quiet.checkpoint(1);
+    context.checkpoint(1);
     return hint.kind === 'data';
   });
   const hints = grouped(
@@ -199,17 +205,17 @@ function imageDataIndex(image: LoadedImage, context: OperationContext): ImageDat
       }))
       .filter((item) => item.end > item.start),
     (item) => coordinate(item.item.range.start),
-    quiet,
+    context,
   );
-  const hintPages = grouped(data, (hint) => pageKey(hint.range.start), quiet);
+  const hintPages = grouped(data, (hint) => pageKey(hint.range.start), context);
   let relocationBytes = 0n;
   const relocations = grouped(
     image.relocations,
     (relocation) => pageKey(relocation.address),
-    quiet,
+    context,
   );
   const indexed: ImageDataIndex = {
-    hints: treesByCoordinate(hints, quiet),
+    hints: treesByCoordinate(hints, context),
     hint_pages: new Map(
       [...hintPages].map(([key, items]) => [
         key,

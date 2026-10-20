@@ -1,7 +1,8 @@
 import {
   entityIdentity,
   fingerprint,
-  uncharged,
+  buildOnce,
+  useBuilt,
   type Annotation,
   type Address,
   type DataLayout,
@@ -54,7 +55,8 @@ const nativeIndexes = new WeakMap<LoadedImage, NativeCallIndex>();
 const nativeAddressKey = (address: Address): string =>
   `${address.image_id}:${address.space}:${address.value}`;
 
-/** Index immutable native facts once; callers/callee summaries only visit their
+/** Index immutable native facts once (every operation using the index pays its build cost once,
+ * see `buildOnce`); callers/callee summaries only visit their
  * own call nodes and reference lists. Array identities bind the exact snapshot. */
 export function nativeCallIndex(
   image: LoadedImage,
@@ -63,13 +65,25 @@ export function nativeCallIndex(
   context: OperationContext,
 ): NativeCallIndex {
   const cached = nativeIndexes.get(image);
-  if (cached?.functions === functions && cached.references === references) return cached;
-  // Built once per image for every later request: see `uncharged`.
-  const quiet = uncharged(context);
+  if (cached?.functions === functions && cached.references === references)
+    return useBuilt(context, cached);
+  const indexed = buildOnce(context, (quiet) =>
+    buildNativeCallIndex(image, functions, references, quiet),
+  );
+  nativeIndexes.set(image, indexed);
+  return indexed;
+}
+
+function buildNativeCallIndex(
+  image: LoadedImage,
+  functions: readonly FunctionRecord[],
+  references: readonly ReferenceRecord[],
+  context: OperationContext,
+): NativeCallIndex {
   const functionsById = new Map<string, FunctionRecord>();
   const functionsByAddress = new Map<string, FunctionRecord[]>();
   for (const fn of functions) {
-    quiet.checkpoint(1);
+    context.checkpoint(1);
     functionsById.set(fn.id, fn);
     const key = nativeAddressKey(fn.entry),
       list = functionsByAddress.get(key) ?? [];
@@ -78,7 +92,7 @@ export function nativeCallIndex(
   }
   const exportsByAddress = new Map<string, LoadedImage['exports'][number][]>();
   for (const item of image.exports) {
-    quiet.checkpoint(1);
+    context.checkpoint(1);
     if (!item.address) continue;
     const key = nativeAddressKey(item.address),
       list = exportsByAddress.get(key) ?? [];
@@ -88,7 +102,7 @@ export function nativeCallIndex(
   const importsByAddress = new Map<string, LoadedImage['imports'][number][]>();
   const importsById = new Map<string, LoadedImage['imports'][number]>();
   for (const item of image.imports) {
-    quiet.checkpoint(1);
+    context.checkpoint(1);
     importsById.set(item.id, item);
     if (!item.callable_entry) continue;
     const key = nativeAddressKey(item.callable_entry),
@@ -99,7 +113,7 @@ export function nativeCallIndex(
   const referencesByFunction = new Map<string, Map<string, ReferenceRecord[]>>();
   const callersByTarget = new Map<string, ReferenceRecord[]>();
   for (const reference of references) {
-    quiet.checkpoint(1);
+    context.checkpoint(1);
     if (reference.kind === 'call' || reference.kind === 'tail_call') {
       if (reference.to) {
         const key = nativeAddressKey(reference.to),
@@ -132,7 +146,6 @@ export function nativeCallIndex(
     references_by_function: referencesByFunction,
     callers_by_target: callersByTarget,
   };
-  nativeIndexes.set(image, indexed);
   return indexed;
 }
 
