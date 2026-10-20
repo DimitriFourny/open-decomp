@@ -313,7 +313,10 @@ reader's operand (`if (fseek(stream, 0, 2) == 0)`). Its text must occur exactly
 once in the reader's first printed line: an `if` header before its arms and edge
 copies. A do-while test printed after its repeat copies, or any other layout that
 separates the call from its reader, re-renders with that call as a statement;
-after four such retries every call prints as a statement. A load addressed
+after four such retries every call prints as a statement. Every attempt renders
+from one reconstruction (computed and validated once per emission); each starts
+from its own fork of the local-validation session state reconstruction left, so
+a failed attempt's records never reach the published result. A load addressed
 through the call's own result is sequenced after it and may share the reader
 (`strerror(*__error())`); an independent load keeps the call a statement.
 Measured on the Homebrew brotli 1.2.0 CLI export (64 functions): 131,052 →
