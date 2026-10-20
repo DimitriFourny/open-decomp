@@ -7,7 +7,11 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/server';
 import { Writable } from 'node:stream';
 import { write as writeFd } from 'node:fs';
 import { QueryService } from '../service/queries/index.js';
+import { DEFAULT_SETTINGS } from '../settings/index.js';
+import type { Settings } from '../settings/index.js';
 import type { WorkerPoolOptions } from '../workers/index.js';
+import { projectDefaults } from './defaults.js';
+import type { McpServerDefaults } from './defaults.js';
 import { createMcpServer } from './server.js';
 import {
   MAX_MCP_INPUT_BYTES,
@@ -25,7 +29,7 @@ export interface RunStdioOptions {
   readonly outputStallMs?: number;
 }
 
-const HELP = `Usage: open-decomp mcp start [--transport stdio] --root PATH [--root PATH ...] [--max-workers N] [--max-queued N] [--no-analysis-cache]
+const HELP = `Usage: open-decomp mcp start [--transport stdio] --root PATH [--root PATH ...] [--max-workers N] [--max-queued N] [--analysis-cache|--no-analysis-cache] [--settings PATH]
 
 Serve the local analysis engine over MCP stdio. At least one explicit authorized
 filesystem root is required; no working-directory or home-directory root is added.
@@ -40,22 +44,41 @@ fault containment, not an operating-system sandbox.
                     candidates, persisted callee summaries) and reuse no in-process summaries.
                     Imports and indexes still persist; results are identical but slower on
                     repetition. An artifact-delivered result is held in memory for the session.
+  --analysis-cache  Server-wide: keep analysis caching on even if the settings file sets
+                    analysis_cache to false. Not valid together with --no-analysis-cache.
+  --settings PATH   Read settings from PATH instead of $XDG_CONFIG_HOME/open-decomp/settings.json
+                    (default ~/.config/open-decomp/settings.json). It must exist. Loaded once at
+                    startup: analysis_cache is the server-wide default; decompile.language/view
+                    apply when a function_decompile request omits options.emitter/view;
+                    cache_root (an existing directory inside a --root) lets project_open import
+                    omit project_path. A flag or request argument always wins.
   --help            Print this help to stderr
   --version         Print the server version to stderr
 `;
 
-type CliOptions = { action: 'serve'; pool: WorkerPoolOptions } | { action: 'help' | 'version' };
+type CliOptions =
+  | { action: 'serve'; pool: WorkerPoolOptions; defaults: McpServerDefaults }
+  | { action: 'help' | 'version' };
 
-export function parseCliArguments(args: readonly string[]): CliOptions {
+/** Parse `mcp start` arguments over the (already loaded) settings: flags beat the file. */
+export function parseCliArguments(
+  args: readonly string[],
+  settings: Settings = DEFAULT_SETTINGS,
+): CliOptions {
   const roots: string[] = [];
   let max_workers: number | undefined, max_queued: number | undefined;
   let action: 'serve' | 'help' | 'version' = 'serve';
-  let analysis_cache = true;
+  let enableCache = false,
+    disableCache = false;
   for (let index = 0; index < args.length; index++) {
     const flag = args[index]!;
-    if (flag === '--no-analysis-cache') {
-      if (!analysis_cache) throw new Error('Duplicate --no-analysis-cache');
-      analysis_cache = false;
+    if (flag === '--analysis-cache' || flag === '--no-analysis-cache') {
+      if (flag === '--analysis-cache' ? enableCache : disableCache)
+        throw new Error(`Duplicate ${flag}`);
+      if (flag === '--analysis-cache') enableCache = true;
+      else disableCache = true;
+      if (enableCache && disableCache)
+        throw new Error('Specify only one of --analysis-cache and --no-analysis-cache');
       continue;
     }
     if (flag === '--help' || flag === '--version') {
@@ -91,13 +114,20 @@ export function parseCliArguments(args: readonly string[]): CliOptions {
   }
   if (action !== 'serve') return { action };
   if (!roots.length) throw new Error('At least one explicit --root PATH is required');
+  const analysisCache = disableCache ? false : enableCache ? true : settings.analysis_cache;
   return {
     action,
     pool: {
       authorized_roots: roots,
       ...(max_workers === undefined ? {} : { max_workers }),
       ...(max_queued === undefined ? {} : { max_queued }),
-      ...(analysis_cache ? {} : { analysis_cache: false }),
+      ...(analysisCache ? {} : { analysis_cache: false }),
+    },
+    defaults: {
+      decompile: { language: settings.decompile.language, view: settings.decompile.view },
+      ...(settings.cache_root === null
+        ? {}
+        : { projects: { cache_root: settings.cache_root, authorized_roots: roots } }),
     },
   };
 }
@@ -239,12 +269,20 @@ class OwnedStdioTransport extends StdioServerTransport {
 export async function runStdio(
   args: readonly string[],
   testOptions: RunStdioOptions = {},
+  settings: Settings = DEFAULT_SETTINGS,
 ): Promise<void> {
-  const options = parseCliArguments(args);
+  const options = parseCliArguments(args, settings);
   if (options.action !== 'serve') {
     process.stderr.write(options.action === 'help' ? HELP : `${MCP_VERSION}\n`);
     return;
   }
+  const { projects, ...rest } = options.defaults;
+  const defaults: McpServerDefaults = {
+    ...rest,
+    ...(projects === undefined
+      ? {}
+      : { projects: await projectDefaults(projects.cache_root, projects.authorized_roots) }),
+  };
   const service = await QueryService.create(options.pool);
   let shutdown: Promise<void> | undefined;
   let handle: StdioServerHandle | undefined;
@@ -293,7 +331,7 @@ export async function runStdio(
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
   try {
-    handle = serveStdio(() => createMcpServer(service), {
+    handle = serveStdio(() => createMcpServer(service, { defaults }), {
       transport,
       onerror: (error) => {
         report(error);

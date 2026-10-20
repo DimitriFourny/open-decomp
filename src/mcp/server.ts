@@ -32,6 +32,8 @@ import {
   soleImageId,
 } from '../service/queries/selector.js';
 import type { FunctionRecord } from '../service/queries/selector.js';
+import { advertiseDefaults, applyDefaults } from './defaults.js';
+import type { McpServerDefaults } from './defaults.js';
 import { decompileText } from './decompile.js';
 import type { FunctionLabel } from './decompile.js';
 import { advertisedInputSchema, prepareRequest } from './handles.js';
@@ -185,6 +187,8 @@ export interface McpServerPolicy {
   readonly authorizeResource?: () => Promise<void | (() => void)>;
   /** Remote jobs belong to a principal, not to one HTTP exchange. Explicit analysis_cancel remains available. */
   readonly preserveJobsOnDisconnect?: boolean;
+  /** Server-wide defaults from the settings file; an explicit request argument always wins. */
+  readonly defaults?: McpServerDefaults;
 }
 
 /** A compact one-object description of a failed result for text consumers. */
@@ -247,9 +251,14 @@ export function createMcpServer(service: QueryService, policy: McpServerPolicy =
   }
   for (const name of toolNameSchema.options) {
     const json = jsonSchemas[name]!;
-    const inputSchema = protocolSchema(name, advertisedInputSchema(name, json.inputSchema));
+    const inputSchema = protocolSchema(
+      name,
+      advertiseDefaults(name, advertisedInputSchema(name, json.inputSchema), policy.defaults),
+    );
     const invoke = async (input: unknown, context: ServerContext): Promise<CallToolResult> => {
-      const prepared = prepareRequest(name, input);
+      const defaulted = await applyDefaults(name, input, policy.defaults);
+      if (!('input' in defaulted)) return toolFailure({ code: 'invalid_arguments', ...defaulted });
+      const prepared = prepareRequest(name, defaulted.input);
       if (!('input' in prepared)) return toolFailure({ code: 'invalid_arguments', ...prepared });
       let args: ToolArgs<typeof name>;
       try {

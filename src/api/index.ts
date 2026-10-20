@@ -1,15 +1,19 @@
-import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
-import { lstat, mkdir, open, realpath } from 'node:fs/promises';
+import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { OperationError, sliceIdSchema } from '../core/index.js';
 import type { ToolInput, ToolResult, WireJob } from '../core/index.js';
 import { QueryService } from '../service/queries/index.js';
+import { hashInput, projectDirectoryName } from '../service/queries/input-identity.js';
 import type { QueryCallOptions } from '../service/queries/index.js';
 import { materializeDecompilation } from '../service/queries/materialize.js';
 import { selectFunction } from '../service/queries/selector.js';
 export { FunctionSelectionError } from '../service/queries/selector.js';
+/** The settings file is never read implicitly: call `loadSettings()` and pass the values you want
+ * (`cache_root` as `cachePath`, `analysis_cache` as `analysisCache`, `decompile.*` as decompile
+ * options) to `openBinary()` / `decompile()`. */
+export { loadSettings, SettingsError } from '../settings/index.js';
+export type { Settings } from '../settings/index.js';
 
 export type { ToolInput, ToolResult, WireJob } from '../core/index.js';
 export { expandEmission } from '../core/index.js';
@@ -97,43 +101,6 @@ async function cacheDirectory(path: string): Promise<string> {
     invalid('Cache directory must be a directory, not a symlink.');
   return realpath(path);
 }
-/** Hash bounded chunks rather than retaining another complete image in the host. */
-async function hashInput(path: string, signal?: AbortSignal): Promise<string> {
-  signal?.throwIfAborted();
-  const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-  try {
-    const before = await file.stat({ bigint: true });
-    if (!before.isFile() || before.size > 512n * 1024n * 1024n)
-      invalid('Input must be a regular file of at most 512 MiB.');
-    const hash = createHash('sha256'),
-      buffer = Buffer.allocUnsafe(Number(before.size < 1_048_576n ? before.size : 1_048_576n));
-    let offset = 0;
-    while (offset < Number(before.size)) {
-      signal?.throwIfAborted();
-      const { bytesRead } = await file.read(
-        buffer,
-        0,
-        Math.min(buffer.length, Number(before.size) - offset),
-        offset,
-      );
-      if (!bytesRead) invalid('Input changed while computing its cache identity.');
-      hash.update(buffer.subarray(0, bytesRead));
-      offset += bytesRead;
-    }
-    const after = await file.stat({ bigint: true });
-    if (
-      before.size !== after.size ||
-      before.mtimeNs !== after.mtimeNs ||
-      before.ctimeNs !== after.ctimeNs
-    ) {
-      invalid('Input changed while computing its cache identity.');
-    }
-    signal?.throwIfAborted();
-    return hash.digest('hex');
-  } finally {
-    await file.close();
-  }
-}
 
 const selectorSchema = z.union([
   z.strictObject({ name: z.string().min(1).max(4096) }),
@@ -182,7 +149,7 @@ export class BinarySession {
     const cachePath = await cacheDirectory(
       resolve(options.cachePath ?? `${inputPath}.open-decomp`),
     );
-    const projectPath = join(cachePath, `${sha256}.${sliceId ?? 'default'}`);
+    const projectPath = join(cachePath, projectDirectoryName(sha256, sliceId));
     const reused = await exists(projectPath);
     const service = await QueryService.create({
       authorized_roots: [dirname(inputPath), cachePath],

@@ -10,6 +10,7 @@ import { QueryService } from '../../service/queries/index.js';
 import { authorizePath } from '../../workers/paths.js';
 import type { WorkerPoolOptions } from '../../workers/index.js';
 import { createMcpServer, MCP_MAX_RESULT_BYTES } from '../server.js';
+import type { McpServerDefaults } from '../defaults.js';
 import { MAX_MCP_INPUT_BYTES, MAX_MCP_REQUEST_ID_BYTES } from '../limits.js';
 import {
   readBoundedLocalFile,
@@ -213,6 +214,8 @@ export async function startHttpServer(
     WorkerPoolOptions,
     'entry_point' | 'exec_argv' | 'cancel_grace_ms' | 'analysis_cache'
   > = {},
+  /** Server-wide request defaults (`decompile.language` / `view`); a request argument wins. */
+  defaults: Pick<McpServerDefaults, 'decompile'> = {},
 ): Promise<HttpServerHandle> {
   const config = await resolveHttpConfig(input);
   const principals: Principal[] = [];
@@ -274,6 +277,7 @@ export async function startHttpServer(
           (context) =>
             createMcpServer(service, {
               preserveJobsOnDisconnect: true,
+              defaults,
               authorizeResource: async () =>
                 reserveAction(principal, false, context.requestInfo?.signal),
               authorizeTool: async (name, args) => {

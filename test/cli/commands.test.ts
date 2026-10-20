@@ -41,6 +41,8 @@ function run(
   // The real subprocess needs a kill deadline, not a guessed delay before an assertion.
   const child = spawn(process.execPath, ['--import', 'tsx', runner, ...args], {
     stdio: ['ignore', 'pipe', 'pipe'],
+    // Never read the developer's real settings file: point the default location nowhere.
+    env: { ...process.env, XDG_CONFIG_HOME: join(tmpdir(), 'open-decomp-no-settings') },
     timeout: 60_000,
     killSignal: 'SIGKILL',
   });

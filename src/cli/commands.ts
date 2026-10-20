@@ -3,6 +3,8 @@ import type { BinarySession, FunctionSelector } from '../api/index.js';
 import { caveats, distinctDiagnostics, entityIdSchema, sliceIdSchema } from '../core/index.js';
 import type { ToolResult, WireDiagnostic, WireJob } from '../core/index.js';
 import { exportBinary } from './export.js';
+import { languageSchema, loadSettings, viewSchema } from '../settings/index.js';
+import type { Settings } from '../settings/index.js';
 
 type Command = 'functions' | 'decompile' | 'export' | 'types';
 interface Arguments {
@@ -11,7 +13,9 @@ interface Arguments {
   json: boolean;
   cachePath?: string;
   sliceId?: string;
-  analysisCache: boolean;
+  /** Explicit `--analysis-cache` / `--no-analysis-cache`; absent means the settings decide. */
+  analysisCache?: boolean;
+  settingsPath?: string;
   name?: string;
   selector?: FunctionSelector;
   emitter?: 'c-like' | 'python-like';
@@ -28,20 +32,19 @@ type AnalysisResult =
   | ToolResult<'project_open'>
   | ToolResult<'binary_info'>;
 
+const settingsOption = '[--settings PATH]';
+const cacheOptions = '[--cache PATH] [--slice ID] [--analysis-cache|--no-analysis-cache]';
 const usage = {
-  functions:
-    'open-decomp functions BINARY [--name TEXT] [--json] [--cache PATH] [--slice ID] [--no-analysis-cache]',
-  decompile:
-    'open-decomp decompile BINARY (--function NAME | --id ID | --address va:0x.../rva:0x.../file:0x...) [--language c-like|python-like] [--view source|checked] [--json] [--cache PATH] [--slice ID] [--no-analysis-cache]',
-  export:
-    'open-decomp export BINARY --out DIR [--language c-like|python-like] [--jobs N] [--name SUBSTRING] [--cache PATH] [--slice ID] [--no-analysis-cache]',
-  types: 'open-decomp types BINARY [--json] [--cache PATH] [--slice ID] [--no-analysis-cache]',
+  functions: `open-decomp functions BINARY [--name TEXT] [--json] ${cacheOptions} ${settingsOption}`,
+  decompile: `open-decomp decompile BINARY (--function NAME | --id ID | --address va:0x.../rva:0x.../file:0x...) [--language c-like|python-like] [--view source|checked] [--json] ${cacheOptions} ${settingsOption}`,
+  export: `open-decomp export BINARY --out DIR [--language c-like|python-like] [--jobs N] [--name SUBSTRING] ${cacheOptions} ${settingsOption}`,
+  types: `open-decomp types BINARY [--json] ${cacheOptions} ${settingsOption}`,
 } as const;
 
 class UsageError extends Error {}
 
 // Binary paths, symbol names and engine messages are untrusted terminal text.
-function terminal(value: string, limit = 8192): string {
+export function terminal(value: string, limit = 8192): string {
   const escaped = value.replace(
     /[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
     (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`,
@@ -92,6 +95,11 @@ function row(item: FunctionRow): string {
   const name = item.display_name ?? item.original_name ?? '(unnamed)';
   return `${terminal(item.id)}  ${terminal(item.entry.space)}:${terminal(item.entry.value)}  ${terminal(name)}  [${terminal(item.boundary)}, ${terminal(item.analysis)}${item.kind === 'import_stub' ? ', import stub' : ''}]`;
 }
+function emitterOption(value: string): 'c-like' | 'python-like' {
+  const language = languageSchema.safeParse(value);
+  if (!language.success) throw new UsageError('--language must be c-like or python-like');
+  return language.data;
+}
 function parse(args: readonly string[]): ParsedArguments {
   const command = args[0];
   if (
@@ -109,6 +117,7 @@ function parse(args: readonly string[]): ParsedArguments {
   const allowed = [
     '--cache',
     '--slice',
+    '--settings',
     ...(command === 'functions'
       ? ['--name']
       : command === 'export'
@@ -118,7 +127,8 @@ function parse(args: readonly string[]): ParsedArguments {
           : []),
   ];
   let json = false,
-    analysisCache = true,
+    enableCache = false,
+    disableCache = false,
     positionalOnly = false;
   for (let index = 1; index < args.length; index++) {
     const argument = args[index]!;
@@ -135,9 +145,13 @@ function parse(args: readonly string[]): ParsedArguments {
       json = true;
       continue;
     }
-    if (argument === '--no-analysis-cache') {
-      if (!analysisCache) throw new UsageError('Duplicate option --no-analysis-cache');
-      analysisCache = false;
+    if (argument === '--analysis-cache' || argument === '--no-analysis-cache') {
+      if (argument === '--analysis-cache' ? enableCache : disableCache)
+        throw new UsageError(`Duplicate option ${argument}`);
+      if (argument === '--analysis-cache') enableCache = true;
+      else disableCache = true;
+      if (enableCache && disableCache)
+        throw new UsageError('Specify only one of --analysis-cache and --no-analysis-cache');
       continue;
     }
     const equals = argument.indexOf('=');
@@ -151,10 +165,14 @@ function parse(args: readonly string[]): ParsedArguments {
   }
   if (positional.length !== 1 || !positional[0])
     throw new UsageError('Expected exactly one BINARY path');
-  const result: Arguments = { command, binary: positional[0], json, analysisCache };
+  const result: Arguments = { command, binary: positional[0], json };
+  if (enableCache) result.analysisCache = true;
+  if (disableCache) result.analysisCache = false;
   const cache = values.get('--cache'),
-    slice = values.get('--slice');
+    slice = values.get('--slice'),
+    settings = values.get('--settings');
   if (cache !== undefined) result.cachePath = cache;
+  if (settings !== undefined) result.settingsPath = settings;
   if (slice !== undefined) {
     if (!sliceIdSchema.safeParse(slice).success) throw new UsageError('--slice must be a slice ID');
     result.sliceId = slice;
@@ -171,11 +189,7 @@ function parse(args: readonly string[]): ParsedArguments {
     if (out === undefined) throw new UsageError('export requires --out DIR');
     result.out = out;
     const language = values.get('--language');
-    if (language !== undefined) {
-      if (language !== 'c-like' && language !== 'python-like')
-        throw new UsageError('--language must be c-like or python-like');
-      result.emitter = language;
-    }
+    if (language !== undefined) result.emitter = emitterOption(language);
     const jobs = values.get('--jobs');
     if (jobs !== undefined) {
       if (!/^[1-9][0-9]{0,2}$/.test(jobs) || Number(jobs) > 32)
@@ -205,16 +219,12 @@ function parse(args: readonly string[]): ParsedArguments {
     };
   }
   const language = values.get('--language');
-  if (language !== undefined) {
-    if (language !== 'c-like' && language !== 'python-like')
-      throw new UsageError('--language must be c-like or python-like');
-    result.emitter = language;
-  }
+  if (language !== undefined) result.emitter = emitterOption(language);
   const view = values.get('--view');
   if (view !== undefined) {
-    if (view !== 'source' && view !== 'checked')
-      throw new UsageError('--view must be source or checked');
-    result.view = view;
+    const parsedView = viewSchema.safeParse(view);
+    if (!parsedView.success) throw new UsageError('--view must be source or checked');
+    result.view = parsedView.data;
   }
   return result;
 }
@@ -228,7 +238,7 @@ function help(command: Command): void {
           : command === 'decompile'
             ? 'Decompile one exact, unambiguous function name, entity ID or address.\nText stdout contains only pseudocode; JSON preserves the result envelope.'
             : 'Print the image-wide merged structure types as C declarations (the names decompile uses).\nAnalyzes function bodies within the default budget; a partial result exits 2.'
-    }\n\n--cache PATH  Override the sidecar cache root (default: BINARY.open-decomp).\n--slice ID    Select a binary slice.\n--no-analysis-cache  Read and write no derived analysis: no published results, reuse candidates or persisted callee summaries, and no in-process summary reuse. Import and indexes still persist. Output is identical; repeated and cross-process runs are slower.\n${command === 'export' ? '' : '--json        Write {project_path,reused,result} JSON to stdout.\n'}--help        Show this help.\nProgress, project reuse and diagnostics go to stderr. Work stays in the foreground.\nExit: ${command === 'export' ? '0 all files written (even if some functions are partial/failed); 1 error/cancelled' : '0 complete/empty; 2 semantic partial; 1 error/unsupported/cancelled'}; 130 SIGINT; 143 SIGTERM.\n`,
+    }\n\n--cache PATH  Override the sidecar cache root (default: BINARY.open-decomp).\n--slice ID    Select a binary slice.\n--analysis-cache     Force analysis caching on (overrides analysis_cache: false in a settings file).\n--no-analysis-cache  Read and write no derived analysis: no published results, reuse candidates or persisted callee summaries, and no in-process summary reuse. Import and indexes still persist. Output is identical; repeated and cross-process runs are slower.\n--settings PATH  Read settings from PATH instead of $XDG_CONFIG_HOME/open-decomp/settings.json (default ~/.config/open-decomp/settings.json). A flag beats the file; the file beats built-in defaults. See: open-decomp settings --help.\n${command === 'export' ? '' : '--json        Write {project_path,reused,result} JSON to stdout.\n'}--help        Show this help.\nProgress, project reuse and diagnostics go to stderr. Work stays in the foreground.\nExit: ${command === 'export' ? '0 all files written (even if some functions are partial/failed); 1 error/cancelled' : '0 complete/empty; 2 semantic partial; 1 error/unsupported/cancelled'}; 130 SIGINT; 143 SIGTERM.\n`,
   );
 }
 
@@ -313,6 +323,19 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
     help(parsed.help);
     return;
   }
+  // Built-in default < settings file < explicit flag. A bad settings file is an error, not a fallback.
+  let settings: Settings;
+  try {
+    settings = await loadSettings(parsed.settingsPath);
+  } catch (error) {
+    process.stderr.write(
+      `error: ${terminal(error instanceof Error ? error.message : String(error))}\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const analysisCache = parsed.analysisCache ?? settings.analysis_cache;
+  const cachePath = parsed.cachePath ?? settings.cache_root ?? undefined;
   const controller = new AbortController();
   let interrupted: number | undefined, session: BinarySession | undefined;
   const interrupt = (code: number): void => {
@@ -336,9 +359,9 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
   let code = 0;
   try {
     session = await openBinary(parsed.binary, {
-      ...(parsed.cachePath === undefined ? {} : { cachePath: parsed.cachePath }),
+      ...(cachePath === undefined ? {} : { cachePath }),
       ...(parsed.sliceId === undefined ? {} : { sliceId: parsed.sliceId }),
-      ...(parsed.analysisCache ? {} : { analysisCache: false }),
+      ...(analysisCache ? {} : { analysisCache: false }),
       signal: controller.signal,
       onProgress,
     });
@@ -363,11 +386,11 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
         session,
         {
           out: parsed.out!,
-          language: parsed.emitter ?? 'c-like',
-          jobs: parsed.jobs,
+          language: parsed.emitter ?? settings.export.language,
+          jobs: parsed.jobs ?? settings.export.jobs ?? undefined,
           sliceId: parsed.sliceId,
           name: parsed.name,
-          analysisCache: parsed.analysisCache,
+          analysisCache,
         },
         controller.signal,
         (message) => process.stderr.write(`${terminal(message)}\n`),
@@ -377,8 +400,8 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
       );
     } else {
       const result = await session.decompile(parsed.selector!, {
-        ...(parsed.emitter === undefined ? {} : { emitter: parsed.emitter }),
-        ...(parsed.view === undefined ? {} : { view: parsed.view }),
+        emitter: parsed.emitter ?? settings.decompile.language,
+        view: parsed.view ?? settings.decompile.view,
         signal: controller.signal,
         onProgress,
       });

@@ -32,9 +32,11 @@ open-decomp export ./app --out ./app-decomp --jobs 4
 open-decomp types ./app > app-types.h
 open-decomp decompile ./app --function main --no-analysis-cache
 
+open-decomp settings                       # resolved settings file and effective values
+open-decomp decompile ./app --function main --settings ./settings.json
 ```
 
-`functions --name` is a case-insensitive substring search; `decompile --function` is exact and case-sensitive. Use discovered original/display names (including format-specific prefixes), a stable `--id`, or an explicit `--address va:0x...`, `rva:0x...` or `file:0x...`. Multiple indexed matches are an error, not a first-match selection. `types` prints the image-wide merged structure types as C declarations, the same names `decompile` uses, with the complete merged layout (a function's text declares only the members it accesses; observed members only). All commands support `--help`, `--cache PATH`, and explicit `--slice ID`.
+`functions --name` is a case-insensitive substring search; `decompile --function` is exact and case-sensitive. Use discovered original/display names (including format-specific prefixes), a stable `--id`, or an explicit `--address va:0x...`, `rva:0x...` or `file:0x...`. Multiple indexed matches are an error, not a first-match selection. `types` prints the image-wide merged structure types as C declarations, the same names `decompile` uses, with the complete merged layout (a function's text declares only the members it accesses; observed members only). All commands support `--help`, `--cache PATH`, explicit `--slice ID`, `--analysis-cache` / `--no-analysis-cache` and `--settings PATH` (see [Settings file](#settings-file)).
 
 ### Export a whole binary as a greppable directory
 
@@ -62,6 +64,42 @@ Text decompilation goes to stdout; progress, cache/project information and diagn
 | `130`, `143` | Interrupted by SIGINT or SIGTERM; owned workers are closed.                       |
 
 For Node.js/TypeScript applications, use the small **`open-decomp/api`** entry: `openBinary()`, `findFunctions()`, `decompile()` and `close()`. It shares the CLI's persistent cache and the MCP service's contracts. See [API.md](API.md) for runnable usage patterns, lifecycle, paging, errors and cache policy.
+
+## Settings file
+
+One optional JSON file sets your defaults once, so you do not repeat flags. It never changes decompiler semantics; it only supplies values for knobs that already exist as flags and options.
+
+**Location.** `$XDG_CONFIG_HOME/open-decomp/settings.json`, else `~/.config/open-decomp/settings.json` (a relative `XDG_CONFIG_HOME` is ignored). Use `--settings PATH` on any CLI command, including `mcp start`, to read another file. This is not `--config`, which belongs to the HTTP transport's private configuration and is unrelated. The default file is optional: if it is missing, built-in defaults apply. An explicit `--settings` file must exist. Unreadable files, files over 64 KiB, invalid JSON, an unknown key, a wrong type or a wrong `version` are errors that name the path and the offending key; a bad file is never ignored.
+
+```json
+{
+  "version": 1,
+  "cache_root": "/Users/me/open-decomp-cache",
+  "analysis_cache": true,
+  "decompile": { "language": "python-like", "view": "source" },
+  "export": { "language": "c-like", "jobs": 4 }
+}
+```
+
+| Key                  | Values                  | Same as                                    | Built-in default                        |
+| -------------------- | ----------------------- | ------------------------------------------ | --------------------------------------- |
+| `version`            | `1` (required)          |                                            | n/a                                     |
+| `cache_root`         | absolute path           | `--cache PATH`                             | `BINARY.open-decomp` beside each binary |
+| `analysis_cache`     | `true`, `false`         | `--analysis-cache` / `--no-analysis-cache` | `true`                                  |
+| `decompile.language` | `c-like`, `python-like` | `decompile --language`, `options.emitter`  | `c-like`                                |
+| `decompile.view`     | `source`, `checked`     | `decompile --view`, `options.view`         | `source`                                |
+| `export.language`    | `c-like`, `python-like` | `export --language`                        | `c-like`                                |
+| `export.jobs`        | integer 1 to 32         | `export --jobs`                            | `min(4, CPUs/2)`                        |
+
+Every key except `version` is optional, and every object rejects unknown keys.
+
+**Precedence:** built-in default < settings file < explicit CLI flag, API option or per-request MCP argument. Passing `--analysis-cache` overrides `"analysis_cache": false` for one run (and `--no-analysis-cache` overrides `true`); passing both flags is an error.
+
+`open-decomp settings [--json] [--settings PATH]` prints the resolved file path, whether it exists and each effective value with its source (`default` or `file`); `--json` writes `{path,exists,explicit,settings,sources}`. It reads no binary and starts no worker.
+
+**MCP.** `mcp start` (stdio and HTTP) loads the file once at startup; editing it later needs a restart. `analysis_cache` is the server-wide default (`--analysis-cache` / `--no-analysis-cache` win). `decompile.language` and `decompile.view` apply when a `function_decompile` request omits `options.emitter` / `options.view`; an explicit request value wins. With stdio, `cache_root` must be an existing directory inside a `--root`; `project_open` with `source.kind: "import"` may then omit `project_path`, and the project is `<cache_root>/<sha256 of the input>.<slice_id|default>`, the same layout the CLI and API use, resumed when it already exists (an explicit `project_path` is used unchanged). The advertised tool schema makes `project_path` optional only in that case. With `--transport http`, `cache_root` does not apply (each principal keeps projects under its configured `project_root`; a startup note says so) while `analysis_cache` and `decompile.*` do. Tool JSON schemas are otherwise unchanged.
+
+**Library.** `open-decomp/api` never reads the settings file implicitly. Call `loadSettings(path?)` and pass the values you want to `openBinary()` / `decompile()`; see [API.md](API.md#settings-file).
 
 ## Launch and configure local MCP
 
@@ -107,6 +145,8 @@ For intended WSL use, the MCP process must execute Linux Node and the installed 
 | `--max-workers N`     | Persistent project workers, 1–32, default 2. Open projects consume owners; close unused ones.                                                                                                                                                                                             |
 | `--max-queued N`      | Queued jobs per worker, 0–1,024, default 16.                                                                                                                                                                                                                                              |
 | `--no-analysis-cache` | Server-wide: no published results, reuse candidates or persisted/in-process callee summaries are read or written. Imports, indexes and annotations still persist; output is identical but repetition is slower. Not a tool-request option. With `--transport http` it follows `--config`. |
+| `--analysis-cache`    | Server-wide: keep analysis caching on even if the [settings file](#settings-file) sets `analysis_cache` to `false`. Cannot be combined with `--no-analysis-cache`.                                                                                                                        |
+| `--settings PATH`     | Read the [settings file](#settings-file) from PATH (must exist) instead of the default location. Loaded once at startup. Not `--config`.                                                                                                                                                  |
 | `--help`, `--version` | Print to stderr, not protocol stdout.                                                                                                                                                                                                                                                     |
 
 For stdio, stdout must remain protocol traffic; help, version and diagnostics use stderr. The SDK owns framing and version negotiation. EOF and catchable termination signals cancel/reap project owners; use `project_close` for an orderly durable close before disconnecting.

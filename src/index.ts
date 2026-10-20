@@ -91,3 +91,4 @@ export {
 } from './project/annotations/index.js';
 export { startHttpServer, type HttpServerHandle } from './mcp/http/server.js';
 export { loadHttpConfig, type HttpConfig } from './mcp/http/config.js';
+export { loadSettings, SettingsError, type Settings } from './settings/index.js';

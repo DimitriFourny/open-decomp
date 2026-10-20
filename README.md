@@ -30,9 +30,11 @@ Names may include a prefix such as `_main`; use the name shown in the function l
 
 Projects are saved next to the binary in `app.open-decomp/`; repeated commands reuse the imported image and cached analysis. Output is pseudocode, not recovered original source.
 
+Set defaults once (cache root, analysis cache, decompile/export language, view, jobs) in an optional `~/.config/open-decomp/settings.json` (or `$XDG_CONFIG_HOME/open-decomp/settings.json`, or `--settings PATH`); flags always win. See [Settings file](docs/README.md#settings-file) and `open-decomp settings`.
+
 ## Documentation
 
-- [CLI, MCP setup and troubleshooting](docs/README.md)
+- [CLI, settings file, MCP setup and troubleshooting](docs/README.md)
 - [JavaScript / TypeScript API](docs/API.md)
 - [Remote MCP and security](docs/REMOTE.md)
 - [Core contracts](docs/CORE.md), [fixtures](docs/FIXTURES.md) and [performance](docs/PERFORMANCE.md)

@@ -10,6 +10,7 @@ import { glob } from 'node:fs/promises';
 const INTEGRATION = [
   'test/cli/commands.test.ts',
   'test/cli/export.test.ts',
+  'test/cli/settings.test.ts',
   'test/cli/slices.test.ts',
   'test/cli/source-quality.test.ts',
   'test/mcp/executable.test.ts',

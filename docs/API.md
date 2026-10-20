@@ -79,6 +79,33 @@ With `analysisCache: false` every `decompile()` is `cache: "computed"` and nothi
 
 Session properties are `inputPath`, `cachePath`, `projectPath`, `reused`, `opened`, `image`, `projectId` and `revision`. `opened` is the original `project_open` envelope, preserving import diagnostics and coverage. `reused` describes project reuse, not whether a particular decompilation is a cache hit.
 
+## Settings file
+
+The library never reads the user's settings file implicitly: `openBinary()` behaves the same on every machine. A program that wants the user's defaults (the same optional JSON the CLI reads: location, schema and precedence are in the [user guide](README.md#settings-file)) loads it explicitly and passes the values it wants:
+
+```ts
+import { loadSettings, openBinary } from 'open-decomp/api';
+import type { Settings } from 'open-decomp/api';
+
+const settings: Settings = await loadSettings(); // default file, or built-in defaults when it is missing
+const binary = await openBinary('./app', {
+  ...(settings.cache_root === null ? {} : { cachePath: settings.cache_root }),
+  analysisCache: settings.analysis_cache,
+});
+try {
+  const result = await binary.decompile(
+    { name: 'main' },
+    { emitter: settings.decompile.language, view: settings.decompile.view },
+  );
+} finally {
+  await binary.close();
+}
+```
+
+`loadSettings(path?)` returns the validated effective `Settings` (`version`, `cache_root: string | null`, `analysis_cache`, `decompile.{language,view}`, `export.{language,jobs: number | null}`). Without `path` it reads `$XDG_CONFIG_HOME/open-decomp/settings.json` (else `~/.config/open-decomp/settings.json`) and returns the built-in defaults when that file is missing; an explicit `path` must exist. Invalid JSON, an unknown key, a wrong type or a wrong version rejects with a `SettingsError` whose message names the file path and key (`error.path`, `error.key`). An optional second argument supplies the environment (`{ XDG_CONFIG_HOME, HOME }`) instead of `process.env`, which keeps tests off the real home directory.
+
+Precedence stays with the caller: an option you pass explicitly (for example `{ emitter: 'c-like' }`) is applied after, and therefore beats, the file value you chose to read. `Settings` and `loadSettings` are also exported from the root `open-decomp` entry.
+
 ## Find functions and page results
 
 ```js
