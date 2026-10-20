@@ -157,6 +157,8 @@ export class Writer {
   offset = 0;
   /** Non-comment lines, used to keep empty Python-like suites syntactically explicit. */
   codeLines = 0;
+  /** Set to null to capture the next code line written; undefined captures nothing. */
+  watched: string | null | undefined = undefined;
   readonly limit: number;
   /** Mappings not recorded because metadata is omitted. */
   omittedMappings = 0;
@@ -289,7 +291,10 @@ export class Writer {
     this.parts.push(line);
     this.bytes += bytes;
     this.offset += line.length;
-    if (code) this.codeLines++;
+    if (code) {
+      this.codeLines++;
+      if (this.watched === null) this.watched = line;
+    }
   }
 
   /** Insert whole depth-0 lines at an existing line boundary of the emitted text.

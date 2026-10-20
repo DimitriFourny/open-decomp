@@ -28,7 +28,8 @@ export interface InlineSite {
 
 export type InlineCall = Extract<Instruction, { kind: 'call' }>;
 /** A call whose single result is read by the very next printed statement or
- * the return: printed once, as that reader's operand, at its original position. */
+ * the return, `if` or `switch` test: printed once, as that reader's operand, at
+ * its original position. */
 export interface InlineCallSite {
   readonly node: InlineCall;
   readonly result: Value;
@@ -659,16 +660,35 @@ export function planSourceInlining(
           continue;
       } else if (
         at.position !== reader.statements.length ||
-        reader.control.kind !== 'return' ||
+        (reader.control.kind !== 'return' &&
+          reader.control.kind !== 'if' &&
+          reader.control.kind !== 'switch') ||
         reader.control.id !== at.anchor ||
         printsDefinition(reader.control.id)
       )
         continue;
       // C leaves operand order open: no other memory read, call or environment
-      // read may be an unsequenced operand of the same reader.
+      // read may be an unsequenced operand of the same reader. A load whose
+      // address reads the call's result (`strerror(*__error())`) is sequenced
+      // after the call.
+      const reads = (operand: Value, depth: number): boolean => {
+        context.checkpoint(1);
+        if (operand.id === value.id) return true;
+        const site = result.get(operand.id);
+        if (depth > 32) return false;
+        if (site?.node.kind === 'load') return reads(site.node.address, depth + 1);
+        const expression =
+          site || program.inline.has(operand.id) ? program.expressions.get(operand.id) : undefined;
+        return (
+          !!expression && expressionOperands(expression).some((nested) => reads(nested, depth + 1))
+        );
+      };
       let ordered = true;
       for (const [id, site] of result)
-        if (site.anchor === at.anchor && (site.node.kind === 'load' || environment.has(id))) {
+        if (
+          site.anchor === at.anchor &&
+          (environment.has(id) || (site.node.kind === 'load' && !reads(site.node.address, 0)))
+        ) {
           ordered = false;
           break;
         }
