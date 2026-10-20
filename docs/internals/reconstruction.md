@@ -1,0 +1,90 @@
+# Source reconstruction
+
+Turns one structured, immutable SSA function plus recovered types and native source evidence into a source-shaped model: which values are live and which print inline, what each call/return means as a C interface, which stack slots become locals, and under which proof or assumption each rewrite was applied. Runs after [structuring](structuring-emission.md#algorithm), before text emission; never restructures the CFG or mutates the IR. The renderer's variable decisions (cross-statement inlining, coalescing, names) are covered here too; control layout and printing belong to [structuring & emission](structuring-emission.md).
+
+**Code:** `src/reconstruction/`, `src/emitters/source-inlining.ts`, `src/emitters/source-control.ts` (coalescing)
+
+## Data model
+
+- **Input** (`EmissionInput`): region tree of SSA blocks with parallel-copy transfers ([SSA](ssa-values.md#data-model)), `TypeRecoveryResult` ([types](types-metadata.md#data-model)), and for native code `SourceEvidence`: ABI profile, observed/proven callee interfaces, address facts, caller result demands, variadic signatures, opt-in likely guesses ([calls](calls-abi.md#data-model)). Without evidence only declared-or-physical boundary projection runs (no source plan).
+- **`Reconstruction`**: a view keyed by original SSA ids.
+  - rewritten pure definitions (operands stay original ids);
+  - demand: live values, retained statements, use counts, live edge copies;
+  - inline set: definitions the renderer may expand;
+  - origins: each original statement → the printed statement that consumes it;
+  - boundary projections per call/return/tail: `source` (declared), `inferred` (observed) or `physical` (registers), with argument-list completeness, out-of-line exit scratch, likely-arity mark;
+  - memory field views, diagnostics, validation session.
+- **`SourcePresentation`** (syntax-neutral): formals and names, return type(s), value/formal/local types, float spellings, promoted locals, frame saves, forwarded reloads, void-like result, requirements, likely guesses, synthesized definitions.
+- **Synthesized values** get deterministic `entity_<fingerprint>` ids; an alias is a forced-inline bitcast definition. No original identity is replaced.
+- **Evidence ledger**: `LocalValidationSession` holds verified/unverified/rejected records, vetoed values, proof allowance and ABI assumptions; published as `emission.local_validation` and `emission.requirements`.
+
+## Algorithm
+
+One linear function (`reconstruct`) over shared maps; order fixed and visible.
+
+```mermaid
+flowchart TD
+  A["Index regions, phi sources"] --> B["Exact folding + range proofs"]
+  B --> C["Constant data loads (S)"]
+  C --> D["Interface plan: calls, formals, results"]
+  D --> E["Stack plan: saves, slots, forwarding"]
+  E --> F["Cell recombination (S), arity closure, variadic args (S)"]
+  F --> G["Rule-pool normalization (demand-bounded)"]
+  G --> H["Identity lattice -> aliases -> normalize again"]
+  H --> I["Boundary snapshots, exit scratch (S)"]
+  I --> J["Liveness, dead reloads (S), live copies"]
+  J --> K["Inline set, materialize, origins"]
+  K --> L["Signature, memory views, diagnostics"]
+  L --> M["Type projection; float, formal spelling, likely (S)"]
+```
+
+(S) = source view only.
+
+1. **Index**: worklist over regions records ownership, defined values and each block parameter's incoming sources. Duplicate ownership is `invalid_input`; sizes are charged to the budget.
+2. **Exact folding** (both views): identity bitcasts, neutral operands, compare-from-subtract; `x-x`, `x*0`, `x^x` refused (would erase a possibly-unknown operand). With native evidence, interval analysis proves upper concat lanes zero so concats narrow.
+3. **Constant data** (S): aligned loads from immutable, relocation-free bytes become literals.
+4. **Interface plan**: each call resolves by strength — variadic format signature (S) → identical established contracts → one ABI-matching declaration → inferred callee → physical. Binding requires cells that tile a location exactly; gaps/overlaps refuse. Entry formals: ABI-classify a synthetic call with 16 integer + 16 double parameters; a candidate is a formal only if the entry binds it and it stays live. A complete declaration replaces inferred formals and suppresses result heuristics. Results: observed written results → primary-result choice (defined on every exit; caller demand, then last-written carrier) → typed FP slice → changed low cell. Likely mode only marks an arity guess; analysis keeps the list open ([calls](calls-abi.md#algorithm)).
+5. **Stack plan**: affine fixpoint gives entry-SP offsets; taint follows expressions, phis, memory. Escapes give a _reach floor_: in S, bytes at or above the lowest escaped offset stay memory and slots wholly below are classified per slot; unknown effects keep the whole frame. Classes: frame save, return-address push, incoming stack formal, private local, explicit memory. Private slots either _forward_ (each load becomes its reaching stored value, a bit range, or concatenated pieces; accesses vanish), become one scalar local (type puns convert by exact reinterpretation), or stay memory. Possible open-call argument slots keep stores but may forward reloads. Each promotion passes the byte-path validator (definite initialization on bounded acyclic paths).
+6. **Cell recombination** (S): phi groups whose register cells move together become one whole value.
+7. **Normalization**: worklist fixpoint over definitions inside a conservative demand closure. Operands resolve through identity chains; the ordered rule pool (`EXPRESSION_RULES`) is tried and the _first_ match wins; the site is revisited, ≤32 rewrites per value. Priority: condition flags (truth-table enumeration → `&&`/`||` relations), cell/bit-slice recombination, constant folding, cast wiring, packing shifts, strength-reduced multiply, magic division/remainder/narrowing, slice narrowing, joins, shift/rotate idioms, compare canonicalization, integer identities, extension folding. Checked has a small own subset (`x<<k` as `x*2^k`).
+8. **Identity lattice** (unreached / identity / conflict) over copies and bitcasts, ignoring unreached back edges, so unchanged loop-carried registers resolve to entry values. Identities become aliases; normalization drains again.
+9. **Boundaries**: snapshots drop slices equal to entry state. In S, an inferred return slice tracing only to same-register entry values or unprojected call clobbers becomes _ABI scratch_; a computed slice excluded by an established primary or void-like interface becomes _computed scratch_; slices overlapping caller demand stay results.
+10. **Liveness** from effects, boundary values, conditions and exit overlays; a phi source is demanded only if its destination is live. S drops dead covered frame reloads and jump-table reads, iterating to stability; formals reached only through uncertain overlays are demoted.
+11. **Inline set**: constants, addresses, and pure single-use same-block definitions with expansion ≤48 operands and depth ≤10; rotation operands stay variables; aliases bypass limits. Live synthesized definitions are materialized at their anchors; folded definitions join their consumer's origins.
+12. **Finish**: signature (dropped if `entry_sp` stays live); memory views (dropped if ambiguous, conflicting or width-mismatched); `unavailable_semantics` warnings for live unknowns, unknown effects, open/physical calls, unresolved returns and control.
+13. **Types**: project complete source types (both views); S then picks float spellings, formal pointer/narrow-integer/slot-pointer/narrow-return spellings, then likely pointer guesses for formals still plain integers.
+
+### Variable recovery
+
+`reconstruct` runs once per emission; each render attempt forks the validation session. In the source view the renderer then:
+
+- **names** (`planSourceNames`, also checked with fewer rules): supplied symbols/annotations > declared parameter names > field names > library interface names (only without a loop/shift/callback role, element or condition) > one role (`index`, `count`/`remaining`, `accumulator`, …) > generic stems; two roles give no name. Names never feed semantics.
+- **inlines across statements** (`planSourceInlining`): single-use pure integer expressions move to their dominated use; FP ones only with no call, unknown effect or register write between; loads only to an unconditional same-block use with no intervening store, call or independent load; same-type copies propagate; cheap single-reader ops repeat (≤4); a single-use call result may sit in the next test.
+- **coalesces**: `phi_copy_coalescing` greedily unions edge-copy and widening pairs using SSA live-range interference (simultaneous block parameters conflict) when storage type, presented type and name agree; formals stay representatives. `copy_coalescing` merges in-place updates (`y = f(x)`, `x` dead) under a bounded interference matrix.
+
+Checked applies none of these beyond direct-copy naming.
+
+## Design decisions
+
+- **One pipeline, two views.** `checked` refuses every rewrite justified by presentation or ABI convention (saves, scratch, cells, flags, idioms, per-slot promotion, float spelling) but still folds exact identities and projects declarations. `source` = checked + recorded rewrites.
+- **Proof classes**: `structural` wiring may be vetoed by the BDD checker while allowance lasts; `bitvector` rules keep the original once it is exhausted; `own` rules (outcome tables, closed-form division bounds) carry their proof plus boundary tests. A counterexample vetoes the value for later passes.
+- **Admission gate**: each source rewrite must store a presentation record; at 256 records (atomic per rewrite) it fails and the explicit form stays. ABI premises become `abi_conformance` requirements and never refuse.
+- **Refuse rather than guess**: partial coverage, disagreeing paths, unknown offsets, open arities, conflicting types fall back to explicit form plus diagnostic; likely guesses stay marked.
+- **Uncertainty channels**: projection kind/completeness, requirements (`fp_environment`, `abi_conformance`, `unresolved`), validation records, diagnostics, likely marks.
+- **Ordering**: interfaces before stack (outgoing args decide privacy); stack before normalization (forwarded values feed rules); aliases before identities; type spelling last (needs final liveness, formals, slots).
+- **Bounded**: every loop charges the budget; proof allowance is `min(8000, remaining/64)`. [inference] Proof outcomes, hence text, can depend on budget left at entry.
+
+## Limits and improvement levers
+
+| Weakness                                                            | Effect                                                                               | Lever                                                    |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------- |
+| Escaped object extent unknown                                       | All slots above the lowest escape stay `entry_sp - N` (dev loop: 329)                | Extent facts from [types](types-metadata.md); stack plan |
+| Path-dependent slot parts                                           | Memory form kept                                                                     | Partial-update spelling                                  |
+| Return carrier choice                                               | Real result can become scratch (`heldout_weighted` `double`, PERFORMANCE.md round 4) | Caller demand; result selection                          |
+| Open arities                                                        | `...` stays; likely mode ships one formal heuristic, none for results                | [calls](calls-abi.md#limits-and-improvement-levers)      |
+| Pointer spelling needs local evidence                               | Casts; declared `char *` prints `int8_t*`                                            | Type projection                                          |
+| First-match rule order, no cost model                               | Early rule may block a better one [inference]; ABI-implied sign extension missed     | Rule pool                                                |
+| BDD fragment (64 leaves, 12k ops, integer)                          | Candidates unverified or unapplied                                                   | Validator                                                |
+| Two inlining layers (fixed limits here, liveness-based in renderer) | Split ownership of temporaries [inference]                                           | One planner                                              |
+| Coalescing needs equal type and name                                | Pointer/integer and truncating copies stay separate                                  | Types first                                              |
+| Cost                                                                | ~780k work per brotli `main` reconstruction; normalization runs twice                | Incremental normalization                                |
