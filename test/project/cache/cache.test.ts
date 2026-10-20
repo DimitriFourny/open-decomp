@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -728,6 +728,40 @@ test('stored hash corruption cannot complete cache-hit jobs or reconstruct trust
   );
 });
 
+test('a payload parsed by an earlier hit is not served once its stored bytes are damaged', async (t) => {
+  const p = await project(t),
+    first = await p.run();
+  const artifact = p.state.store.readJob(first.job.id)!.artifacts[0]!;
+  const hit = async () => {
+    const job = p.job();
+    return runCachedDecompilation(
+      {
+        store: p.state.store,
+        job_id: job.id,
+        identity: p.identity,
+        context: createOperationContext(),
+        inline_limit: 65536,
+      },
+      () => {
+        assert.fail('A hit must not recompute');
+      },
+    );
+  };
+  const served = await hit();
+  assert.ok('data' in served && served.data.cache === 'hit');
+  const again = await hit();
+  assert.ok('data' in again && again.data.cache === 'hit');
+  const original = readFileSync(join(p.state.path, 'artifacts', artifact.id));
+  const damaged = Buffer.from(original);
+  damaged[damaged.length >> 1] = damaged[damaged.length >> 1]! ^ 0x01;
+  writeFileSync(join(p.state.path, 'artifacts', artifact.id), damaged);
+  await assert.rejects(hit(), { code: 'invalid_input' });
+  // Restoring the exact bytes serves again: damage was rejected, not remembered as a miss.
+  writeFileSync(join(p.state.path, 'artifacts', artifact.id), original);
+  const restored = await hit();
+  assert.ok('data' in restored && restored.data.cache === 'hit');
+});
+
 test('original response and full-artifact byte boundaries reject before creating durable success', async (t) => {
   const p = await project(t);
   const tiny = { ...p.identity, budget: { ...p.identity.budget, output_bytes: 1024 } };
@@ -857,7 +891,7 @@ test('schema-2 migration preserves artifacts, jobs, revisions and removal actors
   const { bytes: _bytes, address_map: _map, ...legacyMetadata } = p.image;
   db.prepare('UPDATE loaded_images SET payload=?').run(encodeStored(legacyMetadata));
   db.exec(
-    'DROP TABLE analysis_artifacts; DROP TABLE loaded_image_records; DROP TABLE analysis_reuse; DROP INDEX records_scope_revision; DROP INDEX loaded_images_revision; PRAGMA user_version=2;',
+    'DROP TABLE analysis_artifacts; DROP TABLE loaded_image_records; DROP TABLE analysis_reuse; DROP TABLE native_summaries; DROP INDEX records_scope_revision; DROP INDEX loaded_images_revision; PRAGMA user_version=2;',
   );
   db.close();
   p.state.store = SqliteProjectStore.open(p.state.path, 'resume');

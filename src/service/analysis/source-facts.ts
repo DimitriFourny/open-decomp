@@ -47,7 +47,12 @@ import type {
   SourceAddress,
   SourceEvidence,
 } from '../../reconstruction/source-model.js';
-import type { TracedRead } from '../../project/cache/dependencies.js';
+import {
+  createNativeUnitPersistence,
+  preparedSize,
+  type NativeUnitPersistence,
+  type PreparedUnitEntry,
+} from './native-summaries.js';
 import { records } from '../queries/scope.js';
 import type { AnalysisScope } from './index.js';
 import type { CallScope } from './calls.js';
@@ -1007,33 +1012,20 @@ function sourceAddresses(
  * Reuse then leaves exactly what preparing it would: the same work charge and the same
  * dependency reads in the same order, so a request's result and later budgets never
  * depend on what earlier requests in this process prepared. */
-interface PreparedUnitEntry {
-  /** Without `dependency_readset`, which is a snapshot of the preparing request. */
-  readonly unit: PreparedNativeUnit;
-  /** Work the preparation charged to its worklist context. */
-  readonly work: number;
-  /** Reads the preparation made; absent when it ran without a dependency collector. */
-  readonly trace?: readonly TracedRead[];
-  /** Smallest worklist allowance under which preparation provably returns this unit. */
-  readonly allowance: number;
-  readonly size: number;
-}
-const preparedUnits = new WeakMap<
-  LoadedImage,
-  {
-    readonly identity: string;
-    readonly functions: readonly FunctionRecord[];
-    readonly references: readonly ReferenceRecord[];
-    /** Least recently used first. */
-    readonly entries: Map<string, PreparedUnitEntry>;
-    size: number;
-  }
->();
+type PreparedUnitCache = {
+  readonly identity: string;
+  readonly functions: readonly FunctionRecord[];
+  readonly references: readonly ReferenceRecord[];
+  /** Least recently used first. */
+  readonly entries: Map<string, PreparedUnitEntry>;
+  /** The persisted tier behind `entries`; absent when the store offers none. */
+  readonly persistence?: NativeUnitPersistence;
+  size: number;
+};
+const preparedUnits = new WeakMap<LoadedImage, PreparedUnitCache>();
 /** Retained prepared size (instructions + IR nodes + evidence + traced reads) per
  * image. Measured on SQLite at roughly 1 KiB of heap per unit, so ~256 MiB. */
 const MAX_PREPARED_UNIT_SIZE = 1 << 18;
-const preparedSize = (unit: PreparedNativeUnit): number =>
-  unit.instructions + unit.nodes + unit.evidence.length;
 const reusablePreparation = (unit: PreparedNativeUnit): boolean =>
   !unit.budget_truncated && !unit.reasons.length && unit.analysis?.state === 'complete';
 
@@ -1068,16 +1060,17 @@ export function nativeLibraryContracts(
     }));
 }
 
-type PreparedUnitCache = {
-  readonly identity: string;
-  readonly functions: readonly FunctionRecord[];
-  readonly references: readonly ReferenceRecord[];
-  readonly entries: Map<string, PreparedUnitEntry>;
-  size: number;
-};
-
 /** The process-wide prepared-unit cache of this image revision and component identity. */
 export function preparedUnitCache(input: NativePreparationInput): PreparedUnitCache {
+  // Disabled caching neither reads nor leaves a process-wide cache behind.
+  if (input.scope.analysis_cache === false)
+    return {
+      identity: '',
+      functions: input.functions,
+      references: input.references,
+      entries: new Map(),
+      size: 0,
+    };
   const { components, image, revision } = input,
     abi = components.abi;
   const identity = fingerprint({
@@ -1097,11 +1090,13 @@ export function preparedUnitCache(input: NativePreparationInput): PreparedUnitCa
     prepared.functions !== input.functions ||
     prepared.references !== input.references
   ) {
+    const persistence = createNativeUnitPersistence(input, identity);
     prepared = {
       identity,
       functions: input.functions,
       references: input.references,
       entries: new Map(),
+      ...(persistence ? { persistence } : {}),
       size: 0,
     };
     preparedUnits.set(image, prepared);
@@ -1120,9 +1115,32 @@ export function nativeUnitLoader(
 ): (fn: FunctionRecord, boundedContext: OperationContext) => PreparedNativeUnit {
   const { scope } = input,
     abi = input.components.abi;
+  // With analysis caching off a unit is prepared for this request alone: nothing is
+  // reused, retained or persisted.
+  if (scope.analysis_cache === false)
+    return (fn, boundedContext) => prepareNativeUnit(input, fn, boundedContext, libraryContracts);
+  const { persistence } = cache;
+  /** Keep `entry` in the process tier, evicting least recently used entries to fit. */
+  const retain = (id: string, entry: PreparedUnitEntry): boolean => {
+    if (entry.size > MAX_PREPARED_UNIT_SIZE) return false;
+    for (const [other, old] of cache.entries) {
+      if (cache.size + entry.size <= MAX_PREPARED_UNIT_SIZE) break;
+      cache.entries.delete(other);
+      cache.size -= old.size;
+    }
+    cache.entries.set(id, entry);
+    cache.size += entry.size;
+    return true;
+  };
   const reuse = (fn: FunctionRecord, boundedContext: OperationContext) => {
-    const entry = cache.entries.get(fn.id),
-      allowance = boundedContext.remainingWork?.();
+    let entry = cache.entries.get(fn.id);
+    // A unit this process has not prepared may be one an earlier process persisted. It is
+    // used exactly as if it had been prepared here, so the checks below are the same.
+    if (!entry && persistence) {
+      entry = persistence.load(fn);
+      if (entry && !retain(fn.id, entry)) entry = undefined;
+    }
+    const allowance = boundedContext.remainingWork?.();
     if (
       !entry ||
       allowance === undefined ||
@@ -1176,17 +1194,12 @@ export function nativeUnitLoader(
         work,
         ...(trace ? { trace } : {}),
         allowance: Math.min(allowance, 4 * work + 3, prior?.allowance ?? allowance),
-        size: preparedSize(unit) + (trace?.length ?? 0),
+        size: preparedSize(unit, trace),
       };
-      if (entry.size <= MAX_PREPARED_UNIT_SIZE) {
-        for (const [id, old] of cache.entries) {
-          if (cache.size + entry.size <= MAX_PREPARED_UNIT_SIZE) break;
-          cache.entries.delete(id);
-          cache.size -= old.size;
-        }
-        cache.entries.set(fn.id, entry);
-        cache.size += entry.size;
-      }
+      // Persist only what is retained, and only what the project does not already hold
+      // at an allowance this one cannot improve.
+      if (retain(fn.id, entry) && (prior?.stored === undefined || entry.allowance < prior.stored))
+        persistence?.save(fn, entry);
     }
     return unit;
   };

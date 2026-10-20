@@ -13,6 +13,8 @@ export interface ExportOptions {
   readonly jobs: number | undefined;
   readonly sliceId?: string | undefined;
   readonly name?: string | undefined;
+  /** False: extra workers open their project copies without analysis caching too. */
+  readonly analysisCache?: boolean | undefined;
 }
 export interface ExportSummary {
   readonly functions: number;
@@ -671,6 +673,7 @@ export async function exportBinary(
             await openBinary(primary.inputPath, {
               cachePath,
               ...(options.sliceId === undefined ? {} : { sliceId: options.sliceId }),
+              ...(options.analysisCache === false ? { analysisCache: false } : {}),
               signal,
             }),
           );

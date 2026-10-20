@@ -1,5 +1,6 @@
 import { DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
+import { brotliCompressSync, brotliDecompressSync, constants as zlib } from 'node:zlib';
 import {
   closeSync,
   constants,
@@ -65,6 +66,7 @@ import {
   stringRecordSchema,
   symbolSchema,
   hintSchema,
+  type NativeSummaryRow,
   type Address,
   type Annotation,
   type AnnotationBatch,
@@ -87,7 +89,15 @@ import {
   type StoredRecordKinds,
   type StoreTransaction,
 } from '../../core/index.js';
-import { MAX_RECORD_BYTES, decodeStored, encodeStored, wireValue } from './encoding.js';
+import {
+  MAX_GRAPH_BYTES,
+  MAX_RECORD_BYTES,
+  decodeStored,
+  decodeStoredGraph,
+  encodeStored,
+  encodeStoredGraph,
+  wireValue,
+} from './encoding.js';
 import {
   IMAGE_METADATA_TABLE,
   readImageMetadata,
@@ -96,7 +106,19 @@ import {
 } from './image-metadata.js';
 
 // Persistence migrations are independent of the public wire/artifact schema version.
-const STORE_SCHEMA_VERSION = 5;
+const STORE_SCHEMA_VERSION = 6;
+/** Per-project cap on persisted prepared-callee summaries (compressed payload bytes). Entries
+ * of superseded revisions go first, then the oldest write; see `flushNativeSummaries`. */
+export const DEFAULT_NATIVE_SUMMARY_BYTES = 64 * 1024 * 1024;
+/** Queued summaries are written at the next publication; a long computation that queues more
+ * than this flushes by itself. */
+/** Delivery-only artifacts (analysis caching disabled) kept in memory for this connection. */
+const MAX_TRANSIENT_ARTIFACT_BYTES = 64 * 1024 * 1024;
+const MAX_PENDING_SUMMARY_BYTES = 8 * 1024 * 1024;
+/** One persisted summary larger than this is not stored; loading it would cost about what preparing does. */
+const MAX_NATIVE_SUMMARY_ROW_BYTES = 16 * 1024 * 1024;
+const NATIVE_SUMMARIES_TABLE = `CREATE TABLE native_summaries(scope TEXT NOT NULL, function_id TEXT NOT NULL, revision INTEGER NOT NULL, seq INTEGER NOT NULL, allowance INTEGER NOT NULL, work INTEGER NOT NULL, bytes INTEGER NOT NULL, digest TEXT NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(scope,function_id)) STRICT;
+  CREATE INDEX native_summaries_order ON native_summaries(revision,seq,bytes);`;
 const annotationActorSchema = annotationSchema.pick({ author: true, origin: true });
 const MAX_IMAGE_BYTES = 512 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
@@ -218,6 +240,28 @@ function freezeMetadata(value: unknown): void {
   Object.freeze(value);
 }
 
+interface PendingSummary {
+  readonly scope: string;
+  readonly function_id: string;
+  readonly revision: number;
+  readonly allowance: number;
+  readonly work: number;
+  readonly digest: string;
+  readonly payload: Uint8Array;
+}
+/** A row is authentic only for exactly the identity it was written under. */
+function summaryDigest(
+  scope: string,
+  functionId: string,
+  revision: number,
+  payload: Uint8Array,
+): string {
+  return createHash('sha256')
+    .update(`${scope}\n${functionId}\n${revision}\n`)
+    .update(payload)
+    .digest('hex');
+}
+
 /** Owns one exclusive SQLite connection. OS releases the lock after a worker crash. */
 export class SqliteProjectStore implements ProjectStore {
   readonly project_id: string;
@@ -233,10 +277,20 @@ export class SqliteProjectStore implements ProjectStore {
   // far more than most indexed reads; dynamic SQL shapes are bounded by the cap.
   readonly #statements = new Map<string, StatementSync>();
   readonly #annotatedRevisions = new Map<number, boolean>();
+  readonly #summaryCap: number;
+  // Summaries awaiting the next batched write, by `scope\0function`.
+  readonly #pendingSummaries = new Map<string, PendingSummary>();
+  #pendingSummaryBytes = 0;
+  // Analysis artifacts delivered with analysis caching disabled: memory only, newest kept.
+  readonly #transientArtifacts = new Map<string, { artifact: Artifact; bytes: Uint8Array }>();
+  #transientBytes = 0;
 
-  private constructor(path: string, db: DatabaseSync) {
+  private constructor(path: string, db: DatabaseSync, summaryCap = DEFAULT_NATIVE_SUMMARY_BYTES) {
     this.#path = path;
     this.#db = db;
+    if (!Number.isSafeInteger(summaryCap) || summaryCap < 0)
+      fail('invalid_input', 'Invalid native summary byte cap');
+    this.#summaryCap = summaryCap;
     this.project_id = projectIdSchema.parse(
       stringField(
         db.prepare('SELECT project_id FROM metadata WHERE singleton=1').get(),
@@ -255,7 +309,11 @@ export class SqliteProjectStore implements ProjectStore {
     return statement;
   }
 
-  static open(path: string, mode: 'create' | 'resume'): SqliteProjectStore {
+  static open(
+    path: string,
+    mode: 'create' | 'resume',
+    options: { readonly native_summary_bytes?: number } = {},
+  ): SqliteProjectStore {
     const requested = resolve(path);
     directory(requested, mode === 'create');
     const root = realpathSync(requested);
@@ -311,6 +369,7 @@ export class SqliteProjectStore implements ProjectStore {
           CREATE TABLE artifacts(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, job_id TEXT NOT NULL, cache_key TEXT NOT NULL UNIQUE, payload BLOB NOT NULL) STRICT;
           CREATE TABLE analysis_artifacts(revision INTEGER NOT NULL, analysis_id TEXT NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(revision,analysis_id,artifact_id)) STRICT;
           CREATE TABLE analysis_reuse(scope TEXT NOT NULL, revision INTEGER NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(scope,revision DESC,artifact_id)) STRICT;
+          ${NATIVE_SUMMARIES_TABLE}
           PRAGMA user_version=${STORE_SCHEMA_VERSION};`);
         db.prepare('INSERT INTO metadata VALUES (1,?,0)').run(newIdentity('project'));
         db.exec('COMMIT');
@@ -343,9 +402,11 @@ export class SqliteProjectStore implements ProjectStore {
               row = nextImage.get(imageId, sliceId, revision);
             }
           }
-          db.exec(`CREATE INDEX records_scope_revision ON records(image_id,kind,revision DESC);
-            CREATE INDEX loaded_images_revision ON loaded_images(image_id,revision DESC);
-            CREATE TABLE analysis_reuse(scope TEXT NOT NULL, revision INTEGER NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(scope,revision DESC,artifact_id)) STRICT;`);
+          if (version < 5)
+            db.exec(`CREATE INDEX records_scope_revision ON records(image_id,kind,revision DESC);
+              CREATE INDEX loaded_images_revision ON loaded_images(image_id,revision DESC);
+              CREATE TABLE analysis_reuse(scope TEXT NOT NULL, revision INTEGER NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(scope,revision DESC,artifact_id)) STRICT;`);
+          if (version < 6) db.exec(NATIVE_SUMMARIES_TABLE);
           db.exec(`PRAGMA user_version=${STORE_SCHEMA_VERSION}; COMMIT;`);
         } catch (error) {
           db.exec('ROLLBACK');
@@ -354,7 +415,7 @@ export class SqliteProjectStore implements ProjectStore {
       }
       directory(join(root, 'images'), mode === 'create');
       directory(join(root, 'artifacts'), mode === 'create');
-      return new SqliteProjectStore(root, db);
+      return new SqliteProjectStore(root, db, options.native_summary_bytes);
     } catch (error) {
       db.close();
       throw error;
@@ -1293,6 +1354,7 @@ export class SqliteProjectStore implements ProjectStore {
         artifacts: [artifact],
         published_revision: current,
       });
+      this.#writeNativeSummaries();
       this.#db.exec('COMMIT');
     } catch (error) {
       this.#db.exec('ROLLBACK');
@@ -1302,17 +1364,46 @@ export class SqliteProjectStore implements ProjectStore {
     return { state: 'published', artifact };
   }
 
+  publishTransientArtifact(input: { media_type: string; bytes: Uint8Array }): Artifact {
+    const current = this.#current();
+    if (input.bytes.length > MAX_ARTIFACT_BYTES)
+      fail('resource_limit', 'Artifact exceeds 64 MiB limit');
+    const artifact: Artifact = {
+      id: newIdentity('artifact'),
+      project_id: this.project_id,
+      revision: current,
+      media_type: input.media_type,
+      size: BigInt(input.bytes.length),
+      sha256: contentHash(input.bytes),
+      schema_version: SCHEMA_VERSION,
+    };
+    encodeArtifact(artifact);
+    this.#transientArtifacts.set(artifact.id, { artifact, bytes: input.bytes });
+    this.#transientBytes += input.bytes.length;
+    // Oldest first, never the artifact just published.
+    for (const [id, old] of this.#transientArtifacts) {
+      if (this.#transientBytes <= MAX_TRANSIENT_ARTIFACT_BYTES || id === artifact.id) break;
+      this.#transientArtifacts.delete(id);
+      this.#transientBytes -= old.bytes.length;
+    }
+    return artifact;
+  }
+
   readArtifactBytes(input: Artifact): Uint8Array {
     this.#revision(input.revision);
     encodeArtifact(input);
     if (input.project_id !== this.project_id)
       fail('permission_denied', 'Artifact belongs to another project');
-    const row = this.#prepare('SELECT payload FROM artifacts WHERE id=?').get(input.id);
-    if (!row) fail('not_found', 'Artifact does not exist');
-    const artifact = decodeStored<Artifact>(row['payload']);
+    const transient = this.#transientArtifacts.get(input.id);
+    const row = transient
+      ? undefined
+      : this.#prepare('SELECT payload FROM artifacts WHERE id=?').get(input.id);
+    if (!transient && !row) fail('not_found', 'Artifact does not exist');
+    const artifact = transient?.artifact ?? decodeStored<Artifact>(row!['payload']);
     encodeArtifact(artifact);
     if (fingerprint(encodeArtifact(input)) !== fingerprint(encodeArtifact(artifact)))
       fail('invalid_input', 'Artifact handle does not match published metadata');
+    if (transient) return transient.bytes;
     const bytes = checkedFile(
       this.#storagePath('artifacts', artifactIdSchema.parse(artifact.id)),
       MAX_ARTIFACT_BYTES,
@@ -1329,9 +1420,12 @@ export class SqliteProjectStore implements ProjectStore {
     this.#revision(args.revision);
     if (args.project_id !== this.project_id)
       fail('permission_denied', 'Artifact belongs to another project');
-    const row = this.#prepare('SELECT payload FROM artifacts WHERE id=?').get(args.artifact_id);
-    if (!row) fail('not_found', 'Artifact does not exist');
-    const artifact = decodeStored<Artifact>(row['payload']);
+    const transient = this.#transientArtifacts.get(args.artifact_id);
+    const row = transient
+      ? undefined
+      : this.#prepare('SELECT payload FROM artifacts WHERE id=?').get(args.artifact_id);
+    if (!transient && !row) fail('not_found', 'Artifact does not exist');
+    const artifact = transient?.artifact ?? decodeStored<Artifact>(row!['payload']);
     encodeArtifact(artifact);
     if (artifact.revision !== args.revision)
       fail('stale_revision', 'Artifact belongs to another revision');
@@ -1345,6 +1439,150 @@ export class SqliteProjectStore implements ProjectStore {
       bytes_hex: Buffer.from(bytes.subarray(Number(offset), end)).toString('hex'),
       next_offset: end < bytes.length ? `0x${end.toString(16)}` : null,
     });
+  }
+
+  /** Inside an open transaction: write every queued summary of the current revision, drop those
+   * of superseded revisions (never reusable: their scope names the revision) and evict
+   * deterministically past the byte cap, oldest revision then oldest write first. Failure to
+   * write leaves the enclosing transaction intact. */
+  #writeNativeSummaries(): void {
+    if (this.#pendingSummaries.size === 0) return;
+    const current = this.#current();
+    const rows = [...this.#pendingSummaries.values()].filter((row) => row.revision === current);
+    this.#pendingSummaries.clear();
+    this.#pendingSummaryBytes = 0;
+    if (rows.length === 0) return;
+    this.#db.exec('SAVEPOINT native_summaries');
+    try {
+      this.#prepare('DELETE FROM native_summaries WHERE revision<?').run(current);
+      let seq = numberField(
+        this.#prepare('SELECT COALESCE(MAX(seq),0) AS seq FROM native_summaries').get(),
+        'seq',
+      );
+      const insert = this.#prepare(
+        'INSERT OR REPLACE INTO native_summaries(scope,function_id,revision,seq,allowance,work,bytes,digest,payload) VALUES (?,?,?,?,?,?,?,?,?)',
+      );
+      for (const row of rows)
+        insert.run(
+          row.scope,
+          row.function_id,
+          row.revision,
+          ++seq,
+          row.allowance,
+          row.work,
+          row.payload.length,
+          row.digest,
+          row.payload,
+        );
+      let total = numberField(
+        this.#prepare('SELECT COALESCE(SUM(bytes),0) AS total FROM native_summaries').get(),
+        'total',
+      );
+      if (total > this.#summaryCap) {
+        const oldest = this.#prepare(
+          'SELECT scope,function_id,bytes FROM native_summaries ORDER BY revision,seq LIMIT 64',
+        );
+        const drop = this.#prepare('DELETE FROM native_summaries WHERE scope=? AND function_id=?');
+        while (total > this.#summaryCap) {
+          const victims = oldest.all();
+          if (victims.length === 0) break;
+          for (const victim of victims) {
+            if (total <= this.#summaryCap) break;
+            drop.run(stringField(victim, 'scope'), stringField(victim, 'function_id'));
+            total -= numberField(victim, 'bytes');
+          }
+        }
+      }
+      this.#db.exec('RELEASE native_summaries');
+    } catch {
+      this.#db.exec('ROLLBACK TO native_summaries; RELEASE native_summaries');
+    }
+  }
+
+  readNativeSummary(scope: string, functionId: string): NativeSummaryRow | null {
+    this.#current();
+    const row = this.#prepare(
+      'SELECT revision,allowance,work,digest,payload FROM native_summaries WHERE scope=? AND function_id=?',
+    ).get(scope, functionId);
+    if (!row) return null;
+    try {
+      const revision = numberField(row, 'revision'),
+        payload = row['payload'];
+      if (
+        !(payload instanceof Uint8Array) ||
+        summaryDigest(scope, functionId, revision, payload) !== row['digest']
+      )
+        return null;
+      return {
+        scope,
+        function_id: functionId,
+        revision,
+        allowance: numberField(row, 'allowance'),
+        work: numberField(row, 'work'),
+        value: decodeStoredGraph(
+          brotliDecompressSync(payload, { maxOutputLength: MAX_GRAPH_BYTES }),
+        ),
+      };
+    } catch {
+      // Undecodable content is a miss, never a served summary; the next preparation replaces it.
+      return null;
+    }
+  }
+
+  queueNativeSummary(row: NativeSummaryRow): boolean {
+    const current = this.#current();
+    if (
+      row.scope.length < 1 ||
+      row.scope.length > 256 ||
+      row.revision !== current ||
+      !Number.isSafeInteger(row.allowance) ||
+      row.allowance < 0 ||
+      !Number.isSafeInteger(row.work) ||
+      row.work < 0
+    )
+      return false;
+    entityIdSchema.parse(row.function_id);
+    let payload: Uint8Array;
+    try {
+      const encoded = encodeStoredGraph(row.value);
+      payload = brotliCompressSync(encoded, {
+        params: {
+          [zlib.BROTLI_PARAM_QUALITY]: 4,
+          [zlib.BROTLI_PARAM_SIZE_HINT]: encoded.length,
+        },
+      });
+    } catch {
+      return false;
+    }
+    if (payload.length > Math.min(this.#summaryCap, MAX_NATIVE_SUMMARY_ROW_BYTES)) return false;
+    const key = `${row.scope}\0${row.function_id}`;
+    const prior = this.#pendingSummaries.get(key);
+    if (prior) this.#pendingSummaryBytes -= prior.payload.length;
+    this.#pendingSummaries.set(key, {
+      scope: row.scope,
+      function_id: row.function_id,
+      revision: row.revision,
+      allowance: row.allowance,
+      work: row.work,
+      digest: summaryDigest(row.scope, row.function_id, row.revision, payload),
+      payload,
+    });
+    this.#pendingSummaryBytes += payload.length;
+    if (this.#pendingSummaryBytes > MAX_PENDING_SUMMARY_BYTES) this.flushNativeSummaries();
+    return true;
+  }
+
+  flushNativeSummaries(): void {
+    if (this.#pendingSummaries.size === 0 || this.#db.isTransaction) return;
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      this.#writeNativeSummaries();
+      this.#db.exec('COMMIT');
+    } catch {
+      this.#db.exec('ROLLBACK');
+      this.#pendingSummaries.clear();
+      this.#pendingSummaryBytes = 0;
+    }
   }
 
   saveJob(job: Job): void {
@@ -1424,10 +1662,13 @@ export class SqliteProjectStore implements ProjectStore {
   async close(): Promise<void> {
     if (this.#closed) return;
     if (this.#transaction) fail('invalid_input', 'Cannot close a project inside a transaction');
+    this.flushNativeSummaries();
     this.#db.close();
     this.#closed = true;
     this.#loadedImages.clear();
     this.#loadedImageBytes = 0;
+    this.#transientArtifacts.clear();
+    this.#transientBytes = 0;
   }
 }
 

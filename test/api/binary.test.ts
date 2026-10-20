@@ -38,6 +38,41 @@ function emission(result: ToolResult<'function_decompile'>) {
 }
 
 test(
+  'openBinary({ analysisCache: false }) recomputes every decompilation and persists no derived analysis',
+  { timeout: 60000 },
+  async (t) => {
+    const { input, sessions } = await setup(t);
+    const session = await openBinary(input, { analysisCache: false });
+    sessions.push(session);
+    const selector = { address: { space: 'va', value: '0x100000574' } } as const;
+    const first = await session.decompile(selector);
+    const second = await session.decompile(selector);
+    assert.equal(emission(first).cache, 'computed');
+    assert.equal(emission(second).cache, 'computed');
+    assert.equal(emission(second).emission.text, emission(first).emission.text);
+    const { projectPath } = session;
+    await session.close();
+    // A cached session on the same project computes (nothing was published), then hits.
+    const cached = await openBinary(input);
+    sessions.push(cached);
+    const computed = await cached.decompile(selector);
+    assert.equal(emission(computed).cache, 'computed');
+    assert.equal(emission(computed).emission.text, emission(first).emission.text);
+    assert.equal(emission(await cached.decompile(selector)).cache, 'hit');
+    await cached.close();
+    const store = SqliteProjectStore.open(projectPath, 'resume');
+    try {
+      assert.equal(
+        store.listJobs({ limit: 1000 }).items.filter((job) => job.artifacts.length > 0).length,
+        2,
+      );
+    } finally {
+      await store.close();
+    }
+  },
+);
+
+test(
   'sidecar resumes imports and analysis across owners, while changed bytes cannot return stale analysis',
   { timeout: 60000 },
   async (t) => {

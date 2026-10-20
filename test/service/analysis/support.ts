@@ -92,6 +92,8 @@ export async function project(t: TestContext, fixture: string | Uint8Array) {
     function_id: string,
     overrides: Partial<ToolInput<'function_decompile'>> = {},
     remaining: number = DEFAULT_BUDGET.deadline_ms,
+    /** `analysis_cache: false` disables caching; `phases` collects every progress phase. */
+    extra: { analysis_cache?: boolean; phases?: string[] } = {},
   ) {
     const args = toolSchemas.function_decompile.input.parse({
       project_id: state.store.project_id,
@@ -103,7 +105,13 @@ export async function project(t: TestContext, fixture: string | Uint8Array) {
     const result = await executeDecompilation(args, {
       store: state.store,
       job_id,
-      context: createOperationContext({ budget: { ...args.budget, deadline_ms: remaining } }),
+      ...(extra.analysis_cache === undefined ? {} : { analysis_cache: extra.analysis_cache }),
+      context: createOperationContext({
+        budget: { ...args.budget, deadline_ms: remaining },
+        ...(extra.phases === undefined
+          ? {}
+          : { onProgress: (phase: string) => void extra.phases!.push(phase) }),
+      }),
     });
     return { result, job_id, args };
   }
@@ -147,5 +155,5 @@ export async function project(t: TestContext, fixture: string | Uint8Array) {
     await state.store.close();
     state.store = SqliteProjectStore.open(path, 'resume');
   }
-  return { image, state, functions, job, decompile, annotate, payload, reopen };
+  return { image, state, functions, job, decompile, annotate, payload, reopen, path };
 }

@@ -374,6 +374,18 @@ export interface StoreTransaction {
   setAnnotation(annotation: Annotation): void;
   removeAnnotation(id: string, actor: AnnotationActor): void;
 }
+/** One persisted prepared-callee summary. `scope` is the caller's opaque identity of the image
+ * revision, component versions and supplied native types; `value` is a plain domain graph the
+ * store encodes compactly. `allowance`/`work` are the reuse contract's numbers, never derived
+ * by the store. */
+export interface NativeSummaryRow {
+  readonly scope: string;
+  readonly function_id: string;
+  readonly revision: number;
+  readonly allowance: number;
+  readonly work: number;
+  readonly value: unknown;
+}
 export interface ProjectStore {
   readonly project_id: string;
   snapshot(revision?: number): ProjectSnapshot;
@@ -448,6 +460,21 @@ export interface ProjectStore {
   /** Trusted worker-only whole-artifact read: verifies the exact handle and hashes once,
    * avoiding hex round-trips and repeated full-file hashing for analysis caches. */
   readArtifactBytes(artifact: Artifact): Uint8Array;
+  /** Delivery-only artifact for an analysis computed with analysis caching disabled: held in
+   * memory for this connection (the newest within a bound), readable like a published
+   * artifact, indexed nowhere and never written to the project. */
+  publishTransientArtifact(input: {
+    readonly media_type: string;
+    readonly bytes: Uint8Array;
+  }): Artifact;
+  /** One persisted prepared-callee summary, or null when absent, evicted or not authentic:
+   * a row whose identity or content digest does not match is never returned. */
+  readNativeSummary(scope: string, functionId: string): NativeSummaryRow | null;
+  /** Queue a summary for the next batched write (the next artifact publication, an explicit
+   * flush, or close). Returns false when it cannot be stored (not encodable, larger than the
+   * per-project byte cap). Best effort: a cache write never fails a request. */
+  queueNativeSummary(row: NativeSummaryRow): boolean;
+  flushNativeSummaries(): void;
   saveJob(job: Job): void;
   readJob(jobId: string): Job | null;
   /** Live job lifecycle view in stable ID order; cursors bind the current project revision. */

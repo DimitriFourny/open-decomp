@@ -378,7 +378,9 @@ export function createMcpServer(service: QueryService, policy: McpServerPolicy =
         let text = JSON.stringify(result);
         if (
           name === 'function_decompile' &&
-          Buffer.byteLength(text, 'utf8') > INLINE_ANALYSIS_BYTES
+          Buffer.byteLength(text, 'utf8') > INLINE_ANALYSIS_BYTES &&
+          // Without analysis caching nothing is published, so there is no artifact to refer to.
+          (result as ToolResult<'function_decompile'>).artifacts.length > 0
         ) {
           result = projectDecompilationArtifactResult(result as ToolResult<'function_decompile'>);
           result = validateToolResponse(name, result, args);

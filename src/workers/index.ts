@@ -8,6 +8,7 @@ import {
   budgetSchema,
   decodeDiagnostic,
   newIdentity,
+  markSchemaValidated,
   toolSchemas,
   type Diagnostic,
   type WireJob,
@@ -45,6 +46,10 @@ export interface WorkerPoolOptions {
   readonly authorized_roots: readonly string[];
   readonly max_workers?: number;
   readonly max_queued?: number;
+  /** False disables every derived-analysis read and write in the project children (published
+   * results, reuse candidates, persisted and in-process prepared units); default true. Import,
+   * indexes and annotations still persist. */
+  readonly analysis_cache?: boolean;
   readonly startup_timeout_ms?: number;
   readonly cancel_grace_ms?: number;
   /** Trusted, statically registered child entry point; defaults to workers/entry.js (or .ts under tsx). */
@@ -299,6 +304,7 @@ export class ProjectWorker {
         path: this.path,
         mode,
         max_queued: this.#pool.max_queued,
+        analysis_cache: this.#options.analysis_cache ?? true,
         ...(interrupted ? { interrupted } : {}),
       });
       if (event.kind !== 'opened')
@@ -435,7 +441,10 @@ export class ProjectWorker {
               };
             }
             result = mutation;
-          } else result = toolSchemas[job.request.operation].output.parse(event.result);
+          } else
+            result = markSchemaValidated(
+              toolSchemas[job.request.operation].output.parse(event.result),
+            );
         }
         if (job.request.kind === 'import' && result !== undefined)
           this.#snapshot = snapshotSchema.parse(result);

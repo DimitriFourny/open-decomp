@@ -17,6 +17,7 @@ import {
   encodeDiagnostic,
   encodeJob,
   imageIdentity,
+  isSchemaValidated,
   type Diagnostic,
   type Job,
   type OperationContext,
@@ -61,6 +62,8 @@ export interface WorkerHandler {
       readonly context: OperationContext;
       readonly job_id: string;
       readonly max_result_bytes?: number;
+      /** False: no derived-analysis reads or writes (host setting, not a request option). */
+      readonly analysis_cache?: boolean;
     },
   ): Promise<ToolResult<K>>;
   /** Preparation runs before publication. The final image report and navigation
@@ -115,6 +118,7 @@ export interface WorkerRuntimeObserver {
 export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRuntimeObserver): void {
   let store: SqliteProjectStore | undefined;
   let maxQueued = 0;
+  let analysisCache = true;
   let stopping = false;
   const admitted = new Map<string, { request: WorkRequest; deadline: number }>();
   let chain = Promise.resolve();
@@ -169,6 +173,7 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
         fail('permission_denied', 'Authorized project path changed before child open');
       store = SqliteProjectStore.open(command.path, command.mode);
       maxQueued = command.max_queued;
+      analysisCache = command.analysis_cache;
       const recoveryContext = createOperationContext();
       let cursor: string | undefined;
       do {
@@ -439,15 +444,22 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
             store: db,
             context,
             job_id: job.id,
+            ...(analysisCache ? {} : { analysis_cache: false }),
             ...(work.request.max_result_bytes === undefined
               ? {}
               : { max_result_bytes: work.request.max_result_bytes }),
           });
-          result = toolSchemas[work.request.operation].output.parse(result);
-          frame(
-            result,
-            Math.min(work.request.budget.output_bytes, work.request.max_result_bytes ?? Infinity),
-          );
+          // Prepared callee summaries this request queued and no publication wrote.
+          db.flushNativeSummaries();
+          // A handler that parsed and size-checked its result under these very limits
+          // (queryWorkerHandler) has marked it; do not repeat the parse and serialization.
+          if (!isSchemaValidated(result)) {
+            result = toolSchemas[work.request.operation].output.parse(result);
+            frame(
+              result,
+              Math.min(work.request.budget.output_bytes, work.request.max_result_bytes ?? Infinity),
+            );
+          }
           const persisted = db.readJob(job.id);
           if (persisted && terminal(persisted)) job = persisted;
           else {

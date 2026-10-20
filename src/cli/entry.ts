@@ -6,19 +6,21 @@ import { runHttpCli } from '../mcp/http/cli.js';
 const VERSION = '0.1.0';
 const HELP = `Usage: open-decomp <command>
 
-  functions BINARY [--name TEXT] [--json] [--cache PATH] [--slice ID]
+  functions BINARY [--name TEXT] [--json] [--cache PATH] [--slice ID] [--no-analysis-cache]
   decompile BINARY (--function NAME|--id ID|--address SPACE:0x...)
                    [--language c-like|python-like] [--view source|checked] [--json]
-                   [--cache PATH] [--slice ID]
+                   [--cache PATH] [--slice ID] [--no-analysis-cache]
   export BINARY --out DIR [--language c-like|python-like] [--jobs N] [--name TEXT]
-                 [--cache PATH] [--slice ID]
+                 [--cache PATH] [--slice ID] [--no-analysis-cache]
                  Write every function as OUT/functions/NAME@0xADDR.c plus index/strings/imports TSVs
                  and OUT/types.h
-  types BINARY [--json] [--cache PATH] [--slice ID]
+  types BINARY [--json] [--cache PATH] [--slice ID] [--no-analysis-cache]
   functions --help / decompile --help / export --help / types --help    Show command-specific options
 
 Analysis reuses persistent SQLite projects in INPUT.open-decomp by default;
 --cache PATH overrides the cache root. Content and selected slice identify projects.
+--no-analysis-cache reads and writes no derived analysis (published results, reuse candidates,
+persisted callee summaries); the import and its indexes still persist. Output is identical.
 
 Serve MCP in the foreground:
   mcp start --root PATH [--root PATH ...] [options]

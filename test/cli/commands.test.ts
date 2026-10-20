@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { copyFile, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { FunctionSelectionError, openBinary } from '../../src/api/index.js';
 import { toolSchemas } from '../../src/core/index.js';
@@ -197,6 +198,75 @@ test(
     const cached = JSON.parse(cachedRun.stdout) as DecompileOutput;
     assert.ok('data' in cached.result && cached.result.data.cache === 'hit');
     assert.equal(cached.reused, true);
+  },
+);
+
+test(
+  '--no-analysis-cache decompiles identically and leaves no derived analysis in the project',
+  { timeout: 240_000 },
+  async (t) => {
+    const root = await directory(t),
+      binary = join(root, 'corpus');
+    await copyFile(resolve('fixtures/bin/macho-arm64-symbols'), binary);
+    const decompile = async (cache: string, extra: readonly string[] = []) => {
+      const output = await run([
+        'decompile',
+        binary,
+        '--function',
+        'fixture_arithmetic',
+        '--cache',
+        cache,
+        '--json',
+        ...extra,
+      ]);
+      assert.ok(output.code === 0 || output.code === 2, output.stderr);
+      return JSON.parse(output.stdout) as DecompileOutput;
+    };
+    const text = (output: DecompileOutput): string => {
+      assert.ok('data' in output.result && output.result.data.delivery === 'inline');
+      return 'data' in output.result && output.result.data.delivery === 'inline'
+        ? output.result.data.emission.text
+        : '';
+    };
+    const cached = await decompile(join(root, 'cached'));
+    const cache = join(root, 'uncached');
+    const first = await decompile(cache, ['--no-analysis-cache']);
+    const second = await decompile(cache, ['--no-analysis-cache']);
+    assert.equal(text(first), text(cached));
+    assert.equal(first.result.state, cached.result.state);
+    assert.deepEqual(first.result.diagnostics, cached.result.diagnostics);
+    // The second identical run is computed again: no stored result was published or read.
+    assert.ok('data' in second.result && second.result.data.cache === 'computed');
+    assert.ok('data' in first.result && first.result.data.cache === 'computed');
+    assert.equal(second.reused, true, 'the import itself still persists');
+    for (const project of await readdir(cache)) {
+      const db = new DatabaseSync(join(cache, project, 'project.sqlite'), { readOnly: true });
+      try {
+        for (const table of [
+          'artifacts',
+          'analysis_artifacts',
+          'analysis_reuse',
+          'native_summaries',
+        ])
+          assert.deepEqual(
+            { ...db.prepare(`SELECT count(*) AS n FROM ${table}`).get() },
+            { n: 0 },
+            table,
+          );
+        assert.ok(
+          (db.prepare('SELECT count(*) AS n FROM records').get()!['n'] as number) > 0,
+          'the import still persists its records',
+        );
+      } finally {
+        db.close();
+      }
+      assert.deepEqual(await readdir(join(cache, project, 'artifacts')), []);
+    }
+    const duplicate = await run(['types', binary, '--no-analysis-cache', '--no-analysis-cache']);
+    assert.equal(duplicate.code, 1);
+    assert.ok(duplicate.stderr.includes('Duplicate option --no-analysis-cache'), duplicate.stderr);
+    const help = await run(['decompile', '--help']);
+    assert.ok(help.stdout.includes('--no-analysis-cache'));
   },
 );
 

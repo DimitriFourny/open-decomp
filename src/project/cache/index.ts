@@ -5,6 +5,7 @@ import {
   cacheIdentityKey,
   cacheIdentitySchema,
   contentHash,
+  type CanonicalValue,
   decodeEvidence,
   decodeTypeDefinition,
   encodeArtifact,
@@ -16,6 +17,7 @@ import {
   evidenceSchema,
   fingerprint,
   functionDecompileResultSchema,
+  markSchemaValidated,
   imageIdSchema,
   newIdentity,
   projectDecompilationArtifactResult,
@@ -101,6 +103,16 @@ const payloadSchema = z.strictObject({
   dependencies: analysisReadsetSchema.optional(),
 });
 
+// Digests of immutable parts of parsed identities, results and loaded images, by object. A
+// stored payload and its image are checked against each other on every hit; hash each once.
+const objectFingerprints = new WeakMap<object, string>();
+function objectFingerprint(value: object): string {
+  let digest = objectFingerprints.get(value);
+  if (digest === undefined)
+    objectFingerprints.set(value, (digest = fingerprint(value as CanonicalValue)));
+  return digest;
+}
+
 function fail(
   code: 'invalid_input' | 'stale_revision' | 'cancelled' | 'resource_limit',
   message: string,
@@ -132,12 +144,15 @@ function activeJob(
   return job;
 }
 
-/** Validate both the durable input scope and every semantic dependency before publication/use. */
+/** Validate both the durable input scope and every semantic dependency before publication/use.
+ * `parsed`: the computation is the output of `payloadSchema.parse` (result, catalog and readset
+ * already schema-validated; the catalog decoded once), so those parses are not repeated. */
 function validateComputation(
   store: ProjectStore,
   identity: CacheIdentity,
   computation: AnalysisComputation,
   context: OperationContext,
+  parsed = false,
 ): AnalysisComputation {
   context.checkpoint(1);
   const revision = identity.annotation_revision;
@@ -149,7 +164,7 @@ function validateComputation(
   );
   if (!imported) fail('invalid_input', 'Analysis image does not belong to the requested snapshot');
   const image = store.readLoadedImage(imported.image_id, identity.slice_id, revision);
-  if (fingerprint(image.target) !== fingerprint(identity.target))
+  if (objectFingerprint(image.target) !== objectFingerprint(identity.target))
     fail('invalid_input', 'Analysis target does not match the imported image');
   const functions = store.queryRecords({
     revision,
@@ -160,7 +175,9 @@ function validateComputation(
   });
   if (functions.items.length !== 1)
     fail('invalid_input', 'Analysis function is absent from the requested snapshot');
-  const result = functionDecompileResultSchema.parse(computation.result);
+  const result = parsed
+    ? (computation.result as StoredDecompilation)
+    : functionDecompileResultSchema.parse(computation.result);
   if (
     (result.state !== 'complete' && result.state !== 'partial') ||
     result.data.delivery !== 'inline' ||
@@ -172,9 +189,9 @@ function validateComputation(
     result.project_id !== store.project_id ||
     result.revision !== revision ||
     result.artifacts.length !== 0 ||
-    fingerprint(result.versions) !== fingerprint(identity.versions) ||
-    fingerprint(result.options) !== fingerprint(identity.options) ||
-    fingerprint(result.budget) !== fingerprint(identity.budget)
+    objectFingerprint(result.versions) !== objectFingerprint(identity.versions) ||
+    objectFingerprint(result.options) !== objectFingerprint(identity.options) ||
+    objectFingerprint(result.budget) !== objectFingerprint(identity.budget)
   )
     fail('invalid_input', 'Stored analysis metadata does not match its cache identity');
   if (
@@ -183,25 +200,29 @@ function validateComputation(
   ) {
     fail('invalid_input', 'Stored emission dialect/version does not match its cache identity');
   }
-  const wireCatalog = catalogSchema.parse({
-    subjects: computation.catalog.subjects,
-    types: computation.catalog.types.map((record) => ({
-      id: record.id,
-      definition: encodeTypeDefinition(record.definition),
-      source: record.source,
-      status: record.status,
-      evidence_ids: record.evidence_ids,
-    })),
-    evidence: computation.catalog.evidence.map(encodeEvidence),
-  });
-  const catalog: AnalysisCatalogData = {
-    subjects: wireCatalog.subjects,
-    types: wireCatalog.types.map((record) => ({
-      ...record,
-      definition: decodeTypeDefinition(record.definition),
-    })),
-    evidence: wireCatalog.evidence.map(decodeEvidence),
-  };
+  let catalog: AnalysisCatalogData;
+  if (parsed) catalog = computation.catalog;
+  else {
+    const wireCatalog = catalogSchema.parse({
+      subjects: computation.catalog.subjects,
+      types: computation.catalog.types.map((record) => ({
+        id: record.id,
+        definition: encodeTypeDefinition(record.definition),
+        source: record.source,
+        status: record.status,
+        evidence_ids: record.evidence_ids,
+      })),
+      evidence: computation.catalog.evidence.map(encodeEvidence),
+    });
+    catalog = {
+      subjects: wireCatalog.subjects,
+      types: wireCatalog.types.map((record) => ({
+        ...record,
+        definition: decodeTypeDefinition(record.definition),
+      })),
+      evidence: wireCatalog.evidence.map(decodeEvidence),
+    };
+  }
   createTrustedSemanticCatalog(store, revision, catalog, context, {
     image_id: image.id,
     slice_id: identity.slice_id,
@@ -273,8 +294,58 @@ function validateComputation(
     catalog: { ...catalog, evidence: [...proofs.values()] },
     ...(computation.dependencies === undefined
       ? {}
-      : { dependencies: analysisReadsetSchema.parse(computation.dependencies) }),
+      : {
+          dependencies: parsed
+            ? computation.dependencies
+            : analysisReadsetSchema.parse(computation.dependencies),
+        }),
   };
+}
+
+interface ParsedPayload {
+  readonly size: number;
+  readonly wire: z.output<typeof payloadSchema>;
+  readonly catalog: AnalysisCatalogData;
+}
+// Payloads parsed in this process by the digest of their (store-verified) bytes. Parsing is a
+// pure function of the bytes; every store-dependent validation still runs on each use. Least
+// recently used first, bounded by source bytes.
+const parsedPayloads = new Map<string, ParsedPayload>();
+let parsedPayloadBytes = 0;
+const MAX_PARSED_PAYLOAD_BYTES = 16 * 1024 * 1024;
+
+function parsePayload(sha256: string, bytes: Uint8Array): ParsedPayload {
+  const known = parsedPayloads.get(sha256);
+  if (known) {
+    parsedPayloads.delete(sha256);
+    parsedPayloads.set(sha256, known);
+    return known;
+  }
+  const wire = payloadSchema.parse(
+    JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)),
+  );
+  const parsed: ParsedPayload = {
+    size: bytes.length,
+    wire,
+    catalog: {
+      subjects: wire.catalog.subjects,
+      types: wire.catalog.types.map((record) => ({
+        ...record,
+        definition: decodeTypeDefinition(record.definition),
+      })),
+      evidence: wire.catalog.evidence.map(decodeEvidence),
+    },
+  };
+  if (parsed.size <= MAX_PARSED_PAYLOAD_BYTES) {
+    for (const [key, old] of parsedPayloads) {
+      if (parsedPayloadBytes + parsed.size <= MAX_PARSED_PAYLOAD_BYTES) break;
+      parsedPayloads.delete(key);
+      parsedPayloadBytes -= old.size;
+    }
+    parsedPayloads.set(sha256, parsed);
+    parsedPayloadBytes += parsed.size;
+  }
+  return parsed;
 }
 
 function loadPayload(
@@ -283,6 +354,9 @@ function loadPayload(
   context: OperationContext,
   expected?: CacheIdentity,
   historical = false,
+  /** The artifact `store.findArtifact(expected)` returned: it is the one the payload's own
+   * identity indexes (their keys are checked equal below), so it is not looked up again. */
+  located?: Artifact,
 ): AnalysisArtifactPayload {
   context.checkpoint(1);
   if (
@@ -293,36 +367,30 @@ function loadPayload(
     fail('invalid_input', 'Invalid analysis artifact metadata');
   const bytes = store.readArtifactBytes(artifact);
   context.checkpoint(Math.ceil(bytes.length / 1024));
-  const wire = payloadSchema.parse(
-    JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)),
-  );
+  const { wire, catalog } = parsePayload(artifact.sha256, bytes);
   if (
     wire.identity.annotation_revision !== artifact.revision ||
     wire.identity.evidence_revision !== artifact.revision ||
     (expected && cacheIdentityKey(wire.identity) !== cacheIdentityKey(expected))
   )
     fail('invalid_input', 'Analysis artifact identity mismatch');
-  const indexed = historical
-    ? store.findHistoricalArtifact(wire.identity)
-    : store.findArtifact(wire.identity);
-  if (!indexed || fingerprint(encodeArtifact(indexed)) !== fingerprint(encodeArtifact(artifact)))
-    fail('invalid_input', 'Analysis payload does not match its published cache key');
+  if (located === undefined || located !== artifact || expected === undefined) {
+    const indexed = historical
+      ? store.findHistoricalArtifact(wire.identity)
+      : store.findArtifact(wire.identity);
+    if (!indexed || fingerprint(encodeArtifact(indexed)) !== fingerprint(encodeArtifact(artifact)))
+      fail('invalid_input', 'Analysis payload does not match its published cache key');
+  }
   const computation = validateComputation(
     store,
     wire.identity,
     {
       result: wire.result as StoredDecompilation,
       ...(wire.dependencies === undefined ? {} : { dependencies: wire.dependencies }),
-      catalog: {
-        subjects: wire.catalog.subjects,
-        types: wire.catalog.types.map((record) => ({
-          ...record,
-          definition: decodeTypeDefinition(record.definition),
-        })),
-        evidence: wire.catalog.evidence.map(decodeEvidence),
-      },
+      catalog,
     },
     context,
+    true,
   );
   return { format_version: ANALYSIS_ARTIFACT_VERSION, identity: wire.identity, ...computation };
 }
@@ -343,13 +411,19 @@ function delivery(
   cache: 'hit' | 'computed',
   limit: number,
   preference: 'auto' | 'artifact',
+  /** `result` is a stored, schema-validated inline result: wrapping it in a handle needs no
+   * second full parse. */
+  validated = false,
 ): ToolResult<'function_decompile'> {
   const handle = encodeArtifact(artifact);
-  const inline = functionDecompileResultSchema.parse({
+  const wrapped = {
     ...result,
     artifacts: [handle],
     data: { ...result.data, cache },
-  });
+  };
+  const inline = validated
+    ? (wrapped as ToolResult<'function_decompile'>)
+    : functionDecompileResultSchema.parse(wrapped);
   if (preference === 'artifact') {
     const requested = projectDecompilationArtifactResult(inline, 'requested');
     if (Buffer.byteLength(JSON.stringify(requested)) > limit)
@@ -372,6 +446,9 @@ export async function runCachedDecompilation(
     readonly inline_limit: number;
     readonly delivery?: 'auto' | 'artifact';
     readonly dependencies?: AnalysisDependencyCollector;
+    /** False: read and reuse no stored result and publish none (a transient artifact serves any
+     * artifact delivery for this session only). */
+    readonly analysis_cache?: boolean;
   },
   compute: () => AnalysisComputation | Promise<AnalysisComputation>,
 ): Promise<ToolResult<'function_decompile'>> {
@@ -381,10 +458,20 @@ export async function runCachedDecompilation(
     fail('invalid_input', 'Invalid inline output limit');
   const limit = Math.min(input.inline_limit, identity.budget.output_bytes);
   activeJob(store, job_id, identity, context);
-  const existing = store.findArtifact(identity);
+  // Disabled: no stored result is read or reused and nothing is published; the response
+  // is still delivered exactly as a computed one (inline, or by a transient artifact).
+  const enabled = input.analysis_cache !== false;
+  const existing = enabled ? store.findArtifact(identity) : null;
   if (existing) {
-    const payload = loadPayload(store, existing, context, identity);
-    const response = delivery(payload.result, existing, 'hit', limit, input.delivery ?? 'auto');
+    const payload = loadPayload(store, existing, context, identity, false, existing);
+    const response = delivery(
+      payload.result,
+      existing,
+      'hit',
+      limit,
+      input.delivery ?? 'auto',
+      true,
+    );
     const job = activeJob(store, job_id, identity, context);
     store.saveJob({
       ...job,
@@ -393,12 +480,13 @@ export async function runCachedDecompilation(
       artifacts: [existing],
       published_revision: identity.annotation_revision,
     });
-    return response;
+    // Parsed payload, parsed handle and size already bounded: complete as it stands.
+    return markSchemaValidated(response);
   }
   let reused = false;
   let candidate: AnalysisComputation | undefined;
   const dependencyStore = input.dependencies?.source ?? store;
-  for (const artifact of store.findReuseCandidates(identity, 8)) {
+  for (const artifact of enabled ? store.findReuseCandidates(identity, 8) : []) {
     activeJob(store, job_id, identity, context);
     const payload = loadPayload(dependencyStore, artifact, context, undefined, true);
     if (analysisReuseScope(payload.identity) !== analysisReuseScope(identity))
@@ -423,7 +511,7 @@ export async function runCachedDecompilation(
     break;
   }
   let computation = validateComputation(store, identity, candidate ?? (await compute()), context);
-  if (!reused && input.dependencies !== undefined)
+  if (enabled && !reused && input.dependencies !== undefined)
     computation = { ...computation, dependencies: input.dependencies.finish() };
   if (reused) context.progress('dependency-reuse', 1, 1);
   const serialize = (value: AnalysisComputation): Buffer =>
@@ -484,24 +572,32 @@ export async function runCachedDecompilation(
   );
   if (!('data' in response)) fail('invalid_input', 'Invalid prepared analysis delivery');
   activeJob(store, job_id, identity, context);
-  const publication = await store.publishArtifact({
-    job_id,
-    expected_revision: identity.annotation_revision,
-    media_type: ANALYSIS_ARTIFACT_MEDIA_TYPE,
-    bytes,
-    cache: identity,
-    ...(computation.dependencies === undefined
-      ? {}
-      : { reuse_scope: analysisReuseScope(identity) }),
-    analysis_ids: [
-      ...new Set([
-        identity.function_id,
-        ...computation.catalog.subjects.map((subject) => subject.id),
-        ...computation.catalog.types.map((record) => record.id),
-        ...computation.catalog.evidence.map((proof) => proof.id),
-      ]),
-    ],
-  });
+  const publication = !enabled
+    ? {
+        state: 'published' as const,
+        artifact: store.publishTransientArtifact({
+          media_type: ANALYSIS_ARTIFACT_MEDIA_TYPE,
+          bytes,
+        }),
+      }
+    : await store.publishArtifact({
+        job_id,
+        expected_revision: identity.annotation_revision,
+        media_type: ANALYSIS_ARTIFACT_MEDIA_TYPE,
+        bytes,
+        cache: identity,
+        ...(computation.dependencies === undefined
+          ? {}
+          : { reuse_scope: analysisReuseScope(identity) }),
+        analysis_ids: [
+          ...new Set([
+            identity.function_id,
+            ...computation.catalog.subjects.map((subject) => subject.id),
+            ...computation.catalog.types.map((record) => record.id),
+            ...computation.catalog.evidence.map((proof) => proof.id),
+          ]),
+        ],
+      });
   if (publication.state !== 'published')
     fail(
       publication.state === 'cancelled' ? 'cancelled' : 'stale_revision',

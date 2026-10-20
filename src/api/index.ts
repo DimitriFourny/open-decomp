@@ -46,6 +46,10 @@ export interface OpenBinaryOptions {
   /** Cache root, not a project directory. Defaults to <canonical input>.open-decomp. */
   readonly cachePath?: string;
   readonly sliceId?: string;
+  /** `false` disables analysis caching for this session: no derived analysis (published
+   * results, reuse candidates, persisted or in-process callee summaries) is read or written.
+   * Project import, indexes and annotations still persist. Default `true`. */
+  readonly analysisCache?: boolean;
   readonly budget?: ToolInput<'project_open'>['budget'];
   readonly signal?: AbortSignal;
   readonly onProgress?: (job: WireJob) => void;
@@ -183,6 +187,7 @@ export class BinarySession {
     const service = await QueryService.create({
       authorized_roots: [dirname(inputPath), cachePath],
       max_workers: 1,
+      ...(options.analysisCache === false ? { analysis_cache: false } : {}),
     });
     try {
       options.signal?.throwIfAborted();

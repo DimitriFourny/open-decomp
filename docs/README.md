@@ -30,6 +30,7 @@ open-decomp decompile ./app --function main --json --cache ./analysis-cache
 
 open-decomp export ./app --out ./app-decomp --jobs 4
 open-decomp types ./app > app-types.h
+open-decomp decompile ./app --function main --no-analysis-cache
 
 ```
 
@@ -37,7 +38,7 @@ open-decomp types ./app > app-types.h
 
 ### Export a whole binary as a greppable directory
 
-`export BINARY --out DIR [--language c-like|python-like] [--jobs N] [--name SUBSTRING] [--cache PATH] [--slice ID]` is the fastest way for an agent with file tools to read a binary: one process decompiles every function and writes
+`export BINARY --out DIR [--language c-like|python-like] [--jobs N] [--name SUBSTRING] [--cache PATH] [--slice ID] [--no-analysis-cache]` is the fastest way for an agent with file tools to read a binary: one process decompiles every function and writes
 
 - `DIR/functions/NAME@0xADDR.c` (`.py` for python-like): one header comment (name, address, state and reason, code bytes, caller and callee names; `?` marks an unresolved indirect call) followed by exactly the text `decompile` prints. Names are the C spelling of the native symbol (Mach-O's leading underscore dropped); unnamed functions are `sub_<hex>` (or the import a stub forwards to). Filenames are sanitized and unique.
 - `DIR/functions/NAME@0xADDR.asm`: only for functions with no pseudocode (failed, unsupported, cancelled); the header states why and the body is the compact native disassembly, so no function is missing.
@@ -46,6 +47,8 @@ open-decomp types ./app > app-types.h
 Output order and content are deterministic, re-running overwrites generated files, and the exit status is 0 whenever everything was written; partial and failed functions are rows in `index.tsv`. Native indexes that are incomplete (function discovery and references usually are) are named on stderr and in `README.txt`: caller/callee/referenced-by lists are then lower bounds. `--jobs N` (default `min(4, CPUs/2)`) runs N workers; because a project database has one owner, extra workers analyze private copy-on-write copies of the finished import under the cache root and remove them afterwards, so only the first worker's decompilations are cached for later runs. `--name` limits the export to functions whose name contains the text. SIGINT/SIGTERM stop the export (exit 130/143) before the index files are written.
 
 The default sidecar is **`<canonical binary path>.open-decomp/`**, containing content-addressed SQLite project directories, immutable input snapshots, navigation indexes and analysis artifacts. Unchanged bytes resume the existing project; matching decompilations return cache hits. Each invocation still reads/hashes the binary to validate identity. Changed bytes select a new entry without overwriting earlier investigations. `--cache` overrides the cache root for read-only input locations or centralized storage. There is no silent fallback, automatic eviction or automatic replay of failed imports.
+
+Analysis is cached in the sidecar at two levels, both keyed to the exact project revision, image, target and component versions, and both validated against the project before use: published decompilation results (a repeated request returns a cache hit) and, since storage schema 6, **prepared callee summaries** (`native_summaries`), which let a later process skip re-analyzing callees an earlier process already analyzed. Summaries are capped at 64 MiB per project (compressed; superseded revisions go first, then the oldest write), are written in one batch per request and never on a pure cache hit; see [CORE.md](CORE.md#analysis-cache-and-persisted-callee-summaries). **`--no-analysis-cache`** (`functions`, `decompile`, `export`, `types`) disables both: no published result, reuse candidate or callee summary is read or written, and nothing is reused inside the process either. The import and its indexes still persist, and the pseudocode, state and diagnostics are identical; repeated and cross-process runs are slower (it is not `--cache PATH`, which only moves the sidecar). A result too large for the inline budget is still deliverable by artifact, held in memory for the session only.
 
 Each project has one exclusive owner: close a CLI/API/MCP session before opening the same project elsewhere. The CLI prints the exact project path, which MCP can subsequently resume. Sidecars can contain sensitive target bytes and pseudocode; do not treat them as disposable while another process owns them.
 
@@ -97,13 +100,14 @@ A typical MCP host configuration is below; the outer configuration location/shap
 
 For intended WSL use, the MCP process must execute Linux Node and the installed entry inside WSL, with Linux-visible absolute input/project paths. How an outer Windows MCP host launches WSL is host-specific; the configuration above describes the process inside that Linux environment. Native `C:\\...\\node.exe` launch is not the product execution model.
 
-| CLI option            | Contract                                                                                                     |
-| --------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `--transport stdio`   | Optional explicit stdio selection; stdio is the default for `mcp start`.                                     |
-| `--root PATH`         | Repeatable, at most 64 existing authorized directories; at least one required. No cwd/home root is implicit. |
-| `--max-workers N`     | Persistent project workers, 1–32, default 2. Open projects consume owners; close unused ones.                |
-| `--max-queued N`      | Queued jobs per worker, 0–1,024, default 16.                                                                 |
-| `--help`, `--version` | Print to stderr, not protocol stdout.                                                                        |
+| CLI option            | Contract                                                                                                                                                                                                                                                                                  |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--transport stdio`   | Optional explicit stdio selection; stdio is the default for `mcp start`.                                                                                                                                                                                                                  |
+| `--root PATH`         | Repeatable, at most 64 existing authorized directories; at least one required. No cwd/home root is implicit.                                                                                                                                                                              |
+| `--max-workers N`     | Persistent project workers, 1–32, default 2. Open projects consume owners; close unused ones.                                                                                                                                                                                             |
+| `--max-queued N`      | Queued jobs per worker, 0–1,024, default 16.                                                                                                                                                                                                                                              |
+| `--no-analysis-cache` | Server-wide: no published results, reuse candidates or persisted/in-process callee summaries are read or written. Imports, indexes and annotations still persist; output is identical but repetition is slower. Not a tool-request option. With `--transport http` it follows `--config`. |
+| `--help`, `--version` | Print to stderr, not protocol stdout.                                                                                                                                                                                                                                                     |
 
 For stdio, stdout must remain protocol traffic; help, version and diagnostics use stderr. The SDK owns framing and version negotiation. EOF and catchable termination signals cancel/reap project owners; use `project_close` for an orderly durable close before disconnecting.
 
@@ -236,7 +240,7 @@ Unsupported instructions are not no-ops or invented guaranteed traps. Unknown ef
 
 Close projects and stop the MCP process before backing up the entire project directory (SQLite and project-owned images/artifacts together) or changing application versions. Retain the previous archive/manifest and a pre-upgrade project backup. Install the new reviewed private artifact in a separate application directory, validate its manifest/installed workflow, then change the MCP entry path and resume a copied project. Do not assume an older application can read storage migrated by a newer one; restore the matching backup to roll back.
 
-Storage schema 5 (which adds the `analysis_reuse` table) transactionally migrates schemas 1–4 and preserves historical facts/revisions. This is **not automatic re-parsing by a new loader**. Versioned derived-cache invalidation and native-index refresh are separate concerns. When loader interpretations change, make a fresh project from the same immutable input and explicitly review/reapply assertions using stable evidence and lineage; no public reindex command or automatic historical metadata rewrite is promised. Do not copy cache files between projects or reinterpret old component-version output as newly verified analysis.
+Storage schema 6 (which adds the `native_summaries` table; schema 5 added `analysis_reuse`) transactionally migrates schemas 1–5 and preserves historical facts/revisions. This is **not automatic re-parsing by a new loader**. Versioned derived-cache invalidation and native-index refresh are separate concerns. When loader interpretations change, make a fresh project from the same immutable input and explicitly review/reapply assertions using stable evidence and lineage; no public reindex command or automatic historical metadata rewrite is promised. Do not copy cache files between projects or reinterpret old component-version output as newly verified analysis.
 
 Dependency updates require reviewed exact pins/lockfile, full license/notices and WASM closure, changed component versions when semantics change, and new regression/compiled/installed/host evidence. Follow [a64js snapshot maintenance](../vendor/a64js/README.md), including source/emitted hashes and the recorded transformation; do not silently regenerate against a different Arm release. Unresolved public-redistribution questions in the notices remain unresolved by a successful build or private installation.
 

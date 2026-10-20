@@ -71,6 +71,9 @@ export interface AnalysisScope {
   readonly job_id: string;
   readonly max_result_bytes?: number;
   readonly dependencies?: AnalysisDependencyCollector;
+  /** False disables every derived-analysis read and write (published results, reuse
+   * candidates, persisted and in-process prepared units); default true. */
+  readonly analysis_cache?: boolean;
 }
 
 export async function executeDecompilation(

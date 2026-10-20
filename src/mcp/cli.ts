@@ -25,7 +25,7 @@ export interface RunStdioOptions {
   readonly outputStallMs?: number;
 }
 
-const HELP = `Usage: open-decomp mcp start [--transport stdio] --root PATH [--root PATH ...] [--max-workers N] [--max-queued N]
+const HELP = `Usage: open-decomp mcp start [--transport stdio] --root PATH [--root PATH ...] [--max-workers N] [--max-queued N] [--no-analysis-cache]
 
 Serve the local analysis engine over MCP stdio. At least one explicit authorized
 filesystem root is required; no working-directory or home-directory root is added.
@@ -35,6 +35,11 @@ fault containment, not an operating-system sandbox.
   --root PATH       Authorize an existing directory (repeatable, at most 64)
   --max-workers N   Persistent project workers (1..32; default 2)
   --max-queued N    Queued jobs per worker (0..1024; default 16)
+  --no-analysis-cache
+                    Server-wide: read and write no derived analysis (published results, reuse
+                    candidates, persisted callee summaries) and reuse no in-process summaries.
+                    Imports and indexes still persist; results are identical but slower on
+                    repetition. An artifact-delivered result is held in memory for the session.
   --help            Print this help to stderr
   --version         Print the server version to stderr
 `;
@@ -45,8 +50,14 @@ export function parseCliArguments(args: readonly string[]): CliOptions {
   const roots: string[] = [];
   let max_workers: number | undefined, max_queued: number | undefined;
   let action: 'serve' | 'help' | 'version' = 'serve';
+  let analysis_cache = true;
   for (let index = 0; index < args.length; index++) {
     const flag = args[index]!;
+    if (flag === '--no-analysis-cache') {
+      if (!analysis_cache) throw new Error('Duplicate --no-analysis-cache');
+      analysis_cache = false;
+      continue;
+    }
     if (flag === '--help' || flag === '--version') {
       if (action !== 'serve') throw new Error('Specify --help or --version only once');
       action = flag === '--help' ? 'help' : 'version';
@@ -86,6 +97,7 @@ export function parseCliArguments(args: readonly string[]): CliOptions {
       authorized_roots: roots,
       ...(max_workers === undefined ? {} : { max_workers }),
       ...(max_queued === undefined ? {} : { max_queued }),
+      ...(analysis_cache ? {} : { analysis_cache: false }),
     },
   };
 }

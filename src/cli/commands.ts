@@ -11,6 +11,7 @@ interface Arguments {
   json: boolean;
   cachePath?: string;
   sliceId?: string;
+  analysisCache: boolean;
   name?: string;
   selector?: FunctionSelector;
   emitter?: 'c-like' | 'python-like';
@@ -28,12 +29,13 @@ type AnalysisResult =
   | ToolResult<'binary_info'>;
 
 const usage = {
-  functions: 'open-decomp functions BINARY [--name TEXT] [--json] [--cache PATH] [--slice ID]',
+  functions:
+    'open-decomp functions BINARY [--name TEXT] [--json] [--cache PATH] [--slice ID] [--no-analysis-cache]',
   decompile:
-    'open-decomp decompile BINARY (--function NAME | --id ID | --address va:0x.../rva:0x.../file:0x...) [--language c-like|python-like] [--view source|checked] [--json] [--cache PATH] [--slice ID]',
+    'open-decomp decompile BINARY (--function NAME | --id ID | --address va:0x.../rva:0x.../file:0x...) [--language c-like|python-like] [--view source|checked] [--json] [--cache PATH] [--slice ID] [--no-analysis-cache]',
   export:
-    'open-decomp export BINARY --out DIR [--language c-like|python-like] [--jobs N] [--name SUBSTRING] [--cache PATH] [--slice ID]',
-  types: 'open-decomp types BINARY [--json] [--cache PATH] [--slice ID]',
+    'open-decomp export BINARY --out DIR [--language c-like|python-like] [--jobs N] [--name SUBSTRING] [--cache PATH] [--slice ID] [--no-analysis-cache]',
+  types: 'open-decomp types BINARY [--json] [--cache PATH] [--slice ID] [--no-analysis-cache]',
 } as const;
 
 class UsageError extends Error {}
@@ -116,6 +118,7 @@ function parse(args: readonly string[]): ParsedArguments {
           : []),
   ];
   let json = false,
+    analysisCache = true,
     positionalOnly = false;
   for (let index = 1; index < args.length; index++) {
     const argument = args[index]!;
@@ -132,6 +135,11 @@ function parse(args: readonly string[]): ParsedArguments {
       json = true;
       continue;
     }
+    if (argument === '--no-analysis-cache') {
+      if (!analysisCache) throw new UsageError('Duplicate option --no-analysis-cache');
+      analysisCache = false;
+      continue;
+    }
     const equals = argument.indexOf('=');
     const key = equals < 0 ? argument : argument.slice(0, equals);
     if (!allowed.includes(key)) throw new UsageError(`Unknown option ${terminal(key)}`);
@@ -143,7 +151,7 @@ function parse(args: readonly string[]): ParsedArguments {
   }
   if (positional.length !== 1 || !positional[0])
     throw new UsageError('Expected exactly one BINARY path');
-  const result: Arguments = { command, binary: positional[0], json };
+  const result: Arguments = { command, binary: positional[0], json, analysisCache };
   const cache = values.get('--cache'),
     slice = values.get('--slice');
   if (cache !== undefined) result.cachePath = cache;
@@ -220,7 +228,7 @@ function help(command: Command): void {
           : command === 'decompile'
             ? 'Decompile one exact, unambiguous function name, entity ID or address.\nText stdout contains only pseudocode; JSON preserves the result envelope.'
             : 'Print the image-wide merged structure types as C declarations (the names decompile uses).\nAnalyzes function bodies within the default budget; a partial result exits 2.'
-    }\n\n--cache PATH  Override the sidecar cache root (default: BINARY.open-decomp).\n--slice ID    Select a binary slice.\n${command === 'export' ? '' : '--json        Write {project_path,reused,result} JSON to stdout.\n'}--help        Show this help.\nProgress, project reuse and diagnostics go to stderr. Work stays in the foreground.\nExit: ${command === 'export' ? '0 all files written (even if some functions are partial/failed); 1 error/cancelled' : '0 complete/empty; 2 semantic partial; 1 error/unsupported/cancelled'}; 130 SIGINT; 143 SIGTERM.\n`,
+    }\n\n--cache PATH  Override the sidecar cache root (default: BINARY.open-decomp).\n--slice ID    Select a binary slice.\n--no-analysis-cache  Read and write no derived analysis: no published results, reuse candidates or persisted callee summaries, and no in-process summary reuse. Import and indexes still persist. Output is identical; repeated and cross-process runs are slower.\n${command === 'export' ? '' : '--json        Write {project_path,reused,result} JSON to stdout.\n'}--help        Show this help.\nProgress, project reuse and diagnostics go to stderr. Work stays in the foreground.\nExit: ${command === 'export' ? '0 all files written (even if some functions are partial/failed); 1 error/cancelled' : '0 complete/empty; 2 semantic partial; 1 error/unsupported/cancelled'}; 130 SIGINT; 143 SIGTERM.\n`,
   );
 }
 
@@ -330,6 +338,7 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
     session = await openBinary(parsed.binary, {
       ...(parsed.cachePath === undefined ? {} : { cachePath: parsed.cachePath }),
       ...(parsed.sliceId === undefined ? {} : { sliceId: parsed.sliceId }),
+      ...(parsed.analysisCache ? {} : { analysisCache: false }),
       signal: controller.signal,
       onProgress,
     });
@@ -358,6 +367,7 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
           jobs: parsed.jobs,
           sliceId: parsed.sliceId,
           name: parsed.name,
+          analysisCache: parsed.analysisCache,
         },
         controller.signal,
         (message) => process.stderr.write(`${terminal(message)}\n`),

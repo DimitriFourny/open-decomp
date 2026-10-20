@@ -84,6 +84,8 @@ export const commandSchema = z.discriminatedUnion('kind', [
     path: pathSchema,
     mode: z.enum(['create', 'resume']),
     max_queued: z.number().int().min(0).max(1024),
+    /** False disables derived-analysis caching in this child (trusted host setting). */
+    analysis_cache: z.boolean().default(true),
     interrupted: z
       .strictObject({ id: jobIdSchema, reason: z.enum(['cancelled', 'deadline']) })
       .optional(),

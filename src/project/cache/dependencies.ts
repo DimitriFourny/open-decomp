@@ -513,3 +513,76 @@ export function validateAnalysisReadset(
   }
   return true;
 }
+
+const tracedReadSchema = z.strictObject({
+  key: z.string(),
+  read: z.strictObject({
+    selector: selectorSchema,
+    fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  }),
+  charges: z.union([z.literal(1), z.literal(2)]),
+});
+/** Fingerprints already confirmed against a store, by `revision\0selector`. A store is
+ * immutable per revision, so a verified read stays verified for this process; units that
+ * share proof/type/function closures verify each shared read once. */
+const verifiedReads = new WeakMap<
+  ProjectStore,
+  Map<string, { readonly key: string; readonly fingerprint: string }>
+>();
+const annotationIndexes = new WeakMap<ProjectStore, Map<number, AnnotationReadIndex>>();
+const MAX_VERIFIED_READS = 200000;
+
+/** Whether a persisted trace still describes `revision` of `source`: every read is well formed,
+ * carries the key its selector hashes to, and fingerprints to what the store holds now. Reads
+ * never charge `context` (they only observe cancellation): the reuse contract charges what
+ * preparing would, via `replayTrace`, not what checking costs. Any doubt is `false`. */
+export function verifyTracedReads(
+  source: ProjectStore,
+  revision: number,
+  trace: unknown,
+  context: OperationContext,
+): trace is readonly TracedRead[] {
+  if (!Array.isArray(trace) || trace.length > MAX_READS) return false;
+  let memo = verifiedReads.get(source);
+  if (!memo) verifiedReads.set(source, (memo = new Map()));
+  const free: OperationContext = { ...context, checkpoint: () => context.checkpoint(0) };
+  const annotations = (): AnnotationReadIndex => {
+    let indexes = annotationIndexes.get(source);
+    if (!indexes) annotationIndexes.set(source, (indexes = new Map()));
+    let index = indexes.get(revision);
+    if (!index) indexes.set(revision, (index = allAnnotations(source, revision, free)));
+    return index;
+  };
+  for (const entry of trace as readonly Partial<TracedRead>[]) {
+    const read = entry?.read;
+    if (
+      typeof read !== 'object' ||
+      read === null ||
+      typeof read.selector !== 'object' ||
+      read.selector === null ||
+      typeof entry.key !== 'string' ||
+      (entry.charges !== 1 && entry.charges !== 2)
+    )
+      return false;
+    const memoKey = `${revision}\0${JSON.stringify(read.selector)}`;
+    const known = memo.get(memoKey);
+    if (known) {
+      if (known.key !== entry.key || known.fingerprint !== read.fingerprint) return false;
+      continue;
+    }
+    if (!tracedReadSchema.safeParse(entry).success) return false;
+    let key: string, fingerprintNow: string;
+    try {
+      key = digest(read.selector);
+      if (key !== entry.key) return false;
+      fingerprintNow = digest(readSelector(source, revision, read.selector, free, annotations));
+    } catch (error) {
+      if (error instanceof OperationError && error.code === 'cancelled') throw error;
+      return false;
+    }
+    if (memo.size >= MAX_VERIFIED_READS) memo.clear();
+    memo.set(memoKey, { key, fingerprint: fingerprintNow });
+    if (fingerprintNow !== read.fingerprint) return false;
+  }
+  return true;
+}

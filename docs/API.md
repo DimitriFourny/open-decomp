@@ -66,13 +66,16 @@ Automatically discovered cache roots and project leaves must be directories, not
 openBinary(inputPath: string, options?: OpenBinaryOptions): Promise<BinarySession>
 ```
 
-| Option                                | Meaning                                                                                             |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `cachePath?: string`                  | Cache-root override. Missing directories are created.                                               |
-| `sliceId?: string`                    | Explicit validated slice ID, for example from universal-image metadata.                             |
-| `budget?`                             | Partial shared budget for the initial import/project summary; unspecified fields use core defaults. |
-| `signal?: AbortSignal`                | Cancels opening/importing. Pass a signal separately for later operations.                           |
-| `onProgress?: (job: WireJob) => void` | Import progress; optional, not a durable status record.                                             |
+| Option                                | Meaning                                                                                                                                                                                                                                     |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cachePath?: string`                  | Cache-root override. Missing directories are created.                                                                                                                                                                                       |
+| `sliceId?: string`                    | Explicit validated slice ID, for example from universal-image metadata.                                                                                                                                                                     |
+| `analysisCache?: boolean`             | `false` disables analysis caching for this session (default `true`): no published result, reuse candidate or callee summary is read or written, and no summary is reused in process. Import and indexes still persist; output is identical. |
+| `budget?`                             | Partial shared budget for the initial import/project summary; unspecified fields use core defaults.                                                                                                                                         |
+| `signal?: AbortSignal`                | Cancels opening/importing. Pass a signal separately for later operations.                                                                                                                                                                   |
+| `onProgress?: (job: WireJob) => void` | Import progress; optional, not a durable status record.                                                                                                                                                                                     |
+
+With `analysisCache: false` every `decompile()` is `cache: "computed"` and nothing derived is stored in the sidecar (`artifacts/`, `analysis_*` and `native_summaries` stay empty). A result that has to be delivered as an artifact (large or `delivery: "artifact"`) is held in memory by the owning worker for the session only; reading it works as usual and it is never indexed. Annotation catalogs and the investigation view consume published analyses, so they see only what earlier cache-enabled runs published. The same switch is `--no-analysis-cache` on the CLI and `mcp start`.
 
 Session properties are `inputPath`, `cachePath`, `projectPath`, `reused`, `opened`, `image`, `projectId` and `revision`. `opened` is the original `project_open` envelope, preserving import diagnostics and coverage. `reused` describes project reuse, not whether a particular decompilation is a cache hit.
 

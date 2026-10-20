@@ -209,7 +209,10 @@ async function writeResponse(
 
 export async function startHttpServer(
   input: HttpConfig,
-  workerRuntime: Pick<WorkerPoolOptions, 'entry_point' | 'exec_argv' | 'cancel_grace_ms'> = {},
+  workerRuntime: Pick<
+    WorkerPoolOptions,
+    'entry_point' | 'exec_argv' | 'cancel_grace_ms' | 'analysis_cache'
+  > = {},
 ): Promise<HttpServerHandle> {
   const config = await resolveHttpConfig(input);
   const principals: Principal[] = [];

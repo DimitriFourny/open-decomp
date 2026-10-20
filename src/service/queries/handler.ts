@@ -10,6 +10,8 @@ import {
   encodeSigned,
   fingerprint,
   formatHexU64,
+  isSchemaValidated,
+  markSchemaValidated,
   toolSchemas,
 } from '../../core/index.js';
 import type {
@@ -62,6 +64,7 @@ type Scope = {
   readonly job_id: string;
   readonly paging?: Paging;
   readonly max_result_bytes?: number;
+  readonly analysis_cache?: boolean;
 };
 type Query = {
   readonly text: string;
@@ -350,6 +353,8 @@ export const queryWorkerHandler: WorkerHandler = {
     scope: Scope,
   ): Promise<ToolResult<K>> {
     const result = await dispatch(operation, input, scope);
+    // A cached analysis hit is built from parsed values and already sized to its limits.
+    if (isSchemaValidated(result)) return result as ToolResult<K>;
     const parsed = toolSchemas[operation].output.parse(result) as ToolResult<K>;
     if (
       Buffer.byteLength(JSON.stringify(parsed)) >
@@ -363,7 +368,7 @@ export const queryWorkerHandler: WorkerHandler = {
         'resource_limit',
         'Query result exceeds the operation or transport delivery limit',
       );
-    return parsed;
+    return markSchemaValidated(parsed);
   },
 };
 async function dispatch(

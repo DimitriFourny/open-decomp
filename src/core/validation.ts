@@ -57,6 +57,16 @@ export function validateToolRequest<K extends ToolName>(
   }
   return args;
 }
+// Results parsed against their tool output schema by the code that produced them, or built
+// only from values so parsed. The same trust domain need not repeat a full-result parse.
+const schemaValidated = new WeakSet<object>();
+export function markSchemaValidated<T extends object>(value: T): T {
+  schemaValidated.add(value);
+  return value;
+}
+export function isSchemaValidated(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && schemaValidated.has(value);
+}
 /** Apply after worker/service completion, before returning data through any transport. */
 export function validateToolResponse<K extends ToolName>(
   operation: K,

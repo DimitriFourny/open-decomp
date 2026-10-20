@@ -4,6 +4,7 @@ import {
   artifactReadArgsSchema,
   decodeDiagnostic,
   encodeDiagnostic,
+  isSchemaValidated,
   toolSchemas,
 } from '../../core/index.js';
 import type { ToolArgs, ToolInput, ToolName, ToolResult, WireJob } from '../../core/index.js';
@@ -296,7 +297,10 @@ export class QueryService {
           result = outcome.result;
         }
       }
-      const parsed = toolSchemas[operation].output.parse(result) as ToolResult<K>;
+      // A worker result was parsed when it crossed the process boundary.
+      const parsed = (
+        isSchemaValidated(result) ? result : toolSchemas[operation].output.parse(result)
+      ) as ToolResult<K>;
       if (
         Buffer.byteLength(JSON.stringify(parsed)) >
         Math.min(args.budget.output_bytes, options.max_result_bytes ?? Infinity)

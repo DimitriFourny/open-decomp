@@ -712,7 +712,7 @@ Delivered coverage was **not** equal: Open Decomp returned `complete` output for
 | SQLite threadsafe |               54.7 |             31.8 |          6/6 |                                      +0.8 (3/6) |
 | SQLite strnicmp   |               94.6 |             52.6 |          6/6 |                                     −16.0 (4/6) |
 
-Latency improves in 48/48 pairs (reuse/control median 0.54–0.72 across cells, reopen similar). Memory does **not** consistently improve (counterexamples above; sum-loop reopen heap +8.8 MiB; the 2 ms requested sampler achieved a 12.39 ms median interval, so most short fixture peaks are null, not 0). Cached SQLite leaf hits (~15.5 ms) remain slower than fixture hits (~4.3 ms), so repeated requests still depend on image size. P3.6 therefore stays open.
+Latency improves in 48/48 pairs (reuse/control median 0.54–0.72 across cells, reopen similar). Memory does **not** consistently improve (counterexamples above; sum-loop reopen heap +8.8 MiB; the 2 ms requested sampler achieved a 12.39 ms median interval, so most short fixture peaks are null, not 0). Cached SQLite leaf hits (~15.5 ms) remain slower than fixture hits (~4.3 ms), so repeated requests still depend on image size.
 
 ## Measured optimized conversion coverage
 
@@ -846,3 +846,24 @@ node --import tsx scripts/bench/llm-tasks/run.ts score --packets OUT --answers A
 | `disasm`              |            10 |            11 |                 8,866 |              806 |
 
 The three questions every tool missed in run 1 (`sq-stricmp-case`, `sq-strnicmp-diff`, `sq-limit-hard-varnum`) need constant table contents (`sqlite3UpperToLower`, `aHardLimit`); run 2 prints those tables and answers all three. Other run-1 misses fixed by run 2: a destructor passed as a raw code address (now its function name), keyword strings reached through `base + offset` (now literals), a default quality loaded from read-only data (now folded), and a member named `f_36` read as decimal (now `field_0x36`). The single run-2 wrong answer is `bro-main-lgwin` in `mcp-default` (minimum window bits not identified in `main`'s 62 KB body; `export-file` answered it). Ghidra remains about 2.2× cheaper per correct answer on its 16 questions: its packets are short because its output omits what Open Decomp keeps explicit (call arguments such as `sqlite3_log`'s format arguments, open-arity markers, struct layouts), and it misses the three table questions.
+
+## Persistent analysis cache: result-hit path and callee summaries (2026-10-20)
+
+Host shared with other agents (load average 1.5–3), Node 26.11, ARM64 macOS, Homebrew brotli 1.2.0 CLI (64 functions) and SQLite 3.54.0 `libsqlite3.3.54.0.dylib`. Built CLI (`node dist/src/cli/entry.js`), serial runs, a fresh APFS-cloned project per trial, median of 5–15 runs; "Main" is `9f6ddf2` built in a separate worktree. Every output below was byte-identical across modes: `decompile --json` (pseudocode, state, diagnostics, evidence; same project ID via a copied import) for cold, second process with persisted summaries, in-process warm, result hit and `--no-analysis-cache` on brotli (`_CheckAlias`, `_ParseInt`, `_FileSize`, `_OpenFiles`, `_main`) and SQLite (`_sqlite3_changes64`, `_sqlite3_total_changes64`, `_sqlite3_errcode`); `export` directories of all 64 brotli functions were `diff -r` identical between Main, cold, `--no-analysis-cache` and a second export that reused only persisted summaries (results deleted).
+
+| Wall time, ms (median)                                                                                      |  Main |  After |
+| ----------------------------------------------------------------------------------------------------------- | ----: | -----: |
+| (a) `_ParseInt` in a new process, after an earlier process ran `_CheckAlias` (shares one 2.6 M-work callee) | 1,029 |  1,023 |
+| (a) same function, no earlier process                                                                       | 1,019 |  1,017 |
+| (b) repeated identical `decompile` `_CheckAlias` (result hit, CLI)                                          |   424 |    400 |
+| (b) repeated `decompile` `_main` (7.7 MB result delivered by artifact)                                      |   960 |    838 |
+| (c) `export` all 64 brotli functions, `--jobs 1`, cold                                                      | 6,953 |  6,812 |
+| (c) second `export` of the same project (all hits)                                                          | 3,506 |  2,885 |
+| (c) `export` after an earlier `export --name _Brotli` process                                               | 6,903 |  6,828 |
+| `--no-analysis-cache` `export` (no in-process unit reuse either)                                            |     — | 10,410 |
+
+In-process result hit (one `openBinary` session, `_CheckAlias`, worker CPU per request): 32.7 ms → 21.7 ms for the first hit of a payload (payload parsed once, `validateComputation` no longer re-parses result/catalog/readset, the artifact is not looked up twice, one wrapper parse instead of ~6 full-result zod passes across `validateComputation`, `delivery`, handler, runtime and host) → 10.3 ms for later hits of the same payload (parsed payload memoized by the verified artifact hash). A CLI process spends ~400 ms outside this (startup, worker spawn, project and image-metadata load), so the CLI gain is the 12–120 ms above.
+
+Sidecar growth (brotli, `du -sk`): import 6.7 MB; after `_CheckAlias` +4.4 MB (Main +4.4 MB; persisted summaries add ~12 KB because only small units are stored); after a full export 103 MB (Main 101 MB), of which `native_summaries` is 14 rows / ~3.7 MB when the size bound below is lifted. The cap is 64 MiB per project.
+
+**What this does not deliver.** The expensive units are not worth persisting with the current encoding. A unit of prepared size ~32 k (1,633 instructions; 29.9 MB of JSON, 2.4 MB compressed) costs ~330 ms to encode and ~260 ms to load against ~450 ms to prepare; with it persisted, (a) fell 1,029 → 881 ms but every cold run rose to ~1,340 ms (+30 %) and cold `export` 6.9 → 7.9 s, so units of prepared size above 8,192 are not persisted (a loss on the first run costs more than a later reuse returns). Hash-consing equal sub-objects would shrink the JSON only 30 → 25 MB (measured), so a faster payload format, not a smaller graph, is what would change this. Below that bound, units write and load in a few ms (SQLite: 17 units, 1.7 MB compressed, reuse ≈ 0.15 s of a 2.0 s run). Callee summaries cut by a budget limit (`sqlite3_log`: 0.8 s of every SQLite `sqlite3_*` decompilation) are limit-dependent and, under the reuse contract, never cacheable. Reuse across a revision change is not offered: prepared evidence embeds the revision.
