@@ -73,11 +73,25 @@ export function recoverPointerEvidence(
     list.push(to.id);
     joins.set(from.id, list);
   };
+  /** Exact same-width copies, joined both ways: one value under two IDs. */
+  const copies = new Set<string>();
+  const copy = (a: Value, b: Value): void => {
+    if (bitWidth(a.type) !== bitWidth(b.type)) return;
+    join(a, b);
+    join(b, a);
+    copies.add(`${a.id}>${b.id}`).add(`${b.id}>${a.id}`);
+  };
   /** Exact physical cells of a whole value (`concat` parts, narrow `extract`s):
    * a pointer split across register cells keeps its fragments. */
   const parts = new Map<string, { part: Value; offset: number }[]>();
   const wholes = new Map<string, { whole: string; offset: number }[]>();
   const slices = new Map<string, { part: Value; offset: number }[]>();
+  /** Whole values each narrow `extract` slices. */
+  const sliceOwners = new Map<string, string[]>();
+  const identities: {
+    result: Value;
+    expression: Extract<Expression, { kind: 'integer' }>;
+  }[] = [];
   const cells = new Map<string, Value>();
   const users = new Map<string, { result: Value; expression: Expression; node: string }[]>();
   const use = (operand: Value, result: Value, expression: Expression, node: string): void => {
@@ -126,6 +140,9 @@ export function recoverPointerEvidence(
         const list = slices.get(e.value.id) ?? [];
         list.push({ part: node.result, offset: e.offset });
         slices.set(e.value.id, list);
+        const owners = sliceOwners.get(node.result.id) ?? [];
+        owners.push(e.value.id);
+        sliceOwners.set(node.result.id, owners);
       }
       if (e.kind === 'select') {
         join(e.when_true, node.result);
@@ -136,11 +153,13 @@ export function recoverPointerEvidence(
       ) {
         // A same-width copy is the same value: pointer-ness holds both ways
         // (an argument register's copy of a local is that local).
-        join(e.value, node.result);
-        join(node.result, e.value);
+        copy(e.value, node.result);
       } else if (e.kind === 'integer' && (e.op === 'add' || e.op === 'sub')) {
         use(e.left, node.result, e, node.id);
         use(e.right, node.result, e, node.id);
+        identities.push({ result: node.result, expression: e });
+      } else if (e.kind === 'integer' && (e.op === 'or' || e.op === 'xor' || e.op === 'and')) {
+        identities.push({ result: node.result, expression: e });
       } else if (e.kind === 'compare') {
         use(e.left, node.result, e, node.id);
         use(e.right, node.result, e, node.id);
@@ -161,6 +180,27 @@ export function recoverPointerEvidence(
     const expression = definitions.get(id);
     return expression?.kind === 'constant' ? expression.bits : undefined;
   };
+  // `x | 0`, `x ^ 0`, `x + 0`, `x - 0` and `x & ~0` are exact copies of `x`
+  // (AArch64 `mov xd, xn` is `orr xd, xzr, xn`): pointer-ness holds both ways.
+  for (const { result, expression } of identities) {
+    budget.charge();
+    const width = bitWidth(result.type);
+    const ones = (1n << BigInt(width)) - 1n;
+    const neutral = (value: Value): boolean => {
+      const bits = constant(value.id);
+      return (
+        bits !== undefined && BigInt.asUintN(width, bits) === (expression.op === 'and' ? ones : 0n)
+      );
+    };
+    const source =
+      neutral(expression.right) && expression.left.id !== result.id
+        ? expression.left
+        : expression.op !== 'sub' && neutral(expression.left)
+          ? expression.right
+          : undefined;
+    if (!source) continue;
+    copy(source, result);
+  }
   const eligible = (id: string): boolean =>
     values.has(id) && constant(id) === undefined && stack?.values.get(id)?.value.kind !== 'stack';
   const affine = createAffineResolver(
@@ -219,14 +259,38 @@ export function recoverPointerEvidence(
     pending.push(id);
   };
   const seeds = new Map<string, string[]>();
-  /** Register cells of members: bit offset within the pointer they carry. */
-  const fragments = new Map<string, { offset: number; proof: string }>();
+  /** Register cells of members: bit offset within the pointer they carry, and
+   * the declared pointer type when one association seeded the fragment. */
+  const fragments = new Map<string, { offset: number; proof: string; type?: string }>();
   const fragmentQueue: string[] = [];
   let fragmentCursor = 0;
-  const addFragment = (part: Value, offset: number, proof: string): void => {
+  const addFragment = (part: Value, offset: number, proof: string, type?: string): void => {
     if (fragments.has(part.id) || constant(part.id) !== undefined) return;
-    fragments.set(part.id, { offset, proof });
+    fragments.set(part.id, { offset, proof, ...(type === undefined ? {} : { type }) });
     fragmentQueue.push(part.id);
+  };
+  /** Wholes rebuilt from fragments that all carry one declared pointer type. */
+  const reassembled = new Map<string, string>();
+  /** `whole` is the pointer when these cells, each holding the pointer's bits at
+   * its own position, cover every bit of it. */
+  const reassemble = (whole: string, cellsOf: readonly { part: Value; offset: number }[]): void => {
+    const placed = cellsOf
+      .filter((cell) => fragments.get(cell.part.id)?.offset === cell.offset)
+      .sort((a, b) => a.offset - b.offset);
+    let covered = 0;
+    for (const cell of placed)
+      if (cell.offset <= covered)
+        covered = Math.max(covered, cell.offset + bitWidth(cell.part.type));
+    if (covered < bits) return;
+    const used = placed.map((cell) => fragments.get(cell.part.id)!);
+    const type = used[0]!.type;
+    if (type !== undefined && used.every((item) => item.type === type) && !reassembled.has(whole))
+      reassembled.set(whole, type);
+    add(
+      whole,
+      'joined pointer values',
+      used.map((item) => item.proof),
+    );
   };
   for (const access of addresses) {
     budget.charge();
@@ -261,6 +325,7 @@ export function recoverPointerEvidence(
         cell,
         association.value_offset_bits,
         reason('declared or observed pointer', cell.id, association.evidence_ids),
+        association.type_id,
       );
       continue;
     }
@@ -280,21 +345,17 @@ export function recoverPointerEvidence(
           fragment = fragments.get(id)!;
         for (const target of joins.get(id) ?? []) {
           budget.charge();
-          addFragment(cells.get(target)!, fragment.offset, fragment.proof);
+          addFragment(cells.get(target)!, fragment.offset, fragment.proof, fragment.type);
         }
-        // Every cell of a reassembly in its own position: the whole pointer.
+        // Every cell of a reassembly (`concat` parts, or narrow `extract`s of
+        // one whole) in its own position: the whole pointer.
         for (const { whole, offset } of wholes.get(id) ?? []) {
           budget.charge();
-          const cellsOf = parts.get(whole)!;
-          if (
-            offset === fragment.offset &&
-            cellsOf.every((cell) => fragments.get(cell.part.id)?.offset === cell.offset)
-          )
-            add(
-              whole,
-              'joined pointer values',
-              cellsOf.map((cell) => fragments.get(cell.part.id)!.proof),
-            );
+          if (offset === fragment.offset) reassemble(whole, parts.get(whole)!);
+        }
+        for (const whole of sliceOwners.get(id) ?? []) {
+          budget.charge(slices.get(whole)!.length);
+          reassemble(whole, slices.get(whole)!);
         }
       }
       if (cursor < pending.length) step(pending[cursor++]!);
@@ -443,6 +504,19 @@ export function recoverPointerEvidence(
       objectTypes.set(id, { key, type_id });
     }
   }
+  // A whole rebuilt from cells that all carry one declared pointer type is that
+  // pointer: a prototype's `const char *` bound to two 32-bit register cells.
+  for (const [id, type_id] of [...reassembled].sort(([a], [b]) => a.localeCompare(b))) {
+    budget.charge();
+    const type = layouts.definition(type_id);
+    if (
+      !seeds.has(id) &&
+      !objectTypes.has(id) &&
+      type?.kind === 'pointer' &&
+      layouts.definition(type.to)?.kind !== 'void'
+    )
+      objectTypes.set(id, { key: typeKey(type), type_id });
+  }
   const joinSources = new Map<string, string[]>();
   for (const [from, targets] of joins)
     for (const to of targets) {
@@ -461,6 +535,8 @@ export function recoverPointerEvidence(
       for (const from of joinSources.get(to) ?? []) {
         budget.charge();
         const source = objectTypes.get(from);
+        // An untyped exact copy is the same value, not another incoming one.
+        if (!source && copies.has(`${from}>${to}`)) continue;
         if (source && (!found || found.key === source.key)) found = source;
         else if (source || constant(from) !== 0n) exact = false;
       }

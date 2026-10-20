@@ -195,6 +195,111 @@ test('a declared pointer parameter makes the caller argument and its derivations
   assert.equal(pointerRule(types, table), 'dereferenced address');
 });
 
+/** `0 | v` (AArch64 `mov`) split into two 32-bit cells of rdi, then a call whose
+ * declaration types its first parameter as `parameter`. */
+function cellSplitArgument(parameter: 'char-pointer' | 'integer') {
+  const abi = sysvAMD64Abi,
+    target = { image_id: image, space: 'va' as const, value: 0x2000n };
+  const low = register('edi', 32, 0, 'preserve_other_bits', 'x86_64:rdi'),
+    high = register('rdi_high', 32, 32, 'preserve_other_bits', 'x86_64:rdi');
+  const b = builder(`pointer-cell-split-${parameter}`),
+    entry = b.block('entry');
+  const value = entry.readRegister(rsi);
+  const copy = entry.int('or', entry.constant(i64, 0n), value);
+  entry.writeRegister(low, entry.extract(copy, 0, 32));
+  entry.writeRegister(high, entry.extract(copy, 32, 32));
+  entry.call({ kind: 'direct', address: target }, [], [], abi.unknown_call_clobbers);
+  entry.return([entry.constant(i64, 0n)]);
+  const ssa = finish(b, entry);
+  const call = ssa.blocks
+    .flatMap((block) => block.instructions)
+    .find((node) => node.kind === 'call')!;
+  // The call reads rdi as two exact cells, never as one 64-bit value.
+  assert.deepEqual(
+    call.kind === 'call'
+      ? call.register_inputs
+          .filter((binding) => binding.register.root === 'x86_64:rdi')
+          .map((binding) => binding.register.width_bits)
+      : [],
+    [32, 32],
+  );
+  const charId = entityIdentity(slice, 'source-type', 'char'),
+    pointerId = entityIdentity(slice, 'source-type', 'char-pointer'),
+    longId = entityIdentity(slice, 'source-type', 'long');
+  const records: SuppliedTypeRecord[] = [
+    [charId, { kind: 'integer' as const, bits: 8, signed: true }],
+    [pointerId, { kind: 'pointer' as const, bits: 64, to: charId }],
+    [longId, { kind: 'integer' as const, bits: 64, signed: true }],
+  ].map(([id, definition]) => ({
+    id: id as string,
+    definition: definition as SuppliedTypeRecord['definition'],
+    source: 'library',
+    status: 'established',
+    evidence_ids: [],
+  }));
+  const declared = parameter === 'char-pointer' ? pointerId : longId;
+  const signature: Signature = {
+    abi: abi.id,
+    return_type: longId,
+    parameters: [{ id: entityIdentity(slice, 'parameter', 0), name: null, type_id: declared }],
+    variadic: false,
+    noreturn: false,
+    evidence_ids: [],
+  };
+  const contract: AbiSignature = {
+    returns: { kind: 'integer', bits: 64, signed: true },
+    parameters: [
+      parameter === 'char-pointer'
+        ? { kind: 'pointer' }
+        : { kind: 'integer', bits: 64, signed: true },
+    ],
+    variadic: false,
+    fixed_parameter_count: 1,
+  };
+  const types = analyze(ssa, {
+    types: records,
+    signatures: [
+      {
+        id: 'library-callee',
+        subject_id: call.id,
+        signature,
+        source: 'library',
+        status: 'established',
+        evidence_ids: [],
+      },
+    ],
+    contracts: [
+      {
+        id: 'library-callee',
+        target: { kind: 'address', address: target },
+        signature: contract,
+        evidence_ids: [],
+      },
+    ],
+  });
+  return { types, value, copy, pointerId };
+}
+
+test('a declared pointer bound to split register cells types the whole value and its copies', () => {
+  const { types, value, copy, pointerId } = cellSplitArgument('char-pointer');
+  assert.equal(pointerRule(types, copy), 'joined pointer values');
+  assert.equal(pointerRule(types, value), 'joined pointer values');
+  for (const subject of [copy, value])
+    assert.ok(
+      types.associations.some(
+        (item) =>
+          item.subject_id === subject.id && item.type_id === pointerId && item.width_bits === 64,
+      ),
+      'the reassembled value keeps the declared char pointer type',
+    );
+});
+
+test('an integer split across register cells stays an integer', () => {
+  const { types, value, copy } = cellSplitArgument('integer');
+  assert.equal(pointerRule(types, copy), undefined);
+  assert.equal(pointerRule(types, value), undefined);
+});
+
 for (const language of ['c-like', 'python-like'] as const)
   test(`${language}: dereference beats an integer use; the integer use converts explicitly`, () => {
     const b = builder(`pointer-integer-use-${language}`),
