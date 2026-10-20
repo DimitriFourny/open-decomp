@@ -942,15 +942,22 @@ export function planLayout(
   };
   // Each copy prints at most four edge copies and one return per level (depth <= 4).
   let budget = 128;
-  const clone = (id: string, transfer: ParallelTransfer): Region => {
+  // A copied jump falls into the copy of its target, while the renderer keeps
+  // one action per transfer: a copied transfer whose home occurrence prints
+  // anything else (a loop break, a goto) refuses the labeled edge whose copy
+  // holds it, and that edge keeps its goto. `roots`: copy -> that edge.
+  let roots = new Map<BlockRegion, ParallelTransfer>();
+  const refused = new Set<ParallelTransfer>();
+  const clone = (id: string, transfer: ParallelTransfer, root = transfer): Region => {
     const block = blocks.get(id)!,
       copy: BlockRegion = { ...block };
     clones.add(copy);
+    roots.set(copy, root);
     duplicated.push({ transfer, tail: id });
     budget--;
     const control = block.control;
     return control.kind === 'jump'
-      ? sequence([copy, clone(control.transfer.target, control.transfer)])
+      ? sequence([copy, clone(control.transfer.target, control.transfer, root)])
       : copy;
   };
 
@@ -981,6 +988,7 @@ export function planLayout(
       destination: string | null,
       nested: readonly Nest[],
     ): boolean =>
+      !refused.has(transfer) &&
       tailSize(transfer.target) > 0 &&
       budget >= tailSize(transfer.target) &&
       transferAction(transfer, nested, destination, language, true) === 'goto';
@@ -1009,6 +1017,7 @@ export function planLayout(
   let hidden = new Set<string>();
   const expand = (base: Region): Region => {
     clones = new Set();
+    roots = new Map();
     duplicated = [];
     expansions = new Map();
     hidden = new Set();
@@ -1060,8 +1069,29 @@ export function planLayout(
     }
     return result;
   };
+  // 3. Refuse the copies holding a transfer printed two ways; each round
+  // refuses at least one more labeled edge.
+  let result = expand(body);
+  for (;;) {
+    const actions = new Map<ParallelTransfer, TransferAction>(),
+      conflicting = new Set<ParallelTransfer>();
+    visitTransfers(result, language, active, (occurrence) => {
+      const action = occurrenceAction(occurrence, language),
+        previous = actions.get(occurrence.transfer);
+      if (previous !== undefined && previous !== action) conflicting.add(occurrence.transfer);
+      actions.set(occurrence.transfer, action);
+    });
+    const before = refused.size;
+    if (conflicting.size)
+      visitTransfers(result, language, active, (occurrence) => {
+        const root = conflicting.has(occurrence.transfer) && roots.get(occurrence.owner);
+        if (root) refused.add(root);
+      });
+    if (refused.size === before) break;
+    result = expand(body);
+  }
   return {
-    body: expand(body),
+    body: result,
     clones,
     duplicated,
     hidden: [...hidden],
