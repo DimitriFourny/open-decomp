@@ -9,6 +9,7 @@ import {
   type Evidence,
   type OperationContext,
   type RecoveredType,
+  type RegisterDescriptor,
   type Signature,
 } from '../../core/index.js';
 import {
@@ -31,6 +32,7 @@ import {
   type SuppliedCallContract,
   type SuppliedFunctionContract,
 } from '../calls/index.js';
+import { terminatorOperands } from '../effects/index.js';
 import { inspectRegister, inspectStackMemory, type StackSnapshot } from '../stack/index.js';
 import { AnalysisBudget } from '../ssa/budget.js';
 import { SourceLayouts, typeKey } from './layout.js';
@@ -953,6 +955,80 @@ export function recoverTypes(
       memoryLoopParameters(input, budget),
     );
     const stackAccess = new Map(stack.accesses.map((access) => [access.node_id, access]));
+    // A load of a 32/64-bit word whose every use is an exact same-width IEEE
+    // reinterpretation (or a floating-point register binding), or a store of
+    // such a reinterpreted float (or a float value), accesses the bytes as
+    // binary32/binary64. Any other consumer keeps the integer access. Register
+    // snapshots of loads, stores and opaque effects do not consume the value.
+    // Floating and integer accesses of the same bytes are distinct fields: one
+    // anonymous union member each, never a conflict. This is a presentation
+    // hint; the renderer still names the member of the kind it prints.
+    const reinterpretedUses = new Map<string, { total: number; float: number }>();
+    const noteUse = (value: Value, float: boolean): void => {
+      budget.charge();
+      const use = reinterpretedUses.get(value.id) ?? { total: 0, float: 0 };
+      use.total++;
+      if (float) use.float++;
+      reinterpretedUses.set(value.id, use);
+    };
+    const floatBank = (register: RegisterDescriptor): boolean =>
+      register.bank === 'float' || register.bank === 'vector';
+    for (const block of input.blocks) {
+      for (const node of block.instructions) {
+        budget.charge();
+        switch (node.kind) {
+          case 'assign': {
+            const expression = node.expression;
+            const float =
+              expression.kind === 'cast' &&
+              expression.op === 'bitcast' &&
+              node.result.type.kind === 'float' &&
+              bitWidth(expression.value.type) === bitWidth(node.result.type);
+            for (const operand of expressionOperands(expression)) noteUse(operand, float);
+            break;
+          }
+          case 'load':
+            noteUse(node.address, false);
+            break;
+          case 'store':
+            noteUse(node.address, false);
+            noteUse(node.value, false);
+            break;
+          case 'write_register':
+            noteUse(node.value, floatBank(node.register));
+            break;
+          case 'call':
+            if (node.target.kind === 'indirect') noteUse(node.target.value, false);
+            for (const argument of node.arguments) noteUse(argument, false);
+            for (const binding of node.register_inputs)
+              noteUse(binding.value, floatBank(binding.register));
+            break;
+          default:
+            break;
+        }
+      }
+      for (const operand of terminatorOperands(block.terminator)) noteUse(operand, false);
+    }
+    for (const state of input.register_states)
+      for (const binding of state.exit) noteUse(binding.value, floatBank(binding.register));
+    const floatAccess = (node: Extract<Instruction, { kind: 'load' | 'store' }>): boolean => {
+      const value = node.kind === 'load' ? node.result : node.value,
+        width = bitWidth(value.type);
+      if (width !== 32 && width !== 64) return false;
+      if (value.type.kind === 'float') return true;
+      if (value.type.kind !== 'integer') return false;
+      if (node.kind === 'load') {
+        const use = reinterpretedUses.get(value.id);
+        return use !== undefined && use.total > 0 && use.total === use.float;
+      }
+      const expression = definitions.get(value.id);
+      return (
+        expression?.kind === 'cast' &&
+        expression.op === 'bitcast' &&
+        expression.value.type.kind === 'float' &&
+        bitWidth(expression.value.type) === width
+      );
+    };
     const groups = new Map<
       string,
       { base: MemoryShape['base']; fields: Map<string, ObservedField>; dynamic: boolean }
@@ -988,7 +1064,14 @@ export function recoverTypes(
       };
       const value = node.kind === 'load' ? node.result : node.value,
         width = bitWidth(value.type);
-      const fieldId = id('field', [key, offset, width, address.stride]);
+      const float = !isStack && floatAccess(node);
+      const fieldId = id('field', [
+        key,
+        offset,
+        width,
+        address.stride,
+        ...(float ? ['float'] : []),
+      ]);
       const previous = group.fields.get(fieldId);
       const proof = reason(
         'observed memory access, not complete layout',
@@ -1020,6 +1103,7 @@ export function recoverTypes(
         ],
         stack_region: access?.region ?? null,
         stride: isStack ? null : address.stride,
+        ...(float ? { float: true as const } : {}),
         ...(targetCalls.length || previous?.call_target_ids?.length
           ? {
               call_target_ids: [
@@ -1052,7 +1136,9 @@ export function recoverTypes(
         : machineType(value.type, fieldProof);
       associate({
         subject_id: fieldId,
-        type_id,
+        type_id: float
+          ? machineType({ kind: 'float', bits: width as 32 | 64 }, fieldProof)
+          : type_id,
         source: 'analysis',
         status: 'candidate',
         evidence_ids: fieldProof,
@@ -1101,6 +1187,8 @@ export function recoverTypes(
           dynamic: group.dynamic || (group.base.kind === 'stack' && stack.frame.dynamic),
           field_type: (field) => {
             const proof = field.evidence_ids;
+            if (field.float)
+              return machineType({ kind: 'float', bits: field.width_bits as 32 | 64 }, proof);
             if (field.call_target_ids?.length)
               return generated(
                 {

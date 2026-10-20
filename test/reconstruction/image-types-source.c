@@ -46,6 +46,14 @@ __attribute__((noinline)) uint64_t pair_sum(uint32_t b) {
   free(p);
   return sum;
 }
+/* One member read as integer bits by one callee and as a double by another. */
+union number { uint64_t bits; double value; };
+struct sample { uint32_t id, tag; uint64_t spare; union number number; };
+__attribute__((noinline)) uint64_t sample_bits(struct sample *p) { return p->number.bits + p->id; }
+__attribute__((noinline)) double sample_scale(struct sample *p) { return p->number.value * p->tag; }
+__attribute__((noinline)) double sample_drive(struct sample *p) {
+  return (double)sample_bits(p) + sample_scale(p);
+}
 volatile uint64_t image_types_sink;
 int main(void) {
   struct context context = {0, 0, 40, 2};
@@ -58,6 +66,8 @@ int main(void) {
   release_all(&db);
   printf("%u %u %u %u %u %u\n", nodes[0].wanted, nodes[0].locked, nodes[1].wanted, nodes[1].locked,
          nodes[2].wanted, nodes[2].locked);
-  image_types_sink = context_pass(&context)->count + scale_drive(5) + pair_sum(4);
+  struct sample sample = {1, 2, 0, {.value = 1.5}};
+  image_types_sink =
+      context_pass(&context)->count + scale_drive(5) + pair_sum(4) + (uint64_t)sample_drive(&sample);
   return 0;
 }

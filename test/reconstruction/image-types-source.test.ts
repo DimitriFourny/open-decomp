@@ -133,6 +133,22 @@ test(
     assert.doesNotMatch(wide, new RegExp(`\\b${highName}\\b`));
     assert.doesNotMatch(high, new RegExp(`\\b${otherName}\\b`));
 
+    // One member read as integer bits by one callee and as a double by another
+    // (both reached from one object): one merged type whose +16 holds an
+    // anonymous union; each function names the member of its own kind, with no
+    // cast, and declares only that member.
+    const sampleBits = await decompile('sample_bits'),
+      sampleScale = await decompile('sample_scale');
+    assert.match(sampleBits.text, /->field_0x10\b/, sampleBits.text);
+    assert.match(sampleScale.text, /->field_0x10_f\b/, sampleScale.text);
+    assert.doesNotMatch(`${sampleBits.text}${sampleScale.text}`, /\((?:double|uint64_t) \*\)/);
+    const sampleName = formalStruct(sampleBits.text).name;
+    assert.equal(formalStruct(sampleScale.text).name, sampleName);
+    assert.match(formalStruct(sampleBits.text).declaration, /uint64_t field_0x10;/);
+    assert.match(formalStruct(sampleScale.text).declaration, /double field_0x10_f;/);
+    const sample = new RegExp(`^struct ${sampleName} \\{.*\\};$`, 'm').exec(dump.text)?.[0];
+    assert.match(sample ?? '', /union \{ uint64_t field_0x10; double field_0x10_f; \};/, dump.text);
+
     // db->slots[i].node: the slot array is reloaded after each call, so the
     // compiler keeps a byte offset (+32 per iteration) beside the counter i.
     const [expected] = lines.slice(2);
