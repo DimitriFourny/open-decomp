@@ -95,14 +95,18 @@ const binary = await openBinary('./app', {
 try {
   const result = await binary.decompile(
     { name: 'main' },
-    { emitter: settings.decompile.language, view: settings.decompile.view },
+    {
+      emitter: settings.decompile.language,
+      view: settings.decompile.view,
+      inference: settings.decompile.inference,
+    },
   );
 } finally {
   await binary.close();
 }
 ```
 
-`loadSettings(path?)` returns the validated effective `Settings` (`version`, `cache_root: string | null`, `analysis_cache`, `decompile.{language,view}`, `export.{language,jobs: number | null}`). Without `path` it reads `$XDG_CONFIG_HOME/open-decomp/settings.json` (else `~/.config/open-decomp/settings.json`) and returns the built-in defaults when that file is missing; an explicit `path` must exist. Invalid JSON, an unknown key, a wrong type or a wrong version rejects with a `SettingsError` whose message names the file path and key (`error.path`, `error.key`). An optional second argument supplies the environment (`{ XDG_CONFIG_HOME, HOME }`) instead of `process.env`, which keeps tests off the real home directory.
+`loadSettings(path?)` returns the validated effective `Settings` (`version`, `cache_root: string | null`, `analysis_cache`, `decompile.{language,view,inference}`, `export.{language,jobs: number | null}`). Without `path` it reads `$XDG_CONFIG_HOME/open-decomp/settings.json` (else `~/.config/open-decomp/settings.json`) and returns the built-in defaults when that file is missing; an explicit `path` must exist. Invalid JSON, an unknown key, a wrong type or a wrong version rejects with a `SettingsError` whose message names the file path and key (`error.path`, `error.key`). An optional second argument supplies the environment (`{ XDG_CONFIG_HOME, HOME }`) instead of `process.env`, which keeps tests off the real home directory.
 
 Precedence stays with the caller: an option you pass explicitly (for example `{ emitter: 'c-like' }`) is applied after, and therefore beats, the file value you chose to read. `Settings` and `loadSettings` are also exported from the root `open-decomp` entry.
 
@@ -151,7 +155,7 @@ binary.decompile(selector: FunctionSelector, options?: DecompileOptions)
   : Promise<ToolResult<'function_decompile'>>
 ```
 
-Choose exactly one selector: `{name}`, `{id}`, or `{address: {space, value}}`. Options are `emitter: 'c-like' | 'python-like'`, a partial shared `budget`, `signal`, and `onProgress`. Function resolution (shared with the MCP function handles, `src/service/queries/selector.ts`) is a separate bounded navigation query; the supplied decompilation budget applies to analysis, not to that query.
+Choose exactly one selector: `{name}`, `{id}`, or `{address: {space, value}}`. Options are `emitter: 'c-like' | 'python-like'`, `view: 'source' | 'checked'`, `inference: 'proven' | 'likely'` (default `proven`; `likely` closes open argument lists with the gated heuristics of [CORE.md](CORE.md#inference-mode-likely), marks every guess `likely_arity(...)` in the text and records it as a `guess` inference; its results are cached apart from `proven` ones and a guess may be wrong), a partial shared `budget`, `signal`, and `onProgress`. Function resolution (shared with the MCP function handles, `src/service/queries/selector.ts`) is a separate bounded navigation query; the supplied decompilation budget applies to analysis, not to that query.
 
 The method waits for the operation and assembles artifact-backed output automatically. It validates page metadata, size, SHA-256 and the stored result's request binding. The returned inline result retains the **semantic** state, diagnostics, coverage and source mappings. Consequently, a returned object can exceed `budget.output_bytes`: that field bounds individual service delivery, not the assembled artifact. The existing 16 MiB analysis-artifact limit still applies. Output is C-like or Python-like **pseudocode**, not recovered original source or necessarily executable code.
 

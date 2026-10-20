@@ -27,6 +27,7 @@ open-decomp functions ./app --name main
 open-decomp decompile ./app --function main
 open-decomp decompile ./app --address va:0x100000574 --language python-like
 open-decomp decompile ./app --function main --json --cache ./analysis-cache
+open-decomp decompile ./app --function main --inference likely   # opt-in guesses, marked likely_arity(...)
 
 open-decomp export ./app --out ./app-decomp --jobs 4
 open-decomp types ./app > app-types.h
@@ -40,7 +41,7 @@ open-decomp decompile ./app --function main --settings ./settings.json
 
 ### Export a whole binary as a greppable directory
 
-`export BINARY --out DIR [--language c-like|python-like] [--jobs N] [--name SUBSTRING] [--cache PATH] [--slice ID] [--no-analysis-cache]` is the fastest way for an agent with file tools to read a binary: one process decompiles every function and writes
+`export BINARY --out DIR [--language c-like|python-like] [--inference proven|likely] [--jobs N] [--name SUBSTRING] [--cache PATH] [--slice ID] [--no-analysis-cache]` is the fastest way for an agent with file tools to read a binary: one process decompiles every function and writes
 
 - `DIR/functions/NAME@0xADDR.c` (`.py` for python-like): one header comment (name, address, state and reason, code bytes, caller and callee names; `?` marks an unresolved indirect call) followed by exactly the text `decompile` prints. Names are the C spelling of the native symbol (Mach-O's leading underscore dropped); unnamed functions are `sub_<hex>` (or the import a stub forwards to). Filenames are sanitized and unique.
 - `DIR/functions/NAME@0xADDR.asm`: only for functions with no pseudocode (failed, unsupported, cancelled); the header states why and the body is the compact native disassembly, so no function is missing.
@@ -76,20 +77,21 @@ One optional JSON file sets your defaults once, so you do not repeat flags. It n
   "version": 1,
   "cache_root": "/Users/me/open-decomp-cache",
   "analysis_cache": true,
-  "decompile": { "language": "python-like", "view": "source" },
+  "decompile": { "language": "python-like", "view": "source", "inference": "proven" },
   "export": { "language": "c-like", "jobs": 4 }
 }
 ```
 
-| Key                  | Values                  | Same as                                    | Built-in default                        |
-| -------------------- | ----------------------- | ------------------------------------------ | --------------------------------------- |
-| `version`            | `1` (required)          |                                            | n/a                                     |
-| `cache_root`         | absolute path           | `--cache PATH`                             | `BINARY.open-decomp` beside each binary |
-| `analysis_cache`     | `true`, `false`         | `--analysis-cache` / `--no-analysis-cache` | `true`                                  |
-| `decompile.language` | `c-like`, `python-like` | `decompile --language`, `options.emitter`  | `c-like`                                |
-| `decompile.view`     | `source`, `checked`     | `decompile --view`, `options.view`         | `source`                                |
-| `export.language`    | `c-like`, `python-like` | `export --language`                        | `c-like`                                |
-| `export.jobs`        | integer 1 to 32         | `export --jobs`                            | `min(4, CPUs/2)`                        |
+| Key                   | Values                  | Same as                                      | Built-in default                        |
+| --------------------- | ----------------------- | -------------------------------------------- | --------------------------------------- |
+| `version`             | `1` (required)          |                                              | n/a                                     |
+| `cache_root`          | absolute path           | `--cache PATH`                               | `BINARY.open-decomp` beside each binary |
+| `analysis_cache`      | `true`, `false`         | `--analysis-cache` / `--no-analysis-cache`   | `true`                                  |
+| `decompile.language`  | `c-like`, `python-like` | `decompile --language`, `options.emitter`    | `c-like`                                |
+| `decompile.view`      | `source`, `checked`     | `decompile --view`, `options.view`           | `source`                                |
+| `decompile.inference` | `proven`, `likely`      | `decompile --inference`, `options.inference` | `proven`                                |
+| `export.language`     | `c-like`, `python-like` | `export --language`                          | `c-like`                                |
+| `export.jobs`         | integer 1 to 32         | `export --jobs`                              | `min(4, CPUs/2)`                        |
 
 Every key except `version` is optional, and every object rejects unknown keys.
 
@@ -97,7 +99,7 @@ Every key except `version` is optional, and every object rejects unknown keys.
 
 `open-decomp settings [--json] [--settings PATH]` prints the resolved file path, whether it exists and each effective value with its source (`default` or `file`); `--json` writes `{path,exists,explicit,settings,sources}`. It reads no binary and starts no worker.
 
-**MCP.** `mcp start` (stdio and HTTP) loads the file once at startup; editing it later needs a restart. `analysis_cache` is the server-wide default (`--analysis-cache` / `--no-analysis-cache` win). `decompile.language` and `decompile.view` apply when a `function_decompile` request omits `options.emitter` / `options.view`; an explicit request value wins. With stdio, `cache_root` must be an existing directory inside a `--root`; `project_open` with `source.kind: "import"` may then omit `project_path`, and the project is `<cache_root>/<sha256 of the input>.<slice_id|default>`, the same layout the CLI and API use, resumed when it already exists (an explicit `project_path` is used unchanged). The advertised tool schema makes `project_path` optional only in that case. With `--transport http`, `cache_root` does not apply (each principal keeps projects under its configured `project_root`; a startup note says so) while `analysis_cache` and `decompile.*` do. Tool JSON schemas are otherwise unchanged.
+**MCP.** `mcp start` (stdio and HTTP) loads the file once at startup; editing it later needs a restart. `analysis_cache` is the server-wide default (`--analysis-cache` / `--no-analysis-cache` win). `decompile.language`, `decompile.view` and `decompile.inference` apply when a `function_decompile` request omits `options.emitter` / `options.view` / `options.inference`; an explicit request value wins. With stdio, `cache_root` must be an existing directory inside a `--root`; `project_open` with `source.kind: "import"` may then omit `project_path`, and the project is `<cache_root>/<sha256 of the input>.<slice_id|default>`, the same layout the CLI and API use, resumed when it already exists (an explicit `project_path` is used unchanged). The advertised tool schema makes `project_path` optional only in that case. With `--transport http`, `cache_root` does not apply (each principal keeps projects under its configured `project_root`; a startup note says so) while `analysis_cache` and `decompile.*` do. Tool JSON schemas are otherwise unchanged.
 
 **Library.** `open-decomp/api` never reads the settings file implicitly. Call `loadSettings(path?)` and pass the values you want to `openBinary()` / `decompile()`; see [API.md](API.md#settings-file).
 

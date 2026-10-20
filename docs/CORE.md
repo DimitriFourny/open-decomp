@@ -497,14 +497,58 @@ forwarded untouched to an indirect call (configuration function pointers in
 so every caller that reaches it keeps `...`. Even a 10x budget does not close
 them. Caller consensus would be sound for the source interface (when every call
 site is known, registers no caller sets carry garbage at entry and are not source
-parameters) but is not implemented: the dominant blocker `sqlite3_free` is
-exported (consensus excluded), "every call site known" needs an image-wide escape
-proof that existing block-local address recovery and partial discovery cannot
-give (on ARM64 a linear sweep for B/BL/ADR/ADRP to the callee or its page plus
-complete chained-fixup relocations and export exclusion), and internal hubs such
-as `sqlite3Malloc` receive their callers' own forwarded registers, so consensus
-depends on the callers' arities in turn (a coinductive caller/callee fixed point
-over every caller body).
+parameters), but "every call site known" needs an image-wide escape proof that
+existing block-local address recovery and partial discovery cannot give (on ARM64
+a linear sweep for B/BL/ADR/ADRP to the callee or its page plus complete
+chained-fixup relocations and export exclusion), exported functions have unknown
+external callers, and internal hubs such as `sqlite3Malloc` receive their callers'
+own forwarded registers, so consensus depends on the callers' arities in turn (a
+coinductive caller/callee fixed point over every caller body). Proven mode
+therefore never closes these lists. The opt-in `likely` mode (next section)
+applies two measured, gated approximations of these ideas and marks every result.
+
+### Inference mode (`likely`)
+
+`options.inference` (`proven` by default; CLI `--inference`, MCP `options.inference`,
+settings `decompile.inference`) is part of the cache identity, so `proven` and `likely`
+results never share a row; `proven` output is byte-identical to a build without the option
+(dev-loop texts compared file by file). In `likely` mode, source view, a heuristic may close
+the open argument list of one direct call or direct tail transfer after its observed prefix
+(the caller-prepared registers plus the callee's observed reads). The closure is
+presentation only: the call keeps `argument_list_complete: false`, so storage escape,
+requirement and stack analyses stay as conservative as in `proven` mode, a caller that wrote
+outgoing stack bytes never closes (they may be arguments or Darwin variadic arguments), and
+`arity_complete` in the call inference stays false.
+
+Heuristics (`src/service/analysis/likely-arity.ts`):
+
+- `callee_reads`: the callee's complete body reads exactly its observed argument registers
+  once unobserved arguments forwarded into an indirect call or indirect tail are taken not to
+  be read by the unknown target (every direct callee they reach is closed or itself
+  qualifies), has no incoming stack parameters, no escaping incoming-stack address (not
+  variadic), and the call site prepares nothing beyond those registers. `observeParameters`
+  records the basis as `likely_closure` on the native interface (mode independent, never used
+  by `proven`).
+- `caller_consensus`: every discovered direct call site of the target (a function, or an
+  import without a contract) prepares the same argument-register prefix, the callee's
+  observed reads (when its body is known) lie inside it, and an empty prefix needs a known
+  callee. Callers are loaded as native units under the request's optional-work share; a tail
+  transfer abstains (it forwards the caller's registers), a site this scan cannot read (no
+  owning function, unanalyzable caller, incomplete or capacity-limited unit) or more than 32
+  caller functions leaves the list open, and an exhausted share is a `resource_limit`
+  diagnostic. A caller that passes its own parameter register unchanged is not "prepared",
+  so such sites disagree and the list stays open.
+
+Each firing heuristic is recorded as a `guess` inference (`details.kind: "guess"`, status
+`hypothesis`: call id, target, heuristics, `arity`, agreeing `sites`, `applied`). A
+heuristic prints only if `LIKELY_GATE` says it passed the precision gate; a failing one
+still records its guess with `applied: false` and leaves the text open. Printed guesses are
+wrapped `likely_arity(f(a, b))` in both dialects, the C call declaration of the callee is
+suffixed `/* likely */`, the file header states the marker once and the helper stays in the
+emission metadata. Unsupported or unscored: indirect calls (callbacks), variadic callees,
+callees reading incoming stack arguments, tail-call consensus voting, and parameter types,
+result types and pointer-ness (the harness truth already carries them; no heuristic guesses
+them yet).
 
 Discovery ends intraprocedural flow at a direct call to a callable import whose
 supported, unconflicted library declaration is noreturn (`libraryNoreturnCalls`;

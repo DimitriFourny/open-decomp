@@ -57,12 +57,13 @@ Root causes found in the code, in the order we plan to address them:
 
 Guessing may be used only behind an explicit option (`inference: "proven" | "likely"`; CLI `--inference likely`; MCP/API option). It stays off by default until it meets the precision gate, and either way it can always be turned off. Guessed constructs carry a visible marker in both dialects and an inference record in provenance, so they are never mistaken for proven facts.
 
-- [ ] Build a precision harness first. Score each heuristic against source-derived ground truth (arity, parameter types, result type, pointer-ness) on our fixtures, the dev loop and SQLite/brotli source. Report precision and coverage per heuristic.
-- [ ] Caller-consensus arity closure (the design in docs/CORE.md) in likely mode: use the discovered call sites even when the callee is exported or discovery is partial, and close `...` to the arity every caller agrees on.
-- [ ] Callee arity from the callee's own body: registers read before write that are not callee-saved and not forwarded unchanged into an indirect call.
+- [x] Build a precision harness first. Score each heuristic against source-derived ground truth (arity, parameter types, result type, pointer-ness) on our fixtures, the dev loop and SQLite/brotli source. Report precision and coverage per heuristic.
+- [x] Caller-consensus arity closure (the design in docs/CORE.md) in likely mode: use the discovered call sites even when the callee is exported or discovery is partial, and close `...` to the arity every caller agrees on.
+- [x] Callee arity from the callee's own body: registers read before write that are not callee-saved and not forwarded unchanged into an indirect call.
 - [ ] Likely pointer and result types from use patterns that R4 rejects as unproven (e.g. a single integer use against several dereferences).
-- [ ] Gate: a heuristic ships in likely mode only at ≥95% precision on the harness. Likely mode becomes the default only if, on the sealed held-out set and the LLM task benchmark, it improves readability and tokens per correct answer without increasing the confident-wrong-answer rate.
+- [x] Gate: a heuristic ships in likely mode only at ≥95% precision on the harness. Likely mode becomes the default only if, on the sealed held-out set and the LLM task benchmark, it improves readability and tokens per correct answer without increasing the confident-wrong-answer rate.
   - Acceptance: `proven` mode output is unchanged by this work; the harness reports precision per heuristic; markers and provenance identify every guessed construct.
+  - Status: implemented by `scripts/bench/likely-precision.ts` (harness), `src/service/analysis/likely-arity.ts` (`caller_consensus`, `callee_reads` gate), `likely_closure` in `observeParameters`; results in docs/PERFORMANCE.md (both heuristics pass on small samples; consensus coverage on SQLite is zero because its hubs have more than 32 callers or disagreeing prefixes). Open: the likely pointer/result type bullet (needs R4); "Likely mode becomes the default" stays unmet (needs the sealed set and the LLM benchmark, not run); indirect-call (callback) arities have no heuristic; "gate" checkbox covers the precision gate only.
 
 ## Measurement
 

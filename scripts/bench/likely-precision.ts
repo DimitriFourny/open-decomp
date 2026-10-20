@@ -229,6 +229,8 @@ interface BinaryReport {
   readonly failed: number;
   readonly calls: number;
   readonly open_known: number;
+  /** The most frequent still-open targets (unguessed direct sites with a scorable arity). */
+  readonly open_top: readonly (readonly [string, number])[];
   readonly tallies: Record<Heuristic | 'any', Tally>;
   readonly guessed_sites: number;
   readonly applied_sites: number;
@@ -302,6 +304,7 @@ async function runBinary(
       failed,
       calls: calls.length,
       open_known: guessableSites(calls, truth),
+      open_top: openTargets(calls, guesses, truth),
       tallies,
       guessed_sites: guesses.length,
       applied_sites: guesses.filter((guess) => guess.applied).length,
@@ -310,6 +313,22 @@ async function runBinary(
   } finally {
     await session.close();
   }
+}
+
+function openTargets(
+  calls: readonly CallRow[],
+  guesses: readonly GuessRow[],
+  truth: Truth,
+): [string, number][] {
+  const guessed = new Set(guesses.map((guess) => guess.call_id));
+  const counts = new Map<string, number>();
+  for (const call of calls) {
+    const fact = call.target_name === null ? undefined : truth[call.target_name];
+    if (call.arity_complete || guessed.has(call.call_id) || !fact || fact.variadic || fact.complex)
+      continue;
+    counts.set(call.target_name!, (counts.get(call.target_name!) ?? 0) + 1);
+  }
+  return [...counts].sort((a, b) => b[1] - a[1]).slice(0, 12);
 }
 
 function flag(name: string): string | undefined {
@@ -369,6 +388,7 @@ async function main(): Promise<void> {
           `## ${target.id}/${report.id}`,
           `${report.decompiled}/${report.decompiled + report.failed} sampled functions decompiled; ${report.calls} call records; ${report.open_known} open direct sites with a scorable source arity; ${report.guessed_sites} guesses (${report.applied_sites} applied)`,
           ...[...HEURISTICS, 'any' as const].map((name) => `- ${line(name)}`),
+          `- most frequent open targets: ${report.open_top.map(([name, count]) => `${name} x${count}`).join(', ')}`,
           '',
         );
       }

@@ -45,7 +45,11 @@ test('a missing default file means the built-in defaults and every source is def
     [],
   );
   assert.deepEqual(await loadSettings(undefined, { XDG_CONFIG_HOME: root }), DEFAULT_SETTINGS);
-  assert.deepEqual(DEFAULT_SETTINGS.decompile, { language: 'c-like', view: 'source' });
+  assert.deepEqual(DEFAULT_SETTINGS.decompile, {
+    language: 'c-like',
+    view: 'source',
+    inference: 'proven',
+  });
   assert.equal(DEFAULT_SETTINGS.analysis_cache, true);
 });
 
@@ -87,7 +91,7 @@ test('every key is read with its source; unset keys keep default sources', async
     version: 1,
     cache_root: join(root, 'cache'),
     analysis_cache: false,
-    decompile: { language: 'python-like', view: 'checked' },
+    decompile: { language: 'python-like', view: 'checked', inference: 'likely' },
     export: { language: 'python-like', jobs: 3 },
   });
   const report = await inspectSettings(path, {});
@@ -97,10 +101,10 @@ test('every key is read with its source; unset keys keep default sources', async
     version: 1,
     cache_root: join(root, 'cache'),
     analysis_cache: false,
-    decompile: { language: 'python-like', view: 'checked' },
+    decompile: { language: 'python-like', view: 'checked', inference: 'likely' },
     export: { language: 'python-like', jobs: 3 },
   });
-  assert.deepEqual(Object.values(report.sources), Array(6).fill('file'));
+  assert.deepEqual(Object.values(report.sources), Array(7).fill('file'));
   const partial = await inspectSettings(
     await write(join(root, 'partial.json'), { version: 1, export: { jobs: 2 } }),
     {},
@@ -151,6 +155,11 @@ test('unknown keys and wrong versions are rejected with the path and the key', a
     [{ version: 1, analysis_cache: 'no' }, 'analysis_cache', /key "analysis_cache"/],
     [{ version: 1, decompile: { language: 'rust' } }, 'decompile.language', /decompile\.language/],
     [{ version: 1, decompile: { view: 'raw' } }, 'decompile.view', /decompile\.view/],
+    [
+      { version: 1, decompile: { inference: 'guess' } },
+      'decompile.inference',
+      /decompile\.inference/,
+    ],
     [{ version: 1, export: { language: 1 } }, 'export.language', /export\.language/],
     [{ version: 1, export: { jobs: 0 } }, 'export.jobs', /export\.jobs/],
     [{ version: 1, export: { jobs: 33 } }, 'export.jobs', /export\.jobs/],
