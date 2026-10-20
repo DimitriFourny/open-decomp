@@ -1675,6 +1675,38 @@ export class Renderer {
     return this.sourceView && projection.likely?.applied === true;
   }
   private likelyUsed = false;
+  private likelyTypeUsed = false;
+  /** Whether a formal's printed type is a guess that `likely` mode applied. */
+  private guessedFormal(value: Value): boolean {
+    return (
+      this.sourceView &&
+      this.program.source?.likely_types?.parameters.get(value.id)?.applied === true &&
+      this.program.source.value_types?.get(value.id)?.likely === true
+    );
+  }
+
+  private guessedResult(): boolean {
+    return (
+      this.sourceView &&
+      this.program.source?.likely_types?.result?.applied === true &&
+      this.program.source.return_source_type === this.input.source?.likely_types?.pointer_type_id &&
+      !this.program.signature
+    );
+  }
+
+  /** Likely mode: a type that only a guess established (a formal or the result that
+   * proven analysis left integer) prints inside `likely_type(...)` in both dialects, once
+   * where it is declared; the file header states the meaning and the guess record in the
+   * provenance names the heuristics and call sites. */
+  private likelyType(text: string): string {
+    this.likelyTypeUsed = true;
+    return this.call(
+      'likely_type',
+      'Guessed, not proven: the wrapped type was chosen by an opt-in likely-mode heuristic from how the function callers use this formal or result (see the guess inference); proven analysis leaves it an integer. Values connected to it by copies inherit the type.',
+      [text],
+    );
+  }
+
   /** Likely mode: a call whose open argument list was closed on a guess prints inside
    * `likely_arity(...)` in both dialects (the file header states its meaning once);
    * the guess record in the provenance names the heuristics. */
@@ -7421,7 +7453,11 @@ export class Renderer {
         : this.identifier(value.id, source ? 'arg' : register ? 'reg' : 'arg');
       const type = source ? this.sourceType(source.type_id) : this.valueType(value);
       this.declaredTypes.set(value.id, type);
-      parameters.push({ value, type, name });
+      parameters.push({
+        value,
+        type: this.guessedFormal(value) ? this.likelyType(type) : type,
+        name,
+      });
     }
     // A tail into a proven-void callee yields no result: with no returned value
     // on any other path the function is void, not of unknown result.
@@ -7460,6 +7496,7 @@ export class Renderer {
     const floating = this.sourceView && this.program.source?.return_float;
     if (floating) returnType = floating === 32 ? 'float' : 'double';
     this.returnSpelling = returnType;
+    const returnShown = this.guessedResult() ? this.likelyType(returnType) : returnType;
     // The scalar-support prelude is chosen from the finished text and inserted here.
     const supportAt = this.sourceView && this.language === 'c-like' ? w.offset : undefined;
     if (this.sourceView && this.language === 'c-like') {
@@ -7505,9 +7542,9 @@ export class Renderer {
         w.declaration(parameter.type, parameter.name),
       );
       const prefix =
-        this.language === 'c-like' ? `${returnType} ${headerName}(` : `def ${headerName}(`;
+        this.language === 'c-like' ? `${returnShown} ${headerName}(` : `def ${headerName}(`;
       closing(
-        `${prefix}${this.writer.join(declarations)}${this.language === 'c-like' ? ') {' : `) -> ${returnType}:`}`,
+        `${prefix}${this.writer.join(declarations)}${this.language === 'c-like' ? ') {' : `) -> ${returnShown}:`}`,
       );
       let offset = this.headerStart + prefix.length;
       for (let index = 0; index < parameters.length; index++) {
@@ -7524,7 +7561,10 @@ export class Renderer {
         offset += length + 2;
       }
     } else if (parameters.length) {
-      w.line(0, this.language === 'c-like' ? `${returnType} ${headerName}(` : `def ${headerName}(`);
+      w.line(
+        0,
+        this.language === 'c-like' ? `${returnShown} ${headerName}(` : `def ${headerName}(`,
+      );
       for (let i = 0; i < parameters.length; i++) {
         const parameter = parameters[i]!;
         const start = w.offset;
@@ -7541,12 +7581,12 @@ export class Renderer {
         );
         this.inferenceSites.set(parameter.value.id, { start, end: w.offset });
       }
-      closing(this.language === 'c-like' ? ') {' : `) -> ${returnType}:`);
+      closing(this.language === 'c-like' ? ') {' : `) -> ${returnShown}:`);
     } else
       closing(
         this.language === 'c-like'
-          ? `${returnType} ${headerName}() {`
-          : `def ${headerName}() -> ${returnType}:`,
+          ? `${returnShown} ${headerName}() {`
+          : `def ${headerName}() -> ${returnShown}:`,
       );
     this.headerEnd = w.offset;
     const proof = this.sourceEvidence.get(this.input.function.id);
@@ -7647,6 +7687,13 @@ export class Renderer {
     let support = supportAt;
     if (this.likelyUsed) {
       const comment = 'likely_arity(call): argument list guessed closed, not proven';
+      const delta = insert(scratchAt, [
+        this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
+      ]);
+      if (support !== undefined) support += delta;
+    }
+    if (this.likelyTypeUsed) {
+      const comment = 'likely_type(T): type guessed from caller use, not proven';
       const delta = insert(scratchAt, [
         this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
       ]);

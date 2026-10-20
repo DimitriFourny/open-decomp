@@ -13,13 +13,14 @@
  *
  * Targets: `matrix` (the dev-loop matrix, symbol-bearing cells, scripts/bench/quality-matrix-corpus.c),
  * `fixtures` (Mach-O fixture executables, fixtures/source), `sqlite` (SQLite 3.54.0 executable
- * of the LLM-task benchmark and its amalgamation) and `brotli` (Homebrew brotli 1.2.0 CLI and
- * its tools/brotli.c). Targets whose inputs are absent are reported as skipped. Needs a built
+ * of the LLM-task benchmark and its amalgamation), `brotli` (Homebrew brotli 1.2.0 CLI and its
+ * tools/brotli.c) and `brotli-lib` (the pinned brotli 1.2.0 library sources built here for arm64
+ * macOS at -O0 and -O2). Targets whose inputs are absent are reported as skipped. Needs a built
  * `dist/` or tsx (it imports the API from source), clang and `dwarfdump` (macOS).
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, join, relative, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -28,18 +29,23 @@ import type { BinarySession } from '../../src/api/index.js';
 import {
   DwarfReader,
   HEURISTICS,
+  HEURISTIC_DIMENSION,
   cName,
   gate,
   guessableSites,
-  scoreArity,
+  parseDeclaration,
+  scoreGuess,
   tally,
+  typePopulation,
 } from './likely-precision-score.js';
 import type {
   CallRow,
+  FunctionObservation,
   GuessRow,
   Heuristic,
   Tally,
   Truth,
+  TypePopulation,
   Verdict,
 } from './likely-precision-score.js';
 
@@ -53,8 +59,10 @@ interface Source {
 }
 interface Target {
   readonly id: string;
+  /** `<work>` in a path stands for the working directory. */
   readonly binaries: readonly { readonly id: string; readonly path: string }[];
-  readonly sources: readonly Source[];
+  /** A thunk lists sources that `prepare` creates. */
+  readonly sources: readonly Source[] | (() => readonly Source[]);
   /** Decompile at most this many functions of each binary (deterministic by name hash). */
   readonly sample: number;
   /** Prepares sources that are not in the repository (pinned downloads); may throw. */
@@ -68,6 +76,11 @@ const BROTLI_FILES: Readonly<Record<string, string>> = {
   'common/platform.h': '63d47925374e1015e35eaac73d9d9dfc79b7f0585fe73c19d1ccde7a36aaa407',
   'common/version.h': '792d03d8feff8168edf639899f72b71a37e9cbd9f178e3be397ccef29d3346b0',
 };
+/** Brotli 1.2.0 library (common, dec, enc): built here for arm64 macOS at two optimization levels
+ * with no debug info; the ground truth is a separate `-O1 -g` compile of the same files. */
+const BROTLI_ARCHIVE = 'https://github.com/google/brotli/archive/refs/tags/v1.2.0.tar.gz';
+const BROTLI_ARCHIVE_SHA256 = '816c96e8e8f193b40151dad7e8ff37b1221d019dbcb9c35cd3fadbfe6477dfec';
+const BROTLI_LIBRARY_LEVELS = ['O0', 'O2'] as const;
 const SQLITE_SOURCE = '.local/quality-coordinator-reviewed/reference/sqlite3.c';
 const SQLITE_SHA256 = '2da161e310ef0aba3465f22a4d12b8a43723236f0942fa76e8aac523c3317243';
 const SQLITE_BINARY = '.local/quality-coordinator-reviewed/inputs/sqlite3-arm64';
@@ -91,7 +104,62 @@ async function matrixBinaries(): Promise<Target['binaries']> {
     }));
 }
 
-async function targets(): Promise<readonly Target[]> {
+function brotliLibrarySources(work: string): readonly Source[] {
+  const root = join(work, 'brotli-lib', 'src', 'brotli-1.2.0', 'c');
+  const include = [join(root, 'include')];
+  return ['common', 'dec', 'enc'].flatMap((dir) =>
+    existsSync(join(root, dir))
+      ? readdirSync(join(root, dir))
+          .filter((name) => name.endsWith('.c'))
+          .sort()
+          .map((name) => ({ file: join(root, dir, name), includes: include }))
+      : [],
+  );
+}
+
+async function prepareBrotliLibrary(work: string): Promise<void> {
+  const base = join(work, 'brotli-lib');
+  const archive = join(base, 'v1.2.0.tar.gz');
+  await mkdir(base, { recursive: true });
+  if (!existsSync(archive) || sha256(await readFile(archive)) !== BROTLI_ARCHIVE_SHA256) {
+    const response = await fetch(BROTLI_ARCHIVE);
+    if (!response.ok) throw new Error(`brotli archive: HTTP ${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (sha256(bytes) !== BROTLI_ARCHIVE_SHA256)
+      throw new Error('brotli archive: SHA-256 differs from the pin');
+    await writeFile(archive, bytes);
+  }
+  const root = join(base, 'src');
+  if (!existsSync(join(root, 'brotli-1.2.0'))) {
+    await mkdir(root, { recursive: true });
+    const unpacked = spawnSync('tar', ['xzf', archive, '-C', root], { encoding: 'utf8' });
+    if (unpacked.status !== 0) throw new Error(`tar failed: ${unpacked.stderr}`);
+  }
+  const sources = brotliLibrarySources(work).map((source) => source.file);
+  for (const level of BROTLI_LIBRARY_LEVELS) {
+    const output = join(base, `libbrotli-${level}.dylib`);
+    if (existsSync(output)) continue;
+    const built = spawnSync(
+      'clang',
+      [
+        '-target',
+        'arm64-apple-macos13.0',
+        `-${level}`,
+        '-g0',
+        '-w',
+        '-shared',
+        `-I${join(root, 'brotli-1.2.0', 'c', 'include')}`,
+        ...sources,
+        '-o',
+        output,
+      ],
+      { encoding: 'utf8', maxBuffer: 1 << 26 },
+    );
+    if (built.status !== 0) throw new Error(`clang failed: ${built.stderr.slice(0, 2000)}`);
+  }
+}
+
+async function targets(work: string): Promise<readonly Target[]> {
   return [
     {
       id: 'matrix',
@@ -126,6 +194,16 @@ async function targets(): Promise<readonly Target[]> {
       },
     },
     {
+      id: 'brotli-lib',
+      binaries: BROTLI_LIBRARY_LEVELS.map((level) => ({
+        id: `libbrotli-${level}`,
+        path: join('<work>', 'brotli-lib', `libbrotli-${level}.dylib`),
+      })),
+      sources: () => brotliLibrarySources(work),
+      sample: 150,
+      prepare: prepareBrotliLibrary,
+    },
+    {
       id: 'brotli',
       binaries: [{ id: 'brotli', path: BROTLI_BINARY }],
       sources: [
@@ -154,7 +232,8 @@ async function targets(): Promise<readonly Target[]> {
 /** Compile each source with the host clang (-O1 -g: called externals get declarations too)
  * and merge the DWARF truth. Cached by source hash. */
 async function groundTruth(target: Target, work: string): Promise<Truth> {
-  const files = target.sources.map((source) => ({
+  const listed = typeof target.sources === 'function' ? target.sources() : target.sources;
+  const files = listed.map((source) => ({
     ...source,
     path: resolve(source.file.replace('<work>', work).replace(/^(?!\/)/, `${ROOT}/`)),
   }));
@@ -232,6 +311,8 @@ interface BinaryReport {
   /** The most frequent still-open targets (unguessed direct sites with a scorable arity). */
   readonly open_top: readonly (readonly [string, number])[];
   readonly tallies: Record<Heuristic | 'any', Tally>;
+  readonly population: TypePopulation;
+  readonly observations: readonly FunctionObservation[];
   readonly guessed_sites: number;
   readonly applied_sites: number;
   readonly rows: readonly (GuessRow & Verdict)[];
@@ -244,8 +325,9 @@ async function runBinary(
   work: string,
   sample: number,
 ): Promise<BinaryReport | { readonly id: string; readonly skipped: string }> {
-  if (!existsSync(binary.path)) return { id: binary.id, skipped: `${binary.path} is absent` };
-  const session = await openBinary(binary.path, {
+  const path = binary.path.replace('<work>', work);
+  if (!existsSync(path)) return { id: binary.id, skipped: `${path} is absent` };
+  const session = await openBinary(path, {
     cachePath: join(work, 'cache', `${target.id}-${binary.id}`),
   });
   try {
@@ -260,6 +342,7 @@ async function runBinary(
       .slice(0, sample);
     const guesses: GuessRow[] = [];
     const calls: CallRow[] = [];
+    const observations: FunctionObservation[] = [];
     let decompiled = 0,
       failed = 0;
     for (const fn of candidates) {
@@ -270,7 +353,32 @@ async function runBinary(
       }
       decompiled++;
       const caller = cName(fn.name!);
-      for (const inference of expandEmission(result.data.emission).inferences ?? []) {
+      const emission = expandEmission(result.data.emission);
+      const inferences = emission.inferences ?? [];
+      // The stack base of an escaped frame prints as a formal but is no source parameter:
+      // source formals are the others, numbered without it.
+      const entryOrdinals = new Set<number>();
+      for (const inference of inferences)
+        if (inference.details.kind === 'parameter' && inference.details.role === 'entry_storage')
+          entryOrdinals.add(inference.details.ordinal);
+      const sourceOrdinal = (ordinal: number): number =>
+        ordinal - [...entryOrdinals].filter((entry) => entry < ordinal).length;
+      const printed = emission.declaration_span
+        ? parseDeclaration(
+            emission.text.slice(emission.declaration_span.start, emission.declaration_span.end),
+          )
+        : null;
+      if (printed)
+        observations.push({
+          name: caller,
+          result_pointer: printed.result_pointer,
+          params: printed.params.filter((_, index) => !entryOrdinals.has(index)),
+        });
+      const printedParams = inferences.filter(
+        (inference) =>
+          inference.details.kind === 'parameter' && inference.details.role !== 'entry_storage',
+      ).length;
+      for (const inference of inferences) {
         const details = inference.details;
         if (details.kind === 'call') {
           const address = details.target.kind === 'direct' ? details.target.identity.address : null;
@@ -281,9 +389,24 @@ async function runBinary(
             target_name: address === null ? null : (names.get(address) ?? null),
             arity_complete: details.arity_complete,
           });
-        } else if (details.kind === 'guess' && details.target.kind === 'direct') {
+        } else if (details.kind === 'guess' && details.subject !== 'argument_list') {
+          guesses.push({
+            subject: details.subject,
+            caller,
+            ordinal: details.ordinal === null ? null : sourceOrdinal(details.ordinal),
+            printed_params: printedParams,
+            heuristics: details.heuristics,
+            applied: details.applied,
+            sites: details.sites,
+          });
+        } else if (
+          details.kind === 'guess' &&
+          details.subject === 'argument_list' &&
+          details.target.kind === 'direct'
+        ) {
           const address = details.target.identity.address;
           guesses.push({
+            subject: 'argument_list',
             caller,
             call_id: details.call_id,
             target_address: address,
@@ -306,9 +429,11 @@ async function runBinary(
       open_known: guessableSites(calls, truth),
       open_top: openTargets(calls, guesses, truth),
       tallies,
+      population: typePopulation(observations, truth, guesses),
+      observations,
       guessed_sites: guesses.length,
       applied_sites: guesses.filter((guess) => guess.applied).length,
-      rows: guesses.map((guess) => ({ ...guess, ...scoreArity(guess, truth) })),
+      rows: guesses.map((guess) => ({ ...guess, ...scoreGuess(guess, truth) })),
     };
   } finally {
     await session.close();
@@ -320,7 +445,9 @@ function openTargets(
   guesses: readonly GuessRow[],
   truth: Truth,
 ): [string, number][] {
-  const guessed = new Set(guesses.map((guess) => guess.call_id));
+  const guessed = new Set(
+    guesses.flatMap((guess) => (guess.subject === 'argument_list' ? [guess.call_id] : [])),
+  );
   const counts = new Map<string, number>();
   for (const call of calls) {
     const fact = call.target_name === null ? undefined : truth[call.target_name];
@@ -339,6 +466,26 @@ function flag(name: string): string | undefined {
 const pct = (value: number | null): string =>
   value === null ? 'n/a' : `${(value * 100).toFixed(1)}%`;
 
+/** Correct guesses over what the heuristic could reach: the declared pointer formals (or
+ * results) proven analysis leaves integer for the type heuristics; for arity, every scored
+ * guess over the open direct sites with a scorable arity (when the report has them). */
+function coverageOf(
+  name: Heuristic | 'any',
+  t: Tally,
+  openSites: number | null,
+  population: TypePopulation,
+): number | null {
+  if (name === 'any') return openSites ? t.sites / openSites : null;
+  switch (HEURISTIC_DIMENSION[name]) {
+    case 'parameter_type':
+      return population.open_params ? t.correct / population.open_params : null;
+    case 'result_type':
+      return population.open_results ? t.correct / population.open_results : null;
+    case 'argument_list':
+      return openSites ? t.sites / openSites : null;
+  }
+}
+
 async function main(): Promise<void> {
   const label = flag('--label');
   if (!label) throw new Error('--label is required');
@@ -349,10 +496,13 @@ async function main(): Promise<void> {
   await mkdir(out, { recursive: true });
   const reports: Record<string, unknown> = {};
   // Pool of every scored guess, for the pooled gate decision.
-  const pooled: { guesses: GuessRow[]; truth: Truth[] } = { guesses: [], truth: [] };
+  const pooled: { guesses: GuessRow[]; observations: FunctionObservation[] } = {
+    guesses: [],
+    observations: [],
+  };
   const merged: Record<string, Truth[string]> = {};
   const markdown: string[] = [`# Likely-mode precision (${label})`, ''];
-  for (const target of await targets()) {
+  for (const target of await targets(work)) {
     if (only && !only.includes(target.id)) continue;
     try {
       await target.prepare?.(work);
@@ -376,17 +526,26 @@ async function main(): Promise<void> {
           continue;
         }
         for (const row of report.rows)
-          pooled.guesses.push({
-            ...row,
-            target_name: row.target_name === null ? null : `${target.id}:${row.target_name}`,
-          });
+          pooled.guesses.push(
+            row.subject === 'argument_list'
+              ? {
+                  ...row,
+                  target_name: row.target_name === null ? null : `${target.id}:${row.target_name}`,
+                }
+              : { ...row, caller: `${target.id}:${row.caller}` },
+          );
+        for (const observation of report.observations)
+          pooled.observations.push({ ...observation, name: `${target.id}:${observation.name}` });
         const line = (name: Heuristic | 'any'): string => {
           const t = report.tallies[name];
-          return `${name}: ${t.correct}/${t.sites} sites (${pct(t.precision_sites)}), ${t.callees_correct}/${t.callees} callees (${pct(t.precision_callees)}), over ${t.over} under ${t.under} variadic ${t.variadic} unscored ${t.unscored}`;
+          const coverage = coverageOf(name, t, report.open_known, report.population);
+          return `${name}: ${t.correct}/${t.sites} sites (${pct(t.precision_sites)}), ${t.callees_correct}/${t.callees} ${name !== 'any' && HEURISTIC_DIMENSION[name] !== 'argument_list' ? 'formals/results' : 'callees'} (${pct(t.precision_callees)}), coverage ${pct(coverage)}, wrong ${t.wrong} over ${t.over} under ${t.under} variadic ${t.variadic} unscored ${t.unscored}`;
         };
+        const population = report.population;
         markdown.push(
           `## ${target.id}/${report.id}`,
           `${report.decompiled}/${report.decompiled + report.failed} sampled functions decompiled; ${report.calls} call records; ${report.open_known} open direct sites with a scorable source arity; ${report.guessed_sites} guesses (${report.applied_sites} applied)`,
+          `declared pointers: formals ${population.proven_params} printed as pointers by proven analysis, ${population.open_params} open; results ${population.proven_results} proven, ${population.open_results} open`,
           ...[...HEURISTICS, 'any' as const].map((name) => `- ${line(name)}`),
           `- most frequent open targets: ${report.open_top.map(([name, count]) => `${name} x${count}`).join(', ')}`,
           '',
@@ -402,14 +561,32 @@ async function main(): Promise<void> {
   // so equal names in different programs never alias.
   const pooledTruth: Truth = merged;
   const pooledTallies = tally(pooled.guesses, pooledTruth);
+  const pooledPopulation = typePopulation(pooled.observations, pooledTruth, pooled.guesses);
   markdown.push('## Pooled gate', '');
-  for (const verdict of gate(pooledTallies))
-    markdown.push(
-      `- ${verdict.heuristic}: ${verdict.sites} scored sites, precision ${pct(verdict.precision_sites)} (sites) / ${pct(verdict.precision_callees)} (callees): ${verdict.passes ? 'PASSES' : 'FAILS'} the 95% gate`,
+  for (const verdict of gate(pooledTallies)) {
+    const coverage = coverageOf(
+      verdict.heuristic,
+      pooledTallies[verdict.heuristic],
+      null,
+      pooledPopulation,
     );
+    markdown.push(
+      `- ${verdict.heuristic}: ${verdict.sites} scored sites, precision ${pct(verdict.precision_sites)} (sites) / ${pct(verdict.precision_callees)} (${HEURISTIC_DIMENSION[verdict.heuristic] !== 'argument_list' ? 'formals/results' : 'callees'}), coverage ${pct(coverage)}: ${verdict.passes ? 'PASSES' : 'FAILS'} the 95% gate`,
+    );
+  }
   await writeFile(
     join(out, 'report.json'),
-    JSON.stringify({ label, reports, pooled: pooledTallies, gate: gate(pooledTallies) }, null, 1),
+    JSON.stringify(
+      {
+        label,
+        reports,
+        pooled: pooledTallies,
+        population: pooledPopulation,
+        gate: gate(pooledTallies),
+      },
+      null,
+      1,
+    ),
   );
   await writeFile(join(out, 'report.md'), `${markdown.join('\n')}\n`);
   process.stdout.write(`${markdown.join('\n')}\nreport: ${out}\n`);

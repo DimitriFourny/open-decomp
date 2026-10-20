@@ -90,6 +90,10 @@ function compactDetails(
       };
     }
     case 'guess': {
+      if (details.subject !== 'argument_list') {
+        const { value_ids: _values, ...facts } = details;
+        return facts;
+      }
       const { call_id: _call, target, ...facts } = details;
       return { ...facts, target: target.kind === 'direct' ? target : { kind: 'indirect' } };
     }

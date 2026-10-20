@@ -4,11 +4,20 @@ import {
   MIN_SITES,
   gate,
   guessableSites,
+  parseDeclaration,
   parseDwarf,
   scoreArity,
+  scoreType,
   tally,
+  typePopulation,
 } from '../../scripts/bench/likely-precision-score.js';
-import type { CallRow, GuessRow, Truth } from '../../scripts/bench/likely-precision-score.js';
+import type {
+  ArityGuessRow,
+  CallRow,
+  GuessRow,
+  Truth,
+  TypeGuessRow,
+} from '../../scripts/bench/likely-precision-score.js';
 
 // Shaped like `dwarfdump --debug-info` output of an -O1 compile: header lines carry the DIE
 // offset and tag, nesting is two columns per level, attributes are `DW_AT_name (value)`.
@@ -94,7 +103,8 @@ const truth: Truth = {
   log: { params: [{ kind: 'pointer', bits: 64 }], result: null, variadic: true, complex: false },
   pair: { params: [], result: null, variadic: false, complex: true },
 };
-const guess = (name: string | null, arity: number, id = `c${arity}${name}`): GuessRow => ({
+const guess = (name: string | null, arity: number, id = `c${arity}${name}`): ArityGuessRow => ({
+  subject: 'argument_list',
   caller: 'f',
   call_id: id,
   target_address: '1',
@@ -150,4 +160,96 @@ test('guessable sites are open direct calls to fixed-arity functions with source
     call('missing', false),
   ];
   assert.equal(guessableSites(calls, truth), 1);
+});
+
+const pointer = { kind: 'pointer', bits: 64 } as const;
+const typed: Truth = {
+  mixed: { params: [pointer, word, pointer], result: pointer, variadic: false, complex: false },
+  floaty: {
+    params: [{ kind: 'float', bits: 64 }, pointer],
+    result: null,
+    variadic: false,
+    complex: false,
+  },
+  pair: { params: [], result: null, variadic: false, complex: true },
+};
+const typeGuess = (
+  caller: string,
+  subject: TypeGuessRow['subject'],
+  ordinal: number | null,
+  printed = 3,
+  heuristic: TypeGuessRow['heuristics'][number] = 'opaque_word_formal',
+): TypeGuessRow => ({
+  subject,
+  caller,
+  ordinal,
+  printed_params: printed,
+  heuristics: [heuristic],
+  applied: true,
+  sites: null,
+});
+
+test('type scoring: a guessed pointer is right only for a declared pointer', () => {
+  assert.equal(scoreType(typeGuess('mixed', 'parameter_type', 0), typed).outcome, 'correct');
+  assert.equal(scoreType(typeGuess('mixed', 'parameter_type', 1), typed).outcome, 'wrong');
+  assert.equal(scoreType(typeGuess('mixed', 'result_type', null), typed).outcome, 'correct');
+  // A void function has no pointer result to guess.
+  assert.equal(scoreType(typeGuess('floaty', 'result_type', null), typed).outcome, 'wrong');
+  // Positions only line up when the printed and declared counts agree and no formal is a float.
+  assert.equal(scoreType(typeGuess('mixed', 'parameter_type', 0, 4), typed).outcome, 'unscored');
+  assert.equal(scoreType(typeGuess('floaty', 'parameter_type', 1, 2), typed).outcome, 'unscored');
+  assert.equal(scoreType(typeGuess('pair', 'result_type', null), typed).outcome, 'complex');
+  assert.equal(scoreType(typeGuess('missing', 'result_type', null), typed).outcome, 'unscored');
+});
+
+test('the gate judges a type heuristic on its own guesses, per formal and result', () => {
+  // 20 correct formals pass; a 21st that is wrong takes the heuristic below 95% by sites.
+  const formals: GuessRow[] = Array.from({ length: MIN_SITES }, () =>
+    typeGuess('mixed', 'parameter_type', 0),
+  );
+  const passing = gate(tally(formals, typed)).find((v) => v.heuristic === 'opaque_word_formal')!;
+  assert.equal(passing.passes, true);
+  const failing = gate(tally([...formals, typeGuess('mixed', 'parameter_type', 1)], typed)).find(
+    (v) => v.heuristic === 'opaque_word_formal',
+  )!;
+  assert.equal(failing.precision_callees, 0.5);
+  assert.equal(failing.passes, false);
+  // Another heuristic's guesses never count for this one.
+  assert.equal(
+    gate(tally(formals, typed)).find((v) => v.heuristic === 'indirect_call_target')!.sites,
+    0,
+  );
+});
+
+test('printed declarations: pointer spelling per formal and result', () => {
+  assert.deepEqual(
+    parseDeclaration(
+      'const char* name(uint32_t count, void (*cb)(int, int), likely_type(uint8_t*) p) {',
+    ),
+    { result_pointer: true, params: [false, true, true] },
+  );
+  assert.deepEqual(parseDeclaration('uint64_t f(void) {'), { result_pointer: false, params: [] });
+  assert.deepEqual(parseDeclaration('def f(a: uint64_t, b: pointer[uint8_t]) -> uint64_t:'), {
+    result_pointer: false,
+    params: [false, true],
+  });
+  assert.equal(parseDeclaration('no parentheses'), null);
+});
+
+test('type population separates proven pointers from those only a guess made pointers', () => {
+  const observations = [
+    { name: 'mixed', result_pointer: false, params: [true, false, false] },
+    { name: 'floaty', result_pointer: false, params: [false, true] },
+    { name: 'pair', result_pointer: false, params: [] },
+  ];
+  // `mixed` prints formal 0 as a pointer on its own; formal 2 and the result are open, one of
+  // them pointer only because an applied guess made it so. The float function lines up with
+  // nothing and the aggregate is not scored.
+  const guesses = [typeGuess('mixed', 'parameter_type', 2)];
+  assert.deepEqual(typePopulation(observations, typed, guesses), {
+    proven_params: 1,
+    open_params: 1,
+    proven_results: 0,
+    open_results: 1,
+  });
 });

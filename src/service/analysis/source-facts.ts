@@ -98,6 +98,7 @@ import { variadicRuleCalls, variadicRuleFacts } from './source-variadic.js';
 import { nativeLibraryTails } from './native-library-tails.js';
 import { objcSourceFacts } from './objc-messages.js';
 import { calleeReadsGuess, likelyArities } from './likely-arity.js';
+import { likelyTypes } from './likely-types.js';
 
 export interface SourceFactsInput {
   readonly scope: AnalysisScope;
@@ -1628,6 +1629,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   const calleeReadsCalls = new Set<string>();
   const nativeSummaries = new Map<string, NativeInterface>();
   let likely_arity: SourceEvidence['likely_arity'];
+  let likely_types: SourceEvidence['likely_types'];
   let memory_transfers: readonly MemoryShapeTransfer[] = [];
   let function_returns: SourceEvidence['function_returns'];
   let partialUnits: ReadonlyMap<string, PreparedNativeUnit> = new Map();
@@ -1797,6 +1799,17 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       );
       likely_arity = likely.guesses;
       diagnostics.push(...likely.diagnostics);
+      const typed = likelyTypes({
+        input,
+        selected: selectedUnit,
+        load: loadUnit,
+        context: summaryContext,
+        capacity: result.remaining,
+        callees,
+        summaries: nativeSummaries,
+      });
+      likely_types = typed.types;
+      diagnostics.push(...typed.diagnostics);
     }
     if (selectedUnit)
       memory_transfers = nativeShapeTransfers(selectedUnit, interfaces, summaryContext);
@@ -1987,6 +2000,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     function_return_demands: [...functionReturnDemands.values()],
     ...(function_returns === undefined ? {} : { function_returns }),
     ...(likely_arity === undefined ? {} : { likely_arity }),
+    ...(likely_types === undefined ? {} : { likely_types }),
     call_argument_counts: variadic.counts,
     call_argument_signatures: variadic.signatures,
   };

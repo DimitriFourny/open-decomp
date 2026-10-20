@@ -44,7 +44,9 @@ test(
       assert.ok('data' in result && result.data.delivery === 'inline', name);
       const emission = result.data.emission;
       const guesses = (expandEmission(emission).inferences ?? []).flatMap((inference) =>
-        inference.details.kind === 'guess' ? [{ inference, ...inference.details }] : [],
+        inference.details.kind === 'guess' && inference.details.subject === 'argument_list'
+          ? [{ inference, ...inference.details }]
+          : [],
       );
       return { result, text: emission.text, guesses, emission };
     };

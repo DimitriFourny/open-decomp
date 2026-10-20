@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   inferenceSchema,
   requirementSchema,
+  guessDetailsSchemas,
   inferenceDetailsByKind,
   requirementSiteSchema,
   outputSpanSchema,
@@ -731,12 +732,15 @@ const compactCallSchema = inferenceDetailsByKind.call
       .array(inferenceDetailsByKind.call.shape.ordered_arguments.element.omit({ value_ids: true }))
       .max(10000),
   });
-const compactGuessSchema = inferenceDetailsByKind.guess.omit({ call_id: true }).extend({
-  target: z.discriminatedUnion('kind', [
-    inferenceDetailsByKind.guess.shape.target.options[0],
-    inferenceDetailsByKind.guess.shape.target.options[1].omit({ value_ids: true }),
-  ]),
-});
+const compactGuessSchema = z.discriminatedUnion('subject', [
+  guessDetailsSchemas.argument_list.omit({ call_id: true }).extend({
+    target: z.discriminatedUnion('kind', [
+      guessDetailsSchemas.argument_list.shape.target.options[0],
+      guessDetailsSchemas.argument_list.shape.target.options[1].omit({ value_ids: true }),
+    ]),
+  }),
+  guessDetailsSchemas.type.omit({ value_ids: true }),
+]);
 const investigationDetailsSchema = z.discriminatedUnion('kind', [
   compactParameterSchema,
   inferenceDetailsByKind.type
