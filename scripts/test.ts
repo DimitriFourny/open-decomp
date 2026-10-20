@@ -24,6 +24,7 @@ const INTEGRATION = [
   'test/reconstruction/source-names.test.ts',
   'test/reconstruction/sqlite-interfaces.test.ts',
   'test/service/analysis/native-summary.test.ts',
+  'test/service/likely-inference.test.ts',
   'test/workers/protocol.test.ts',
 ];
 

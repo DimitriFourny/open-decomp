@@ -1594,6 +1594,23 @@ export class Renderer {
     return '...';
   }
 
+  /** Whether a `likely`-mode guess prints a call with its argument list closed. */
+  private likelyArgumentList(projection: BoundaryProjection): boolean {
+    return this.sourceView && projection.likely?.applied === true;
+  }
+  private likelyUsed = false;
+  /** Likely mode: a call whose open argument list was closed on a guess prints inside
+   * `likely_arity(...)` in both dialects (the file header states its meaning once);
+   * the guess record in the provenance names the heuristics. */
+  private likelyCall(text: string): string {
+    this.likelyUsed = true;
+    return this.call(
+      'likely_arity',
+      'Guessed, not proven: the argument list of the wrapped call was closed after its observed prefix by an opt-in likely-mode heuristic (see the guess inference). More arguments may exist; the callee was not proven to read no others.',
+      [text],
+    );
+  }
+
   private dataOrigin(id: string): Origin {
     return (
       this.origins.get(id) ?? {
@@ -3161,9 +3178,11 @@ export class Renderer {
       const parameters = signature
         ? signature.parameters.map((_, index) => this.callParameterType(projection, index))
         : projection.arguments.map((value) => this.valueType(value));
+      const guessed = !signature && this.likelyArgumentList(projection);
       const open = signature
         ? signature.variadic
-        : projection.argument_list_complete === false || projection.kind === 'physical';
+        : !guessed &&
+          (projection.argument_list_complete === false || projection.kind === 'physical');
       if (signature?.variadic && parameters.length === 0) continue;
       if (open) parameters.push(parameters.length ? '...' : 'uintptr_t');
       const text = `extern ${signature?.noreturn ? '_Noreturn ' : ''}${result} ${name}(${parameters.length ? this.writer.join(parameters) : 'void'});`;
@@ -3196,7 +3215,13 @@ export class Renderer {
         );
       const start = this.writer.offset;
       // An open argument list already prints `...`; a closed observed one is marked inferred.
-      this.writer.line(0, signature || text.includes('...') ? text : `${text} /* inferred */`);
+      const guessedList = !signature && this.likelyArgumentList(this.program.calls.get(node.id)!);
+      this.writer.line(
+        0,
+        signature || text.includes('...')
+          ? text
+          : `${text} /* ${guessedList ? 'likely' : 'inferred'} */`,
+      );
       this.mapped(node, start, [], signature?.evidence_ids ?? []);
     }
   }
@@ -3812,7 +3837,9 @@ export class Renderer {
       )
         this.writer.statement(depth, this.clobbers(node.clobbers));
     }
-    const open = projection.argument_list_complete === false || projection.kind === 'physical';
+    const guessed = this.likelyArgumentList(projection);
+    const open =
+      !guessed && (projection.argument_list_complete === false || projection.kind === 'physical');
     if (open)
       args.push(
         this.openArguments(
@@ -3862,7 +3889,10 @@ export class Renderer {
           args.slice(skip + arity),
         ),
       );
-    } else operation = `${target}(${this.writer.join(args)})`;
+    } else {
+      operation = `${target}(${this.writer.join(args)})`;
+      if (guessed) operation = this.likelyCall(operation);
+    }
     if (operand) return operation;
     const results = projection.results.filter((value) => this.program.live.has(value.id));
     const result = results.length === 1 ? results[0] : undefined;
@@ -6780,7 +6810,8 @@ export class Renderer {
             ids.push(value.id);
             return this.valueLiteral(value)?.text ?? this.value(value);
           });
-          if (tail.boundary.argument_list_complete === false)
+          const guessedTail = this.likelyArgumentList(tail.boundary);
+          if (tail.boundary.argument_list_complete === false && !guessedTail)
             arguments_.push(
               this.openArguments(
                 arguments_.length ? 'unknown_argument_remainder' : 'unknown_arguments',
@@ -6792,9 +6823,10 @@ export class Renderer {
             `Native tail transfer to ${this.writer.quote(key)} using observed ${this.input.source!.abi.id} storage. Preserve unknown target effects and forward its actual results. An absent observed result layout is unknown, not void.`,
           );
           ids.push(control.target.id);
+          const tailCall = `${name}(${this.writer.join(arguments_)})`;
           this.tailStatement(
             depth,
-            `${name}(${this.writer.join(arguments_)})`,
+            guessedTail ? this.likelyCall(tailCall) : tailCall,
             tail.result_void === true,
           );
           break;
@@ -7382,6 +7414,13 @@ export class Renderer {
     this.declareFunctionValues(globalsAt, insert);
     if (this.structureSlot) insert(this.structureSlot.at, this.structureLines());
     let support = supportAt;
+    if (this.likelyUsed) {
+      const comment = 'likely_arity(call): argument list guessed closed, not proven';
+      const delta = insert(scratchAt, [
+        this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
+      ]);
+      if (support !== undefined) support += delta;
+    }
     if (this.ellipsisUsed) {
       const comment = '...: more args possible';
       const delta = insert(scratchAt, [

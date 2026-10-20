@@ -48,8 +48,8 @@ fault containment, not an operating-system sandbox.
                     analysis_cache to false. Not valid together with --no-analysis-cache.
   --settings PATH   Read settings from PATH instead of $XDG_CONFIG_HOME/open-decomp/settings.json
                     (default ~/.config/open-decomp/settings.json). It must exist. Loaded once at
-                    startup: analysis_cache is the server-wide default; decompile.language/view
-                    apply when a function_decompile request omits options.emitter/view;
+                    startup: analysis_cache is the server-wide default; decompile.language/view/inference
+                    apply when a function_decompile request omits options.emitter/view/inference;
                     cache_root (an existing directory inside a --root) lets project_open import
                     omit project_path. A flag or request argument always wins.
   --help            Print this help to stderr
@@ -124,7 +124,11 @@ export function parseCliArguments(
       ...(analysisCache ? {} : { analysis_cache: false }),
     },
     defaults: {
-      decompile: { language: settings.decompile.language, view: settings.decompile.view },
+      decompile: {
+        language: settings.decompile.language,
+        view: settings.decompile.view,
+        inference: settings.decompile.inference,
+      },
       ...(settings.cache_root === null
         ? {}
         : { projects: { cache_root: settings.cache_root, authorized_roots: roots } }),

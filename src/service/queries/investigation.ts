@@ -89,6 +89,10 @@ function compactDetails(
         target: target.kind === 'direct' ? target : { kind: 'indirect' },
       };
     }
+    case 'guess': {
+      const { call_id: _call, target, ...facts } = details;
+      return { ...facts, target: target.kind === 'direct' ? target : { kind: 'indirect' } };
+    }
     case 'conflict': {
       const { alternatives, ...facts } = details;
       return { ...facts, alternative_count: alternatives.length };

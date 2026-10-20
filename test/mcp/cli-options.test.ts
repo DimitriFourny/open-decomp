@@ -29,7 +29,7 @@ const fromFile: Settings = {
   ...DEFAULT_SETTINGS,
   cache_root: '/tmp/cache',
   analysis_cache: false,
-  decompile: { language: 'python-like', view: 'checked' },
+  decompile: { language: 'python-like', view: 'checked', inference: 'likely' },
 };
 
 test('settings are server-wide defaults: analysis cache, decompile language/view and cache root', () => {
@@ -37,13 +37,17 @@ test('settings are server-wide defaults: analysis cache, decompile language/view
   assert.ok(options.action === 'serve');
   assert.equal(options.pool.analysis_cache, false);
   assert.deepEqual(options.defaults, {
-    decompile: { language: 'python-like', view: 'checked' },
+    decompile: { language: 'python-like', view: 'checked', inference: 'likely' },
     projects: { cache_root: '/tmp/cache', authorized_roots: ['/tmp'] },
   });
   const builtIn = parseCliArguments(['--root', '/tmp']);
   assert.ok(builtIn.action === 'serve' && !('analysis_cache' in builtIn.pool));
   assert.equal(builtIn.defaults.projects, undefined);
-  assert.deepEqual(builtIn.defaults.decompile, { language: 'c-like', view: 'source' });
+  assert.deepEqual(builtIn.defaults.decompile, {
+    language: 'c-like',
+    view: 'source',
+    inference: 'proven',
+  });
 });
 
 test('--analysis-cache overrides a file setting and --no-analysis-cache overrides the default', () => {

@@ -13,9 +13,11 @@ const MAX_SETTINGS_BYTES = 65_536;
 // One definition of each domain: the same enums and bounds the flags and options validate.
 export const languageSchema = analysisOptionsSchema.shape.emitter.unwrap();
 export const viewSchema = analysisOptionsSchema.shape.view.unwrap();
+export const inferenceSchema = analysisOptionsSchema.shape.inference.unwrap();
 export const jobsSchema = z.number().int().min(1).max(32);
 export type SettingsLanguage = z.infer<typeof languageSchema>;
 export type SettingsView = z.infer<typeof viewSchema>;
+export type SettingsInference = z.infer<typeof inferenceSchema>;
 
 const cacheRootSchema = z
   .string()
@@ -23,14 +25,18 @@ const cacheRootSchema = z
   .max(32768)
   .refine((value) => isAbsolute(value) && !value.includes('\0'), 'Expected an absolute path');
 
-/** The file as written: every key but `version` is optional. Strict at every level. A future key
- * (for example `inference`) is one more optional entry here, in `Settings` and in `resolve`. */
+/** The file as written: every key but `version` is optional. Strict at every level. A new key
+ * is one more optional entry here, in `Settings` and in `resolve`. */
 export const settingsFileSchema = z.strictObject({
   version: z.literal(SETTINGS_VERSION),
   cache_root: cacheRootSchema.optional(),
   analysis_cache: z.boolean().optional(),
   decompile: z
-    .strictObject({ language: languageSchema.optional(), view: viewSchema.optional() })
+    .strictObject({
+      language: languageSchema.optional(),
+      view: viewSchema.optional(),
+      inference: inferenceSchema.optional(),
+    })
     .optional(),
   export: z
     .strictObject({ language: languageSchema.optional(), jobs: jobsSchema.optional() })
@@ -44,7 +50,11 @@ export interface Settings {
   readonly version: typeof SETTINGS_VERSION;
   readonly cache_root: string | null;
   readonly analysis_cache: boolean;
-  readonly decompile: { readonly language: SettingsLanguage; readonly view: SettingsView };
+  readonly decompile: {
+    readonly language: SettingsLanguage;
+    readonly view: SettingsView;
+    readonly inference: SettingsInference;
+  };
   readonly export: { readonly language: SettingsLanguage; readonly jobs: number | null };
 }
 export type SettingKey =
@@ -52,6 +62,7 @@ export type SettingKey =
   | 'analysis_cache'
   | 'decompile.language'
   | 'decompile.view'
+  | 'decompile.inference'
   | 'export.language'
   | 'export.jobs';
 export type SettingSource = 'default' | 'file';
@@ -63,6 +74,7 @@ export const DEFAULT_SETTINGS: Settings = Object.freeze({
   decompile: Object.freeze({
     language: DEFAULT_ANALYSIS_OPTIONS.emitter,
     view: DEFAULT_ANALYSIS_OPTIONS.view,
+    inference: DEFAULT_ANALYSIS_OPTIONS.inference,
   }),
   export: Object.freeze({ language: DEFAULT_ANALYSIS_OPTIONS.emitter, jobs: null }),
 });
@@ -158,6 +170,7 @@ function resolveFile(file: SettingsFile | undefined): Pick<SettingsReport, 'sett
       decompile: {
         language: file?.decompile?.language ?? DEFAULT_SETTINGS.decompile.language,
         view: file?.decompile?.view ?? DEFAULT_SETTINGS.decompile.view,
+        inference: file?.decompile?.inference ?? DEFAULT_SETTINGS.decompile.inference,
       },
       export: {
         language: file?.export?.language ?? DEFAULT_SETTINGS.export.language,
@@ -169,6 +182,7 @@ function resolveFile(file: SettingsFile | undefined): Pick<SettingsReport, 'sett
       analysis_cache: from(file?.analysis_cache !== undefined),
       'decompile.language': from(file?.decompile?.language !== undefined),
       'decompile.view': from(file?.decompile?.view !== undefined),
+      'decompile.inference': from(file?.decompile?.inference !== undefined),
       'export.language': from(file?.export?.language !== undefined),
       'export.jobs': from(file?.export?.jobs !== undefined),
     },

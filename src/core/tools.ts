@@ -352,6 +352,7 @@ export const functionGetArgsSchema = z
           'field',
           'identity',
           'call',
+          'guess',
           'rewrite',
           'conflict',
           'annotation',
@@ -363,7 +364,7 @@ export const functionGetArgsSchema = z
         ]),
       )
       .min(1)
-      .max(15)
+      .max(16)
       .optional(),
     include_quotes: z.boolean().optional(),
     detail: z.enum(['full', 'compact']).optional().describe('Disassembly only; omitted means full'),
@@ -730,6 +731,12 @@ const compactCallSchema = inferenceDetailsByKind.call
       .array(inferenceDetailsByKind.call.shape.ordered_arguments.element.omit({ value_ids: true }))
       .max(10000),
   });
+const compactGuessSchema = inferenceDetailsByKind.guess.omit({ call_id: true }).extend({
+  target: z.discriminatedUnion('kind', [
+    inferenceDetailsByKind.guess.shape.target.options[0],
+    inferenceDetailsByKind.guess.shape.target.options[1].omit({ value_ids: true }),
+  ]),
+});
 const investigationDetailsSchema = z.discriminatedUnion('kind', [
   compactParameterSchema,
   inferenceDetailsByKind.type
@@ -739,6 +746,7 @@ const investigationDetailsSchema = z.discriminatedUnion('kind', [
   inferenceDetailsByKind.field.omit({ shape_id: true, field_ids: true, type_id: true }),
   inferenceDetailsByKind.identity.omit({ value_ids: true }),
   compactCallSchema,
+  compactGuessSchema,
   inferenceDetailsByKind.rewrite,
   inferenceDetailsByKind.conflict
     .omit({ alternatives: true })
