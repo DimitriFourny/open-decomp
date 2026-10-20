@@ -1426,10 +1426,10 @@ export function recoverTypes(
       }
     }
     return {
+      // Undecoded debug declarations could contradict local inference; a debug
+      // capability that is missing for an image without debug data hides nothing.
       state:
-        options.debug?.status === 'partial' || options.library?.state === 'partial'
-          ? 'partial'
-          : 'complete',
+        options.debug?.undecoded || options.library?.state === 'partial' ? 'partial' : 'complete',
       work: budget.work,
       subjects: [...subjects].sort(),
       types: [...records.values()]

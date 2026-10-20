@@ -616,6 +616,7 @@ export async function executeDecompilation(
         ...new Set([
           ...graph.coverage.reasons,
           ...(types.state === 'partial' ? ['Source metadata or type recovery is incomplete'] : []),
+          ...(debug.status === 'partial' ? ['Debug metadata recovery is incomplete'] : []),
           ...(source.diagnostics ?? []).map((diagnostic) => diagnostic.message),
         ]),
       ];
@@ -642,6 +643,7 @@ export async function executeDecompilation(
           state:
             graph.coverage.state === 'complete' &&
             types.state === 'complete' &&
+            debug.status !== 'partial' &&
             !source.diagnostics?.length
               ? 'complete'
               : 'partial',
