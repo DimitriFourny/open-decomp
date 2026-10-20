@@ -138,7 +138,11 @@ export function planSourceStack(
     }
   }
   const memoryDependencies = new Map<string, Value[]>(),
-    dependenciesByRange = new Map<string, Value[]>();
+    dependenciesByRange = new Map<string, Value[]>(),
+    // Ranges every overlapping store writes exactly: a reload there holds one
+    // whole stored value, never bytes combined from several stores.
+    exactRanges = new Set<string>(),
+    rangeOfLoad = new Map<string, string>();
   for (const load of memory) {
     context.checkpoint(1);
     if (load.kind !== 'load') continue;
@@ -157,13 +161,21 @@ export function planSourceStack(
         }
       }
       sources = [];
+      let exact = true;
       for (const store of stores) {
         context.checkpoint(1);
         sources.push(store.value);
+        if (
+          addresses.get(store.address.id) !== offset ||
+          bitWidth(store.value.type) !== bitWidth(load.result.type)
+        )
+          exact = false;
       }
+      if (exact) exactRanges.add(key);
       dependenciesByRange.set(key, sources);
     }
     memoryDependencies.set(load.result.id, sources);
+    rangeOfLoad.set(load.result.id, key);
   }
   changed = true;
   while (changed) {
@@ -193,13 +205,19 @@ export function planSourceStack(
   let escaped = false,
     unknownCallStorage = false,
     // Frame saves rest on ABI conformance: an unresolved callee reads only
-    // argument registers/stack and never writes its caller's frame. Any stack
-    // address in possible argument/result storage escapes private promotion
-    // (`saveEscaped`). For frame saves only an address of unknown offset exposes
-    // the whole frame (`frameExposed`); an escaped address of known offset
-    // designates its own object, never a compiler-owned save slot elsewhere.
-    saveEscaped = view !== 'source',
-    frameExposed = saveEscaped;
+    // argument registers/stack and never writes its caller's frame. For frame
+    // saves only an address of unknown offset exposes the whole frame
+    // (`frameExposed`); an escaped address of known offset designates its own
+    // object, never a compiler-owned save slot elsewhere.
+    frameExposed = view !== 'source',
+    // Source-view promotion is per slot. An escaped frame address reaches only
+    // bytes at or above the lowest entry-SP offset it can take
+    // (`frame_object_base`): the stack grows downward, so an object designated
+    // by an escaped pointer extends toward the entry SP and the caller frame.
+    // Every byte at or above `reachFloor` may be reached; `reachAll` records an
+    // escape without a lower bound (unknown effects, unbounded arithmetic).
+    reachFloor: bigint | undefined,
+    reachAll = false;
   const exposedOffsets = new Set<bigint>();
   // Known frame offsets of every address a tainted value is derived from (cell
   // halves, indexed/phi'd pointers, pointers spilled to the frame and reloaded),
@@ -228,12 +246,177 @@ export function planSourceStack(
     }
     return [...bases];
   };
+  // Number of low bits that can be nonzero; fewer than the width means the
+  // value is a nonnegative two's-complement addend.
+  const significantBits = (value: Value, depth = 0): number => {
+    const width = bitWidth(value.type),
+      expression = depth < 8 ? expressions.get(value.id) : undefined;
+    if (!expression) return width;
+    const bits = (operand: Value): number => significantBits(operand, depth + 1);
+    const constant = (operand: Value): bigint | undefined => {
+      const found = expressions.get(operand.id);
+      return found?.kind === 'constant'
+        ? BigInt.asUintN(bitWidth(operand.type), found.bits)
+        : undefined;
+    };
+    switch (expression.kind) {
+      case 'constant':
+        return BigInt.asUintN(width, expression.bits).toString(2).replace(/^0$/, '').length;
+      case 'cast':
+        return expression.op === 'zero_extend' || expression.op === 'bitcast'
+          ? Math.min(width, bits(expression.value))
+          : width;
+      case 'concat': {
+        let low = 0,
+          result = 0;
+        for (const part of expression.values) {
+          const used = bits(part);
+          if (used) result = low + used;
+          low += bitWidth(part.type);
+        }
+        return Math.min(width, result);
+      }
+      case 'integer': {
+        const shift = constant(expression.right);
+        switch (expression.op) {
+          case 'and':
+            return Math.min(bits(expression.left), bits(expression.right));
+          case 'add':
+            return Math.min(width, Math.max(bits(expression.left), bits(expression.right)) + 1);
+          case 'mul':
+            return Math.min(width, bits(expression.left) + bits(expression.right));
+          case 'shl':
+            return shift !== undefined && shift < BigInt(width)
+              ? Math.min(width, bits(expression.left) + Number(shift))
+              : width;
+          case 'lshr':
+            return shift !== undefined && shift < BigInt(width)
+              ? Math.max(0, bits(expression.left) - Number(shift))
+              : width;
+          default:
+            return width;
+        }
+      }
+      default:
+        return width;
+    }
+  };
+  // Lowest entry-SP offset each tainted value can take; null when unbounded
+  // below, absent when it cannot carry a frame address (a comparison result).
+  // Exact offsets, constant steps, nonnegative (zero-extended, masked or
+  // shifted) index addends, cell halves, phis and spill/reload sources keep a
+  // bound. Any other derivation, or a cycle that keeps lowering it, loses it.
+  const floors = new Map<string, bigint | null>();
+  if (view === 'source') {
+    const lower = (left: bigint | null | undefined, right: bigint | null | undefined) =>
+      left === undefined
+        ? right
+        : right === undefined
+          ? left
+          : left === null || right === null
+            ? null
+            : left < right
+              ? left
+              : right;
+    const floorOf = (value: Value): bigint | null | undefined =>
+      tainted.has(value.id) ? floors.get(value.id) : undefined;
+    const derive = (id: string): bigint | null | undefined => {
+      const offset = addresses.get(id);
+      if (offset !== undefined) return offset;
+      const expression = expressions.get(id);
+      if (expression) {
+        switch (expression.kind) {
+          case 'compare':
+          case 'float_compare':
+            return undefined;
+          case 'cast':
+            return expression.op === 'truncate' ||
+              expression.op === 'zero_extend' ||
+              expression.op === 'sign_extend' ||
+              expression.op === 'bitcast'
+              ? floorOf(expression.value)
+              : null;
+          case 'extract':
+            return floorOf(expression.value);
+          case 'concat': {
+            const whole = recombined(expression.values);
+            return whole ? floorOf(whole) : null;
+          }
+          case 'select':
+            return tainted.has(expression.when_true.id) || tainted.has(expression.when_false.id)
+              ? lower(floorOf(expression.when_true), floorOf(expression.when_false))
+              : undefined;
+          case 'integer': {
+            if (expression.op !== 'add' && expression.op !== 'sub') return null;
+            const left = tainted.has(expression.left.id),
+              right = tainted.has(expression.right.id);
+            if (left === right || (expression.op === 'sub' && right)) return null;
+            const base = left ? expression.left : expression.right,
+              step = left ? expression.right : expression.left,
+              floor = floorOf(base);
+            if (floor === null || floor === undefined) return floor;
+            const constant = expressions.get(step.id);
+            if (constant?.kind === 'constant') {
+              const amount = BigInt.asIntN(bitWidth(step.type), constant.bits);
+              return floor + (expression.op === 'add' ? amount : -amount);
+            }
+            return expression.op === 'add' && significantBits(step) < bitWidth(step.type)
+              ? floor
+              : null;
+          }
+          default:
+            return null;
+        }
+      }
+      const phi = incoming.get(id);
+      if (phi?.length) {
+        let result: bigint | null | undefined;
+        for (const source of phi) result = lower(result, floorOf(source));
+        return result;
+      }
+      const stored = memoryDependencies.get(id);
+      if (stored?.length) {
+        // A reload combining bytes of several stores holds only some bits of a
+        // stored address: no bound.
+        if (!exactRanges.has(rangeOfLoad.get(id)!)) return null;
+        let result: bigint | null | undefined;
+        for (const source of stored) result = lower(result, floorOf(source));
+        return result;
+      }
+      return null;
+    };
+    // Unvisited operands are optimistic until reached; after eight passes a
+    // value whose bound still drops (a lowering cycle) becomes unbounded.
+    for (let pass = 0, moved = true; moved; pass++) {
+      moved = false;
+      for (const id of tainted) {
+        context.checkpoint(1);
+        const previous = floors.get(id);
+        if (previous === null) continue;
+        let next = derive(id);
+        if (next === undefined) continue;
+        if (previous !== undefined && next !== null) {
+          if (next >= previous) continue;
+          if (pass >= 8) next = null;
+        }
+        floors.set(id, next);
+        moved = true;
+      }
+    }
+  }
   const expose = (value: Value): void => {
     if (!tainted.has(value.id)) return;
-    saveEscaped = true;
     const bases = baseOffsets(value);
     if (bases) for (const offset of bases) exposedOffsets.add(offset);
     else frameExposed = true;
+    if (view !== 'source' || !floors.has(value.id)) {
+      const expression = expressions.get(value.id);
+      if (expression?.kind !== 'compare' && expression?.kind !== 'float_compare') reachAll = true;
+      return;
+    }
+    const floor = floors.get(value.id)!;
+    if (floor === null) reachAll = true;
+    else if (reachFloor === undefined || floor < reachFloor) reachFloor = floor;
   };
   const abi = input.source!.abi;
   const preservedRoot = (root: string): boolean =>
@@ -335,7 +518,7 @@ export function planSourceStack(
       if (node.kind === 'unknown_effect') {
         escaped = true;
         if (fpFailureArms.has(block.id)) guardEffects.add(block.id);
-        else saveEscaped = frameExposed = true;
+        else reachAll = frameExposed = true;
       }
       if (node.kind !== 'load' && node.kind !== 'store') continue;
       const offset = addresses.get(node.address.id),
@@ -368,8 +551,9 @@ export function planSourceStack(
     if (block.control.kind === 'indirect')
       for (const binding of argumentBindings(block.register_exit)) expose(binding.value);
   }
-  for (const id of frameExposed ? [] : guardEffects)
+  for (const id of guardEffects)
     if (
+      frameExposed ||
       !validation.presentation(
         'fp_guard_frame',
         id,
@@ -377,7 +561,29 @@ export function planSourceStack(
         [id],
       )
     )
-      saveEscaped = frameExposed = true;
+      reachAll = frameExposed = true;
+  // A frame address stored into bytes an escaped address reaches escapes too:
+  // whoever holds the outer address can read it back.
+  const storedEscapes = new Set<string>();
+  for (let lowered = true; lowered && view === 'source' && !reachAll;) {
+    lowered = false;
+    for (const access of accesses) {
+      context.checkpoint(1);
+      const node = access.node;
+      if (
+        node.kind !== 'store' ||
+        storedEscapes.has(node.id) ||
+        !tainted.has(node.value.id) ||
+        reachFloor === undefined ||
+        access.end <= reachFloor
+      )
+        continue;
+      storedEscapes.add(node.id);
+      const floor = reachFloor;
+      expose(node.value);
+      if (reachAll || reachFloor !== floor) lowered = true;
+    }
+  }
   // Established ABI stack locations are outgoing argument storage at a call,
   // even when their entry-SP offsets are negative. They are not private spills.
   const outgoingRanges = (input.types?.calls?.calls ?? []).flatMap((call) =>
@@ -411,11 +617,11 @@ export function planSourceStack(
   // the callee-entry SP are by definition that return address. The last store
   // before the call (only pure assignments between) writing exactly those bytes
   // with a code address, originating from the call's own instruction, is the
-  // call's push. When no other access touches those bytes and no frame address
-  // escapes, only the callee's return consumes it: call mechanics, not a
-  // source local. The checked view retains every store.
+  // call's push. When no other access touches those bytes and no escaped frame
+  // address reaches them, only the callee's return consumes it: call mechanics,
+  // not a source local. The checked view retains every store.
   const returnAddressPushes = new Set<string>();
-  if (view === 'source' && !saveEscaped && abi.stack_return_address_bytes > 0n) {
+  if (view === 'source' && !reachAll && abi.stack_return_address_bytes > 0n) {
     const pushes: (typeof accesses)[number][] = [];
     const byStore = new Map(accesses.map((access) => [access.node.id, access]));
     for (const block of blocks.values())
@@ -452,6 +658,7 @@ export function planSourceStack(
     for (const push of pushes) {
       context.checkpoint(accesses.length);
       if (
+        (reachFloor !== undefined && push.end > reachFloor) ||
         accesses.some(
           (access) =>
             !pushIds.has(access.node.id) && access.offset < push.end && access.end > push.offset,
@@ -459,7 +666,7 @@ export function planSourceStack(
         !validation.presentation(
           'call_return_address',
           push.node.id,
-          `call instruction's own push of its fall-through address at callee-entry SP ${push.offset}; no other frame access overlaps; no frame address escapes`,
+          `call instruction's own push of its fall-through address at callee-entry SP ${push.offset}; no other frame access overlaps; no escaped frame address reaches it`,
           [push.node.id],
         )
       )
@@ -473,40 +680,145 @@ export function planSourceStack(
         'Hiding a call’s return-address push assumes ABI conformance: the callee consumes the pushed fall-through address only to return and it is not argument storage. Each store remains in the checked view and the original mappings.',
       );
   }
-  // An open argument list describes an unbounded caller-SP-relative area.
-  // Do not infer its end from observed registers or written bytes. A slot used
-  // only after the last such call, however, cannot supply that call's arguments.
-  const openCallPositions = new Map<string, number>(),
-    reachesOpenCall = new Set<string>(),
-    openCallSuccessors = new Set<string>();
+  // An open argument list describes an unbounded caller-SP-relative area: any
+  // slot accessed before such a call may be its stack argument. Observed
+  // registers or written bytes never bound it. Under ABI conformance a call's
+  // stack arguments form one contiguous callee-owned area starting at its
+  // callee-entry SP (above a pushed return address), and the callee may
+  // overwrite it, so a caller never reads back after the call the pre-call
+  // contents of its bytes. A slot written before the call and read after it
+  // with no write, call or unknown effect between therefore lies above that
+  // area: every slot at or above the lowest such slot is not argument storage
+  // of that call (`open_call_argument_area`). A slot used only after the call
+  // cannot supply its arguments either.
+  const positions = new Map<string, number>();
+  for (const block of blocks.values())
+    for (let index = 0; index < block.statements.length; index++) {
+      context.checkpoint(1);
+      positions.set(block.statements[index]!.id, index);
+    }
+  const predecessors = new Map<string, string[]>(),
+    successors = new Map<string, string[]>();
+  for (const { transfer, block } of transfers) {
+    const before = predecessors.get(transfer.target) ?? [];
+    before.push(block.id);
+    predecessors.set(transfer.target, before);
+    const after = successors.get(block.id) ?? [];
+    after.push(transfer.target);
+    successors.set(block.id, after);
+  }
+  const openCalls: {
+    readonly block: string;
+    readonly position: number;
+    /** Blocks from which the call's block is reachable through some edge. */
+    readonly reachers: ReadonlySet<string>;
+    /** Lowest offset known to lie above the call's argument area, or null. */
+    readonly bound: bigint | null;
+  }[] = [];
   if (view === 'source' && unknownCallStorage) {
+    // Bounded search; an exhausted allowance leaves the remaining areas open.
+    let allowance = 4096;
+    // Private slots in ascending offset order with the stores covering them.
+    // A covering store contains the slot's first byte.
+    const storeAccesses = new Map<string, (typeof accesses)[number]>();
+    for (const access of accesses)
+      if (access.node.kind === 'store') storeAccesses.set(access.node.id, access);
+    const slotsByOffset = [...groups.values()]
+      .map((group) => group[0]!)
+      .filter((slot) => slot.end <= 0n)
+      .sort((left, right) => (left.offset < right.offset ? -1 : 1))
+      .map((slot) => ({
+        slot,
+        covering: (storesByByte.get(slot.offset) ?? []).flatMap((node) => {
+          const access = storeAccesses.get(node.id);
+          return access && access.end >= slot.end ? [access] : [];
+        }),
+      }));
     for (const block of blocks.values())
       for (let position = 0; position < block.statements.length; position++) {
-        const node = block.statements[position]!;
-        if (node.kind === 'call' && openArguments(calls.get(node.id)!)) {
-          openCallPositions.set(block.id, position);
-          reachesOpenCall.add(block.id);
+        const call = block.statements[position]!;
+        if (call.kind !== 'call' || !openArguments(calls.get(call.id)!)) continue;
+        const reachers = new Set<string>(),
+          pending = [block.id];
+        while (pending.length) {
+          context.checkpoint(1);
+          for (const id of predecessors.get(pending.pop()!) ?? [])
+            if (!reachers.has(id)) {
+              reachers.add(id);
+              pending.push(id);
+            }
         }
-      }
-    for (let changed = true; changed;) {
-      changed = false;
-      for (const { transfer, block } of transfers) {
-        context.checkpoint(1);
-        if (!reachesOpenCall.has(transfer.target)) continue;
-        openCallSuccessors.add(block.id);
-        if (!reachesOpenCall.has(block.id)) {
-          reachesOpenCall.add(block.id);
-          changed = true;
+        const precedes = (access: (typeof accesses)[number]): boolean =>
+          reachers.has(access.block) ||
+          (access.block === block.id && positions.get(access.node.id)! < position);
+        const stack = call.register_inputs.find(
+            (binding) =>
+              binding.register.root === abi.stack_pointer.root &&
+              binding.register.width_bits === abi.stack_pointer.width_bits,
+          ),
+          entrySp = stack && addresses.get(stack.value.id);
+        let bound: bigint | null = null;
+        if (entrySp !== undefined) {
+          const area = entrySp + abi.stack_return_address_bytes;
+          const candidates = slotsByOffset.filter(
+            ({ slot, covering }) => slot.offset >= area && covering.some(precedes),
+          );
+          for (const { slot } of candidates) {
+            if (allowance-- <= 0) break;
+            // Does a load of exactly this slot read its contents at the call?
+            const scan = (id: string, start: number): 'read' | 'written' | 'open' => {
+              const statements = blocks.get(id)!.statements;
+              for (let index = start; index < statements.length; index++) {
+                const node = statements[index]!;
+                if (node.kind === 'call' || node.kind === 'unknown_effect') return 'written';
+                if (node.kind === 'store') {
+                  const offset = addresses.get(node.address.id);
+                  if (
+                    offset === undefined ||
+                    (offset < slot.end &&
+                      offset + BigInt(Math.ceil(bitWidth(node.value.type) / 8)) > slot.offset)
+                  )
+                    return 'written';
+                }
+                if (
+                  node.kind === 'load' &&
+                  !node.access.volatile &&
+                  addresses.get(node.address.id) === slot.offset &&
+                  slot.offset + BigInt(Math.ceil(bitWidth(node.result.type) / 8)) === slot.end
+                )
+                  return 'read';
+              }
+              return 'open';
+            };
+            let state = scan(block.id, position + 1);
+            const visited = new Set<string>(),
+              frontier = state === 'open' ? [...(successors.get(block.id) ?? [])] : [];
+            while (state !== 'read' && frontier.length && allowance > 0) {
+              const id = frontier.pop()!;
+              if (visited.has(id)) continue;
+              visited.add(id);
+              allowance--;
+              context.checkpoint(1);
+              const result = scan(id, 0);
+              if (result === 'read') state = 'read';
+              else if (result === 'open') frontier.push(...(successors.get(id) ?? []));
+            }
+            if (state === 'read') {
+              bound = slot.offset;
+              break;
+            }
+          }
         }
+        openCalls.push({ block: block.id, position, reachers, bound });
       }
-    }
   }
   // Under activation-private storage ownership an external pointer cannot name
-  // this activation's negative entry-SP offsets until a frame address escapes.
-  // The original alias facts stay intact; source promotion records this ABI
-  // premise and the independent byte validator receives the exact disjoint set.
+  // this activation's negative entry-SP offsets that no escaped frame address
+  // reaches. The original alias facts stay intact; source promotion records
+  // this ABI premise and the independent byte validator receives the exact
+  // disjoint set, which holds only for the slots below every escaped address.
   const disjointStores =
-    view === 'source' && !saveEscaped
+    view === 'source' && !reachAll
       ? new Set(
           memory
             .filter((node) => node.kind === 'store' && !addresses.has(node.address.id))
@@ -517,26 +829,36 @@ export function planSourceStack(
     // Source view: narrower loads wholly inside a promoted integer slot, keyed
     // by that slot; each reads its endian-determined bits of the slot value.
     slotParts = new Map<string, typeof accesses>(),
-    partSlot = new Map<string, string>();
-  if (view === 'source' ? !saveEscaped : !escaped && !unknownCallStorage && !aliased)
+    partSlot = new Map<string, string>(),
+    // Source view: same-width accesses of differing types; promoted only when
+    // every load forwards (as a bitcast of) its reaching stored value.
+    punnedSlots = new Set<string>(),
+    // Slots accessed before an open-arity call that lie above its bounded area.
+    boundedSlots = new Set<string>(),
+    // Source view: exact private slots that may be open-call stack-argument
+    // storage and are otherwise promotable.
+    argumentSlots = new Set<string>();
+  if (view === 'source' ? !reachAll : !escaped && !unknownCallStorage && !aliased)
     for (const [key, group] of groups) {
       const first = group[0]!;
       context.checkpoint(accesses.length);
       const overlapping = accesses.filter(
         (access) => access.key !== key && access.offset < first.end && access.end > first.offset,
       );
+      const members = [...group, ...overlapping];
+      const preceded = openCalls.filter((call) =>
+        members.some(
+          (access) =>
+            call.reachers.has(access.block) ||
+            (access.block === call.block && positions.get(access.node.id)! < call.position),
+        ),
+      );
       if (
         returnAddressPushes.has(first.node.id) ||
         first.offset >= 0n ||
         first.end > 0n ||
+        (reachFloor !== undefined && first.end > reachFloor) ||
         group.some((access) => access.node.access.volatile) ||
-        (view === 'source' &&
-          [...group, ...overlapping].some(
-            (access) =>
-              openCallSuccessors.has(access.block) ||
-              blocks.get(access.block)!.statements.indexOf(access.node) <
-                (openCallPositions.get(access.block) ?? -1),
-          )) ||
         outgoingRanges.some((range) => range.start < first.end && range.end > first.offset)
       )
         continue;
@@ -558,18 +880,24 @@ export function planSourceStack(
         )
       )
         continue;
-      if (
-        group.some(
-          (access) =>
-            access.node.access.endian !== first.node.access.endian ||
-            !sameType(
-              access.node.kind === 'load' ? access.node.result.type : access.node.value.type,
-              first.node.kind === 'load' ? first.node.result.type : first.node.value.type,
-            ),
-        )
-      )
+      if (group.some((access) => access.node.access.endian !== first.node.access.endian)) continue;
+      const punned = group.some(
+        (access) =>
+          !sameType(
+            access.node.kind === 'load' ? access.node.result.type : access.node.value.type,
+            first.node.kind === 'load' ? first.node.result.type : first.node.value.type,
+          ),
+      );
+      if (punned && (view !== 'source' || overlapping.length)) continue;
+      if (preceded.some((call) => call.bound === null || first.offset < call.bound)) {
+        // Possible stack-argument storage keeps its stores in memory; its
+        // reloads may still read the value stored before them.
+        if (view === 'source' && !overlapping.length && !punned) argumentSlots.add(key);
         continue;
+      }
+      if (punned) punnedSlots.add(key);
       eligible.add(key);
+      if (preceded.length) boundedSlots.add(key);
       if (overlapping.length) {
         slotParts.set(key, overlapping);
         for (const part of overlapping) partSlot.set(part.node.id, key);
@@ -590,12 +918,6 @@ export function planSourceStack(
       block.control.kind === 'return' ||
       (block.control.kind === 'indirect' && block.control.tail_call === true),
   );
-  const positions = new Map<string, number>();
-  for (const block of blocks.values())
-    for (let index = 0; index < block.statements.length; index++) {
-      context.checkpoint(1);
-      positions.set(block.statements[index]!.id, index);
-    }
   const dominates = (
     first: (typeof accesses)[number],
     second: (typeof accesses)[number],
@@ -851,27 +1173,24 @@ export function planSourceStack(
       calls.set(node.id, { ...kept, argument_list_complete: false });
     }
   }
-  const predecessors = new Map<string, string[]>();
-  for (const { transfer, block } of transfers) {
-    const row = predecessors.get(transfer.target) ?? [];
-    row.push(block.id);
-    predecessors.set(transfer.target, row);
-  }
   // State is exact reaching value / definitely initialized but differing values /
   // uninitialized. Unvisited predecessors are ignored until reached, then joins
   // can only lose precision, so backedges converge without inventing assignment.
   type Cell = Value | null | undefined;
   const outgoing = new Map<string, Map<string, Cell>>(),
     before = new Map<string, Cell>();
+  for (const key of argumentSlots)
+    if (
+      groups
+        .get(key)!
+        .some((access) => saveStores.has(access.node.id) || saveReloads.has(access.node.id))
+    )
+      argumentSlots.delete(key);
+  const tracked = [...eligible, ...argumentSlots];
   changed = true;
-  const indegree = new Map([...blocks.keys()].map((id) => [id, 0])),
-    successors = new Map<string, string[]>();
-  for (const { transfer, block } of transfers) {
+  const indegree = new Map([...blocks.keys()].map((id) => [id, 0]));
+  for (const { transfer } of transfers)
     indegree.set(transfer.target, (indegree.get(transfer.target) ?? 0) + 1);
-    const row = successors.get(block.id) ?? [];
-    row.push(transfer.target);
-    successors.set(block.id, row);
-  }
   const acyclicQueue = [...indegree].filter(([, count]) => count === 0).map(([id]) => id);
   for (let cursor = 0; cursor < acyclicQueue.length; cursor++)
     for (const target of successors.get(acyclicQueue[cursor]!) ?? []) {
@@ -890,7 +1209,7 @@ export function planSourceStack(
         .filter((state): state is Map<string, Cell> => state !== undefined);
       if (block.id !== input.function.entry && !parents.length) continue;
       const state = new Map<string, Cell>();
-      for (const key of eligible) {
+      for (const key of tracked) {
         let cell: Cell = block.id === input.function.entry ? undefined : parents[0]?.get(key);
         for (const parent of parents) {
           const other = parent.get(key);
@@ -905,9 +1224,12 @@ export function planSourceStack(
       }
       for (const node of block.statements) {
         context.checkpoint(1);
+        // A call may write its own stack arguments; an unknown effect anything.
+        if (node.kind === 'call' || node.kind === 'unknown_effect')
+          for (const key of argumentSlots) state.set(key, null);
         const access = byNode.get(node.id);
         const key = access && (partSlot.get(node.id) ?? access.key);
-        if (!access || !key || !eligible.has(key)) continue;
+        if (!access || !key || !(eligible.has(key) || argumentSlots.has(key))) continue;
         if (access.node.kind === 'load') before.set(node.id, state.get(key));
         else state.set(key, access.node.value);
       }
@@ -968,6 +1290,7 @@ export function planSourceStack(
         alias(node.result, { kind: 'cast', op: 'bitcast', value });
       }
     }
+  const frameObjectBase = `An escaped frame address reaches only bytes at or above the lowest entry-SP offset it can take (here ${reachFloor}): callees, memory holding the address and code reached through it never step below the address they were given. Code that steps backward from an interior pointer (container_of, negative indexing) is outside this premise. Each slot this rewrite touches lies wholly below that offset.`;
   for (const key of eligible) {
     const group = groups.get(key)!,
       parts = slotParts.get(key) ?? [],
@@ -983,9 +1306,9 @@ export function planSourceStack(
           members.every(
             (access) => access.node.kind !== 'store' || access.block === input.function.entry,
           )));
-    // A part reads bits of the reaching whole-slot value; no scalar local
-    // spelling exists for a part of an unforwarded slot.
-    if (parts.length && !forwarded) continue;
+    // A part reads bits of the reaching whole-slot value, and a punned load
+    // reinterprets it; neither has a scalar local spelling unless forwarded.
+    if ((parts.length || punnedSlots.has(key)) && !forwarded) continue;
     const first = group[0]!;
     // Byte significance of each part's low byte within the slot value.
     const shifts = new Map(
@@ -1034,13 +1357,15 @@ export function planSourceStack(
         ? validation.presentation(
             'wide_slot_parts',
             `stack:${key}`,
-            'exact nonvolatile negative entry-SP integer slot written only by whole-slot stores; every other overlapping access is a narrower integer load wholly inside it, forwarded as its endian-determined bit range of the reaching slot value; no frame address escapes; definitely initialized reads; no established outgoing argument overlap or access preceding an open-arity call',
+            'exact nonvolatile negative entry-SP integer slot written only by whole-slot stores; every other overlapping access is a narrower integer load wholly inside it, forwarded as its endian-determined bit range of the reaching slot value; no escaped frame address reaches it; definitely initialized reads; no established outgoing argument overlap; any access preceding an open-arity call lies above that call’s bounded argument area',
             subjects,
           )
         : validation.presentation(
             'private_stack_promotion',
             `stack:${key}`,
-            'exact nonvolatile nonoverlapping negative entry-SP slot; no frame address escapes; definitely initialized reads; no established outgoing argument overlap or access preceding an open-arity call',
+            punnedSlots.has(key)
+              ? 'exact nonvolatile nonoverlapping negative entry-SP slot accessed with same-width types; every load forwards a bitcast of its reaching stored value; no escaped frame address reaches it; definitely initialized reads; no established outgoing argument overlap; any access preceding an open-arity call lies above that call’s bounded argument area'
+              : 'exact nonvolatile nonoverlapping negative entry-SP slot; no escaped frame address reaches it; definitely initialized reads; no established outgoing argument overlap; any access preceding an open-arity call lies above that call’s bounded argument area',
             subjects,
           ))
     )
@@ -1049,7 +1374,15 @@ export function planSourceStack(
       validation.requireAbi(
         'frame_private_to_activation',
         subjects,
-        'Nonescaping frame-private storage belongs to this activation: pointers supplied by callers, globals, external loads and call results cannot alias it. Callees observe only declared argument storage; open-arity calls precede every access to this promoted slot. Original memory effects and alias facts remain in the checked view.',
+        'Nonescaping frame-private storage belongs to this activation: pointers supplied by callers, globals, external loads and call results cannot alias it. Callees observe only declared argument storage. Original memory effects and alias facts remain in the checked view.',
+      );
+    if (view === 'source' && reachFloor !== undefined)
+      validation.requireAbi('frame_object_base', subjects, frameObjectBase);
+    if (boundedSlots.has(key))
+      validation.requireAbi(
+        'open_call_argument_area',
+        subjects,
+        'An open-arity call’s stack arguments form one contiguous callee-owned area starting at its callee-entry SP, which the callee may overwrite, so a caller never reads back after the call the pre-call contents of those bytes. A slot written before the call and read after it with no write, call or unknown effect between bounds that area; this promoted slot lies at or above that bound.',
       );
     if (forwarded) {
       for (const access of members) {
@@ -1073,6 +1406,74 @@ export function planSourceStack(
         locals.set(access.node.id, local);
         if (access.node.kind === 'load') privateLoads.add(access.node.id);
       }
+    }
+  }
+  // Source view: a slot that may be an open call's stack argument keeps every
+  // store in memory, but a reload whose bytes hold, on every path, exactly the
+  // value of one store with no call, unknown effect or other write between
+  // reads that value: an O0 spill/reload of an argument is the argument.
+  for (const key of argumentSlots) {
+    const group = groups.get(key)!;
+    const reloads = group.filter(
+      (access) =>
+        access.node.kind === 'load' &&
+        before.get(access.node.id) !== null &&
+        before.get(access.node.id) !== undefined,
+    );
+    if (!reloads.length) continue;
+    const subjects = [...group.filter((access) => access.node.kind === 'store'), ...reloads]
+      .map((access) => access.node.id)
+      .slice(0, 64);
+    const checked = validation.check(
+      'stack-promotion',
+      `stack:${key}`,
+      'stack-argument slot reload forwarding',
+      () => {
+        const proposed = new Map<string, Value>();
+        for (const access of reloads) {
+          validation.allowance.charge();
+          proposed.set(access.node.id, before.get(access.node.id)!);
+        }
+        return validateStackPromotion(
+          `stack:${key}`,
+          input.function.entry,
+          blocks,
+          transfers,
+          addresses,
+          new Set(subjects),
+          proposed,
+          expressions,
+          validation.allowance,
+          disjointStores,
+        );
+      },
+      subjects,
+    );
+    if (
+      checked.status === 'rejected' ||
+      !validation.presentation(
+        'argument_slot_reload',
+        `stack:${key}`,
+        'exact nonvolatile nonoverlapping negative entry-SP slot that may be open-call stack-argument storage: its stores stay in memory; each forwarded reload reads the one stored value reaching it on every path, with no call, unknown effect or other write to the slot between; no escaped frame address reaches it',
+        subjects,
+      )
+    )
+      continue;
+    validation.requireAbi(
+      'frame_private_to_activation',
+      subjects,
+      'Nonescaping frame-private storage belongs to this activation: pointers supplied by callers, globals, external loads and call results cannot alias it. Callees observe only declared argument storage. Original memory effects and alias facts remain in the checked view.',
+    );
+    if (reachFloor !== undefined)
+      validation.requireAbi('frame_object_base', subjects, frameObjectBase);
+    for (const access of reloads) {
+      hidden.add(access.node.id);
+      if (access.node.kind === 'load')
+        alias(access.node.result, {
+          kind: 'cast',
+          op: 'bitcast',
+          value: before.get(access.node.id)!,
+        });
     }
   }
   const dynamicStorage = memory.some(

@@ -25,10 +25,14 @@ Root causes found in the code, in the order we plan to address them:
 
 ## R1: Per-slot stack promotion
 
-- [ ] Replace the frame-wide `saveEscaped` gate with per-slot escape analysis. A slot is promotable when no escaped address can alias its byte range (derive the range from the escaped pointer's base offset and the observed access extents; unknown extent aliases the whole frame above the base). Keep escaped slots as explicit frame memory; promote the rest.
+- [x] Replace the frame-wide `saveEscaped` gate with per-slot escape analysis. A slot is promotable when no escaped address can alias its byte range (derive the range from the escaped pointer's base offset and the observed access extents; unknown extent aliases the whole frame above the base). Keep escaped slots as explicit frame memory; promote the rest.
+  - Done in `src/reconstruction/source-stack.ts` (`reachFloor`, requirement `frame_object_base`). No current fact bounds an escaped object's extent, so every escape uses the unknown extent (everything above its lowest offset); optimized frames whose lowest object escapes (SQLite `renameColumnFunc`, brotli `main`) therefore gain nothing. Slots that are not escaped but may be an open-arity call's stack arguments were the main O0 blocker; they now promote above the call's bounded argument area (`open_call_argument_area`).
 - [ ] Recover each promoted slot's width/type from its accesses and merge split parts (`wide_slot_parts`) per slot, not per frame.
-- [ ] Classify O0 spill/reload pairs of incoming arguments as the argument itself when no intervening write or escape exists.
+  - Done: `wide_slot_parts` and same-width integer/IEEE puns are decided per slot (puns promote when every load forwards a bitcast). Open: a punned slot that needs a real local (differing reaching values) stays explicit, since locals have one type and the renderer prints no conversions at local accesses; narrower stores composing a wider slot are not merged.
+- [x] Classify O0 spill/reload pairs of incoming arguments as the argument itself when no intervening write or escape exists.
+  - Promoted slots forward through the existing reaching-value analysis; a slot that may be open-call argument storage keeps its stores and forwards reloads with no call, unknown effect or write between (`argument_slot_reload`). A rewritten spill stays a local.
   - Acceptance: on the dev loop and fixtures, O0 cells no longer show `entry_sp - N` for slots whose address never escapes. A slot whose address reaches a call, a store or an unknown effect stays explicit. Executable-subset cases still pass, and the validator rejects nothing new.
+  - Dev loop (`base-de95fa4` → `r1-3364fdd`): `entry_sp` 617 → 329 (O0 468 → 208, O2 149 → 121), est. tokens 78,527 → 76,262, casts 3,077 → 2,757. Remaining O0 `entry_sp` without escape: possible open-call argument storage that is never read back after the call (a call result slot reaching the next loop iteration's call in `matrix_callback`; ELF `matrix_variadic_call` argument spills before a variadic call), incoming/aggregate stack bytes, and the SysV `va_list` register save area.
 
 ## R2: Region-collapse structuring
 
