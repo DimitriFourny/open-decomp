@@ -74,6 +74,51 @@ for (const language of ['c-like', 'python-like'] as const) {
   });
 }
 
+/** `r = sub(p)`, then `deref`: `return *r`; `branch`: `if (r == 0) return 1; return 2`;
+ * `later`: an independent load of `p` follows the call and feeds the same return. */
+function tested(shape: 'deref' | 'branch' | 'later') {
+  const b = builder(`call-reader-${shape}`),
+    entry = b.block('entry');
+  const pointer = entry.readRegister(rdi);
+  const [result] = entry.call(target(0x4000n), [pointer], [i64], writing);
+  if (shape === 'branch') {
+    const yes = b.block('yes'),
+      no = b.block('no');
+    entry.branch(
+      entry.compare('eq', result!, entry.constant(i64, 0n)),
+      entry.edge(yes),
+      entry.edge(no),
+    );
+    yes.return([yes.constant(i64, 1n)]);
+    no.return([no.constant(i64, 2n)]);
+  } else if (shape === 'deref') entry.return([entry.load(i64, result!)]);
+  else entry.return([entry.int('add', entry.load(i64, result!), entry.load(i64, pointer))]);
+  return constructSSA(b.finish(entry, [i64])).value as SSAForm;
+}
+
+for (const language of ['c-like', 'python-like'] as const)
+  test(`${language} a call result read by an if test or through its own load inlines; an independent load keeps it a statement`, () => {
+    const render = (shape: 'deref' | 'branch' | 'later') =>
+      emit(tested(shape), { source }, language).emission;
+    const branch = render('branch');
+    assert.match(
+      branch.text,
+      language === 'c-like' ? /if \(sub_\w+\(/ : /if sub_\w+\(/,
+      branch.text,
+    );
+    assert.doesNotMatch(branch.text, /call_result/, branch.text);
+    const deref = render('deref');
+    assert.match(deref.text, /return .*sub_\w+\(/, deref.text);
+    assert.doesNotMatch(deref.text, /call_result/, deref.text);
+    // `*r + *p`: the load of `p` would be unsequenced with the call.
+    const later = render('later');
+    assert.match(later.text, /^\s+\w+ = sub_4000\(/m, later.text);
+    assert.ok(
+      !later.local_validation?.some((record) => record.rule === 'single_use_call_inlining'),
+      later.text,
+    );
+  });
+
 /** `input` is a double formal, copied through an integer bit pattern and back; the copy is read twice. */
 function copied(reinterpret: boolean) {
   const b = builder(`fp-copy-${reinterpret}`),

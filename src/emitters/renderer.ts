@@ -189,8 +189,13 @@ const NEGATED_PREDICATE: Readonly<Record<IntegerPredicate, IntegerPredicate>> = 
   sgt: 'sle',
 };
 
-/** A held single-use call was not printed at its reader: render again without call inlining. */
-export class CallInliningRetry extends Error {}
+/** Held single-use calls (result value ids) were not printed at their reader:
+ * render again with those calls printed as statements. */
+export class CallInliningRetry extends Error {
+  constructor(readonly results: readonly string[]) {
+    super('call inlining retry');
+  }
+}
 
 /** Only syntax lives here: both dialects consume the same reconstructed program. */
 export class Renderer {
@@ -259,6 +264,8 @@ export class Renderer {
   private readonly inlinedCallSites = new Map<string, InlineCallSite[]>();
   /** Printed text of an inlined call between its original position and its reader. */
   private readonly pendingCalls = new Map<string, string>();
+  /** The reader printing held calls, until its first code line is checked. */
+  private openReader: { readonly start: number; readonly held: InlineCallSite[] } | null = null;
   private liveness: VariableLiveness | null = null;
   /** Do-while tests restated over the values written by their repeat copies. */
   private readonly rebased = new Map<string, Extract<Expression, { kind: 'compare' }>>();
@@ -347,7 +354,8 @@ export class Renderer {
     private readonly context: OperationContext,
     private readonly language: 'c-like' | 'python-like',
     private readonly version: string,
-    private readonly inlineCalls = true,
+    /** Call results never printed as their reader's operand; null: no call is. */
+    private readonly rejectedCalls: ReadonlySet<string> | null = new Set(),
     private readonly metadata: 'full' | 'omitted' = 'full',
   ) {
     this.writer = new Writer(context, options.indent, options.include_evidence, language, metadata);
@@ -3916,7 +3924,7 @@ export class Renderer {
     const projection = this.program.calls.get(node.id);
     const declared = projection?.signature?.signature;
     return (
-      this.inlineCalls &&
+      this.rejectedCalls?.has(result.id) === false &&
       projection?.results.length === 1 &&
       !(
         this.nativeIntegerStorage &&
@@ -3932,6 +3940,7 @@ export class Renderer {
   /** Print an inlined call's expression now (its notes, comments and clobber
    * statements keep the call's position) and hold it for its reader. */
   private holdCall(node: InlineCall, site: InlineCallSite, depth: number): void {
+    this.settleReader();
     this.emitNotes(node.id, depth);
     const text = this.sourceCall(node, depth, true, true);
     this.settleCalls(text);
@@ -3944,7 +3953,7 @@ export class Renderer {
    * or reorder the call. The emission is then retried without call inlining. */
   private settleCalls(text: string): void {
     for (const [id, call] of this.pendingCalls) {
-      if (text.split(call).length !== 2) throw new CallInliningRetry();
+      if (text.split(call).length !== 2) throw new CallInliningRetry([...this.pendingCalls.keys()]);
       this.pendingCalls.delete(id);
     }
   }
@@ -5819,6 +5828,17 @@ export class Renderer {
       deferred = new Map();
       for (const site of reused) candidates.delete(site.node.result.id);
     }
+    const repeated = [...candidates.values()].filter((site) => site.repeated);
+    if (
+      repeated.length &&
+      !this.localValidation.presentation(
+        'repeated_operation',
+        subject,
+        'a cheap pure integer operation of one printed variable (an add, subtract, bitwise or shift with a constant, a negation, complement or integer conversion) read only by one statement, test or edge copy (the copy only through one consumer statement), at most four times, is printed at each occurrence in that reader instead of a temporary; liveness treats each occurrence as a read of its operand at the reader, so the operand is never reassigned in between',
+        repeated.map(({ node }) => node.id),
+      )
+    )
+      for (const site of repeated) candidates.delete(site.node.result.id);
     if (
       candidates.size &&
       this.localValidation.presentation(
@@ -5845,7 +5865,7 @@ export class Renderer {
       this.localValidation.presentation(
         'single_use_call_inlining',
         subject,
-        'a call with exactly one live result, read once and unconditionally by the next printed statement of its block or by its return, is printed as an operand of that reader at its original position: no statement prints between them, the reader has no other memory read, call or FP-environment read operand, non-result clobbers print nothing, and the result is printed with the declared result type',
+        "a call with exactly one live result, read once and unconditionally by the next printed statement of its block or by its return, if or switch test, is printed exactly once in that reader's first printed line (a statement, or a test before its arms and edge copies; a do-while test printed after repeat copies keeps the call a statement) at its original position: no statement prints between them, the reader has no other memory read, call or FP-environment read operand except loads addressed through the call's own result, non-result clobbers print nothing, and the result is printed with the declared result type",
         [...calls.values()].map(({ node }) => node.id),
       )
     )
@@ -6988,14 +7008,32 @@ export class Renderer {
 
   /** Print the statement or control that reads the held inlined calls. */
   private reader(print: () => void): void {
-    const start = this.writer.offset,
-      held = [...this.pendingCalls.keys()].map((id) => this.inlinedCalls.get(id)!);
-    if (held.length && this.writer.codeLines !== this.heldLines) throw new CallInliningRetry();
+    // A nested reader before the open reader's first line (an `if` carrying its
+    // enclosing conjuncts) prints that line itself.
+    if (this.openReader && this.writer.watched === null) return print();
+    this.settleReader();
+    const held = [...this.pendingCalls.keys()].map((id) => this.inlinedCalls.get(id)!);
+    if (!held.length) return print();
+    if (this.writer.codeLines !== this.heldLines)
+      throw new CallInliningRetry([...this.pendingCalls.keys()]);
+    this.openReader = { start: this.writer.offset, held };
+    this.writer.watched = null;
     print();
-    if (!held.length) return;
-    this.settleCalls(this.writer.text().slice(start));
-    for (const site of held)
-      this.inferenceSites.set(site.node.id, { start, end: this.writer.offset });
+    this.settleReader();
+  }
+
+  /** The open reader's held calls are read by the first code line it printed: the
+   * statement, or a control's header before its arms, edge copies or a do-while's
+   * repeat copies. A later reader or held call settles them as soon as it starts. */
+  private settleReader(): void {
+    const open = this.openReader;
+    if (!open) return;
+    this.openReader = null;
+    const line = this.writer.watched ?? '';
+    this.writer.watched = undefined;
+    this.settleCalls(line);
+    for (const site of open.held)
+      this.inferenceSites.set(site.node.id, { start: open.start, end: this.writer.offset });
   }
 
   render(): EmissionResult {
@@ -7365,7 +7403,7 @@ export class Renderer {
     this.region(this.body, 1);
     if (this.language === 'python-like' && this.writer.codeLines === bodyLines)
       w.statement(1, 'pass');
-    if (this.pendingCalls.size) throw new CallInliningRetry();
+    if (this.pendingCalls.size) throw new CallInliningRetry([...this.pendingCalls.keys()]);
     if (this.language === 'c-like') w.line(0, '}');
     // Hidden subjects retain annotations without resurrecting dead declarations.
     for (const subject of this.notes.keys()) this.emitNotes(subject, 0);
@@ -7537,8 +7575,9 @@ export class Renderer {
   }
 }
 
-/** Render with single-use call inlining; if a held call does not reach its
- * reader as laid out, render again with every call printed as a statement. */
+/** Render with single-use call inlining; a held call that does not reach its
+ * reader as laid out prints as a statement in the next attempt. After four
+ * failed attempts every call prints as a statement. */
 export function renderSource(
   input: EmissionInput,
   options: ConstructorParameters<typeof Renderer>[1],
@@ -7547,11 +7586,23 @@ export function renderSource(
   version: string,
 ): EmissionResult {
   const attempt = (metadata: 'full' | 'omitted'): EmissionResult => {
-    try {
-      return new Renderer(input, options, context, language, version, true, metadata).render();
-    } catch (error) {
-      if (!(error instanceof CallInliningRetry)) throw error;
-      return new Renderer(input, options, context, language, version, false, metadata).render();
+    const rejected = new Set<string>();
+    // Each retry prints the failed calls as statements.
+    for (let retry = 0; ; retry++) {
+      try {
+        return new Renderer(
+          input,
+          options,
+          context,
+          language,
+          version,
+          retry < 4 ? rejected : null,
+          metadata,
+        ).render();
+      } catch (error) {
+        if (!(error instanceof CallInliningRetry) || retry >= 4) throw error;
+        for (const id of error.results) rejected.add(id);
+      }
     }
   };
   try {

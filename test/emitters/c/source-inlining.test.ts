@@ -145,6 +145,57 @@ for (const language of ['c-like', 'python-like'] as const)
       }
     });
 
+    test('a call between a load and its single use keeps the load a statement before the call', () => {
+      const b = program('single-use-call'),
+        entry = b.block('entry');
+      const loaded = entry.load(i8, entry.constant(i64, 0x1000n));
+      entry.call(
+        { kind: 'direct', address: { image_id: image, space: 'va', value: 0x4000n } },
+        [],
+        [],
+        { registers: [], flags: [], memory: 'unknown_read_write' },
+      );
+      entry.return([entry.cast('zero_extend', i32, loaded)]);
+      const output = render(b.finish(entry, [i32]));
+      assert.ok(named(output, loaded), output.emission.text);
+      const text = output.emission.text,
+        variable = output.identifiers.find((row) => row.entity_id === loaded.id)!.identifier;
+      assert.ok(text.indexOf(`${variable} = `) < text.search(/sub_4000\(/), text);
+    });
+
+    test('a cheap operation read twice by one statement repeats there; read by two statements it stays a variable', () => {
+      for (const split of [false, true]) {
+        const b = program(`repeated-${split}`),
+          entry = b.block('entry', [i1, i32]);
+        const [condition, x] = entry.parameters as [Value, Value];
+        const half = entry.int('lshr', x, entry.constant(i32, 1n));
+        const mixed = entry.int('xor', half, entry.constant(i32, 0xedb88320n));
+        const selected = entry.select(condition, mixed, half);
+        if (split) entry.store(entry.constant(i64, 0x1000n), half);
+        entry.return([selected]);
+        const input = b.finish(entry, [i32]),
+          output = render(input);
+        const rules = (output.emission.local_validation ?? []).map((record) => record.rule);
+        assert.equal(named(output, half), split, output.emission.text);
+        assert.equal(rules.includes('repeated_operation'), !split, output.emission.text);
+        for (const [c, value] of [
+          [0n, 0x80000003n],
+          [1n, 0x80000003n],
+          [1n, 0xffffffffn],
+        ] as const) {
+          const inputs = new Map([
+            [condition.id, c],
+            [x.id, value],
+          ]);
+          const actual = execute(output.emission, inputs, memory());
+          const expected = execute(render(input, 'checked').emission, inputs, memory());
+          assert.deepEqual(actual.values, expected.values);
+          assert.deepEqual(actual.memory, expected.memory);
+          assert.deepEqual(actual.values, [c ? (value >> 1n) ^ 0xedb88320n : value >> 1n]);
+        }
+      }
+    });
+
     test('a load used by a lazy select stays unconditional', () => {
       const b = program('single-use-lazy'),
         entry = b.block('entry', [i1]);

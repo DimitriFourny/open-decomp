@@ -70,7 +70,7 @@ test(
     // A tail call into a void method is a call statement and a plain return.
     const increment = await text(session, '-[ODCounter increment]');
     assert.match(increment, /^void -\[ODCounter increment\]/m);
-    assert.match(increment, /\[self setCount:\w+\];\n\s*return;/);
+    assert.match(increment, /\[self setCount:[^\]\n]+\];\n\s*return;/);
     assert.match(await text(session, '+[ODCounter greeting]'), /return @"hello, fixture";/);
     // Super sends stay explicit dispatcher calls with their selector.
     const init = await text(session, '-[ODCounter initWithLabel:]');
