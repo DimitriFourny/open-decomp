@@ -311,6 +311,9 @@ export interface SourcePresentation {
   readonly call_results?: ReadonlyMap<string, readonly Value[]>;
   /** Synthetic display values map back to catalogued, original SSA contributors. */
   readonly value_origins?: ReadonlyMap<string, readonly string[]>;
+  /** A stored value -> its forwarded stack reloads that read exactly its bits (an
+   * O0 argument spill reloaded for a call): their type evidence is the value's. */
+  readonly forwarded_reloads?: ReadonlyMap<string, readonly string[]>;
   /** Ordered pure definitions after an original node; control anchors emit before control. */
   readonly definitions?: ReadonlyMap<string, readonly Extract<Instruction, { kind: 'assign' }>[]>;
 }

@@ -588,10 +588,35 @@ export function recoverPointerEvidence(
       width_bits: bitWidth(machine_type),
     });
   };
+  /** The object pointer type of the wholes a cell holds its own bits of. */
+  const fragmentObject = (id: string, offset: number): { key: string; type_id: string } | null => {
+    const found = new Map<string, string>();
+    const owners = [
+      ...(wholes.get(id) ?? []),
+      ...(sliceOwners.get(id) ?? []).flatMap((whole) =>
+        slices
+          .get(whole)!
+          .filter((slice) => slice.part.id === id)
+          .map((slice) => ({ whole, offset: slice.offset })),
+      ),
+    ];
+    for (const owner of owners) {
+      budget.charge();
+      const object = owner.offset === offset ? objectTypes.get(owner.whole) : undefined;
+      if (object) found.set(object.key, object.type_id);
+    }
+    if (found.size !== 1) return null;
+    const [key, type_id] = [...found][0]!;
+    return { key, type_id };
+  };
   for (const [subject_id, fragment] of [...fragments].sort(([a], [b]) => a.localeCompare(b))) {
     budget.charge();
-    if (!proofs.has(subject_id))
-      associate(subject_id, pointerId, fragment.proof, 'fragment', fragment.offset);
+    if (proofs.has(subject_id)) continue;
+    associate(subject_id, pointerId, fragment.proof, 'fragment', fragment.offset);
+    // A source formal built from these cells reads the whole's declared type.
+    const object = fragmentObject(subject_id, fragment.offset);
+    if (object)
+      associate(subject_id, object.type_id, fragment.proof, 'fragment object', fragment.offset);
   }
   for (const [subject_id, proof] of [...proofs].sort(([a], [b]) => a.localeCompare(b))) {
     budget.charge();

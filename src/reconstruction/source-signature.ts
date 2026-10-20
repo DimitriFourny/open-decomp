@@ -726,14 +726,19 @@ export function projectSourceSignature(
   for (const parameter of program.parameters) {
     context.checkpoint(1);
     if (parameter.type.kind !== 'integer' || conflicting(parameter)) continue;
-    // Independent supplied declarations and projected pointer layouts win.
+    // Independent supplied declarations and projected pointer layouts win, as
+    // does a declared type record that analysis carried here (a library
+    // `const char *` an image flow proves the formal is forwarded to).
     const projected = program.source.value_types?.get(parameter.id);
     if (
       projected &&
-      input.types?.associations.some(
+      (input.types?.associations.some(
         (association) =>
           projected.association_ids.includes(association.id) && association.source !== 'analysis',
-      )
+      ) ||
+        input.types?.types.some(
+          (record) => record.id === projected.type_id && record.source !== 'analysis',
+        ))
     )
       continue;
     const origins = program.source.value_origins?.get(parameter.id) ?? [];

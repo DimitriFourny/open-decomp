@@ -1351,6 +1351,15 @@ export function planSourceStack(
   // The value a forwarded load reads from its reaching stored bytes: the whole
   // stored value, a bit range of one integer value, or adjacent stored integer
   // pieces concatenated low to high. Null when the bytes have no such spelling.
+  /** Stored value -> reloads that read exactly its whole bits (bitcast forward). */
+  const forwardedReloads = new Map<string, string[]>();
+  const forward = (reload: Value, read: Expression): void => {
+    if (read.kind !== 'cast' || read.op !== 'bitcast' || !sameType(read.value.type, reload.type))
+      return;
+    const list = forwardedReloads.get(read.value.id) ?? [];
+    list.push(reload.id);
+    forwardedReloads.set(read.value.id, list);
+  };
   const forwardedRead = (
     access: (typeof accesses)[number],
     cells: readonly ForwardedByte[],
@@ -1497,7 +1506,10 @@ export function planSourceStack(
     if (forwarded) {
       for (const access of members) {
         hidden.add(access.node.id);
-        if (access.node.kind === 'load') alias(access.node.result, reads.get(access.node.id)!);
+        if (access.node.kind !== 'load') continue;
+        const read = reads.get(access.node.id)!;
+        alias(access.node.result, read);
+        forward(access.node.result, read);
       }
     } else {
       // A punned local takes its stores' common type (else the first access's);
@@ -1590,7 +1602,10 @@ export function planSourceStack(
       validation.requireAbi('frame_object_base', subjects, frameObjectBase);
     for (const access of reloads) {
       hidden.add(access.node.id);
-      if (access.node.kind === 'load') alias(access.node.result, reads.get(access.node.id)!);
+      if (access.node.kind !== 'load') continue;
+      const read = reads.get(access.node.id)!;
+      alias(access.node.result, read);
+      forward(access.node.result, read);
     }
   }
   const dynamicStorage = memory.some(
@@ -1672,5 +1687,6 @@ export function planSourceStack(
     requiresEntry,
     saves,
     deadReloadCandidates,
+    forwardedReloads,
   };
 }

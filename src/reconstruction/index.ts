@@ -1217,6 +1217,7 @@ export function reconstruct(
           locals: sourceStack.locals,
           stack: sourceStack.frame(retained, live),
           stack_addresses: sourceStack.addresses,
+          forwarded_reloads: sourceStack.forwardedReloads,
           ...(view === 'source' ? { frame_saves: sourceStack.saves } : {}),
         }
       : undefined;

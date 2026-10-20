@@ -36,8 +36,11 @@ export interface LocalTypeHost {
   literal(value: Value): boolean;
   /** Declared result type of the function. */
   readonly result: Fact | undefined;
-  /** A value printed as a variable whose type this pass may choose. */
+  /** A printed variable whose type this pass may choose. */
   variable(value: Value): boolean;
+  /** A formal whose printed spelling (not type) this pass may choose: it has a
+   * projected source type and no inferred formal spelling of its own. */
+  respell_formal?(id: string): boolean;
 }
 
 /** The chosen pointer type of one connected set of locals (formals excluded). */
@@ -429,10 +432,6 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
     }
     // A member that already has a scalar declaration keeps the set integer.
     if (facts.includes('scalar')) continue;
-    const known = facts.filter((fact): fact is PointerFact => fact !== 'scalar');
-    const knownTypes = new Set(known.map((fact) => fact.type_id));
-    const knownSpellings = new Set(known.map((fact) => fact.spelling));
-    if (knownTypes.size > 1 && knownSpellings.size > 1) continue;
     const typedUses = uses.filter(
       (use): use is Extract<Use, { kind: 'pointer' }> => use.kind === 'pointer',
     );
@@ -440,6 +439,26 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
       (definition): definition is Extract<Definition, { kind: 'pointer' }> =>
         definition.kind === 'pointer',
     );
+    // A use or definition that declares the very type record a member already has
+    // spells it as its declaration does (a library `const char *` rather than
+    // the record's generic `int8_t *`): same type, declared spelling.
+    const declaredSpelling = new Map<string, string>();
+    for (const fact of [
+      ...typedUses.map((use) => use.fact),
+      ...typedDefinitions.map((definition) => definition.fact),
+    ])
+      if (fact.type_id !== undefined && !declaredSpelling.has(fact.type_id))
+        declaredSpelling.set(fact.type_id, fact.spelling);
+    const known = facts
+      .filter((fact): fact is PointerFact => fact !== 'scalar')
+      .map((fact) => {
+        const spelling =
+          fact.type_id === undefined ? undefined : declaredSpelling.get(fact.type_id);
+        return spelling === undefined ? fact : { ...fact, spelling };
+      });
+    const knownTypes = new Set(known.map((fact) => fact.type_id));
+    const knownSpellings = new Set(known.map((fact) => fact.spelling));
+    if (knownTypes.size > 1 && knownSpellings.size > 1) continue;
     const evidence = [
       ...known,
       ...typedUses.map((use) => use.fact),
@@ -508,7 +527,16 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
     for (const [to, from] of copies)
       if (memberSet.has(to) && pointerMember(to) !== pointerMember(from)) score++;
     if (score < (known.length ? 0 : 1)) continue;
-    const assignable = members.filter((id) => !host.formals.has(id));
+    // A formal joins only to take its own type's declared spelling: the source
+    // type it already has stays, so no value or conversion changes.
+    const assignable = members.filter(
+      (id) =>
+        !host.formals.has(id) ||
+        (typeId !== undefined &&
+          host.respell_formal?.(id) === true &&
+          events.get(id)!.facts.length > 0 &&
+          events.get(id)!.facts.every((fact) => fact !== 'scalar' && fact.type_id === typeId)),
+    );
     if (!assignable.length) continue;
     chosen.set(assignable[0]!, {
       fact: { ...(typeId === undefined ? {} : { type_id: typeId }), spelling },

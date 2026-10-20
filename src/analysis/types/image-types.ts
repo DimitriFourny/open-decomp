@@ -45,6 +45,9 @@ export interface ImageTypeObject {
     readonly stride: bigint | null;
     readonly object: string;
   }[];
+  /** Declared pointer type IDs (library or debug prototypes, user assertions) of
+   * call parameters this exact value is passed to unchanged. */
+  readonly declared?: readonly string[];
 }
 
 export interface ImageTypeFunction {
@@ -74,6 +77,8 @@ export interface ImageTypeClass {
   readonly conflicts: readonly string[];
   /** No flow or holder identifies this class: one function's private view. */
   readonly local: boolean;
+  /** Declared pointer types the members are passed as (see ImageTypeObject). */
+  readonly declared: readonly string[];
 }
 
 export interface ImageTypeSolution {
@@ -200,8 +205,9 @@ export function solveImageTypes(
       if (localImageAnchor(anchor)) confirmed.add(key);
     }
   // Least fixpoint: stack and allocation anchors are local; an argument/result
-  // anchor needs a callee-side object that dereferences the value or forwards it
-  // to one.
+  // anchor needs a callee-side object that dereferences the value, passes it
+  // unchanged where a declared prototype expects a pointer, or forwards it to
+  // a confirmed flow.
   for (let changed = true; changed;) {
     changed = false;
     for (const [key, list] of owners) {
@@ -213,6 +219,7 @@ export function solveImageTypes(
           return (
             object.fields.length > 0 ||
             object.pointees.length > 0 ||
+            (object.declared?.length ?? 0) > 0 ||
             object.anchors.some((item) => !item.own && confirmed.has(imageAnchorKey(item.anchor)))
           );
         })
@@ -462,6 +469,9 @@ export function solveImageTypes(
       state: item.bounded ? 'bounded' : 'complete',
       conflicts: [...(conflicts.get(item.id) ?? [])].sort(),
       local: item.local === true,
+      declared: [
+        ...new Set(item.members.flatMap((member) => byKey.get(member)!.declared ?? [])),
+      ].sort(),
     });
   }
   // A bounded member set may differ by exploration root: its name carries a
