@@ -824,9 +824,23 @@ sign extension by c other than 0 and -1, is the extended narrow operation),
 `compare_canonical` (constant to the right; comparisons of matching extensions,
 or of one extension with a representable constant, use the narrow operands) and
 `low_bits_narrowing` (the former BDD-checked low-slice narrowing, now its own
-lemma; the checked view keeps the BDD check). Signed magic division and 32-bit
-magic sequences over a 64-bit operand with an unproven high half are not
-recognized. Two value-level rules (`src/analysis/values/rules.ts`) run in
+lemma; the checked view keeps the BDD check). The division recognizer tracks each
+step of floor(x*M/2^s) as its exact integer while the step's width holds it and
+otherwise only the low bits it provably preserves (extensions, including x86's
+register-cell joins, and slices of one value are recognized as the same x).
+Signed quotients floor(x*M/2^s) + [x*M < 0] (the sign bit added, the replicated
+sign of x subtracted, or the quotient subtracted from it for a negated divisor)
+are x / d when `exactSignedMagicDivisor` proves d = ±ceil(2^s/|M|) on both sides
+of zero (2 <= |d| < 2^(w-1)); signed powers of two below 2^(w-1) through the bias
+`x < 0 ? 2^k-1 : 0` (select or shift spelling), `-(x / d)` as `x / -d`, and the
+remainders x - q*d over any product spelling, x - ((x + bias) & -2^k),
+((x + bias) & (2^k-1)) - bias (checked modulo 2^k) and the csneg form
+`x > 0 ? x & m : -((-x) & m)`. A quotient or remainder known only modulo 2^b is
+used only where no other bits are read (`r << (w-b)`): x86 O2 adler32's 32-bit
+tail over a 64-bit sum prints `(uint32_t)(sum % 0xfff1) << 16`; the sum's high
+half is not proven zero. The printer spells a 128-bit product of sign-extended
+64-bit operands as the exact signed `(int128_t)(int64_t)a * b`
+(`signed_wide_product`). Two value-level rules (`src/analysis/values/rules.ts`) run in
 `simplifySSA` for both views: `zext(trunc v)` is `v` when `v` is proven below the
 narrow width, and `x OP x` of one value is OP's reflexive truth value unless an
 indeterminate definition can reach `x` (through definitions or phi inputs, 128
@@ -835,10 +849,13 @@ dividend by a constant thus folds and its unreachable trap disappears. The print
 prints division by a constant other than 0 (signed: other than -1) natively
 (`native_division`; Python-like keeps the helper for signed operands, whose floor
 division differs) and an integer insert as `(base & kept) | (value << offset)`
-(`mask_insert`). `test/reconstruction/source-division.test.ts` checks the magic
-divisor bound against exhaustive 8-bit and sampled 16-bit search, compiler
-constants and off-by-one multipliers, and the narrowing/remainder lemmas at
-INT_MIN, -1 and width edges.
+(`mask_insert`). `test/reconstruction/source-division.test.ts` checks both magic
+divisor bounds against exhaustive 8-bit and sampled 16-bit search, compiler
+constants and off-by-one multipliers, and the narrowing/remainder/power-of-two
+lemmas at INT_MIN, -1 and width edges;
+`test/reconstruction/source-division-rules.test.ts` runs the rule pool on signed
+magic, power-of-two and remainder sequences (and near misses) and compares the
+rewritten DAG with the original on every 8-bit and sampled 32-bit dividend.
 
 The bitvector checker first accepts the same operator over identity-equal
 operands (congruence) without BDD work, then compiles both sides with every
