@@ -55,6 +55,8 @@ import type {
 } from './model.js';
 export type * from './model.js';
 export { refineMemoryShapes, parameterMemoryShapes } from './memory-shapes.js';
+export { recoverPointerEvidence } from './pointers.js';
+export type { PointerEvidenceOptions, PointerRule } from './pointers.js';
 export type {
   NativeParameterShape,
   MemoryShapeTransfer,

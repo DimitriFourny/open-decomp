@@ -1074,6 +1074,7 @@ export class Renderer {
   private scalarPointee(id: string): IntegerCType | null {
     const pointer = this.typeRecords.get(id)?.definition;
     if (pointer?.kind !== 'pointer') return null;
+    if (this.byteAddress(pointer.to)) return { bits: 8, signed: false };
     const target = this.naturalScalar(pointer.to) ?? pointer.to;
     const type = this.typeRecords.get(target)?.definition;
     return type?.kind === 'integer' && type.bits % 8 === 0 && type.bits <= 64
@@ -2366,6 +2367,8 @@ export class Renderer {
       case 'pointer':
         if (this.sourceView && this.language === 'c-like' && record.spelling !== undefined)
           return record.spelling;
+        if (this.byteAddress(type.to))
+          return this.language === 'c-like' ? 'uint8_t*' : 'pointer[uint8_t]';
         return this.language === 'c-like'
           ? `${this.sourceType(type.to, depth + 1)}*`
           : `pointer[${this.sourceType(type.to, depth + 1)}]`;
@@ -2392,6 +2395,23 @@ export class Renderer {
       case 'unknown':
         return this.sourceView ? this.opaqueType(id) : this.identifier(id, 'type');
     }
+  }
+
+  /** Source view: an analysis address whose pointee type is not established
+   * (`void`) is spelled byte-addressed, so `p + k` and `*(T *)(p + k)` are the
+   * machine's exact byte arithmetic without integer round trips. */
+  private byteAddress(pointee: string): boolean {
+    const record = this.typeRecords.get(pointee);
+    return (
+      this.sourceView &&
+      record?.source === 'analysis' &&
+      record.definition.kind === 'void' &&
+      this.localValidation.presentation(
+        'byte_addressed_pointer',
+        this.input.function.id,
+        'analysis address without an established pointee type spelled as a byte pointer; arithmetic and dereferences keep the exact address bits and access widths, no pointee type is claimed',
+      )
+    );
   }
 
   /** A whole machine address stepped by a proven record stride retains its

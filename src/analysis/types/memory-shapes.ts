@@ -620,17 +620,52 @@ export function buildMemoryShape(
     base_offset = start < 0n ? start : 0n;
   let extent: MemoryShape['observed_extent'] = null;
   const conflicts: TypeConflict[] = [];
+  const end = (field: ObservedField): bigint =>
+    field.offset + BigInt(Math.ceil(field.width_bits / 8));
+  // Equal-width fixed/dynamic observations can be compatible views of the
+  // same element. Different widths or element periods remain alternatives.
+  const compatible = (a: ObservedField, b: ObservedField): boolean =>
+    !a.dynamic &&
+    !b.dynamic &&
+    a.offset === b.offset &&
+    a.width_bits === b.width_bits &&
+    (a.stride === null || b.stride === null || a.stride === b.stride);
+  // Overlapping constant/strided views compete by evidence weight (accesses,
+  // then lower offset, then narrower width): the layout keeps the heavier
+  // member and every losing access stays an explicit cast at its own use; only
+  // the losing member is conflicted, not the whole view.
+  const placed: ObservedField[] = [];
+  const winners = new Map<string, ObservedField>();
+  for (const field of fields
+    .filter((item) => !item.dynamic)
+    .sort(
+      (a, b) =>
+        b.node_ids.length - a.node_ids.length ||
+        (a.offset < b.offset ? -1 : a.offset > b.offset ? 1 : 0) ||
+        a.width_bits - b.width_bits ||
+        a.id.localeCompare(b.id),
+    )) {
+    budget.charge(placed.length + 1);
+    const winner = placed.find(
+      (other) =>
+        field.offset < end(other) && other.offset < end(field) && !compatible(field, other),
+    );
+    if (winner) winners.set(field.id, winner);
+    else placed.push(field);
+  }
+  for (const field of fields) {
+    budget.charge();
+    if (field.stride !== null || field.dynamic) continue;
+    const stop = end(field);
+    extent =
+      extent === null
+        ? { start: field.offset, end: stop }
+        : { start: extent.start, end: stop > extent.end ? stop : extent.end };
+  }
   const coreFields = fields
-    .filter((field) => !field.dynamic)
+    .filter((field) => !field.dynamic && !winners.has(field.id))
     .map((field) => {
       budget.charge();
-      if (field.stride === null && !field.dynamic) {
-        const end = field.offset + BigInt(Math.ceil(field.width_bits / 8));
-        extent =
-          extent === null
-            ? { start: field.offset, end }
-            : { start: extent.start, end: end > extent.end ? end : extent.end };
-      }
       let type_id = options.field_type(field);
       if (field.width_bits % 8 === 0 && field.stride === BigInt(field.width_bits / 8))
         type_id = options.array_type(type_id, field);
@@ -641,27 +676,28 @@ export function buildMemoryShape(
         type_id,
       };
     });
+  for (const loser of fields) {
+    const winner = winners.get(loser.id);
+    if (!winner) continue;
+    conflicts.push({
+      subject_id: loser.id,
+      alternatives: [winner.id, loser.id],
+      evidence_ids: [...new Set([...winner.evidence_ids, ...loser.evidence_ids])],
+      reason: 'overlapping_accesses',
+    });
+  }
   for (let index = 0; index < fields.length; index++)
     for (
       let next = index + 1;
-      next < fields.length &&
-      fields[next]!.offset <
-        fields[index]!.offset + BigInt(Math.ceil(fields[index]!.width_bits / 8));
+      next < fields.length && fields[next]!.offset < end(fields[index]!);
       next++
     ) {
       budget.charge();
       const a = fields[index]!,
         b = fields[next]!;
-      // Equal-width fixed/dynamic observations can be compatible views of the
-      // same element. Different widths or element periods remain alternatives.
-      if (
-        !a.dynamic &&
-        !b.dynamic &&
-        a.offset === b.offset &&
-        a.width_bits === b.width_bits &&
-        (a.stride === null || b.stride === null || a.stride === b.stride)
-      )
-        continue;
+      // A dynamic index may select any member: an overlap with one leaves the
+      // whole view unresolved.
+      if ((!a.dynamic && !b.dynamic) || compatible(a, b)) continue;
       conflicts.push({
         subject_id: options.id,
         alternatives: [a.id, b.id],

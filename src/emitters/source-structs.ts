@@ -112,15 +112,18 @@ export class SourceStructs {
   }
 
   /** A pointee whose observed members are all one integer/float type at
-   * contiguous, element-aligned offsets and that has no size or period evidence
-   * is a plain scalar array (`p[k]`, `p[k + 1]`, ...); anything else (different
-   * widths or kinds, gaps, a proven record stride or size) stays a structure. */
+   * contiguous, element-aligned offsets and that has no size evidence is a
+   * plain scalar array (`p[k]`, `p[k + 1]`, ...). A proven record stride keeps
+   * that view only when the members fill each record exactly from offset zero
+   * (records of n elements are n consecutive elements); anything else
+   * (different widths or kinds, gaps, a partial record) stays a structure. */
   private scalarArray(
     id: string,
     fields: Extract<SuppliedTypeRecord['definition'], { kind: 'structure' }>['fields'],
     size: bigint | null,
   ): string | null {
-    if (size !== null || this.strides.get(id) || fields.length > 64) return null;
+    const stride = this.strides.get(id);
+    if (size !== null || fields.length > 64) return null;
     let element: { id: string; key: string; size: bigint } | undefined;
     const offsets = new Set<bigint>();
     for (const field of fields) {
@@ -149,6 +152,7 @@ export class SourceStructs {
     const sorted = [...offsets].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     for (let index = 1; index < sorted.length; index++)
       if (sorted[index]! - sorted[index - 1]! !== element.size) return null;
+    if (stride && (sorted[0] !== 0n || sorted.at(-1)! + element.size !== stride)) return null;
     return this.validation.presentation(
       'scalar_array_pointee',
       this.subject,

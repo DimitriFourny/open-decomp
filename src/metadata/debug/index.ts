@@ -72,6 +72,24 @@ export function recoverDebugInfo(
 ): DebugRecovery {
   context.checkpoint(0);
   if (image.target.format === 'elf') {
+    // Without embedded DWARF sections there is no debug data to recover (as for
+    // a Mach-O image without __debug_info); only present DWARF stays unread.
+    if (
+      !external &&
+      !image.sections.some(
+        (section) => section.kind === 'section' && /^\.z?debug_/.test(section.name),
+      )
+    )
+      return {
+        status: 'absent',
+        uuid: null,
+        content_sha256: image.sha256,
+        data: null,
+        types: [],
+        functions: [],
+        evidence: [],
+        diagnostics: [],
+      };
     const diagnostic: Diagnostic = {
       code: 'unavailable_semantics',
       severity: 'warning',
