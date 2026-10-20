@@ -15,6 +15,7 @@ const INTEGRATION = [
   'test/cli/source-quality.test.ts',
   'test/mcp/executable.test.ts',
   'test/mcp/stdio.test.ts',
+  'test/reconstruction/emitted-c-source.test.ts',
   'test/reconstruction/float-source.test.ts',
   'test/reconstruction/fp-vector-source.test.ts',
   'test/reconstruction/image-types-source.test.ts',

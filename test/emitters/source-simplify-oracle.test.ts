@@ -89,7 +89,10 @@ interface Tree {
   readonly definitions: Map<string, Expression>;
   readonly root: Value;
 }
-function generate(seed: number): Tree {
+/** `widths`: integer widths of interior nodes (leaves stay at most 64 bits, the
+ * root at most 64 bits so a C function can return it). Widths above 64 add two
+ * constants at or above 2^63 (64-bit literals in a wider context). */
+function generate(seed: number, widths: readonly number[] = [8, 16, 32, 64]): Tree {
   const random = prng(seed),
     values = new Map<string, Value>(),
     definitions = new Map<string, Expression>();
@@ -103,6 +106,7 @@ function generate(seed: number): Tree {
   const constant = (bits: number, kind: 'zero' | 'mask' | 'any'): Value => {
     const ones = (1n << BigInt(bits)) - 1n;
     const choices = [0n, 1n, ones, ones >> 1n, 0xffn & ones, 0xffffn & ones, 0xffffffffn & ones];
+    if (bits > 64) choices.push(0x9e3779b97f4a7c15n, 0xffffffffffffffffn);
     return make(bits, {
       kind: 'constant',
       bits:
@@ -121,7 +125,7 @@ function generate(seed: number): Tree {
     values.set(value.id, value);
     return value;
   };
-  const widths = [8, 16, 32, 64];
+  const rootWidths = [1, ...widths.filter((width) => width <= 64)];
   const gen = (bits: number, depth: number): Value => {
     if (bits === 1) {
       if (depth <= 0 || random() < 0.2) {
@@ -213,7 +217,7 @@ function generate(seed: number): Tree {
       value: gen(bits, depth - 1),
     });
   };
-  const root = gen(pick([1, 8, 16, 32, 64]), 4);
+  const root = gen(pick(rootWidths), 4);
   return { values, definitions, root };
 }
 
@@ -291,111 +295,120 @@ const samples = [
 const cases = 700,
   vectors = 14;
 
+/** Prints `cases` generated trees (seeds from `seed`) in both dialects, with and
+ * without simplifications, and runs every printing against the IR semantics. */
+async function checkPrintings(
+  directory: string,
+  seed: number,
+  widths?: readonly number[],
+): Promise<{ changed: number; rulesSeen: ReadonlySet<string>; trees: readonly Tree[] }> {
+  const random = prng(7);
+  const trees: Tree[] = [];
+  const rulesSeen = new Set<string>();
+  let changed = 0;
+  const prototype = leaves.map((item) => `${item.c} ${item.name}`).join(', ');
+  const parameters = leaves.map((item) => item.name).join(', ');
+  const cLines = [
+    '#include <stdint.h>',
+    '#include <stdio.h>',
+    'typedef unsigned __int128 uint128_t;',
+    'typedef __int128 int128_t;',
+  ];
+  const pyLines = [
+    ...[1, 8, 16, 32, 64, 128].flatMap((bits) => [
+      `def uint${bits}(v): return v & ${(1n << BigInt(bits)) - 1n}`,
+      `def int${bits}(v): return ((v + ${1n << BigInt(bits - 1)}) & ${(1n << BigInt(bits)) - 1n}) - ${1n << BigInt(bits - 1)}`,
+    ]),
+    'failures = 0',
+  ];
+  const cMain: string[] = [],
+    pyMain: string[] = [];
+  for (let index = 0; index < cases; index++) {
+    const tree = generate(seed + index, widths);
+    trees.push(tree);
+    const width = bitWidth(tree.root.type),
+      mask = (1n << BigInt(width)) - 1n;
+    const printings = {
+      c: [print(tree, 'c-like', false), print(tree, 'c-like', true)] as const,
+      py: [print(tree, 'python-like', false), print(tree, 'python-like', true)] as const,
+    };
+    const texts = {
+      c: printings.c.map((printing) => printing.text),
+      py: printings.py.map((printing) => printing.text),
+    };
+    for (const printing of [...printings.c, ...printings.py])
+      for (const rule of printing.rules) rulesSeen.add(rule);
+    if (texts.c[0] !== texts.c[1] || texts.py[0] !== texts.py[1]) changed++;
+    cLines.push(
+      `static uint64_t u${index}(${prototype}) { return (uint64_t)(${texts.c[0]}); }`,
+      `static uint64_t s${index}(${prototype}) { return (uint64_t)(${texts.c[1]}); }`,
+    );
+    pyLines.push(
+      `def u${index}(${parameters}): return ${texts.py[0]}`,
+      `def s${index}(${parameters}): return ${texts.py[1]}`,
+    );
+    for (let vector = 0; vector < vectors; vector++) {
+      const inputs = new Map<string, bigint>();
+      const cArgs: string[] = [],
+        pyArgs: string[] = [];
+      for (const item of leaves) {
+        const raw =
+          random() < 0.75
+            ? samples[Math.floor(random() * samples.length)]!
+            : BigInt(Math.floor(random() * 2 ** 32)) * 0x100000001n;
+        const pattern = item.pattern(raw);
+        inputs.set(`leaf:${item.name}`, pattern);
+        const variable = item.variable(pattern);
+        cArgs.push(variable < 0n ? `(${item.c})${variable}LL` : `${variable}ULL`);
+        pyArgs.push(String(variable));
+      }
+      const expected = evaluate(tree, inputs) & mask;
+      for (const kind of ['u', 's']) {
+        cMain.push(
+          `if ((${kind}${index}(${cArgs.join(', ')}) & ${mask}ULL) != ${expected}ULL) { printf("${kind}${index} vector ${vector}\\n"); failures++; }`,
+        );
+        pyMain.push(
+          `if (${kind}${index}(${pyArgs.join(', ')}) & ${mask}) != ${expected}: print("${kind}${index} vector ${vector}"); failures += 1`,
+        );
+      }
+    }
+  }
+  cLines.push('int main(void) { int failures = 0;', ...cMain, 'return failures != 0; }');
+  pyLines.push(...pyMain, 'raise SystemExit(1 if failures else 0)');
+  const cPath = join(directory, 'oracle.c'),
+    pyPath = join(directory, 'oracle.py'),
+    binary = join(directory, 'oracle');
+  await writeFile(cPath, `${cLines.join('\n')}\n`);
+  await writeFile(pyPath, `${pyLines.join('\n')}\n`);
+  const build = spawnSync(
+    CLANG,
+    [
+      '-std=c11',
+      '-w',
+      '-O0',
+      '-fsanitize=signed-integer-overflow,shift',
+      '-fno-sanitize-recover=all',
+      cPath,
+      '-o',
+      binary,
+    ],
+    { encoding: 'utf8' },
+  );
+  assert.equal(build.status, 0, build.stderr.slice(0, 4000));
+  const c = spawnSync(binary, [], { encoding: 'utf8' });
+  assert.equal(c.status, 0, `${c.stdout.slice(0, 2000)}${c.stderr.slice(0, 2000)}`);
+  const python = spawnSync('python3', [pyPath], { encoding: 'utf8' });
+  assert.equal(python.status, 0, `${python.stdout.slice(0, 2000)}${python.stderr.slice(0, 2000)}`);
+  return { changed, rulesSeen, trees };
+}
+
 test(
   'source printer simplifications equal the unsimplified printing and the IR semantics',
   { skip: nativeAndPythonOracleSkip(), timeout: 300_000 },
   async (t) => {
     const directory = await mkdtemp(join(tmpdir(), 'open-decomp-simplify-'));
     t.after(() => rm(directory, { recursive: true, force: true }));
-    const random = prng(7);
-    const rulesSeen = new Set<string>();
-    let changed = 0;
-    const prototype = leaves.map((item) => `${item.c} ${item.name}`).join(', ');
-    const parameters = leaves.map((item) => item.name).join(', ');
-    const cLines = [
-      '#include <stdint.h>',
-      '#include <stdio.h>',
-      'typedef unsigned __int128 uint128_t;',
-      'typedef __int128 int128_t;',
-    ];
-    const pyLines = [
-      ...[1, 8, 16, 32, 64, 128].flatMap((bits) => [
-        `def uint${bits}(v): return v & ${(1n << BigInt(bits)) - 1n}`,
-        `def int${bits}(v): return ((v + ${1n << BigInt(bits - 1)}) & ${(1n << BigInt(bits)) - 1n}) - ${1n << BigInt(bits - 1)}`,
-      ]),
-      'failures = 0',
-    ];
-    const cMain: string[] = [],
-      pyMain: string[] = [];
-    for (let index = 0; index < cases; index++) {
-      const tree = generate(1000 + index);
-      const width = bitWidth(tree.root.type),
-        mask = (1n << BigInt(width)) - 1n;
-      const printings = {
-        c: [print(tree, 'c-like', false), print(tree, 'c-like', true)] as const,
-        py: [print(tree, 'python-like', false), print(tree, 'python-like', true)] as const,
-      };
-      const texts = {
-        c: printings.c.map((printing) => printing.text),
-        py: printings.py.map((printing) => printing.text),
-      };
-      for (const printing of [...printings.c, ...printings.py])
-        for (const rule of printing.rules) rulesSeen.add(rule);
-      if (texts.c[0] !== texts.c[1] || texts.py[0] !== texts.py[1]) changed++;
-      cLines.push(
-        `static uint64_t u${index}(${prototype}) { return (uint64_t)(${texts.c[0]}); }`,
-        `static uint64_t s${index}(${prototype}) { return (uint64_t)(${texts.c[1]}); }`,
-      );
-      pyLines.push(
-        `def u${index}(${parameters}): return ${texts.py[0]}`,
-        `def s${index}(${parameters}): return ${texts.py[1]}`,
-      );
-      for (let vector = 0; vector < vectors; vector++) {
-        const inputs = new Map<string, bigint>();
-        const cArgs: string[] = [],
-          pyArgs: string[] = [];
-        for (const item of leaves) {
-          const raw =
-            random() < 0.75
-              ? samples[Math.floor(random() * samples.length)]!
-              : BigInt(Math.floor(random() * 2 ** 32)) * 0x100000001n;
-          const pattern = item.pattern(raw);
-          inputs.set(`leaf:${item.name}`, pattern);
-          const variable = item.variable(pattern);
-          cArgs.push(variable < 0n ? `(${item.c})${variable}LL` : `${variable}ULL`);
-          pyArgs.push(String(variable));
-        }
-        const expected = evaluate(tree, inputs) & mask;
-        for (const kind of ['u', 's']) {
-          cMain.push(
-            `if ((${kind}${index}(${cArgs.join(', ')}) & ${mask}ULL) != ${expected}ULL) { printf("${kind}${index} vector ${vector}\\n"); failures++; }`,
-          );
-          pyMain.push(
-            `if (${kind}${index}(${pyArgs.join(', ')}) & ${mask}) != ${expected}: print("${kind}${index} vector ${vector}"); failures += 1`,
-          );
-        }
-      }
-    }
-    cLines.push('int main(void) { int failures = 0;', ...cMain, 'return failures != 0; }');
-    pyLines.push(...pyMain, 'raise SystemExit(1 if failures else 0)');
-    const cPath = join(directory, 'oracle.c'),
-      pyPath = join(directory, 'oracle.py'),
-      binary = join(directory, 'oracle');
-    await writeFile(cPath, `${cLines.join('\n')}\n`);
-    await writeFile(pyPath, `${pyLines.join('\n')}\n`);
-    const build = spawnSync(
-      CLANG,
-      [
-        '-std=c11',
-        '-w',
-        '-O0',
-        '-fsanitize=signed-integer-overflow,shift',
-        '-fno-sanitize-recover=all',
-        cPath,
-        '-o',
-        binary,
-      ],
-      { encoding: 'utf8' },
-    );
-    assert.equal(build.status, 0, build.stderr.slice(0, 4000));
-    const c = spawnSync(binary, [], { encoding: 'utf8' });
-    assert.equal(c.status, 0, `${c.stdout.slice(0, 2000)}${c.stderr.slice(0, 2000)}`);
-    const python = spawnSync('python3', [pyPath], { encoding: 'utf8' });
-    assert.equal(
-      python.status,
-      0,
-      `${python.stdout.slice(0, 2000)}${python.stderr.slice(0, 2000)}`,
-    );
+    const { changed, rulesSeen } = await checkPrintings(directory, 1000);
     assert.ok(changed > cases / 10, `simplifications applied in ${changed} of ${cases} cases`);
     for (const rule of [
       'zero_high_join',
@@ -407,5 +420,29 @@ test(
       'negative_addend',
     ])
       assert.ok(rulesSeen.has(rule), `${rule} exercised`);
+  },
+);
+
+test(
+  'source printing of 128-bit interiors (64-bit literals at or above 2^63 included) equals the IR semantics',
+  { skip: nativeAndPythonOracleSkip(), timeout: 300_000 },
+  async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), 'open-decomp-simplify-128-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const { trees } = await checkPrintings(directory, 5000, [8, 16, 32, 64, 128]);
+    // The printed literal's C type decides whether a 128-bit product stays 128-bit.
+    const wideProducts = trees.filter((tree) =>
+      [...tree.definitions].some(
+        ([id, expression]) =>
+          expression.kind === 'integer' &&
+          expression.op === 'mul' &&
+          bitWidth(tree.values.get(id)!.type) === 128 &&
+          [expression.left, expression.right].some((operand) => {
+            const constant = tree.definitions.get(operand.id);
+            return constant?.kind === 'constant' && constant.bits >> 63n === 1n;
+          }),
+      ),
+    ).length;
+    assert.ok(wideProducts > 0, `128-bit products by a constant in [2^63, 2^64): ${wideProducts}`);
   },
 );

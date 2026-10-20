@@ -722,6 +722,8 @@ export class SourcePrinter {
       return result!;
     }
     // C11 6.4.4.1: decimal constants are signed; hexadecimal may be unsigned.
+    // A constant below 2^64 has a 64-bit type whatever the IR width (wider
+    // contexts convert it under the usual arithmetic conversions).
     const ctype: IntegerCType =
       value < 1n << 31n
         ? INT
@@ -729,7 +731,7 @@ export class SourcePrinter {
           ? { bits: 32, signed: false }
           : value < 1n << 63n
             ? { bits: 64, signed: true }
-            : { bits: Math.max(64, bits), signed: false };
+            : { bits: 64, signed: false };
     return this.primary(text, ctype);
   }
 

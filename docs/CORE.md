@@ -450,6 +450,12 @@ is removed with it; no orphan return remains after a terminal statement.
 Independently reachable labeled blocks are not truncated. The existing
 `return_tail_duplication` record and control validation cover this source-only
 layout change, preserving original tail identities through loop shaping.
+Copies keep the original transfer objects and the renderer prints one action
+per transfer, so a copied jump (which falls into the copy of its target) must
+also fall through at its home. When the home occurrence prints anything else (a
+`break` out of the loop that holds the home, a goto), the labeled edge whose copy
+holds that jump is refused and keeps its goto; refusal repeats until every
+transfer prints one way (`planLayout`, `src/emitters/source-control.ts`).
 
 Focused emitted-output regressions exercise nested loop/switch exits, edge-specific cyclic copies, guarded effects and faults, split-register joins and synthetic source-definition scope in both dialects and both source/machine modes. The four independent source-derived fixtures cover 544 observations; this is bounded regression evidence, not a whole-program equivalence proof.
 
