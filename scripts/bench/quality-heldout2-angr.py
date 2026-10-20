@@ -8,7 +8,7 @@ from quality-heldout2-selection.json and the completeness check scales with the 
 import sys
 
 sys.dont_write_bytecode = True
-import quality_heldout2_wrap as wrap
+import quality_heldout_wrap as wrap
 
 namespace = wrap.load('angr-decompile.py', __file__, [
     ("'quality-heldout-selection.json'", "'quality-heldout2-selection.json'", 1),
