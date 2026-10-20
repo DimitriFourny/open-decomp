@@ -19,6 +19,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import statistics
 import subprocess
@@ -224,6 +225,70 @@ def command_run(args):
                       'failures': len(failures), 'wall_seconds': summary['wall_seconds'], 'output': str(output)}))
     for item in failures:
         print(f'FAIL {item["cell"]}/{item["function"]} exit={item["exit_code"]}: {(item["diagnostics"] or [""])[-1][:160]}')
+    return 0
+
+
+# --------------------------------------------------------------------------- metrics
+
+# Cheap static text counts over a run's texts. Not a quality verdict: use them to see whether a change moved the
+# defect classes the readability roadmap targets (TODO.md R1-R5), then confirm with review packets.
+METRIC_PATTERNS = {
+    'goto': re.compile(r'\bgoto\b'),
+    'label': re.compile(r'^\s*(?!default:)[A-Za-z_]\w*:\s*;?\s*$', re.M),
+    'entry_sp': re.compile(r'\bentry_sp\b'),
+    'open_arity': re.compile(r'\.\.\.'),
+    'cast': re.compile(r'\((?:const\s+)?(?:(?:unsigned|signed)\s+)?(?:\w+_t|char|short|int|long|float|double|bool|void|type_\d+|struct\s+\w+)'
+                       r'(?:\s*\*+)?\)\s*(?=[\w(*&~!-])'),
+    'helper_preamble': re.compile(r'^(?:#define|static inline)\b', re.M),
+    'helper_call': re.compile(r'\b(?:__od_\w+|bv_\w+|insert_bits|extract_bits)\s*\('),
+    'type_n': re.compile(r'\btype_\d+\b'),
+    'local_decl': re.compile(r'^  (?:const\s+)?[A-Za-z_]\w*(?:\s*\*+\s*|\s+)[A-Za-z_]\w*(?:\[\d+\])?;\s*$', re.M),
+}
+METRICS = ('files', 'lines', 'est_tokens', *METRIC_PATTERNS)
+
+
+def text_metrics(text):
+    counts = {name: len(pattern.findall(text)) for name, pattern in METRIC_PATTERNS.items()}
+    return {'files': 1, 'lines': text.count('\n'), 'est_tokens': len(text.encode()) // 4, **counts}
+
+
+def run_metrics(run, only=None):
+    summary = json.loads((run / 'summary.json').read_text())
+    groups = defaultdict(Counter)
+    for cell_id, cell in summary['cells'].items():
+        for name, row in cell['functions'].items():
+            if row['status'] not in TEXT_STATUSES or (only is not None and (cell_id, name) not in only):
+                continue
+            counts = text_metrics((run / row['path']).read_text())
+            for group in ('all', cell['optimization'], f'{cell["target"]}'):
+                groups[group].update(counts)
+    return groups
+
+
+def command_metrics(args):
+    runs = [args.runs.resolve() / label for label in args.label]
+    for run in runs:
+        quality.require((run / 'summary.json').is_file(), f'No run at {run}')
+    # Compare only (cell, function) pairs that have text in every run so totals stay comparable.
+    common = None
+    for run in runs:
+        summary = json.loads((run / 'summary.json').read_text())
+        pairs = {(cell_id, name) for cell_id, cell in summary['cells'].items()
+                 for name, row in cell['functions'].items() if row['status'] in TEXT_STATUSES}
+        common = pairs if common is None else common & pairs
+    results = {label: run_metrics(run, common) for label, run in zip(args.label, runs)}
+    groups = sorted({group for result in results.values() for group in result}, key=lambda g: (g != 'all', g))
+    if args.json:
+        print(json.dumps({label: {group: dict(counts) for group, counts in result.items()}
+                          for label, result in results.items()}, indent=2, sort_keys=True))
+        return 0
+    for group in groups:
+        print(f'## {group}\n')
+        print('| metric | ' + ' | '.join(args.label) + ' |')
+        print('|---|' + '---:|' * len(args.label))
+        for metric in METRICS:
+            print(f'| {metric} | ' + ' | '.join(str(results[label][group][metric]) for label in args.label) + ' |')
+        print()
     return 0
 
 
@@ -470,8 +535,13 @@ def main():
     aggregate.add_argument('--mapping', type=Path, required=True, help='Sealed directory holding mapping.json (the moved private/)')
     aggregate.add_argument('--review', type=Path, action='append', required=True)
     aggregate.add_argument('--output', type=Path, help='Default: <packets parent>/aggregate-<packets name>')
+    metrics = commands.add_parser('metrics', help='Static text counts (gotos, entry_sp, casts, helpers, temporaries) per run')
+    metrics.add_argument('--label', action='append', required=True, help='Run label (repeat to compare runs side by side)')
+    metrics.add_argument('--runs', type=Path, default=DEFAULT_RUNS)
+    metrics.add_argument('--json', action='store_true')
     args = parser.parse_args()
-    return {'ghidra': command_ghidra, 'run': command_run, 'packets': command_packets, 'aggregate': command_aggregate}[args.command](args)
+    return {'ghidra': command_ghidra, 'run': command_run, 'packets': command_packets, 'aggregate': command_aggregate,
+            'metrics': command_metrics}[args.command](args)
 
 
 if __name__ == '__main__':

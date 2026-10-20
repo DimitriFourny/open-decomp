@@ -646,9 +646,13 @@ mv .local/quality-dev/review-r8/private .local/quality-dev/sealed-review-r8 && c
 # 4. After the reviewers write submissions (schema in review-r8/instructions.md):
 python3 scripts/bench/quality-dev-loop.py aggregate --packets .local/quality-dev/review-r8 \
   --mapping .local/quality-dev/sealed-review-r8 --review submissions/review-A.json [--review submissions/review-B.json]
+# Cheap per-change check, no reviewers: static text counts side by side (only pairs with text in every run)
+python3 scripts/bench/quality-dev-loop.py metrics --label base --label r9 [--json]
 ```
 
 `run` writes `.local/quality-dev/runs/<label>/<cell>/<function>.c` and `summary.json` (status `complete`/`partial`/`failed`, exit code, seconds, failure diagnostics); each cell uses one throwaway cache under `/tmp`, deleted afterwards. `packets` reuses the frozen six-dimension 0–4 rubric and instruction wording, writes `case-NNN/{X.c,Y.c,question.json}` with a seeded random X/Y assignment, and keeps the mapping in `private/` for sealing; add `--require-label OTHER` to restrict a round to pairs that also have text in an earlier run. `aggregate` decodes preferences and dimension means per tool, function, O0/O2, target and symbol state into `aggregate.json` and `aggregate.md`.
+
+`metrics` counts defect classes from the readability roadmap in each run's texts: `goto`, labels, `entry_sp` frame references, open `...` arities, casts to scalar/pointer types, helper preamble lines (`#define`/`static inline`), helper calls (`__od_*`, `bv_*`, `insert_bits`), `type_N` names and local declarations, plus lines and bytes/4 as an estimated token count, grouped by all/O0/O2/target. The counts are regex-based and only show whether a change moved a defect class; they are not a readability verdict.
 
 ## Source view round 8 (2026-10-19, commits `50c361b`, `41b9dee`)
 
