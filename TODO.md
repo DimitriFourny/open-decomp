@@ -67,7 +67,8 @@ Guessing may be used only behind an explicit option (`inference: "proven" | "lik
 ## Measurement
 
 - Development: `scripts/bench/quality-dev-loop.py` (not held out) after each item.
-- The second held-out suite is no longer fully blind (`h2_level` was read during triage). Build a new sealed third set before the first R-item lands, following the sealing rule in docs/PERFORMANCE.md, and keep it unread until a measurement round.
+- [x] The second held-out suite is no longer fully blind (`h2_level` was read during triage). Build a new sealed third set before the first R-item lands, following the sealing rule in docs/PERFORMANCE.md, and keep it unread until a measurement round.
+  - Done: `scripts/bench/quality-heldout3*.py` and `quality-heldout3-selection.json`, pins and procedure in the "Third held-out suite (sealed)" section of docs/PERFORMANCE.md. The source and models exist only under `.local/quality-heldout3/source/` (back them up; the suite cannot be rebuilt if they are lost). Not measured: no decompiler has run on the inputs.
 - Gate for the roadmap: on the sealed set, blind preference is at least even with Ghidra and the executable-correctness subset does not regress. Report counterexamples and losses next to wins.
 - LLM task benchmark (`scripts/bench/llm-tasks/`): track tokens per correct answer against Ghidra and the wrong-answer rate, in both inference modes.
 

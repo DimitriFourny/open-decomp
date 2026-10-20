@@ -1,11 +1,12 @@
 """Run a frozen-suite script unchanged except for explicit, counted text substitutions.
 
 The frozen evaluator/packet/angr scripts hardcode the frozen selection, oracle and
-cell counts and must not be edited (pinned hashes). The second-suite wrappers load
-the frozen file's text, apply the substitutions listed in each wrapper, fail loudly
-if any substitution does not apply exactly the stated number of times, and execute
-the result. Later fixes to the frozen scripts therefore flow into this suite, and
-any change that breaks a substitution is detected instead of silently ignored.
+cell counts and must not be edited (pinned hashes). The sealed-suite wrappers
+(`quality-heldout2-*.py`, `quality-heldout3-*.py`) load the frozen file's text, apply
+the substitutions listed in each wrapper, fail loudly if any substitution does not
+apply exactly the stated number of times, and execute the result. Later fixes to the
+frozen scripts therefore flow into these suites, and any change that breaks a
+substitution is detected instead of silently ignored.
 """
 import json
 from pathlib import Path
@@ -15,12 +16,11 @@ sys.dont_write_bytecode = True
 import quality
 
 HERE = Path(__file__).resolve().parent
-SELECTION = HERE / 'quality-heldout2-selection.json'
 
 
-def contracts():
-    """Evaluator CONTRACTS (return type, positional source parameter types) from the selection."""
-    selected = json.loads(SELECTION.read_text())['selected_functions']
+def contracts(suite):
+    """Evaluator CONTRACTS (return type, positional source parameter types) from `quality-<suite>-selection.json`."""
+    selected = json.loads((HERE / f'quality-{suite}-selection.json').read_text())['selected_functions']
     return {item['name']: (item['signature']['return'], list(item['signature']['params'])) for item in selected}
 
 
@@ -34,6 +34,6 @@ def load(frozen, wrapper, replacements):
         found = text.count(old)
         quality.require(found == count, f'{frozen}: expected {count} occurrence(s) of {old!r}, found {found}; frozen script changed')
         text = text.replace(old, new)
-    namespace = {'__name__': 'quality_heldout2_wrapped', '__file__': str(Path(wrapper).resolve())}
+    namespace = {'__name__': 'quality_heldout_wrapped', '__file__': str(Path(wrapper).resolve())}
     exec(compile(text, str(HERE / frozen), 'exec'), namespace)
     return namespace
