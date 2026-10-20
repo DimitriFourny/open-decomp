@@ -171,11 +171,19 @@ export function projectSourceTypes(
       expression.kind === 'concat' ||
       (expression.kind === 'extract' && expression.offset === 0) ||
       (expression.kind === 'cast' && (expression.op === 'bitcast' || expression.op === 'truncate'));
-    const subjects = transport
-      ? [value.id, ...(source.value_origins?.get(value.id) ?? [])]
-      : [value.id];
+    const own = transport ? [value.id, ...(source.value_origins?.get(value.id) ?? [])] : [value.id];
+    // A forwarded reload of exactly this value holds the same bits: what a call
+    // declares about the reload (a library `const char *`) types the value. The
+    // reload's own analysis guesses (an indirect call target) stay its own.
+    const reloads = own.flatMap((id) => source.forwarded_reloads?.get(id) ?? []);
+    const subjects = [...own, ...reloads];
     if (subjects.some((id) => direct.has(id))) continue;
-    let candidates = subjects.flatMap((id) => associations.get(id) ?? []);
+    let candidates = [
+      ...own.flatMap((id) => associations.get(id) ?? []),
+      ...reloads.flatMap((id) =>
+        (associations.get(id) ?? []).filter((item) => item.source !== 'analysis'),
+      ),
+    ];
     // A layout conflict leaves only the evidence that the value is an address.
     if (subjects.some((id) => conflicts.has(id)))
       candidates = candidates.filter((item) => addressEvidence(item));

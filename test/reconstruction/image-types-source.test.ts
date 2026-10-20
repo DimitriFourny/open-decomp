@@ -122,6 +122,21 @@ test(
     assert.match(pair, /pair_sum_alloc_0x18\* \w+;/, pair);
     assert.doesNotMatch(pair, /\(uintptr_t\)/, pair);
 
+    // A formal passed to strlen/strncmp is spelled as the library declares it,
+    // with no conversion at the calls; the first formal reaches strrchr only
+    // through file_name (forwarded unchanged), which makes it a char pointer.
+    const check = (await decompile('check_alias')).text;
+    assert.match(check, /^uint32_t check_alias\(int8_t\* \w+, const char\* (\w+)\)/m, check);
+    assert.doesNotMatch(check, /\(const char\*\)\w/, check);
+    assert.match((await decompile('file_name')).text, /^\S+ file_name\(const char\* \w+\)/m);
+    assert.match(
+      (await decompile('check_alias', 'python-like')).text,
+      /^def check_alias\(\w+: pointer\[int8_t\], \w+: pointer\[char\]\)/m,
+    );
+    // Forwarded to labs(long): an integer declaration proves no pointer.
+    const drive = (await decompile('absolute_drive')).text;
+    assert.match(drive, /^uint64_t absolute_drive\(uint64_t \w+\)/m, drive);
+
     // views_wide reads 64 bits at +0, views_high 32 bits at +4: one object,
     // but incompatible overlapping views never share a name or a layout.
     const high = (await decompile('views_high')).text;
@@ -209,5 +224,49 @@ test(
       assert.equal(result.join(' '), expected, emission.text);
       assert.deepEqual(unlocked, [nodes[0]]);
     }
+  },
+);
+
+test(
+  'O0 argument spills reloaded for a library call carry the declared pointer type to the formal',
+  { skip: nativeOracleSkip(), timeout: 120000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'open-decomp-image-types-o0-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const binary = join(root, 'image-types-o0');
+    const compiled = spawnSync(
+      '/usr/bin/clang',
+      [
+        '-target',
+        'arm64-apple-macos13.0',
+        '-O0',
+        '-fno-builtin',
+        resolve('test/reconstruction/image-types-source.c'),
+        '-o',
+        binary,
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(compiled.status, 0, compiled.stderr);
+    const p = await project(t, new Uint8Array(await readFile(binary)));
+    const decompile = async (name: string, emitter: 'c-like' | 'python-like' = 'c-like') => {
+      const fn = p.functions.find((candidate) => candidate.original_name === `_${name}`);
+      assert.ok(fn, name);
+      const response = await p.decompile(fn.id, { options: { emitter } });
+      assert.ok('data' in response.result);
+      return (p.payload(response.result).result.data.emission as WireEmission).text;
+    };
+    // `str x1, [sp, #0x18]; ldr x0, [sp, #0x18]; bl _strlen`: the forwarded
+    // reload is the formal, so the formal takes strlen's declared type.
+    const check = await decompile('check_alias');
+    assert.match(check, /^uint32_t check_alias\(\w+ \w+, const char\* (\w+)\)/m, check);
+    assert.doesNotMatch(check, /strlen\(\(const char\*\)/, check);
+    assert.match(await decompile('file_name'), /^\S+ file_name\(const char\* \w+\)/m);
+    assert.match(
+      await decompile('file_name', 'python-like'),
+      /^def file_name\(\w+: pointer\[char\]\)/m,
+    );
+    // A spilled formal reloaded for labs(long) stays an integer.
+    assert.match(await decompile('absolute'), /^int64_t absolute\(int64_t \w+\)/m);
   },
 );

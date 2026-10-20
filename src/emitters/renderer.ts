@@ -5957,6 +5957,9 @@ export class Renderer {
       load: (id) => this.typedLoadFact(id),
       literal: (value) => this.sourceLiteral(value, true) !== undefined,
       result,
+      respell_formal: (id) =>
+        !source.formal_types?.has(id) &&
+        (this.sourceValueTypes.get(id) ?? source.value_types?.get(id)?.type_id) !== undefined,
       variable: (value) =>
         value.type.kind === 'integer' &&
         value.type.bits === bits &&

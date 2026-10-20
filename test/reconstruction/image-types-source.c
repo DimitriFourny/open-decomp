@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 /* One context object reaches two callees through the same pointer flow. */
 struct context { uint32_t flags, pad; uint64_t total; uint32_t count; };
 __attribute__((noinline)) void context_set(struct context *p, uint32_t flags) { p->flags = flags; }
@@ -54,6 +55,19 @@ __attribute__((noinline)) double sample_scale(struct sample *p) { return p->numb
 __attribute__((noinline)) double sample_drive(struct sample *p) {
   return (double)sample_bits(p) + sample_scale(p);
 }
+/* Library prototypes type formals: used directly (strlen), forwarded unchanged
+ * (strrchr through file_name), or forwarded to an integer parameter (labs). */
+__attribute__((noinline)) const char *file_name(const char *path) {
+  const char *s = strrchr(path, '/');
+  return s ? s + 1 : path;
+}
+__attribute__((noinline)) int check_alias(const char *name, const char *alias) {
+  size_t alias_len = strlen(alias);
+  name = file_name(name);
+  return strncmp(name, alias, alias_len) == 0 && (name[alias_len] == 0 || name[alias_len] == '.');
+}
+__attribute__((noinline)) long absolute(long v) { return labs(v); }
+__attribute__((noinline)) long absolute_drive(long h) { return absolute(h) + 1; }
 volatile uint64_t image_types_sink;
 int main(void) {
   struct context context = {0, 0, 40, 2};

@@ -19,6 +19,7 @@ import {
   type Value,
 } from '../../ir/index.js';
 import { AnalysisBudget } from '../../analysis/ssa/budget.js';
+import { typeKey } from '../../analysis/types/layout.js';
 import {
   createAffineResolver,
   memoryAddressSources,
@@ -344,6 +345,33 @@ export function functionTypeObjects(
       if (value) anchor(value, { kind: 'return', function_id: fn.id }, true);
     }
   }
+  // A value passed unchanged where an established declaration (library or debug
+  // prototype, assertion) expects a pointer: the object it anchors is an address
+  // of that declared type. Integer declarations prove nothing.
+  const declaredTypes = new Map<string, RecoveredType>();
+  for (const record of types.types) {
+    budget.charge();
+    if (record.source !== 'analysis') declaredTypes.set(record.id, record.definition);
+  }
+  const declared = new Map<string, Set<string>>();
+  for (const association of types.associations) {
+    budget.charge();
+    if (
+      association.source === 'analysis' ||
+      (association.status !== 'established' && association.status !== 'asserted') ||
+      association.width_bits !== 64 ||
+      association.value_offset_bits !== 0 ||
+      association.machine_offset_bits !== 0 ||
+      declaredTypes.get(association.type_id)?.kind !== 'pointer' ||
+      stack?.values.get(association.subject_id)?.value.kind === 'stack'
+    )
+      continue;
+    const address = affine({ id: association.subject_id, type: { kind: 'integer', bits: 64 } });
+    if (address.offset !== 0n || address.stride !== null) continue;
+    const key = objectKey(address.base, 0n);
+    if (!objects.has(key)) continue;
+    (declared.get(key) ?? declared.set(key, new Set()).get(key)!).add(association.type_id);
+  }
   const list: ImageTypeObject[] = [];
   for (const [key, object] of objects) {
     budget.charge();
@@ -356,6 +384,7 @@ export function functionTypeObjects(
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([, item]) => item),
       pointees: object.pointees,
+      ...(declared.has(key) ? { declared: [...declared.get(key)!].sort() } : {}),
     });
   }
   return list.sort((a, b) => a.key.localeCompare(b.key));
@@ -808,12 +837,29 @@ export function applyImageTypes(
     types.shapes.flatMap((shape) => (shape.base.kind === 'value' ? [shape.base.value_id] : [])),
   );
   const prefix = `${input.ir.id}|`;
+  // A class without observed members but passed where declarations expect one
+  // pointer type (a parameter forwarded unchanged to `strrchr`) is that type.
+  const declaredType = (item: ImageTypeClass | undefined): string | undefined => {
+    if (!item || item.fields.length || !item.declared.length) return undefined;
+    const keys = new Set(
+      item.declared.map((id) => {
+        const definition = byId.get(id)?.definition;
+        return definition?.kind === 'pointer' ? typeKey(definition) : '';
+      }),
+    );
+    return keys.size === 1 && !keys.has('') ? item.declared[0] : undefined;
+  };
   const flows: { value_id: string; class_id: string }[] = [];
   for (const [key, class_id] of solution.class_of) {
     context.checkpoint(1);
     if (!key.startsWith(prefix) || !key.endsWith('|0')) continue;
     const value_id = key.slice(prefix.length, -2);
-    if (value_id === 'stack' || shapeBases.has(value_id) || !classes.get(class_id)?.fields.length)
+    const item = classes.get(class_id);
+    if (
+      value_id === 'stack' ||
+      shapeBases.has(value_id) ||
+      (!item?.fields.length && declaredType(item) === undefined)
+    )
       continue;
     flows.push({ value_id, class_id });
   }
@@ -853,7 +899,9 @@ export function applyImageTypes(
       associations.push({
         id: entityIdentity(slice, 'image-type-association', [input.ir.id, value_id, class_id]),
         subject_id: value_id,
-        type_id: generated({ kind: 'pointer', bits: 64, to: typeOf(class_id) }, proofIds),
+        type_id:
+          declaredType(item) ??
+          generated({ kind: 'pointer', bits: 64, to: typeOf(class_id) }, proofIds),
         source: 'analysis',
         status: 'candidate',
         evidence_ids: proofIds,
