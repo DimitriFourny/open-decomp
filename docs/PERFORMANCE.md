@@ -692,7 +692,7 @@ Category-level reasons in the second-suite reviews were:
 
 ## Readability roadmap round (2026-10-20, dev loop, not held out)
 
-Scope: TODO.md items R1–R5 (per-slot stack promotion, region-collapse structuring, expression rule pool, pointer and type inference, opt-in `likely` inference). **Everything below is development-set evidence.** The 24-cell matrix and the structure sample were inspected while tuning, no reviewer preference or Ghidra/angr comparison was collected this round, and the sealed third suite (see "Third held-out suite (sealed)") has not been measured: no decompiler has run on its inputs. The static counts are regex-based (see "Development comparison loop") and show whether a defect class moved, not whether text became more readable. The LLM task benchmark was not re-run for this round.
+Scope: TODO.md items R1–R5 (per-slot stack promotion, region-collapse structuring, expression rule pool, pointer and type inference, opt-in `likely` inference). **Everything below is development-set evidence.** The 24-cell matrix and the structure sample were inspected while tuning, no reviewer preference or Ghidra/angr comparison was collected this round, and the sealed third suite (see "Third held-out suite (sealed)") had not been measured when this round was written (it was measured afterwards: "Third held-out suite: round 1"). The static counts are regex-based (see "Development comparison loop") and show whether a defect class moved, not whether text became more readable. The LLM task benchmark was not re-run for this round (see round 1 of the third suite).
 
 Builds: `base-de95fa4` (main before the round) and `int-112527d` (integrate, equal to main: R1–R5 rounds, including the R2 forward-label round, `structure/6`). Both are `quality-dev-loop.py run` outputs in default `proven` mode, C source view, default budget, 288 (cell, function) pairs. Table: `python3 scripts/bench/quality-dev-loop.py metrics --label base-de95fa4 --label int-112527d` (only pairs with text in both).
 
@@ -865,7 +865,123 @@ The toolchain pins are those of the second suite (Apple clang 21.0.0 `/usr/bin/c
 
 **Measurement procedure.** Same as the second suite with `heldout3` in place of `heldout2` in every script name, `.local/quality-heldout3/inputs` as `IN` and a new round root (`R=.local/quality-rounds/heldout3-<date>`). The oracle step must report `cases_sha256` `1729011868fda274284c4e22c5778130cf6e16486351e6771caf5430add2ec0d` and 510/510 on all five runs; a complete recording has 48 OD/Ghidra tool cells and 192 matched function pairs, and angr 24 cells and 192 pairs. The wrappers load the second suite's scripts through `quality_heldout_wrap.py` with counted substitutions and fail loudly if a substitution no longer applies; `quality-heldout-instructions.py` and `quality-heldout-review-results.py` are used as is. Rebuild the inputs only from the pinned source: `python3 scripts/bench/quality-heldout3.py build --output <new dir>` prints `aggregate_image_sha256` and fails unless it equals the value above. Expected limitation: a tool that emits the handler-table callback parameter with a type the exact-output compile cannot accept is reported `unverified`, not passing.
 
-Results from this suite stay separate from earlier rounds and are reported with the same availability, exact-executable-subset and blind-readability lanes. Do not tune any pass against the outputs, the questions or the source. After a measurement round the suite has been seen: record who saw what, and treat the next round as a new suite.
+Results from this suite stay separate from earlier rounds and are reported with the same availability, exact-executable-subset and blind-readability lanes. Do not tune any pass against the outputs, the questions or the source. After a measurement round the suite has been seen: record who saw what, and treat the next round as a new suite. Measured once, 2026-10-20 (next section); the suite is now seen.
+
+## Third held-out suite: round 1 (2026-10-20)
+
+First and only measurement of the sealed third suite, `proven` inference (default), C source view, default budget. Build: `dist/` of `dda46a2` (main after the R1–R5 roadmap round); commit `3ba2255` followed it and changed only `scripts/bench/quality-matrix.py`. Round root `.local/quality-rounds/heldout3-2026-10-20/` (gold, `heldout3` = Open Decomp + Ghidra recording, `angr`, `correctness`, `review*`, `submissions*`, `readability*`, `records/` with commands and logs). Tooling: Ghidra 12.1.4, bridge `xjoker/ghidra-mcp` `73ea1c8e…` re-provisioned at `$HOME/open-decomp-bridge/ghidra-mcp` (`uv sync --locked --python 3.13`, clean tracked tree), Homebrew OpenJDK 27, angr venv `.local/angr-venv`. The oracle step reproduced `cases_sha256` `1729011868fda274284c4e22c5778130cf6e16486351e6771caf5430add2ec0d` and 510/510 on all five runs.
+
+**Harness fix (`3ba2255`).** The first Open Decomp recording classified all 192 cells `tool_error`: MCP `function_decompile` is text-first (no `structuredContent`) and the recorder reads the full envelope. `quality-matrix.py` now passes `detail:"full"`; on three dev-matrix functions the full envelope's emission text is the exact tail of the text-first response. The failed recording is kept as `discarded-run1-od-tool_error` and is not used. No product change.
+
+**Availability (192 function cells per tool).**
+
+| Tool        | Text returned | Not delivered                                                                                                      |
+| ----------- | ------------: | ------------------------------------------------------------------------------------------------------------------ |
+| Open Decomp |           126 | 64 `function_not_discovered` (every stripped PE and ELF cell), 2 `tool_error` (see open defects)                    |
+| Ghidra      |           113 | 79 `tool_error`: all 64 PE cells and 15 ELF cells ("address not contained in function"; same pattern as round 8)   |
+| angr        |           192 | 0                                                                                                                  |
+
+Open Decomp states on the 126 texts: 52 complete, 74 partial. Reviewable pairs (both sides have text): 94 for Open Decomp vs Ghidra, 126 for Open Decomp vs angr. The other pairs are unscored.
+
+**Exact-executable subset** (finite vectors, 510 per function, compiled from the exact emitted C; no analyzed binary executed; `correctness/correctness.json`):
+
+| Tool        | Cells passing all vectors | Counterexample | Unverified |
+| ----------- | ------------------------: | -------------: | ---------: |
+| Open Decomp |                        54 |              4 |        134 |
+| Ghidra      |                        44 |              0 |        148 |
+| angr        |                        46 |             12 |        134 |
+
+Open Decomp passes by function: `h3_walk` 16, `h3_pack` 12, `h3_pairsum` 12, `h3_clock` 8, `h3_unescape` 6, `h3_dispatch`, `h3_label` and `h3_rescale` 0. Ghidra: `h3_pairsum` 14, `h3_pack` 14, `h3_unescape` 8, `h3_clock` 4, `h3_label` 4, others 0. angr: `h3_walk` 24, `h3_pairsum` 12, `h3_clock` 6, `h3_unescape` 4. Unverified reasons, Open Decomp: no emitted text 66, recovered interface with a different input count than the source (5 vs 4: 42, 5 vs 6: 4, 4 vs 3: 4, 6 vs 5: 2), exact C outside the executable subset 12, machine-entry state input 4. Ghidra: no text 79, outside the subset 69. angr: outside the subset 70, plain-`long` data model on PE 48, unsupported pointer-to-pointer parameter declarations (at least 10 cells). The four-cell comparison is not a ranking: a pass count depends on how many cells compile at all.
+
+**Open defects found (not fixed in this round, the suite is not tuned against):**
+
+- **`h3_clock`, Mach-O arm64 `-O2`:** Open Decomp's emitted C is wrong: 4 of 64 vectors pass in each of the four cells (Apple clang 21 and LLVM clang 23, symbol-bearing and stripped). angr is also wrong on `h3_clock` in 8 cells (0/64 at `-O0`, 10/64 at `-O2`) and on `h3_pack` in 4 Mach-O `-O2` cells (54/57). Ghidra has no counterexample.
+- **`h3_unescape`, Mach-O arm64 LLVM clang 23 `-O2`** (symbol-bearing and stripped): `function_decompile` fails with `invalid_input: "A duplicated transfer has inconsistent rendered actions"` (a reconstruction invariant rejection; no text). The same function decompiles in the Apple clang 21 cells.
+- **Interface mismatches:** 52 Open Decomp cells are unverified because the number of recovered inputs differs from the source's positional signature (not a type judgement; an extra input or a missing one both count).
+- **No recovered algorithm in some cells:** reviewers in both sets noted `h3_pack` at ELF `-O2` where the text is mostly `unknown_value`/`unknown_exit` markers and only a zero check can be explained.
+
+**Blind readability (LLM reviewers, not a human study).** Both reviewers were Claude Haiku, fresh agents chunked 16 cases per agent, the same instructions per reviewer id (A and B), reading only `review/reviewer` or `review-angr/reviewer` (no tool names; X/Y assignment varies). Reviewer instructions: `.local/quality-rounds/heldout3-2026-10-20/review-instructions{,-angr}/reviewer-instructions.md`. The aggregator validated all submissions (94 and 126 cases each, ids matching). Counts below are reviewer ratings (two per pair).
+
+| Pair set (reviewed pairs)         | Overall preference (2 ratings per pair)       | Reviewer split | Per reviewer (A / B)                                |
+| --------------------------------- | --------------------------------------------- | -------------- | --------------------------------------------------- |
+| Open Decomp vs Ghidra (94 of 192) | OD 108, Ghidra 78, tie 2                      | 11 of 94 pairs | A: OD 57, Ghidra 36, tie 1; B: OD 51, Ghidra 42, tie 1 |
+| Open Decomp vs angr (126 of 192)  | OD 135, angr 111, tie 6                       | 11 of 126 pairs | A: OD 68, angr 57, tie 1; B: OD 67, angr 54, tie 5 |
+
+Round 8, second suite, for comparison (different functions and reviewers, so a trend and not a delta): OD 44 / Ghidra 138 / tie 10 and OD 84 / angr 153 / tie 13 / neither 6.
+
+Dimension means (0–4, higher is more readable; round 8 second suite in brackets):
+
+| Dimension                         | OD vs Ghidra: OD | Ghidra | OD vs angr: OD | angr |
+| --------------------------------- | ---------------: | -----: | -------------: | ---: |
+| algorithm comprehension           |      2.49 [2.81] |   2.64 |           2.66 | 2.59 |
+| control flow                      |      2.90 [2.75] |   3.10 |           2.94 | 2.87 |
+| irrelevant machine-state clutter  |      2.16 [1.95] |   2.26 |           2.17 | 2.13 |
+| style                             |      2.18 [2.01] |   1.99 |           2.25 | 2.24 |
+| types and interfaces              |      2.28 [2.30] |   1.89 |           2.22 | 2.20 |
+| unresolved semantics              |      2.20 [3.04] |   2.19 |           2.32 | 2.06 |
+
+Open Decomp is ahead of Ghidra on style and types/interfaces and behind on algorithm comprehension, control flow and clutter (means differ by 0.1–0.2 on three of six, so those are small). Its unresolved-semantics mean fell from 3.04 on the second suite to 2.20 (Ghidra: 3.36 there, 2.19 here); this set was not matched to that one.
+
+Where Open Decomp wins and loses (reviewer ratings, OD vs Ghidra / OD vs angr):
+
+| Slice                      | OD vs Ghidra (OD / Ghidra / tie)                               | OD vs angr (OD / angr / tie)                                                                    |
+| -------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `h3_pairsum`               | 24 / 0 / 0                                                     | 25 / 7 / 0                                                                                      |
+| `h3_walk`                  | 24 / 0 / 0                                                     | 20 / 8 / 4                                                                                      |
+| `h3_clock`                 | 23 / 0 / 1                                                     | 18 / 14 / 0                                                                                     |
+| `h3_unescape`              | 15 / 5 / 0                                                     | 24 / 2 / 2                                                                                      |
+| `h3_pack`                  | 10 / 14 / 0                                                    | 8 / 24 / 0                                                                                      |
+| `h3_dispatch`              | 8 / 16 / 0                                                     | 15 / 17 / 0                                                                                     |
+| `h3_label`                 | 3 / 20 / 1                                                     | 16 / 16 / 0                                                                                     |
+| `h3_rescale`               | 1 / 23 / 0                                                     | 9 / 23 / 0                                                                                      |
+| Mach-O `-O2`               | 43 / 17 / 0                                                    | 56 / 3 / 1                                                                                      |
+| Mach-O `-O0`               | 30 / 34 / 0                                                    | 29 / 34 / 1                                                                                     |
+| ELF (`-O0` / `-O2`)        | 19 / 13 / 0 and 16 / 14 / 2                                    | 8 / 22 / 2 and 23 / 9 / 0                                                                       |
+| PE (`-O0` / `-O2`)         | no pairs (Ghidra has no PE text)                               | 2 / 28 / 2 and 17 / 15 / 0                                                                      |
+| symbol-bearing / stripped  | 70 / 54 / 2 and 38 / 24 / 0                                    | 90 / 95 / 5 and 45 / 16 / 1                                                                     |
+
+The losses are concentrated in three kinds of function and in `-O0`. Recurring reviewer reasons for preferring the other tool:
+
+- `entry_sp` stack-slot reads and offsets as variables (`h3_label`, `h3_dispatch`, `h3_rescale`);
+- a 128-bit macro helper header and sign-extension masks around a 64-bit rescale (`h3_rescale`);
+- a variadic cast on an indirect handler call and an undeclared inferred helper prototype (`h3_dispatch`, `h3_rescale`);
+- a `do { … break; } while (0)` construct standing in for `continue` and a mask routed through a stack buffer (`h3_pack` at `-O0`);
+- unknown-value/unknown-exit markers instead of a computation (`h3_pack` ELF/PE `-O2`);
+- `valueN` temporaries.
+
+Reasons reviewers gave for preferring Open Decomp: explicit byte offsets on a record pointer where the other tool steps an `int*` (`h3_walk`, `h3_pack`), named locals and return codes with fewer gotos and no goto web (`h3_unescape`, `h3_label`), typed table/byte parameters with the same control flow (`h3_dispatch`), scalar expressions where the other tool uses vector views and helper calls (`h3_clock` at `-O0`), and named typed temporaries instead of signed-modulo constants.
+
+**Blinding is weak.** Reviewers flagged possible style unblinding in 188 of 188 (Ghidra set) and 247 of 252 (angr set) ratings; the engines' output styles are recognisable (`entry_sp` slots, `FUN_`/`param_` names, macro helpers). Preferences may partly reflect style bias. Both reviewers share a model lineage, so their agreement is weaker evidence than two different reviewers; reviewer confidence averaged 0.66 (Ghidra set) and 0.69 (angr set). Cells share one source function, so 94/126 pairs are not independent programs. Missing pairs (98 and 66) get no score, so a tool that decompiles less is not penalised by the readability lane.
+
+**LLM task benchmark (`scripts/bench/llm-tasks/`, 42 questions, configs `mcp-default` and `export-file`, answerers Claude Haiku agents, 14 questions per agent, single run per set).** Packets `.local/llm-tasks/r20-{proven,likely}` built from checkout `3ba2255` (dist of `dda46a2`) with the binaries copied to `.local/llm-tasks/inputs/` (the MCP root check rejects the Homebrew symlink path); `likely` packets were built through a throwaway `HOME` whose `settings.json` sets `decompile.inference` to `likely`. Answers `.local/llm-tasks/answers-{proven,likely}`, scores `<packets>/score/score.{json,md}`. Only the `likely` packets contain `likely_arity(`/`likely_type(` markers (3 of 42 files per config; none in `proven`). Previous run (2026-10-19, `c8dceed`) in the same table:
+
+| Run and config                      | Correct / unknown / wrong | Material tokens | Tokens / correct |
+| ----------------------------------- | ------------------------: | --------------: | ---------------: |
+| run 2 `mcp-default` (`c8dceed`)     |                41 / 0 / 1 |          ~103.9k |            2,534 |
+| run 2 `export-file`                 |                42 / 0 / 0 |          ~104.9k |            2,497 |
+| round 1 `proven` `mcp-default`      |                39 / 3 / 0 |          57,628 |            1,478 |
+| round 1 `proven` `export-file`      |                41 / 1 / 0 |         100,909 |            2,461 |
+| round 1 `likely` `mcp-default`      |                39 / 3 / 0 |          57,711 |            1,480 |
+| round 1 `likely` `export-file`      |                40 / 1 / 1 |         100,989 |            2,525 |
+
+On Ghidra's 16 questions (its archived output, 2,518 tokens, 13 correct, 194 tokens/correct; the 2,518 reproduces from the archived files):
+
+| Config (round 1)               | Correct | Material tokens | Tokens / correct | Round 2 (previous run) |
+| ------------------------------ | ------: | --------------: | ---------------: | ---------------------: |
+| `mcp-default`, `proven`        |   16/16 |           6,895 |              431 |        16, 6,983, 436  |
+| `export-file`, `proven`        |   16/16 |           7,323 |              458 |        16, 7,407, 463  |
+| `mcp-default`, `likely`        |   16/16 |           6,931 |              433 |                      — |
+| `export-file`, `likely`        |   16/16 |           7,359 |              460 |                      — |
+| Ghidra (archived)              |   13/16 |           2,518 |              194 |        13, 2,518, 194  |
+
+Ghidra is still about 2.2× cheaper per correct answer on its 16 questions; Open Decomp answers all 16.
+
+What the totals hide. The all-question token totals dropped by about 45% for `mcp-default`, but not for the reason the table suggests: brotli `main` now fails in the current build with `resource_limit: Operation work limit exceeded` (consumed 10,000,001 of 10,000,000 work). The `mcp-default` packet for the three `bro-main-*` questions is the 234-byte failure envelope (previously a 66 KB partial output), so all three are `unknown` (not wrong); `export-file` delivers the function's disassembly (51 KB) and answers two of the three from it (`bro-main-quality` unknown). The previous run answered `bro-main-lgwin` wrongly in `mcp-default` from the 62 KB body. So per-correct tokens improved because a large function stopped decompiling, not because the others shrank: on the 16 Ghidra questions the totals changed by about 1% (6,983 → 6,895 and 7,407 → 7,323). This is an open defect: brotli `main` (inlined option parser) is now `failed` at the default work budget.
+
+`likely` mode did not help: `mcp-default` is identical (39/3/0, 1,480 vs 1,478 tokens/correct), and `export-file` lost one answer and gained one confident wrong answer, `bro-filesize-failure` (`0xffffffffffffffff` where the gold is `-1`; the scorer compares the number, the value is the same 64-bit pattern, but it is scored wrong): 40/1/1, 2,525 vs 2,461 tokens/correct. Single runs with Haiku answerers; one-question differences are within noise. The held-out readability round ran in `proven` mode only, so no held-out readability evidence exists for `likely`.
+
+**Who saw what (the suite is now seen; the next measurement needs a new suite).** Development workers did not read it before this round. In this round: the measurement agent (`Heldout3Round`) ran the oracle and all tools, read the correctness records and per-function pass counts, the blind reviewers' rationales and aggregated results, and the reviewer packets' structure; it did not read the private C source or models. The coordinator (`Main`) saw the aggregated results. Reviewers (Haiku, per-reviewer-id chunks) saw only the reviewer packet trees (X/Y decompiler text, question, rubric) and no source, gold or mapping. The private mappings were sealed under `sealed/` until both submissions existed, then restored for aggregation. The decompiler output texts for all 24 cells are now in `.local/quality-rounds/heldout3-2026-10-20/` and have been seen by reviewers; do not use this suite for tuning, and do not paste its source, vectors or output into tracked files.
+
 
 ## Per-function latency and cross-request callee reuse (2026-10-19)
 
@@ -885,7 +1001,7 @@ Changes (none alters output): readset replay skips reads the collector already h
 
 ## LLM task success per token (`scripts/bench/llm-tasks/`)
 
-The readability review compares how pseudocode looks to a human. The primary consumer is an LLM reversing an application, so this harness measures what that consumer needs: **the fraction of source-derived questions answered correctly from the delivered material, and the tokens that material cost.** Results of two runs are below.
+The readability review compares how pseudocode looks to a human. The primary consumer is an LLM reversing an application, so this harness measures what that consumer needs: **the fraction of source-derived questions answered correctly from the delivered material, and the tokens that material cost.** Results of two runs are below; a third run (2026-10-20, both inference modes) is in "Third held-out suite: round 1".
 
 **Question set (`questions.json`, frozen 2026-10-19 before any decompiler output was built).** 42 questions: 26 over SQLite 3.54.0 (`sqlite3-arm64`, the binary the archived Ghidra run analysed, SHA-256 `4e01e37e…7e56`; 14 functions, including the 10 Ghidra-archived ones and `btreeLeaveAll`, `sqlite3_result_pointer` (carries the inlined `sqlite3VdbeMemSetPointer`), `renameColumnFunc`, `sqlite3_incomplete`) and 16 over the brotli 1.2.0 CLI (Homebrew, `9a3bf101…23c7`; `ParseInt`, `CheckAlias`, `OpenFiles`, `FileSize`, `WriteOutput`, `NextFile`, `main` with the inlined option parser). Kinds: return value, constant/limit, struct field offset, error message text, file mode/flags, call order, loop bound/stride, branch condition, callee. Each record has the function and address, question text, answer format, gold answer, a machine scoring rule (`numeric`, `exact`, `set` (optionally ordered), `regex`, `rubric` of required facts), and a source span with an anchor line. Gold comes from `sqlite3.c` (SHA-256 `2da161e3…3243`) and `brotli.c` at tag v1.2.0 (`cb6c8ca6…cd0c`), using the build configuration the binary itself embeds (SQLite's compile-option string table: `MAX_VARIABLE_NUMBER=250000`, `THREADSAFE=1`, `ENABLE_API_ARMOR`, …) and struct offsets from `offsetof()` over the verbatim source; every offset/constant was also checked against `llvm-objdump` output. `node --import tsx scripts/bench/llm-tasks/run.ts verify --sources DIR` re-checks every source span and anchor text. Gold never comes from decompiler output. `questions.json` is hashed into each packet manifest and `score` refuses a different file. Limitations: the set is small and was authored by one author; scoring rules are intentionally lenient regexes for short phrases (see the rule definitions); `disclosure` in the file records what the author had seen.
 
