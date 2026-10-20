@@ -3,11 +3,19 @@
  * ground truth from a DWARF dump of a compiler's own output for the analyzed sources, and the
  * scoring of the decompiler's `guess` provenance records against it. No decompiler, no I/O.
  *
- * Dimensions. Only `arity` is scored today because it is the only construct a heuristic guesses.
- * The truth already carries each parameter's kind (`int`/`float`/`pointer`) and width and the
- * result kind, so pointer-ness and result-type heuristics (TODO.md R5, the R4-dependent bullet)
- * add a scorer to `SCORERS` without touching the truth format or the report shape.
+ * Dimensions. `arity`: the printed argument count of a closed call against the declared
+ * parameter count of its target. `parameter_type` / `result_type`: the guessed pointer-ness of
+ * a formal or of the result against the declared kind (pointer vs integer/float). The truth
+ * carries each parameter's kind (`int`/`float`/`pointer`) and width and the result kind. The
+ * population of a type dimension (coverage) is every declared pointer formal or result that
+ * the proven rules do not already print as a pointer.
  */
+
+import {
+  LIKELY_PRECISION_GATE,
+  likelyHeuristicSchema,
+  type LikelyHeuristic,
+} from '../../src/core/inference.js';
 
 export type TypeKind = 'int' | 'float' | 'pointer';
 export interface TypeFact {
@@ -146,13 +154,26 @@ export function parseDwarf(text: string): Truth {
 
 // --------------------------------------------------------------------------------------- scoring
 
-export type Heuristic = 'callee_reads' | 'caller_consensus';
-export const HEURISTICS: readonly Heuristic[] = ['callee_reads', 'caller_consensus'];
+export type Heuristic = LikelyHeuristic;
+export const HEURISTICS: readonly Heuristic[] = likelyHeuristicSchema.options;
+/** What each heuristic guesses; the dimension decides how its guesses are scored. */
+export const HEURISTIC_DIMENSION: Readonly<
+  Record<Heuristic, 'argument_list' | 'parameter_type' | 'result_type'>
+> = {
+  callee_reads: 'argument_list',
+  caller_consensus: 'argument_list',
+  caller_argument_pointer: 'parameter_type',
+  caller_result_pointer: 'result_type',
+  indirect_call_target: 'parameter_type',
+  opaque_word_formal: 'parameter_type',
+  carried_word_formal: 'parameter_type',
+};
 /** Gate of TODO.md R5: a heuristic prints in `likely` mode only at this precision or better. */
-export const PRECISION_GATE = 0.95;
+export const PRECISION_GATE = LIKELY_PRECISION_GATE;
 
-/** One `guess` record joined with its call site. */
-export interface GuessRow {
+/** An `argument_list` `guess` record joined with its call site. */
+export interface ArityGuessRow {
+  readonly subject: 'argument_list';
   readonly caller: string;
   readonly call_id: string;
   readonly target_address: string;
@@ -163,6 +184,20 @@ export interface GuessRow {
   readonly arity: number;
   readonly sites: number | null;
 }
+/** A `parameter_type` / `result_type` `guess` record of the decompiled function `caller`. */
+export interface TypeGuessRow {
+  readonly subject: 'parameter_type' | 'result_type';
+  /** C name of the decompiled function the guess is about. */
+  readonly caller: string;
+  /** Position among the printed formals; null for the result. */
+  readonly ordinal: number | null;
+  /** Printed formals of that function, to tell whether ordinals line up with the source. */
+  readonly printed_params: number;
+  readonly heuristics: readonly Heuristic[];
+  readonly applied: boolean;
+  readonly sites: number | null;
+}
+export type GuessRow = ArityGuessRow | TypeGuessRow;
 /** One call record of a decompiled function (guessed or not). */
 export interface CallRow {
   readonly caller: string;
@@ -172,7 +207,7 @@ export interface CallRow {
   readonly arity_complete: boolean;
 }
 
-export type Outcome = 'correct' | 'over' | 'under' | 'variadic' | 'complex' | 'unscored';
+export type Outcome = 'correct' | 'wrong' | 'over' | 'under' | 'variadic' | 'complex' | 'unscored';
 export interface Verdict {
   readonly outcome: Outcome;
   readonly truth_arity: number | null;
@@ -181,7 +216,7 @@ export interface Verdict {
 /** The arity dimension: a guess is correct when the printed argument count is exactly the
  * declared parameter count of the function the call targets. `over`/`under`: more/fewer
  * arguments than declared. A variadic target has no fixed count, so a closure is wrong. */
-export function scoreArity(row: GuessRow, truth: Truth): Verdict {
+export function scoreArity(row: ArityGuessRow, truth: Truth): Verdict {
   const fact = row.target_name === null ? undefined : truth[row.target_name];
   if (!fact) return { outcome: 'unscored', truth_arity: null };
   if (fact.variadic) return { outcome: 'variadic', truth_arity: fact.params.length };
@@ -192,19 +227,48 @@ export function scoreArity(row: GuessRow, truth: Truth): Verdict {
     truth_arity: expected,
   };
 }
-/** Dimensions a guess can be scored on; the key is the report section. */
-export const SCORERS = { arity: scoreArity } as const;
+/** The type dimensions: a guessed pointer is correct when the declared formal (or result) is a
+ * pointer. Formals are compared by position, which is the source order only when the printed
+ * and declared counts agree and no declared formal is a float (the float bank is numbered
+ * apart); any other function is unscored rather than guessed at. */
+export function scoreType(row: TypeGuessRow, truth: Truth): Verdict {
+  const fact = truth[row.caller];
+  if (!fact) return { outcome: 'unscored', truth_arity: null };
+  if (fact.complex) return { outcome: 'complex', truth_arity: null };
+  let declared: TypeFact | null | undefined;
+  if (row.subject === 'result_type') declared = fact.result;
+  else if (
+    row.ordinal === null ||
+    row.printed_params !== fact.params.length ||
+    fact.params.some((param) => param.kind === 'float')
+  )
+    return { outcome: 'unscored', truth_arity: null };
+  else declared = fact.params[row.ordinal];
+  return { outcome: declared?.kind === 'pointer' ? 'correct' : 'wrong', truth_arity: null };
+}
+export function scoreGuess(row: GuessRow, truth: Truth): Verdict {
+  return row.subject === 'argument_list' ? scoreArity(row, truth) : scoreType(row, truth);
+}
+/** What a guess is about: scored callee-wise (arity) or per formal/result (types). */
+export function guessSubject(row: GuessRow): string | null {
+  return row.subject === 'argument_list'
+    ? row.target_name
+    : `${row.caller}:${row.subject}:${row.ordinal ?? ''}`;
+}
 
 export interface Tally {
   /** Scored guesses (site level). */
   sites: number;
   correct: number;
+  /** Type guesses whose declared formal or result is not a pointer. */
+  wrong: number;
   over: number;
   under: number;
   variadic: number;
   /** Guesses with no source truth (target not in the sources) or a complex signature. */
   unscored: number;
-  /** Distinct scored callees; a callee is correct only when every guess about it is. */
+  /** Distinct scored subjects (callees for arity, formals/results for types); a subject is
+   * correct only when every guess about it is. */
   callees: number;
   callees_correct: number;
   precision_sites: number | null;
@@ -225,6 +289,7 @@ export function tally(
     const t: Tally = {
       sites: 0,
       correct: 0,
+      wrong: 0,
       over: 0,
       under: 0,
       variadic: 0,
@@ -236,7 +301,7 @@ export function tally(
     };
     const callee = new Map<string, boolean>();
     for (const row of rows) {
-      const { outcome } = scoreArity(row, truth);
+      const { outcome } = scoreGuess(row, truth);
       if (outcome === 'unscored' || outcome === 'complex') {
         t.unscored++;
         continue;
@@ -244,7 +309,8 @@ export function tally(
       t.sites++;
       if (outcome === 'correct') t.correct++;
       else t[outcome]++;
-      callee.set(row.target_name!, (callee.get(row.target_name!) ?? true) && outcome === 'correct');
+      const subject = guessSubject(row)!;
+      callee.set(subject, (callee.get(subject) ?? true) && outcome === 'correct');
     }
     t.callees = callee.size;
     t.callees_correct = [...callee.values()].filter(Boolean).length;
@@ -271,6 +337,89 @@ export function guessableSites(calls: readonly CallRow[], truth: Truth): number 
       count++;
   }
   return count;
+}
+
+// ------------------------------------------------------------------- printed declarations
+
+/** Pointer-ness of what one decompiled function declares, read from the span of its printed
+ * declaration (`emission.declaration_span`): a `*` or `pointer[` in a spelling. A wrapped
+ * (`likely_type(...)`) spelling counts as printed, which is what the reader sees. */
+export interface PrintedDeclaration {
+  readonly result_pointer: boolean;
+  /** One entry per printed formal, `...` excluded. */
+  readonly params: readonly boolean[];
+}
+const isPointerSpelling = (text: string): boolean =>
+  text.includes('*') || text.includes('pointer[');
+
+export function parseDeclaration(text: string): PrintedDeclaration | null {
+  const open = text.indexOf('(');
+  const close = text.lastIndexOf(')');
+  if (open < 0 || close < open) return null;
+  const params: string[] = [];
+  let depth = 0;
+  let current = '';
+  for (const char of text.slice(open + 1, close)) {
+    if (char === '(' || char === '[') depth++;
+    if (char === ')' || char === ']') depth--;
+    if (char === ',' && depth === 0) {
+      params.push(current.trim());
+      current = '';
+    } else current += char;
+  }
+  if (current.trim()) params.push(current.trim());
+  return {
+    result_pointer: isPointerSpelling(text.slice(0, open)),
+    params: params.filter((param) => param !== 'void' && param !== '...').map(isPointerSpelling),
+  };
+}
+
+export interface FunctionObservation extends PrintedDeclaration {
+  readonly name: string;
+}
+export interface TypePopulation {
+  /** Declared pointer formals the proven rules print as pointers. */
+  readonly proven_params: number;
+  /** Declared pointer formals still integer without a guess: what a heuristic can reach. */
+  readonly open_params: number;
+  readonly proven_results: number;
+  readonly open_results: number;
+}
+/** Declared pointer formals and results of the observed functions, split by whether proven
+ * analysis already prints them as pointers. A pointer printed because an applied guess made it
+ * one was open before the guess. Only functions whose printed formals line up with the source
+ * (see `scoreType`) take part in the formal counts. */
+export function typePopulation(
+  observations: readonly FunctionObservation[],
+  truth: Truth,
+  guesses: readonly GuessRow[],
+): TypePopulation {
+  const applied = new Set<string>();
+  for (const row of guesses)
+    if (row.subject !== 'argument_list' && row.applied)
+      applied.add(`${row.caller}:${row.subject}:${row.ordinal ?? ''}`);
+  const population = { proven_params: 0, open_params: 0, proven_results: 0, open_results: 0 };
+  for (const observation of observations) {
+    const fact = truth[observation.name];
+    if (!fact || fact.complex) continue;
+    if (fact.result?.kind === 'pointer') {
+      if (observation.result_pointer && !applied.has(`${observation.name}:result_type:`))
+        population.proven_results++;
+      else population.open_results++;
+    }
+    if (
+      observation.params.length !== fact.params.length ||
+      fact.params.some((param) => param.kind === 'float')
+    )
+      continue;
+    fact.params.forEach((param, index) => {
+      if (param.kind !== 'pointer') return;
+      if (observation.params[index] && !applied.has(`${observation.name}:parameter_type:${index}`))
+        population.proven_params++;
+      else population.open_params++;
+    });
+  }
+  return population;
 }
 
 export interface GateVerdict {

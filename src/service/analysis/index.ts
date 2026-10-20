@@ -61,6 +61,7 @@ import {
 import { pipelineComponents, pipelineVersions } from './versions.js';
 import { boundIR, requirePass } from './passes.js';
 import { recoverSourceEvidence } from './source-facts.js';
+import { likelyPointerTypes } from './likely-types.js';
 import { objcMethodSignature } from './objc-signature.js';
 import { imageTypeDump, recoverImageTypes, type ImageTypeDump } from './image-types.js';
 export type { ImageTypeDump } from './image-types.js';
@@ -544,6 +545,16 @@ export async function executeDecompilation(
         layout: components.abi.layout,
         max_work: context.budget.work,
       });
+      if (source.likely_types) {
+        const likely = likelyPointerTypes(image.selected_slice_id, ir.id);
+        types = {
+          ...types,
+          subjects: [
+            ...new Set([...types.subjects, ...likely.records.map((record) => record.id)]),
+          ].sort(),
+          types: [...types.types, ...likely.records],
+        };
+      }
       context.progress('emit', 6, 7);
       const emit = args.options.emitter === 'python-like' ? emitPythonLike : emitC;
       const emitted = emit(

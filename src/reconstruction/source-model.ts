@@ -23,6 +23,36 @@ export interface LikelyArity {
   /** Call sites that agreed on the arity (`caller_consensus`). */
   readonly sites?: number;
 }
+/** `likely` inference mode only: what the callers of the selected function suggest about
+ * an integer-typed formal or its result being an address (`void *`). */
+export interface LikelyTypeEvidence {
+  readonly heuristics: readonly LikelyHeuristic[];
+  /** Caller sites that agreed. */
+  readonly sites: number;
+}
+/** A guess that an integer-typed formal, or the function result, is an address (`void *`),
+ * made where proven analysis leaves it integer. */
+export interface LikelyTypeGuess {
+  readonly heuristics: readonly LikelyHeuristic[];
+  /** Some firing heuristic passes its precision gate: the type prints, marked. Otherwise
+   * the declaration stays as proven analysis leaves it and only provenance states the guess. */
+  readonly applied: boolean;
+  /** Call sites that supported the guess (caller votes); absent for body-only evidence. */
+  readonly sites?: number;
+}
+export interface LikelyTypes {
+  /** Caller evidence for pointer formals by the register root the caller prepares them in. */
+  readonly parameters: ReadonlyMap<string, LikelyTypeEvidence>;
+  readonly result?: LikelyTypeEvidence;
+  /** Type record of `void *`, supplied beside the types in likely mode. */
+  readonly pointer_type_id: string;
+}
+/** Source view, likely mode: the guesses that fired for this body and found the type still
+ * open after proven analysis, keyed by the formal value; `applied` ones changed the text. */
+export interface LikelyTypePresentation {
+  readonly parameters: ReadonlyMap<string, LikelyTypeGuess>;
+  readonly result?: LikelyTypeGuess;
+}
 /** Observed native callee inputs, not a user-supplied or proven source prototype. */
 export interface InferredCallee {
   readonly call_id: string;
@@ -142,6 +172,8 @@ export interface SourceEvidence {
   readonly call_argument_counts?: ReadonlyMap<string, number>;
   /** Likely mode, source view: guessed argument-list closures by call or tail id. */
   readonly likely_arity?: ReadonlyMap<string, LikelyArity>;
+  /** Likely mode, source view: guessed pointer formals and result of the selected function. */
+  readonly likely_types?: LikelyTypes;
   /** Source-only actual types from an established variadic library rule over
    * every possible rule-argument value: immutable printf-family format
    * literals, or Darwin `open` flags that all set `O_CREAT`. */
@@ -199,6 +231,8 @@ export type SourceStackStorage = {
 /** Complete source interpretation of an unchanged machine-width value. */
 export interface SourceTypeView {
   readonly type_id: string;
+  /** Likely mode: this view is a guess (`caller_argument_pointer`), not a proven projection. */
+  readonly likely?: true;
   readonly association_ids: readonly string[];
   readonly subject_ids: readonly string[];
   readonly evidence_ids: readonly string[];
@@ -235,6 +269,8 @@ export interface SourcePresentation {
   readonly return_pointer?: 'char' | 'byte';
   readonly value_types?: ReadonlyMap<string, SourceTypeView>;
   readonly return_source_type?: string;
+  /** Likely mode: guessed formal and result types (see `LikelyTypePresentation`). */
+  readonly likely_types?: LikelyTypePresentation;
   /** Inferred formal spellings; reloads of a typed promoted slot share its type. */
   readonly formal_types?: ReadonlyMap<string, SourceFormalType>;
   /** Inferred incoming-stack formals by the callee-entry SP offset of their ABI slot. */

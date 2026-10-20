@@ -570,9 +570,28 @@ still records its guess with `applied: false` and leaves the text open. Printed 
 wrapped `likely_arity(f(a, b))` in both dialects, the C call declaration of the callee is
 suffixed `/* likely */`, the file header states the marker once and the helper stays in the
 emission metadata. Unsupported or unscored: indirect calls (callbacks), variadic callees,
-callees reading incoming stack arguments, tail-call consensus voting, and parameter types,
-result types and pointer-ness (the harness truth already carries them; no heuristic guesses
-them yet).
+callees reading incoming stack arguments and tail-call consensus voting.
+
+Likely types. Four more heuristics (`src/service/analysis/likely-types.ts` for caller evidence,
+`src/reconstruction/source-likely.ts` for the body) guess that an integer formal, or the
+result, of the selected function is an address, only where every proven rule left it a plain
+unsigned machine-width integer (never over a declared, pointer, narrowed, float or conflicting
+type, a supplied signature, or an escaped-frame spill whose reloads this scan cannot attribute).
+`caller_argument_pointer` / `caller_result_pointer`: every discovered direct caller passes a value
+(or consumes a result) its own proven pointer evidence holds as an address; null constants
+abstain; caller discovery and limits are those of `caller_consensus`. `indirect_call_target`: the
+formal, through unchanged copies, is an indirect call or tail target. `opaque_word_formal`: the
+formal's copies are only carried (call argument, store, return), never computed with (no
+arithmetic, mask, narrowing, ordered or non-null comparison, switch, library-integer argument,
+nor an argument narrower than the register). `carried_word_formal`: that, and null-tested or in
+the first argument register. Each firing guess records `guess` inference with
+`subject: "parameter_type" | "result_type"`, `ordinal`, `guessed_type: "pointer"`, heuristics,
+`applied` and caller `sites`. An applied guess prints `likely_type(T)` around the declared type
+of the formal or result (both dialects; the header states it once; connected locals inherit the
+type) and types the formal `void *` (spelled as the existing untyped pointer); an unapplied one
+leaves the proven text byte-for-byte. `LIKELY_GATE` (`src/core/inference.ts`) currently enables
+`carried_word_formal` only; measurements and the failing heuristics are in docs/PERFORMANCE.md.
+Proven mode is untouched by all of this.
 
 Discovery ends intraprocedural flow at a direct call to a callable import whose
 supported, unconflicted library declaration is noreturn (`libraryNoreturnCalls`;

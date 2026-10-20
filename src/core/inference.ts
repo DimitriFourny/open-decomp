@@ -90,10 +90,61 @@ const callContext = z.strictObject({
   type_evidence_scope: z.string().regex(/^[a-f0-9]{64}$/),
 });
 /** The opt-in `likely`-mode heuristics (see docs/CORE.md, inference mode). */
-export const likelyHeuristicSchema = z.enum(['callee_reads', 'caller_consensus']);
+export const likelyHeuristicSchema = z.enum([
+  'callee_reads',
+  'caller_consensus',
+  'caller_argument_pointer',
+  'caller_result_pointer',
+  'indirect_call_target',
+  'opaque_word_formal',
+  'carried_word_formal',
+]);
 export type LikelyHeuristic = z.infer<typeof likelyHeuristicSchema>;
+
+/** Minimum precision a heuristic needs on the harness (`scripts/bench/likely-precision.ts`)
+ * before it may change the printed text in `likely` inference mode. */
+export const LIKELY_PRECISION_GATE = 0.95;
+
+/** Which heuristics currently pass the gate. This table is data from a measurement run:
+ * each entry must cite its harness result in docs/PERFORMANCE.md and is changed only with
+ * a new run. A heuristic that fails keeps firing and is recorded in provenance
+ * (`applied: false`), so the harness can keep measuring it, but it never prints. */
+export const LIKELY_GATE: Readonly<Record<LikelyHeuristic, boolean>> = {
+  callee_reads: true,
+  caller_consensus: true,
+  caller_argument_pointer: false,
+  caller_result_pointer: false,
+  indirect_call_target: false,
+  opaque_word_formal: false,
+  carried_word_formal: true,
+};
 /** Snake-case name of one source-view presentation rewrite rule. */
 export const presentationRuleSchema = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
+const guessArgumentList = z.strictObject({
+  kind: z.literal('guess'),
+  subject: z.literal('argument_list'),
+  call_id: entityIdSchema,
+  target: z.discriminatedUnion('kind', [
+    z.strictObject({ kind: z.literal('direct'), identity }),
+    z.strictObject({ kind: z.literal('indirect'), value_ids: ids }),
+  ]),
+  heuristics: z.array(likelyHeuristicSchema).min(1).max(16),
+  applied: z.boolean(),
+  arity: z.number().int().min(0).max(9999),
+  sites: z.number().int().min(1).max(1_000_000).nullable(),
+});
+const guessType = z.strictObject({
+  kind: z.literal('guess'),
+  subject: z.enum(['parameter_type', 'result_type']),
+  /** Position among the printed formals; null for the result. */
+  ordinal: z.number().int().min(0).max(9999).nullable(),
+  value_ids: ids,
+  guessed_type: z.literal('pointer'),
+  heuristics: z.array(likelyHeuristicSchema).min(1).max(16),
+  applied: z.boolean(),
+  sites: z.number().int().min(1).max(1_000_000).nullable(),
+});
+export const guessDetailsSchemas = { argument_list: guessArgumentList, type: guessType } as const;
 export const inferenceDetailsByKind = {
   parameter: z.strictObject({
     kind: z.literal('parameter'),
@@ -191,22 +242,13 @@ export const inferenceDetailsByKind = {
   }),
   /** An opt-in `likely`-mode guess, never an established fact. `argument_list`: the
    * open argument list of `call_id` was closed after `arity` printed arguments on the
-   * strength of `heuristics`; `applied` is false when every firing heuristic is below
-   * its precision gate, so the text stays open and only this record states the guess.
+   * strength of `heuristics`. `parameter_type` / `result_type`: the formal at `ordinal`
+   * (or the function result) that proven analysis leaves integer-typed was given the
+   * `guessed_type` (`pointer`: an address of no particular object type, `void *`).
+   * `applied` is false when every firing heuristic is below its precision gate, so the
+   * text stays as proven analysis leaves it and only this record states the guess.
    * `sites` counts the call sites that agreed (caller consensus), else null. */
-  guess: z.strictObject({
-    kind: z.literal('guess'),
-    subject: z.literal('argument_list'),
-    call_id: entityIdSchema,
-    target: z.discriminatedUnion('kind', [
-      z.strictObject({ kind: z.literal('direct'), identity }),
-      z.strictObject({ kind: z.literal('indirect'), value_ids: ids }),
-    ]),
-    heuristics: z.array(likelyHeuristicSchema).min(1).max(16),
-    applied: z.boolean(),
-    arity: z.number().int().min(0).max(9999),
-    sites: z.number().int().min(1).max(1_000_000).nullable(),
-  }),
+  guess: z.discriminatedUnion('subject', [guessArgumentList, guessType]),
   rewrite: z.strictObject({
     kind: z.literal('rewrite'),
     validation_kind: z.enum([

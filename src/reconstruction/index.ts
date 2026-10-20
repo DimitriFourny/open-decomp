@@ -37,6 +37,7 @@ import {
 } from './source-expressions.js';
 import { normalizeSourceRanges } from './source-ranges.js';
 import { constantRotationOperands } from './source-shifts.js';
+import { projectLikelyTypes } from './source-likely.js';
 import { projectSourceTypes } from './source-types.js';
 import {
   permitsVoidSourceSignature,
@@ -1269,7 +1270,7 @@ export function reconstruct(
     context,
     floating.float_accesses,
   );
-  return {
+  const typed: Reconstruction = {
     ...program,
     returns: signatureReturns ?? program.returns,
     source: {
@@ -1278,4 +1279,7 @@ export function reconstruct(
       ...floating,
     },
   };
+  // Likely mode only; fills formals and a result that every proven rule left integer.
+  const likely = projectLikelyTypes(typed, input, context);
+  return likely ? { ...typed, source: { ...typed.source!, ...likely } } : typed;
 }

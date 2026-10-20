@@ -3,6 +3,7 @@ import {
   type Address,
   type Diagnostic,
   type FunctionRecord,
+  LIKELY_GATE,
   type LikelyHeuristic,
   type OperationContext,
   type RegisterDescriptor,
@@ -14,19 +15,6 @@ import type { PreparedNativeUnit } from './native-prepare.js';
 import type { NativeInterface, NativeSummary, NativeSummaryCapacity } from './native-worklist.js';
 import type { SourceFactsInput } from './source-facts.js';
 
-/** Minimum precision a heuristic needs on the harness (`scripts/bench/likely-precision.ts`)
- * before it may change the printed text in `likely` inference mode. */
-export const LIKELY_PRECISION_GATE = 0.95;
-
-/** Which heuristics currently pass the gate. This table is data from a measurement run:
- * each entry must cite its harness result in docs/PERFORMANCE.md and is changed only with
- * a new run. A heuristic that fails keeps firing and is recorded in provenance
- * (`applied: false`), so the harness can keep measuring it, but it never prints. */
-export const LIKELY_GATE: Readonly<Record<LikelyHeuristic, boolean>> = {
-  callee_reads: true,
-  caller_consensus: true,
-};
-
 /** Most distinct caller functions one consensus examines. A hub with more callers
  * (`sqlite3_free`) is not guessed: consensus over a sample is a different, unmeasured
  * heuristic, and the work grows with every caller. */
@@ -34,7 +22,7 @@ export const MAX_CONSENSUS_CALLERS = 32;
 
 const rootsOf = (registers: readonly RegisterDescriptor[]): readonly string[] =>
   registers.map((register) => register.root);
-const addressKey = (address: Address): string =>
+export const addressKey = (address: Address): string =>
   `${address.image_id}:${address.space}:${address.value}`;
 
 /** `callee_reads`: the callee's body, taken alone, reads exactly its observed argument
@@ -65,7 +53,7 @@ interface Site {
 }
 
 /** Marks a work-limit stop of this module's own bounded share. */
-class ConsensusLimit extends Error {}
+export class ConsensusLimit extends Error {}
 
 export interface LikelyArityEnv {
   readonly input: SourceFactsInput;
@@ -81,17 +69,61 @@ export interface LikelyArityEnv {
   readonly summaries: ReadonlyMap<string, NativeInterface>;
 }
 
-/** Caller-consensus arity: every discovered call site of the target prepares the same
- * argument-register prefix, and the callee (when its body is known) reads nothing outside
- * it. Sound for the source interface only if the discovered sites are all the sites; the
- * mode says so by being opt-in and by marking every closure. */
-function consensusPrefix(
+/** Half of the request's remaining optional work, as an operation context whose checkpoints
+ * throw `ConsensusLimit` once the share is spent. Every likely-mode caller scan runs in one. */
+export function boundedShare(env: LikelyArityEnv): {
+  readonly context: OperationContext;
+  limited: boolean;
+  readonly diagnostic: () => Diagnostic;
+} {
+  const share = Math.max(1, Math.floor((env.context.remainingWork?.() ?? 0) / 2));
+  let used = 0;
+  return {
+    limited: false,
+    context: {
+      ...env.context,
+      budget: {
+        ...env.context.budget,
+        instructions: env.capacity.instructions,
+        blocks: env.capacity.blocks,
+        ir_nodes: env.capacity.nodes,
+      },
+      remainingWork: () => Math.max(0, Math.min(share - used, env.context.remainingWork?.() ?? 0)),
+      checkpoint(work) {
+        if (used + work > share) throw new ConsensusLimit();
+        env.context.checkpoint(work);
+        used += work;
+      },
+    },
+    diagnostic: () => ({
+      code: 'resource_limit',
+      severity: 'warning',
+      message:
+        'Likely-mode caller scan stopped at its work share; guesses it did not reach stay as proven analysis leaves them',
+      evidence_ids: [],
+      details: { kind: 'limit', resource: 'work', limit: share, consumed: used },
+    }),
+  };
+}
+
+/** One caller function of a target and its direct call nodes of that target. */
+export interface CallerUnit {
+  readonly unit: PreparedNativeUnit;
+  readonly calls: readonly string[];
+}
+
+/** Every discovered direct call site of `target`, grouped by the caller's native unit. A
+ * tail transfer abstains (it forwards the caller's registers rather than preparing any), a
+ * site no function owns, more than `MAX_CONSENSUS_CALLERS` caller functions, an unanalyzable
+ * or incomplete caller, or a caller too large for the remaining capacity leaves the sites
+ * unknown (`undefined`). The caller scan is a guess basis, never proof that these are all
+ * the call sites. */
+export function directCallers(
   env: LikelyArityEnv,
   target: Address,
-  calleeReads: ReadonlySet<string> | undefined,
   ir: SSAForm,
   context: OperationContext,
-): { readonly sites: number; readonly prefix: string } | undefined {
+): readonly CallerUnit[] | undefined {
   const { input } = env;
   const index = nativeCallIndex(input.image, input.functions, input.references, context);
   const key = addressKey(target);
@@ -107,7 +139,7 @@ function consensusPrefix(
     byCaller.set(reference.from_function, (byCaller.get(reference.from_function) ?? 0) + 1);
     if (byCaller.size > MAX_CONSENSUS_CALLERS) return undefined;
   }
-  const sites: Site[] = [];
+  const callers: CallerUnit[] = [];
   for (const [callerId, count] of byCaller) {
     context.checkpoint(1);
     let unit: PreparedNativeUnit | undefined;
@@ -142,12 +174,31 @@ function consensusPrefix(
         )
           found.push(node.id);
     if (found.length !== count) return undefined;
-    for (const id of found) {
+    callers.push({ unit, calls: found });
+  }
+  return callers;
+}
+
+/** Caller-consensus arity: every discovered call site of the target prepares the same
+ * argument-register prefix, and the callee (when its body is known) reads nothing outside
+ * it. Sound for the source interface only if the discovered sites are all the sites; the
+ * mode says so by being opt-in and by marking every closure. */
+function consensusPrefix(
+  env: LikelyArityEnv,
+  target: Address,
+  calleeReads: ReadonlySet<string> | undefined,
+  ir: SSAForm,
+  context: OperationContext,
+): { readonly sites: number; readonly prefix: string } | undefined {
+  const callers = directCallers(env, target, ir, context);
+  if (!callers) return undefined;
+  const sites: Site[] = [];
+  for (const { unit, calls } of callers)
+    for (const id of calls) {
       const observed = unit.observed_calls.find((call) => call.call_id === id);
       if (!observed) return undefined;
       sites.push({ prefix: rootsOf(observed.parameters).join(',') });
     }
-  }
   const first = sites[0];
   if (!first || sites.some((site) => site.prefix !== first.prefix)) return undefined;
   const roots = new Set(first.prefix === '' ? [] : first.prefix.split(','));
@@ -182,24 +233,8 @@ export function likelyArities(
   for (const id of calleeReads) add(id, 'callee_reads');
   const calls = new Map(input.types.calls?.calls.map((call) => [call.node_id, call]) ?? []);
   const memo = new Map<string, { sites: number; prefix: string } | null>();
-  let limited = false;
-  const share = Math.max(1, Math.floor((env.context.remainingWork?.() ?? 0) / 2));
-  let used = 0;
-  const bounded: OperationContext = {
-    ...env.context,
-    budget: {
-      ...env.context.budget,
-      instructions: env.capacity.instructions,
-      blocks: env.capacity.blocks,
-      ir_nodes: env.capacity.nodes,
-    },
-    remainingWork: () => Math.max(0, Math.min(share - used, env.context.remainingWork?.() ?? 0)),
-    checkpoint(work) {
-      if (used + work > share) throw new ConsensusLimit();
-      env.context.checkpoint(work);
-      used += work;
-    },
-  };
+  const share = boundedShare(env);
+  const bounded = share.context;
   try {
     for (const block of input.ir.blocks)
       for (const node of block.instructions) {
@@ -235,16 +270,8 @@ export function likelyArities(
       }
   } catch (error) {
     if (!(error instanceof ConsensusLimit)) throw error;
-    limited = true;
+    share.limited = true;
   }
-  if (limited)
-    diagnostics.push({
-      code: 'resource_limit',
-      severity: 'warning',
-      message:
-        'Likely-mode caller scan stopped at its work share; arities it did not reach stay open',
-      evidence_ids: [],
-      details: { kind: 'limit', resource: 'work', limit: share, consumed: used },
-    });
+  if (share.limited) diagnostics.push(share.diagnostic());
   return { guesses, diagnostics };
 }
