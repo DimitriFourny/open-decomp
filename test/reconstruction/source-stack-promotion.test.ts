@@ -347,6 +347,54 @@ for (const abi of targets) {
     }
   });
 
+  test(`${abi.id}: halves stored to possible argument storage reload as one concatenated value`, () => {
+    const b = builder(`argument-slot-halves-${abi.id}`),
+      block = b.block('entry');
+    const argument = block.readRegister(firstArgument(abi));
+    const sp = block.int('sub', block.readRegister(abi.stack_pointer), block.constant(u64, 32n));
+    block.writeRegister(abi.stack_pointer, sp);
+    const slot = block.int('add', sp, block.constant(u64, abi.stack_return_address_bytes));
+    block.store(slot, block.extract(argument, 0, 32));
+    // The high half carries the sign bit.
+    block.store(block.int('add', slot, block.constant(u64, 4n)), block.constant(u32, 0x80000000n));
+    const whole = block.load(u64, slot);
+    block.call(
+      { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+      [],
+      [],
+      { registers: [], flags: [], memory: 'unknown_read_write' },
+      [newIdentity('evidence')],
+    );
+    block.return([whole]);
+    const fixture = prepare(b.finish(block, [u64]), abi);
+    const source = fixture.view('source');
+    assert.deepEqual([...promoted(source)], []);
+    assert.ok(rules(source).includes('argument_slot_reload'));
+    for (const language of ['c-like', 'python-like'] as const) {
+      const output = emit(fixture.ir, fixture.extra, language).emission;
+      const inputs = new Map<string, bigint>();
+      for (const formal of emittedFormals(output))
+        inputs.set(formal.statement_id, formal.name === 'entry_sp' ? 0x8000n : 0xfedcba98n);
+      const memory = new Map(
+        Array.from({ length: 32 }, (_, index) => [0x8000n - 32n + BigInt(index), 0] as const),
+      );
+      const observation = execute(
+        output,
+        inputs,
+        memory,
+        0n,
+        new Map(),
+        new Map(),
+        new Map([['sub_2000', () => []]]),
+      );
+      assert.deepEqual(observation.values, [0x80000000fedcba98n]);
+      assert.deepEqual(
+        observation.events.filter((event) => event === 'store' || event === 'load'),
+        ['store', 'store'],
+      );
+    }
+  });
+
   test(`${abi.id}: a slot written as integer and IEEE bits is one local read through exact reinterpretation`, () => {
     for (const read of ['integer', 'float'] as const) {
       const b = builder(`punned-local-${abi.id}-${read}`),

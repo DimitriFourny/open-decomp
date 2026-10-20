@@ -892,19 +892,19 @@ export function planSourceStack(
           ),
       );
       if (punned && (view !== 'source' || overlapping.length)) continue;
+      if (overlapping.length) {
+        slotParts.set(key, overlapping);
+        for (const part of overlapping) partSlot.set(part.node.id, key);
+      }
       if (preceded.some((call) => call.bound === null || first.offset < call.bound)) {
         // Possible stack-argument storage keeps its stores in memory; its
-        // reloads may still read the value stored before them.
-        if (view === 'source' && !overlapping.length && !punned) argumentSlots.add(key);
+        // reloads may still read the bytes stored before them.
+        if (view === 'source') argumentSlots.add(key);
         continue;
       }
       if (punned) punnedSlots.add(key);
       eligible.add(key);
       if (preceded.length) boundedSlots.add(key);
-      if (overlapping.length) {
-        slotParts.set(key, overlapping);
-        for (const part of overlapping) partSlot.set(part.node.id, key);
-      }
     }
   // Source view: frame-private save/restore of an entry register. A slot is a
   // save when (i) its only store writes the entry value of a preserved register
@@ -1187,11 +1187,15 @@ export function planSourceStack(
         .some((access) => saveStores.has(access.node.id) || saveReloads.has(access.node.id))
     )
       argumentSlots.delete(key);
-  const tracked: string[] = [];
+  const tracked: string[] = [],
+    // State cells a call or unknown effect may overwrite.
+    argumentCells: string[] = [];
   for (const key of [...eligible, ...argumentSlots]) {
-    const first = groups.get(key)![0]!;
+    const first = groups.get(key)![0]!,
+      cells = tracked.length;
     if (!slotParts.has(key)) tracked.push(key);
     else for (let byte = first.offset; byte < first.end; byte++) tracked.push(`${key}@${byte}`);
+    if (argumentSlots.has(key)) argumentCells.push(...tracked.slice(cells));
   }
   // Byte significance of memory byte `byte` within an access.
   const significance = (access: (typeof accesses)[number], byte: bigint): number =>
@@ -1238,7 +1242,7 @@ export function planSourceStack(
         context.checkpoint(1);
         // A call may write its own stack arguments; an unknown effect anything.
         if (node.kind === 'call' || node.kind === 'unknown_effect')
-          for (const key of argumentSlots) state.set(key, null);
+          for (const cell of argumentCells) state.set(cell, null);
         const access = byNode.get(node.id);
         const key = access && (partSlot.get(node.id) ?? access.key);
         if (!access || !key || !(eligible.has(key) || argumentSlots.has(key))) continue;
@@ -1328,6 +1332,17 @@ export function planSourceStack(
       }
     }
   const frameObjectBase = `An escaped frame address reaches only bytes at or above the lowest entry-SP offset it can take (here ${reachFloor}): callees, memory holding the address and code reached through it never step below the address they were given. Code that steps backward from an interior pointer (container_of, negative indexing) is outside this premise. Each slot this rewrite touches lies wholly below that offset.`;
+  // A reaching stored SSA value still holds the stored instance at the load:
+  // no loop can redefine it in between (acyclic CFG, a single block, or every
+  // store in an entry block no edge returns to).
+  const sameInstances = (members: readonly (typeof accesses)[number][], block: string) =>
+    acyclic ||
+    members.every((access) => access.block === block) ||
+    (view === 'source' &&
+      !predecessors.get(input.function.entry)?.length &&
+      members.every(
+        (access) => access.node.kind !== 'store' || access.block === input.function.entry,
+      ));
   // The value a forwarded load reads from its reaching stored bytes: the whole
   // stored value, a bit range of one integer value, or adjacent stored integer
   // pieces concatenated low to high. Null when the bytes have no such spelling.
@@ -1380,13 +1395,7 @@ export function planSourceStack(
       continue;
     const exact =
       loads.every((access) => before.get(access.node.id)!.every((cell) => cell !== null)) &&
-      (acyclic ||
-        members.every((access) => access.block === group[0]!.block) ||
-        (view === 'source' &&
-          !predecessors.get(input.function.entry)?.length &&
-          members.every(
-            (access) => access.node.kind !== 'store' || access.block === input.function.entry,
-          )));
+      sameInstances(members, group[0]!.block);
     const reads = new Map<string, Expression>();
     if (exact)
       for (const access of loads) {
@@ -1512,16 +1521,26 @@ export function planSourceStack(
   // value of one store with no call, unknown effect or other write between
   // reads that value: an O0 spill/reload of an argument is the argument.
   for (const key of argumentSlots) {
-    const group = groups.get(key)!;
-    const reloads = group.filter(
-      (access) =>
-        access.node.kind === 'load' &&
-        before.get(access.node.id)?.every((cell) => cell !== null && cell !== undefined),
-    );
+    const group = groups.get(key)!,
+      members = [...group, ...(slotParts.get(key) ?? [])];
+    const reads = new Map<string, Expression>();
+    if (sameInstances(members, group[0]!.block))
+      for (const access of members) {
+        const cells = before.get(access.node.id);
+        if (
+          access.node.kind !== 'load' ||
+          !cells?.every((cell) => cell !== null && cell !== undefined)
+        )
+          continue;
+        const read = forwardedRead(access, cells as ForwardedByte[]);
+        if (read) reads.set(access.node.id, read);
+      }
+    const reloads = members.filter((access) => reads.has(access.node.id));
     if (!reloads.length) continue;
-    const subjects = [...group.filter((access) => access.node.kind === 'store'), ...reloads]
-      .map((access) => access.node.id)
-      .slice(0, 64);
+    const ids = [...members.filter((access) => access.node.kind === 'store'), ...reloads].map(
+        (access) => access.node.id,
+      ),
+      subjects = ids.slice(0, 64);
     const checked = validation.check(
       'stack-promotion',
       `stack:${key}`,
@@ -1538,7 +1557,7 @@ export function planSourceStack(
           blocks,
           transfers,
           addresses,
-          new Set(subjects),
+          new Set(ids),
           proposed,
           expressions,
           validation.allowance,
@@ -1552,7 +1571,7 @@ export function planSourceStack(
       !validation.presentation(
         'argument_slot_reload',
         `stack:${key}`,
-        'exact nonvolatile nonoverlapping negative entry-SP slot that may be open-call stack-argument storage: its stores stay in memory; each forwarded reload reads the one stored value reaching it on every path, with no call, unknown effect or other write to the slot between; no escaped frame address reaches it',
+        'exact nonvolatile negative entry-SP slot that may be open-call stack-argument storage: its stores stay in memory; each forwarded reload reads the bytes the stores reaching it on every path wrote (one stored value, a bit range of one, or adjacent stored pieces), with no call, unknown effect or other write to the slot between; no escaped frame address reaches it',
         subjects,
       )
     )
@@ -1566,12 +1585,7 @@ export function planSourceStack(
       validation.requireAbi('frame_object_base', subjects, frameObjectBase);
     for (const access of reloads) {
       hidden.add(access.node.id);
-      if (access.node.kind === 'load')
-        alias(access.node.result, {
-          kind: 'cast',
-          op: 'bitcast',
-          value: before.get(access.node.id)![0]!.value,
-        });
+      if (access.node.kind === 'load') alias(access.node.result, reads.get(access.node.id)!);
     }
   }
   const dynamicStorage = memory.some(
