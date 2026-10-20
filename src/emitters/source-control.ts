@@ -801,35 +801,6 @@ export function gotoOccurrences(
   return gotos;
 }
 
-/** The region each block region falls into (its lexical follow); a loop
- * body's end falls into its loop, null is the function end. */
-function lexicalFollows(body: Region, context: OperationContext): Map<Region, Region | null> {
-  const follows = new Map<Region, Region | null>();
-  const walk = (region: Region, follow: Region | null): void => {
-    context.checkpoint(1);
-    if (region.kind === 'sequence') {
-      for (let i = 0; i < region.regions.length; i++) {
-        let next = follow;
-        for (let j = i + 1; j < region.regions.length; j++)
-          if (firstBlock(region.regions[j]!) !== null) {
-            next = region.regions[j]!;
-            break;
-          }
-        walk(region.regions[i]!, next);
-      }
-      return;
-    }
-    if (region.kind === 'loop') {
-      walk(region.body, region.once ? follow : region);
-      return;
-    }
-    follows.set(region, leaf(follow));
-    for (const arm of controlArms(region.control)) if (arm.body) walk(arm.body, follow);
-  };
-  walk(body, null);
-  return follows;
-}
-
 export interface LoopExitRoute {
   readonly loop: string;
   /** Breakable scopes, innermost first, ending at the target loop. */
@@ -924,9 +895,6 @@ export interface LayoutPlan {
   readonly duplicated: readonly { readonly transfer: ParallelTransfer; readonly tail: string }[];
   /** Tails whose every incoming edge now ends in an owned copy. */
   readonly hidden: readonly string[];
-  /** Tails lexically between a goto and its target, copied onto every
-   * incoming edge (fallthroughs included) so the goto falls through. */
-  readonly forced: readonly string[];
 }
 
 /** Source-view tail copies, after structuring (which already orders regions,
@@ -948,8 +916,7 @@ export function planLayout(
 ): LayoutPlan {
   let clones = new Set<BlockRegion>();
   let duplicated: { transfer: ParallelTransfer; tail: string }[] = [];
-  // Optional searches charge a bounded share of the remaining work (see step 4).
-  let active = context;
+  const active = context;
   const blocks = program.blocks;
   const tails = new Map<string, number>();
   const tailSize = (id: string, path = new Set<string>()): number => {
@@ -974,7 +941,6 @@ export function planLayout(
     if (size > 0) tails.set(id, size);
     return size;
   };
-  const isTail = (id: string): boolean => tailSize(id) > 0;
   // Each copy prints at most four edge copies and one return per level (depth <= 4).
   let budget = 128;
   const clone = (id: string, transfer: ParallelTransfer): Region => {
@@ -989,19 +955,11 @@ export function planLayout(
       : copy;
   };
 
-  const edges = new Map<string, number>();
-  for (const block of blocks.values())
-    for (const transfer of controlTransfers(block.control))
-      edges.set(transfer.target, (edges.get(transfer.target) ?? 0) + 1);
-  let presented = body;
-
   // 1. Each labeled edge into a tail ends in an owned copy of the tail instead.
   // A jump and the copied continuation it owns are removed together if the
   // jump's home becomes unreachable. Otherwise its orphan return would remain
-  // after another terminal block, despite having no incoming edge. `forced`
-  // tails are copied onto every incoming edge, labeled or not.
+  // after another terminal block, despite having no incoming edge.
   let expansions = new Map<Region, BlockRegion>();
-  let forced: ReadonlySet<string> = new Set<string>();
   const duplicate = (region: Region, follow: string | null, nesting: readonly Nest[]): Region => {
     active.checkpoint(1);
     if (region.kind === 'sequence')
@@ -1026,8 +984,7 @@ export function planLayout(
     ): boolean =>
       tailSize(transfer.target) > 0 &&
       budget >= tailSize(transfer.target) &&
-      (forced.has(transfer.target) ||
-        transferAction(transfer, nested, destination, language, true) === 'goto');
+      transferAction(transfer, nested, destination, language, true) === 'goto';
     if (control.kind === 'jump') {
       if (!labeled(control.transfer, follow, nesting)) return region;
       const expanded = sequence([region, clone(control.transfer.target, control.transfer)]);
@@ -1104,69 +1061,11 @@ export function planLayout(
     }
     return result;
   };
-  const base = presented;
-  presented = expand(base);
-
-  // 3. A goto whose lexical path to its target crosses only tail homes falls
-  // through once those tails are copied onto every incoming edge instead.
-  // This search is optional work: exhausting its share keeps step 2's layout.
-  const kept = { presented, clones, duplicated, expansions, hidden };
-  const restore = (): void => {
-    forced = new Set();
-    ({ presented, clones, duplicated, expansions, hidden } = kept);
-  };
-  try {
-    active = optionalWork(context, 16);
-    const gotos = gotoOccurrences(presented, language, active);
-    const follows = gotos.length ? lexicalFollows(presented, active) : new Map();
-    // A copy appended to a jump is removed together with that jump's home.
-    const owners = new Map<Region, string>();
-    for (const [expanded, owner] of gotos.length ? expansions : [])
-      if (expanded.kind === 'sequence')
-        for (const part of expanded.regions.slice(1)) {
-          const walk = (region: Region): void => {
-            active.checkpoint(1);
-            if (region.kind === 'sequence') region.regions.forEach(walk);
-            else owners.set(region, owner.id);
-          };
-          walk(part);
-        }
-    const wanted = new Set<string>();
-    for (const occurrence of gotos) {
-      const path: string[] = [];
-      let at = occurrence.destination;
-      while (at?.kind === 'block' && at.id !== occurrence.transfer.target && path.length < 8) {
-        active.checkpoint(1);
-        if (clones.has(at)) {
-          if (!path.includes(owners.get(at) ?? '')) break;
-        } else if (isTail(at.id)) path.push(at.id);
-        else break;
-        at = follows.get(at) ?? null;
-      }
-      if (path.length && at && firstBlock(at) === occurrence.transfer.target)
-        for (const id of path) wanted.add(id);
-    }
-    // Every incoming edge of a wanted tail takes one copy of its whole chain.
-    let cost = 0;
-    for (const id of wanted) cost += (edges.get(id) ?? 0) * tailSize(id);
-    if (wanted.size && cost <= 64) {
-      forced = wanted;
-      const retried = expand(base);
-      if (gotoOccurrences(retried, language, active).length < gotos.length) presented = retried;
-      else restore();
-    }
-  } catch (error) {
-    if (!(error instanceof OptionalWorkExhausted)) throw error;
-    restore();
-  } finally {
-    active = context;
-  }
   return {
-    body: presented,
+    body: expand(body),
     clones,
     duplicated,
     hidden: [...hidden],
-    forced: [...forced],
   };
 }
 

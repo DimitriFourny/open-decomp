@@ -6328,20 +6328,13 @@ export class Renderer {
     );
     let body = this.body;
     if (
-      (!layout.duplicated.length ||
-        this.localValidation.presentation(
-          'return_tail_duplication',
-          subject,
-          'a labeled edge into an acyclic return, tail-call or trap tail of at most four blocks, each with at most four assignments/loads/stores/calls and four edge copies, ends in an owned copy; effects execute once on the same path in the same order, and copies retain original identities',
-          [...new Set(layout.duplicated.map((item) => item.tail))],
-        )) &&
-      (!layout.forced.length ||
-        this.localValidation.presentation(
-          'goto_path_tail_duplication',
-          subject,
-          'a bounded tail lexically between a goto and its target is copied onto every incoming edge, fallthroughs included, so its home is no longer printed and the goto falls through; each path still runs the same effects once in the same order before the same exit',
-          layout.forced,
-        ))
+      !layout.duplicated.length ||
+      this.localValidation.presentation(
+        'return_tail_duplication',
+        subject,
+        'a labeled edge into an acyclic return, tail-call or trap tail of at most four blocks, each with at most four assignments/loads/stores/calls and four edge copies, ends in an owned copy; effects execute once on the same path in the same order, and copies retain original identities',
+        [...new Set(layout.duplicated.map((item) => item.tail))],
+      )
     ) {
       body = layout.body;
       this.clones = layout.clones;

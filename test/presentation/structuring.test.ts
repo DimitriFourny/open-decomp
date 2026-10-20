@@ -2,12 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createOperationContext, entityIdentity } from '../../src/core/index.js';
 import { constructSSA } from '../../src/analysis/ssa/index.js';
-import { IRBuilder, evaluateIR, integer } from '../../src/ir/index.js';
+import { IRBuilder, evaluateIR, integer, successors } from '../../src/ir/index.js';
 import type { BlockBuilder, SSAForm, TrustedCall, Value } from '../../src/ir/index.js';
 import { structureControlFlow } from '../../src/presentation/index.js';
 import type {
   BlockRegion,
   ParallelTransfer,
+  Region,
   StructuredFunction,
 } from '../../src/presentation/index.js';
 import { builder, image, provenance, register, returned, slice } from '../ir/support.js';
@@ -701,4 +702,95 @@ test('reducible programs without multi-level exits structure without labeled tra
     const labeled = transfers(result).filter((transfer) => transfer.mode === 'goto');
     assert.deepEqual(labeled, [], `program ${index}`);
   }
+});
+
+test('random acyclic graphs with shared joins keep every labeled transfer forward', () => {
+  let seed = 0x1b873593;
+  const next = (bound: number): number => {
+    seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+    return (seed >>> 8) % bound;
+  };
+  const bytes = (values: readonly number[]): Uint8Array => {
+    const result = new Uint8Array(0x100);
+    values.forEach((value, index) => (result[index * 4] = value));
+    return result;
+  };
+  let labels = 0;
+  for (let index = 0; index < 300; index++) {
+    // Blocks only jump forward, so joins are entered from unrelated arms.
+    const b = ssa(`dag-${index}`),
+      count = 4 + next(10),
+      list = Array.from({ length: count }, (_, id) => b.block(`n${id}`));
+    list.forEach((block, id) => {
+      block.store(
+        block.constant(i64, 0x1080n + 4n * BigInt(id % 16)),
+        block.constant(i32, BigInt(id)),
+      );
+      const later = (): BlockBuilder => list[id + 1 + next(Math.min(4, count - id - 1))]!;
+      if (id === count - 1 || (id > 1 && next(6) === 0)) block.return([]);
+      else if (next(3) === 0) block.jump(later());
+      else {
+        const yes = later();
+        let no = later();
+        if (no === yes) no = list[id + 1]! === yes ? list[count - 1]! : list[id + 1]!;
+        block.branch(
+          block.compare(
+            'ne',
+            block.load(i32, block.constant(i64, 0x1000n + 4n * BigInt(id % 4))),
+            block.constant(i32, 0n),
+          ),
+          block.edge(yes),
+          block.edge(no),
+        );
+      }
+    });
+    const input = b.finish(list[0]!, []);
+    const result = equivalent(
+      input,
+      [
+        [0, 0, 0, 0],
+        [1, 0, 1, 0],
+        [1, 1, 1, 1],
+        [0, 1, 1, 0],
+      ].map((cells) => ({ memory: [{ base: 0x1000n, bytes: bytes(cells), writable: true }] })),
+    );
+    // Text order: sequence elements in order, a block before its arm bodies.
+    const position = new Map<string, number>();
+    const walk = (region: Region): void => {
+      if (region.kind === 'sequence') region.regions.forEach(walk);
+      else if (region.kind === 'loop') walk(region.body);
+      else {
+        position.set(region.id, position.size);
+        const control = region.control;
+        if (control.kind === 'if')
+          for (const arm of [control.when_true, control.when_false]) if (arm.body) walk(arm.body);
+      }
+    };
+    walk(result.body);
+    // Unreachable blocks are only kept, never ordered.
+    const reached = new Set([input.entry]);
+    for (const block of input.blocks)
+      if (reached.has(block.id))
+        for (const edge of successors(block.terminator)) reached.add(edge.target);
+    for (const block of blocks(result)) {
+      if (!reached.has(block.id)) continue;
+      const control = block.control;
+      const own =
+        control.kind === 'jump'
+          ? [control.transfer]
+          : control.kind === 'if'
+            ? [control.when_true.transfer, control.when_false.transfer]
+            : [];
+      for (const transfer of own) {
+        if (transfer.mode !== 'goto') continue;
+        labels++;
+        assert.ok(
+          position.get(transfer.target)! > position.get(block.id)!,
+          `program ${index}: labeled transfer ${block.id} -> ${transfer.target} jumps backward`,
+        );
+      }
+    }
+  }
+  // The sample does exercise labels (joins entered from unrelated arms).
+  assert.ok(labels > 0);
 });
