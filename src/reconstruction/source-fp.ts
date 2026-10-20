@@ -228,9 +228,16 @@ export function sourceFpPresentation(
       else for (const source of copies.get(value.id) ?? []) release(source);
     }
   }
+  // An omitted failure block prints nothing: it leaves its sequence, so the
+  // lexical first/last statement of a list (a loop's test position) is real.
   const rewrite = (region: Region): Region => {
     context.checkpoint(1);
-    if (region.kind === 'sequence') return { ...region, regions: region.regions.map(rewrite) };
+    if (region.kind === 'sequence') {
+      const regions = region.regions
+        .map(rewrite)
+        .filter((child) => child.kind !== 'sequence' || child.regions.length > 0);
+      return regions.length === 1 ? regions[0]! : { ...region, regions };
+    }
     if (region.kind === 'loop') return { ...region, body: rewrite(region.body) };
     if (omitted.has(region.id)) return { kind: 'sequence', regions: [] };
     const control = region.control;
