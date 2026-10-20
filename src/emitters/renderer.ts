@@ -20,6 +20,7 @@ import {
   bitWidth,
   expressionOperands,
   integer,
+  sameType,
   type DataType,
   type Expression,
   type Instruction,
@@ -46,6 +47,7 @@ import type {
   ObjCMessage,
   SourceAddress,
   SourceFormalType,
+  SourceLocal,
 } from '../reconstruction/source-model.js';
 import { selectorArity } from '../metadata/runtime/objc-types.js';
 import { objcMessageText, objcStringLiteral } from './objc.js';
@@ -99,6 +101,7 @@ import {
   PRIMARY,
   SourcePrinter,
   UNARY,
+  castExplanation,
   expressionText,
   machineType,
   finiteFloatBits,
@@ -1167,28 +1170,15 @@ export class Renderer {
       (expression.value.type.kind === 'integer' || expression.value.type.kind === 'float') &&
       type.kind !== expression.value.type.kind &&
       (type.bits === 32 || type.bits === 64) &&
-      type.bits === expression.value.type.bits &&
-      this.localValidation.presentation(
-        'c_bitcast',
-        expression.value.id,
-        'equal-width integer/IEEE storage copied with memcpy, preserving every bit without aliasing or numeric conversion',
-      )
+      type.bits === expression.value.type.bits
     ) {
-      this.localValidation.requireAbi(
-        'c_bitcast',
-        [expression.value.id],
-        'Native C float/double and integer storage use the target IEEE binary32/binary64 representation and matching byte order.',
+      const reinterpreted = this.reinterpret(
+        this.value(expression.value),
+        expression.value.type,
+        type,
+        expression.value.id,
       );
-      const target = `${type.kind === 'float' ? 'f' : 'u'}${type.bits}`;
-      const source = `${expression.value.type.kind === 'float' ? 'f' : 'u'}${type.bits}`;
-      return this.printer.primary(
-        this.call(
-          `__od_bitcast_${target}_${source}`,
-          'Copy the exact same-width IEEE/integer object representation; preserve NaN payloads and signed zero.',
-          [this.value(expression.value)],
-        ),
-        type.kind === 'integer' ? { bits: type.bits, signed: false } : null,
-      );
+      if (reinterpreted) return reinterpreted;
     }
     if (
       this.sourceView &&
@@ -1279,6 +1269,68 @@ export class Renderer {
 
   /** A C context that converts to unsigned `bits` (assignment, return, store)
    * makes a final reduction or widening to exactly that type implicit. */
+  /** Source view: `text` (a value of type `from`) as type `to` by exact bit
+   * reinterpretation. C prints a validated equal-width integer/IEEE memcpy
+   * helper; otherwise (Python-like, other types, refused record) the explicit
+   * `cast_bitcast` helper. Null in C when no validated helper applies. */
+  private reinterpret(
+    text: string,
+    from: DataType,
+    to: DataType,
+    subject: string,
+    fallback = false,
+  ): Printed | null {
+    if (
+      this.language === 'c-like' &&
+      (to.kind === 'integer' || to.kind === 'float') &&
+      (from.kind === 'integer' || from.kind === 'float') &&
+      to.kind !== from.kind &&
+      (to.bits === 32 || to.bits === 64) &&
+      to.bits === from.bits &&
+      this.localValidation.presentation(
+        'c_bitcast',
+        subject,
+        'equal-width integer/IEEE storage copied with memcpy, preserving every bit without aliasing or numeric conversion',
+      )
+    ) {
+      this.localValidation.requireAbi(
+        'c_bitcast',
+        [subject],
+        'Native C float/double and integer storage use the target IEEE binary32/binary64 representation and matching byte order.',
+      );
+      const target = `${to.kind === 'float' ? 'f' : 'u'}${to.bits}`;
+      const source = `${from.kind === 'float' ? 'f' : 'u'}${to.bits}`;
+      return this.printer.primary(
+        this.call(
+          `__od_bitcast_${target}_${source}`,
+          'Copy the exact same-width IEEE/integer object representation; preserve NaN payloads and signed zero.',
+          [text],
+        ),
+        to.kind === 'integer' ? { bits: to.bits, signed: false } : null,
+      );
+    }
+    if (this.language === 'c-like' && !fallback) return null;
+    return this.printer.primary(
+      this.call('cast_bitcast', castExplanation('bitcast'), [
+        this.writer.quote(machineType(to)),
+        this.writer.quote(machineType(from)),
+        text,
+      ]),
+      to.kind === 'integer' ? { bits: to.bits, signed: false } : null,
+    );
+  }
+
+  /** Source view: the promoted local a load/store accesses when the access's
+   * type differs from the local's declared type (a punned slot). */
+  private punnedLocal(
+    node: Extract<Instruction, { kind: 'load' | 'store' }>,
+  ): SourceLocal | undefined {
+    const local = this.sourceView ? this.program.source?.locals.get(node.id) : undefined;
+    return local && !sameType(local.type, node.kind === 'load' ? node.result.type : node.value.type)
+      ? local
+      : undefined;
+  }
+
   private converted(value: Printed, bits: number | null): string {
     const implicit = value.unreduced ?? value.widened;
     return this.sourceView &&
@@ -1455,6 +1507,11 @@ export class Renderer {
         this.writer.fail('Reconstructed expression expansion exceeds its budget');
       this.expanding.add(value.id);
       const storage = this.storage(load);
+      const punned = this.punnedLocal(load);
+      if (punned) {
+        this.expanding.delete(value.id);
+        return this.reinterpret(storage, punned.type, load.result.type, load.id, true)!;
+      }
       const member = this.memberPointers.get(load.id);
       if (
         this.language === 'c-like' &&
@@ -2634,7 +2691,7 @@ export class Renderer {
     if (this.constantOf(value) === 0n) return '0';
     if (!this.inline.has(value.id) && this.declaredSpelling(value) === spelling)
       return this.local(value);
-    return `(${spelling})(uintptr_t)${this.printer.group(this.printed(value), UNARY)}`;
+    return this.pointerValue(this.printed(value), spelling);
   }
 
   /** Exact whole value behind same-width casts, low extracts and a
@@ -4018,6 +4075,11 @@ export class Renderer {
       )}`;
     }
     storage ??= this.storage(node);
+    const punned = this.punnedLocal(node);
+    if (punned)
+      return this.program.live.has(node.result.id)
+        ? `${this.local(node.result)} = ${this.reinterpret(storage, punned.type, node.result.type, node.id, true)!.text}`
+        : storage;
     const member = this.memberPointers.get(node.id);
     if (member && this.program.live.has(node.result.id)) {
       const spelling = this.declaredSpelling(node.result);
@@ -4141,6 +4203,11 @@ export class Renderer {
         }
         if (this.program.source) {
           const storage = this.storage(node);
+          const punned = this.punnedLocal(node);
+          if (node.kind === 'store' && punned) {
+            text = `${storage} = ${this.reinterpret(this.value(node.value), node.value.type, punned.type, node.id, true)!.text}`;
+            break;
+          }
           if (node.kind === 'store') {
             // Storing converts to the lvalue's own width (a local is declared
             // unsigned; a dereference has exactly the stored width).
@@ -4160,7 +4227,7 @@ export class Renderer {
                 : literal
                   ? literal.text
                   : typed
-                    ? `(${this.formalSpelling(typed)})(uintptr_t)${this.printer.group(this.printed(node.value), UNARY)}`
+                    ? this.pointerValue(this.printed(node.value), this.formalSpelling(typed))
                     : this.converted(this.printed(node.value), bitWidth(node.value.type)))
             }`;
           } else text = this.assignmentText(node, storage);

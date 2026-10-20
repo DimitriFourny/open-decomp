@@ -1,6 +1,13 @@
 import { characterLiteral } from './string-literals.js';
 import type { Address } from '../core/index.js';
-import { bitWidth, sameType, type DataType, type Expression, type Value } from '../ir/index.js';
+import {
+  bitWidth,
+  sameType,
+  type CastOp,
+  type DataType,
+  type Expression,
+  type Value,
+} from '../ir/index.js';
 import type { Writer } from './writer.js';
 
 const floatLiteralStorage = new DataView(new ArrayBuffer(8));
@@ -95,6 +102,9 @@ const castMeaning: Record<string, string> = {
   float_convert:
     'IEEE precision conversion with nearest ties-even rounding, gradual underflow and canonical arithmetic NaNs.',
 };
+/** Explanation of the explicit `cast_<op>` helper (destination type, source type, value). */
+export const castExplanation = (op: CastOp): string =>
+  `Arguments: destination machine type, source machine type, value. ${castMeaning[op]} Unknown/undefined operands propagate.`;
 const fpMeaning =
   'IEEE binary32/64, nearest ties-even and gradual underflow; arithmetic NaNs canonicalize to 0x7fc00000/0x7ff8000000000000. No ambient exception/control-register behavior is invented.';
 
@@ -216,15 +226,11 @@ function checkedExpressionText(
         if (expression.op === 'sign_extend')
           return unsigned(width, signed(bitWidth(expression.value.type), name(expression.value)));
       }
-      return invoke(
-        `cast_${expression.op}`,
-        `Arguments: destination machine type, source machine type, value. ${castMeaning[expression.op]} Unknown/undefined operands propagate.`,
-        [
-          writer.quote(machineType(type)),
-          writer.quote(machineType(expression.value.type)),
-          name(expression.value),
-        ],
-      );
+      return invoke(`cast_${expression.op}`, castExplanation(expression.op), [
+        writer.quote(machineType(type)),
+        writer.quote(machineType(expression.value.type)),
+        name(expression.value),
+      ]);
     case 'extract':
       if (source && expression.value.type.kind === 'integer' && type.kind === 'integer')
         return unsigned(
