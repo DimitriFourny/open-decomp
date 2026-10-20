@@ -5,6 +5,8 @@ import type { LocalValidationSession } from '../reconstruction/local-validation.
 /** Synthesized member and padding names carry the byte offset in unambiguous
  * hexadecimal (`field_0x36` is offset 54): a bare `f_36` reads as decimal 36. */
 export const memberName = (offset: bigint): string => `field_0x${offset.toString(16)}`;
+/** The floating member of an anonymous union over the same bytes as an integer member. */
+export const overlayMemberName = (offset: bigint): string => `${memberName(offset)}_f`;
 export const paddingName = (offset: bigint): string => `pad_0x${offset.toString(16)}`;
 
 export interface ObservedMember {
@@ -13,9 +15,25 @@ export interface ObservedMember {
   readonly bits: number;
   readonly size: bigint;
   readonly count?: bigint | null;
+  /** The member holds a float/double. */
+  readonly float: boolean;
+  /** Shares its bytes with the member of the other scalar kind at the same
+   * offset and width: both are members of one anonymous union. */
+  readonly overlaid?: true;
   /** Declared source member name (Objective-C ivar), when the record has one. */
   readonly name?: string;
 }
+
+/** The declared name of a member: a recovered ivar name, else the offset name
+ * (the floating member of an overlay carries the `_f` suffix). */
+export const structMemberName = (member: ObservedMember): string =>
+  member.name ??
+  (member.overlaid && member.float ? overlayMemberName(member.offset) : memberName(member.offset));
+
+/** Identity of a member within its structure: both members of an overlay share
+ * an offset. */
+export const usedMemberKey = (member: ObservedMember): string =>
+  `${member.offset}${member.float ? 'f' : ''}`;
 
 /** Names and layouts are presentation views, never allocation/sizeof evidence. */
 export class SourceStructs {
@@ -112,15 +130,18 @@ export class SourceStructs {
   }
 
   /** A pointee whose observed members are all one integer/float type at
-   * contiguous, element-aligned offsets and that has no size or period evidence
-   * is a plain scalar array (`p[k]`, `p[k + 1]`, ...); anything else (different
-   * widths or kinds, gaps, a proven record stride or size) stays a structure. */
+   * contiguous, element-aligned offsets and that has no size evidence is a
+   * plain scalar array (`p[k]`, `p[k + 1]`, ...). A proven record stride keeps
+   * that view only when the members fill each record exactly from offset zero
+   * (records of n elements are n consecutive elements); anything else
+   * (different widths or kinds, gaps, a partial record) stays a structure. */
   private scalarArray(
     id: string,
     fields: Extract<SuppliedTypeRecord['definition'], { kind: 'structure' }>['fields'],
     size: bigint | null,
   ): string | null {
-    if (size !== null || this.strides.get(id) || fields.length > 64) return null;
+    const stride = this.strides.get(id);
+    if (size !== null || fields.length > 64) return null;
     let element: { id: string; key: string; size: bigint } | undefined;
     const offsets = new Set<bigint>();
     for (const field of fields) {
@@ -149,6 +170,7 @@ export class SourceStructs {
     const sorted = [...offsets].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     for (let index = 1; index < sorted.length; index++)
       if (sorted[index]! - sorted[index - 1]! !== element.size) return null;
+    if (stride && (sorted[0] !== 0n || sorted.at(-1)! + element.size !== stride)) return null;
     return this.validation.presentation(
       'scalar_array_pointee',
       this.subject,
@@ -261,9 +283,25 @@ export class SourceStructs {
       return null;
     const members: ObservedMember[] = [];
     let end = 0n;
+    // Non-floating members sort before the floating member of the same offset,
+    // so an overlay always follows the integer view of its bytes.
+    const isFloat = (typeId: string): boolean => {
+      const definition = this.records.get(typeId)?.definition;
+      return (
+        (definition?.kind === 'array'
+          ? this.records.get(definition.element)?.definition
+          : definition
+        )?.kind === 'float'
+      );
+    };
     const fields = [...type.fields].sort((a, b) =>
-      a.offset < b.offset ? -1 : a.offset > b.offset ? 1 : 0,
+      a.offset < b.offset
+        ? -1
+        : a.offset > b.offset
+          ? 1
+          : Number(isFloat(a.type_id)) - Number(isFloat(b.type_id)),
     );
+    let overlays = 0;
     for (const [index, field] of fields.entries()) {
       this.context.checkpoint(1);
       const definition = this.records.get(field.type_id)?.definition;
@@ -281,12 +319,40 @@ export class SourceStructs {
         previous.count === count
       )
         continue;
+      const float = isFloat(typeId);
+      // The same bytes accessed as an integer and as a float of that width:
+      // two members of one anonymous union (scalars only, no declared names).
+      if (
+        previous &&
+        float &&
+        !previous.float &&
+        !previous.overlaid &&
+        previous.offset === field.offset &&
+        previous.size === size &&
+        previous.count === undefined &&
+        count === undefined &&
+        previous.name === undefined &&
+        !record.member_names
+      ) {
+        members[members.length - 1] = { ...previous, overlaid: true };
+        members.push({
+          offset: field.offset,
+          typeId,
+          bits: storage.bits,
+          size,
+          float,
+          overlaid: true,
+        });
+        overlays++;
+        continue;
+      }
       if (field.offset < end || size <= 0n || field.offset + size > 0x10000n) return null;
       members.push({
         offset: field.offset,
         typeId,
         bits: storage.bits,
         size,
+        float,
         ...(array ? { count: array.count } : {}),
         ...(record.member_names && /^[A-Za-z_$][\w$]*$/.test(field.name)
           ? { name: field.name }
@@ -303,7 +369,14 @@ export class SourceStructs {
         this.subject,
         'nonoverlapping observed typed members with explicit byte gaps; no object size or array bound inferred',
         [id],
-      )
+      ) ||
+      (overlays > 0 &&
+        !this.validation.presentation(
+          'struct_member_overlay',
+          this.subject,
+          'an integer and a floating member of identical offset and width are the two members of one anonymous union: both name the same bytes, and each access uses the member of its own kind without a cast',
+          [id],
+        ))
     )
       return null;
     this.validation.requireAbi(
@@ -311,6 +384,12 @@ export class SourceStructs {
       [this.subject, id],
       'Observed member declarations use target scalar widths and packed byte offsets; their C sizeof is not evidence of an allocation extent.',
     );
+    if (overlays > 0)
+      this.validation.requireAbi(
+        'struct_member_overlay',
+        [this.subject, id],
+        'The integer and floating members of an anonymous union share the same little-endian bytes; reading one after writing the other reinterprets the object representation (C11 6.5.2.3, type punning through a union), and neither the target integer nor its IEEE binary32/binary64 representation has trap values, so no bit pattern (negative zero, NaN payloads, all ones) changes.',
+      );
     this.layouts.set(id, members);
     return members;
   }

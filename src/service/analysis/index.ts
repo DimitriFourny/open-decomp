@@ -23,6 +23,7 @@ import { constructSSA } from '../../analysis/ssa/index.js';
 import { abiObservableRegisterMasks } from '../../analysis/ssa/observable-masks.js';
 import { simplifySSA } from '../../analysis/values/index.js';
 import {
+  recoverPointerEvidence,
   recoverTypes,
   refineMemoryShapes,
   type SuppliedSignature,
@@ -60,6 +61,7 @@ import {
 import { pipelineComponents, pipelineVersions } from './versions.js';
 import { boundIR, requirePass } from './passes.js';
 import { recoverSourceEvidence } from './source-facts.js';
+import { likelyPointerTypes } from './likely-types.js';
 import { objcMethodSignature } from './objc-signature.js';
 import { imageTypeDump, recoverImageTypes, type ImageTypeDump } from './image-types.js';
 export type { ImageTypeDump } from './image-types.js';
@@ -535,7 +537,24 @@ export async function executeDecompilation(
       );
       if (refinementFailure) throw new OperationError(refinementFailure);
       const imageTypes = recoverImageTypes(sourceInput, localTypes, types);
-      types = imageTypes.types;
+      // Pointer-ness reaches every value derived from, joined with or compared
+      // to an address only once local, callee-summary and image views are in.
+      types = recoverPointerEvidence(ir, imageTypes.types, fullContext, {
+        slice_id: image.selected_slice_id,
+        revision: args.revision,
+        layout: components.abi.layout,
+        max_work: context.budget.work,
+      });
+      if (source.likely_types) {
+        const likely = likelyPointerTypes(image.selected_slice_id, ir.id);
+        types = {
+          ...types,
+          subjects: [
+            ...new Set([...types.subjects, ...likely.records.map((record) => record.id)]),
+          ].sort(),
+          types: [...types.types, ...likely.records],
+        };
+      }
       context.progress('emit', 6, 7);
       const emit = args.options.emitter === 'python-like' ? emitPythonLike : emitC;
       const emitted = emit(
@@ -608,6 +627,7 @@ export async function executeDecompilation(
         ...new Set([
           ...graph.coverage.reasons,
           ...(types.state === 'partial' ? ['Source metadata or type recovery is incomplete'] : []),
+          ...(debug.status === 'partial' ? ['Debug metadata recovery is incomplete'] : []),
           ...(source.diagnostics ?? []).map((diagnostic) => diagnostic.message),
         ]),
       ];
@@ -634,6 +654,7 @@ export async function executeDecompilation(
           state:
             graph.coverage.state === 'complete' &&
             types.state === 'complete' &&
+            debug.status !== 'partial' &&
             !source.diagnostics?.length
               ? 'complete'
               : 'partial',

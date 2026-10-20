@@ -61,6 +61,8 @@ export interface LibraryContract {
     readonly arguments: readonly ArgumentMemory[] | null;
     readonly captures: readonly number[] | null;
     readonly returns_argument: number | null;
+    /** Arguments whose product sizes the fresh object the result points to (or null). */
+    readonly allocates: readonly number[] | null;
   };
   readonly variadic_rule: CatalogEntry['variadic_rule'] | null;
   readonly source: string;
@@ -331,6 +333,7 @@ export function recoverLibraryContracts(
         arguments: declaration.memory ?? null,
         captures: declaration.captures ?? null,
         returns_argument: declaration.returns_argument ?? null,
+        allocates: declaration.allocates ?? null,
       },
       variadic_rule: declaration.variadic_rule ?? null,
       source: declaration.source,
@@ -346,6 +349,7 @@ export function recoverLibraryContracts(
         declaration.library,
         declaration.noreturn === true,
         declaration.variadic === true,
+        declaration.allocates ?? null,
       ]),
     );
     evidence.push({

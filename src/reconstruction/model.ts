@@ -2,7 +2,7 @@ import type { Address, Diagnostic, PresentationView, RegisterDescriptor } from '
 import type { SignatureAssociation, MemoryShape, ObservedField } from '../analysis/types/model.js';
 import type { DataType, Expression, Instruction, Origin, Value } from '../ir/index.js';
 import type { BlockRegion, ParallelTransfer, StructuredFunction } from '../presentation/index.js';
-import type { SourcePresentation } from './source-model.js';
+import type { LikelyArity, SourcePresentation } from './source-model.js';
 import type { LocalValidationRecord, LocalValidationSession } from './local-validation.js';
 
 /** A source projection exists only when every physical location is an exact,
@@ -13,6 +13,9 @@ export interface BoundaryProjection {
   readonly arguments: readonly Value[];
   /** False preserves a known prefix without claiming that trailing source arguments are absent. */
   readonly argument_list_complete?: boolean;
+  /** Likely mode: the open list was guessed closed after `arity` arguments. The list
+   * stays open for every analysis (storage, requirements); only presentation reads this. */
+  readonly likely?: LikelyArity & { readonly arity: number };
   readonly results: readonly Value[];
   readonly inputs: readonly { readonly register: RegisterDescriptor; readonly value: Value }[];
   readonly outputs: readonly { readonly register: RegisterDescriptor; readonly value: Value }[];

@@ -888,7 +888,12 @@ export function projectSourceSignature(
   for (const [slot, stores] of slotStores) {
     const kinds = stores.map((value) => pointerKind(value, slotTypes));
     const kind = kinds.find((item) => item !== undefined);
-    if (kind?.kind === 'pointer' && stores.every((value) => bitWidth(value.type) === kind.bits))
+    // A slot also accessed as IEEE bits (a punned local) keeps its integer type.
+    if (
+      kind?.kind === 'pointer' &&
+      stores.every((value) => bitWidth(value.type) === kind.bits) &&
+      [...stores, ...(slotLoads.get(slot) ?? [])].every((value) => value.type.kind === 'integer')
+    )
       slotTypes.set(slot, kind);
   }
   for (let changed = slotTypes.size > 0; changed;) {

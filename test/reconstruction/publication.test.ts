@@ -31,11 +31,23 @@ function multiExit() {
     'ssa',
   );
   const entry = b.block('entry', [i32]),
+    guard = b.block('guard', [i32]),
     loop = b.block('loop', [i32]),
     step = b.block('step', [i32]);
   const zero = b.block('zero'),
     mismatch = b.block('mismatch');
-  entry.jump(loop, entry.parameters);
+  // Both exits are also entered from outside the loop, so they stay after it:
+  // two distinct break destinations from one loop.
+  entry.branch(
+    entry.compare('eq', entry.parameters[0]!, entry.constant(i32, 100n)),
+    entry.edge(mismatch),
+    entry.edge(guard, entry.parameters),
+  );
+  guard.branch(
+    guard.compare('eq', guard.parameters[0]!, guard.constant(i32, 99n)),
+    guard.edge(zero),
+    guard.edge(loop, guard.parameters),
+  );
   loop.branch(
     loop.compare('eq', loop.parameters[0]!, loop.constant(i32, 0n)),
     loop.edge(zero),

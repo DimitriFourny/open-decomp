@@ -122,9 +122,17 @@ test('source proof aggregation never merges counterexamples or unsuccessful chec
   }
   for (let index = 0; index < 2; index++) {
     const value: Value = { id: `unverified_${index}`, type: integer(128) };
-    const identity: Expression = { kind: 'cast', op: 'zero_extend', value: input };
+    const wide: Value = { id: `wide_${index}`, type: integer(128) };
+    // Not congruent (identical candidates verify without a BDD); a 128-bit leaf
+    // is outside the BDD's symbolic width.
     const record = session.check('bitvector', value.id, 'wide unsupported proof', () =>
-      validateBitvectorCandidate(value, identity, identity, new Map(), session.allowance),
+      validateBitvectorCandidate(
+        value,
+        { kind: 'cast', op: 'zero_extend', value: input },
+        { kind: 'cast', op: 'bitcast', value: wide },
+        new Map(),
+        session.allowance,
+      ),
     );
     assert.equal(record.status, 'unverified');
   }
@@ -146,6 +154,8 @@ test('exhausted source proof work retains later original forms and publishes one
     const first: Value = { id: 'first', type: integer(8) };
     const second: Value = { id: 'second', type: integer(8) };
     const wiring: Value = { id: 'wiring', type: integer(8) };
+    const folded: Value = { id: 'folded', type: integer(8) };
+    const refolded: Value = { id: 'refolded', type: integer(8) };
     const wide: Value = { id: 'wide', type: integer(16) };
     const other: Value = { id: 'other', type: integer(16) };
     const sum: Value = { id: 'sum', type: integer(16) };
@@ -153,19 +163,33 @@ test('exhausted source proof work retains later original forms and publishes one
     const low: Value = { id: 'low', type: integer(8) };
     const lowDifference: Value = { id: 'low_difference', type: integer(8) };
     const values = new Map(
-      [input, count, first, second, wiring, wide, other, sum, difference, low, lowDifference].map(
-        (value) => [value.id, value],
-      ),
+      [
+        input,
+        count,
+        first,
+        second,
+        wiring,
+        folded,
+        refolded,
+        wide,
+        other,
+        sum,
+        difference,
+        low,
+        lowDifference,
+      ].map((value) => [value.id, value]),
     );
     // Shift-to-multiply is the speculative arithmetic candidate of the checked
-    // view (the source view keeps a lone shift), and narrowing an arithmetic
-    // word is one in both; a same-width offset-zero extract is exact wiring and
-    // is not gated by proof work.
+    // view (the source view keeps a lone shift); constant folding is one in both
+    // views. Low-bits narrowing carries its own lemma in the source view, and a
+    // same-width offset-zero extract is exact wiring: neither is gated by proof work.
     const definitions = new Map<string, Expression>([
       [count.id, { kind: 'constant', bits: 1n }],
       [first.id, { kind: 'integer', op: 'shl', left: input, right: count }],
       [second.id, { kind: 'integer', op: 'shl', left: input, right: count }],
       [wiring.id, { kind: 'extract', value: input, offset: 0 }],
+      [folded.id, { kind: 'integer', op: 'add', left: count, right: count }],
+      [refolded.id, { kind: 'integer', op: 'mul', left: count, right: count }],
       [sum.id, { kind: 'integer', op: 'add', left: wide, right: other }],
       [difference.id, { kind: 'integer', op: 'sub', left: wide, right: other }],
       [low.id, { kind: 'extract', value: sum, offset: 0 }],
@@ -194,7 +218,9 @@ test('exhausted source proof work retains later original forms and publishes one
       assert.equal(definition.op, source ? 'shl' : 'mul');
     }
     for (const value of [low, lowDifference])
-      assert.equal(definitions.get(value.id)!.kind, source ? 'extract' : 'integer');
+      assert.equal(definitions.get(value.id)!.kind, 'integer');
+    for (const value of [folded, refolded])
+      assert.equal(definitions.get(value.id)!.kind, source ? 'integer' : 'constant');
     assert.equal(definitions.get(wiring.id)!.kind, 'cast');
     const summaries = session.records.filter((record) => record.scope.includes('not attempted'));
     assert.equal(summaries.length, source ? 1 : 0);

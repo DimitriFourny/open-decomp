@@ -25,6 +25,11 @@ export type NativeInterface = Omit<InferredCallee, 'call_id' | 'evidence_ids'> &
    * completeness is inherited from them only. Worklist bookkeeping, never a
    * source fact. */
   readonly argument_reaching_calls?: readonly string[];
+  /** `likely` inference only: the argument list would close if unobserved entry
+   * arguments forwarded into an indirect call were not read by its unknown target
+   * (and every direct callee they reach is closed or likewise closes). Never a proof:
+   * proven mode ignores it and no closure is derived from it. */
+  readonly likely_closure?: true;
 };
 export interface NativeDependency {
   readonly call_id: string;

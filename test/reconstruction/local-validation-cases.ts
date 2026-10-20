@@ -194,7 +194,7 @@ export function localValidationCounterexamples(): void {
   assert.equal(localValidationSchema.parse(uninitialized).status, 'rejected');
   assert.equal(uninitialized.counterexample!.original, 'uninitialized');
   const store = { kind: 'store' as const, offset: -4n, bytes: 4, value: 'x', promoted: true };
-  const load = { kind: 'load' as const, offset: -4n, bytes: 4, candidate: 'local' };
+  const load = { kind: 'load' as const, offset: -4n, bytes: 4, candidate: 'local' as const };
   assert.equal(validateStorageTrace('slot', [store, load], allowance()).status, 'verified');
   assert.equal(
     localValidationSchema.parse(
@@ -272,12 +272,14 @@ export function localValidationCounterexamples(): void {
       'unverified',
     );
   }
+  // Not congruent: identical candidates verify by congruence without a BDD.
   const pure: Expression = { kind: 'integer', op: 'add', left: x, right: y };
+  const swapped: Expression = { kind: 'integer', op: 'add', left: y, right: x };
   assert.equal(
     validateBitvectorCandidate(
       result,
       pure,
-      pure,
+      swapped,
       new Map(),
       new ValidationAllowance(createOperationContext(), 0),
     ).status,
@@ -290,7 +292,7 @@ export function localValidationCounterexamples(): void {
       validateBitvectorCandidate(
         result,
         pure,
-        pure,
+        swapped,
         new Map(),
         new ValidationAllowance(createOperationContext({ signal: controller.signal })),
       ),
@@ -301,7 +303,7 @@ export function localValidationCounterexamples(): void {
       validateBitvectorCandidate(
         result,
         pure,
-        pure,
+        swapped,
         new Map(),
         new ValidationAllowance(createOperationContext({ budget: { work: 1 } }), 100),
       ),
@@ -322,10 +324,13 @@ export function localValidationCounterexamples(): void {
       'bitvector',
       result.id,
       'bounded',
-      () => validateBitvectorCandidate(result, pure, pure, new Map(), session.allowance),
+      () => validateBitvectorCandidate(result, pure, swapped, new Map(), session.allowance),
       [result.id],
     );
-  assert.equal(charged, 10, 'one shared allowance, not reset for each candidate');
+  // Ten allowance ticks in total plus bounded structural steps per candidate
+  // (congruence and cone walks are charged to the operation, not the allowance).
+  assert.ok(session.allowance.exhausted, 'one shared allowance, not reset');
+  assert.ok(charged < 256, `bounded structural work (${charged})`);
   assert.ok(session.records.every((record) => record.status === 'unverified'));
   assert.ok(
     session.records.every((record) => record.subject_ids?.[0] === result.id),

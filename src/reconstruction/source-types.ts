@@ -67,6 +67,9 @@ export function projectSourceTypes(
       }
     }
   }
+  // A subject conflicted only through a layout it depends on keeps the
+  // layout-free evidence that it holds an address (`void *`, below).
+  const direct = new Set(conflicts);
   const pendingConflicts = [...conflicts];
   for (let index = 0; index < pendingConflicts.length; index++)
     for (const subject of dependents.get(pendingConflicts[index]!) ?? []) {
@@ -94,11 +97,59 @@ export function projectSourceTypes(
     if (result) keys.set(id, typeKey(result));
     return result;
   };
+  /** A pointer to `void`: an address of no particular object type. */
+  const untyped = (id: string): boolean => {
+    const type = definition(id);
+    if (type?.kind !== 'pointer') return false;
+    // An opaque declared pointee (`unknown`) is a specific named type, not `void`.
+    return definition(type.to)?.kind === 'void';
+  };
+  /** An analysis pointer whose pointee does not depend on a recovered layout. */
+  const addressEvidence = (association: TypeAssociation): boolean =>
+    association.source === 'analysis' &&
+    association.status === 'candidate' &&
+    untyped(association.type_id);
+  /** Members of a pointee: a scalar pointee is one member at offset zero. */
+  const pointeeMembers = (
+    pointee: string,
+  ): { offset: bigint; key: string | undefined }[] | null => {
+    const type = definition(pointee);
+    if (type?.kind === 'integer' || type?.kind === 'float')
+      return [{ offset: 0n, key: keys.get(pointee) }];
+    if (type?.kind !== 'structure') return null;
+    return type.fields.map((field) => {
+      context.checkpoint(1);
+      return {
+        offset: field.offset,
+        key: definition(field.type_id) ? keys.get(field.type_id) : undefined,
+      };
+    });
+  };
+  /** Pointer `outer` declares every member of `inner`'s pointee at the same
+   * offset with the same type (identical layouts contain each other). */
+  const containsLayout = (outer: string, inner: string): boolean => {
+    if (keys.get(outer) === keys.get(inner)) return true;
+    const a = definition(outer),
+      b = definition(inner);
+    if (a?.kind !== 'pointer' || b?.kind !== 'pointer') return false;
+    const wide = pointeeMembers(a.to),
+      narrow = pointeeMembers(b.to);
+    return (
+      !!wide &&
+      !!narrow &&
+      narrow.every(
+        (field) =>
+          field.key !== undefined &&
+          wide.some((member) => member.offset === field.offset && member.key === field.key),
+      )
+    );
+  };
   const associations = new Map<string, TypeAssociation[]>();
   for (const association of types.associations) {
     context.checkpoint(1);
     if (
-      conflicts.has(association.subject_id) ||
+      (conflicts.has(association.subject_id) &&
+        (direct.has(association.subject_id) || !addressEvidence(association))) ||
       conflicts.has(association.type_id) ||
       association.status === 'conflicting' ||
       association.status === 'hypothesis' ||
@@ -113,7 +164,7 @@ export function projectSourceTypes(
   }
   for (const value of values.values()) {
     context.checkpoint(1);
-    if (conflicts.has(value.id)) continue;
+    if (direct.has(value.id)) continue;
     const expression = expressions.get(value.id);
     const transport =
       !expression ||
@@ -123,21 +174,30 @@ export function projectSourceTypes(
     const subjects = transport
       ? [value.id, ...(source.value_origins?.get(value.id) ?? [])]
       : [value.id];
-    if (subjects.some((id) => conflicts.has(id))) continue;
+    if (subjects.some((id) => direct.has(id))) continue;
     let candidates = subjects.flatMap((id) => associations.get(id) ?? []);
+    // A layout conflict leaves only the evidence that the value is an address.
+    if (subjects.some((id) => conflicts.has(id)))
+      candidates = candidates.filter((item) => addressEvidence(item));
     if (!candidates.length) continue;
-    if (
-      candidates.some(
-        (item) =>
-          item.source !== 'analysis' &&
-          (item.status === 'established' || item.status === 'asserted'),
-      )
-    )
-      candidates = candidates.filter(
-        (item) =>
-          item.source !== 'analysis' &&
-          (item.status === 'established' || item.status === 'asserted'),
-      );
+    const declared = candidates.filter(
+      (item) =>
+        item.source !== 'analysis' && (item.status === 'established' || item.status === 'asserted'),
+    );
+    // A declaration wins over analysis, except that a declared `void *` is
+    // refined by an observed object pointer (C converts it implicitly).
+    if (declared.length)
+      candidates = declared.every((item) => untyped(item.type_id))
+        ? [
+            ...declared,
+            ...candidates.filter(
+              (item) =>
+                item.source === 'analysis' &&
+                definition(item.type_id)?.kind === 'pointer' &&
+                !untyped(item.type_id),
+            ),
+          ]
+        : declared;
     const groups = new Map<string, TypeAssociation[]>();
     for (const candidate of candidates) {
       const type = definition(candidate.type_id);
@@ -197,6 +257,23 @@ export function projectSourceTypes(
           })
         )
           groups.delete(key);
+    // Pointer alternatives: an object pointer beats a bare address; equal or
+    // nested observed layouts merge into the widest; unrelated object views
+    // fall back to the bare address their dereferences prove.
+    if (pointer) {
+      const pointers = [...groups].filter(([, group]) => {
+        const type = definition(group[0]!.type_id);
+        return type?.kind === 'pointer';
+      });
+      const objects = pointers.filter(([, group]) => !untyped(group[0]!.type_id));
+      const merged = objects.find(([, group]) =>
+        objects.every(([, other]) => containsLayout(group[0]!.type_id, other[0]!.type_id)),
+      );
+      if (pointers.length === groups.size && objects.length)
+        for (const [key] of pointers)
+          if (merged ? key !== merged[0] : !untyped(groups.get(key)![0]!.type_id))
+            groups.delete(key);
+    }
     // Alternatives remain alternatives even when their machine widths coincide.
     if (groups.size !== 1) continue;
     const group = [...groups.values()][0]!;

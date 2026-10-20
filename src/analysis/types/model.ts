@@ -81,6 +81,12 @@ export interface ObservedField {
   /** Dynamic index evidence without a single representable stride. In this
    * case a null stride does not establish a constant-displacement access. */
   readonly dynamic?: boolean;
+  /** Every access is an IEEE binary32/binary64 read or write of the bytes (the
+   * loaded value is only reinterpreted as a float, or the stored value is a
+   * reinterpreted float). Floating and non-floating accesses of the same bytes
+   * are distinct fields, never a conflict: same offset and width, one
+   * anonymous union member each. */
+  readonly float?: true;
   /** Exact calls whose indirect target was read from this field. No prototype
    * or complete argument count is implied by observing a callable address. */
   readonly call_target_ids?: readonly string[];
@@ -100,6 +106,19 @@ export interface MemoryShape {
   readonly alias: 'possible' | 'observed';
   readonly escape: 'unknown' | 'observed';
   readonly dynamic: boolean;
+  readonly evidence_ids: readonly string[];
+  /** The base value is a fresh allocation (see `TypeRecoveryResult.allocations`) and
+   * every constant-displacement access lies inside that object. */
+  readonly allocation?: ObjectAllocation;
+}
+/** A library allocator call (`alloc_size`) whose size arguments are constants:
+ * its result value is null or a fresh object of exactly `size` bytes. */
+export interface ObjectAllocation {
+  /** The whole machine-width result value. */
+  readonly value_id: string;
+  /** The allocating call node. */
+  readonly call_id: string;
+  readonly size: bigint;
   readonly evidence_ids: readonly string[];
 }
 export interface TypeConflict {
@@ -138,6 +157,8 @@ export interface TypeRecoveryResult {
   readonly calls: CallAnalysisResult | null;
   /** Image-wide identities of the structure types used here (see image types). */
   readonly image_types?: readonly ImageTypeBinding[];
+  /** Constant-size library allocations whose results this body holds. */
+  readonly allocations?: readonly ObjectAllocation[];
 }
 /** One structure type's image-wide identity: the same name denotes the same
  * merged layout in every function's output. */

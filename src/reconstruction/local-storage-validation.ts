@@ -15,11 +15,11 @@ export type StorageEvent =
       readonly kind: 'load';
       readonly offset: bigint;
       readonly bytes: number;
-      readonly candidate: string | 'local';
+      /** `local`: the promoted scalar's bytes. Otherwise the proposed byte
+       * identities (`value:significance`), least significant load byte first:
+       * a forwarded value, a narrower part of one, or adjacent stored parts. */
+      readonly candidate: 'local' | readonly string[];
       readonly endian?: 'little' | 'big';
-      /** Byte significance of the load's least significant byte within the
-       * candidate: a narrower part of a wider forwarded value. */
-      readonly shift?: number;
     }
   | { readonly kind: 'barrier'; readonly subject: string };
 
@@ -61,13 +61,25 @@ export function validateStorageTrace(
       if (event.promoted) local = event.value;
       continue;
     }
-    const candidate = event.candidate === 'local' ? local : event.candidate;
+    const candidates =
+      event.candidate === 'local'
+        ? local === undefined
+          ? []
+          : [local]
+        : [...new Set(event.candidate.map((source) => source.slice(0, source.lastIndexOf(':'))))];
     for (let i = 0; i < event.bytes; i++) {
       allowance.charge();
       const address = event.offset + BigInt(i),
-        expected = bytes.get(address);
+        expected = bytes.get(address),
+        significance = event.endian === 'big' ? event.bytes - 1 - i : i,
+        candidate =
+          event.candidate === 'local'
+            ? local === undefined
+              ? undefined
+              : `${local}:${significance}`
+            : event.candidate[significance];
       if (alias && alias.epoch > (written.get(address) ?? -1)) {
-        if (candidate === undefined || alias.value === candidate)
+        if (!candidates.length || candidates.includes(alias.value))
           return {
             ...record,
             status: 'unverified',
@@ -78,19 +90,14 @@ export function validateStorageTrace(
           status: 'rejected',
           counterexample: {
             alias_address: String(address),
-            [candidate]: '0xffffffffffffffff',
+            ...Object.fromEntries(candidates.map((value) => [value, '0xffffffffffffffff'])),
             [alias.value]: '0x0',
             original_byte_after_alias: '0x00',
             promoted_byte: '0xff',
           },
         };
       }
-      if (
-        expected === undefined ||
-        candidate === undefined ||
-        expected !==
-          `${candidate}:${(event.endian === 'big' ? event.bytes - 1 - i : i) + (event.shift ?? 0)}`
-      )
+      if (expected === undefined || candidate === undefined || expected !== candidate)
         return {
           ...record,
           status: 'rejected',
@@ -105,6 +112,10 @@ export function validateStorageTrace(
   return { ...record, status: 'verified' };
 }
 
+export interface ForwardedByte {
+  readonly value: Value;
+  readonly index: number;
+}
 /** Enumerate small acyclic paths independently of the planner's reaching-value
  * fixed point. Loops/large CFGs are explicitly outside this proof scope. */
 export function validateStackPromotion(
@@ -114,11 +125,12 @@ export function validateStackPromotion(
   transfers: readonly { transfer: ParallelTransfer; block: BlockRegion }[],
   addresses: ReadonlyMap<string, bigint>,
   group: ReadonlySet<string>,
-  forwarded: ReadonlyMap<string, Value> | null,
+  /** Proposed bytes of each forwarded load, least significant first: a byte
+   * (`index` = significance) of the value a store wrote. */
+  forwarded: ReadonlyMap<string, readonly ForwardedByte[]> | null,
   expressions: ReadonlyMap<string, Expression>,
   allowance: ValidationAllowance,
   disjointStores?: ReadonlySet<string>,
-  shifts?: ReadonlyMap<string, number>,
 ): LocalValidationRecord {
   const base = {
     kind: 'stack-promotion' as const,
@@ -186,8 +198,9 @@ export function validateStackPromotion(
           offset: addresses.get(node.address.id)!,
           bytes: Math.ceil(bitWidth(node.result.type) / 8),
           endian: node.access.endian,
-          candidate: forwarded ? identity(forwarded.get(node.id)!) : 'local',
-          ...(shifts?.has(node.id) ? { shift: shifts.get(node.id)! } : {}),
+          candidate: forwarded
+            ? forwarded.get(node.id)!.map((source) => `${identity(source.value)}:${source.index}`)
+            : 'local',
         });
     }
     const next = successors.get(current.id) ?? [];

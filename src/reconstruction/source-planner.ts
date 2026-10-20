@@ -246,9 +246,11 @@ export function planSource(
             reason: 'bits outside source ABI result',
           });
           valueOrigins.set(base.id, [binding.value.id]);
+          // The inserted part is integer bits (the whole IEEE result's integer
+          // view in the source view), so the insert prints as a mask-and-or.
           const part =
             offset === 0 && high - low === bitWidth(type)
-              ? whole
+              ? sliced()
               : make(`${key}:result-part:${binding.value.id}`, integer(high - low), block, {
                   kind: 'extract',
                   value: sliced(),
@@ -581,6 +583,10 @@ export function planSource(
           callee.parameter_state !== 'ambiguous' &&
           callee.argument_list_closure !== undefined &&
           !callee.variadic_stack;
+        const guess =
+          view === 'source' && !closed && !missing
+            ? evidence.likely_arity?.get(node.id)
+            : undefined;
         projection = {
           kind: callee.parameter_state === 'ambiguous' || missing ? 'physical' : 'inferred',
           signature: null,
@@ -590,6 +596,7 @@ export function planSource(
             : callee.argument_list_complete === false || missing
               ? { argument_list_complete: false }
               : {}),
+          ...(guess ? { likely: { ...guess, arity: args.length } } : {}),
           results: returned,
           inputs: [],
           outputs: node.register_outputs,
@@ -611,6 +618,10 @@ export function planSource(
       callee = inferred.get(control.id);
     if (control.kind !== 'indirect' || !control.tail_call || !callee?.target) continue;
     const args = observedArguments(callee, block.register_exit, control.id, block.id);
+    const guess =
+      view === 'source' && !args.missing && callee.argument_list_closure === undefined
+        ? evidence.likely_arity?.get(control.id)
+        : undefined;
     tails.set(control.id, {
       target: callee.target,
       result_types:
@@ -633,6 +644,7 @@ export function planSource(
           callee.parameter_state !== 'ambiguous' &&
           callee.argument_list_closure !== undefined &&
           !callee.variadic_stack,
+        ...(guess ? { likely: { ...guess, arity: args.arguments.length } } : {}),
         results: [],
         inputs: [],
         outputs: [],

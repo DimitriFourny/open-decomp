@@ -62,6 +62,10 @@ export interface DecompileOptions {
   readonly emitter?: 'c-like' | 'python-like';
   /** `source` (default) applies proof-carrying presentation rewrites; `checked` prints every machine fact. */
   readonly view?: 'source' | 'checked';
+  /** `proven` (default) closes only established interfaces. `likely` also applies gated
+   * heuristics (marked in the text, recorded as `guess` inferences); its results are cached
+   * separately and may be wrong. */
+  readonly inference?: 'proven' | 'likely';
   readonly budget?: ToolInput<'function_decompile'>['budget'];
   readonly signal?: AbortSignal;
   readonly onProgress?: (job: WireJob) => void;
@@ -329,12 +333,15 @@ export class BinarySession {
         revision: this.revision,
         function_id: functionId,
         wait: true,
-        ...(options.emitter === undefined && options.view === undefined
+        ...(options.emitter === undefined &&
+        options.view === undefined &&
+        options.inference === undefined
           ? {}
           : {
               options: {
                 ...(options.emitter === undefined ? {} : { emitter: options.emitter }),
                 ...(options.view === undefined ? {} : { view: options.view }),
+                ...(options.inference === undefined ? {} : { inference: options.inference }),
               },
             }),
         ...(options.budget === undefined ? {} : { budget: options.budget }),

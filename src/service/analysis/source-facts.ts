@@ -97,6 +97,8 @@ import { prepareNativeContext } from './native-context-prepare.js';
 import { variadicRuleCalls, variadicRuleFacts } from './source-variadic.js';
 import { nativeLibraryTails } from './native-library-tails.js';
 import { objcSourceFacts } from './objc-messages.js';
+import { calleeReadsGuess, likelyArities } from './likely-arity.js';
+import { likelyTypes } from './likely-types.js';
 
 export interface SourceFactsInput {
   readonly scope: AnalysisScope;
@@ -573,6 +575,29 @@ function observeParameters(
     !variadicStack &&
     !stack_parameters.length &&
     reaching.every((id) => closedCallee(interfaces.get(id)));
+  // Opt-in heuristic basis (`callee_reads`): the same closure, except that an
+  // unobserved argument forwarded into an indirect call or indirect tail is taken
+  // not to be read by its unknown target.
+  const indirectTargets = new Set<string>();
+  for (const [id, node] of callNodes) if (node.target.kind === 'indirect') indirectTargets.add(id);
+  for (const block of ir.blocks)
+    if (block.terminator.kind === 'indirect' && block.terminator.tail_call)
+      indirectTargets.add(block.terminator.id);
+  const likelyClosure =
+    !closure &&
+    !ambiguous &&
+    !variadicStack &&
+    !stack_parameters.length &&
+    reaching.every((id) => {
+      const callee = interfaces.get(id);
+      return (
+        indirectTargets.has(id) ||
+        closedCallee(callee) ||
+        (callee?.likely_closure === true &&
+          callee.parameter_state !== 'ambiguous' &&
+          !callee.variadic_stack)
+      );
+    });
   return {
     parameters,
     parameter_types: parameters.map(
@@ -586,6 +611,7 @@ function observeParameters(
     argument_list_complete: false,
     stack_parameters,
     ...(closure ? { argument_list_closure: 'callee_reads' as const } : {}),
+    ...(likelyClosure ? { likely_closure: true as const } : {}),
     ...(reaching.length ? { argument_reaching_calls: reaching } : {}),
     ...(variadicStack ? { variadic_stack: true as const } : {}),
     requirements: [
@@ -1599,6 +1625,11 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       work <= (summaryContext.remainingWork?.() ?? 0) &&
       work + reads <= (context.remainingWork?.() ?? 0),
   );
+  const likelyMode = input.identity?.options.inference === 'likely';
+  const calleeReadsCalls = new Set<string>();
+  const nativeSummaries = new Map<string, NativeInterface>();
+  let likely_arity: SourceEvidence['likely_arity'];
+  let likely_types: SourceEvidence['likely_types'];
   let memory_transfers: readonly MemoryShapeTransfer[] = [];
   let function_returns: SourceEvidence['function_returns'];
   let partialUnits: ReadonlyMap<string, PreparedNativeUnit> = new Map();
@@ -1668,6 +1699,15 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         summaryContext,
       );
       interfaces.set(dependency.call_id, observed);
+      if (summary) nativeSummaries.set(dependency.call_id, summary.observed);
+      if (
+        likelyMode &&
+        calleeReadsGuess(
+          summary,
+          observedCalls.find((call) => call.call_id === dependency.call_id),
+        )
+      )
+        calleeReadsCalls.add(dependency.call_id);
       const {
         parameter_shapes,
         written_result: _written,
@@ -1743,6 +1783,33 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
             callee: dependency.target.original_name ?? dependency.target.id,
           },
         });
+    }
+    if (likelyMode) {
+      const likely = likelyArities(
+        {
+          input,
+          selected: selectedUnit,
+          load: loadUnit,
+          context: summaryContext,
+          capacity: result.remaining,
+          callees,
+          summaries: nativeSummaries,
+        },
+        calleeReadsCalls,
+      );
+      likely_arity = likely.guesses;
+      diagnostics.push(...likely.diagnostics);
+      const typed = likelyTypes({
+        input,
+        selected: selectedUnit,
+        load: loadUnit,
+        context: summaryContext,
+        capacity: result.remaining,
+        callees,
+        summaries: nativeSummaries,
+      });
+      likely_types = typed.types;
+      diagnostics.push(...typed.diagnostics);
     }
     if (selectedUnit)
       memory_transfers = nativeShapeTransfers(selectedUnit, interfaces, summaryContext);
@@ -1932,6 +1999,8 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     memory_transfers,
     function_return_demands: [...functionReturnDemands.values()],
     ...(function_returns === undefined ? {} : { function_returns }),
+    ...(likely_arity === undefined ? {} : { likely_arity }),
+    ...(likely_types === undefined ? {} : { likely_types }),
     call_argument_counts: variadic.counts,
     call_argument_signatures: variadic.signatures,
   };

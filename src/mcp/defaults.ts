@@ -4,13 +4,18 @@ import { z } from 'zod';
 import { OperationError } from '../core/index.js';
 import type { ToolName } from '../core/index.js';
 import { hashInput, projectDirectoryName } from '../service/queries/input-identity.js';
-import type { SettingsLanguage, SettingsView } from '../settings/index.js';
+import type { SettingsInference, SettingsLanguage, SettingsView } from '../settings/index.js';
 import { authorizePath, containsPath } from '../workers/paths.js';
 
 /** Server-wide defaults from the settings file. A per-request argument always wins. */
 export interface McpServerDefaults {
-  /** Used when a `function_decompile` request omits `options.emitter` / `options.view`. */
-  readonly decompile?: { readonly language?: SettingsLanguage; readonly view?: SettingsView };
+  /** Used when a `function_decompile` request omits `options.emitter` / `options.view` /
+   * `options.inference`. */
+  readonly decompile?: {
+    readonly language?: SettingsLanguage;
+    readonly view?: SettingsView;
+    readonly inference?: SettingsInference;
+  };
   /** Lets `project_open` import omit `project_path`: the project is then
    * `<cache_root>/<sha256>.<slice|default>`, the layout the CLI and API use. */
   readonly projects?: { readonly cache_root: string; readonly authorized_roots: readonly string[] };
@@ -28,6 +33,7 @@ function decompileOptions(defaults: NonNullable<McpServerDefaults['decompile']>)
   return {
     ...(defaults.language === undefined ? {} : { emitter: defaults.language }),
     ...(defaults.view === undefined ? {} : { view: defaults.view }),
+    ...(defaults.inference === undefined ? {} : { inference: defaults.inference }),
   };
 }
 

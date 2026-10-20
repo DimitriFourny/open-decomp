@@ -1,5 +1,5 @@
 import type { ImageTypeClass, ImageTypeField } from '../analysis/types/image-types.js';
-import { memberName, paddingName } from './source-structs.js';
+import { memberName, overlayMemberName, paddingName } from './source-structs.js';
 
 function scalar(field: ImageTypeField): string | null {
   if (field.kind === 'float' && (field.width_bits === 32 || field.width_bits === 64))
@@ -10,8 +10,10 @@ function scalar(field: ImageTypeField): string | null {
 
 /** C declarations for merged image types: observed members only, explicit byte
  * gaps, no size; a member proven to hold another declared type's pointer is
- * declared as that pointer. Members overlapping an earlier member, or of a
- * width without a C scalar, stay inside the surrounding gap. */
+ * declared as that pointer. A floating and an integer access of the same bytes
+ * are the two members of one anonymous union. Members otherwise overlapping an
+ * earlier member, or of a width without a C scalar, stay inside the surrounding
+ * gap. */
 export function renderImageTypeDeclarations(
   classes: readonly ImageTypeClass[],
   functionName: (id: string) => string,
@@ -46,9 +48,20 @@ export function renderImageTypeDeclarations(
     let end = 0n,
       packed = false;
     const last = item.fields.at(-1)?.offset;
-    for (const field of item.fields) {
+    for (let index = 0; index < item.fields.length; index++) {
+      const field = item.fields[index]!;
       const type = scalar(field);
       if (!type || field.offset < end) continue;
+      const next = item.fields[index + 1];
+      const overlay =
+        next !== undefined &&
+        next.offset === field.offset &&
+        next.width_bits === field.width_bits &&
+        field.kind !== 'float' &&
+        next.kind === 'float'
+          ? next
+          : undefined;
+      if (overlay) index++;
       if (field.offset > end) parts.push(`uint8_t ${paddingName(end)}[${field.offset - end}];`);
       const pointee =
         field.kind === 'pointer'
@@ -60,8 +73,16 @@ export function renderImageTypeDeclarations(
       const spelling =
         field.kind === 'pointer' && field.width_bits === 64 ? `${target ?? 'void'}*` : type;
       const array =
-        field.offset === last && field.offset > 0n && field.stride === BigInt(field.width_bits / 8);
-      parts.push(`${spelling} ${memberName(field.offset)}${array ? '[]' : ''};`);
+        !overlay &&
+        field.offset === last &&
+        field.offset > 0n &&
+        field.stride === BigInt(field.width_bits / 8);
+      const text = `${spelling} ${memberName(field.offset)}${array ? '[]' : ''};`;
+      parts.push(
+        overlay
+          ? `union { ${text} ${scalar(overlay)} ${overlayMemberName(field.offset)}; };`
+          : text,
+      );
       packed ||= field.offset % BigInt(field.width_bits / 8) !== 0n;
       end = field.offset + BigInt(field.width_bits / 8);
     }

@@ -9,6 +9,7 @@ import {
   type Evidence,
   type OperationContext,
   type RecoveredType,
+  type RegisterDescriptor,
   type Signature,
 } from '../../core/index.js';
 import {
@@ -31,6 +32,7 @@ import {
   type SuppliedCallContract,
   type SuppliedFunctionContract,
 } from '../calls/index.js';
+import { terminatorOperands } from '../effects/index.js';
 import { inspectRegister, inspectStackMemory, type StackSnapshot } from '../stack/index.js';
 import { AnalysisBudget } from '../ssa/budget.js';
 import { SourceLayouts, typeKey } from './layout.js';
@@ -43,6 +45,7 @@ import {
 } from './memory-shapes.js';
 import type {
   MemoryShape,
+  ObjectAllocation,
   ObservedField,
   SignatureAssociation,
   SuppliedSignature,
@@ -55,6 +58,8 @@ import type {
 } from './model.js';
 export type * from './model.js';
 export { refineMemoryShapes, parameterMemoryShapes } from './memory-shapes.js';
+export { recoverPointerEvidence } from './pointers.js';
+export type { PointerEvidenceOptions, PointerRule } from './pointers.js';
 export type {
   NativeParameterShape,
   MemoryShapeTransfer,
@@ -862,6 +867,82 @@ export function recoverTypes(
           );
       }
     }
+    // A library allocator (`alloc_size`) called with constant size arguments
+    // returns null or a fresh object of exactly their product in bytes.
+    const allocators = new Map<string, readonly number[]>();
+    for (const contract of options.library?.contracts ?? []) {
+      budget.charge();
+      if (
+        contract.abi_state !== 'supported' ||
+        contract.conflicts_with.length ||
+        !contract.effects.allocates?.length
+      )
+        continue;
+      allocators.set(contract.id, contract.effects.allocates);
+      if (contract.callable_entry)
+        allocators.set(`${contract.id}:entry`, contract.effects.allocates);
+    }
+    const allocations = new Map<string, ObjectAllocation>();
+    for (const call of allocators.size ? calls.calls : []) {
+      budget.charge();
+      const node = nodes.get(call.node_id);
+      // The import and its callable entry may both match: they must all agree.
+      const observation = call.contracts[0];
+      const sizes = observation && allocators.get(observation.contract.id);
+      if (
+        node?.kind !== 'call' ||
+        !sizes ||
+        call.contracts.some(
+          (item) =>
+            item.status !== 'established' ||
+            allocators.get(item.contract.id)?.join(',') !== sizes.join(','),
+        )
+      )
+        continue;
+      let size: bigint | null = 1n;
+      for (const index of sizes) {
+        const locations =
+          observation.parameters.find((parameter) => parameter.index === index)?.locations ?? [];
+        const fact = locations.length === 1 ? locations[0]!.fact.value : undefined;
+        size = fact?.kind === 'constant' && size !== null ? size * fact.bits : null;
+      }
+      const result = observation.returns.length === 1 ? observation.returns[0]!.location : null;
+      // The whole result: one 64-bit cell, or the concatenation of its exact cells.
+      const cells =
+        result?.kind === 'register'
+          ? node.register_outputs
+              .filter((binding) => binding.register.root === result.register.root)
+              .sort((a, b) => a.register.offset_bits - b.register.offset_bits)
+          : [];
+      let value =
+        cells.length === 1 && cells[0]!.register.offset_bits === 0 ? cells[0]!.value : undefined;
+      if (cells.length > 1) {
+        const key = cells.map((cell) => cell.value.id).join(',');
+        for (const [id, expression] of definitions) {
+          budget.charge();
+          if (
+            expression.kind === 'concat' &&
+            expression.values.map((part) => part.id).join(',') === key
+          ) {
+            value = values.get(id);
+            break;
+          }
+        }
+      }
+      if (value && bitWidth(value.type) !== 64) value = undefined;
+      if (size === null || size <= 0n || size >= 1n << 64n || !value) continue;
+      allocations.set(value.id, {
+        value_id: value.id,
+        call_id: node.id,
+        size,
+        evidence_ids: [
+          reason('library allocator result with constant size arguments', node.id, [
+            ...observation.contract.evidence_ids,
+            ...node.provenance.evidence_ids,
+          ]),
+        ],
+      });
+    }
 
     const affine = createAffineResolver(
       definitions,
@@ -874,6 +955,80 @@ export function recoverTypes(
       memoryLoopParameters(input, budget),
     );
     const stackAccess = new Map(stack.accesses.map((access) => [access.node_id, access]));
+    // A load of a 32/64-bit word whose every use is an exact same-width IEEE
+    // reinterpretation (or a floating-point register binding), or a store of
+    // such a reinterpreted float (or a float value), accesses the bytes as
+    // binary32/binary64. Any other consumer keeps the integer access. Register
+    // snapshots of loads, stores and opaque effects do not consume the value.
+    // Floating and integer accesses of the same bytes are distinct fields: one
+    // anonymous union member each, never a conflict. This is a presentation
+    // hint; the renderer still names the member of the kind it prints.
+    const reinterpretedUses = new Map<string, { total: number; float: number }>();
+    const noteUse = (value: Value, float: boolean): void => {
+      budget.charge();
+      const use = reinterpretedUses.get(value.id) ?? { total: 0, float: 0 };
+      use.total++;
+      if (float) use.float++;
+      reinterpretedUses.set(value.id, use);
+    };
+    const floatBank = (register: RegisterDescriptor): boolean =>
+      register.bank === 'float' || register.bank === 'vector';
+    for (const block of input.blocks) {
+      for (const node of block.instructions) {
+        budget.charge();
+        switch (node.kind) {
+          case 'assign': {
+            const expression = node.expression;
+            const float =
+              expression.kind === 'cast' &&
+              expression.op === 'bitcast' &&
+              node.result.type.kind === 'float' &&
+              bitWidth(expression.value.type) === bitWidth(node.result.type);
+            for (const operand of expressionOperands(expression)) noteUse(operand, float);
+            break;
+          }
+          case 'load':
+            noteUse(node.address, false);
+            break;
+          case 'store':
+            noteUse(node.address, false);
+            noteUse(node.value, false);
+            break;
+          case 'write_register':
+            noteUse(node.value, floatBank(node.register));
+            break;
+          case 'call':
+            if (node.target.kind === 'indirect') noteUse(node.target.value, false);
+            for (const argument of node.arguments) noteUse(argument, false);
+            for (const binding of node.register_inputs)
+              noteUse(binding.value, floatBank(binding.register));
+            break;
+          default:
+            break;
+        }
+      }
+      for (const operand of terminatorOperands(block.terminator)) noteUse(operand, false);
+    }
+    for (const state of input.register_states)
+      for (const binding of state.exit) noteUse(binding.value, floatBank(binding.register));
+    const floatAccess = (node: Extract<Instruction, { kind: 'load' | 'store' }>): boolean => {
+      const value = node.kind === 'load' ? node.result : node.value,
+        width = bitWidth(value.type);
+      if (width !== 32 && width !== 64) return false;
+      if (value.type.kind === 'float') return true;
+      if (value.type.kind !== 'integer') return false;
+      if (node.kind === 'load') {
+        const use = reinterpretedUses.get(value.id);
+        return use !== undefined && use.total > 0 && use.total === use.float;
+      }
+      const expression = definitions.get(value.id);
+      return (
+        expression?.kind === 'cast' &&
+        expression.op === 'bitcast' &&
+        expression.value.type.kind === 'float' &&
+        bitWidth(expression.value.type) === width
+      );
+    };
     const groups = new Map<
       string,
       { base: MemoryShape['base']; fields: Map<string, ObservedField>; dynamic: boolean }
@@ -909,7 +1064,14 @@ export function recoverTypes(
       };
       const value = node.kind === 'load' ? node.result : node.value,
         width = bitWidth(value.type);
-      const fieldId = id('field', [key, offset, width, address.stride]);
+      const float = !isStack && floatAccess(node);
+      const fieldId = id('field', [
+        key,
+        offset,
+        width,
+        address.stride,
+        ...(float ? ['float'] : []),
+      ]);
       const previous = group.fields.get(fieldId);
       const proof = reason(
         'observed memory access, not complete layout',
@@ -941,6 +1103,7 @@ export function recoverTypes(
         ],
         stack_region: access?.region ?? null,
         stride: isStack ? null : address.stride,
+        ...(float ? { float: true as const } : {}),
         ...(targetCalls.length || previous?.call_target_ids?.length
           ? {
               call_target_ids: [
@@ -973,7 +1136,9 @@ export function recoverTypes(
         : machineType(value.type, fieldProof);
       associate({
         subject_id: fieldId,
-        type_id,
+        type_id: float
+          ? machineType({ kind: 'float', bits: width as 32 | 64 }, fieldProof)
+          : type_id,
         source: 'analysis',
         status: 'candidate',
         evidence_ids: fieldProof,
@@ -1022,6 +1187,8 @@ export function recoverTypes(
           dynamic: group.dynamic || (group.base.kind === 'stack' && stack.frame.dynamic),
           field_type: (field) => {
             const proof = field.evidence_ids;
+            if (field.float)
+              return machineType({ kind: 'float', bits: field.width_bits as 32 | 64 }, proof);
             if (field.call_target_ids?.length)
               return generated(
                 {
@@ -1053,6 +1220,9 @@ export function recoverTypes(
           },
           array_type: (element, field) =>
             generated({ kind: 'array', element, count: null }, field.evidence_ids),
+          ...(group.base.kind === 'value' && allocations.has(group.base.value_id)
+            ? { allocation: allocations.get(group.base.value_id)! }
+            : {}),
         },
         budget,
       );
@@ -1260,7 +1430,9 @@ export function recoverTypes(
         for (const field of shape.fields) {
           budget.charge();
           const displacement = field.offset - offset;
-          const objectSize = layouts.size(type_id);
+          const object = layouts.definition(type_id);
+          // `void *` declares an address, not a zero-byte object.
+          const objectSize = object?.kind === 'void' ? null : layouts.size(type_id);
           // Separate stack objects do not constrain one another's adjacent bytes.
           if (
             shape.base.kind === 'stack' &&
@@ -1268,7 +1440,6 @@ export function recoverTypes(
           )
             continue;
           const fieldTypes = layouts.fields(type_id, displacement, field.width_bits);
-          const object = layouts.definition(type_id);
           const exactMember =
             object?.kind === 'structure'
               ? object.fields.find((member) => member.offset === displacement)
@@ -1424,10 +1595,10 @@ export function recoverTypes(
       }
     }
     return {
+      // Undecoded debug declarations could contradict local inference; a debug
+      // capability that is missing for an image without debug data hides nothing.
       state:
-        options.debug?.status === 'partial' || options.library?.state === 'partial'
-          ? 'partial'
-          : 'complete',
+        options.debug?.undecoded || options.library?.state === 'partial' ? 'partial' : 'complete',
       work: budget.work,
       subjects: [...subjects].sort(),
       types: [...records.values()]
@@ -1447,6 +1618,13 @@ export function recoverTypes(
       evidence: [...evidence.values()].sort((a, b) => a.id.localeCompare(b.id)),
       diagnostics,
       calls,
+      ...(allocations.size
+        ? {
+            allocations: [...allocations.values()].sort((a, b) =>
+              a.value_id.localeCompare(b.value_id),
+            ),
+          }
+        : {}),
     };
   } catch (error) {
     const result = budget.result(null, error);

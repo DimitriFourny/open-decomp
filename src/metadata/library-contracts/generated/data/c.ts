@@ -13,7 +13,7 @@ acosh|d|x:d||3
 acoshf|f|x:f||3
 acoshl|e|x:e||3
 acosl|e|x:e||3
-aligned_alloc|*v|alignment:z,size:z||4
+aligned_alloc|*v|alignment:z,size:z|a1|4
 asctime|*c|tm:^@struct tm;||5
 asctime_r|*c|tm:^@struct tm;,buf:*c||5
 asin|d|x:d||3
@@ -39,7 +39,7 @@ atol|l|nptr:^c||2
 atoll|q|nptr:^c||2
 bsearch|*v|key:^v,base:^v,nel:z,width:z,compar:p||2
 btowc|$wint_t;|c:i||6
-calloc|*v|count:z,size:z||4
+calloc|*v|count:z,size:z|a0a1|4
 cbrt|d|x:d||3
 cbrtf|f|x:f||3
 cbrtl|e|x:e||3
@@ -220,7 +220,7 @@ lrintl|l|x:e||3
 lround|l|x:d||3
 lroundf|l|x:f||3
 lroundl|l|x:e||3
-malloc|*v|size:z||4
+malloc|*v|size:z|a0|4
 mblen|i|s:^c,n:z||2
 mbrlen|z|ch:^c,n:z,state:*@__mbstate_t;||6
 mbrtowc|z|pwc:*w,s:^c,n:z,ps:*@__mbstate_t;||6
@@ -265,7 +265,7 @@ qsort|v|base:*v,nel:z,width:z,compar:p||2
 quick_exit|v|status:i|n|2
 raise|i|sig:i||i
 rand|i|||2
-realloc|*v|ptr:*v,size:z||4
+realloc|*v|ptr:*v,size:z|a1|4
 remainder|d|x:d,y:d||3
 remainderf|f|x:f,y:f||3
 remainderl|e|x:e,y:e||3

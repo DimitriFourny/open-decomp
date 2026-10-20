@@ -106,6 +106,22 @@ test(
     });
     assert.equal(header.status, 0, header.stderr);
 
+    // context_touch dereferences and returns its argument: context_pass's call
+    // result (never dereferenced there) is that object's pointer, so the
+    // function returns the callee's structure pointer in both dialects.
+    assert.match((await decompile('context_pass')).text, /^(\w+)\* context_pass\(\1\* \w+\)/m);
+    assert.match((await decompile('context_pass', 'python-like')).text, /-> pointer\[\w+\]/);
+    // scale_value only does integer arithmetic on its parameter: no pointer flows back.
+    const scale = (await decompile('scale_drive')).text;
+    assert.match(scale, /^uint64_t scale_drive\(uint64_t \w+\)/m, scale);
+    assert.doesNotMatch(scale, /\w\* /, scale);
+    // malloc(sizeof(struct pair)) used locally: the allocator's header alloc_size
+    // names the object by allocation site and size; members print as fields.
+    const pair = (await decompile('pair_sum')).text;
+    assert.match(pair, /^struct pair_sum_alloc_0x18 \{/m, pair);
+    assert.match(pair, /pair_sum_alloc_0x18\* \w+;/, pair);
+    assert.doesNotMatch(pair, /\(uintptr_t\)/, pair);
+
     // views_wide reads 64 bits at +0, views_high 32 bits at +4: one object,
     // but incompatible overlapping views never share a name or a layout.
     const high = (await decompile('views_high')).text;
@@ -116,6 +132,22 @@ test(
     assert.notEqual(otherName, highName);
     assert.doesNotMatch(wide, new RegExp(`\\b${highName}\\b`));
     assert.doesNotMatch(high, new RegExp(`\\b${otherName}\\b`));
+
+    // One member read as integer bits by one callee and as a double by another
+    // (both reached from one object): one merged type whose +16 holds an
+    // anonymous union; each function names the member of its own kind, with no
+    // cast, and declares only that member.
+    const sampleBits = await decompile('sample_bits'),
+      sampleScale = await decompile('sample_scale');
+    assert.match(sampleBits.text, /->field_0x10\b/, sampleBits.text);
+    assert.match(sampleScale.text, /->field_0x10_f\b/, sampleScale.text);
+    assert.doesNotMatch(`${sampleBits.text}${sampleScale.text}`, /\((?:double|uint64_t) \*\)/);
+    const sampleName = formalStruct(sampleBits.text).name;
+    assert.equal(formalStruct(sampleScale.text).name, sampleName);
+    assert.match(formalStruct(sampleBits.text).declaration, /uint64_t field_0x10;/);
+    assert.match(formalStruct(sampleScale.text).declaration, /double field_0x10_f;/);
+    const sample = new RegExp(`^struct ${sampleName} \\{.*\\};$`, 'm').exec(dump.text)?.[0];
+    assert.match(sample ?? '', /union \{ uint64_t field_0x10; double field_0x10_f; \};/, dump.text);
 
     // db->slots[i].node: the slot array is reloaded after each call, so the
     // compiler keeps a byte offset (+32 per iteration) beside the counter i.

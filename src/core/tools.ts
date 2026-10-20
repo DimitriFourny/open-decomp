@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   inferenceSchema,
   requirementSchema,
+  guessDetailsSchemas,
   inferenceDetailsByKind,
   requirementSiteSchema,
   outputSpanSchema,
@@ -352,6 +353,7 @@ export const functionGetArgsSchema = z
           'field',
           'identity',
           'call',
+          'guess',
           'rewrite',
           'conflict',
           'annotation',
@@ -363,7 +365,7 @@ export const functionGetArgsSchema = z
         ]),
       )
       .min(1)
-      .max(15)
+      .max(16)
       .optional(),
     include_quotes: z.boolean().optional(),
     detail: z.enum(['full', 'compact']).optional().describe('Disassembly only; omitted means full'),
@@ -730,6 +732,15 @@ const compactCallSchema = inferenceDetailsByKind.call
       .array(inferenceDetailsByKind.call.shape.ordered_arguments.element.omit({ value_ids: true }))
       .max(10000),
   });
+const compactGuessSchema = z.discriminatedUnion('subject', [
+  guessDetailsSchemas.argument_list.omit({ call_id: true }).extend({
+    target: z.discriminatedUnion('kind', [
+      guessDetailsSchemas.argument_list.shape.target.options[0],
+      guessDetailsSchemas.argument_list.shape.target.options[1].omit({ value_ids: true }),
+    ]),
+  }),
+  guessDetailsSchemas.type.omit({ value_ids: true }),
+]);
 const investigationDetailsSchema = z.discriminatedUnion('kind', [
   compactParameterSchema,
   inferenceDetailsByKind.type
@@ -739,6 +750,7 @@ const investigationDetailsSchema = z.discriminatedUnion('kind', [
   inferenceDetailsByKind.field.omit({ shape_id: true, field_ids: true, type_id: true }),
   inferenceDetailsByKind.identity.omit({ value_ids: true }),
   compactCallSchema,
+  compactGuessSchema,
   inferenceDetailsByKind.rewrite,
   inferenceDetailsByKind.conflict
     .omit({ alternatives: true })
@@ -899,7 +911,7 @@ const functionGetDataSchema = z
         )
         .max(10000),
       selection: z.strictObject({
-        kinds: z.array(z.string()).max(15).nullable(),
+        kinds: z.array(z.string()).max(16).nullable(),
         subject_id: entityIdSchema.nullable(),
         quotes: z.boolean(),
         counts: z.record(

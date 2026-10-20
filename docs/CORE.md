@@ -107,7 +107,8 @@ pointers keep the access-derived type. Windows data imports and Darwin
 
 ELF library contracts require explicit recognized ELF library attribution; a
 needed-library list or Darwin path is not symbol attribution. ELF DWARF recovery
-is explicitly unavailable (partial diagnostic, no recovered debug declarations),
+is explicitly unavailable (partial diagnostic, no recovered debug declarations;
+local types are withheld only when `.debug_*`/`.zdebug_*` sections are present),
 without suppressing native symbols or treating Mach-O section rules as ELF rules.
 
 ## Address and byte ownership rules
@@ -203,7 +204,11 @@ Discovery returns shared `FunctionGraph` records consumed directly by lifters; n
 
 `src/analysis/types/` consumes SSA plus explicit ABI, debug, library and annotation evidence without rewriting machine IR. Associations retain source status and exact machine/source bit ranges. Observed memory shapes preserve signed, machine-width-wrapped offsets, access widths, alias/escape uncertainty and dynamic strides; their observed extent is not an inferred object size. Declared type and field IDs are valid subjects; a function-anchored type annotation declares a type in scope rather than assigning the function a scalar machine type. Conflicting declarations remain alternatives. A supplied call declaration matches both the exact call node and contract ID, preserving source provenance without leaking a call-local assertion to another call. Retractions recompute from the requested snapshot instead of retaining prior conclusions.
 
+Pointer evidence (`src/analysis/types/pointers.ts`, `recoverPointerEvidence`) runs once per decompilation after local, callee-summary (`refineMemoryShapes`) and image types (`recoverImageTypes`), so declared prototype parameters, library results (allocators included), transferred callee shapes and image flows are already associations. A whole 64-bit value, or each exact register cell of one, holds an address when it is dereferenced (the load/store address or its affine base within ±64 KiB, so `table + i` never makes the index a pointer), carries a declared or observed pointer association, is `pointer ± integer` (`pointer − pointer` is an integer; a variable subtrahend counts only once every other rule settled), is a same-width copy, phi or select of a pointer, or is compared with a pointer. Two integers compared, an integer used in arithmetic and constants never become pointers; stack addresses stay frame storage. Each member gets one analysis-candidate `void *` association with its rule (`pointer-evidence` evidence); a member reached only from pointers to one scalar element by whole-element steps also gets that element pointer (C typing of `p ± k`). Projection (`src/reconstruction/source-types.ts`) resolves alternatives by weight instead of dropping them: a declaration beats analysis except that a declared `void *` is refined by an observed object pointer; an object pointer beats the bare address; equal or nested observed layouts merge into the widest; unrelated views and values conflicted only through a layout keep the bare address their dereferences prove. Overlapping constant/strided accesses of one view compete by access count (then lower offset, narrower width): the layout keeps the heavier member, only the losing member is conflicted and its accesses keep explicit casts; an overlap with a dynamically indexed access still conflicts the whole view. The source view spells an analysis `void *` byte-addressed (`uint8_t*`, `pointer[uint8_t]`; presentation `byte_addressed_pointer`), so `p + k` and `*(T *)(p + k)` are exact byte arithmetic; integer uses of a pointer print `(uintptr_t)p`. On AAPCS64 the hidden-result register (x8) read at entry and stored through anchors the function's own `return` role, so its object is named `<function>_ret`. Library allocators carry their header `alloc_size` parameters (catalog `allocates`); a call whose size arguments are constants gives its whole result value a fresh object of that byte size (`TypeRecoveryResult.allocations`), which sizes the memory shape on that value (`MemoryShape.allocation`, structure `size`) only when every constant-displacement access lies inside it, and names its image class `<function>_alloc_0x<size>` (ranked after argument/result roles, before stack slots). `applyImageTypes` also types every value of the selected body that flows at displacement zero into a class some view dereferences, so caller arguments and call results become pointers without a callee-summary transfer; pointer evidence keeps one object pointer type through exact copies, phis and selects whose other sources are null. Debug recovery reports `undecoded` when debug data exists that it did not decode; only then is type recovery partial and local types withheld, since unread declarations could contradict them. An ELF image without `.debug_*`/`.zdebug_*` sections keeps debug status `partial` (DWARF recovery stays explicitly unavailable and the analysis coverage partial) but hides no declaration, so its local types are used.
+
 Image types (`src/analysis/types/image-types.ts`, `src/service/analysis/image-types.ts`) give structure types one image-wide identity. Each function contributes its local object views: memory shapes at displacement zero plus pointer values at exact flows — integer argument registers on entry and at direct calls, the result register at returns and direct calls, entry-SP-relative stack addresses. A bounded, deterministic exploration (12 neighbor bodies, 4 callers per flow, two pointee hops) loads the callees and callers of the selected function's flows through the shared native-unit cache. Views unify (Steensgaard-style; members holding unified pointees unify their pointees) only through flows the callee itself confirms by dereferencing, forwarding or returning the value, so a stale caller register joins nothing. Overlapping incompatible members refuse the union and stay separate classes with recorded conflicts. Classes are named after the lowest-address function owning a flow (`OpenFiles_arg0`, `X_ret`, `X_local_40`, pointees `X_arg0_f20`, private views `X_objN`). A class with an unexplored flow — exploration cut, absent callee body, or an image reference index that is not complete — is `bounded` and its name carries a 4-hex layout digest, so one name never denotes two layouts. The selected function declares the merged layout of every class it has a view of (a pointee class it never dereferences is declared by name only; its layout is in the image types): its own members keep their IDs and types; other members are added where they do not overlap, an unbounded indexed member before others keeps only its first element (indexed accesses stay explicit), and a member another view proves to hold an object pointer becomes that pointer. Single-view private layouts keep layout-digest names (`struct_3fa2c1`), shared by equal layouts. A loop-carried byte offset `c + k*s` beside a lockstep 0-based counter `k` (strength-reduced `a[k].f`) gives the access a constant element stride and the counter as its index, rendered `p->f_20[k].f_8`. `binary_info` view `types` (CLI `open-decomp types`, API `types()` / `typeDeclarations()`) analyzes every function body within the budget and prints all non-private classes as C declarations (`partial` when bodies remain).
+
+Integer and floating accesses of the same bytes (`ObservedField.float`, `src/analysis/types/index.ts`): a 32/64-bit load whose every consumer is an exact same-width IEEE reinterpretation (or a float/vector register binding; register snapshots of loads, stores and opaque effects are not consumers), or a store of a reinterpreted float or float value, is a floating access; every other access is an integer access. Non-stack accesses get one field per kind (the kind is part of the field ID), and accesses of one offset and width never conflict across kinds, so `buildMemoryShape` declares both members (`field_10`, `field_10_f`); other widths or partial overlaps keep the `overlapping_accesses` conflict and the explicit cast at the losing access. Image types treat the two kinds as one compatible member and merge both into the class layout (`sameMember`, `layout` in `src/service/analysis/image-types.ts`). `SourceStructs.layout` accepts exactly this overlap (scalar members of one offset and size, one integer then one floating, no declared member names) as the two members of an anonymous union and records the `struct_member_overlay` presentation rule with an ABI requirement (reading one member after writing the other reinterprets the same little-endian bytes, C11 type punning; neither representation has trap values, so negative zero, NaN payloads and all-ones patterns are unchanged). A function declares only the members its text uses, as `union { uint64_t field_0x10; double field_0x10_f; };` when both are used; the floating member is named `field_0x<offset>_f` whenever the layout has an integer sibling. The renderer selects the member of the printed access's kind (integer, or a float lvalue for `float_accesses`) and keeps the explicit cast when the layout has no member of that kind. Python-like prints no structure declarations or members: its `memory.u64[...]` and `memory.f64[...]` views already name the access kind. The header (`types.h`) declares the same union.
 
 `src/project/annotations/` validates names, notes, type declarations and signatures against durable subjects or a trusted, project/revision-bound semantic catalog. A batch commits annotations, assertion evidence and an optional synchronous job-completion hook atomically; cancellation or a hook failure rolls everything back. The hook receives prepared proof bodies so the complete response can be validated before commit without reading an uncommitted future snapshot. Active entity-filtered views retain local alternatives and reachable type dependencies, not unrelated declarations from other functions. User/LLM assertions never become immutable type/signature facts. Retraction, removal and stale revisions remain distinct.
 
@@ -213,22 +218,30 @@ The emission wire form is compact and canonical. `emission.ids` (entity identiti
 
 `src/reconstruction/` and the shared renderer produce both dialects from one source projection. The native pipeline supplies source evidence: physical register slices become ABI arguments/results, private stack spills become forwarded values or scalar locals, and unchanged phi/clobber plumbing disappears before rendering. Inferred interfaces are labeled and never promoted into established source signatures. Escapes, overlaps and uninitialized paths retain shared storage; unknown calls and live non-result clobbers remain explicit. Pure synthetic definitions are bounded and materialized at their original SSA definition sites. C-like casts and Python-like width helpers preserve integer storage; floating/vector helpers retain exact payload semantics. Source-level behavior observes ABI-visible values and ordered external effects, not scratch-register snapshots at every fault. Internal callers without native source evidence retain machine-boundary rendering. Names/notes are escaped, and final-dialect UTF-16 mappings resolve synthesized values to original catalogued subjects.
 
-Structured loop exits retain exact CFG destinations. Source layout orders acyclic sibling regions by their CFG dependencies (`loop_exit_layout`), placing shared continuations after their predecessors without moving instructions across a dynamic edge. Transfers to the nearest loop's header/successor use `continue`/`break` regardless of an obsolete outer-loop annotation. Small acyclic return, tail-call or trap tails (at most four blocks, four assignments/loads/stores/calls and four copies per block) may be copied onto an exiting edge; each path executes its original effects exactly once and in order. When the only code lexically between a goto and its target is such tail homes, they are copied onto every incoming edge, fallthroughs included, and their homes are no longer printed, so the goto falls through and the copies read as early returns (`goto_path_tail_duplication`; kept only when fewer gotos remain). Otherwise an exit to an enclosing loop's exact successor may use one boolean and immediate propagation guards after intervening loops/switches (`multi_level_loop_exit`). Control validation checks the complete scope chain, flag initialization and emitted guards. Entries bypassing initialization and irreducible sibling cycles keep explicit gotos. When no exit is reached by most loop edges but some exit is no duplicable tail, each exit (including the continuation after the enclosing statement list) is tried as the loop's successor so the others can move onto their edges (`loop_exit_merge`). After loop forms, a short-circuit test whose operands all leave for the next statement X, entered by those edges only, prints as `if (a && b) {…} else {X}`, or `if (a || b) {X} else {…}` when every operand leaves on its true arm (`shared_condition_arm`): X becomes the `shared` body of the head's leaving arm and the other operands' leaving arms `join` it (emitted edge kind `shared-arm`). Operands are copy-free tests that print nothing but their condition, with only silent copy-free jumps between them; the last operand's staying edge may carry copies. Both control validators accept a `shared-arm` edge only from an operand on the structural chain of its head (the head's other arm, then the last element after jumps of each staying arm) and require it to reach the shared body's first block. An else arm may hold another such condition. The rewrite is kept only when an edge leaving the remaining branch now falls through, and it is tried before breakable blocks. Afterwards, a remaining forward goto to a later element of an enclosing statement list becomes `break` out of a block run once (`breakable_block`: C `do { } while (0)`, Python-like `while True:` ending in `break`) that holds the elements from the goto up to its target. The block starts at a plain block no inner edge re-enters, nothing continues it (both control validators reject a `continue` that would target it, and its body falls through to its follow), and a wrap is kept only when the number of printed gotos drops, so outer breaks and continues are never turned into gotos; edges crossing it to an outer loop's continuation use the multi-level exit flag. Both searches charge at most a sixteenth of the remaining work and keep their best layout when it runs out. Remaining gotos are backward edges, entries into loops (irreducible regions), loop exits to a non-continuation target that no block run once can reach without crossing a loop, and edges inside C `switch` arms. Exhausted presentation capacity keeps the original layout; checked output is unchanged. The source-backed SQLite 3.54.0 `strnicmp` regression evaluates both emitted dialects over 30 boundary cases without executing analyzed code.
+Structuring (`src/presentation/index.ts`, `structure/4`) is an iterative region collapse over the whole CFG, shared by both dialects and both views. Loops are cyclic strongly connected components; a component with several entries (irreducible) loops at the entry first in reverse postorder and its other entries stay labeled transfers into the loop body (exit flags are refused for a loop entered that way). A loop's follow is the exit leaving the fewest other non-tail exits (then the header's exit, then a latch's), and acyclic blocks entered only from its body join the body, so their edges to the follow are breaks. Inside the function and each loop body, nodes collapse by priority: a node whose structured successors are one node entered only from it becomes a sequence (a switch's last case target stays its arm); a successor entered by one arm becomes that arm's owned body when it has no structured exit (if-no-exit), when every other successor is its sole exit or a clause leaving only for it (proper if, if/else, switch cases; several case arms alone entering one target give it to the first), or when it is a short-circuit operand sharing an exit with the node; a single-entry successor of a nested jump extends that jump's arm body. A node all of whose incoming edges are labeled follows the closest node before it that does not fall through. In a loop body, a branch whose other arm repeats the loop owns a terminal exit path as its arm instead of being followed by it, so the repeat edge stays the body's lexical end (bottom tests and `for` loops). When nothing applies, the edge group between two nodes is labeled whose removal unblocks the most collapses: edges into small function tails (straight-line chains of at most four blocks with at most four stores/calls each, ending in a return, trap, unknown or indirect transfer) first, which the source view copies as early returns (return splitting); then candidates ranked by whether they leave a node without structured entry, by the dominator depth of the join's immediate dominator (innermost first) and by a one-step lookahead are simulated on a copy (eight per decision; ties keep the edge from a join's latest predecessor) and a label whose target would then become a nested arm body ranks after one to a later statement. Selection work is bounded by `64 * (blocks + edges) + 20000`; past it, the remaining nodes of a scope follow each other in dependency order. Every CFG edge keeps exactly one transfer with its own copies and effect (structured edges `next`, labeled `goto`, loop edges `break`/`continue`); `test/presentation/structuring.test.ts` checks this on every case and that 300 random reducible programs with only innermost break/continue structure without any label. The former source-view repairs `loop_exit_layout`, `loop_exit_merge` and `terminal_block_placement` are subsumed and deleted. Measured with `open-decomp export` on 215 functions (brotli 1.2.0 CLI, SQLite 3.54.0 `btree`/`vdbemem`/`exprcode` name filters, the Mach-O and ELF fixture libraries), printed source-view gotos dropped from 409 to 353 against the previous structurer with those repairs (brotli `main` 167 to 119, `btreeBeginTrans` 41 to 28), loops printed with a test rose from 79 to 96 (`while (true)` 59 to 51); losses: some functions gain gotos (`sqlite3BtreeInsert` 7 to 16, `sqlite3VdbeMemStringify` 2 to 7), and the three `for` loops of the sample now print as `while`/`do`/`while (true)` forms, so this is no per-function guarantee.
 
-Natural-loop header backedges do not constrain sibling order. Projection-exposed
-successors whose external incoming edges all belong to one owned region move
-to the smallest such region, immediately after any containing loop. Fixed-point
-placement exposes further joins; bounded ownership depth keeps complex regions
-explicit. `loop_transfer_target` records
-nearest-loop target normalization separately, and exhausted record capacity
-retains the original labeled edge.
+Source-view tail copies and breakable blocks still remove gotos the structurer labels and are kept: on an intermediate version of this structurer the same sample printed 458 gotos, 595 without breakable blocks and 846 without tail copies as well. Small acyclic return, tail-call or trap tails (at most four blocks, four assignments/loads/stores/calls and four copies per block) may be copied onto an exiting edge; each path executes its original effects exactly once and in order. Transfers to the nearest loop's header/successor use `continue`/`break` regardless of an obsolete outer-loop annotation (`loop_transfer_target` records this normalization; exhausted record capacity retains the original labeled edge). When the only code lexically between a goto and its target is such tail homes, they are copied onto every incoming edge, fallthroughs included, and their homes are no longer printed, so the goto falls through and the copies read as early returns (`goto_path_tail_duplication`; kept only when fewer gotos remain). Otherwise an exit to an enclosing loop's exact successor may use one boolean and immediate propagation guards after intervening loops/switches (`multi_level_loop_exit`). Control validation checks the complete scope chain, flag initialization and emitted guards. Entries bypassing initialization and irreducible sibling cycles keep explicit gotos. After loop forms, a short-circuit test whose operands all leave for the next statement X, entered by those edges only, prints as `if (a && b) {…} else {X}`, or `if (a || b) {X} else {…}` when every operand leaves on its true arm (`shared_condition_arm`): X becomes the `shared` body of the head's leaving arm and the other operands' leaving arms `join` it (emitted edge kind `shared-arm`). Operands are copy-free tests that print nothing but their condition, with only silent copy-free jumps between them; the last operand's staying edge may carry copies. Both control validators accept a `shared-arm` edge only from an operand on the structural chain of its head (the head's other arm, then the last element after jumps of each staying arm) and require it to reach the shared body's first block. An else arm may hold another such condition. The rewrite is kept only when an edge leaving the remaining branch now falls through, and it is tried before breakable blocks. Afterwards, a remaining forward goto to a later element of an enclosing statement list becomes `break` out of a block run once (`breakable_block`: C `do { } while (0)`, Python-like `while True:` ending in `break`) that holds the elements from the goto up to its target. The block starts at a plain block no inner edge re-enters, nothing continues it (both control validators reject a `continue` that would target it, and its body falls through to its follow), and a wrap is kept only when the number of printed gotos drops, so outer breaks and continues are never turned into gotos; edges crossing it to an outer loop's continuation use the multi-level exit flag. Both searches charge at most a sixteenth of the remaining work and keep their best layout when it runs out. Remaining gotos are backward edges, entries into loops (irreducible regions), loop exits to a non-continuation target that no block run once can reach without crossing a loop, and edges inside C `switch` arms. Exhausted presentation capacity keeps the original layout; checked output is unchanged. The source-backed SQLite 3.54.0 `strnicmp` regression evaluates both emitted dialects over 30 boundary cases without executing analyzed code.
 
 Source presentation coalesces noninterfering unsigned widening copies with phi
 storage, retaining the original narrow definition/read conversions and choosing
-the widest declaration. Signed extensions, incompatible declarations and live-range
-interference keep separate storage. The `phi_copy_coalescing` presentation record
-names the affected values; simultaneous edge copies still pass the existing move
-validator.
+the widest declaration. Widening copies are retained `zero_extend` assignments and
+edge copies whose source is an inline zero extension of a variable (`v = ~arg0;`
+then `p = (uint64_t)v` on each edge into a 64-bit phi prints `p = ~arg0;` with no
+edge copies). The edge-copy form applies only when those extensions are the
+narrow variable's only reads, so the merge never adds a conversion at a read; only
+when the narrow variable is at least 32 bits wide (a narrower unsigned value
+promotes to signed `int`, so its definition into wider storage would print one);
+and only when the narrow variable carries no role name (`accumulator`, `index`, ...)
+that the phi lacks. A dropped widening edge copy is validated under the stated
+invariant that the class storage holds exactly the zero extension of its live
+narrow member: that member's definition stores its narrow value with the narrow
+conversion (`(uint16_t)~(uint16_t)x`, never a promoted negative `int`), and no
+other member is defined while it is live. Signed extensions, truncations,
+incompatible declarations and live-range interference keep separate storage. The
+`phi_copy_coalescing` presentation record names the affected values; simultaneous
+edge copies still pass the existing move validator. An `if` or `switch` arm whose
+edge and blocks then print nothing is dropped like an arm without a body
+(`branch_layout`), in both dialects.
 
 `copy_coalescing` then shares storage for in-place updates: a value defined from
 a printed variable that is not read after that definition (`y = f(x)`, the next
@@ -342,17 +355,57 @@ like any plain test; the dead flag storage is not declared.
 
 Source-only `private_stack_promotion` gives exact, initialized, nonvolatile
 negative entry-SP slots stable location names (`local_38` means offset -0x38),
-unless a proven role supplies a better name. Mixed-width overlaps, outgoing
-argument slots, unknown effects and escaping frame addresses stay explicit.
+unless a proven role supplies a better name. Promotion is decided per slot, not
+per frame (`src/reconstruction/source-stack.ts`). Each frame address that
+escapes (a call argument or open argument register, a store to memory outside
+the private frame, a result, an indirect exit, an access at unknown offset)
+contributes the lowest entry-SP offset it can take: exact offsets, constant
+steps, nonnegative (zero-extended, masked or shifted) index addends, cell halves,
+phis and exact spill/reload copies keep that bound; signed or other arithmetic,
+and cycles that keep lowering it, lose it. The stack grows downward, so an object
+designated by an escaped pointer extends toward the entry SP and the caller
+frame: bytes at or above the lowest escaped offset stay explicit frame memory
+(`entry_sp - N`), slots wholly below it promote under the recorded
+`frame_object_base` requirement (code reached through an escaped address never
+steps below it; `container_of` or negative indexing from an interior pointer is
+outside this premise). A frame address stored into bytes an escaped address
+reaches escapes too. No current fact bounds an escaped object's extent
+(library contracts carry no size relation), so every escape covers everything
+above its base: when the lowest-addressed object escapes, as in optimized frames
+that place aggregates below scalars (SQLite `renameColumnFunc`, brotli `main`),
+all slots above it stay explicit; a 21-function SQLite/brotli sample of the LLM task set
+showed no change. Unknown effects and unbounded escapes keep the whole frame
+explicit. Accesses straddling a slot's end, outgoing argument slots and volatile
+accesses stay explicit. Same-width accesses of differing types (an O0
+integer/IEEE pun through memory) forward a bitcast of the reaching stored value;
+when the reaching values differ, the slot is one local of its stores' common type
+(else its first access's type) and every other-typed 32/64-bit access converts by
+exact bit reinterpretation (C `__od_bitcast_*` under `c_bitcast`, Python-like
+`cast_bitcast`). Narrower integer loads and stores wholly inside a whole-slot
+integer slot (`wide_slot_parts`) are tracked per byte: each load forwards the
+bytes its reaching stores wrote, as a bit range of one stored value or adjacent
+stored pieces concatenated low to high (two 32-bit halves building a 64-bit slot,
+a 16-bit store inside a 64-bit value). A slot whose reaching bytes differ by path
+keeps its memory form; parts never become a scalar local.
 External-pointer stores are disjoint from an activation's nonescaping private
 frame only under the recorded `frame_private_to_activation` / `abi_conformance`
 requirement; the original alias facts remain in checked output. Open-arity
-calls do not block fresh slots accessed only after those calls, but any slot
-access from which an open call is reachable remains possible argument storage.
-Loop-invariant entry stores may forward through loops. Initialized private-local
-reads may inline across unrelated effects, never across a write to the same
-local. Byte-path validation remains independent, including its explicit
-loop/path bounds; exhausted presentation capacity retains the explicit form.
+calls do not block fresh slots accessed only after those calls. Any slot access
+from which an open call is reachable remains possible argument storage, except
+above the call's bounded argument area (`open_call_argument_area`): a call's
+stack arguments form one contiguous callee-owned area from its callee-entry SP
+(above a pushed return address) that the callee may overwrite, so a slot written
+before the call and read back after it, with no write, call or unknown effect
+between, lies above that area, and so does every slot at or above it. A
+possible argument slot keeps its stores in memory, but `argument_slot_reload`
+forwards each reload that reads the one store reaching it on every path with no
+call, unknown effect or other write between; an O0 argument spill reloaded
+before an open call reads as the argument. A spill rewritten in between keeps
+its local or memory form. Loop-invariant entry stores may forward through loops.
+Initialized private-local reads may inline across unrelated effects, never
+across a write to the same local. Byte-path validation remains independent,
+including its explicit loop/path bounds; exhausted presentation capacity retains
+the explicit form. The checked view keeps the frame-wide conservative gate.
 
 Source-view `call_effects` records a visible call's unchanged memory, register
 and flag clobber contract rather than printing a redundant `boundary(...)`
@@ -519,14 +572,79 @@ forwarded untouched to an indirect call (configuration function pointers in
 so every caller that reaches it keeps `...`. Even a 10x budget does not close
 them. Caller consensus would be sound for the source interface (when every call
 site is known, registers no caller sets carry garbage at entry and are not source
-parameters) but is not implemented: the dominant blocker `sqlite3_free` is
-exported (consensus excluded), "every call site known" needs an image-wide escape
-proof that existing block-local address recovery and partial discovery cannot
-give (on ARM64 a linear sweep for B/BL/ADR/ADRP to the callee or its page plus
-complete chained-fixup relocations and export exclusion), and internal hubs such
-as `sqlite3Malloc` receive their callers' own forwarded registers, so consensus
-depends on the callers' arities in turn (a coinductive caller/callee fixed point
-over every caller body).
+parameters), but "every call site known" needs an image-wide escape proof that
+existing block-local address recovery and partial discovery cannot give (on ARM64
+a linear sweep for B/BL/ADR/ADRP to the callee or its page plus complete
+chained-fixup relocations and export exclusion), exported functions have unknown
+external callers, and internal hubs such as `sqlite3Malloc` receive their callers'
+own forwarded registers, so consensus depends on the callers' arities in turn (a
+coinductive caller/callee fixed point over every caller body). Proven mode
+therefore never closes these lists. The opt-in `likely` mode (next section)
+applies two measured, gated approximations of these ideas and marks every result.
+
+### Inference mode (`likely`)
+
+`options.inference` (`proven` by default; CLI `--inference`, MCP `options.inference`,
+settings `decompile.inference`) is part of the cache identity, so `proven` and `likely`
+results never share a row; `proven` output is byte-identical to a build without the option
+(dev-loop texts compared file by file). In `likely` mode, source view, a heuristic may close
+the open argument list of one direct call or direct tail transfer after its observed prefix
+(the caller-prepared registers plus the callee's observed reads). The closure is
+presentation only: the call keeps `argument_list_complete: false`, so storage escape,
+requirement and stack analyses stay as conservative as in `proven` mode, a caller that wrote
+outgoing stack bytes never closes (they may be arguments or Darwin variadic arguments), and
+`arity_complete` in the call inference stays false.
+
+Heuristics (`src/service/analysis/likely-arity.ts`):
+
+- `callee_reads`: the callee's complete body reads exactly its observed argument registers
+  once unobserved arguments forwarded into an indirect call or indirect tail are taken not to
+  be read by the unknown target (every direct callee they reach is closed or itself
+  qualifies), has no incoming stack parameters, no escaping incoming-stack address (not
+  variadic), and the call site prepares nothing beyond those registers. `observeParameters`
+  records the basis as `likely_closure` on the native interface (mode independent, never used
+  by `proven`).
+- `caller_consensus`: every discovered direct call site of the target (a function, or an
+  import without a contract) prepares the same argument-register prefix, the callee's
+  observed reads (when its body is known) lie inside it, and an empty prefix needs a known
+  callee. Callers are loaded as native units under the request's optional-work share; a tail
+  transfer abstains (it forwards the caller's registers), a site this scan cannot read (no
+  owning function, unanalyzable caller, incomplete or capacity-limited unit) or more than 32
+  caller functions leaves the list open, and an exhausted share is a `resource_limit`
+  diagnostic. A caller that passes its own parameter register unchanged is not "prepared",
+  so such sites disagree and the list stays open.
+
+Each firing heuristic is recorded as a `guess` inference (`details.kind: "guess"`, status
+`hypothesis`: call id, target, heuristics, `arity`, agreeing `sites`, `applied`). A
+heuristic prints only if `LIKELY_GATE` says it passed the precision gate; a failing one
+still records its guess with `applied: false` and leaves the text open. Printed guesses are
+wrapped `likely_arity(f(a, b))` in both dialects, the C call declaration of the callee is
+suffixed `/* likely */`, the file header states the marker once and the helper stays in the
+emission metadata. Unsupported or unscored: indirect calls (callbacks), variadic callees,
+callees reading incoming stack arguments and tail-call consensus voting.
+
+Likely types. Four more heuristics (`src/service/analysis/likely-types.ts` for caller evidence,
+`src/reconstruction/source-likely.ts` for the body) guess that an integer formal, or the
+result, of the selected function is an address, only where every proven rule left it a plain
+unsigned machine-width integer (never over a declared, pointer, narrowed, float or conflicting
+type, a supplied signature, or an escaped-frame spill whose reloads this scan cannot attribute).
+`caller_argument_pointer` / `caller_result_pointer`: every discovered direct caller passes a value
+(or consumes a result) its own proven pointer evidence holds as an address; null constants
+abstain; caller discovery and limits are those of `caller_consensus`. `indirect_call_target`: the
+formal, through unchanged copies, is an indirect call or tail target. `opaque_word_formal`: the
+formal's copies are only carried (call argument, store, return), never computed with (no
+arithmetic, mask, narrowing, ordered or non-null comparison, switch, library-integer argument,
+nor an argument narrower than the register). `carried_word_formal`: that, and null-tested or in
+the first argument register. Each firing guess records `guess` inference with
+`subject: "parameter_type" | "result_type"`, `ordinal`, `guessed_type: "pointer"`, heuristics,
+`applied` and caller `sites`. An applied guess prints `likely_type(T)` around the declared type
+of the formal or result (both dialects; the header states it once; connected locals inherit the
+type) and types the formal `void *` (spelled as the existing untyped pointer); an unapplied one
+leaves the proven text byte-for-byte. `LIKELY_GATE` (`src/core/inference.ts`) currently enables
+`callee_reads` (arity) and `carried_word_formal` (types) only; `caller_consensus` measured 86.4%
+on the larger corpus and is disabled. Measurements and the failing heuristics are in
+docs/PERFORMANCE.md.
+Proven mode is untouched by all of this.
 
 Discovery ends intraprocedural flow at a direct call to a callable import whose
 supported, unconflicted library declaration is noreturn (`libraryNoreturnCalls`;
@@ -710,6 +828,68 @@ evaluates randomly generated typed expressions in both dialects against the IR
 semantics and the unsimplified printing; `test/emitters/c/source-simplify.test.ts`
 and `test/reconstruction/source-integer-identity.test.ts` pin the signed/width
 edge cases where a cast or an unknown operand must stay.
+
+All of these source-normalization rewrites form one ordered rule pool
+(`src/reconstruction/source-rules.ts`, `EXPRESSION_RULES`). Each rule names its
+presentation record (or none for exact wiring), its views and its proof class:
+`structural` (exact wiring; the BDD may veto while its allowance remains),
+`bitvector` (the original form stays once the allowance is exhausted) or `own`
+(side conditions are the proof and are pinned by counterexample tests).
+`normalizeSourceExpressions` applies the first matching rule per value and
+revisits it to a fixpoint, at most 32 rewrites per value. Source-only rules added
+with the pool: `magic_division` (floor(x*M/2^s) of a zero-extended x through
+multiply-high, shifts and high slices, or the add-back form t + ((x-t)>>1) of a
+2^w+M multiplier, is x / d when d = ceil(2^s/M) passes an exact closed-form bound
+over every residue; a shifted quotient folds into the divisor), `division_narrowing`
+(unsigned division/remainder of a zero extension by 0 < c < 2^N, and signed of a
+sign extension by c other than 0 and -1, is the extended narrow operation),
+`remainder_idiom` (x - (x/c)*c of one SSA value and one constant c is x % c),
+`compare_canonical` (constant to the right; comparisons of matching extensions,
+or of one extension with a representable constant, use the narrow operands) and
+`low_bits_narrowing` (the former BDD-checked low-slice narrowing, now its own
+lemma; the checked view keeps the BDD check). The division recognizer tracks each
+step of floor(x*M/2^s) as its exact integer while the step's width holds it and
+otherwise only the low bits it provably preserves (extensions, including x86's
+register-cell joins, and slices of one value are recognized as the same x).
+Signed quotients floor(x*M/2^s) + [x*M < 0] (the sign bit added, the replicated
+sign of x subtracted, or the quotient subtracted from it for a negated divisor)
+are x / d when `exactSignedMagicDivisor` proves d = ±ceil(2^s/|M|) on both sides
+of zero (2 <= |d| < 2^(w-1)); signed powers of two below 2^(w-1) through the bias
+`x < 0 ? 2^k-1 : 0` (select or shift spelling), `-(x / d)` as `x / -d`, and the
+remainders x - q*d over any product spelling, x - ((x + bias) & -2^k),
+((x + bias) & (2^k-1)) - bias (checked modulo 2^k) and the csneg form
+`x > 0 ? x & m : -((-x) & m)`. A quotient or remainder known only modulo 2^b is
+used only where no other bits are read (`r << (w-b)`): x86 O2 adler32's 32-bit
+tail over a 64-bit sum prints `(uint32_t)(sum % 0xfff1) << 16`; the sum's high
+half is not proven zero. The printer spells a 128-bit product of sign-extended
+64-bit operands as the exact signed `(int128_t)(int64_t)a * b`
+(`signed_wide_product`). Two value-level rules (`src/analysis/values/rules.ts`) run in
+`simplifySSA` for both views: `zext(trunc v)` is `v` when `v` is proven below the
+narrow width, and `x OP x` of one value is OP's reflexive truth value unless an
+indeterminate definition can reach `x` (through definitions or phi inputs, 128
+values bounded). x86's quotient-overflow guard after a division of a zero-extended
+dividend by a constant thus folds and its unreachable trap disappears. The printer
+prints division by a constant other than 0 (signed: other than -1) natively
+(`native_division`; Python-like keeps the helper for signed operands, whose floor
+division differs) and an integer insert as `(base & kept) | (value << offset)`
+(`mask_insert`). `test/reconstruction/source-division.test.ts` checks both magic
+divisor bounds against exhaustive 8-bit and sampled 16-bit search, compiler
+constants and off-by-one multipliers, and the narrowing/remainder/power-of-two
+lemmas at INT_MIN, -1 and width edges;
+`test/reconstruction/source-division-rules.test.ts` runs the rule pool on signed
+magic, power-of-two and remainder sequences (and near misses) and compares the
+rewritten DAG with the original on every 8-bit and sampled 32-bit dividend.
+
+The bitvector checker first accepts the same operator over identity-equal
+operands (congruence) without BDD work, then compiles both sides with every
+subterm common to both cones as one leaf and only then the whole bounded cone; a
+proof that adds or drops a leaf is accepted only when no added/dropped cone can
+reach an indeterminate definition, and a counterexample is reported only over true
+inputs. Bits are ordered most-significant first (a ripple-carry adder is linear),
+results compare by canonical node identity, a verified shared-leaf formula is
+cached per session by its leaf-renamed shape, and parallel moves of whole
+variables are checked by identity. On the development matrix this lowered
+allowance exhaustion from 186 to 29 of 200 functions.
 
 Source-only unsigned range analysis combines edge guards, definedness and parallel phi transfers before removing proven singleton register-cell plumbing. It widens unresolved loops and preserves unsupported signed guards, underflow paths and unknown definitions. The emitted-output induction smoke covers 294 observations, including zero trips, maximal counts, early exits, wrong guards and additional phi inputs; this is not a proof for arbitrary loops.
 

@@ -3,7 +3,7 @@ import type { Inference, InferenceStatus } from '../core/inference.js';
 import type { MemoryShape, ObservedField, TypeStatus } from '../analysis/types/model.js';
 import { bitWidth, expressionOperands, type Origin, type Value } from '../ir/index.js';
 import type { Region } from '../presentation/index.js';
-import type { Reconstruction } from '../reconstruction/model.js';
+import type { BoundaryProjection, Reconstruction } from '../reconstruction/model.js';
 import type { LocalValidationRecord } from '../reconstruction/local-validation.js';
 import { sourceConstantValues, sourceDataValues } from '../reconstruction/source-data.js';
 import type { SourceAddress } from '../reconstruction/source-model.js';
@@ -63,6 +63,35 @@ export function collectInferences(
   return { records, omitted: tally.skipped };
 }
 
+const likelyExplanation = (applied: boolean): string =>
+  applied
+    ? 'Likely-mode guess, not an established fact: the open argument list of this call was closed after its observed prefix by the named heuristics, which passed their precision gate on the benchmark harness. The call record keeps arity_complete false.'
+    : 'Likely-mode guess recorded only: the named heuristics are below their precision gate, so the printed argument list stays open.';
+const likelyTypeExplanation = (
+  applied: boolean,
+  subject: 'parameter_type' | 'result_type',
+): string =>
+  `${
+    applied
+      ? 'Likely-mode guess, not an established fact'
+      : 'Likely-mode guess recorded only: the named heuristics are below their precision gate, so the declaration stays as proven analysis leaves it'
+  }: ${subject === 'parameter_type' ? 'this formal' : 'the function result'} was taken to be an address (void *) because every discovered direct caller that ${subject === 'parameter_type' ? 'prepares it passes a value its own proven analysis holds as an address' : 'consumes the result treats it as an address'}. Proven analysis leaves it an integer, and the caller scan is not proof that these are all the callers.`;
+function likelyDetails(
+  call: string,
+  target: Extract<Details, { readonly subject: 'argument_list' }>['target'],
+  likely: NonNullable<BoundaryProjection['likely']>,
+): Extract<Details, { readonly subject: 'argument_list' }> {
+  return {
+    kind: 'guess',
+    subject: 'argument_list',
+    call_id: call,
+    target,
+    heuristics: [...likely.heuristics],
+    applied: likely.applied,
+    arity: likely.arity,
+    sites: likely.sites ?? null,
+  };
+}
 function gatherInferences(
   input: EmissionInput,
   program: Reconstruction,
@@ -461,6 +490,38 @@ function gatherInferences(
       program.signature?.evidence_ids,
     );
   }
+  const likelyTypes = program.source?.likely_types;
+  for (let ordinal = 0; ordinal < program.parameters.length; ordinal++) {
+    const value = program.parameters[ordinal]!;
+    const guess = likelyTypes?.parameters.get(value.id);
+    if (!guess) continue;
+    add([value.id], 'hypothesis', likelyTypeExplanation(guess.applied, 'parameter_type'), {
+      kind: 'guess',
+      subject: 'parameter_type',
+      ordinal,
+      value_ids: originalValues(value),
+      guessed_type: 'pointer',
+      heuristics: [...guess.heuristics],
+      applied: guess.applied,
+      sites: guess.sites ?? null,
+    });
+  }
+  if (likelyTypes?.result)
+    add(
+      [program.function.id],
+      'hypothesis',
+      likelyTypeExplanation(likelyTypes.result.applied, 'result_type'),
+      {
+        kind: 'guess',
+        subject: 'result_type',
+        ordinal: null,
+        value_ids: [],
+        guessed_type: 'pointer',
+        heuristics: [...likelyTypes.result.heuristics],
+        applied: likelyTypes.result.applied,
+        sites: likelyTypes.result.sites ?? null,
+      },
+    );
   const displayedAssociations = new Set<string>();
   for (const view of program.source?.value_types?.values() ?? [])
     for (const id of view.association_ids) displayedAssociations.add(id);
@@ -719,6 +780,21 @@ function gatherInferences(
         ],
         [node.id],
       );
+      if (projection.likely)
+        add(
+          [node.id, ...(native?.target_subject_id ? [native.target_subject_id] : [])],
+          'hypothesis',
+          likelyExplanation(projection.likely.applied),
+          likelyDetails(
+            node.id,
+            node.target.kind === 'direct'
+              ? { kind: 'direct', identity: identity(node.target.address) }
+              : { kind: 'indirect', value_ids: originalValues(node.target.value) },
+            projection.likely,
+          ),
+          native?.evidence_ids,
+          [node.id],
+        );
     }
   for (const [control, tail] of program.tails) {
     context.checkpoint(1);
@@ -766,6 +842,19 @@ function gatherInferences(
       [...(projection.signature?.evidence_ids ?? []), ...(native?.evidence_ids ?? [])],
       [control],
     );
+    if (projection.likely)
+      add(
+        [control, ...(native?.target_subject_id ? [native.target_subject_id] : [])],
+        'hypothesis',
+        likelyExplanation(projection.likely.applied),
+        likelyDetails(
+          control,
+          { kind: 'direct', identity: identity(tail.target) },
+          projection.likely,
+        ),
+        native?.evidence_ids,
+        [control],
+      );
   }
   for (const record of localValidation) {
     context.checkpoint(1);

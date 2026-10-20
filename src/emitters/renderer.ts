@@ -20,6 +20,7 @@ import {
   bitWidth,
   expressionOperands,
   integer,
+  sameType,
   type DataType,
   type Expression,
   type Instruction,
@@ -46,6 +47,7 @@ import type {
   ObjCMessage,
   SourceAddress,
   SourceFormalType,
+  SourceLocal,
 } from '../reconstruction/source-model.js';
 import { selectorArity } from '../metadata/runtime/objc-types.js';
 import { objcMessageText, objcStringLiteral } from './objc.js';
@@ -99,6 +101,7 @@ import {
   PRIMARY,
   SourcePrinter,
   UNARY,
+  castExplanation,
   expressionText,
   machineType,
   finiteFloatBits,
@@ -141,7 +144,13 @@ import {
   type InlineStore,
   type InlineSite,
 } from './source-inlining.js';
-import { memberName, paddingName, SourceStructs, type ObservedMember } from './source-structs.js';
+import {
+  paddingName,
+  SourceStructs,
+  structMemberName,
+  usedMemberKey,
+  type ObservedMember,
+} from './source-structs.js';
 import { planFlagTests, type FlagTest } from './source-flags.js';
 import { planLocalTypes, type Fact, type PointerFact } from './source-local-types.js';
 
@@ -306,7 +315,7 @@ export class Renderer {
   /** C integer type of each printed struct-member lvalue, by its text. */
   private readonly memberTypes = new Map<string, IntegerCType>();
   /** Offsets of each structure's members this function's text accesses, by structure name. */
-  private readonly usedMembers = new Map<string, Set<bigint>>();
+  private readonly usedMembers = new Map<string, Set<string>>();
   /** Where the structure bodies are inserted once the accessed members are known. */
   private structureSlot: { readonly at: number; readonly ids: readonly string[] } | null = null;
   private readonly sourceStructs: SourceStructs;
@@ -497,8 +506,18 @@ export class Renderer {
       if (!projection.signature) continue;
       const declaration = projection.signature.signature;
       if (projection.results.length === 1) {
-        this.sourceValueTypes.set(projection.results[0]!.id, declaration.return_type);
-        this.callResults.set(projection.results[0]!.id, projection);
+        const result = projection.results[0]!;
+        // A declared `void *` result (malloc) is refined by the object pointer
+        // projection proved from its uses; C converts it implicitly.
+        const declared = this.typeRecords.get(declaration.return_type)?.definition;
+        const projected = this.program.source?.value_types?.get(result.id)?.type_id;
+        const refined =
+          declared?.kind === 'pointer' &&
+          this.typeRecords.get(declared.to)?.definition.kind === 'void' &&
+          projected !== undefined &&
+          this.typeRecords.get(projected)?.definition.kind === 'pointer';
+        if (!refined) this.sourceValueTypes.set(result.id, declaration.return_type);
+        this.callResults.set(result.id, projection);
       }
     }
     if (this.sourceView) {
@@ -1074,6 +1093,7 @@ export class Renderer {
   private scalarPointee(id: string): IntegerCType | null {
     const pointer = this.typeRecords.get(id)?.definition;
     if (pointer?.kind !== 'pointer') return null;
+    if (this.byteAddress(pointer.to)) return { bits: 8, signed: false };
     const target = this.naturalScalar(pointer.to) ?? pointer.to;
     const type = this.typeRecords.get(target)?.definition;
     return type?.kind === 'integer' && type.bits % 8 === 0 && type.bits <= 64
@@ -1175,28 +1195,15 @@ export class Renderer {
       (expression.value.type.kind === 'integer' || expression.value.type.kind === 'float') &&
       type.kind !== expression.value.type.kind &&
       (type.bits === 32 || type.bits === 64) &&
-      type.bits === expression.value.type.bits &&
-      this.localValidation.presentation(
-        'c_bitcast',
-        expression.value.id,
-        'equal-width integer/IEEE storage copied with memcpy, preserving every bit without aliasing or numeric conversion',
-      )
+      type.bits === expression.value.type.bits
     ) {
-      this.localValidation.requireAbi(
-        'c_bitcast',
-        [expression.value.id],
-        'Native C float/double and integer storage use the target IEEE binary32/binary64 representation and matching byte order.',
+      const reinterpreted = this.reinterpret(
+        this.value(expression.value),
+        expression.value.type,
+        type,
+        expression.value.id,
       );
-      const target = `${type.kind === 'float' ? 'f' : 'u'}${type.bits}`;
-      const source = `${expression.value.type.kind === 'float' ? 'f' : 'u'}${type.bits}`;
-      return this.printer.primary(
-        this.call(
-          `__od_bitcast_${target}_${source}`,
-          'Copy the exact same-width IEEE/integer object representation; preserve NaN payloads and signed zero.',
-          [this.value(expression.value)],
-        ),
-        type.kind === 'integer' ? { bits: type.bits, signed: false } : null,
-      );
+      if (reinterpreted) return reinterpreted;
     }
     if (
       this.sourceView &&
@@ -1287,6 +1294,68 @@ export class Renderer {
 
   /** A C context that converts to unsigned `bits` (assignment, return, store)
    * makes a final reduction or widening to exactly that type implicit. */
+  /** Source view: `text` (a value of type `from`) as type `to` by exact bit
+   * reinterpretation. C prints a validated equal-width integer/IEEE memcpy
+   * helper; otherwise (Python-like, other types, refused record) the explicit
+   * `cast_bitcast` helper. Null in C when no validated helper applies. */
+  private reinterpret(
+    text: string,
+    from: DataType,
+    to: DataType,
+    subject: string,
+    fallback = false,
+  ): Printed | null {
+    if (
+      this.language === 'c-like' &&
+      (to.kind === 'integer' || to.kind === 'float') &&
+      (from.kind === 'integer' || from.kind === 'float') &&
+      to.kind !== from.kind &&
+      (to.bits === 32 || to.bits === 64) &&
+      to.bits === from.bits &&
+      this.localValidation.presentation(
+        'c_bitcast',
+        subject,
+        'equal-width integer/IEEE storage copied with memcpy, preserving every bit without aliasing or numeric conversion',
+      )
+    ) {
+      this.localValidation.requireAbi(
+        'c_bitcast',
+        [subject],
+        'Native C float/double and integer storage use the target IEEE binary32/binary64 representation and matching byte order.',
+      );
+      const target = `${to.kind === 'float' ? 'f' : 'u'}${to.bits}`;
+      const source = `${from.kind === 'float' ? 'f' : 'u'}${to.bits}`;
+      return this.printer.primary(
+        this.call(
+          `__od_bitcast_${target}_${source}`,
+          'Copy the exact same-width IEEE/integer object representation; preserve NaN payloads and signed zero.',
+          [text],
+        ),
+        to.kind === 'integer' ? { bits: to.bits, signed: false } : null,
+      );
+    }
+    if (this.language === 'c-like' && !fallback) return null;
+    return this.printer.primary(
+      this.call('cast_bitcast', castExplanation('bitcast'), [
+        this.writer.quote(machineType(to)),
+        this.writer.quote(machineType(from)),
+        text,
+      ]),
+      to.kind === 'integer' ? { bits: to.bits, signed: false } : null,
+    );
+  }
+
+  /** Source view: the promoted local a load/store accesses when the access's
+   * type differs from the local's declared type (a punned slot). */
+  private punnedLocal(
+    node: Extract<Instruction, { kind: 'load' | 'store' }>,
+  ): SourceLocal | undefined {
+    const local = this.sourceView ? this.program.source?.locals.get(node.id) : undefined;
+    return local && !sameType(local.type, node.kind === 'load' ? node.result.type : node.value.type)
+      ? local
+      : undefined;
+  }
+
   private converted(value: Printed, bits: number | null): string {
     const implicit = value.unreduced ?? value.widened;
     return this.sourceView &&
@@ -1463,6 +1532,11 @@ export class Renderer {
         this.writer.fail('Reconstructed expression expansion exceeds its budget');
       this.expanding.add(value.id);
       const storage = this.storage(load);
+      const punned = this.punnedLocal(load);
+      if (punned) {
+        this.expanding.delete(value.id);
+        return this.reinterpret(storage, punned.type, load.result.type, load.id, true)!;
+      }
       const member = this.memberPointers.get(load.id);
       if (
         this.language === 'c-like' &&
@@ -1600,6 +1674,55 @@ export class Renderer {
     this.writer.helper(helper, explanation);
     this.ellipsisUsed = true;
     return '...';
+  }
+
+  /** Whether a `likely`-mode guess prints a call with its argument list closed. */
+  private likelyArgumentList(projection: BoundaryProjection): boolean {
+    return this.sourceView && projection.likely?.applied === true;
+  }
+  private likelyUsed = false;
+  private likelyTypeUsed = false;
+  /** Whether a formal's printed type is a guess that `likely` mode applied. */
+  private guessedFormal(value: Value): boolean {
+    return (
+      this.sourceView &&
+      this.program.source?.likely_types?.parameters.get(value.id)?.applied === true &&
+      this.program.source.value_types?.get(value.id)?.likely === true
+    );
+  }
+
+  private guessedResult(): boolean {
+    return (
+      this.sourceView &&
+      this.program.source?.likely_types?.result?.applied === true &&
+      this.program.source.return_source_type === this.input.source?.likely_types?.pointer_type_id &&
+      !this.program.signature
+    );
+  }
+
+  /** Likely mode: a type that only a guess established (a formal or the result that
+   * proven analysis left integer) prints inside `likely_type(...)` in both dialects, once
+   * where it is declared; the file header states the meaning and the guess record in the
+   * provenance names the heuristics and call sites. */
+  private likelyType(text: string): string {
+    this.likelyTypeUsed = true;
+    return this.call(
+      'likely_type',
+      'Guessed, not proven: the wrapped type was chosen by an opt-in likely-mode heuristic from how the function callers use this formal or result (see the guess inference); proven analysis leaves it an integer. Values connected to it by copies inherit the type.',
+      [text],
+    );
+  }
+
+  /** Likely mode: a call whose open argument list was closed on a guess prints inside
+   * `likely_arity(...)` in both dialects (the file header states its meaning once);
+   * the guess record in the provenance names the heuristics. */
+  private likelyCall(text: string): string {
+    this.likelyUsed = true;
+    return this.call(
+      'likely_arity',
+      'Guessed, not proven: the argument list of the wrapped call was closed after its observed prefix by an opt-in likely-mode heuristic (see the guess inference). More arguments may exist; the callee was not proven to read no others.',
+      [text],
+    );
   }
 
   private dataOrigin(id: string): Origin {
@@ -2366,6 +2489,8 @@ export class Renderer {
       case 'pointer':
         if (this.sourceView && this.language === 'c-like' && record.spelling !== undefined)
           return record.spelling;
+        if (this.byteAddress(type.to))
+          return this.language === 'c-like' ? 'uint8_t*' : 'pointer[uint8_t]';
         return this.language === 'c-like'
           ? `${this.sourceType(type.to, depth + 1)}*`
           : `pointer[${this.sourceType(type.to, depth + 1)}]`;
@@ -2392,6 +2517,23 @@ export class Renderer {
       case 'unknown':
         return this.sourceView ? this.opaqueType(id) : this.identifier(id, 'type');
     }
+  }
+
+  /** Source view: an analysis address whose pointee type is not established
+   * (`void`) is spelled byte-addressed, so `p + k` and `*(T *)(p + k)` are the
+   * machine's exact byte arithmetic without integer round trips. */
+  private byteAddress(pointee: string): boolean {
+    const record = this.typeRecords.get(pointee);
+    return (
+      this.sourceView &&
+      record?.source === 'analysis' &&
+      record.definition.kind === 'void' &&
+      this.localValidation.presentation(
+        'byte_addressed_pointer',
+        this.input.function.id,
+        'analysis address without an established pointee type spelled as a byte pointer; arithmetic and dereferences keep the exact address bits and access widths, no pointee type is claimed',
+      )
+    );
   }
 
   /** A whole machine address stepped by a proven record stride retains its
@@ -2642,7 +2784,7 @@ export class Renderer {
     if (this.constantOf(value) === 0n) return '0';
     if (!this.inline.has(value.id) && this.declaredSpelling(value) === spelling)
       return this.local(value);
-    return `(${spelling})(uintptr_t)${this.printer.group(this.printed(value), UNARY)}`;
+    return this.pointerValue(this.printed(value), spelling);
   }
 
   /** Exact whole value behind same-width casts, low extracts and a
@@ -2682,7 +2824,7 @@ export class Renderer {
    * a declared partial structure with a member of exactly that offset and width.
    * The base may itself be an inline pointer member read (`p->f_20->f_8`), and
    * a loop counter proven by shape analysis indexes a strided element view. */
-  private memberAccess(address: Value, bits: number, node?: string): string | null {
+  private memberAccess(address: Value, bits: number, node?: string, float = false): string | null {
     let base = address,
       offset = 0n;
     let index: Value | undefined,
@@ -2776,7 +2918,9 @@ export class Renderer {
       const kind = this.typeRecords.get(item.typeId)?.definition.kind;
       if (
         item.bits !== bits ||
-        !(kind === 'integer' || (kind === 'pointer' && item.count === undefined))
+        !(float
+          ? kind === 'float'
+          : kind === 'integer' || (kind === 'pointer' && item.count === undefined))
       )
         return false;
       if (item.count === undefined) return (!index || indexedStruct) && item.offset === offset;
@@ -2803,10 +2947,10 @@ export class Renderer {
       if (!node) return null;
       this.memberPointers.set(node, member.typeId);
     }
-    const field = member.name ?? memberName(member.offset);
+    const field = structMemberName(member);
     const used = this.sourceStructs.name(pointer.to);
-    const offsets = this.usedMembers.get(used) ?? new Set<bigint>();
-    offsets.add(member.offset);
+    const offsets = this.usedMembers.get(used) ?? new Set<string>();
+    offsets.add(usedMemberKey(member));
     this.usedMembers.set(used, offsets);
     let access = indexedStruct
       ? `${baseText}[${this.value(index!)}].${field}`
@@ -2925,9 +3069,7 @@ export class Renderer {
       const parts: string[] = [];
       let end = 0n,
         packed = false;
-      for (const member of members) {
-        if (!used.has(member.offset)) continue;
-        if (member.offset > end) parts.push(`uint8_t ${paddingName(end)}[${member.offset - end}];`);
+      const declare = (member: ObservedMember): string => {
         const definition = this.typeRecords.get(member.typeId)?.definition;
         const spelling =
           definition?.kind === 'float'
@@ -2940,7 +3082,24 @@ export class Renderer {
                 : '__uint128_t'
               : this.sourceType(member.typeId);
         const array = member.count === undefined ? '' : `[${member.count ?? ''}]`;
-        parts.push(`${spelling} ${member.name ?? memberName(member.offset)}${array};`);
+        return `${spelling} ${structMemberName(member)}${array};`;
+      };
+      for (let index = 0; index < members.length; index++) {
+        const member = members[index]!;
+        // The integer member of an overlay is followed by its floating partner;
+        // both print as one anonymous union only when the text uses both.
+        const partner = member.overlaid && !member.float ? members[index + 1] : undefined;
+        if (partner) index++;
+        const printed = [member, ...(partner ? [partner] : [])].filter((item) =>
+          used.has(usedMemberKey(item)),
+        );
+        if (!printed.length) continue;
+        if (member.offset > end) parts.push(`uint8_t ${paddingName(end)}[${member.offset - end}];`);
+        parts.push(
+          printed.length === 2
+            ? `union { ${printed.map(declare).join(' ')} };`
+            : declare(printed[0]!),
+        );
         packed ||= member.offset % BigInt(member.bits / 8) !== 0n;
         end = member.offset + member.size;
       }
@@ -3169,9 +3328,11 @@ export class Renderer {
       const parameters = signature
         ? signature.parameters.map((_, index) => this.callParameterType(projection, index))
         : projection.arguments.map((value) => this.valueType(value));
+      const guessed = !signature && this.likelyArgumentList(projection);
       const open = signature
         ? signature.variadic
-        : projection.argument_list_complete === false || projection.kind === 'physical';
+        : !guessed &&
+          (projection.argument_list_complete === false || projection.kind === 'physical');
       if (signature?.variadic && parameters.length === 0) continue;
       if (open) parameters.push(parameters.length ? '...' : 'uintptr_t');
       const text = `extern ${signature?.noreturn ? '_Noreturn ' : ''}${result} ${name}(${parameters.length ? this.writer.join(parameters) : 'void'});`;
@@ -3204,7 +3365,13 @@ export class Renderer {
         );
       const start = this.writer.offset;
       // An open argument list already prints `...`; a closed observed one is marked inferred.
-      this.writer.line(0, signature || text.includes('...') ? text : `${text} /* inferred */`);
+      const guessedList = !signature && this.likelyArgumentList(this.program.calls.get(node.id)!);
+      this.writer.line(
+        0,
+        signature || text.includes('...')
+          ? text
+          : `${text} /* ${guessedList ? 'likely' : 'inferred'} */`,
+      );
       this.mapped(node, start, [], signature?.evidence_ids ?? []);
     }
   }
@@ -3562,8 +3729,13 @@ export class Renderer {
       )
         return indexed;
     }
-    if (this.language === 'c-like' && plain) {
-      const member = this.memberAccess(node.address, bitWidth(type), node.id);
+    if (this.language === 'c-like' && (plain || (type.kind === 'float' && scalar))) {
+      const member = this.memberAccess(
+        node.address,
+        bitWidth(type),
+        node.id,
+        type.kind === 'float',
+      );
       if (member && this.permitUnaligned(node)) return member;
     }
     let address = this.stringBaseSum(node.address) ?? this.sourceAddressPrinted(node.address);
@@ -3820,7 +3992,9 @@ export class Renderer {
       )
         this.writer.statement(depth, this.clobbers(node.clobbers));
     }
-    const open = projection.argument_list_complete === false || projection.kind === 'physical';
+    const guessed = this.likelyArgumentList(projection);
+    const open =
+      !guessed && (projection.argument_list_complete === false || projection.kind === 'physical');
     if (open)
       args.push(
         this.openArguments(
@@ -3870,7 +4044,10 @@ export class Renderer {
           args.slice(skip + arity),
         ),
       );
-    } else operation = `${target}(${this.writer.join(args)})`;
+    } else {
+      operation = `${target}(${this.writer.join(args)})`;
+      if (guessed) operation = this.likelyCall(operation);
+    }
     if (operand) return operation;
     const results = projection.results.filter((value) => this.program.live.has(value.id));
     const result = results.length === 1 ? results[0] : undefined;
@@ -4027,6 +4204,11 @@ export class Renderer {
       )}`;
     }
     storage ??= this.storage(node);
+    const punned = this.punnedLocal(node);
+    if (punned)
+      return this.program.live.has(node.result.id)
+        ? `${this.local(node.result)} = ${this.reinterpret(storage, punned.type, node.result.type, node.id, true)!.text}`
+        : storage;
     const member = this.memberPointers.get(node.id);
     if (member && this.program.live.has(node.result.id)) {
       const spelling = this.declaredSpelling(node.result);
@@ -4150,6 +4332,11 @@ export class Renderer {
         }
         if (this.program.source) {
           const storage = this.storage(node);
+          const punned = this.punnedLocal(node);
+          if (node.kind === 'store' && punned) {
+            text = `${storage} = ${this.reinterpret(this.value(node.value), node.value.type, punned.type, node.id, true)!.text}`;
+            break;
+          }
           if (node.kind === 'store') {
             // Storing converts to the lvalue's own width (a local is declared
             // unsigned; a dereference has exactly the stored width).
@@ -4169,7 +4356,7 @@ export class Renderer {
                 : literal
                   ? literal.text
                   : typed
-                    ? `(${this.formalSpelling(typed)})(uintptr_t)${this.printer.group(this.printed(node.value), UNARY)}`
+                    ? this.pointerValue(this.printed(node.value), this.formalSpelling(typed))
                     : this.converted(this.printed(node.value), bitWidth(node.value.type)))
             }`;
           } else text = this.assignmentText(node, storage);
@@ -4600,6 +4787,23 @@ export class Renderer {
         if (hoisted.has(key(copy.destination)) && moves.length <= 128)
           moves.push({ destination: key(copy.destination), source: copy.source });
     if (this.program.transfers.get(transfer)!.length) {
+      // A dropped zero-extension self-copy reads the live narrow member `u` of a
+      // widened class: its storage holds exactly zero_extend(u), written by u's own
+      // definition with no other member defined while u is live (interference).
+      const widened = new Map<string, Value>();
+      for (const copy of this.program.transfers.get(transfer)!) {
+        const representative = this.variables.get(copy.destination.id);
+        const narrow = this.uncast(copy.source, ['bitcast', 'zero_extend']);
+        if (
+          representative &&
+          narrow.id !== copy.source.id &&
+          !this.inline.has(narrow.id) &&
+          this.variables.get(narrow.id) === representative &&
+          bitWidth(narrow.type) < bitWidth(representative.type)
+        )
+          widened.set(representative.id, narrow);
+      }
+      const assumed = new Set([...widened.values()].map((value) => value.id));
       const checked = this.localValidation.check(
         'parallel-copy',
         transfer.effect.destination.id,
@@ -4631,6 +4835,9 @@ export class Renderer {
             }),
             moves,
             (id) => {
+              const narrow = widened.get(id);
+              if (narrow) return { kind: 'cast', op: 'zero_extend', value: narrow };
+              if (assumed.has(id)) return undefined;
               // A coalesced value is read from its class's single variable.
               const representative = this.variables.get(id);
               if (representative && representative.id !== id && !this.inline.has(id))
@@ -4938,7 +5145,10 @@ export class Renderer {
     }
   }
 
-  /** Edge copies actually printed: a coalesced class's self-copy is no move. */
+  /** Edge copies actually printed: a coalesced class's self-copy is no move. A
+   * zero extension of a narrower member of the destination's class is one too:
+   * that class shares widened unsigned storage, which holds the zero-extended
+   * value (the parallel-copy validation states this assumption). */
   private printedCopies(
     transfer: ParallelTransfer,
   ): readonly { readonly destination: Value; readonly source: Value }[] {
@@ -4949,10 +5159,13 @@ export class Renderer {
     return copies.filter((copy) => {
       const destination = this.variables.get(copy.destination.id);
       const source = this.uncast(copy.source, ['bitcast']);
+      const narrow = this.uncast(source, ['bitcast', 'zero_extend']);
       return !(
         destination &&
-        !this.inline.has(source.id) &&
-        this.variables.get(source.id) === destination
+        ((!this.inline.has(source.id) && this.variables.get(source.id) === destination) ||
+          (!this.inline.has(narrow.id) &&
+            this.variables.get(narrow.id) === destination &&
+            bitWidth(narrow.type) < bitWidth(destination.type)))
       );
     });
   }
@@ -5242,7 +5455,7 @@ export class Renderer {
         )
       ) {
         this.conjunct = [...(pending ?? []), term(positive)];
-        this.transfer((positive ? no : yes).transfer, depth, control);
+        this.silentArm(positive ? no : yes, depth, control);
         this.arm(body, depth, control);
         if (this.conjunct) this.invalid('A merged condition was not printed');
         return;
@@ -5250,15 +5463,15 @@ export class Renderer {
     }
     if (shaped && this.emptyArm(no)) {
       open(true);
-      this.transfer(no.transfer, depth + 1, control);
+      this.silentArm(no, depth + 1, control);
       if (this.emptyArm(yes)) {
-        this.transfer(yes.transfer, depth + 1, control);
+        this.silentArm(yes, depth + 1, control);
         if (!c) this.writer.statement(depth + 1, 'pass');
       } else this.arm(yes, depth + 1, control);
       close();
     } else if (shaped && this.emptyArm(yes)) {
       open(false);
-      this.transfer(yes.transfer, depth + 1, control);
+      this.silentArm(yes, depth + 1, control);
       this.arm(no, depth + 1, control);
       close();
     } else if (pending) this.invalid('A merged condition reached an if with an else');
@@ -5383,7 +5596,7 @@ export class Renderer {
       printed++;
     }
     if (this.emptyArm(control.otherwise) && (c || printed)) {
-      this.transfer(control.otherwise.transfer, depth + 2, control);
+      this.silentArm(control.otherwise, depth + 2, control);
     } else {
       const scoped = c && this.armDeclares(control.otherwise);
       this.writer.line(depth + 1, c ? `default:${scoped ? ' {' : ''}` : 'case _:');
@@ -5425,8 +5638,56 @@ export class Renderer {
     );
   }
 
+  /** An arm that prints nothing: a silent edge, through blocks that print nothing
+   * and fall through silently (e.g. a branch whose only copy coalesced away). */
   private emptyArm(arm: ControlArm): boolean {
-    return !arm.body && this.silentTransfer(arm.transfer);
+    if (!this.silentTransfer(arm.transfer)) return false;
+    if (!arm.body) return true;
+    const blocks: BlockRegion[] = [];
+    const flatten = (region: Region): boolean => {
+      if (region.kind === 'sequence') return region.regions.every(flatten);
+      if (region.kind !== 'block') return false;
+      blocks.push(region);
+      return true;
+    };
+    return (
+      flatten(arm.body) &&
+      blocks.every(
+        (block) =>
+          this.quietBlock(block) &&
+          block.control.kind === 'jump' &&
+          this.silentTransfer(block.control.transfer),
+      )
+    );
+  }
+
+  /** Print an empty arm: its edge and silent blocks record their mappings and edges. */
+  private silentArm(arm: ControlArm, depth: number, origin: Control): void {
+    this.transfer(arm.transfer, depth, origin);
+    if (arm.body) this.region(arm.body, depth);
+  }
+
+  /** A block printing nothing before its control: no label, note, definition or
+   * printed statement. */
+  private quietBlock(block: BlockRegion): boolean {
+    const definitions = this.program.source?.definitions;
+    const printed = (anchor: string): boolean =>
+      definitions?.get(anchor)?.some((definition) => !this.inlined.has(definition.result.id)) ??
+      false;
+    return !(
+      this.notes.has(block.id) ||
+      this.notes.has(block.control.id) ||
+      (this.labels.has(block.id) && !this.clones.has(block)) ||
+      printed(block.id) ||
+      printed(block.control.id) ||
+      block.statements.some(
+        (node) =>
+          printed(node.id) ||
+          (this.program.retained.has(node.id) &&
+            !this.flagAccesses.has(node.id) &&
+            !('result' in node && this.inlined.has(node.result.id))),
+      )
+    );
   }
 
   /** A fallthrough edge whose printed copies all moved into a `for` header. */
@@ -5450,28 +5711,13 @@ export class Renderer {
       return true;
     };
     if (!flatten(arm.body) || !blocks.length) return null;
-    const definitions = this.program.source?.definitions;
-    const printed = (anchor: string): boolean =>
-      definitions?.get(anchor)?.some((definition) => !this.inlined.has(definition.result.id)) ??
-      false;
     for (const [index, block] of blocks.entries()) {
       const control = block.control;
       // A flag short-circuit head prints nothing; its merge test follows.
       const flag = this.flagHeads.get(block.id),
         head = flag !== undefined && flag.merge === blocks[index + 1]?.id;
       if (
-        this.notes.has(block.id) ||
-        this.notes.has(control.id) ||
-        (this.labels.has(block.id) && !this.clones.has(block)) ||
-        printed(block.id) ||
-        printed(control.id) ||
-        block.statements.some(
-          (node) =>
-            printed(node.id) ||
-            (this.program.retained.has(node.id) &&
-              !this.flagAccesses.has(node.id) &&
-              !('result' in node && this.inlined.has(node.result.id))),
-        ) ||
+        !this.quietBlock(block) ||
         (index < blocks.length - 1 &&
           !head &&
           (control.kind !== 'jump' || !this.silentTransfer(control.transfer)))
@@ -5890,31 +6136,89 @@ export class Renderer {
     // at every other definition; narrow reads retain their original C type.
     const widening = new Map<string, Value>();
     const assignments: { destination: Value; source: Value }[] = [];
+    /** `destination = zero_extend(source)` of a plain unsigned variable: one
+     * widest-declared storage holds both (a source widened to two different
+     * storage types keeps its own). */
+    const widen = (source: Value, destination: Value): void => {
+      const previous = widening.get(source.id);
+      if (
+        source.type.kind !== 'integer' ||
+        destination.type.kind !== 'integer' ||
+        source.type.bits >= destination.type.bits ||
+        formals.has(source.id) ||
+        this.inlinedCalls.has(source.id) ||
+        this.valueType(source) !== this.dataType(source.type) ||
+        this.valueType(destination) !== this.dataType(destination.type) ||
+        (previous && machineType(previous.type) !== machineType(destination.type))
+      )
+        return;
+      widening.set(source.id, destination);
+      assignments.push({ source, destination });
+    };
+    // Narrow variables zero-extended by edge copies, with each extension's copy count.
+    const extended = new Map<string, { narrow: Value; copies: Map<string, Value[]> }>();
     for (const copies of program.transfers.values())
       for (const copy of copies) {
         const source = this.uncast(copy.source, ['bitcast']);
         if (source.id !== copy.source.id)
           assignments.push({ destination: copy.destination, source });
+        const expression = this.inline.has(copy.source.id)
+          ? program.expressions.get(copy.source.id)
+          : undefined;
+        if (
+          expression?.kind !== 'cast' ||
+          expression.op !== 'zero_extend' ||
+          this.inline.has(expression.value.id)
+        )
+          continue;
+        const row = extended.get(expression.value.id) ?? {
+          narrow: expression.value,
+          copies: new Map<string, Value[]>(),
+        };
+        row.copies.set(copy.source.id, [
+          ...(row.copies.get(copy.source.id) ?? []),
+          copy.destination,
+        ]);
+        extended.set(expression.value.id, row);
       }
+    // A narrow variable joins the wide phi storage only when those edge copies
+    // are its only reads, so the merge adds no conversion at any read; when its
+    // value is at least `int` wide, since a narrower unsigned value (a narrow type
+    // or the zero extension of one) promotes to signed `int` and its definition
+    // into wider storage would need a conversion; and when it carries no role name
+    // the phi lacks (the merged variable keeps it).
+    const promoted = (value: Value): boolean => {
+      const expression = program.expressions.get(value.id);
+      return (
+        bitWidth(value.type) < 32 ||
+        (expression?.kind === 'cast' &&
+          expression.op === 'zero_extend' &&
+          bitWidth(expression.value.type) < 32)
+      );
+    };
+    for (const { narrow, copies } of extended.values()) {
+      const role = this.sourceRoleNames.get(narrow.id);
+      if (
+        promoted(narrow) ||
+        program.use_counts.get(narrow.id) !== copies.size ||
+        [...copies].some(
+          ([id, destinations]) =>
+            program.use_counts.get(id) !== destinations.length ||
+            destinations.some(
+              (destination) => !!role && this.sourceRoleNames.get(destination.id) !== role,
+            ),
+        )
+      )
+        continue;
+      for (const destinations of copies.values())
+        for (const destination of destinations) widen(narrow, destination);
+    }
     for (const block of program.blocks.values())
       for (const node of block.statements) {
         if (node.kind !== 'assign' || !program.retained.has(node.id)) continue;
         const expression = program.expressions.get(node.result.id) ?? node.expression;
-        if (expression.kind !== 'cast' || expression.op !== 'zero_extend') continue;
-        const source = expression.value,
-          destination = node.result;
-        if (
-          source.type.kind !== 'integer' ||
-          destination.type.kind !== 'integer' ||
-          source.type.bits >= destination.type.bits ||
-          formals.has(source.id) ||
-          this.inlinedCalls.has(source.id) ||
-          this.valueType(source) !== this.dataType(source.type) ||
-          this.valueType(destination) !== this.dataType(destination.type)
-        )
-          continue;
-        widening.set(source.id, destination);
-        assignments.push({ source, destination });
+        if (expression.kind === 'cast' && expression.op === 'zero_extend')
+          widen(expression.value, node.result);
       }
     const storageType = (value: Value): string =>
       machineType((widening.get(value.id) ?? value).type);
@@ -6084,13 +6388,6 @@ export class Renderer {
     );
     let body = this.body;
     if (
-      (!layout.ordered.length ||
-        this.localValidation.presentation(
-          'loop_exit_layout',
-          subject,
-          'acyclic sibling regions follow exact CFG dependencies, excluding natural header backedges; successors whose external incoming edges all belong to one owned region move to the smallest such region, after any containing loop; fixed-point placement preserves every statement, edge copy and dynamic effect order, while cyclic dependencies retain labels',
-          layout.ordered,
-        )) &&
       (!layout.duplicated.length ||
         this.localValidation.presentation(
           'return_tail_duplication',
@@ -6104,20 +6401,6 @@ export class Renderer {
           subject,
           'a bounded tail lexically between a goto and its target is copied onto every incoming edge, fallthroughs included, so its home is no longer printed and the goto falls through; each path still runs the same effects once in the same order before the same exit',
           layout.forced,
-        )) &&
-      (!layout.relocated.length ||
-        this.localValidation.presentation(
-          'terminal_block_placement',
-          subject,
-          'a terminal block is printed at its only edge, or right after the only loop entering it when every other exit of that loop is a duplicated tail',
-          layout.relocated.map((item) => item.block),
-        )) &&
-      (!layout.merged.length ||
-        this.localValidation.presentation(
-          'loop_exit_merge',
-          subject,
-          'the exit reached by most loop edges follows the loop, so those edges print as breaks; an exit entered by one loop edge only moves onto that edge and still runs the same statements once on the same path before its own jump, so no exit edge, edge copy or effect changes',
-          layout.merged.map((item) => item.block),
         ))
     ) {
       body = layout.body;
@@ -6800,7 +7083,8 @@ export class Renderer {
             ids.push(value.id);
             return this.valueLiteral(value)?.text ?? this.value(value);
           });
-          if (tail.boundary.argument_list_complete === false)
+          const guessedTail = this.likelyArgumentList(tail.boundary);
+          if (tail.boundary.argument_list_complete === false && !guessedTail)
             arguments_.push(
               this.openArguments(
                 arguments_.length ? 'unknown_argument_remainder' : 'unknown_arguments',
@@ -6812,9 +7096,10 @@ export class Renderer {
             `Native tail transfer to ${this.writer.quote(key)} using observed ${this.input.source!.abi.id} storage. Preserve unknown target effects and forward its actual results. An absent observed result layout is unknown, not void.`,
           );
           ids.push(control.target.id);
+          const tailCall = `${name}(${this.writer.join(arguments_)})`;
           this.tailStatement(
             depth,
-            `${name}(${this.writer.join(arguments_)})`,
+            guessedTail ? this.likelyCall(tailCall) : tailCall,
             tail.result_void === true,
           );
           break;
@@ -7196,7 +7481,11 @@ export class Renderer {
         : this.identifier(value.id, source ? 'arg' : register ? 'reg' : 'arg');
       const type = source ? this.sourceType(source.type_id) : this.valueType(value);
       this.declaredTypes.set(value.id, type);
-      parameters.push({ value, type, name });
+      parameters.push({
+        value,
+        type: this.guessedFormal(value) ? this.likelyType(type) : type,
+        name,
+      });
     }
     // A tail into a proven-void callee yields no result: with no returned value
     // on any other path the function is void, not of unknown result.
@@ -7235,6 +7524,7 @@ export class Renderer {
     const floating = this.sourceView && this.program.source?.return_float;
     if (floating) returnType = floating === 32 ? 'float' : 'double';
     this.returnSpelling = returnType;
+    const returnShown = this.guessedResult() ? this.likelyType(returnType) : returnType;
     // The scalar-support prelude is chosen from the finished text and inserted here.
     const supportAt = this.sourceView && this.language === 'c-like' ? w.offset : undefined;
     if (this.sourceView && this.language === 'c-like') {
@@ -7280,9 +7570,9 @@ export class Renderer {
         w.declaration(parameter.type, parameter.name),
       );
       const prefix =
-        this.language === 'c-like' ? `${returnType} ${headerName}(` : `def ${headerName}(`;
+        this.language === 'c-like' ? `${returnShown} ${headerName}(` : `def ${headerName}(`;
       closing(
-        `${prefix}${this.writer.join(declarations)}${this.language === 'c-like' ? ') {' : `) -> ${returnType}:`}`,
+        `${prefix}${this.writer.join(declarations)}${this.language === 'c-like' ? ') {' : `) -> ${returnShown}:`}`,
       );
       let offset = this.headerStart + prefix.length;
       for (let index = 0; index < parameters.length; index++) {
@@ -7299,7 +7589,10 @@ export class Renderer {
         offset += length + 2;
       }
     } else if (parameters.length) {
-      w.line(0, this.language === 'c-like' ? `${returnType} ${headerName}(` : `def ${headerName}(`);
+      w.line(
+        0,
+        this.language === 'c-like' ? `${returnShown} ${headerName}(` : `def ${headerName}(`,
+      );
       for (let i = 0; i < parameters.length; i++) {
         const parameter = parameters[i]!;
         const start = w.offset;
@@ -7316,12 +7609,12 @@ export class Renderer {
         );
         this.inferenceSites.set(parameter.value.id, { start, end: w.offset });
       }
-      closing(this.language === 'c-like' ? ') {' : `) -> ${returnType}:`);
+      closing(this.language === 'c-like' ? ') {' : `) -> ${returnShown}:`);
     } else
       closing(
         this.language === 'c-like'
-          ? `${returnType} ${headerName}() {`
-          : `def ${headerName}() -> ${returnType}:`,
+          ? `${returnShown} ${headerName}() {`
+          : `def ${headerName}() -> ${returnShown}:`,
       );
     this.headerEnd = w.offset;
     const proof = this.sourceEvidence.get(this.input.function.id);
@@ -7420,6 +7713,20 @@ export class Renderer {
     this.declareFunctionValues(globalsAt, insert);
     if (this.structureSlot) insert(this.structureSlot.at, this.structureLines());
     let support = supportAt;
+    if (this.likelyUsed) {
+      const comment = 'likely_arity(call): argument list guessed closed, not proven';
+      const delta = insert(scratchAt, [
+        this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
+      ]);
+      if (support !== undefined) support += delta;
+    }
+    if (this.likelyTypeUsed) {
+      const comment = 'likely_type(T): type guessed from caller use, not proven';
+      const delta = insert(scratchAt, [
+        this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
+      ]);
+      if (support !== undefined) support += delta;
+    }
     if (this.ellipsisUsed) {
       const comment = '...: more args possible';
       const delta = insert(scratchAt, [

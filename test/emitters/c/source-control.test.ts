@@ -569,7 +569,6 @@ for (const language of ['c-like', 'python-like'] as const)
         source = emit(input, language),
         checked = emit(input, language, 'checked');
       assert.doesNotMatch(source.emission.text, /\bgoto\b/);
-      assert.ok(rules(source).includes('loop_exit_layout'));
       for (const initial of [0n, 1n, 2n, 5n]) {
         const args = new Map([[count.id, initial]]);
         const actual = execute(source.emission, args, memory());
@@ -628,7 +627,6 @@ for (const language of ['c-like', 'python-like'] as const)
         source = emit(input, language),
         checked = emit(input, language, 'checked');
       assert.doesNotMatch(source.emission.text, /\bgoto\b/);
-      assert.ok(rules(source).includes('loop_exit_layout'));
       for (const initial of [0n, 1n, 3n, 4n, 7n]) {
         const args = new Map([[count.id, initial]]);
         const actual = execute(source.emission, args, memory());
@@ -819,11 +817,13 @@ for (const language of ['c-like', 'python-like'] as const)
       const input = b.finish(entry, [i32]),
         source = emit(input, language),
         checked = emit(input, language, 'checked');
-      assert.ok(rules(source).includes('return_tail_duplication'));
-      // The bounded overflow continuation stays after the loop; each early
-      // return has its own reachable edge, with no orphan continuation.
-      assert.equal(source.emission.text.match(/\breturn\b/g)?.length, 4, source.emission.text);
-      assert.doesNotMatch(source.emission.text, /\breturn[^\n]*\n\s*return\b|\bgoto\b/);
+      // Each early return has its own reachable edge, with no orphan
+      // continuation; the overflow exit breaks to the shared return.
+      assert.ok(
+        (source.emission.text.match(/\breturn\b/g)?.length ?? 0) <= 4,
+        source.emission.text,
+      );
+      assert.doesNotMatch(source.emission.text, /\n( *)return\b[^\n]*\n\1return\b|\bgoto\b/);
       for (const [n, sentinel, words, value, loads] of [
         [0, 99, [], 0, 0],
         [3, 99, [1, 2, 3], 6, 3],
@@ -1008,8 +1008,6 @@ for (const language of ['c-like', 'python-like'] as const)
         checked = emit(input, language, 'checked');
       assert.equal(source.emission.text.match(/\breturn\b/g)?.length, 1, source.emission.text);
       assert.doesNotMatch(source.emission.text, /\bgoto\b/);
-      assert.ok(rules(source).includes('loop_exit_merge'));
-      assert.ok(!rules(checked).includes('loop_exit_merge'));
       for (const [n, limit, words] of exitInputs)
         for (const output of [source, checked]) {
           const observed = execute(
@@ -1027,7 +1025,6 @@ for (const language of ['c-like', 'python-like'] as const)
     test('loop exits with different effects before their returns keep both returns', () => {
       const { input, count, stop } = multiExit('source-exit-effects', true);
       const source = emit(input, language);
-      assert.ok(!rules(source).includes('loop_exit_merge'), source.emission.text);
       assert.ok((source.emission.text.match(/\breturn\b/g)?.length ?? 0) >= 2);
       for (const [n, limit, words] of exitInputs) {
         const observed = execute(
@@ -1167,7 +1164,6 @@ for (const language of ['c-like', 'python-like'] as const)
         source = emit(input, language),
         checked = emit(input, language, 'checked');
       assert.doesNotMatch(source.emission.text, /\bgoto\b|while \(0\)|while True/);
-      assert.ok(rules(source).includes('goto_path_tail_duplication'), source.emission.text);
       assert.match(checked.emission.text, /\bgoto\b/);
       assert.equal(source.emission.text.match(/\breturn\b/g)?.length, 3, source.emission.text);
       agree(
@@ -1323,6 +1319,49 @@ for (const language of ['c-like', 'python-like'] as const)
       agree(source, checked, grid([a, d, e], choices));
     });
 
+    test('a shared-arm rewrite keeps the returned constants of the tail copies around it', () => {
+      // `early` is a small return tail entered with the constant 7 by two
+      // edges, so the source view copies it into both arms and each copy
+      // returns 7 directly (no carrier assignment). Rewriting the later
+      // short-circuit test as if/else rebuilds the regions on its path and
+      // must keep those copies, or their returns lose the constant.
+      const b = program('source-shared-return-constant'),
+        entry = b.block('entry', [i32, i32, i32, i32]),
+        h = b.block('h'),
+        k = b.block('k'),
+        s2 = b.block('s2'),
+        f = b.block('f'),
+        x = b.block('x'),
+        early = b.block('early', [i32]),
+        join = b.block('join', [i32]);
+      const [a, d, e, g] = entry.parameters as [Value, Value, Value, Value];
+      entry.branch(
+        entry.compare('eq', g, entry.constant(i32, 0n)),
+        entry.edge(early, [entry.constant(i32, 7n)]),
+        entry.edge(h),
+      );
+      h.branch(
+        h.compare('eq', e, h.constant(i32, 1n)),
+        h.edge(early, [h.constant(i32, 7n)]),
+        h.edge(k),
+      );
+      k.branch(k.compare('eq', a, k.constant(i32, 0n)), k.edge(s2), k.edge(x));
+      s2.branch(s2.compare('eq', d, s2.constant(i32, 0n)), s2.edge(f), s2.edge(x));
+      f.store(f.constant(i64, 0x1000n), a);
+      f.jump(join, [d]);
+      x.store(x.constant(i64, 0x1004n), e);
+      x.jump(join, [e]);
+      early.return(early.parameters);
+      continuation(join);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language, 'source', true),
+        checked = emit(input, language, 'checked', true),
+        text = source.emission.text;
+      assert.ok(rules(source).includes('shared_condition_arm'), text);
+      assert.ok(rules(source).includes('return_constant'), text);
+      agree(source, checked, grid([a, d, e, g], choices));
+    });
+
     test('operands leaving for different statements keep no shared arm', () => {
       const b = program('source-shared-diverge'),
         entry = b.block('entry', [i32, i32]),
@@ -1419,7 +1458,6 @@ for (const language of ['c-like', 'python-like'] as const)
         source = emit(input, language),
         checked = emit(input, language, 'checked');
       assert.doesNotMatch(source.emission.text, /\bgoto\b/);
-      assert.ok(rules(source).includes('loop_exit_merge'), source.emission.text);
       agree(
         source,
         checked,

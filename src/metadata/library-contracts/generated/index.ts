@@ -27,7 +27,8 @@ import * as windowsWinsock from './data/windows-winsock.js';
  *   line defines it);
  * - parameters are `name:type` separated by `,`;
  * - flags are `n` noreturn, `v` variadic, `f<i>` / `s<i>` printf / scanf format
- *   parameter index, `o<i>` open-flags parameter index.
+ *   parameter index, `o<i>` open-flags parameter index, `a<i>` an `alloc_size`
+ *   parameter (the result is a fresh object of the product of every `a` argument).
  * An extern data object is one line `=name|type|flags|header` (flag `c`: the object
  * itself is const-qualified); it carries a type only, never a size or an array extent.
  * Only interface facts are stored. No entry has a memory footprint, so every
@@ -133,6 +134,9 @@ class Table {
       ...(flags.includes('n') ? { noreturn: true } : {}),
       ...(flags.includes('v') ? { variadic: true } : {}),
       ...(variadic_rule ? { variadic_rule } : {}),
+      ...(/a\d/.test(flags)
+        ? { allocates: [...flags.matchAll(/a(\d+)/g)].map((match) => Number(match[1])) }
+        : {}),
       source: `${this.module.provenance} ${this.module.headers[Number.parseInt(header, 36)]}`,
     };
   }
