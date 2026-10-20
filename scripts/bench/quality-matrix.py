@@ -89,8 +89,11 @@ async def tool_cell(args, manifest, cell, tool, budget):
                                     'lookup_result': found})
                         continue
                     row['discovered'] = matches[0]
+                    # The text-first default (header + pseudocode, no structuredContent) carries no
+                    # emission or semantic state; this harness reads the full envelope.
                     value, record, failed = await client.call('function_decompile', {
-                        **scope, 'function_id': matches[0]['id'], 'wait': True, 'budget': budget})
+                        **scope, 'function_id': matches[0]['id'], 'wait': True, 'budget': budget,
+                        'detail': 'full'})
                 else:
                     value, record, failed = await client.call('decompile_function', {
                         **scope, 'address': function['address'].removeprefix('0x'), 'max_chars': 200000})
