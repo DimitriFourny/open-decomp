@@ -28,16 +28,26 @@ interface Leaf {
 interface Seq {
   readonly kind: 'seq';
   readonly items: Payload[];
+  /** The arm whose body this sequence is; null at a node root. */
+  parent: ArmRef | null;
 }
 interface LoopPayload {
   readonly kind: 'loop';
   readonly header: EntityId;
   readonly body: Payload;
+  parent: Seq | ArmRef | null;
 }
 interface ArmRef {
   readonly kind: 'arm';
   readonly block: EntityId;
   readonly slot: number;
+}
+/** A labeled transfer (or a loop exit to a target other than the loop's
+ * follow) into a node's entry. The target is placed only after its source. */
+interface Pending {
+  readonly block: EntityId;
+  /** The node holding `block` when the transfer was recorded. */
+  readonly source: CollapseNode;
 }
 
 /** A structured edge between collapse nodes. Every structured out-edge of a
@@ -69,6 +79,10 @@ interface CollapseNode {
   /** Exact region depth of `root`. */
   depth: number;
   alive: boolean;
+  /** The node that absorbed this one. */
+  into: CollapseNode | null;
+  /** Labeled transfers into the entry; shared with simulation copies. */
+  readonly gotos: Pending[];
 }
 type Rule =
   | { readonly kind: 'sequence'; readonly target: CollapseNode }
@@ -85,6 +99,10 @@ interface Graph {
   readonly simulated: boolean;
   /** The scope is a loop body entered at its header. */
   readonly loop: boolean;
+  /** Simulation copies of the real graph's nodes. */
+  readonly twins: ReadonlyMap<CollapseNode, CollapseNode> | null;
+  /** Loop payloads of this scope by the blocks of their bodies. */
+  readonly loops: ReadonlyMap<EntityId, LoopPayload>;
   alive: number;
   /** Nodes by the priority of their best rule (see classify). */
   readonly buckets: Set<CollapseNode>[];
@@ -238,30 +256,6 @@ export function structureControlFlow(
         tailBlock(term.edge.target, hops + 1)
       );
     };
-    /** Dominator-tree depth of a block's immediate dominator: the region a
-     * join closes; deeper is more inner. */
-    const depths = new Map<EntityId, number>();
-    const domDepth = (id: EntityId): number => {
-      const path: EntityId[] = [];
-      let current: EntityId | null = id,
-        depth = 0;
-      while (current !== null) {
-        budget.charge();
-        const known = depths.get(current);
-        if (known !== undefined) {
-          depth = known;
-          break;
-        }
-        path.push(current);
-        current = dominance.idom(current);
-      }
-      for (let index = path.length - 1; index >= 0; index--) depths.set(path[index]!, ++depth);
-      return depths.get(id)!;
-    };
-    const joinDepth = (id: EntityId): number => {
-      const parent = dominance.idom(id);
-      return parent === null ? 0 : domDepth(parent);
-    };
     /** Outgoing slots of a block: slot number and target. */
     const slots = (id: EntityId): { slot: number; target: EntityId }[] => {
       const outgoing = edges.get(id)!;
@@ -349,7 +343,7 @@ export function structureControlFlow(
     const adopt = (items: readonly Payload[], parent: Seq | ArmRef): void => {
       for (const item of items) {
         budget.charge();
-        if (item.kind === 'leaf') item.parent = parent;
+        if (item.kind !== 'seq') item.parent = parent;
       }
     };
     const detach = (edge: CollapseEdge): void => {
@@ -502,12 +496,7 @@ export function structureControlFlow(
         loopBodies.set(group.index, { body: best.body, follow: best.follow });
       }
 
-      // Collapse nodes: loops, then the blocks directly in this scope.
-      const owner = new Map<EntityId, CollapseNode>();
-      const nodes: CollapseNode[] = [];
-      const loopNodes: { node: CollapseNode; body: ReadonlySet<EntityId>; follow?: EntityId }[] =
-        [];
-      for (const group of loopGroups) {
+      const inners = loopGroups.map((group) => {
         const loop = loopBodies.get(group.index)!;
         const inner = buildScope(
           loop.body,
@@ -515,15 +504,28 @@ export function structureControlFlow(
           [...scopes, { header: group.header, members: loop.body }],
           base + 1,
         );
+        return { group, loop, inner };
+      });
+      // Collapse nodes: loops, then the blocks directly in this scope.
+      const owner = new Map<EntityId, CollapseNode>();
+      const nodes: CollapseNode[] = [];
+      const loopNodes: {
+        node: CollapseNode;
+        body: ReadonlySet<EntityId>;
+        follow?: EntityId;
+      }[] = [];
+      for (const { group, loop, inner } of inners) {
         const node: CollapseNode = {
           entry: group.header,
           rpo: rpo.get(group.header)!,
           outs: [],
           ins: [],
-          root: { kind: 'loop', header: group.header, body: inner.root },
+          root: { kind: 'loop', header: group.header, body: inner.root, parent: null },
           seq: false,
           depth: inner.depth + 1,
           alive: true,
+          into: null,
+          gotos: [],
         };
         nodes.push(node);
         for (const id of loop.body) owner.set(id, node);
@@ -538,6 +540,7 @@ export function structureControlFlow(
         if (owner.has(id)) continue;
         const leaf: Leaf = { kind: 'leaf', id, parent: null };
         leaves.set(id, leaf);
+        armBodies.delete(id);
         chains.set(id, scopes);
         const node: CollapseNode = {
           entry: id,
@@ -548,6 +551,8 @@ export function structureControlFlow(
           seq: false,
           depth: 1,
           alive: true,
+          into: null,
+          gotos: [],
         };
         nodes.push(node);
         owner.set(id, node);
@@ -587,17 +592,31 @@ export function structureControlFlow(
           else link(node, id, slot, target, slotKind(id));
         }
       }
-      // A loop's edges to its follow are its breaks: they land after the loop.
+      // A loop's edges to its follow are its breaks: they land after the
+      // loop. Its other exits are labeled transfers into this scope.
+      const loopPayloads = new Map<EntityId, LoopPayload>();
       for (const loop of loopNodes) {
-        if (loop.follow === undefined || owner.get(loop.follow)!.entry !== loop.follow) continue;
-        for (const id of loop.body)
+        const follow =
+          loop.follow !== undefined && owner.get(loop.follow)!.entry === loop.follow
+            ? loop.follow
+            : undefined;
+        for (const id of loop.body) {
+          loopPayloads.set(id, loop.node.root as LoopPayload);
           for (const { slot, target } of slots(id)) {
             budget.charge();
-            if (target === loop.follow) link(loop.node, id, slot, target, null);
+            if (target === follow) link(loop.node, id, slot, target, null);
+            else if (
+              ids.has(target) &&
+              !loop.body.has(target) &&
+              !(loopScope && target === entry) &&
+              owner.get(target)!.entry === target
+            )
+              owner.get(target)!.gotos.push({ block: id, source: loop.node });
           }
+        }
       }
       const entryNode = owner.get(entry)!;
-      collapse(nodes, entryNode, base, loopScope);
+      collapse(nodes, entryNode, base, loopScope, loopPayloads);
       return { root: entryNode.root, depth: entryNode.depth };
     };
 
@@ -606,6 +625,66 @@ export function structureControlFlow(
       for (const edge of node.outs) if (edge.to !== node) result.add(edge.to);
       budget.charge(1 + node.outs.length);
       return result;
+    };
+    /** The live node holding `node` in `graph` (simulations start from copies). */
+    const resolve = (graph: Graph, node: CollapseNode): CollapseNode => {
+      for (let pass = 0; pass < 2; pass++) {
+        while (node.into) {
+          budget.charge();
+          node = node.into;
+        }
+        const twin = graph.twins?.get(node);
+        if (!twin) break;
+        node = twin;
+      }
+      return node;
+    };
+    /** Lexical position of a payload below its node root: sequence indices
+     * (>= 0) and, below a block, 0 for its own code and -(slot + 1) for an
+     * arm body. Arms of one block are unordered (the printer may invert). */
+    const pathOf = (item: Payload): { root: Payload; steps: number[] } => {
+      const steps: number[] = [];
+      for (;;) {
+        budget.charge();
+        const parent: Seq | ArmRef | null = item.parent;
+        if (parent === null) break;
+        if (parent.kind === 'seq') {
+          steps.push(parent.items.indexOf(item));
+          item = parent;
+        } else {
+          steps.push(-(parent.slot + 1));
+          item = leaves.get(parent.block)!;
+        }
+      }
+      return { root: item, steps: steps.reverse() };
+    };
+    /** `a` is printed before `b` whatever arm order the printer chooses. */
+    const precedes = (a: readonly number[], b: readonly number[]): boolean => {
+      for (let index = 0; index < Math.min(a.length, b.length); index++) {
+        const x = a[index]!,
+          y = b[index]!;
+        if (x === y) continue;
+        return x >= 0 && y >= 0 ? x < y : x === 0;
+      }
+      return false;
+    };
+    /** Every labeled transfer into `target` comes from inside `host`, and
+     * (in the real layout) before position `at` of `host`. */
+    const forward = (
+      graph: Graph,
+      target: CollapseNode,
+      host: CollapseNode,
+      at?: () => number[],
+    ): boolean => {
+      let position: number[] | undefined;
+      for (const pending of target.gotos) {
+        if (resolve(graph, pending.source) !== host) return false;
+        if (!at || graph.simulated) continue;
+        const source = pathOf(graph.loops.get(pending.block) ?? leaves.get(pending.block)!);
+        position ??= at();
+        if (source.root !== host.root || !precedes([...source.steps, 0], position)) return false;
+      }
+      return true;
     };
     const classify = (
       graph: Graph,
@@ -628,7 +707,8 @@ export function structureControlFlow(
           target !== node &&
           target !== graph.entry &&
           outs.every((edge) => edge.to === target) &&
-          target.ins.every((edge) => edge.from === node)
+          target.ins.every((edge) => edge.from === node) &&
+          forward(graph, target, node)
         ) {
           const rule: Rule = { kind: 'sequence', target };
           // In a loop body, a branch whose other arm repeats the loop owns a
@@ -659,6 +739,16 @@ export function structureControlFlow(
           target.ins.every((item) => item.block === edge.block && item.slot >= edge.slot) &&
           blocks.get(edge.block)!.terminator.kind === 'switch';
         if (!single && !shared) continue;
+        // A labeled transfer into the target must stay a forward jump.
+        const at = (): number[] => {
+          const leaf = leaves.get(edge.block)!,
+            steps = pathOf(leaf).steps;
+          if (edge.arm) return [...steps, -(edge.slot + 1)];
+          return leaf.parent?.kind === 'seq'
+            ? [...steps.slice(0, -1), steps.at(-1)! + 1]
+            : [...steps, 1];
+        };
+        if (!forward(graph, target, node, at)) continue;
         // Simulations ignore nesting bounds; the real layout never exceeds them.
         if (!graph.simulated) {
           let depth: number;
@@ -760,6 +850,7 @@ export function structureControlFlow(
           detach(edge);
         }
       other.alive = false;
+      other.into = node;
       graph.alive--;
       refresh(graph, other);
     };
@@ -768,7 +859,7 @@ export function structureControlFlow(
       if (!node.seq) node.depth += 1;
       if (!graph.simulated) {
         if (node.root.kind !== 'seq') {
-          const root: Seq = { kind: 'seq', items: [node.root] };
+          const root: Seq = { kind: 'seq', items: [node.root], parent: null };
           adopt(root.items, root);
           node.root = root;
         }
@@ -793,8 +884,7 @@ export function structureControlFlow(
           let arms = armBodies.get(edge.block);
           if (!arms) armBodies.set(edge.block, (arms = new Map()));
           arms.set(edge.slot, target.root);
-          if (target.root.kind === 'leaf')
-            target.root.parent = { kind: 'arm', block: edge.block, slot: edge.slot };
+          target.root.parent = { kind: 'arm', block: edge.block, slot: edge.slot };
         }
         node.depth = Math.max(node.depth, edge.level + target.depth);
         absorb(graph, node, target, edge.level, true);
@@ -808,7 +898,7 @@ export function structureControlFlow(
             parent.items.push(...items);
             adopt(items, parent);
           } else {
-            const seq: Seq = { kind: 'seq', items: [leaf, ...items] };
+            const seq: Seq = { kind: 'seq', items: [leaf, ...items], parent };
             armBodies.get(parent.block)!.set(parent.slot, seq);
             adopt(seq.items, seq);
             shift = edge.level - (target.seq ? 1 : 0);
@@ -841,14 +931,17 @@ export function structureControlFlow(
       entry: CollapseNode,
       base: number,
       loop: boolean,
-      simulated: boolean,
+      twins: ReadonlyMap<CollapseNode, CollapseNode> | null,
+      loops: ReadonlyMap<EntityId, LoopPayload>,
     ): Graph => {
       const graph: Graph = {
         nodes,
         entry,
         base,
-        simulated,
+        simulated: twins !== null,
         loop,
+        twins,
+        loops,
         alive: nodes.filter((node) => node.alive).length,
         buckets: [0, 1, 2, 3, 4].map(() => new Set<CollapseNode>()),
         orphans: new Set(),
@@ -867,7 +960,7 @@ export function structureControlFlow(
     ): { readonly count: number; readonly nested: boolean } => {
       const copies = new Map<CollapseNode, CollapseNode>();
       for (const node of graph.nodes)
-        if (node.alive) copies.set(node, { ...node, outs: [], ins: [] });
+        if (node.alive) copies.set(node, { ...node, outs: [], ins: [], gotos: [...node.gotos] });
       for (const [node, copy] of copies)
         for (const edge of node.outs) {
           budget.charge();
@@ -876,14 +969,17 @@ export function structureControlFlow(
           copy.outs.push(twin);
           twin.to.ins.push(twin);
         }
+      const target = copies.get(group[0]!.to)!;
+      for (const edge of group)
+        target.gotos.push({ block: edge.block, source: copies.get(edge.from)! });
       const copy = graphOf(
-          [...copies.values()],
-          copies.get(graph.entry)!,
-          graph.base,
-          graph.loop,
-          true,
-        ),
-        target = copies.get(group[0]!.to)!;
+        [...copies.values()],
+        copies.get(graph.entry)!,
+        graph.base,
+        graph.loop,
+        copies,
+        graph.loops,
+      );
       let count = 0,
         nested = false;
       for (let found = pick(copy, 3); found && count < 256; found = pick(copy, 3)) {
@@ -938,12 +1034,9 @@ export function structureControlFlow(
           group,
           key: [
             tailBlock(target.entry, 0) ? 0 : 1,
-            // A node left without structured entry is laid out after some
-            // unrelated terminal node, so its other edges become labels too.
+            // A node left without structured entry waits for a host holding
+            // all its sources, so its other edges often become labels too.
             orphan ? 1 : 0,
-            // Joins closing the innermost region first: once it collapses,
-            // the enclosing joins can become ordinary follows.
-            -joinDepth(target.entry),
             -enabled,
             group.length,
             -sources,
@@ -961,6 +1054,7 @@ export function structureControlFlow(
         target = group[0]!.to;
       for (const edge of group) {
         if (!graph.simulated) labeled.add(edge.key);
+        target.gotos.push({ block: edge.block, source });
         detach(edge);
       }
       touched(graph, source);
@@ -977,11 +1071,14 @@ export function structureControlFlow(
       for (const candidate of ranked.slice(0, 8)) {
         if (selection < 0) break;
         const outcome = unblocked(graph, candidate.group);
+        // Collapses enabled count before whether the target becomes nested:
+        // with labeled targets kept after their sources, a nested target
+        // no longer means a jump back into an arm.
         const key = [
-          ...candidate.key.slice(0, 3),
-          outcome.nested ? 1 : 0,
+          ...candidate.key.slice(0, 2),
           -outcome.count,
-          ...candidate.key.slice(3),
+          outcome.nested ? 1 : 0,
+          ...candidate.key.slice(2),
         ];
         if (!bestKey || before(key, bestKey)) {
           best = candidate;
@@ -991,15 +1088,24 @@ export function structureControlFlow(
       label(graph, best.group);
       return true;
     };
-    /** Past the selection allowance: dependency order, each node after the last. */
+    /** Past the selection allowance: dependency order (structured and labeled
+     * transfers), each node after the last. */
     const linearize = (graph: Graph): void => {
       const rest = graph.nodes.filter((node) => node.alive);
       const indegree = new Map<CollapseNode, number>(rest.map((node) => [node, 0]));
-      for (const node of rest)
+      const later = new Map<CollapseNode, CollapseNode[]>(rest.map((node) => [node, []]));
+      for (const node of rest) {
         for (const edge of node.outs) {
           budget.charge();
-          if (edge.to !== node) indegree.set(edge.to, indegree.get(edge.to)! + 1);
+          if (edge.to !== node) later.get(node)!.push(edge.to);
         }
+        for (const pending of node.gotos) {
+          const source = resolve(graph, pending.source);
+          if (source !== node && later.has(source)) later.get(source)!.push(node);
+        }
+      }
+      for (const targets of later.values())
+        for (const target of targets) indegree.set(target, indegree.get(target)! + 1);
       const order: CollapseNode[] = [],
         done = new Set<CollapseNode>();
       const byRpo = [...rest].sort((a, b) => a.rpo - b.rpo);
@@ -1014,10 +1120,10 @@ export function structureControlFlow(
         done.add(next);
         order.push(next);
         const fresh: CollapseNode[] = [];
-        for (const edge of next.outs) {
-          const count = indegree.get(edge.to)! - 1;
-          indegree.set(edge.to, count);
-          if (count === 0 && !done.has(edge.to)) fresh.push(edge.to);
+        for (const target of later.get(next)!) {
+          const count = indegree.get(target)! - 1;
+          indegree.set(target, count);
+          if (count === 0 && !done.has(target)) fresh.push(target);
         }
         fresh.sort((a, b) => b.rpo - a.rpo);
         ready.push(...fresh);
@@ -1030,28 +1136,36 @@ export function structureControlFlow(
       }
     };
     /** A node entered only by labeled edges follows a node that does not
-     * fall through: the closest one before it, else the first after it. */
+     * fall through and holds all their sources: the closest one before it,
+     * else the first after it. */
     const placeOrphan = (graph: Graph): boolean => {
-      const orphan = [...graph.orphans].sort((a, b) => a.rpo - b.rpo)[0];
-      if (!orphan) return false;
-      const order = (node: CollapseNode): number[] =>
-        node.rpo < orphan.rpo ? [0, -node.rpo] : [1, node.rpo];
-      let host: CollapseNode | undefined;
-      for (const sink of graph.sinks) {
-        budget.charge();
-        if (sink !== orphan && (!host || before(order(sink), order(host)))) host = sink;
+      for (const orphan of [...graph.orphans].sort((a, b) => a.rpo - b.rpo)) {
+        const order = (node: CollapseNode): number[] =>
+          node.rpo < orphan.rpo ? [0, -node.rpo] : [1, node.rpo];
+        let host: CollapseNode | undefined;
+        for (const sink of graph.sinks) {
+          budget.charge();
+          if (
+            sink !== orphan &&
+            (!host || before(order(sink), order(host))) &&
+            forward(graph, orphan, sink)
+          )
+            host = sink;
+        }
+        if (!host) continue;
+        sequence(graph, host, orphan);
+        return true;
       }
-      if (!host) return false;
-      sequence(graph, host, orphan);
-      return true;
+      return false;
     };
     const collapse = (
       nodes: CollapseNode[],
       entry: CollapseNode,
       base: number,
       loop: boolean,
+      loops: ReadonlyMap<EntityId, LoopPayload>,
     ): void => {
-      const graph = graphOf(nodes, entry, base, loop, false);
+      const graph = graphOf(nodes, entry, base, loop, null, loops);
       while (graph.alive > 1) {
         budget.charge();
         const found = pick(graph, 3);
