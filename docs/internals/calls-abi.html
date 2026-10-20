@@ -1,0 +1,1828 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ABIs, calls &amp; callee summaries — Open Decomp internals</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- Shared SVG defs: every diagram on the page references url(#arrow) / url(#arrow-accent). Keep exactly this block once per page. -->
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true" focusable="false">
+      <defs>
+        <marker
+          id="arrow"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" class="arrowhead" />
+        </marker>
+        <marker
+          id="arrow-accent"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" class="arrowhead accent" />
+        </marker>
+      </defs>
+    </svg>
+
+    <nav class="sidebar" aria-label="Internals pages">
+      <a class="brand" href="index.html">Open Decomp internals</a>
+      <p class="brand-sub">How the decompiler works</p>
+      <ol>
+        <li><a href="index.html">Architecture overview</a></li>
+        <li><a href="loaders.html">Loading binaries &amp; addresses</a></li>
+        <li><a href="discovery.html">Function discovery &amp; CFG</a></li>
+        <li><a href="decode-lift-ir.html">Decoding, lifting &amp; IR</a></li>
+        <li><a href="ssa-values.html">SSA, values &amp; stack</a></li>
+        <li><a href="calls-abi.html" aria-current="page">ABIs, calls &amp; callee summaries</a></li>
+        <li><a href="types-metadata.html">Types &amp; metadata</a></li>
+        <li><a href="reconstruction.html">Source reconstruction</a></li>
+        <li><a href="structuring-emission.html">Structuring &amp; emission</a></li>
+        <li><a href="project-cache.html">Projects, cache &amp; execution</a></li>
+      </ol>
+      <a class="back" href="../README.md">← User documentation</a>
+    </nav>
+
+    <main>
+      <header>
+        <p class="eyebrow">Stage 06 · Interprocedural</p>
+        <h1>ABIs, calls &amp; callee summaries</h1>
+        <p class="lede">
+          This stage turns a function's SSA form plus an ABI profile into machine-level call facts,
+          and then into an interprocedural interface for every call it makes. It is the only place
+          where "what a register means at a call" is decided: argument carriers, result storage,
+          stack offsets, clobbers, variadic tails and Objective-C selectors. Its output is not a
+          recovered prototype — it is evidence that later source reconstruction may present.
+        </p>
+        <p class="sources">
+          Sources:
+          <a class="src" href="../../src/core/contracts.ts">src/core/contracts.ts</a>
+          <a class="src" href="../../src/abi/darwin-arm64/index.ts"
+            >src/abi/darwin-arm64/index.ts</a
+          >
+          <a class="src" href="../../src/abi/sysv-amd64/index.ts">src/abi/sysv-amd64/index.ts</a>
+          <a class="src" href="../../src/abi/windows-x64/index.ts">src/abi/windows-x64/index.ts</a>
+          <a class="src" href="../../src/analysis/calls/index.ts">src/analysis/calls/index.ts</a>
+          <a class="src" href="../../src/service/analysis/native-worklist.ts"
+            >src/service/analysis/native-worklist.ts</a
+          >
+          <a class="src" href="../../src/service/analysis/source-facts.ts"
+            >src/service/analysis/source-facts.ts</a
+          >
+        </p>
+      </header>
+
+      <nav class="toc" aria-label="On this page">
+        <strong>On this page</strong>
+        <ol>
+          <li><a href="#position">Where this sits in the pipeline</a></li>
+          <li><a href="#abi-model">The ABI model: one pure layout function</a></li>
+          <li><a href="#abi-profiles">The three profiles</a></li>
+          <li><a href="#call-facts">Call analysis: facts, not prototypes</a></li>
+          <li><a href="#summaries">Callee summaries and the dependency worklist</a></li>
+          <li><a href="#reuse">Two cache tiers and why they are invisible</a></li>
+          <li><a href="#worked">Worked example: one fixture, one open argument list</a></li>
+          <li><a href="#objc-variadic">Objective-C sends and variadic tails</a></li>
+          <li><a href="#diagnostics">Reading the diagnostics</a></li>
+          <li><a href="#limitations">Limitations &amp; extension points</a></li>
+        </ol>
+      </nav>
+
+      <section id="position">
+        <h2>Where this sits in the pipeline</h2>
+        <p>
+          The stage consumes the simplified SSA form of one selected function (<a
+            class="src"
+            href="ssa-values.html"
+            >page 05</a
+          >), the target's <code>AbiProfile</code>, the image-wide function and reference index, and
+          a set of supplied declarations (library headers, DWARF, durable signatures and
+          annotations). It produces two distinct objects that later stages must not confuse:
+        </p>
+        <ul>
+          <li>
+            <code>CallAnalysisResult</code> from <code>analyzeCalls</code>: per call node, its
+            resolved targets, contract observations with an <code>AbiCallLayout</code>, prepared
+            register candidates, explicit arguments, noreturn status, and per-exit function
+            observations. This is intraprocedural evidence about the call boundary.
+          </li>
+          <li>
+            <code>SourceEvidence</code> from <code>recoverSourceEvidence</code>: an
+            <code>InferredCallee</code> for each call whose interface was observed or summarized,
+            carrying the callee's parameter and result storage, plus variadic and Objective-C facts.
+            This is the interprocedural “summary” the source planner and emitters read; calls
+            described entirely by an established supplied contract are rendered from that contract
+            instead.
+          </li>
+        </ul>
+        <p>
+          The orchestration is in <code>executeDecompilation</code> (<a
+            class="src"
+            href="../../src/service/analysis/index.ts"
+            >src/service/analysis/index.ts</a
+          >). It runs <code>resolveCalls</code> and <code>callDeclarations</code> first, because
+          type recovery needs grounded targets and typed contracts; then <code>recoverTypes</code>,
+          which internally calls <code>analyzeCalls</code> and exposes it as
+          <code>TypeRecoveryResult.calls</code>
+          (<a class="src" href="../../src/analysis/types/index.ts">src/analysis/types/index.ts</a>);
+          then structuring; then <code>recoverSourceEvidence</code>, which builds callee interfaces
+          and can prepare other function bodies; then memory-shape refinement and emission.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 960 210" role="img" aria-labelledby="fig-position-title">
+            <title id="fig-position-title">
+              Pipeline position of call analysis and native callee summaries
+            </title>
+
+            <rect class="box muted" x="10" y="40" width="140" height="56" rx="8" />
+            <text x="80" y="60" text-anchor="middle" class="title">SSA + stack</text>
+            <text x="80" y="78" text-anchor="middle" class="small">SSAForm, snapshots</text>
+
+            <path class="edge" d="M150,68 L188,68" marker-end="url(#arrow)" />
+            <text x="169" y="60" text-anchor="middle" class="edge-label">SSAForm</text>
+
+            <rect class="box accent" x="190" y="40" width="180" height="56" rx="8" />
+            <text x="280" y="60" text-anchor="middle" class="title">analyzeCalls</text>
+            <text x="280" y="78" text-anchor="middle" class="small mono">analysis/calls</text>
+
+            <path class="edge" d="M370,68 L418,68" marker-end="url(#arrow)" />
+            <text x="394" y="60" text-anchor="middle" class="edge-label">CallFact[]</text>
+
+            <rect class="box" x="420" y="40" width="220" height="56" rx="8" />
+            <text x="530" y="60" text-anchor="middle" class="title">
+              resolveCalls + declarations
+            </text>
+            <text x="530" y="78" text-anchor="middle" class="small">
+              library · debug · annotations
+            </text>
+
+            <path class="edge accent" d="M640,68 L688,68" marker-end="url(#arrow-accent)" />
+            <text x="664" y="60" text-anchor="middle" class="edge-label">proofs</text>
+
+            <rect class="box accent" x="690" y="40" width="250" height="56" rx="8" />
+            <text x="815" y="60" text-anchor="middle" class="title">recoverSourceEvidence</text>
+            <text x="815" y="78" text-anchor="middle" class="small">worklist + summaries</text>
+
+            <path class="edge dashed" d="M280,96 L280,128" marker-end="url(#arrow)" />
+            <rect class="box ok" x="190" y="130" width="180" height="50" rx="8" />
+            <text x="280" y="150" text-anchor="middle" class="title">CallAnalysisResult</text>
+            <text x="280" y="168" text-anchor="middle" class="small">layouts · demands</text>
+
+            <path class="edge dashed" d="M815,96 L815,128" marker-end="url(#arrow)" />
+            <rect class="box ok" x="690" y="130" width="250" height="50" rx="8" />
+            <text x="815" y="150" text-anchor="middle" class="title">SourceEvidence</text>
+            <text x="815" y="168" text-anchor="middle" class="small">callees · source_callees</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 1.</strong> Call analysis is intraprocedural and needs only the selected
+            body; the native worklist is a second, optional layer that prepares other bodies before
+            any source text is produced. The dashed outputs are the two data structures downstream
+            code consumes.
+          </figcaption>
+        </figure>
+
+        <div class="callout invariant">
+          <span class="title">Invariant — no name-based calling conventions</span>
+          <p>
+            All three profiles are stateless and <code>classifyCall</code> is pure. The target's
+            full contract (format, architecture and <code>abi</code>) is dispatched in
+            <code>pipelineComponents</code>
+            (<a class="src" href="../../src/service/analysis/versions.ts"
+              >src/service/analysis/versions.ts</a
+            >);
+            <a class="src" href="../../src/reconstruction/boundaries.ts"
+              >src/reconstruction/boundaries.ts</a
+            >
+            keeps the same mapping for boundary projection. No profile consults a symbol name, a
+            host register set, a prototype string or the requested emitter.
+          </p>
+        </div>
+      </section>
+
+      <section id="abi-model">
+        <h2>The ABI model: one pure layout function</h2>
+        <p>
+          <code>AbiProfile</code> is deliberately small: physical facts plus one classifier. The
+          profile does not know about IR, evidence or source languages.
+        </p>
+        <pre><code>export interface AbiProfile extends ComponentIdentity {
+  readonly id: Target['abi'];
+  readonly architecture: Target['architecture'];
+  readonly layout: DataLayout;
+  readonly stack_pointer: RegisterDescriptor;
+  readonly preserved: readonly RegisterDescriptor[];
+  readonly link_register?: RegisterDescriptor;
+  readonly stack_return_address_bytes: bigint;
+  readonly red_zone_bytes: bigint;
+  readonly unknown_call_clobbers: CallClobbers;
+  classifyCall(signature: AbiSignature): AbiCallLayout;
+}</code></pre>
+        <p class="sources">
+          Defined in
+          <a class="src" href="../../src/core/contracts.ts">src/core/contracts.ts</a>
+          (<code>AbiProfile</code>); see also <code>AbiType</code>, <code>AbiLocation</code>,
+          <code>AbiCallLayout</code> and <code>AbiSignature</code> in the same file.
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Member</th>
+              <th>Consumer and meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>layout</code></td>
+              <td>
+                Source-level widths (<code>long_bits</code>, <code>long_double_bits</code> vs
+                <code>long_double_storage_bits</code>), stack alignment and aggregate maximum
+                alignment. The layout feeds source type resolution; it is not a second type system.
+              </td>
+            </tr>
+            <tr>
+              <td><code>stack_pointer</code>, <code>stack_return_address_bytes</code></td>
+              <td>
+                The register whose value anchors stack facts, and whether the return address is
+                pushed. Both x86 profiles declare <code>8n</code>; Darwin ARM64 declares
+                <code>0n</code> and names <code>link_register</code> <code>X[30]</code> instead.
+                Every <code>AbiLocation</code> stack offset is relative to the <em>callee-entry</em>
+                stack pointer, so consumers never re-add the hardware push.
+              </td>
+            </tr>
+            <tr>
+              <td><code>preserved</code></td>
+              <td>
+                Registers a callee must restore. Used by the interface observer to reject
+                callee-saved registers as incoming arguments and by stack recovery to delimit
+                private state. Darwin's comment is explicit that <code>x18</code> is
+                platform-reserved and therefore not an allocatable callee-saved register.
+              </td>
+            </tr>
+            <tr>
+              <td><code>red_zone_bytes</code></td>
+              <td>
+                A capability record only. The comments state it never establishes ownership of
+                negative offsets or survival across calls; Windows declares <code>0n</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>unknown_call_clobbers</code></td>
+              <td>
+                Conservative effects for a call with no known contract: registers, flags and
+                <code>memory: 'unknown_read_write'</code>. Darwin includes only the upper 64 bits of
+                <code>v8</code>–<code>v15</code>, because their low halves are preserved.
+              </td>
+            </tr>
+            <tr>
+              <td><code>classifyCall</code></td>
+              <td>
+                Maps a typed <code>AbiSignature</code> to parameter/return locations, hidden result,
+                stack bytes, shadow space, alignment, clobbers, implicit register inputs,
+                diagnostics and a <code>state</code> of <code>complete</code>,
+                <code>partial</code> or <code>unsupported</code>.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>
+          <code>AbiLocation</code> has three shapes. A <code>register</code> location names a
+          descriptor plus <code>value_offset_bits</code> and <code>width_bits</code>: the offset
+          indexes the <em>source value</em>, not the physical register, which is what makes an HFA
+          member in <code>s3</code> and the high half of a split 128-bit argument expressible. A
+          <code>stack</code> location carries an offset, object size, alignment and the value
+          offset. An <code>indirect</code> location carries the pointer location and the pointee
+          size; the object bytes are never claimed to be in registers.
+        </p>
+
+        <div class="callout invariant">
+          <span class="title">Invariant — partial means “stop allocating, do not guess”</span>
+          <p>
+            Once a parameter's type cannot be classified, every later parameter gets an empty
+            location list and <code>stack_bytes</code> is only the rounded known-prefix lower bound.
+            Both the SysV and Darwin implementations say this in code comments, and
+            <code>argument_count</code> stays <code>null</code> for a known prefix. A partial layout
+            therefore cannot be mistaken for “the remaining arguments are on the stack”.
+          </p>
+        </div>
+
+        <p>
+          <code>implicit_register_inputs</code> is the one place where a machine requirement is
+          modelled without pretending it is a source argument. On SysV, a variadic or unprototyped
+          call requires <code>AL</code> to hold an unsigned upper bound on vector-register usage.
+          The classifier reports the minimum as the count of vector registers actually allocated and
+          the maximum as <code>8n</code>, with purpose
+          <code>vector_argument_register_upper_bound</code>.
+          <code>observeImplicitRegisterInputs</code> then records the observed fact and one of
+          <code>satisfied</code> / <code>violated</code> / <code>unknown</code>; a partial layout
+          can never establish satisfaction. The other two profiles return an empty list.
+        </p>
+      </section>
+
+      <section id="abi-profiles">
+        <h2>The three profiles</h2>
+        <p>
+          The profiles agree on the data model and disagree on everything else. The table is the
+          quick reference; the subsections explain the algorithms and the deliberate refusals.
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Profile</th>
+              <th>Argument registers</th>
+              <th>Stack</th>
+              <th>Returns</th>
+              <th>Preserved (selection)</th>
+              <th>Special</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>sysv-amd64</code></td>
+              <td>
+                INTEGER: <code>rdi rsi rdx rcx r8 r9</code>; SSE: <code>xmm0</code>–<code
+                  >xmm7</code
+                >
+                (independent banks)
+              </td>
+              <td>
+                First stack argument at <code>+8</code> (return address pushed); 16-byte outgoing
+                alignment; <code>shadow_space: 0n</code>
+              </td>
+              <td>
+                INTEGER <code>rax</code>, then <code>rdx</code>; SSE <code>xmm0</code>,
+                <code>xmm1</code>; MEMORY result → hidden pointer in <code>rdi</code>, pointer
+                returned in <code>rax</code>
+              </td>
+              <td>
+                <code>rbx rbp rsp r12</code>–<code>r15</code>, <code>fpcsr</code>,
+                <code>mxcsr[6:16]</code>
+              </td>
+              <td>Red zone 128 B; <code>AL</code> upper bound for variadic calls</td>
+            </tr>
+            <tr>
+              <td><code>windows-x64</code></td>
+              <td>
+                Slot <em>n</em>: <code>rcx rdx r8 r9</code> for integer, <code>xmm0</code>–<code
+                  >xmm3</code
+                >
+                for float; both banks share the slot index
+              </td>
+              <td>
+                32-byte home space at <code>+8</code>…<code>+39</code>; slot 4 is at
+                <code>+40</code>; <code>stack_bytes</code> is 16-aligned
+              </td>
+              <td>
+                <code>rax</code> (integer/pointer) or <code>xmm0</code> (float);
+                <code>__m128</code> in <code>xmm0</code>; indirect result in <code>rcx</code>
+              </td>
+              <td>
+                <code>rbx rbp rdi rsi rsp r12</code>–<code>r15</code>,
+                <code>xmm6</code>–<code>xmm15</code>, <code>fpcsr</code>, <code>mxcsr[6:16]</code>
+              </td>
+              <td>Red zone 0; LLP64 <code>long</code>; no implicit register inputs</td>
+            </tr>
+            <tr>
+              <td><code>darwin-arm64</code></td>
+              <td>
+                <code>x0</code>–<code>x7</code> integer; <code>v0</code>–<code>v7</code> SIMD;
+                HFA/HVA members consume consecutive SIMD registers
+              </td>
+              <td>
+                First stack argument at <code>+0</code> (no pushed return address;
+                <code>BL</code> writes <code>x30</code>); <code>shadow_space: 0n</code>
+              </td>
+              <td>
+                <code>x0</code>/<code>x1</code> or <code>v0</code>–<code>v3</code>; indirect result
+                in <code>x8</code> (no result register asserted)
+              </td>
+              <td>
+                <code>x19</code>–<code>x28</code>, <code>sp</code>, <code>d8</code>–<code>d15</code>
+              </td>
+              <td>
+                Red zone 128 B; variadic actuals always on the stack; unprototyped calls
+                <code>unsupported</code>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>System V AMD64: recursive eightbyte classification</h3>
+        <p>
+          <code>classify</code> walks the resolved <code>AbiType</code> tree and produces a list of
+          eightbyte classes from <code>NO_CLASS</code>, <code>INTEGER</code>, <code>SSE</code>,
+          <code>SSEUP</code>, <code>X87</code>, <code>X87UP</code> and <code>MEMORY</code>.
+          Aggregates allocate one class per eightbyte of the first 64 bytes, recursively classify
+          each field at its absolute enclosing offset, and merge into the slots the field covers.
+          <code>merge</code> is the psABI lattice: <code>MEMORY</code> dominates, then
+          <code>INTEGER</code>, x87 forces <code>MEMORY</code>, otherwise <code>SSE</code>.
+        </p>
+        <p>
+          Three checks matter for accuracy. A field whose absolute offset violates its own alignment
+          makes the whole aggregate <code>MEMORY</code> (this includes packed primitive leaves), and
+          an aggregate larger than 64 bytes starts in memory. A mixed wider sequence is
+          <code>MEMORY</code>, but an aggregate whose classes are all <code>SSE</code>/<code
+            >SSEUP</code
+          >
+          across more than two eightbytes would need AVX semantics, so <code>classify</code> returns
+          <code>null</code> — an explicit unsupported answer, not a guessed <code>MEMORY</code>.
+          <code>locations</code> then consumes one INTEGER or SSE register per class;
+          <code>SSEUP</code> does not consume a new register but widens the previous location.
+        </p>
+        <p>
+          Register exhaustion is all-or-nothing for an argument: if an aggregate needs more INTEGER
+          or SSE registers than remain, the entire argument goes to the stack at an alignment of
+          <code>max(8, alignment)</code>, and the register cursors are not advanced. Default
+          promotions apply only to anonymous arguments (variadic tail or unprototyped call):
+          <code>float</code> becomes <code>double</code>, and 8/16-bit integers become signed
+          32-bit. A 16-bit float is refused because width alone cannot distinguish
+          <code>_Float16</code> from a storage-only half type.
+        </p>
+
+        <h3>Microsoft x64: slots, home space, indirect aggregates</h3>
+        <p>
+          Win64 has no independent register banks. Every argument consumes one slot; the first four
+          slots map to <code>rcx</code>, <code>rdx</code>, <code>r8</code>, <code>r9</code> or
+          <code>xmm0</code>–<code>xmm3</code> depending on its class, and slot 4 onward lives at
+          <code>40 + (slot - 4) * 8</code> from callee-entry RSP. The 32-byte home area is always
+          part of <code>stack_bytes</code>, even for a zero-argument function, and the final value
+          is rounded up to 16.
+        </p>
+        <p>
+          <code>classifyType</code> is intentionally narrower than SysV: a plain aggregate of 1, 2,
+          4 or 8 bytes is passed as an integer of that width; every other aggregate is passed by
+          pointer (the caller's copy), and <code>__m128</code>-sized vectors are also indirect.
+          Other vector widths are unsupported because shape alone cannot distinguish the
+          <code>__m64</code> integer ABI class from a compiler vector extension. For variadic float
+          arguments, the value is placed in both the SIMD register and the corresponding integer
+          register, mirroring the shadow-store requirement.
+        </p>
+
+        <h3>Darwin ARM64: HFA/HVA, odd registers and variadic stack slots</h3>
+        <p>
+          The Darwin classifier returns a <code>Shape</code>: <code>empty</code>,
+          <code>integer</code>, <code>simd</code> (with up to four homogeneous members), or
+          <code>indirect</code>. An aggregate is <code>simd</code> only when every non-empty field
+          is itself SIMD, fields are contiguous from offset zero, all members have the same width
+          and vector-ness, and the total member count is at most four; otherwise an aggregate larger
+          than 16 bytes is passed indirectly, and one of at most 16 bytes is treated as an integer
+          object. Nested HFA fields are flattened into members with absolute bit offsets, which is
+          why a <code>{float,float}</code> inside a larger homogeneous aggregate still lands in
+          consecutive <code>s</code> registers.
+        </p>
+        <p>
+          Allocation tracks <code>ngrn</code> and <code>nsrn</code> separately. A SIMD shape uses
+          consecutive SIMD registers if all members fit; an integer shape needs
+          <code>ceil(size/8)</code> integer registers. Crucially, Apple does not round NGRN to an
+          even number for a 16-byte value, and an aggregate is never split between the last register
+          and the stack: if it does not fit, <code>ngrn</code> is set to 8 and the object moves
+          whole to the stack. All stack offsets are relative to callee-entry SP, where the first
+          anonymous argument is at <code>+0</code>.
+        </p>
+        <p>
+          For variadic actuals the profile departs from ordinary allocation: every anonymous
+          argument goes to the stack, in eight-byte slots, while retaining natural alignment for
+          16-byte scalars and vectors. Anonymous HFA/HVA aggregates use eight-byte alignment so
+          their members remain contiguous; integer and float promotions match SysV. This is the
+          reason a Darwin call to <code>fixture_variadic(3, 1.0, 2.5, -0.5)</code> has its fixed
+          <code>count</code> in <code>w0</code> and all three doubles at <code>+0</code>,
+          <code>+8</code>, <code>+16</code>.
+        </p>
+
+        <pre><code>const alignment = anonymous
+  ? type.kind === 'aggregate' &amp;&amp; shape.kind === 'simd'
+    ? 8
+    : Math.max(8, indirect ? 8 : shape.alignment)
+  : indirect
+    ? 8
+    : shape.alignment;
+// …
+stack = align(stack, alignment);
+const locations: readonly AbiLocation[] = indirect
+  ? [{ kind: 'indirect', pointer: { stack_offset: stack }, size: shape.size, alignment: shape.alignment }]
+  : [{ kind: 'stack', offset: stack, size, alignment, value_offset_bits: 0 }];
+stack += anonymous ? align(size, 8) : size;</code></pre>
+        <p class="sources">
+          <a class="src" href="../../src/abi/darwin-arm64/index.ts"
+            >src/abi/darwin-arm64/index.ts</a
+          >
+          (<code>DarwinArm64Abi.classifyCall</code>, <code>classify</code>).
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 320" role="img" aria-labelledby="fig-stackargs-title">
+            <title id="fig-stackargs-title">
+              Real register and stack assignment for fixture_stack_args on Darwin ARM64
+            </title>
+
+            <rect class="group" x="10" y="30" width="280" height="270" rx="10" />
+            <text x="150" y="52" text-anchor="middle" class="title">Register arguments</text>
+            <text x="150" y="69" text-anchor="middle" class="small mono">_fixture_stack_args</text>
+
+            <rect class="box c1" x="25" y="82" width="250" height="22" rx="4" />
+            <text x="36" y="98" class="mono">x0 ← arg0 = 1</text>
+            <rect class="box c1" x="25" y="109" width="250" height="22" rx="4" />
+            <text x="36" y="125" class="mono">x1 ← arg1 = 2</text>
+            <rect class="box c1" x="25" y="136" width="250" height="22" rx="4" />
+            <text x="36" y="152" class="mono">x2 ← arg2 = 3</text>
+            <rect class="box c1" x="25" y="163" width="250" height="22" rx="4" />
+            <text x="36" y="179" class="mono">x3 ← arg3 = 4</text>
+            <rect class="box c1" x="25" y="190" width="250" height="22" rx="4" />
+            <text x="36" y="206" class="mono">x4 ← arg4 = 5</text>
+            <rect class="box c1" x="25" y="217" width="250" height="22" rx="4" />
+            <text x="36" y="233" class="mono">x5 ← arg5 = 6</text>
+            <rect class="box c1" x="25" y="244" width="250" height="22" rx="4" />
+            <text x="36" y="260" class="mono">x6 ← arg6 = 7</text>
+            <rect class="box c1" x="25" y="271" width="250" height="22" rx="4" />
+            <text x="36" y="287" class="mono">x7 ← arg7 = 8</text>
+
+            <path class="edge" d="M290,190 L350,190" marker-end="url(#arrow)" />
+            <text x="320" y="182" text-anchor="middle" class="edge-label">call</text>
+
+            <rect class="group" x="352" y="30" width="290" height="270" rx="10" />
+            <text x="497" y="52" text-anchor="middle" class="title">Callee-entry stack</text>
+            <text x="497" y="69" text-anchor="middle" class="small">
+              BL wrote x30, nothing pushed
+            </text>
+
+            <rect class="box accent" x="366" y="86" width="262" height="46" rx="6" />
+            <text x="378" y="105" class="mono">SP + 0</text>
+            <text x="378" y="123" class="small">arg8 = 9 · size 8, align 8</text>
+
+            <rect class="box accent" x="366" y="146" width="262" height="46" rx="6" />
+            <text x="378" y="165" class="mono">SP + 8</text>
+            <text x="378" y="183" class="small">arg9 = 10 · size 8, align 8</text>
+
+            <rect class="box muted" x="366" y="206" width="262" height="46" rx="6" />
+            <text x="378" y="225" class="mono">SP + 16</text>
+            <text x="378" y="243" class="small">caller frame / unused</text>
+
+            <text x="497" y="276" text-anchor="middle" class="small mono">stack_bytes = 16</text>
+
+            <rect class="box ok" x="680" y="80" width="245" height="80" rx="8" />
+            <text x="802" y="103" text-anchor="middle" class="title">Caller side</text>
+            <text x="802" y="121" text-anchor="middle" class="small mono">
+              *(entry_sp - 192) = 9
+            </text>
+            <text x="802" y="139" text-anchor="middle" class="small mono">
+              *(entry_sp - 184) = 10
+            </text>
+
+            <rect class="box muted" x="680" y="186" width="245" height="86" rx="8" />
+            <text x="802" y="208" text-anchor="middle" class="title">Why offsets look far</text>
+            <text x="802" y="226" text-anchor="middle" class="small">
+              emitted address is relative to
+            </text>
+            <text x="802" y="242" text-anchor="middle" class="small">
+              caller entry SP; at the call SP
+            </text>
+            <text x="802" y="258" text-anchor="middle" class="small">
+              moved, so callee sees +0/+8
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 2.</strong> Real assignment for the fixture's ten-argument
+            <code>u64</code> function, produced by <code>darwinArm64Abi.classifyCall</code>: eight
+            integer registers, then two eight-byte stack slots. The caller's two stores are quoted
+            verbatim from its decompiled text; they are relative to the caller's entry SP, not to
+            the callee's.
+          </figcaption>
+        </figure>
+      </section>
+
+      <section id="call-facts">
+        <h2>Call analysis: facts, not prototypes</h2>
+        <p>
+          <code>analyzeCalls</code> is a single pass over the SSA blocks, sharing its work budget
+          with stack recovery. Its contract is stated in the function's comment: it performs
+          non-rewriting ABI observations, never prototype inference; contracts are explicit typed
+          inputs, and names never establish signatures. The first thing it does is
+          <code>recoverStack</code>, because every register and stack location must be inspected
+          against a snapshot rather than against the final SSA values.
+        </p>
+
+        <ol class="steps">
+          <li>
+            <strong>Index contracts and resolutions.</strong> A contract's key is either
+            <code>{kind:'address', address}</code> — image, address space and value — or
+            <code>{kind:'import', image_id, import_id}</code>. Pointer storage is never a matching
+            key. Each target is bounded first: aggregate field trees are traversed to depth 64 and
+            charged to the budget, so a hostile recursive type cannot stall the pass.
+          </li>
+          <li>
+            <strong>Collect call targets.</strong> A direct call contributes an established address
+            target; an indirect call contributes one only if its target value evaluates to an
+            <code>address</code> fact. Supplied resolutions are appended, and duplicates are allowed
+            to survive so contradictions remain visible.
+          </li>
+          <li>
+            <strong>Match contracts.</strong> Only contracts whose target is in the established set
+            are trusted. Two established addresses of the same kind, or two trusted contracts with
+            different headers, parameter types or complete counts, make the call
+            <code>conflicting</code>. <code>conflicting()</code> fingerprints returns, variadic,
+            <code>fixed_parameter_count</code>, calling convention and prototyped flag, plus the
+            <code>noreturn</code> claim and every parameter type by index.
+          </li>
+          <li>
+            <strong>Classify and observe.</strong> Each matching contract is run through
+            <code>abi.classifyCall</code>; each parameter, hidden-result and return location is
+            observed in the caller's snapshot at the call and in the output snapshot for returns. A
+            stack location is read as <code>SP + offset</code>; an indirect location is one pointer
+            read plus a pointee read when the pointer itself points into the stack. Sizes above
+            65,536 bytes stay unknown, and external memory is never read.
+          </li>
+          <li>
+            <strong>Record status and noreturn.</strong> Status is <code>conflicting</code>,
+            <code>established</code> (a trusted contract), <code>candidate</code> (a matching
+            contract or resolution that is not trusted), or <code>unresolved</code>. Noreturn is
+            <code>yes</code> only from an unopposed trusted contract. If the CFG still continues
+            after the call, <code>analyzeCalls</code> reports the contradiction and removes nothing.
+          </li>
+          <li>
+            <strong>Collect candidates.</strong> Initialized general registers at the call become
+            <code>register_candidates</code>; parameter candidates are the incoming registers of
+            semantic uses; return candidates are exit registers that are not themselves incoming
+            values. These are candidates, never established parameters or results.
+          </li>
+        </ol>
+
+        <p>
+          The function also supports <em>prepared</em> interfaces for calls without a contract.
+          <code>observePreparedCallInterfaces</code> asks <code>preparedCallArguments</code>
+          whether each ABI slot cell was authored: its definition must reach a load, a constant, a
+          computation or a different entry register, on every path, with casts, extracts, concat and
+          block parameters followed. Being merely live or initialized is not preparation, and the
+          callable target itself is not evidence that the same value is the first source argument.
+          Once a slot is witnessed, its whole physical carrier is kept, including unknown upper
+          cells; trailing slots are not invented, and
+          <code>argument_list_complete</code> remains <code>false</code>.
+        </p>
+
+        <p>
+          Result widths are handled symmetrically but in the opposite direction.
+          <code>createCallResultDemandIndex</code> walks backwards from semantic roots — load and
+          store addresses, call arguments and indirect targets, branch/switch conditions, return
+          values — through call outputs, extracts, truncations, sign extensions, concats and block
+          parameters. Each hit records the register root and the width actually consumed, so reading
+          <code>W0</code> never asserts the unknown high bits of <code>X0</code>.
+        </p>
+
+        <pre><code>const output = outputs.get(value.id);
+if (output) {
+  const registers = demanded.get(output.call) ?? new Map&lt;string, RegisterDescriptor&gt;();
+  const register = output.binding.register,
+    high = register.offset_bits + offset + width;
+  const previous = registers.get(register.root);
+  registers.set(register.root, {
+    ...register,
+    offset_bits: 0,
+    width_bits: Math.max(previous?.width_bits ?? 0, high),
+  });
+  demanded.set(output.call, registers);
+}</code></pre>
+        <p class="sources">
+          <a class="src" href="../../src/analysis/calls/result-demands.ts"
+            >src/analysis/calls/result-demands.ts</a
+          >
+          (<code>createCallResultDemandIndex</code>, <code>query</code>).
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 840 200" role="img" aria-labelledby="fig-demand-title">
+            <title id="fig-demand-title">
+              Result demand propagates consumed widths back to a call output
+            </title>
+            <rect class="box accent" x="10" y="70" width="170" height="52" rx="8" />
+            <text x="95" y="91" text-anchor="middle" class="title">call output</text>
+            <text x="95" y="109" text-anchor="middle" class="small mono">x0[0:64]</text>
+
+            <path class="edge" d="M180,80 L228,58" marker-end="url(#arrow)" />
+            <path class="edge" d="M180,112 L228,136" marker-end="url(#arrow)" />
+
+            <rect class="box" x="230" y="32" width="170" height="48" rx="8" />
+            <text x="315" y="51" text-anchor="middle" class="mono">truncate → 32</text>
+            <text x="315" y="68" text-anchor="middle" class="small">W0 consumed</text>
+
+            <rect class="box" x="230" y="122" width="170" height="48" rx="8" />
+            <text x="315" y="141" text-anchor="middle" class="mono">whole value</text>
+            <text x="315" y="158" text-anchor="middle" class="small">X0 consumed</text>
+
+            <path class="edge" d="M400,56 L448,56" marker-end="url(#arrow)" />
+            <path class="edge" d="M400,146 L448,146" marker-end="url(#arrow)" />
+
+            <rect class="box ok" x="450" y="32" width="170" height="48" rx="8" />
+            <text x="535" y="51" text-anchor="middle" class="title">demand 32</text>
+            <text x="535" y="68" text-anchor="middle" class="small mono">width_bits = 32</text>
+
+            <rect class="box ok" x="450" y="122" width="170" height="48" rx="8" />
+            <text x="535" y="141" text-anchor="middle" class="title">demand 64</text>
+            <text x="535" y="158" text-anchor="middle" class="small mono">width_bits = 64</text>
+
+            <rect class="box muted" x="650" y="70" width="180" height="62" rx="8" />
+            <text x="740" y="92" text-anchor="middle" class="title">callee contract</text>
+            <text x="740" y="110" text-anchor="middle" class="small">may guarantee more;</text>
+            <text x="740" y="126" text-anchor="middle" class="small">
+              consumption is the demand
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 3.</strong> Demand is semantic consumption, not snapshot liveness. In the
+            fixture, <code>_main</code> compares <code>(uint32_t)call_result == 0</code> (32 bits)
+            while <code>_fixture_check</code> compares a <code>fixture_stack_args</code> result
+            against <code>0x181</code> as a full 64-bit value.
+          </figcaption>
+        </figure>
+
+        <h3>Return storage</h3>
+        <p>
+          Result storage is tracked at three independent strengths.
+          <code>analyzeCalls</code> records <code>return_candidates</code> per return terminator:
+          initialized general registers other than the stack pointer that are not themselves
+          incoming values. Those are candidates, not a result list.
+          <code>possibleAbiReturnStorage(abi)</code> then enumerates what the profile could ever
+          use: it classifies one pointer-sized integer, floats of 16/32/64/80/128 bits, 4/8/16-lane
+          <code>i32</code> vectors, <code>{word,word}</code>, <code>{f64,f64}</code> and
+          <code>{f32×4}</code> returns, unions the resulting register roots and widens overlapping
+          widths. The answer is cached per profile in a <code>WeakMap</code>.
+        </p>
+        <p>
+          That capability set is not evidence. The function's comment is explicit that the synthetic
+          probes' fields and offsets never become author structure fields and that a spare register
+          is not thereby a result. With the built modules the register roots are
+          <code
+            >arm64:x0[0:64], arm64:v0[0:128], arm64:x1[0:64], arm64:v1[0:64], arm64:v2[0:32],
+            arm64:v3[0:32]</code
+          >
+          for Darwin,
+          <code>x86_64:rax[0:64], x86_64:zmm0[0:128], x86_64:rdx[0:64], x86_64:zmm1[0:64]</code> for
+          SysV and only <code>x86_64:rax[0:64], x86_64:zmm0[0:128]</code> for Win64. Presentation
+          combines this capability with observed written storage; when the final return projection
+          is <code>inferred</code> and storage changed, reconstruction emits the
+          <code>return_storage</code> diagnostic with the exact output and exit-scratch slices.
+        </p>
+        <p>
+          Callee summaries carry the complementary fact: <code>NativeInterface.written_result</code>
+          lists the registers a body actually writes on exit, with types. Its comment draws the line
+          that matters for recursion: consumption alone is not a write or extension guarantee, so a
+          caller's demand never seeds a recursive dependency's contract.
+        </p>
+
+        <h3>Classifying call targets</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Kind</th>
+              <th>Where it is decided</th>
+              <th>What it establishes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Direct call</td>
+              <td>
+                <code>Instruction.kind === 'call'</code> with <code>target.kind === 'direct'</code>
+              </td>
+              <td>
+                An established <code>{kind:'address'}</code> target. The direct target is prepended
+                before supplied resolutions, so a contradiction stays visible.
+              </td>
+            </tr>
+            <tr>
+              <td>Import stub</td>
+              <td>
+                <code>resolveCalls</code> consults <code>imports_by_address</code> for the direct
+                callable entry and emits <code>{kind:'import', import_id}</code>
+              </td>
+              <td>
+                The callee is an imported identity, not a code address. <code>pointer_storage</code>
+                is attached only as provenance for an import-slot reference.
+              </td>
+            </tr>
+            <tr>
+              <td>Indirect</td>
+              <td>
+                <code>analyzeCalls</code> accepts a target only if the SSA value is a proven
+                <code>address</code>; <code>resolveCalls</code> adds discovery references when
+                <code>indirect_targets === 'bounded'</code>
+              </td>
+              <td>
+                <code>established</code> or <code>candidate</code> status is inherited from the
+                reference; unresolved references are skipped. A candidate never establishes arity or
+                parameter types.
+              </td>
+            </tr>
+            <tr>
+              <td>Tail call</td>
+              <td>
+                <code>Terminator.kind === 'indirect'</code> with <code>tail_call: true</code>;
+                <code>nativeDependencies</code> resolves a constant target and
+                <code>nativeLibraryTails</code> binds established library tails
+              </td>
+              <td>
+                A dependency edge without a returning call frame; its target is resolved like a
+                direct call. Separately, <code>nativeIncomingStackEscapes</code> treats an exact
+                pointer into the incoming argument area as a variadic escape.
+              </td>
+            </tr>
+            <tr>
+              <td>Noreturn</td>
+              <td><code>CallFact.noreturn</code> from trusted contracts only</td>
+              <td>
+                <code>yes</code>, <code>no</code>, <code>unknown</code> or <code>conflicting</code>.
+                Effects and CFG edges are never removed; a continuation after a claimed noreturn is
+                a diagnostic, not a rewrite.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Where contracts come from</h3>
+        <p>
+          A contract is always an explicit typed input. <code>callDeclarations</code> is the single
+          place that turns declarations into <code>SuppliedCallContract</code>s, and it insists on a
+          grounded use: an annotation signature is matched through
+          <code>CallScope.calls_by_subject</code>; a DWARF signature is matched only when a direct
+          call's address equals the debug function's address in the same image and
+          <code>va</code> space; a source declaration is applied only to calls with a grounded
+          target identity. Each application publishes an evidence record whose analyzer is
+          <code>pipeline-call-contracts</code>. Library contracts come from
+          <code>recoverLibraryContracts</code>, and the native worklist further filters them to
+          <code>abi_state === 'supported'</code> with no conflicts
+          (<code>nativeLibraryContracts</code>).
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th>Strength</th>
+              <th>Behaviour when contradicted</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Library prototype (curated catalog + generated headers)</td>
+              <td>Established for the exact import identity or callable entry</td>
+              <td>Conflicting contracts survive as alternatives; no unique conclusion</td>
+            </tr>
+            <tr>
+              <td>DWARF signature</td>
+              <td>Established unless the record is conflicting</td>
+              <td>Marked <code>conflicting</code>, not silently preferred</td>
+            </tr>
+            <tr>
+              <td>Annotation / durable signature</td>
+              <td>Asserted, established or conflicting, depending on status</td>
+              <td>Retracted annotations are ignored; competing signatures conflict</td>
+            </tr>
+            <tr>
+              <td>Objective-C method encoding</td>
+              <td>Established for that method implementation</td>
+              <td>Unparseable encodings and non-unique records yield no signature</td>
+            </tr>
+            <tr>
+              <td>Observation (prepared prefix, result demand, callee summary)</td>
+              <td>Physical, never a complete source prototype</td>
+              <td>Supplements locations; cannot close arity by itself</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="summaries">
+        <h2>Callee summaries and the dependency worklist</h2>
+        <p>
+          A callee summary answers a narrower question than a prototype:
+          <em
+            >which physical registers and stack slots does this body read on entry, which does it
+            write on exit, and can anything outside that set be read?</em
+          >
+          The answer is built by preparing the callee body through exactly the same lifter/SSA/type
+          pipeline as the selected function, then observing its calls and entry uses. Nothing is
+          inferred from the caller's argument list.
+        </p>
+
+        <pre><code>export type NativeInterface = Omit&lt;InferredCallee, 'call_id' | 'evidence_ids'&gt; &amp; {
+  readonly parameter_shapes?: readonly NativeParameterShape[];
+  readonly source_interface?: Omit&lt;NativeInterface, 'source_interface'&gt;;
+  readonly written_result?: {
+    readonly registers: readonly RegisterDescriptor[];
+    readonly types: readonly DataType[];
+  };
+  readonly argument_reaching_calls?: readonly string[];
+};
+export interface NativeSummary {
+  readonly observed: NativeInterface;
+  readonly evidence_ids: readonly string[];
+  readonly reasons: readonly string[];
+  readonly complete: boolean;
+  readonly arity_complete?: boolean;
+}</code></pre>
+        <p class="sources">
+          <a class="src" href="../../src/service/analysis/native-worklist.ts"
+            >src/service/analysis/native-worklist.ts</a
+          >
+          (<code>NativeInterface</code>, <code>NativeSummary</code>, <code>NativeSummaryUnit</code>,
+          <code>NativeDependency</code>).
+        </p>
+
+        <p>
+          <code>NativeSummaryUnit</code> is the prepared body plus accounting: instruction, block
+          and final/peak IR-node counts, its dependencies, evidence, human-readable
+          <code>reasons</code>, <code>budget_truncated</code> and an optional
+          <code>arity_complete</code>. <code>NativeDependency</code> carries the call id, target,
+          demanded result registers, optional context assumptions, and the original subject ids used
+          to publish a context-use proof.
+        </p>
+
+        <h3>Demand-first loading, then refinement</h3>
+        <p>
+          The worklist is deliberately not a whole-program sweep. Its documented rule is that a
+          requested call's arity depends only on the target's own reads and, transitively, on the
+          callees that an <em>unobserved</em> entry argument may reach. Everything else — callees
+          wanted only for effects, results and memory shapes — is deferred.
+        </p>
+
+        <ol class="steps">
+          <li>
+            <strong>Schedule roots.</strong> For the selected function,
+            <code>recoverSourceEvidence</code> passes its direct dependencies as
+            <code>root_dependencies</code> (with <code>roots: []</code>), records their result
+            demands, and probes the arity sub-closure breadth-first through
+            <code>demandArity</code>. The probe uses <code>argument_reaching</code>; when the probe
+            itself hits its work share, it narrows nothing and every call stays relied on. Callees
+            that the argument cannot reach are queued in <code>deferred</code>.
+          </li>
+          <li>
+            <strong>Schedule contexts.</strong> A body may be prepared under constant/alias
+            assumptions derived from the call site (<code>nativeCallContext</code>). The context key
+            is <code>functionId@fingerprint(assumptions)</code>. At most
+            <code>max_contexts_per_function</code> (4 in the pipeline) and
+            <code>max_contexts</code> (64) are prepared; beyond that the generic body is used and a
+            reason records that the interface is a conservative generic one.
+          </li>
+          <li>
+            <strong>Load under a fair share.</strong> Each load or demand probe receives at most
+            <code>floor(remainingWork / 4)</code>; the loader's own capacities (instructions,
+            blocks, IR nodes) are also decremented. No new body starts once remaining work is below
+            half of the initial allowance, so finished interfaces keep a reserve for the fixed
+            point. Only a limit that matches this step's own reservation is recoverable;
+            cancellation, deadlines, the global work limit and selected-body failures escape.
+          </li>
+          <li>
+            <strong>Order components.</strong> <code>dependencyComponents</code> computes strongly
+            connected components over loaded units and emits them callees-first (the code names the
+            traversal Tarjan). A component is recursive when it has more than one member or a self
+            edge. Non-recursive bodies are observed once, against final callee interfaces; only
+            recursive groups iterate.
+          </li>
+          <li>
+            <strong>Refine.</strong> Refinement gets three quarters of the work left after loading.
+            A changed member enqueues only its direct callers <em>inside</em> the group; callers
+            outside it are later components and observe the final result. Each body is visited at
+            most <code>max_refinements</code> (64) times; exceeding that records
+            <code>native interface refinement limit (64)</code> and leaves the body unfinished.
+            Equality is a fingerprint of the whole interface, so transported types and evidence
+            participate in the fixed point, not just register names.
+          </li>
+          <li>
+            <strong>Close recursive groups coinductively.</strong> <code>closeRecursive</code>
+            assumes every member closed with its current parameter list, re-observes each body once
+            against those assumptions, and keeps the results only if every member then closes with
+            exactly the assumed parameters. The rationale is in the comment: any actual read happens
+            at a finite call depth, so a self-consistent assumption is a proof; otherwise the group
+            stays open.
+          </li>
+          <li>
+            <strong>Propagate limits.</strong> Reasons are propagated as a bounded fixed point,
+            qualified by the callee name and kept as leaf identities so call chains do not grow.
+            Arity completeness is inherited only through the calls in
+            <code>argument_reaching_calls</code>; a callee that sees only observed parameters or
+            computed values cannot widen the caller's argument list.
+          </li>
+        </ol>
+
+        <div class="callout invariant">
+          <span class="title">Invariant — absence is not a zero-argument declaration</span>
+          <p>
+            A unit that was never observed is summarized with <code>unresolved()</code> —
+            <code
+              >{ parameters: [], returns: [], parameter_state: 'ambiguous', argument_list_complete:
+              false }</code
+            >
+            — and an unfinished body keeps whatever it had established.
+            <code>complete</code> requires zero reasons <em>and</em> a non-ambiguous parameter
+            state; <code>arity_complete</code> additionally requires an unambiguous closure and no
+            limit/refinement reason.
+          </p>
+        </div>
+
+        <p>
+          <code>budgetReason</code> classifies a reason as budget-related by matching the words
+          <code>limit</code>, <code>capacity</code>, <code>reserve</code> or <code>budget</code>.
+          That single predicate decides whether the eventual diagnostic is
+          <code>resource_limit</code> (“cut by budget”) or
+          <code>unavailable_semantics</code> (“partial”).
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 960 400" role="img" aria-labelledby="fig-worklist-title">
+            <title id="fig-worklist-title">
+              Demand-first worklist over the real fixture call graph
+            </title>
+
+            <rect class="box accent" x="30" y="20" width="230" height="56" rx="8" />
+            <text x="145" y="41" text-anchor="middle" class="title">_main</text>
+            <text x="145" y="59" text-anchor="middle" class="small mono">va:0x100000a8c</text>
+
+            <path class="edge accent" d="M145,76 L145,118" marker-end="url(#arrow-accent)" />
+            <text x="205" y="102" text-anchor="middle" class="edge-label">direct</text>
+
+            <path class="edge" d="M260,48 L316,48" marker-end="url(#arrow)" />
+            <text x="288" y="40" text-anchor="middle" class="edge-label">direct</text>
+
+            <rect class="box c1" x="320" y="20" width="230" height="56" rx="8" />
+            <text x="435" y="41" text-anchor="middle" class="title">_fixture_string</text>
+            <text x="435" y="59" text-anchor="middle" class="small mono">va:0x100000708</text>
+
+            <rect class="box accent" x="30" y="120" width="230" height="56" rx="8" />
+            <text x="145" y="141" text-anchor="middle" class="title">_fixture_check</text>
+            <text x="145" y="159" text-anchor="middle" class="small mono">va:0x100000714</text>
+
+            <path class="edge" d="M260,142 L288,142 L288,118 L318,118" marker-end="url(#arrow)" />
+            <path class="edge" d="M260,148 L288,148 L288,213 L318,213" marker-end="url(#arrow)" />
+            <path class="edge" d="M260,154 L288,154 L288,323 L318,323" marker-end="url(#arrow)" />
+
+            <rect class="box muted" x="320" y="96" width="260" height="46" rx="8" />
+            <text x="450" y="115" text-anchor="middle" class="title">13 other direct callees</text>
+            <text x="450" y="132" text-anchor="middle" class="small mono">
+              _fixture_variadic, _fixture_stack_args
+            </text>
+
+            <rect class="box" x="320" y="190" width="260" height="46" rx="8" />
+            <text x="450" y="209" text-anchor="middle" class="title">_fixture_direct</text>
+            <text x="450" y="226" text-anchor="middle" class="small mono">va:0x1000005d4</text>
+
+            <rect class="box warn" x="320" y="300" width="260" height="46" rx="8" />
+            <text x="450" y="319" text-anchor="middle" class="title">_fixture_indirect</text>
+            <text x="450" y="336" text-anchor="middle" class="small mono">va:0x100000608</text>
+
+            <path class="edge" d="M580,213 L620,213 L620,185 L658,185" marker-end="url(#arrow)" />
+            <path class="edge" d="M580,213 L620,213 L620,246 L658,246" marker-end="url(#arrow)" />
+            <path
+              class="edge bad dashed"
+              d="M580,323 L620,323 L620,330 L658,330"
+              marker-end="url(#arrow)"
+            />
+
+            <rect class="box c1" x="660" y="162" width="230" height="44" rx="8" />
+            <text x="775" y="181" text-anchor="middle" class="title">_fixture_stack</text>
+            <text x="775" y="197" text-anchor="middle" class="small mono">va:0x100000548</text>
+
+            <rect class="box c1" x="660" y="224" width="230" height="44" rx="8" />
+            <text x="775" y="243" text-anchor="middle" class="title">_fixture_arithmetic</text>
+            <text x="775" y="259" text-anchor="middle" class="small mono">va:0x100000574</text>
+
+            <rect class="box bad" x="660" y="306" width="230" height="48" rx="8" />
+            <text x="775" y="325" text-anchor="middle" class="title">callback target</text>
+            <text x="775" y="343" text-anchor="middle" class="small">unresolved · not a unit</text>
+
+            <rect class="group" x="300" y="80" width="610" height="290" rx="12" />
+            <text x="320" y="362" class="small accent">arity-demanded closure</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 4.</strong> The real call graph reachable from <code>_main</code>: two
+            local direct callees (<code>_fixture_string</code> is the other), with 13 of the 15
+            direct callees of <code>_fixture_check</code> collapsed. The import stub
+            <code>_puts</code> is skipped by <code>nativeDependencies</code>. Every edge drawn is a
+            direct call with an exact address, so every target is prepared; the callback inside
+            <code>_fixture_indirect</code> is an unresolved indirect target and therefore never
+            becomes a unit. This fixture has no recursive SCC, so each component is observed once.
+          </figcaption>
+        </figure>
+
+        <h3>Transferring callee facts into the caller</h3>
+        <p>
+          A summary is not copied wholesale onto the call. <code>mergeNativeInterface</code>
+          combines the callee-proven interface with the caller-authored prepared prefix:
+          callee-proven locations take precedence, prepared slots fill missing locations, integer
+          cells of smaller width do not replace wider ones, and the result is re-ordered by
+          <code>parameterRegisters(abi)</code> — a capability probe that classifies sixteen pointer
+          and sixteen double parameters and returns the distinct register roots with the integer
+          bank first and the SIMD bank second. <code>argument_list_complete</code> is forced to
+          <code>false</code> because a caller prefix is not arity.
+        </p>
+        <p>
+          From there, <code>nativeTypeSlices</code> seeds per-cell scalar/vector lane types,
+          <code>nativeCallInputs</code> observes the transferred parameter registers and stack
+          parameters in the caller's stack snapshot, <code>nativeStackParameters</code> accepts only
+          entry-backed reads as stack parameters (a private spill or write-before-read never becomes
+          an incoming argument), and <code>nativeReturnInterface</code> computes the callee's
+          written result storage. <code>nativeShapeTransfers</code> turns parameter memory shapes
+          into transfers for <code>refineMemoryShapes</code>. The caller also learns the opposite
+          direction: for every prepared unit that names the selected function as a dependency, that
+          dependency's <code>return_demand</code> is replayed into
+          <code>SourceEvidence.function_return_demands</code>, so a callee's consumption of the
+          caller's result is visible without scanning incoming callers.
+        </p>
+        <p>
+          <code>source_interface</code> is a second refinement used when context assumptions,
+          library tails or a callee's own source interface change the observation. It never replaces
+          the checked interface; it is merged and kept beside it, and only its proven
+          <code>argument_list_closure</code> is exposed when the summary is arity-complete.
+        </p>
+      </section>
+
+      <section id="reuse">
+        <h2>Two cache tiers and why they are invisible</h2>
+        <p>
+          Preparing a callee is the dominant cold cost of a decompilation, and the useful unit is
+          the prepared body, not the final summary: the summary depends on demands and context,
+          while the IR, types, call analysis and dependency list do not. The cache therefore stores
+          <code>PreparedNativeUnit</code>s and re-observes them on demand.
+        </p>
+
+        <h3>Tier 1: in-process <code>WeakMap</code></h3>
+        <p>
+          <code>preparedUnits</code> is a <code>WeakMap&lt;LoadedImage, PreparedUnitCache&gt;</code>
+          bound to the image object, the exact function and reference arrays, and an identity
+          fingerprint over revision, image SHA-256, selected slice, target, pipeline versions,
+          lifter, ABI and supplied native types. Entries are a least-recently-used
+          <code>Map</code> capped at <code>MAX_PREPARED_UNIT_SIZE = 1 &lt;&lt; 18</code> retained
+          size (instructions + IR nodes + evidence + traced reads), roughly 1 KiB of heap per unit
+          according to the comment. A hit is served only when the current allowance is at least the
+          entry's <code>allowance</code>, its instruction/block/node counts fit, and the dependency
+          trace is present and its replay charges fit every enclosing allowance; the trace is
+          replayed and the original preparation work is charged, so a cache hit consumes the same
+          budget as a cold preparation.
+        </p>
+
+        <h3>Tier 2: the project's <code>native_summaries</code> table</h3>
+        <p>
+          <code>createNativeUnitPersistence</code> sits behind the in-process cache. It stores a row
+          only when analysis caching is enabled and <code>reusablePreparation</code> holds: no
+          instruction budget truncation, no reasons, and a complete call analysis. The row is keyed
+          by <code>(scope, function_id)</code>, where <code>scope</code> is a fingerprint of the
+          format, project revision, image SHA-256, slice, target, component versions, lifter, ABI
+          and supplied native types. The table is declared by <code>NATIVE_SUMMARIES_TABLE</code> in
+          <a class="src" href="../../src/project/store/index.ts">src/project/store/index.ts</a>;
+          store schema 6 adds it, and payloads are Brotli quality 4 over the store's graph encoding.
+        </p>
+        <p>
+          The row carries <code>allowance</code> and <code>work</code> from the reuse contract —
+          never re-derived by the store — plus a digest over scope, function, revision and payload.
+          A read validates the digest, decodes the payload, checks the envelope schema, identity
+          fields, dependency targets against the current function list, and then re-reads every
+          stored dependency read from the project at the current revision
+          (<code>verifyTracedReads</code>). Verification itself does not charge the request; only
+          preparing's charges are replayed. Any mismatch is a miss, and the unit is prepared
+          normally.
+        </p>
+        <p>
+          Writes are batched: at most 8 MiB of pending payload before an early flush, written in the
+          request's transaction or one batch at the end. A row larger than 16 MiB is not stored, and
+          a prepared unit above <code>MAX_PERSISTED_UNIT_SIZE = 8192</code> is skipped because
+          encoding it costs more than a later reuse recovers. The per-project cap is
+          <code>DEFAULT_NATIVE_SUMMARY_BYTES = 64 * 1024 * 1024</code>; rows of superseded revisions
+          are dropped first, then the oldest writes. A cache write can never fail a request.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 960 280" role="img" aria-labelledby="fig-cache-title">
+            <title id="fig-cache-title">Prepared-unit reuse and the two cache tiers</title>
+
+            <rect class="box accent" x="20" y="40" width="190" height="56" rx="8" />
+            <text x="115" y="61" text-anchor="middle" class="title">prepareNativeUnit</text>
+            <text x="115" y="79" text-anchor="middle" class="small">lifter → SSA → types</text>
+
+            <path class="edge" d="M210,68 L248,68" marker-end="url(#arrow)" />
+
+            <rect class="box" x="250" y="40" width="190" height="56" rx="8" />
+            <text x="345" y="61" text-anchor="middle" class="title">in-process LRU</text>
+            <text x="345" y="79" text-anchor="middle" class="small">WeakMap per image</text>
+
+            <path class="edge" d="M440,68 L478,68" marker-end="url(#arrow)" />
+            <text x="459" y="60" text-anchor="middle" class="edge-label">miss</text>
+
+            <rect class="box" x="480" y="40" width="190" height="56" rx="8" />
+            <text x="575" y="61" text-anchor="middle" class="title">native_summaries</text>
+            <text x="575" y="79" text-anchor="middle" class="small mono">SQLite · Brotli</text>
+
+            <path class="edge" d="M670,68 L708,68" marker-end="url(#arrow)" />
+            <text x="689" y="60" text-anchor="middle" class="edge-label">row</text>
+
+            <rect class="box" x="710" y="40" width="230" height="56" rx="8" />
+            <text x="825" y="61" text-anchor="middle" class="title">verifyTracedReads</text>
+            <text x="825" y="79" text-anchor="middle" class="small">digest · re-reads</text>
+
+            <path class="edge bad dashed" d="M825,96 L825,126" marker-end="url(#arrow)" />
+            <text x="895" y="114" text-anchor="middle" class="edge-label">miss</text>
+
+            <rect class="box" x="710" y="128" width="230" height="56" rx="8" />
+            <text x="825" y="149" text-anchor="middle" class="title">prepare again</text>
+            <text x="825" y="167" text-anchor="middle" class="small">a miss is never served</text>
+
+            <path
+              class="edge ok"
+              d="M710,68 L700,68 L700,146 L560,146 L560,160"
+              marker-end="url(#arrow)"
+            />
+            <text x="630" y="138" text-anchor="middle" class="edge-label">valid</text>
+
+            <path class="edge" d="M440,68 L458,68 L458,190 L440,190" marker-end="url(#arrow)" />
+            <text x="448" y="180" text-anchor="middle" class="edge-label">hit</text>
+
+            <rect class="box ok" x="250" y="162" width="190" height="56" rx="8" />
+            <text x="345" y="183" text-anchor="middle" class="title">replay + charge</text>
+            <text x="345" y="201" text-anchor="middle" class="small">work · reads · progress</text>
+
+            <path class="edge" d="M440,190 L478,190" marker-end="url(#arrow)" />
+
+            <rect class="box accent" x="480" y="162" width="160" height="56" rx="8" />
+            <text x="560" y="183" text-anchor="middle" class="title">observe</text>
+            <text x="560" y="201" text-anchor="middle" class="small">per demand/context</text>
+
+            <path class="edge accent" d="M640,190 L668,190" marker-end="url(#arrow-accent)" />
+
+            <rect class="box ok" x="670" y="162" width="180" height="56" rx="8" />
+            <text x="760" y="183" text-anchor="middle" class="title">NativeSummary</text>
+            <text x="760" y="201" text-anchor="middle" class="small">complete / partial</text>
+
+            <text x="115" y="235" class="small">
+              Only complete preparations are stored; the summary itself never is.
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 5.</strong> A stored row is a prepared unit plus the ordered reads and
+            the work/allowance numbers. It is offered only under the exact scope it was prepared in,
+            re-verified against the current store, and then re-observed — which is why
+            <code>--analysis-cache</code> and <code>--no-analysis-cache</code> produce identical
+            text.
+          </figcaption>
+        </figure>
+
+        <div class="callout caveat">
+          <span class="title">Identity includes the revision</span>
+          <p>
+            Prepared evidence embeds the revision in its IDs. The scope therefore names the
+            revision, and any annotation or other revision change invalidates every stored row; the
+            next write deletes superseded rows. This is deliberate: a row must never be offered for
+            a state in which preparing would produce a different unit.
+          </p>
+        </div>
+      </section>
+
+      <section id="worked">
+        <h2>Worked example: one fixture, one open argument list</h2>
+        <p>
+          The fixture <code>fixtures/bin/macho-arm64-symbols</code> is Apple ARM64, so the profile
+          is <code>darwin-arm64</code>. The following are real outputs from the built CLI (the
+          commands are listed in the final report). First <code>_main</code>:
+        </p>
+        <pre><code>extern uint64_t fixture_check(uintptr_t); /* inferred */
+extern int8_t* fixture_string(void); /* inferred */
+extern int32_t puts(const char*);
+uint64_t main() { /* assumes nearest-even rounding and masked FP traps */
+  uint64_t call_result;
+  call_result = fixture_check(...);
+  if ((uint32_t)call_result == 0) {
+    puts((const char*)fixture_string());
+  }
+  return call_result;
+}</code></pre>
+        <p class="sources">
+          Produced by
+          <code
+            >node dist/src/cli/entry.js decompile fixtures/bin/macho-arm64-symbols --function _main
+            --cache /tmp/od-cache</code
+          >
+          (comment trimmed). The stderr caveats were:
+        </p>
+        <pre><code>warning: unavailable_semantics: 1 call with unresolved interface
+warning: unavailable_semantics: return list unresolved (possible storage: x1, v0, v1, v2, v3)
+warning: unavailable_semantics: callee summaries partial: _fixture_check</code></pre>
+
+        <p>
+          There is no supplied prototype for <code>fixture_check</code>; it is a local function, so
+          the caller's interface comes from the callee summary. That summary stays open because
+          <code>_fixture_check</code> calls <code>_fixture_indirect</code>, whose body has an
+          unresolved indirect target. Its observed interface therefore has
+          <code>parameter_state: 'ambiguous'</code>, and <code>observeParameters</code>'s
+          <code>closedCallee</code> test rejects an ambiguous callee;
+          <code>_fixture_check</code> gets no <code>argument_list_closure</code>.
+          <code>_main</code> reaches <code>_fixture_check</code>, so the chain propagates and the
+          caller prints <code>fixture_check(...)</code>. The same reason appears as
+          <code>callee summaries partial: _fixture_check</code>: the diagnostic is attached to the
+          dependency that stayed incomplete, not to the call site.
+        </p>
+        <p>
+          Inside <code>_fixture_check</code>, the callee-side text for the ten-argument function and
+          its call site are both real:
+        </p>
+        <pre><code>uint64_t fixture_stack_args(
+  uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4,
+  uint64_t arg5, uint64_t arg6, uint64_t arg7, uint64_t arg8, uint64_t arg9
+) { … }
+
+/* caller, after preparing two outgoing slots */
+*(uint64_t *)(entry_sp - 192) = 9;
+*(uint64_t *)(entry_sp - 184) = 10;
+call_result_2 = fixture_stack_args(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...);</code></pre>
+        <p>
+          Ten obvious physical arguments, eight in <code>x0</code>–<code>x7</code> and two in the
+          outgoing stack slots — yet the list still carries an open marker. The reason is an
+          invariant, not a missing argument: <code>_fixture_stack_args</code> reads
+          <code>arg8</code> and <code>arg9</code> from its incoming stack area, so
+          <code>nativeStackParameters</code> reports two stack parameters, and
+          <code>observeParameters</code> refuses <code>argument_list_closure</code> whenever
+          <code>stack_parameters.length</code> is non-zero. The two printed calls in
+          <code>_fixture_check</code> that keep an open marker are
+          <code>_fixture_stack_args</code> (shown here) and <code>_fixture_variadic</code>; the JSON
+          envelope's two <code>call_interface</code> diagnostics resolve to exactly these two call
+          nodes.
+        </p>
+
+        <div class="callout invariant">
+          <span class="title">Invariant — a cache hit cannot change the result</span>
+          <p>
+            <code>--no-analysis-cache</code> disables the in-process cache, the persisted tier and
+            published-result reuse, but not the dependency collector: work charges, and therefore
+            results, are identical. Running the same <code>_main</code> decompilation with
+            <code>--analysis-cache</code> and with <code>--no-analysis-cache</code> produced
+            byte-identical stdout in this repository.
+          </p>
+        </div>
+
+        <p>
+          The comparison to make is therefore not “with and without the cache” but “call site
+          against callee interface”. <code>_fixture_float</code> decompiles to
+          <code>double fixture_float(double arg0, double arg1)</code>; the caller passes two
+          constants in <code>d0</code>/<code>d1</code> and still prints them in integer storage
+          form. The summary supplies physical carriers and widths; presentation of a constant as a
+          floating literal is a source-type decision made later, and it is not something the ABI
+          layer asserts.
+        </p>
+      </section>
+
+      <section id="objc-variadic">
+        <h2>Objective-C sends and variadic tails</h2>
+        <p>
+          Objective-C is handled as a source-level interface over the same ABI facts. Two metadata
+          forms are resolved: an import that names a dispatcher (<code>_objc_msgSend</code>,
+          <code>_objc_msgSendSuper</code>, <code>_objc_msgSendSuper2</code>) or a runtime entry
+          (<code>_objc_alloc</code>, <code>_objc_alloc_init</code>, <code>_objc_opt_new</code>,
+          <code>_objc_opt_class</code>, <code>_objc_opt_self</code>,
+          <code>_objc_opt_isKindOfClass</code>, <code>_objc_opt_respondsToSelector</code>), and a
+          stub entry in <code>__objc_stubs</code> that names its selector directly.
+        </p>
+        <ol class="steps">
+          <li>
+            <strong>Find the selector.</strong> For a stub, the selector is metadata. For a
+            dispatcher, the second integer argument register is <code>SEL</code>; it must be an
+            exact 64-bit load of a slot in <code>__objc_selrefs</code>. A constant SEL argument
+            without that load is not a proof.
+          </li>
+          <li>
+            <strong>Get keyword arity.</strong> <code>selectorArity</code> counts colons. The
+            interface is <code>(receiver, SEL, keyword…)</code>; a stub's caller supplies no SEL, so
+            that slot is filtered out.
+          </li>
+          <li>
+            <strong>Type the keywords.</strong> The unique method type encoding for the selector is
+            parsed; its parameter count must be <code>arity + 2</code>. Without an encoding, every
+            keyword is a pointer-sized integer. The resulting <code>AbiSignature</code> is run
+            through <code>abi.classifyCall</code>, and a non-complete layout, a hidden result, or a
+            location that is not exactly one register of the declared width rejects the typed
+            interface.
+          </li>
+          <li>
+            <strong>Check caller preparation.</strong> If the caller prepares an FP/SIMD or integer
+            argument register beyond the selector's arity, the message would have more actual
+            arguments than the selector names, so the source interface is not applied and the
+            physical call remains.
+          </li>
+          <li>
+            <strong>Close or leave open.</strong> A non-variadic selector yields
+            <code>argument_list_closure: 'objc_selector'</code>. A known variadic selector (for
+            example an <code>NSString</code> format selector) closes only when the format argument
+            is an exact string literal and the promoted actuals occupy Darwin's anonymous stack
+            slots; otherwise it is marked <code>variadic_stack: true</code>. A constant
+            <code>stringWithFormat:@"%@=%ld"</code> therefore produces a closed two-argument
+            message, while an unknown format leaves the tail open.
+          </li>
+        </ol>
+        <p>
+          Method <em>implementations</em> are typed by <code>objcMethodSignature</code>: it requires
+          a unique method record at the function address, parses the compiler's type encoding (which
+          includes the result and both implicit parameters), and types <code>self</code> from the
+          class's ivar layout at static offsets, including in-image superclasses. Categories belong
+          to their class (<code>Class(Category)</code> becomes <code>Class</code>). Real output for
+          <code>-[ODCounter summary]</code>:
+        </p>
+        <pre><code>id -[ODCounter summary](ODCounter* self, SEL _cmd) {
+  uint64_t value0;
+  void* object;
+  void* objc_claimAutoreleasedReturnValue_result;
+  value0 = [NSString class];
+  object = objc_claimAutoreleasedReturnValue([self label]);
+  objc_claimAutoreleasedReturnValue_result =
+    objc_claimAutoreleasedReturnValue([NSString stringWithFormat:@"%@=%ld", object, [self count]]);
+  objc_release(object);
+  return objc_autoreleaseReturnValue((uintptr_t)objc_claimAutoreleasedReturnValue_result);
+}</code></pre>
+        <p class="sources">
+          Produced from <code>test/metadata/fixtures/objc-foundation</code>; the selector, keyword
+          arity and <code>%@</code>/<code>%ld</code> argument classes come from
+          <a class="src" href="../../src/service/analysis/objc-messages.ts"
+            >src/service/analysis/objc-messages.ts</a
+          >
+          and
+          <a class="src" href="../../src/service/analysis/objc-signature.ts"
+            >src/service/analysis/objc-signature.ts</a
+          >. The super dispatcher stays explicit (<code
+            >objc_msgSendSuper2(..., @selector(init))</code
+          >) rather than being rewritten into a message.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 330" role="img" aria-labelledby="fig-objc-title">
+            <title id="fig-objc-title">Objective-C message site resolution</title>
+
+            <rect class="box accent" x="15" y="120" width="180" height="52" rx="8" />
+            <text x="105" y="141" text-anchor="middle" class="title">call / tail site</text>
+            <text x="105" y="159" text-anchor="middle" class="small">exact direct target</text>
+
+            <path class="edge" d="M195,132 L228,132 L228,66 L258,66" marker-end="url(#arrow)" />
+            <path class="edge" d="M195,140 L258,140" marker-end="url(#arrow)" />
+            <path class="edge" d="M195,152 L228,152 L228,214 L258,214" marker-end="url(#arrow)" />
+
+            <rect class="box" x="260" y="42" width="200" height="48" rx="8" />
+            <text x="360" y="61" text-anchor="middle" class="title">import name</text>
+            <text x="360" y="78" text-anchor="middle" class="small mono">
+              _objc_msgSend* / runtime
+            </text>
+
+            <rect class="box" x="260" y="116" width="200" height="48" rx="8" />
+            <text x="360" y="135" text-anchor="middle" class="title">stub entry</text>
+            <text x="360" y="152" text-anchor="middle" class="small mono">__objc_stubs</text>
+
+            <rect class="box" x="260" y="190" width="200" height="48" rx="8" />
+            <text x="360" y="209" text-anchor="middle" class="title">SEL register</text>
+            <text x="360" y="226" text-anchor="middle" class="small">exact selref load</text>
+
+            <path class="edge" d="M460,66 L498,66 L498,128 L528,128" marker-end="url(#arrow)" />
+            <path class="edge" d="M460,140 L528,140" marker-end="url(#arrow)" />
+            <path class="edge" d="M460,214 L498,214 L498,152 L528,152" marker-end="url(#arrow)" />
+
+            <rect class="box accent" x="530" y="116" width="170" height="52" rx="8" />
+            <text x="615" y="137" text-anchor="middle" class="title">selector → arity</text>
+            <text x="615" y="155" text-anchor="middle" class="small">colon count</text>
+
+            <path class="edge" d="M700,128 L738,128 L738,62 L768,62" marker-end="url(#arrow)" />
+            <path class="edge" d="M700,152 L768,152" marker-end="url(#arrow)" />
+
+            <rect class="box" x="770" y="38" width="160" height="48" rx="8" />
+            <text x="850" y="57" text-anchor="middle" class="title">type encoding</text>
+            <text x="850" y="74" text-anchor="middle" class="small">unique record</text>
+
+            <rect class="box" x="770" y="128" width="160" height="48" rx="8" />
+            <text x="850" y="147" text-anchor="middle" class="title">classifyCall</text>
+            <text x="850" y="164" text-anchor="middle" class="small">receiver · SEL · args</text>
+
+            <path class="edge" d="M850,86 L850,126" marker-end="url(#arrow)" />
+            <path class="edge" d="M850,176 L850,204" marker-end="url(#arrow)" />
+
+            <rect class="box" x="745" y="206" width="190" height="48" rx="8" />
+            <text x="840" y="225" text-anchor="middle" class="title">prepared-arg check</text>
+            <text x="840" y="242" text-anchor="middle" class="small">no extra prepared slot</text>
+
+            <path
+              class="edge ok"
+              d="M745,238 L718,238 L718,278 L690,278"
+              marker-end="url(#arrow)"
+            />
+            <path class="edge bad dashed" d="M790,254 L790,278 L820,278" marker-end="url(#arrow)" />
+
+            <rect class="box ok" x="500" y="256" width="188" height="48" rx="8" />
+            <text x="594" y="275" text-anchor="middle" class="title">message interface</text>
+            <text x="594" y="292" text-anchor="middle" class="small">
+              closure or variadic_stack
+            </text>
+
+            <rect class="box muted" x="822" y="256" width="110" height="48" rx="8" />
+            <text x="877" y="275" text-anchor="middle" class="title">keep call</text>
+            <text x="877" y="292" text-anchor="middle" class="small">physical</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 6.</strong> Selector resolution never guesses: a dispatcher without a
+            proven selref load, an encoding whose parameter count disagrees with the colon count, or
+            an extra prepared argument register all fall back to the physical call.
+          </figcaption>
+        </figure>
+
+        <h3>Variadic handling</h3>
+        <p>
+          Variadic calls split into two independent problems: <em>allocation</em> of unknown
+          actuals, and <em>closing</em> the list from a library rule. Allocation is pure
+          <code>classifyCall</code>: SysV promotes and allocates by class with the AL upper bound;
+          Win64 promotes and duplicates float actuals in the integer slot; Darwin puts every
+          anonymous argument on the stack. A fixed prefix still uses registers — the real layout for
+          <code>fixture_variadic</code> is <code>w0</code> for the count, then <code>+0</code>,
+          <code>+8</code>, <code>+16</code> for three doubles.
+        </p>
+        <p>
+          Closing is a separate, evidence-gated step. <code>variadicRuleCalls</code> accepts only
+          calls whose status is <code>established</code>, whose recognized library contract carries
+          a <code>variadic_rule</code> of kind <code>format</code>, <code>scanf_format</code> or
+          <code>open_flags</code>, and whose rule argument has a finite, identical value set in
+          every established observation. <code>constantCandidates</code> is limited to eight
+          candidates and to constants, addresses, phis, selects and pure integer operators; entry
+          values, loads, call results and cycles are unknown. <code>variadicRuleFacts</code> then
+          parses the literal bytes (<code>printfArgumentTypes</code>,
+          <code>scanfArgumentTypes</code>), or applies the Darwin <code>open</code> rule (<code
+            >O_CREAT</code
+          >
+          is <code>0x200</code>), and emits a signature with
+          <code>argument_list_complete: true</code> only when every possible rule value agrees. A
+          nearby string, mutable storage, a guessed name or a conflicting contract never closes a
+          list.
+        </p>
+        <p>
+          On the callee side, <code>nativeIncomingStackEscapes</code> detects the shape of an
+          escaping <code>va_list</code>: an exact pointer into the body's own incoming argument area
+          that leaves it (an integer ABI argument register at a call or tail call, or a stored
+          value). Such a body is marked <code>variadic_stack</code>, its arity never closes, and its
+          caller keeps an open marker. Direct reads of the incoming stack area instead become
+          <code>stack_parameters</code>, which is the case for
+          <code>_fixture_stack_args</code> above.
+        </p>
+      </section>
+
+      <section id="diagnostics">
+        <h2>Reading the diagnostics</h2>
+        <p>
+          Three caveats are frequently mistaken for failures of this stage. All three are produced
+          by <code>caveats</code> in
+          <a class="src" href="../../src/core/diagnostic-summary.ts"
+            >src/core/diagnostic-summary.ts</a
+          >, which groups equal diagnostics and renders one reader-facing line per cause.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Caveat text</th>
+              <th>Diagnostic detail</th>
+              <th>Emitted by</th>
+              <th>Meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>N calls with unresolved interface</code></td>
+              <td><code>details.kind === 'call_interface'</code></td>
+              <td>
+                <a class="src" href="../../src/reconstruction/index.ts"
+                  >src/reconstruction/index.ts</a
+                >
+                when a call is <code>physical</code> or its <code>argument_list_complete</code> is
+                <code>false</code>
+              </td>
+              <td>
+                Arguments after those shown are not established and the call's effects remain
+                explicit. It is a per-call count, not one line per call.
+              </td>
+            </tr>
+            <tr>
+              <td><code>return list unresolved (possible storage: …)</code></td>
+              <td><code>details.kind === 'return_storage'</code> with a storage list</td>
+              <td>
+                Same reconstruction pass, on a block whose return projection is
+                <code>inferred</code>
+              </td>
+              <td>
+                The listed changed outputs and exit-scratch slices may also carry results. The
+                caveat unions the register names (at most six, then <code>+N</code>); the full
+                slices stay in the envelope.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>callee summaries partial: …</code> /
+                <code>callee summaries cut by budget: …</code>
+              </td>
+              <td>
+                <code>details.kind === 'callee_partial'</code> with <code>details.callee</code>
+              </td>
+              <td>
+                <a class="src" href="../../src/service/analysis/source-facts.ts"
+                  >src/service/analysis/source-facts.ts</a
+                >
+                for every dependency whose summary has reasons
+              </td>
+              <td>
+                <code>resource_limit</code> becomes “cut by budget”, anything else “partial”. The
+                native message itself lists the reasons, for example
+                <code>Native callee _fixture_indirect remains partial: unresolved control flow</code
+                >.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          The cut-by-budget/partial distinction is made by <code>budgetReason</code> over the
+          summary's reasons. A reason like <code>native dependency load work reserve (…)</code> or
+          <code>native interface refinement limit (64)</code> is a budget cut and may be resolved by
+          more allowance; <code>unresolved control flow</code> or an unsupported layout is a
+          semantic limit. The selected body's own analysis stays available either way: the native
+          worklist runs on an optional half of the remaining work, and unfinished interfaces are
+          left unresolved rather than guessed.
+        </p>
+        <p>
+          Outside the digest, <code>analyzeCalls</code> reports its own diagnostics directly:
+          <code>unavailable_semantics</code> for contradictory supplied targets/contracts or for a
+          noreturn claim that contradicts a retained continuation, and
+          <code>invalid_input</code> for a malformed <code>fixed_parameter_count</code> (severity
+          <code>error</code> on the x86 profiles, a warning on Darwin).
+          <code>classifyCall</code> diagnostics are copied into the result, so an unsupported x87
+          return or an unknown aggregate surfaces with the layout that produced it.
+        </p>
+      </section>
+
+      <section id="limitations">
+        <h2>Limitations &amp; extension points</h2>
+        <p>
+          The following gaps are visible in the code or stated by its comments. Items marked
+          <em>roadmap</em> are not implemented today; they are not configuration switches.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Gap</th>
+              <th>Consequence today</th>
+              <th>Where</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>No caller-consensus arity closure (roadmap)</td>
+              <td>
+                A body that reads incoming stack parameters or escapes an incoming pointer keeps
+                <code>argument_list_closure</code> unset. Callers therefore print
+                <code>...</code> even when every call passes the same ten arguments.
+                <a href="../../TODO.md">TODO.md</a> lists “caller-consensus arity closure” as an
+                unimplemented <em>likely</em>-mode item: use discovered call sites and close
+                <code>...</code> to the arity every caller agrees on.
+              </td>
+              <td><code>observeParameters</code>, <code>nativeStackParameters</code></td>
+            </tr>
+            <tr>
+              <td>Indirect calls</td>
+              <td>
+                Only a proven constant address or a bounded discovery reference establishes a
+                target. A callback parameter is observed as a physical argument prefix with an open
+                tail; arbitrary callback targets are never followed or executed.
+              </td>
+              <td><code>analyzeCalls</code>, <code>observePreparedCallInterfaces</code></td>
+            </tr>
+            <tr>
+              <td>Recursive groups</td>
+              <td>
+                A recursive SCC closes only by the coinductive check; any ambiguous member, variadic
+                stack escape, stack parameter or refinement limit leaves the whole group open. There
+                is no fixture with a recursive SCC, so this path is exercised by tests, not by the
+                worked example.
+              </td>
+              <td><code>dependencyComponents</code>, <code>closeRecursive</code></td>
+            </tr>
+            <tr>
+              <td>x87 and AVX argument/return semantics</td>
+              <td>
+                SysV 80-bit floats are classified as <code>X87</code>/<code>X87UP</code> and refused
+                for value reconstruction; aggregates needing AVX eightbyte semantics return
+                <code>null</code> instead of being mislabelled <code>MEMORY</code>.
+              </td>
+              <td>
+                <code>sysv-amd64/index.ts</code> (<code>classify</code>, <code>locations</code>)
+              </td>
+            </tr>
+            <tr>
+              <td>Other conventions</td>
+              <td>
+                <code>vectorcall</code>, <code>member_function</code>, Win64 MinGW long double,
+                nontrivial C++ objects, APX/AMX, Darwin unprototyped calls and ambiguous
+                half-precision are <code>unsupported</code>, not reinterpreted as ordinary C.
+              </td>
+              <td>All three profiles</td>
+            </tr>
+            <tr>
+              <td>Persisted summaries</td>
+              <td>
+                Only complete, untruncated preparations are stored, only below 8,192 prepared size
+                and 16 MiB compressed per row, under a 64 MiB project cap. Any revision change
+                invalidates the scope.
+              </td>
+              <td><code>native-summaries.ts</code>, <code>project/store/index.ts</code></td>
+            </tr>
+            <tr>
+              <td>Objective-C</td>
+              <td>
+                Resolution requires a dispatcher import or a <code>__objc_stubs</code> entry plus a
+                unique method encoding; direct <code>objc_msgSend</code> calls with runtime-computed
+                selectors remain physical, and the dispatcher stub bodies are themselves reported as
+                partial callee summaries.
+              </td>
+              <td><code>objc-messages.ts</code>, <code>objc-signature.ts</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Adding a new ABI</h3>
+        <ol class="steps">
+          <li>
+            <strong>Create the profile.</strong> Add <code>src/abi/&lt;id&gt;/index.ts</code> with a
+            class implementing <code>AbiProfile</code>. Keep it stateless and frozen; do not read
+            symbol names, the host platform or the requested emitter.
+          </li>
+          <li>
+            <strong>Describe the source layout.</strong> Fill <code>DataLayout</code>, including the
+            <code>long</code>/<code>long double</code> distinction between precision and storage.
+            Choose <code>preserved</code>, <code>link_register</code>,
+            <code>stack_return_address_bytes</code> and <code>red_zone_bytes</code> from the ABI,
+            not from observed code.
+          </li>
+          <li>
+            <strong>Implement <code>classifyCall</code>.</strong> Return one
+            <code>AbiLocation</code> per parameter cell with <code>value_offset_bits</code> indexing
+            the source value; keep stack offsets relative to callee-entry SP. Set
+            <code>state</code> to <code>partial</code>/<code>unsupported</code> as soon as
+            allocation is unknown, and put a specific message in <code>diagnostics</code>. Fill
+            <code>implicit_register_inputs</code>
+            only for requirements that are not source arguments.
+          </li>
+          <li>
+            <strong>Register it.</strong> Extend the <code>Target.abi</code> enum in
+            <code>src/core/primitives.ts</code>, add a <code>components</code> entry and a
+            <code>targetPipeline</code> case in <code>src/service/analysis/versions.ts</code>, add
+            the profile to the <code>profiles</code> table in
+            <code>src/reconstruction/boundaries.ts</code>, and export it from
+            <code>src/index.ts</code>.
+          </li>
+          <li>
+            <strong>Prove it.</strong> Add table-driven classification tests under
+            <code>test/abi/&lt;id&gt;/</code>, including aggregates, register exhaustion, stack
+            alignment and every refusal; the existing SysV and Win64 suites also contain
+            compiler-evidence fixtures. Then add a service-level fixture under
+            <code>test/service/analysis/</code> so the profile is exercised through the worklist,
+            not only through <code>classifyCall</code>.
+          </li>
+        </ol>
+        <div class="callout caveat">
+          <span class="title">What a new profile does not get for free</span>
+          <p>
+            Caller-consensus closure, Objective-C selectors and variadic library rules are all
+            layered above <code>classifyCall</code>. A new ABI must at minimum be compatible with
+            <code>parameterRegisters</code> and <code>possibleAbiReturnStorage</code>, which probe
+            the profile with synthetic signatures, and with <code>nativeRegisterPrefix</code>, which
+            consumes the resulting register bank; a profile that answers <code>unsupported</code> to
+            those probes will observe fewer parameters even when its real calls are fine.
+          </p>
+        </div>
+        <p>
+          For the persisted tier's checks and the store's transactions see
+          <a href="project-cache.html">Projects, cache &amp; execution</a>; for the broader contract
+          see <a href="../CORE.md#abi-boundary-facts">CORE.md “ABI boundary facts”</a> and
+          <a href="../CORE.md#analysis-cache-and-persisted-callee-summaries"
+            >“Analysis cache and persisted callee summaries”</a
+          >
+          (secondary sources). Tests worth reading first:
+          <code>test/abi/darwin-arm64/abi.test.ts</code>,
+          <code>test/abi/sysv-amd64/profile.test.ts</code>,
+          <code>test/abi/windows-x64/profile.test.ts</code>,
+          <code>test/analysis/calls/calls.test.ts</code>,
+          <code>test/analysis/calls/result-demands.test.ts</code>,
+          <code>test/analysis/calls/argument-preparation.test.ts</code>,
+          <code>test/service/analysis/native-worklist.test.ts</code> and
+          <code>test/service/analysis/native-summary-persistence.test.ts</code>.
+        </p>
+      </section>
+
+      <footer class="pager">
+        <a class="prev" href="ssa-values.html">← SSA, values &amp; stack</a>
+        <a class="next" href="types-metadata.html">Types &amp; metadata →</a>
+      </footer>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,2132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Architecture overview — Open Decomp internals</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- Shared SVG defs: every diagram on the page references url(#arrow) / url(#arrow-accent). Keep exactly this block once per page. -->
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true" focusable="false">
+      <defs>
+        <marker
+          id="arrow"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" class="arrowhead" />
+        </marker>
+        <marker
+          id="arrow-accent"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" class="arrowhead accent" />
+        </marker>
+      </defs>
+    </svg>
+
+    <nav class="sidebar" aria-label="Internals pages">
+      <a class="brand" href="index.html">Open Decomp internals</a>
+      <p class="brand-sub">How the decompiler works</p>
+      <ol>
+        <li><a href="index.html" aria-current="page">Architecture overview</a></li>
+        <li><a href="loaders.html">Loading binaries &amp; addresses</a></li>
+        <li><a href="discovery.html">Function discovery &amp; CFG</a></li>
+        <li><a href="decode-lift-ir.html">Decoding, lifting &amp; IR</a></li>
+        <li><a href="ssa-values.html">SSA, values &amp; stack</a></li>
+        <li><a href="calls-abi.html">ABIs, calls &amp; callee summaries</a></li>
+        <li><a href="types-metadata.html">Types &amp; metadata</a></li>
+        <li><a href="reconstruction.html">Source reconstruction</a></li>
+        <li><a href="structuring-emission.html">Structuring &amp; emission</a></li>
+        <li><a href="project-cache.html">Projects, cache &amp; execution</a></li>
+      </ol>
+      <a class="back" href="../README.md">← User documentation</a>
+    </nav>
+
+    <main>
+      <header>
+        <p class="eyebrow">Overview</p>
+        <h1>Architecture overview</h1>
+        <p class="lede">
+          Open Decomp is a static native-binary decompiler: binary formats become an immutable
+          image, the image becomes a CFG, the CFG becomes typed SSA, and the SSA becomes C-like or
+          Python-like pseudocode with evidence attached to every derived fact. This page maps the
+          module graph, the process boundaries, the per-target component set, the cache identity and
+          the seven progress stages of one decompile request.
+        </p>
+        <p class="sources">
+          Sources:
+          <a class="src" href="../../src/index.ts">src/index.ts</a>
+          <a class="src" href="../../src/core/contracts.ts">src/core/contracts.ts</a>
+          <a class="src" href="../../src/core/tools.ts">src/core/tools.ts</a>
+          <a class="src" href="../../src/service/analysis/index.ts"
+            >src/service/analysis/index.ts</a
+          >
+          <a class="src" href="../../src/service/analysis/versions.ts"
+            >src/service/analysis/versions.ts</a
+          >
+          <a class="src" href="../../src/workers/index.ts">src/workers/index.ts</a>
+        </p>
+      </header>
+
+      <nav class="toc" aria-label="On this page">
+        <strong>On this page</strong>
+        <ol>
+          <li><a href="#position">Where this sits in the pipeline</a></li>
+          <li><a href="#layers">Layers, processes and the tool surface</a></li>
+          <li><a href="#modules">Module dependency map</a></li>
+          <li><a href="#components">Per-target components and cache identity</a></li>
+          <li><a href="#walkthrough">One decompile request, end to end</a></li>
+          <li>
+            <a href="#example">Worked example: <code>_fixture_maximum</code></a>
+          </li>
+          <li><a href="#concepts">Cross-cutting concepts</a></li>
+          <li><a href="#reading">Reading guide and glossary</a></li>
+          <li><a href="#limitations">Limitations &amp; extension points</a></li>
+        </ol>
+      </nav>
+
+      <section id="position">
+        <h2>Where this sits in the pipeline</h2>
+        <p>
+          The decompiler is a single TypeScript code base (96,896 lines under <code>src/</code>)
+          with three targets: Mach-O on AArch64 with the Darwin ABI, PE on x86-64 with the Microsoft
+          x64 ABI, and ELF on x86-64 with the System V AMD64 ABI. Those triples are the only values
+          <code>targetSchema</code> accepts; it also pins little-endian, 64-bit addressing and a
+          feature string list.
+          <a class="src" href="../../src/core/primitives.ts">src/core/primitives.ts</a>
+          (<code>targetSchema</code>).
+        </p>
+        <p>Technically the system is four things stacked on one contract vocabulary:</p>
+        <ol class="steps">
+          <li>
+            <strong>A binary reader.</strong> A format loader produces a <code>LoadedImage</code>:
+            immutable bytes, selected slice, mappings, sections, symbols, imports, exports,
+            relocations, loader hints, evidence and diagnostics.
+            <a class="src" href="../../src/core/model.ts">src/core/model.ts</a>
+            (<code>LoadedImage</code>).
+          </li>
+          <li>
+            <strong>A machine-semantics pipeline.</strong> Decoding produces
+            <code>DecodedInstruction</code> records; discovery builds <code>CFGBlock</code>s; a
+            lifter produces the typed <code>RegisterIR</code>; SSA construction, value
+            simplification, call/ABI recovery and type recovery operate on that IR.
+            <a class="src" href="../../src/core/contracts.ts">src/core/contracts.ts</a>
+            (<code>Decoder</code>, <code>Lifter</code>, <code>AbiProfile</code>).
+          </li>
+          <li>
+            <strong>A source projection.</strong> Structuring turns the CFG into nested regions;
+            reconstruction maps SSA values, stack slots and calls onto a C-like source model with
+            explicit uncertainties; an emitter renders that model.
+            <a class="src" href="../../src/presentation/index.ts">src/presentation/index.ts</a>
+            (<code>structureControlFlow</code>).
+          </li>
+          <li>
+            <strong>A durable project.</strong> A SQLite store keyed by content hash holds the
+            imported image, native facts, annotations, jobs and published analysis artifacts, all at
+            explicit revisions.
+            <a class="src" href="../../src/project/store/index.ts">src/project/store/index.ts</a>
+            (<code>SqliteProjectStore</code>).
+          </li>
+        </ol>
+        <p>The design principles that a reader will see enforced over and over are:</p>
+        <ul>
+          <li>
+            <strong>The target never executes.</strong> The README states analysis happens “without
+            source code or executing the target”, and the MCP surface advertises “No target
+            execution, dynamic plugins or URL fetching” (<a
+              class="src"
+              href="../../src/mcp/server.ts"
+              >src/mcp/server.ts</a
+            >, <code>trustBoundary</code>). Image bytes live in <code>ImmutableBytes</code>, which
+            copies on construction and exposes no mutable view (<a
+              class="src"
+              href="../../src/core/addresses.ts"
+              >src/core/addresses.ts</a
+            >).
+          </li>
+          <li>
+            <strong>Refuse or mark <code>partial</code> rather than guess.</strong> Component
+            dispatch throws <code>unsupported_target</code>; an ambiguous function name is an error,
+            not a first match; a pass that cannot produce a complete representation throws
+            <code>unavailable_semantics</code>; unresolved call interfaces stay as <code>...</code>
+            and carry a diagnostic.
+          </li>
+          <li>
+            <strong>Evidence-bearing output.</strong> Diagnostics and presentation records cite
+            <code>evidence_…</code> identities; analysis closes the proof graph before publishing,
+            and an unavailable proof is an <code>internal_error</code>, never a silently omitted
+            citation (<code>closeEvidence</code> in
+            <a class="src" href="../../src/service/analysis/catalog.ts"
+              >src/service/analysis/catalog.ts</a
+            >).
+          </li>
+          <li>
+            <strong>Determinism and content identity.</strong> Identity is computed from canonical,
+            type-tagged data with sorted keys; the project directory is the SHA-256 of the input
+            plus the selected slice; the analysis cache key is a fingerprint of a
+            <code>CacheIdentity</code>.
+            <a class="src" href="../../src/core/identity.ts">src/core/identity.ts</a>
+            (<code>canonicalIdentity</code>, <code>fingerprint</code>).
+          </li>
+          <li>
+            <strong>Budgets everywhere.</strong> Every operation carries a <code>Budget</code> and
+            an <code>OperationContext.checkpoint</code> that charges actual work; instruction,
+            block, IR-node, work, deadline and output limits are enforced at different layers, and
+            the budget is part of the cache identity.
+          </li>
+        </ul>
+        <div class="callout caveat">
+          <span class="title">What “complete” means</span>
+          <p>
+            A <code>complete</code> result means the requested bounded operation finished with every
+            coverage layer complete — not that every architecture feature or every callee is
+            understood. Per-layer <code>coverage</code> remains authoritative, and
+            <code>docs/CORE.md</code> says the same explicitly.
+          </p>
+        </div>
+      </section>
+
+      <section id="layers">
+        <h2>Layers, processes and the tool surface</h2>
+        <p>
+          Everything below the transport is expressed with 14 tool operations
+          (<code>project_open</code>, <code>project_close</code>, <code>binary_info</code>,
+          <code>symbols_find</code>, <code>strings_find</code>, <code>functions_find</code>,
+          <code>function_get</code>, <code>function_decompile</code>, <code>xrefs_get</code>,
+          <code>evidence_get</code>, <code>memory_read</code>, <code>annotations_apply</code>,
+          <code>analysis_status</code>, <code>analysis_cancel</code>) declared once in
+          <code>toolSchemas</code>.
+          <a class="src" href="../../src/core/tools.ts">src/core/tools.ts</a>
+          (<code>ToolSchemaRegistry</code>, <code>toolSchemas</code>).
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Surface</th>
+              <th>Entry point</th>
+              <th>Transport behaviour</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>CLI</td>
+              <td>
+                <code>open-decomp functions|decompile|export|types</code> →
+                <a class="src" href="../../src/cli/entry.ts">src/cli/entry.ts</a>
+                (<code>runAnalysisCli</code>)
+              </td>
+              <td>
+                Pseudocode on stdout, progress/diagnostics on stderr; exit 0 complete/empty, 2
+                semantic partial, 1 error/unsupported/cancelled.
+              </td>
+            </tr>
+            <tr>
+              <td>MCP stdio</td>
+              <td>
+                <a class="src" href="../../src/mcp/server.ts">src/mcp/server.ts</a> +
+                <a class="src" href="../../src/mcp/cli.ts">src/mcp/cli.ts</a>
+              </td>
+              <td>
+                JSON-RPC; stdout is reserved for protocol traffic; messages bounded to 2 MiB
+                (<code>MCP_MAX_RESULT_BYTES</code>).
+              </td>
+            </tr>
+            <tr>
+              <td>MCP HTTP</td>
+              <td>
+                <a class="src" href="../../src/mcp/http/server.ts">src/mcp/http/server.ts</a>
+                (<code>startHttpServer</code>),
+                <a class="src" href="../../src/mcp/http/config.ts">src/mcp/http/config.ts</a>
+                (<code>loadHttpConfig</code>)
+              </td>
+              <td>
+                Authenticated, operator-configured roots and per-principal
+                <code>max_workers</code>/<code>max_queued</code> quotas.
+              </td>
+            </tr>
+            <tr>
+              <td>JS/TS API</td>
+              <td>
+                <a class="src" href="../../src/api/index.ts">src/api/index.ts</a>
+                (<code>openBinary</code>, <code>BinarySession</code>)
+              </td>
+              <td>
+                In-process facade over the same <code>QueryService</code>; <code>close()</code> must
+                run in <code>finally</code> to release the SQLite lock and the child.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>
+          All four surfaces converge on <code>QueryService</code>, which parses the input schema
+          before admission and then submits a <em>tool-shaped</em> command to a per-project child
+          process. The child parses the same schema again in <code>dispatch</code>: the host parse
+          stops invalid requests early, and the child parse is the trust boundary for a process that
+          owns the store.
+          <a class="src" href="../../src/service/queries/index.ts">src/service/queries/index.ts</a>
+          (<code>QueryService.execute</code>),
+          <a class="src" href="../../src/service/queries/handler.ts"
+            >src/service/queries/handler.ts</a
+          >
+          (<code>dispatch</code>).
+        </p>
+        <p>
+          The pool keeps one persistent child per canonical project.
+          <code>ProjectWorkerPool</code> bounds <code>max_workers</code> to 2 by default (range
+          1–32) and <code>max_queued</code> to 16 (range 0–1024); the CLI's
+          <code>BinarySession</code> deliberately creates the service with
+          <code>max_workers: 1</code>. IPC is length-prefixed JSON frames with
+          <code>MAX_FRAME_BYTES = 2 * 1024 * 1024</code> and at most 256 images per project
+          (<code>MAX_IMAGES</code>).
+          <a class="src" href="../../src/workers/index.ts">src/workers/index.ts</a>,
+          <a class="src" href="../../src/workers/protocol.ts">src/workers/protocol.ts</a>.
+        </p>
+        <p>
+          Below the pool, durability and derivation are deliberately split. Every durable fact —
+          images, native records, evidence, types, signatures, annotations and jobs — goes through
+          <code>ProjectStore</code>, whose transactions are revision-checked. Derived analysis is
+          not a table of mutable results: <code>runCachedDecompilation</code> looks up a published
+          artifact by exact cache key, tries up to eight reuse candidates and validates a recorded
+          dependency readset, and only then computes; publication is a separate atomic step tied to
+          the job and the expected revision. With <code>analysis_cache: false</code>, the same
+          result is served from a transient in-memory artifact and nothing derived is indexed.
+          <a class="src" href="../../src/project/cache/index.ts">src/project/cache/index.ts</a>
+          (<code>runCachedDecompilation</code>). The emitters are the last layer: they consume the
+          structured presentation and produce the wire <code>Emission</code>, which is the only
+          artifact the transports ever render.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 470" role="img" aria-labelledby="fig-layers-title">
+            <title id="fig-layers-title">
+              Layered architecture from entry surfaces to emitters
+            </title>
+
+            <rect class="box c1" x="20" y="10" width="200" height="44" rx="8" />
+            <text x="120" y="28" text-anchor="middle" class="title">CLI</text>
+            <text x="120" y="44" text-anchor="middle" class="small mono">cli/commands.ts</text>
+
+            <rect class="box c1" x="240" y="10" width="200" height="44" rx="8" />
+            <text x="340" y="28" text-anchor="middle" class="title">MCP stdio</text>
+            <text x="340" y="44" text-anchor="middle" class="small mono">mcp/server.ts</text>
+
+            <rect class="box c1" x="460" y="10" width="200" height="44" rx="8" />
+            <text x="560" y="28" text-anchor="middle" class="title">MCP HTTP</text>
+            <text x="560" y="44" text-anchor="middle" class="small mono">mcp/http/server.ts</text>
+
+            <rect class="box c1" x="680" y="10" width="240" height="44" rx="8" />
+            <text x="800" y="28" text-anchor="middle" class="title">JS / TypeScript API</text>
+            <text x="800" y="44" text-anchor="middle" class="small mono">
+              openBinary() · BinarySession
+            </text>
+
+            <path class="edge" d="M120,54 L120,74" marker-end="url(#arrow)" />
+            <path class="edge" d="M340,54 L340,74" marker-end="url(#arrow)" />
+            <path class="edge" d="M560,54 L560,74" marker-end="url(#arrow)" />
+            <path class="edge" d="M800,54 L800,74" marker-end="url(#arrow)" />
+
+            <rect class="box accent" x="20" y="76" width="900" height="48" rx="8" />
+            <text x="470" y="96" text-anchor="middle" class="title">
+              Tool schemas &amp; boundary validation
+            </text>
+            <text x="470" y="114" text-anchor="middle" class="small mono">
+              toolSchemas[op].input.parse · validateToolRequest · validateToolResponse
+            </text>
+
+            <path class="edge accent" d="M470,124 L470,142" marker-end="url(#arrow-accent)" />
+            <text x="478" y="137" class="edge-label">ToolArgs</text>
+
+            <rect class="box" x="140" y="144" width="300" height="50" rx="8" />
+            <text x="290" y="165" text-anchor="middle" class="title">QueryService (host)</text>
+            <text x="290" y="183" text-anchor="middle" class="small">
+              authorized roots · admission · wait
+            </text>
+
+            <path class="edge" d="M440,169 L538,169" marker-end="url(#arrow)" />
+            <text x="489" y="162" text-anchor="middle" class="edge-label">2 MiB frames</text>
+
+            <rect class="box" x="540" y="144" width="300" height="50" rx="8" />
+            <text x="690" y="165" text-anchor="middle" class="title">ProjectWorker child</text>
+            <text x="690" y="183" text-anchor="middle" class="small">
+              one per project · owns the store
+            </text>
+
+            <path class="edge" d="M690,194 L690,204 L450,204 L450,212" marker-end="url(#arrow)" />
+
+            <rect class="box accent" x="280" y="214" width="340" height="48" rx="8" />
+            <text x="450" y="234" text-anchor="middle" class="title">
+              queryWorkerHandler.execute
+            </text>
+            <text x="450" y="252" text-anchor="middle" class="small">
+              dispatch → executeDecompilation
+            </text>
+
+            <path class="edge" d="M450,262 L450,282" marker-end="url(#arrow)" />
+
+            <rect class="box ok" x="20" y="284" width="560" height="64" rx="8" />
+            <text x="300" y="306" text-anchor="middle" class="title">
+              executeDecompilation — seven progress stages
+            </text>
+            <text x="300" y="324" text-anchor="middle" class="small">
+              decode · lift · ssa · metadata · types · structure · emit
+            </text>
+            <text x="300" y="341" text-anchor="middle" class="small mono">
+              service/analysis/index.ts
+            </text>
+
+            <rect class="box" x="680" y="214" width="240" height="134" rx="8" />
+            <text x="800" y="236" text-anchor="middle" class="title">ProjectStore</text>
+            <text x="800" y="256" text-anchor="middle" class="small">SQLite · revisions</text>
+            <text x="800" y="274" text-anchor="middle" class="small">artifacts · cache · jobs</text>
+            <text x="800" y="292" text-anchor="middle" class="small">annotations · evidence</text>
+            <text x="800" y="318" text-anchor="middle" class="small mono">project/store</text>
+
+            <path class="edge" d="M790,194 L790,212" marker-end="url(#arrow)" />
+            <path class="edge" d="M580,316 L678,316" marker-end="url(#arrow)" />
+            <text x="629" y="309" text-anchor="middle" class="edge-label">cache</text>
+
+            <path class="edge" d="M160,348 L160,378" marker-end="url(#arrow)" />
+
+            <rect class="box c4" x="20" y="380" width="280" height="56" rx="8" />
+            <text x="160" y="402" text-anchor="middle" class="title">emitC / emitPythonLike</text>
+            <text x="160" y="420" text-anchor="middle" class="small">
+              Emission + source mappings
+            </text>
+
+            <rect class="box" x="340" y="380" width="320" height="56" rx="8" />
+            <text x="500" y="400" text-anchor="middle" class="title">Result envelope</text>
+            <text x="500" y="417" text-anchor="middle" class="small">
+              state · coverage · diagnostics
+            </text>
+            <text x="500" y="432" text-anchor="middle" class="small">evidence · artifact</text>
+
+            <path class="edge" d="M300,408 L338,408" marker-end="url(#arrow)" />
+
+            <path class="edge dashed" d="M900,348 L900,408 L662,408" marker-end="url(#arrow)" />
+            <text x="892" y="378" text-anchor="end" class="edge-label">cache hit</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 1.</strong> The request path is narrow at the top and wide at the bottom:
+            four surfaces share one schema registry, one host facade and one child per project. The
+            store is a side participant — every stage may read or publish through it, and a cache
+            hit bypasses the whole seven-stage pipeline.
+          </figcaption>
+        </figure>
+
+        <h3>What validation actually checks</h3>
+        <p>
+          <code>validateToolRequest</code> parses the operation's Zod schema, then enforces
+          cross-field preconditions that a structural schema cannot express: a supplied
+          <code>revision</code> or <code>expected_revision</code> must equal the current revision
+          (otherwise <code>RevisionConflict</code>, code <code>stale_revision</code>), and an
+          address or range must belong to the named image.
+          <a class="src" href="../../src/core/validation.ts">src/core/validation.ts</a>.
+          <code>validateToolResponse</code> goes further on the way out: the result must parse
+          against the output schema, belong to the same project and revision, mutations must advance
+          exactly one revision, a queued job must describe the same operation, and the serialized
+          result must fit <code>args.budget.output_bytes</code>.
+        </p>
+        <div class="callout invariant">
+          <span class="title">Invariant</span>
+          <p>
+            A successful mutation advances the project revision by exactly one
+            (<code>nextRevision</code>), and a transaction either commits whole or rolls back. The
+            store's <code>transaction(expectedRevision, mutate)</code> compares the expected
+            revision before running <code>mutate</code>; a throw rolls back, and a conflicting
+            expectation returns <code>{ state: 'conflict' }</code>.
+            <a class="src" href="../../src/project/store/index.ts">src/project/store/index.ts</a>
+            (<code>#transaction</code>, <code>snapshot</code>).
+          </p>
+        </div>
+      </section>
+
+      <section id="modules">
+        <h2>Module dependency map</h2>
+        <p>
+          The map below was computed by resolving every relative
+          <code>import … from '../&lt;dir&gt;/…'</code> in <code>src/</code> to its top-level
+          directory, then splitting value imports from type-only imports. There are 18 top-level
+          directories plus <code>src/index.ts</code> (94 lines), which is a pure re-export barrel
+          for the public API. Line counts are physical lines of <code>.ts</code>.
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Directory</th>
+              <th class="num">Lines</th>
+              <th>Responsibility</th>
+              <th>Value imports († = only type imports)</th>
+              <th>Detailed page</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>core</code></td>
+              <td class="num">4,463</td>
+              <td>
+                Wire schemas, <code>LoadedImage</code>, component contracts, errors, identity,
+                addresses, validation.
+              </td>
+              <td>—</td>
+              <td><a href="index.html#concepts">this page</a></td>
+            </tr>
+            <tr>
+              <td><code>ir</code></td>
+              <td class="num">2,755</td>
+              <td>Register-form and SSA IR, the builder, <code>assertValidIR</code>.</td>
+              <td>core</td>
+              <td><a href="decode-lift-ir.html">04 Decoding &amp; IR</a></td>
+            </tr>
+            <tr>
+              <td><code>abi</code></td>
+              <td class="num">1,369</td>
+              <td>Data layouts and <code>classifyCall</code> for the three supported ABIs.</td>
+              <td>core†</td>
+              <td><a href="calls-abi.html">06 Calls &amp; ABIs</a></td>
+            </tr>
+            <tr>
+              <td><code>decoders</code></td>
+              <td class="num">1,944</td>
+              <td>AArch64 and x86-64 instruction decoding to <code>DecodedInstruction</code>.</td>
+              <td>core</td>
+              <td><a href="decode-lift-ir.html">04 Decoding &amp; IR</a></td>
+            </tr>
+            <tr>
+              <td><code>lifters</code></td>
+              <td class="num">2,423</td>
+              <td>Machine instructions to typed <code>RegisterIR</code>.</td>
+              <td>core, ir</td>
+              <td><a href="decode-lift-ir.html">04 Decoding &amp; IR</a></td>
+            </tr>
+            <tr>
+              <td><code>loaders</code></td>
+              <td class="num">4,727</td>
+              <td>Mach-O, PE and ELF parsing into <code>LoadedImage</code>.</td>
+              <td>core</td>
+              <td><a href="loaders.html">02 Loading &amp; addresses</a></td>
+            </tr>
+            <tr>
+              <td><code>metadata</code></td>
+              <td class="num">14,161</td>
+              <td>DWARF, CodeView, library contracts, runtime metadata, symbol decoration.</td>
+              <td>core</td>
+              <td><a href="types-metadata.html">07 Types &amp; metadata</a></td>
+            </tr>
+            <tr>
+              <td><code>analysis</code></td>
+              <td class="num">11,904</td>
+              <td>
+                Discovery/CFG, SSA, values, effects, stack, calls, types, references, strings, jump
+                targets.
+              </td>
+              <td>core, ir, metadata</td>
+              <td>
+                <a href="discovery.html">03 Discovery</a> · <a href="ssa-values.html">05 SSA</a> ·
+                <a href="types-metadata.html">07 Types</a>
+              </td>
+            </tr>
+            <tr>
+              <td><code>presentation</code></td>
+              <td class="num">592</td>
+              <td>Control-flow structuring from the CFG.</td>
+              <td>analysis, ir</td>
+              <td><a href="structuring-emission.html">09 Structuring &amp; emission</a></td>
+            </tr>
+            <tr>
+              <td><code>reconstruction</code></td>
+              <td class="num">14,750</td>
+              <td>Source evidence, expression/type rewrites, local validation of each rewrite.</td>
+              <td>abi, analysis, core, ir, lifters</td>
+              <td><a href="reconstruction.html">08 Source reconstruction</a></td>
+            </tr>
+            <tr>
+              <td><code>emitters</code></td>
+              <td class="num">15,787</td>
+              <td>C-like and Python-like renderers; emission tables, mappings, inferences.</td>
+              <td>core, ir, metadata, reconstruction</td>
+              <td><a href="structuring-emission.html">09 Structuring &amp; emission</a></td>
+            </tr>
+            <tr>
+              <td><code>project</code></td>
+              <td class="num">4,179</td>
+              <td>SQLite store, annotation service, analysis cache and dependency readset.</td>
+              <td>core</td>
+              <td><a href="project-cache.html">10 Projects &amp; cache</a></td>
+            </tr>
+            <tr>
+              <td><code>service</code></td>
+              <td class="num">11,752</td>
+              <td>
+                Query handler and the analysis orchestration (<code>executeDecompilation</code>).
+              </td>
+              <td>
+                abi, analysis, core, decoders, emitters, ir, lifters, loaders, metadata,
+                presentation, project, reconstruction, workers
+              </td>
+              <td><a href="project-cache.html">10 Projects &amp; cache</a></td>
+            </tr>
+            <tr>
+              <td><code>workers</code></td>
+              <td class="num">1,381</td>
+              <td>Child-process pool, framed IPC, durable job admission and recovery.</td>
+              <td>core, loaders, project, service</td>
+              <td><a href="project-cache.html">10 Projects &amp; cache</a></td>
+            </tr>
+            <tr>
+              <td><code>api</code></td>
+              <td class="num">364</td>
+              <td>
+                <code>BinarySession</code>: content-addressed project open, selection, decompile,
+                close.
+              </td>
+              <td>core, service</td>
+              <td><a href="index.html#layers">this page</a></td>
+            </tr>
+            <tr>
+              <td><code>cli</code></td>
+              <td class="num">1,446</td>
+              <td>Argument parsing, settings resolution, sessions, text rendering, export.</td>
+              <td>api, core, mcp, metadata, settings</td>
+              <td><a href="index.html#layers">this page</a></td>
+            </tr>
+            <tr>
+              <td><code>mcp</code></td>
+              <td class="num">2,592</td>
+              <td>MCP server, stdio and authenticated HTTP transports, handles, listings.</td>
+              <td>core, project, service, settings, workers</td>
+              <td><a href="index.html#layers">this page</a></td>
+            </tr>
+            <tr>
+              <td><code>settings</code></td>
+              <td class="num">213</td>
+              <td>Optional JSON settings file and its precedence rules.</td>
+              <td>core, mcp</td>
+              <td><a href="project-cache.html">10 Projects &amp; cache</a></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 960 620" role="img" aria-labelledby="fig-modules-title">
+            <title id="fig-modules-title">Top-level src directory import graph</title>
+
+            <rect class="box c1" x="40" y="16" width="110" height="40" rx="8" />
+            <text x="95" y="41" text-anchor="middle" class="title">api</text>
+            <rect class="box c1" x="180" y="16" width="100" height="40" rx="8" />
+            <text x="230" y="41" text-anchor="middle" class="title">cli</text>
+            <rect class="box c1" x="320" y="16" width="100" height="40" rx="8" />
+            <text x="370" y="41" text-anchor="middle" class="title">mcp</text>
+            <rect class="box" x="760" y="16" width="120" height="40" rx="8" />
+            <text x="820" y="41" text-anchor="middle" class="title">settings</text>
+
+            <rect class="box accent" x="40" y="100" width="880" height="76" rx="8" />
+            <text x="52" y="122" class="title">service — imports 13 directories</text>
+            <text x="52" y="142" class="small mono">
+              abi · analysis · core · decoders · emitters · ir · lifters · loaders
+            </text>
+            <text x="52" y="160" class="small mono">
+              metadata · presentation · project · reconstruction · workers
+            </text>
+
+            <rect class="box" x="380" y="230" width="140" height="40" rx="8" />
+            <text x="450" y="255" text-anchor="middle" class="title">workers</text>
+            <rect class="box" x="560" y="230" width="140" height="40" rx="8" />
+            <text x="630" y="255" text-anchor="middle" class="title">project</text>
+
+            <rect class="box" x="40" y="310" width="120" height="40" rx="8" />
+            <text x="100" y="335" text-anchor="middle" class="title">emitters</text>
+            <rect class="box" x="200" y="310" width="160" height="40" rx="8" />
+            <text x="280" y="335" text-anchor="middle" class="title">reconstruction</text>
+            <rect class="box" x="400" y="310" width="150" height="40" rx="8" />
+            <text x="475" y="335" text-anchor="middle" class="title">presentation</text>
+            <rect class="box" x="590" y="310" width="130" height="40" rx="8" />
+            <text x="655" y="335" text-anchor="middle" class="title">metadata</text>
+
+            <rect class="box" x="40" y="390" width="140" height="40" rx="8" />
+            <text x="110" y="415" text-anchor="middle" class="title">analysis</text>
+            <rect class="box" x="220" y="390" width="120" height="40" rx="8" />
+            <text x="280" y="415" text-anchor="middle" class="title">loaders</text>
+            <rect class="box" x="380" y="390" width="130" height="40" rx="8" />
+            <text x="445" y="415" text-anchor="middle" class="title">decoders</text>
+            <rect class="box" x="550" y="390" width="120" height="40" rx="8" />
+            <text x="610" y="415" text-anchor="middle" class="title">lifters</text>
+
+            <rect class="box" x="60" y="470" width="90" height="40" rx="8" />
+            <text x="105" y="495" text-anchor="middle" class="title">ir</text>
+            <rect class="box" x="190" y="470" width="90" height="40" rx="8" />
+            <text x="235" y="495" text-anchor="middle" class="title">abi</text>
+
+            <rect class="box muted" x="380" y="550" width="140" height="40" rx="8" />
+            <text x="450" y="575" text-anchor="middle" class="title">core</text>
+
+            <path class="edge" d="M180,36 L152,36" marker-end="url(#arrow)" />
+            <path class="edge" d="M280,36 L318,36" marker-end="url(#arrow)" />
+            <path class="edge" d="M240,56 L240,86 L820,86 L820,58" marker-end="url(#arrow)" />
+            <path class="edge" d="M95,56 L95,92 L330,92 L330,98" marker-end="url(#arrow)" />
+            <path class="edge" d="M370,56 L370,98" marker-end="url(#arrow)" />
+            <path class="edge" d="M450,176 L450,228" marker-end="url(#arrow)" />
+            <path class="edge" d="M630,176 L630,228" marker-end="url(#arrow)" />
+            <path class="edge" d="M90,176 L90,308" marker-end="url(#arrow)" />
+            <path class="edge" d="M280,176 L280,308" marker-end="url(#arrow)" />
+            <path class="edge" d="M540,176 L540,308" marker-end="url(#arrow)" />
+            <path class="edge" d="M710,176 L710,308" marker-end="url(#arrow)" />
+            <path class="edge" d="M520,250 L558,250" marker-end="url(#arrow)" />
+            <path
+              class="edge"
+              d="M450,270 L450,290 L380,290 L380,380 L330,380 L330,388"
+              marker-end="url(#arrow)"
+            />
+            <path class="edge" d="M160,330 L198,330" marker-end="url(#arrow)" />
+            <path class="edge" d="M90,350 L90,388" marker-end="url(#arrow)" />
+            <path class="edge" d="M220,350 L220,362 L110,362 L110,388" marker-end="url(#arrow)" />
+            <path class="edge" d="M360,330 L398,330" marker-end="url(#arrow)" />
+            <path class="edge" d="M430,350 L430,374 L170,374 L170,388" marker-end="url(#arrow)" />
+            <path class="edge" d="M100,430 L100,468" marker-end="url(#arrow)" />
+            <path class="edge" d="M600,430 L600,450 L140,450 L140,468" marker-end="url(#arrow)" />
+            <path class="edge" d="M110,510 L110,538 L400,538 L400,548" marker-end="url(#arrow)" />
+            <path class="edge" d="M240,510 L240,528 L450,528 L450,548" marker-end="url(#arrow)" />
+          </svg>
+          <figcaption>
+            <strong>Figure 2.</strong> Curated value-import edges, oriented importer → imported,
+            drawn in separate layers. <code>core</code> is the sink of almost every layer;
+            <code>service</code> is the composition root and its band lists the 13 directories it
+            imports. Edges to the deeper stages are shown once through the layer chain rather than
+            all from the band, so no line crosses a box. Type-only edges (for example
+            <code>reconstruction → emitters</code> for <code>EmissionInput</code>) and reverse edges
+            are omitted here and listed in the table above.
+          </figcaption>
+        </figure>
+
+        <p>Three properties of this graph matter architecturally:</p>
+        <ul>
+          <li>
+            <strong><code>core</code> is generic, not semantic.</strong> It declares
+            <code>Lifter&lt;RegisterIR&gt;</code> and
+            <code>Emitter&lt;Presentation&gt;</code> without importing <code>ir</code> or
+            <code>emitters</code>; the comment on <code>Lifter</code> says “the semantic IR module
+            supplies RegisterIR. Core does not define semantic operations”.
+            <a class="src" href="../../src/core/contracts.ts">src/core/contracts.ts</a>.
+          </li>
+          <li>
+            <strong
+              >Directory-level cycles exist; file-level ones are cut by composition roots.</strong
+            >
+            <code>service</code> imports <code>workers</code> for the pool, while
+            <code>workers/entry.ts</code> imports <code>queryWorkerHandler</code> from
+            <code>service/queries/handler.ts</code>; <code>mcp</code> and <code>settings</code>
+            import each other. These are wiring edges, not stage dependencies.
+          </li>
+          <li>
+            <strong>Type-only edges point backwards.</strong> <code>reconstruction</code> imports
+            <code>EmissionInput</code> (emitters), <code>NativeContext</code> (service),
+            <code>TypeRecoveryResult</code> (analysis) and presentation types, all with
+            <code>import type</code>. That is what lets reconstruction describe a render target
+            without creating a runtime cycle.
+          </li>
+        </ul>
+      </section>
+
+      <section id="components">
+        <h2>Per-target components and cache identity</h2>
+        <p>
+          Component selection is not a plugin registry. The live registry is the frozen
+          <code>components</code> object in <code>versions.ts</code>, keyed by
+          <code>darwin_arm64</code>, <code>windows_x64</code> and <code>sysv_amd64</code>.
+          <code>targetPipeline</code> first requires little-endian 64-bit addressing and then
+          matches the complete <em>format + architecture + ABI</em> triple; anything else throws
+          <code>unsupported_target</code> with “No complete lifter/ABI pipeline is registered”.
+          <a class="src" href="../../src/service/analysis/versions.ts"
+            >src/service/analysis/versions.ts</a
+          >
+          (<code>pipelineComponents</code>, <code>targetPipeline</code>).
+        </p>
+        <div class="callout caveat">
+          <span class="title">Two different interfaces</span>
+          <p>
+            <code>contracts.ts</code> also declares <code>ComponentRegistry</code> and
+            <code>ServiceContext.AnalysisService</code>, but no implementation of
+            <code>ComponentRegistry</code> exists in <code>src/</code>; the frozen object above is
+            the actual composition root. Do not go looking for a runtime registry.
+          </p>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Target</th>
+              <th>Loader</th>
+              <th>Decoder</th>
+              <th>Lifter</th>
+              <th>ABI</th>
+              <th>Emitter</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Mach-O / arm64 / darwin-arm64</td>
+              <td>
+                <code>MachOLoader</code><br /><span class="mono">open-decomp-macho/1.0.4</span>
+              </td>
+              <td>
+                <code>Arm64Decoder</code><br /><span class="mono">a64js aa0e547…+adapter.2</span>
+              </td>
+              <td>
+                <code>Arm64Lifter</code><br /><span class="mono"
+                  >ARM64 typed semantic lifter/1.0.6</span
+                >
+              </td>
+              <td><code>DarwinArm64Abi</code><br /><span class="mono">darwin-arm64/1.3.0</span></td>
+              <td>
+                <span class="mono">reconstructed-c-53</span><br /><span class="mono"
+                  >reconstructed-python-like-53</span
+                >
+              </td>
+            </tr>
+            <tr>
+              <td>PE / x86-64 / windows-x64</td>
+              <td><code>PELoader</code><br /><span class="mono">open-decomp-pe/1.0.1</span></td>
+              <td>
+                <code>X86Decoder</code> (<code>open-decomp/iced-x86</code>)<br /><span class="mono"
+                  >1.21.0</span
+                >
+              </td>
+              <td>
+                <code>X86Lifter</code><br /><span class="mono">x86-64 typed semantic lifter/4</span>
+              </td>
+              <td><code>WindowsX64Abi</code><br /><span class="mono">windows-x64/2</span></td>
+              <td>
+                <span class="mono">reconstructed-c-53</span><br /><span class="mono"
+                  >reconstructed-python-like-53</span
+                >
+              </td>
+            </tr>
+            <tr>
+              <td>ELF / x86-64 / sysv-amd64</td>
+              <td><code>ELFLoader</code><br /><span class="mono">open-decomp-elf/1.0.0</span></td>
+              <td>
+                <code>X86Decoder</code> (<code>open-decomp/iced-x86</code>)<br /><span class="mono"
+                  >1.21.0</span
+                >
+              </td>
+              <td>
+                <code>X86Lifter</code><br /><span class="mono">x86-64 typed semantic lifter/4</span>
+              </td>
+              <td><code>SysVAMD64Abi</code><br /><span class="mono">sysv-amd64/1</span></td>
+              <td>
+                <span class="mono">reconstructed-c-53</span><br /><span class="mono"
+                  >reconstructed-python-like-53</span
+                >
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>
+          Note that the decoder is <em>not</em> part of <code>pipelineComponents</code>; it is
+          selected by <code>image.target.architecture</code> at the point where a function graph is
+          reconstructed (<code>Arm64Decoder</code> for <code>arm64</code>, otherwise
+          <code>X86Decoder</code>). The import path does the same in
+          <code>prepareQueryImport</code>.
+          <a class="src" href="../../src/service/queries/graphs.ts"
+            >src/service/queries/graphs.ts</a
+          >
+          (<code>reconstructFunctionGraph</code>),
+          <a class="src" href="../../src/service/queries/prepare.ts"
+            >src/service/queries/prepare.ts</a
+          >
+          (<code>prepareQueryImport</code>).
+        </p>
+        <p>
+          Versions are computed once at module load. <code>pipelineVersions</code> builds one
+          immutable record per target × emitter; the <code>analysis</code> field is a semicolon
+          joined composition string:
+        </p>
+        <pre><code>const analysis =
+  'pipeline/25;discovery/5;targets/2;ssa/5;values-effects/4;stack-calls/9;debug/1;library/8;types/8;annotations/1;structure/3;reconstruction/49';</code></pre>
+        <p>
+          Each of those numbers is the composition contract for a stage group whose semantics
+          changed; bumping one changes every cache key that includes it. The
+          <code>acceptsAnalysisIdentity</code> guard compares the stored identity's
+          <code>backend</code>, <code>loader</code>, <code>decoder</code>, <code>lifter</code>,
+          <code>analysis</code>, <code>abi</code> and <code>emitter</code> fields against the
+          current record before any artifact is reused for investigation or annotation.
+        </p>
+
+        <pre><code>export interface CacheIdentity {
+  readonly image_sha256: string;
+  readonly slice_id: string;
+  readonly target: Target;
+  readonly versions: z.infer&lt;typeof versionsSchema&gt;;
+  readonly evidence_revision: number;
+  readonly annotation_revision: number;
+  readonly options: z.infer&lt;typeof analysisOptionsSchema&gt;;
+  readonly budget: Budget;
+  readonly function_id: string;
+}</code></pre>
+        <p class="sources">
+          Defined in <a class="src" href="../../src/core/contracts.ts">src/core/contracts.ts</a>
+          (<code>CacheIdentity</code>); keyed by
+          <a class="src" href="../../src/core/validation.ts">src/core/validation.ts</a>
+          (<code>cacheIdentityKey</code>).
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 960 300" role="img" aria-labelledby="fig-cache-identity-title">
+            <title id="fig-cache-identity-title">Composition of the analysis cache key</title>
+
+            <rect class="box c2" x="10" y="30" width="200" height="210" rx="8" />
+            <text x="110" y="52" text-anchor="middle" class="title">CacheIdentity</text>
+            <text x="24" y="76" class="small mono">image_sha256</text>
+            <text x="24" y="94" class="small mono">slice_id</text>
+            <text x="24" y="112" class="small mono">target</text>
+            <text x="24" y="130" class="small mono">versions</text>
+            <text x="24" y="148" class="small mono">evidence_revision</text>
+            <text x="24" y="166" class="small mono">annotation_revision</text>
+            <text x="24" y="184" class="small mono">options</text>
+            <text x="24" y="202" class="small mono">budget</text>
+            <text x="24" y="220" class="small mono">function_id</text>
+
+            <path class="edge" d="M210,135 L228,135" marker-end="url(#arrow)" />
+            <rect class="box" x="230" y="104" width="180" height="62" rx="8" />
+            <text x="320" y="126" text-anchor="middle" class="title">cacheIdentitySchema</text>
+            <text x="320" y="145" text-anchor="middle" class="small">
+              strict shape, both revisions
+            </text>
+
+            <path class="edge" d="M410,135 L438,135" marker-end="url(#arrow)" />
+            <rect class="box" x="440" y="104" width="180" height="62" rx="8" />
+            <text x="530" y="126" text-anchor="middle" class="title">canonicalIdentity</text>
+            <text x="530" y="145" text-anchor="middle" class="small">type tags, sorted keys</text>
+
+            <path class="edge accent" d="M620,135 L648,135" marker-end="url(#arrow-accent)" />
+            <rect class="box accent" x="650" y="104" width="180" height="62" rx="8" />
+            <text x="740" y="126" text-anchor="middle" class="title">fingerprint = SHA-256</text>
+            <text x="740" y="145" text-anchor="middle" class="small">
+              64 hex · artifacts.cache_key
+            </text>
+
+            <path class="edge" d="M740,166 L740,198" marker-end="url(#arrow)" />
+            <rect class="box ok" x="650" y="200" width="280" height="62" rx="8" />
+            <text x="790" y="222" text-anchor="middle" class="title">
+              findArtifact · publishArtifact
+            </text>
+            <text x="790" y="241" text-anchor="middle" class="small">
+              reuse candidates compare a readset, not just the key
+            </text>
+
+            <text x="10" y="270" class="small">
+              Same binary + slice + target + versions + revisions + options + budget + function ⇒
+              same key.
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 3.</strong> The key is a fingerprint over the complete parsed identity,
+            not a string concatenation. Two requests that differ only in budget or view therefore
+            miss each other, which is why a larger budget cannot silently reuse a budget-truncated
+            artifact.
+          </figcaption>
+        </figure>
+      </section>
+
+      <section id="walkthrough">
+        <h2>One decompile request, end to end</h2>
+        <p>
+          The example command is
+          <code
+            >open-decomp decompile fixtures/bin/macho-arm64-symbols --function
+            _fixture_maximum</code
+          >. Each numbered step names the function that actually runs.
+        </p>
+        <ol class="steps">
+          <li>
+            <strong>CLI parse.</strong> <code>parse</code> accepts exactly one of
+            <code>--function</code>, <code>--id</code> or <code>--address</code>; the function
+            selector is <code>{ name: '_fixture_maximum' }</code>. Settings are resolved as built-in
+            default &lt; settings file &lt; explicit flag.
+            <a class="src" href="../../src/cli/commands.ts">src/cli/commands.ts</a>.
+          </li>
+          <li>
+            <strong>Project open.</strong> <code>BinarySession.open</code> canonicalizes the path,
+            hashes the whole file with <code>hashInput</code> (refusing a symlink, a file over 512
+            MiB, or a file that changes while hashing), derives the project directory as
+            <code>&lt;sha256&gt;.&lt;slice|default&gt;</code>, creates a
+            <code>QueryService</code> with one worker, and sends <code>project_open</code> with
+            <code>{ kind: 'import', wait: true }</code>.
+            <a class="src" href="../../src/api/index.ts">src/api/index.ts</a>
+            (<code>BinarySession.open</code>),
+            <a class="src" href="../../src/service/queries/input-identity.ts"
+              >src/service/queries/input-identity.ts</a
+            >
+            (<code>projectDirectoryName</code>).
+          </li>
+          <li>
+            <strong>Image snapshot and discovery.</strong> The child re-checks the canonical path,
+            reads the file with <code>O_NOFOLLOW</code> into <code>ImmutableBytes</code>, chooses
+            the loader by magic (<code>MZ</code> → PE, <code>0x7f ELF</code> → ELF, otherwise
+            Mach-O), calls <code>loader.load</code>, stores the image with <code>importImage</code>,
+            then runs <code>prepareQueryImport</code>: <code>recoverRuntimeMetadata</code>,
+            <code>decorateImageNames</code>, <code>discoverFunctions</code>,
+            <code>buildStringIndex</code>, <code>buildReferenceIndex</code>,
+            <code>classifyImportStubs</code>. Image, indexes and the completed job commit in one
+            transaction.
+            <a class="src" href="../../src/workers/runtime.ts">src/workers/runtime.ts</a>
+            (<code>execute</code>, import branch),
+            <a class="src" href="../../src/service/queries/prepare.ts"
+              >src/service/queries/prepare.ts</a
+            >.
+          </li>
+          <li>
+            <strong>Function resolution.</strong> <code>BinarySession.decompile</code> calls
+            <code>selectFunction</code>, which asks <code>functions_find</code> for an
+            <em>exact, case-sensitive</em> name and refuses more than one match. If the function
+            index is partial, it falls back to the authoritative native symbol and export tables
+            through <code>symbols_find</code>; anything they cannot settle stays
+            <code>incomplete</code>, never guessed.
+            <a class="src" href="../../src/service/queries/selector.ts"
+              >src/service/queries/selector.ts</a
+            >
+            (<code>selectFunction</code>, <code>selectByNativeName</code>).
+          </li>
+          <li>
+            <strong>Job admission.</strong> <code>decompileFunction</code> submits
+            <code>function_decompile</code> with <code>wait: true</code>. The host frames
+            <code>admit</code>; the child creates and persists the durable <code>queued</code> job,
+            then creates an <code>OperationContext</code> whose deadline is capped by the admission
+            deadline.
+            <a class="src" href="../../src/service/queries/index.ts"
+              >src/service/queries/index.ts</a
+            >
+            (<code>submit</code>),
+            <a class="src" href="../../src/workers/runtime.ts">src/workers/runtime.ts</a>
+            (<code>createOperationContext</code>).
+          </li>
+          <li>
+            <strong>Analysis.</strong> <code>dispatch</code> routes
+            <code>function_decompile</code> to <code>executeDecompilation</code>, which checks
+            project ownership, builds the <code>CacheIdentity</code> and calls
+            <code>runCachedDecompilation</code>. On a miss, the seven stages below run.
+          </li>
+          <li>
+            <strong>Delivery.</strong> The stored result is delivered inline if its JSON fits
+            <code>inline_limit</code>; otherwise the envelope becomes <code>state: 'partial'</code>,
+            <code>reason: 'output_limit'</code> plus an artifact handle. The CLI prints
+            <code>emission.text</code> after <code>materializeDecompilation</code> has verified the
+            artifact's pages, digest, project, revision, versions, options and budget.
+            <a class="src" href="../../src/service/queries/materialize.ts"
+              >src/service/queries/materialize.ts</a
+            >.
+          </li>
+        </ol>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 960 700" role="img" aria-labelledby="fig-pipeline-title">
+            <title id="fig-pipeline-title">
+              The seven progress stages of executeDecompilation with data artifacts
+            </title>
+
+            <rect class="box accent" x="120" y="14" width="520" height="48" rx="8" />
+            <text x="380" y="34" text-anchor="middle" class="title">
+              runCachedDecompilation — findArtifact(identity)
+            </text>
+            <text x="380" y="52" text-anchor="middle" class="small">
+              hit: loadPayload → delivery (no stage runs)
+            </text>
+
+            <path class="edge accent" d="M380,62 L380,80" marker-end="url(#arrow-accent)" />
+            <text x="390" y="75" class="edge-label">miss</text>
+
+            <rect class="box" x="120" y="82" width="520" height="56" rx="8" />
+            <text x="132" y="103" class="title">decode — progress 0/7</text>
+            <text x="132" y="122" class="small mono">
+              loadFunctionGraph → reconstructFunctionGraph → discoverFunctions
+            </text>
+
+            <path class="edge" d="M380,138 L380,158" marker-end="url(#arrow)" />
+            <text x="660" y="153" class="small mono">FunctionGraph</text>
+
+            <rect class="box" x="120" y="160" width="520" height="56" rx="8" />
+            <text x="132" y="181" class="title">lift — progress 1/7</text>
+            <text x="132" y="200" class="small mono">
+              components.lifter.lift(graph, abi, context) → boundIR
+            </text>
+
+            <path class="edge" d="M380,216 L380,236" marker-end="url(#arrow)" />
+            <text x="660" y="231" class="small mono">RegisterIR</text>
+
+            <rect class="box" x="120" y="238" width="520" height="56" rx="8" />
+            <text x="132" y="259" class="title">ssa — progress 2/7</text>
+            <text x="132" y="278" class="small mono">
+              constructSSA → requirePass → simplifySSA → requirePass
+            </text>
+
+            <path class="edge" d="M380,294 L380,314" marker-end="url(#arrow)" />
+            <text x="660" y="309" class="small mono">SSAForm</text>
+
+            <rect class="box" x="120" y="316" width="520" height="56" rx="8" />
+            <text x="132" y="337" class="title">metadata — progress 3/7</text>
+            <text x="132" y="356" class="small mono">
+              recoverDebugInfo · recoverLibraryContracts · resolveCalls
+            </text>
+
+            <path class="edge" d="M380,372 L380,392" marker-end="url(#arrow)" />
+            <text x="660" y="387" class="small mono">calls · debug · library types</text>
+
+            <rect class="box" x="120" y="394" width="520" height="56" rx="8" />
+            <text x="132" y="415" class="title">types — progress 4/7</text>
+            <text x="132" y="434" class="small mono">
+              recoverTypes · annotations · refineMemoryShapes
+            </text>
+
+            <path class="edge" d="M380,450 L380,470" marker-end="url(#arrow)" />
+            <text x="660" y="465" class="small mono">TypeRecoveryResult</text>
+
+            <rect class="box" x="120" y="472" width="520" height="56" rx="8" />
+            <text x="132" y="493" class="title">structure — progress 5/7</text>
+            <text x="132" y="512" class="small mono">
+              structureControlFlow(ir, context, { max_work })
+            </text>
+
+            <path class="edge" d="M380,528 L380,548" marker-end="url(#arrow)" />
+            <text x="660" y="543" class="small mono">StructuredFunction</text>
+
+            <rect class="box" x="120" y="550" width="520" height="56" rx="8" />
+            <text x="132" y="571" class="title">emit — progress 6/7</text>
+            <text x="132" y="590" class="small mono">
+              emitC / emitPythonLike({ function, types, names, source })
+            </text>
+
+            <path class="edge" d="M380,606 L380,626" marker-end="url(#arrow)" />
+            <text x="690" y="620" text-anchor="end" class="small mono">Emission + mappings</text>
+
+            <rect class="box ok" x="120" y="628" width="520" height="44" rx="8" />
+            <text x="380" y="647" text-anchor="middle" class="title">
+              return { result, catalog } → publishArtifact
+            </text>
+            <text x="380" y="663" text-anchor="middle" class="small">
+              coverage · diagnostics · evidence closure · signature
+            </text>
+
+            <path class="edge" d="M640,650 L698,650" marker-end="url(#arrow)" />
+            <rect class="box" x="700" y="622" width="240" height="56" rx="8" />
+            <text x="820" y="642" text-anchor="middle" class="title">delivery</text>
+            <text x="820" y="660" text-anchor="middle" class="small">inline | artifact</text>
+
+            <path class="edge dashed" d="M642,30 L930,30 L930,620" marker-end="url(#arrow)" />
+            <text x="920" y="52" text-anchor="end" class="edge-label">cached payload</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 4.</strong> The seven <code>progress</code> labels are coarse: the
+            <code>types</code> label covers the whole annotation/type/source-evidence block, and
+            <code>recoverSourceEvidence</code> runs inside it. Each arrow is a real value passed to
+            the next stage, not a log message.
+          </figcaption>
+        </figure>
+
+        <h3>What each stage consumes and produces</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Stage</th>
+              <th>Consumes</th>
+              <th>Produces</th>
+              <th>Detail page</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>decode</code></td>
+              <td><code>LoadedImage</code>, function record, instruction/block budgets</td>
+              <td>
+                <code>FunctionGraph</code>: blocks, instructions, gaps, coverage, optional
+                query-local jump tables and evidence. A gap with
+                <code>reason: 'budget'</code> aborts the request.
+              </td>
+              <td><a href="discovery.html">03</a></td>
+            </tr>
+            <tr>
+              <td><code>lift</code></td>
+              <td>graph, selected <code>AbiProfile</code>, budget</td>
+              <td>
+                <code>RegisterIR</code> plus lift coverage and diagnostics;
+                <code>boundIR</code> charges blocks/instructions and enforces node and block limits.
+              </td>
+              <td><a href="decode-lift-ir.html">04</a></td>
+            </tr>
+            <tr>
+              <td><code>ssa</code></td>
+              <td><code>RegisterIR</code>, pass options (work, nodes, blocks, observable masks)</td>
+              <td>
+                Simplified <code>SSAForm</code>; either pass can throw
+                <code>unavailable_semantics</code> instead of publishing a partial form.
+              </td>
+              <td><a href="ssa-values.html">05</a></td>
+            </tr>
+            <tr>
+              <td><code>metadata</code></td>
+              <td>image, SSA, function/reference indexes</td>
+              <td>Debug/library types, native signatures, call resolutions and declarations.</td>
+              <td><a href="calls-abi.html">06</a> · <a href="types-metadata.html">07</a></td>
+            </tr>
+            <tr>
+              <td><code>types</code></td>
+              <td>SSA, calls, debug/library/user types, annotation catalog</td>
+              <td>
+                Baseline and refined <code>TypeRecoveryResult</code>, source evidence, memory
+                shapes, image-wide types.
+              </td>
+              <td><a href="types-metadata.html">07</a> · <a href="reconstruction.html">08</a></td>
+            </tr>
+            <tr>
+              <td><code>structure</code></td>
+              <td>SSA CFG</td>
+              <td>
+                <code>StructuredFunction</code>; a missing presentation is
+                <code>internal_error</code>.
+              </td>
+              <td><a href="structuring-emission.html">09</a></td>
+            </tr>
+            <tr>
+              <td><code>emit</code></td>
+              <td>structured function, types, names, annotations, source evidence, options</td>
+              <td>
+                <code>Emission</code> with interned ids/evidence/ranges, mappings, inferences,
+                requirements, helper list and coverage counters.
+              </td>
+              <td><a href="structuring-emission.html">09</a></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout invariant">
+          <span class="title">Invariant</span>
+          <p>
+            The analysis works against a <code>fullContext</code> whose <code>output_bytes</code> is
+            raised to <code>MAX_ANALYSIS_ARTIFACT_BYTES</code>
+            (16 MiB), while the deliverable inline limit is
+            <code
+              >min(args.budget.output_bytes, scope.max_result_bytes, MAX_FRAME_BYTES - 16384)</code
+            >. The stages therefore never fail because the transport is small; only the final
+            <code>delivery</code> step switches to an artifact. Every other budget field is shared.
+            <a class="src" href="../../src/service/analysis/index.ts"
+              >src/service/analysis/index.ts</a
+            >
+            (<code>fullContext</code>),
+            <a class="src" href="../../src/project/cache/index.ts">src/project/cache/index.ts</a>
+            (<code>delivery</code>).
+          </p>
+        </div>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 960 620" role="img" aria-labelledby="fig-sequence-title">
+            <title id="fig-sequence-title">
+              Sequence of one CLI decompile across host, worker and store
+            </title>
+
+            <rect class="box c1" x="10" y="8" width="120" height="34" rx="8" />
+            <text x="70" y="30" text-anchor="middle" class="title">CLI</text>
+            <rect class="box c1" x="160" y="8" width="120" height="34" rx="8" />
+            <text x="220" y="24" text-anchor="middle" class="title">BinarySession</text>
+            <text x="220" y="37" text-anchor="middle" class="small mono">api</text>
+            <rect class="box" x="320" y="8" width="120" height="34" rx="8" />
+            <text x="380" y="24" text-anchor="middle" class="title">QueryService</text>
+            <text x="380" y="37" text-anchor="middle" class="small mono">host</text>
+            <rect class="box" x="490" y="8" width="120" height="34" rx="8" />
+            <text x="550" y="24" text-anchor="middle" class="title">worker child</text>
+            <text x="550" y="37" text-anchor="middle" class="small mono">handler</text>
+            <rect class="box" x="660" y="8" width="120" height="34" rx="8" />
+            <text x="720" y="24" text-anchor="middle" class="title">ProjectStore</text>
+            <text x="720" y="37" text-anchor="middle" class="small mono">SQLite</text>
+            <rect class="box accent" x="810" y="8" width="140" height="34" rx="8" />
+            <text x="880" y="24" text-anchor="middle" class="title">pipeline</text>
+            <text x="880" y="37" text-anchor="middle" class="small mono">executeDecompilation</text>
+
+            <path class="edge dashed" d="M70,42 L70,572" />
+            <path class="edge dashed" d="M220,42 L220,572" />
+            <path class="edge dashed" d="M380,42 L380,572" />
+            <path class="edge dashed" d="M550,42 L550,572" />
+            <path class="edge dashed" d="M720,42 L720,572" />
+            <path class="edge dashed" d="M880,42 L880,572" />
+
+            <path class="edge" d="M70,70 L218,70" marker-end="url(#arrow)" />
+            <text x="144" y="63" text-anchor="middle" class="edge-label">openBinary()</text>
+
+            <path class="edge" d="M250,88 L292,88 L292,104 L254,104" marker-end="url(#arrow)" />
+            <text x="298" y="82" class="edge-label">sha256 · dir</text>
+
+            <path class="edge" d="M220,130 L378,130" marker-end="url(#arrow)" />
+            <text x="299" y="123" text-anchor="middle" class="edge-label">
+              project_open {import}
+            </text>
+
+            <path class="edge" d="M380,156 L548,156" marker-end="url(#arrow)" />
+            <text x="464" y="149" text-anchor="middle" class="edge-label">spawn / open</text>
+
+            <path class="edge" d="M580,182 L620,182 L620,198 L584,198" marker-end="url(#arrow)" />
+            <text x="626" y="176" class="edge-label">loader.load()</text>
+
+            <path class="edge" d="M550,222 L718,222" marker-end="url(#arrow)" />
+            <text x="634" y="215" text-anchor="middle" class="edge-label">import + discovery</text>
+
+            <path class="edge dashed" d="M718,246 L552,246" marker-end="url(#arrow)" />
+            <text x="635" y="239" text-anchor="middle" class="edge-label">revision 1</text>
+
+            <path class="edge" d="M220,270 L378,270" marker-end="url(#arrow)" />
+            <text x="299" y="263" text-anchor="middle" class="edge-label">functions_find</text>
+
+            <path class="edge" d="M380,292 L718,292" marker-end="url(#arrow)" />
+            <text x="549" y="285" text-anchor="middle" class="edge-label">
+              queryRecords(function)
+            </text>
+
+            <path class="edge dashed" d="M718,314 L382,314" marker-end="url(#arrow)" />
+            <text x="550" y="307" text-anchor="middle" class="edge-label">FunctionRecord</text>
+
+            <path class="edge" d="M220,338 L378,338" marker-end="url(#arrow)" />
+            <text x="299" y="331" text-anchor="middle" class="edge-label">function_decompile</text>
+
+            <path class="edge" d="M380,362 L548,362" marker-end="url(#arrow)" />
+            <text x="464" y="355" text-anchor="middle" class="edge-label">admit(job)</text>
+
+            <path class="edge" d="M550,386 L878,386" marker-end="url(#arrow)" />
+            <text x="714" y="379" text-anchor="middle" class="edge-label">dispatch</text>
+
+            <path class="edge" d="M880,410 L722,410" marker-end="url(#arrow)" />
+            <text x="801" y="403" text-anchor="middle" class="edge-label">findArtifact()</text>
+
+            <path class="edge dashed" d="M720,432 L878,432" marker-end="url(#arrow)" />
+            <text x="799" y="425" text-anchor="middle" class="edge-label">hit / miss</text>
+
+            <path class="edge" d="M880,456 L722,456" marker-end="url(#arrow)" />
+            <text x="801" y="449" text-anchor="middle" class="edge-label">publishArtifact()</text>
+
+            <path class="edge dashed" d="M550,480 L382,480" marker-end="url(#arrow)" />
+            <text x="466" y="473" text-anchor="middle" class="edge-label">result</text>
+
+            <path class="edge dashed" d="M380,504 L222,504" marker-end="url(#arrow)" />
+            <text x="301" y="497" text-anchor="middle" class="edge-label">materialize</text>
+
+            <path class="edge dashed" d="M220,528 L72,528" marker-end="url(#arrow)" />
+            <text x="146" y="521" text-anchor="middle" class="edge-label">emission.text</text>
+
+            <path class="edge" d="M70,552 L218,552" marker-end="url(#arrow)" />
+            <text x="144" y="545" text-anchor="middle" class="edge-label">close()</text>
+
+            <text x="20" y="592" class="small">
+              Dashed: responses and returned values. The child owns every durable read and write;
+            </text>
+            <text x="20" y="607" class="small">
+              the host never opens SQLite or decodes an instruction.
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 5.</strong> The CLI owns cancellation and exit codes; the child owns the
+            store and all CPU work. A decompile that outlives its transport stays a durable job and
+            is resumed by a second <code>wait:true</code> call, which hits the published artifact.
+          </figcaption>
+        </figure>
+      </section>
+
+      <section id="example">
+        <h2>Worked example: <code>_fixture_maximum</code></h2>
+        <p>
+          The fixture source is a three-instruction conditional select. From
+          <a class="src" href="../../fixtures/source/corpus.c">fixtures/source/corpus.c</a>:
+        </p>
+        <pre><code>API NOINLINE i32 fixture_maximum(i32 a, i32 b) { return a &gt; b ? a : b; }</code></pre>
+        <p>
+          The function record is
+          <code>entity_835a96c5…f1817f</code> at <code>va:0x100000588</code>. Asking the project for
+          the disassembly returns exactly three valid instructions, each with its own entity ID,
+          byte range and decoder payload:
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>VA</th>
+              <th>Mnemonic</th>
+              <th>Encoding</th>
+              <th>Flow</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>0x100000588</code></td>
+              <td><code>SUBS w31, w0, w1</code></td>
+              <td><code>SUBS_32_addsub_shift</code></td>
+              <td>fallthrough</td>
+            </tr>
+            <tr>
+              <td><code>0x10000058c</code></td>
+              <td><code>CSEL w0, w0, w1, gt</code></td>
+              <td><code>CSEL_32_condsel</code></td>
+              <td>fallthrough</td>
+            </tr>
+            <tr>
+              <td><code>0x100000590</code></td>
+              <td><code>RET</code></td>
+              <td><code>RET_64R_branch_reg</code></td>
+              <td>return</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>The CLI run (stdout only; progress and project reuse go to stderr) produced:</p>
+        <pre><code>$ node dist/src/cli/entry.js decompile fixtures/bin/macho-arm64-symbols \
+    --function _fixture_maximum --cache /tmp/od-cache
+/* C-like */
+int32_t fixture_maximum(int32_t arg0, int32_t arg1) {
+  return arg0 &gt; arg1 ? arg0 : arg1;
+}</code></pre>
+        <p>
+          The unsimplified view of the same function shows what “checked” means — every machine fact
+          stays explicit, including the register-width casts and the unsigned intermediate value:
+        </p>
+        <pre><code>$ node dist/src/cli/entry.js decompile fixtures/bin/macho-arm64-symbols \
+    --function _fixture_maximum --view checked --cache /tmp/od-cache
+/* C-like */
+uint64_t fn__fixture_maximum(uint64_t arg0, uint64_t arg1) {
+  return ((uint64_t)(((((int32_t)(((uint32_t)(arg0)))) &gt; ((int32_t)(((uint32_t)(arg1))))) ? ((uint32_t)(arg0)) : ((uint32_t)(arg1)))));
+}</code></pre>
+        <p>
+          The structured envelope reports <code>state: "complete"</code>,
+          <code>cache: "hit"</code> (this was the second run), five coverage layers all
+          <code>complete</code> (decode 11/11, lift 11/11, abi 1/1, analysis 1/1, reconstruction
+          40/40), and the emission carries 23 source mappings and two evidence records for a
+          105-character text. The call’s versions identify exactly the components from Table 3:
+          <code>open-decomp-macho/1.0.4</code>, <code>aa0e547…+adapter.2</code>,
+          <code>ARM64 typed semantic lifter/1.0.6</code>, <code>darwin-arm64/1.3.0</code>,
+          <code>reconstructed-c-53</code>.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 960 300" role="img" aria-labelledby="fig-example-title">
+            <title id="fig-example-title">
+              Three real instructions mapped to the emitted conditional expression
+            </title>
+
+            <text x="20" y="32" class="small">function_get, view: disassembly</text>
+            <rect class="box" x="20" y="50" width="360" height="34" rx="6" />
+            <text x="32" y="72" class="small mono">0x100000588 SUBS w31, w0, w1</text>
+            <rect class="box" x="20" y="100" width="360" height="34" rx="6" />
+            <text x="32" y="122" class="small mono">0x10000058c CSEL w0, w0, w1, gt</text>
+            <rect class="box" x="20" y="150" width="360" height="34" rx="6" />
+            <text x="32" y="172" class="small mono">0x100000590 RET</text>
+
+            <path class="edge" d="M380,67 L400,67 L400,167" />
+            <path class="edge" d="M380,117 L400,117" />
+            <path class="edge" d="M380,167 L400,167" />
+            <path class="edge accent" d="M400,117 L428,117" marker-end="url(#arrow-accent)" />
+
+            <rect class="box accent" x="430" y="70" width="200" height="110" rx="8" />
+            <text x="530" y="94" text-anchor="middle" class="title">SSA expression</text>
+            <text x="442" y="118" class="small mono">cmp = arg0 &gt; arg1</text>
+            <text x="442" y="136" class="small mono">value = cmp ? arg0 : arg1</text>
+            <text x="442" y="160" class="small">arg0 ← x0, arg1 ← x1</text>
+
+            <path class="edge accent" d="M630,125 L678,125" marker-end="url(#arrow-accent)" />
+
+            <rect class="box ok" x="680" y="70" width="260" height="110" rx="8" />
+            <text x="810" y="94" text-anchor="middle" class="title">emitted C (source view)</text>
+            <text x="692" y="118" class="small mono">return arg0 &gt; arg1 ?</text>
+            <text x="692" y="136" class="small mono">arg0 : arg1;</text>
+            <text x="692" y="160" class="small">spans 37–49, 51–63, 67–103</text>
+
+            <text x="20" y="230" class="small">
+              23 mappings · 2 evidence records · complete coverage
+            </text>
+            <text x="680" y="230" class="small">
+              CacheIdentity hit · artifact reused byte-for-byte
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 6.</strong> Real values from the fixture. The comparison and the select
+            collapse into one C conditional; each emitted span is mapped back to the SSA nodes and
+            evidence that justify it. In the checked view the same operations appear as explicit
+            width casts instead.
+          </figcaption>
+        </figure>
+
+        <p>Where each visible feature is explained:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Feature in the output</th>
+              <th>Produced by</th>
+              <th>Read more</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>int32_t</code> and two parameters</td>
+              <td>ABI classification plus type recovery on x0/x1</td>
+              <td><a href="calls-abi.html">06</a>, <a href="types-metadata.html">07</a></td>
+            </tr>
+            <tr>
+              <td><code>arg0 &gt; arg1 ? arg0 : arg1</code></td>
+              <td>Lifted compare + conditional select, SSA simplification, source rewrite</td>
+              <td>
+                <a href="decode-lift-ir.html">04</a>, <a href="ssa-values.html">05</a>,
+                <a href="reconstruction.html">08</a>
+              </td>
+            </tr>
+            <tr>
+              <td>One <code>return</code> statement</td>
+              <td><code>structureControlFlow</code> then the C emitter</td>
+              <td><a href="structuring-emission.html">09</a></td>
+            </tr>
+            <tr>
+              <td>23 mappings, 2 evidence records</td>
+              <td>Emitter span table plus <code>closeEvidence</code></td>
+              <td>
+                <a href="structuring-emission.html">09</a>, <a href="project-cache.html">10</a>
+              </td>
+            </tr>
+            <tr>
+              <td><code>cache: "hit"</code></td>
+              <td><code>findArtifact(identity)</code> in <code>runCachedDecompilation</code></td>
+              <td><a href="project-cache.html">10</a></td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="concepts">
+        <h2>Cross-cutting concepts</h2>
+
+        <h3>OperationContext and budgets</h3>
+        <pre><code>export interface OperationContext {
+  readonly signal: AbortSignal;
+  readonly budget: Budget;
+  /** Implementations must charge actual work and throw a typed resource-limit/cancel error. */
+  checkpoint(work: number): void;
+  /** Actual shared work remaining; methods survive context wrappers/spreads. */
+  remainingWork?(): number;
+  progress(phase: string, completed: number, total: number | null): void;
+}</code></pre>
+        <p>
+          One context per operation: counters and the monotonic deadline are never reset by a pass.
+          <code>createOperationContext</code> freezes the parsed budget and samples the clock only
+          every 32 charges (<code>clockCountdown = 31</code>), latching expiry so later charges fail
+          identically; this is explicitly to keep the clock read off the hot path of analyses that
+          “charge millions of times per request”. A charge that is not a nonnegative safe integer
+          throws <code>RangeError</code>; an aborted signal throws <code>cancelled</code>; an
+          expired deadline or exhausted work counter throws <code>resource_limit</code> with
+          <code>details.kind: 'limit'</code> and the resource name.
+          <a class="src" href="../../src/core/operation.ts">src/core/operation.ts</a>.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Budget field</th>
+              <th class="num">Default</th>
+              <th>Enforced where</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>instructions</code></td>
+              <td class="num">10,000</td>
+              <td>
+                Discovery stops at the cap; lifters reject an oversized graph; a
+                <code>budget</code> gap aborts the decompile.
+              </td>
+            </tr>
+            <tr>
+              <td><code>blocks</code></td>
+              <td class="num">10,000</td>
+              <td><code>boundIR</code>, discovery, pass options.</td>
+            </tr>
+            <tr>
+              <td><code>ir_nodes</code></td>
+              <td class="num">100,000</td>
+              <td>
+                <code>boundIR</code> (3 + parameters + instructions per block) and the IR builder.
+              </td>
+            </tr>
+            <tr>
+              <td><code>work</code></td>
+              <td class="num">10,000,000</td>
+              <td>
+                Every <code>checkpoint</code>; also passed to passes as <code>max_work</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>deadline_ms</code></td>
+              <td class="num">30,000</td>
+              <td><code>checkpoint</code>, capped again by the worker's admission deadline.</td>
+            </tr>
+            <tr>
+              <td><code>output_bytes</code></td>
+              <td class="num">1,048,576</td>
+              <td>
+                <code>validateToolResponse</code> and delivery; analysis itself runs with a 16 MiB
+                allowance.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>OperationError and diagnostic codes</h3>
+        <p>
+          <code>OperationError</code> carries one <code>Diagnostic</code>; its
+          <code>code</code> getter is the diagnostic code. Diagnostics are also used as non-fatal
+          warnings: an unsupported instruction is a warning <code>unavailable_semantics</code> on
+          the instruction, while a pass that cannot produce a complete form escalates it to an
+          error. The envelope keeps up to 1,000 diagnostics; the CLI collapses them with
+          <code>caveats()</code> into reader-facing lines, grouping unresolved call interfaces,
+          return storage and partial callees, and hiding <code>info</code> records.
+          <a class="src" href="../../src/core/diagnostic-summary.ts"
+            >src/core/diagnostic-summary.ts</a
+          >.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Raised by (representative)</th>
+              <th>Meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>unsupported_target</code></td>
+              <td><code>pipelineComponents</code>, loaders</td>
+              <td>No loader or no complete lifter/ABI pipeline for the target triple.</td>
+            </tr>
+            <tr>
+              <td><code>ambiguous_slice</code></td>
+              <td><code>loadImage</code></td>
+              <td>An image-only query cannot choose among multiple imported slices.</td>
+            </tr>
+            <tr>
+              <td><code>invalid_address</code></td>
+              <td>discovery, debug metadata</td>
+              <td>
+                Address belongs to another image, is not a 64-bit value, or is not an indexed root.
+              </td>
+            </tr>
+            <tr>
+              <td><code>invalid_input</code></td>
+              <td>API, cache, store, worker</td>
+              <td>Malformed or inconsistent request/state; never a retryable condition.</td>
+            </tr>
+            <tr>
+              <td><code>stale_revision</code></td>
+              <td><code>RevisionConflict</code>, store</td>
+              <td>Expected revision no longer matches, or a requested revision does not exist.</td>
+            </tr>
+            <tr>
+              <td><code>stale_cursor</code></td>
+              <td><code>decodeCursor</code></td>
+              <td>Cursor is bound to a different project, revision, operation or query hash.</td>
+            </tr>
+            <tr>
+              <td><code>invalid_cursor</code></td>
+              <td><code>decodeCursor</code></td>
+              <td>Malformed or non-canonical continuation cursor.</td>
+            </tr>
+            <tr>
+              <td><code>resource_limit</code></td>
+              <td><code>checkpoint</code>, <code>boundIR</code>, cache size cap</td>
+              <td>Work, deadline, node/block, queue, frame or artifact limit exceeded.</td>
+            </tr>
+            <tr>
+              <td><code>unavailable_semantics</code></td>
+              <td>lifters, calls, types, <code>requirePass</code></td>
+              <td>
+                A pass or instruction has no complete semantics; published as warning or escalated
+                to error.
+              </td>
+            </tr>
+            <tr>
+              <td><code>unmapped</code></td>
+              <td>discovery</td>
+              <td>A reachable target has no executable file backing.</td>
+            </tr>
+            <tr>
+              <td><code>malformed_image</code></td>
+              <td>runtime metadata reader</td>
+              <td>Container structure violates its own bounds or encoding.</td>
+            </tr>
+            <tr>
+              <td><code>conflicting_evidence</code></td>
+              <td>name/alias resolution</td>
+              <td>
+                Competing assertions or hypotheses remain unresolved (often <code>info</code>).
+              </td>
+            </tr>
+            <tr>
+              <td><code>cancelled</code></td>
+              <td><code>checkpoint</code>, worker</td>
+              <td>Signal aborted, or a job was cancelled before mutation.</td>
+            </tr>
+            <tr>
+              <td><code>worker_failed</code></td>
+              <td>pool/runtime</td>
+              <td>Child exited, lost ownership, or sent a nonterminal/invalid acknowledgement.</td>
+            </tr>
+            <tr>
+              <td><code>permission_denied</code></td>
+              <td>worker, analysis, annotations</td>
+              <td>Path no longer canonical, or request belongs to another project.</td>
+            </tr>
+            <tr>
+              <td><code>not_found</code></td>
+              <td><code>loadFunctionScope</code></td>
+              <td>Function or image absent from the requested snapshot.</td>
+            </tr>
+            <tr>
+              <td><code>unsupported_version</code></td>
+              <td>project store</td>
+              <td>Project schema is newer than this build; no mutation is attempted.</td>
+            </tr>
+            <tr>
+              <td><code>internal_error</code></td>
+              <td>analysis invariants</td>
+              <td>
+                A proven invariant failed (missing proof, register-form SSA, missing presentation).
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Complete, partial and refusal</h3>
+        <p>
+          Result envelopes are a discriminated union over
+          <code>complete</code>, <code>empty</code>, <code>partial</code>, <code>queued</code>,
+          <code>running</code>, <code>unsupported</code>, <code>failed</code> and
+          <code>cancelled</code>. A <code>partial</code> result always carries a
+          <code>reason</code> — <code>budget</code>, <code>incomplete_index</code>,
+          <code>unsupported_subset</code> or <code>output_limit</code> — and a
+          <code>continuation</code> (always <code>null</code> for decompilation).
+          <a class="src" href="../../src/core/tools.ts">src/core/tools.ts</a>
+          (<code>ResultEnvelope</code>, <code>projectDecompilationArtifactResult</code>).
+        </p>
+        <pre><code>export function requirePass(
+  state: 'complete' | 'partial',
+  diagnostics: readonly Diagnostic[],
+  context: OperationContext,
+): void {
+  context.checkpoint(0);
+  const failure = diagnostics.find(
+    (item) =&gt; item.code === 'cancelled' || item.code === 'resource_limit',
+  );
+  if (failure) throw new OperationError(failure);
+  if (state === 'partial')
+    throw new OperationError({
+      code: 'unavailable_semantics',
+      // …
+    });
+}</code></pre>
+        <p class="sources">
+          <a class="src" href="../../src/service/analysis/passes.ts"
+            >src/service/analysis/passes.ts</a
+          >
+          (<code>requirePass</code>).
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 960 420" role="img" aria-labelledby="fig-states-title">
+            <title id="fig-states-title">
+              How a pass result becomes an error, a partial result or a complete result
+            </title>
+
+            <rect class="box" x="330" y="10" width="300" height="46" rx="8" />
+            <text x="480" y="30" text-anchor="middle" class="title">
+              a stage returns diagnostics + state
+            </text>
+            <text x="480" y="47" text-anchor="middle" class="small">
+              passes also call requirePass
+            </text>
+
+            <path class="edge" d="M480,56 L480,88" marker-end="url(#arrow)" />
+            <rect class="box accent" x="330" y="90" width="300" height="46" rx="8" />
+            <text x="480" y="110" text-anchor="middle" class="title">
+              cancelled or resource_limit?
+            </text>
+            <text x="480" y="127" text-anchor="middle" class="small">
+              checked before the partial state
+            </text>
+
+            <path class="edge bad" d="M630,113 L678,113" marker-end="url(#arrow)" />
+            <text x="650" y="106" text-anchor="middle" class="edge-label">yes</text>
+            <rect class="box bad" x="680" y="90" width="260" height="46" rx="8" />
+            <text x="810" y="110" text-anchor="middle" class="title">throw OperationError</text>
+            <text x="810" y="127" text-anchor="middle" class="small mono">
+              cancelled / resource_limit
+            </text>
+
+            <path class="edge" d="M480,136 L480,168" marker-end="url(#arrow)" />
+            <text x="490" y="156" class="edge-label">no</text>
+            <rect class="box accent" x="330" y="170" width="300" height="46" rx="8" />
+            <text x="480" y="190" text-anchor="middle" class="title">pass state is partial?</text>
+            <text x="480" y="207" text-anchor="middle" class="small">
+              form is not a complete valid representation
+            </text>
+
+            <path class="edge bad" d="M630,193 L678,193" marker-end="url(#arrow)" />
+            <text x="650" y="186" text-anchor="middle" class="edge-label">yes</text>
+            <rect class="box bad" x="680" y="170" width="260" height="46" rx="8" />
+            <text x="810" y="190" text-anchor="middle" class="title">unavailable_semantics</text>
+            <text x="810" y="207" text-anchor="middle" class="small">
+              an error, never a partial form
+            </text>
+
+            <path class="edge" d="M480,216 L480,248" marker-end="url(#arrow)" />
+            <text x="490" y="236" class="edge-label">no</text>
+            <rect class="box accent" x="330" y="250" width="300" height="46" rx="8" />
+            <text x="480" y="270" text-anchor="middle" class="title">
+              every coverage layer complete?
+            </text>
+            <text x="480" y="287" text-anchor="middle" class="small">
+              decode · lift · abi · analysis · reconstruction
+            </text>
+
+            <path class="edge warn" d="M630,273 L678,270" marker-end="url(#arrow)" />
+            <text x="648" y="260" text-anchor="middle" class="edge-label">no</text>
+            <rect class="box warn" x="680" y="240" width="260" height="60" rx="8" />
+            <text x="810" y="261" text-anchor="middle" class="title">state: partial</text>
+            <text x="810" y="279" text-anchor="middle" class="small mono">
+              incomplete_index | budget
+            </text>
+            <text x="810" y="294" text-anchor="middle" class="small mono">unsupported_subset</text>
+
+            <path class="edge ok" d="M480,296 L480,328" marker-end="url(#arrow)" />
+            <text x="490" y="316" class="edge-label">yes</text>
+            <rect class="box ok" x="330" y="330" width="300" height="46" rx="8" />
+            <text x="480" y="350" text-anchor="middle" class="title">state: complete</text>
+            <text x="480" y="367" text-anchor="middle" class="small">
+              stored + published at the revision
+            </text>
+
+            <path class="edge warn" d="M630,353 L678,352" marker-end="url(#arrow)" />
+            <text x="655" y="345" text-anchor="middle" class="edge-label">large</text>
+            <rect class="box warn" x="680" y="330" width="260" height="46" rx="8" />
+            <text x="810" y="350" text-anchor="middle" class="title">artifact delivery</text>
+            <text x="810" y="367" text-anchor="middle" class="small">
+              envelope: partial(output_limit)
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 7.</strong> Two different “partials” exist. A semantic partial means a
+            coverage layer is incomplete and is stored with a reason; an output-limit partial means
+            the computation was complete but its envelope did not fit the inline budget and an
+            artifact handle was substituted. The stored artifact keeps the complete result.
+          </figcaption>
+        </figure>
+
+        <h3>Evidence and provenance</h3>
+        <p>
+          <code>Evidence</code> is a revisioned record with an <code>origin</code> that is one of
+          five kinds — <code>binary</code> (range + description), <code>analysis</code> (analyzer,
+          version, rule), <code>debug</code> (artifact id, record, whether identity was verified),
+          <code>library</code> (library, contract, version), or <code>assertion</code> (author, user
+          or LLM, status) — plus <code>claim</code>, <code>derived_from</code> and
+          <code>conflicts_with</code>. The schema rejects self-derivation and self-conflict.
+          <a class="src" href="../../src/core/primitives.ts">src/core/primitives.ts</a>
+          (<code>evidenceSchema</code>).
+        </p>
+        <p>
+          Navigation results cite evidence IDs; <code>evidence_get</code> resolves them, and
+          <code>derivation: 'closure'</code> walks ancestors. Inside one emission, every proof is
+          interned once in <code>emission.evidence</code> and cited by index, which is why an
+          emission's mappings are compact even when many spans share a proof. The presentation
+          status vocabulary — <code>established</code>, <code>inferred</code>,
+          <code>asserted</code>, <code>hypothesis</code>, <code>conflicting</code>,
+          <code>assumption</code>, <code>unresolved</code> — is separate from semantic coverage; the
+          comment in <code>inference.ts</code> warns that “presentation confidence is not semantic
+          coverage or a translation proof”.
+          <a class="src" href="../../src/core/inference.ts">src/core/inference.ts</a>.
+        </p>
+
+        <h3>Revisions, snapshots and cursors</h3>
+        <p>
+          A project is a sequence of revisions starting at 0. <code>snapshot(revision)</code>
+          returns the project id, schema version and every image imported at or before that revision
+          (with its selected slice); reading a future revision is
+          <code>stale_revision</code>. Jobs record <code>input_revision</code> separately from
+          <code>published_revision</code>, because a long-running analysis publishes into the
+          revision it started from and a newer annotation does not retroactively authorize it.
+          Annotations are applied in a batch with <code>expected_revision</code>; the result is
+          <code>committed</code>, <code>conflict</code> or <code>rejected</code>, and a commit
+          advances exactly one revision while invalidating derived analysis before that point.
+          <a class="src" href="../../src/project/store/index.ts">src/project/store/index.ts</a>
+          (<code>applyAnnotations</code>, <code>snapshot</code>).
+        </p>
+        <p>
+          Paging cursors are base64url JSON binding
+          <code>project_id</code>, <code>revision</code>, <code>operation</code>,
+          <code>query_hash</code> and the composite <code>after</code> key. They are query state,
+          never authorization: decoding validates the binding and raises
+          <code>stale_cursor</code> when it no longer matches.
+          <a class="src" href="../../src/core/identity.ts">src/core/identity.ts</a>
+          (<code>encodeCursor</code>, <code>decodeCursor</code>).
+        </p>
+
+        <h3>Content-derived identity</h3>
+        <p>
+          IDs are <code>prefix_</code> plus 64 hex digits. Image identity is literally the SHA-256
+          of the file; slice identity is a fingerprint of image id, offset, size and architecture;
+          entity identity is a fingerprint of slice id, kind and an immutable
+          <em>birth</em> discriminator, so a split or merge mints new IDs and records lineage rather
+          than renaming an old one (the comment in <code>entityIdentity</code> says exactly this).
+          Project and job/annotation/evidence/artifact identities are randomly minted when they are
+          not content-derived. Canonical encoding tags every scalar type before hashing, so
+          <code>bigint</code> 1 and the string <code>"0x1"</code> cannot collide.
+          <a class="src" href="../../src/core/identity.ts">src/core/identity.ts</a>
+          (<code>canonicalIdentity</code>, <code>entityIdentity</code>).
+        </p>
+
+        <h3>Address spaces</h3>
+        <p>
+          An <code>Address</code> is <code>{ image_id, space, value }</code> with
+          <code>space</code> ∈ <code>va</code>, <code>rva</code>, <code>file</code>. File offsets
+          address the immutable container, not the selected slice.
+          <code>AddressMap.translate</code> returns <code>mapped</code>, <code>zero_fill</code> or
+          <code>unmapped</code>, and <code>spans</code> partitions a read without inventing bytes
+          for holes or zero-fill; both refuse a foreign image id. This is the entire reason a memory
+          read can say “zero-filled” instead of returning bytes that were never there.
+          <a class="src" href="../../src/core/addresses.ts">src/core/addresses.ts</a>
+          (<code>AddressMap</code>, <code>Translation</code>). Details on slice selection and
+          per-format mapping live in <a href="loaders.html">02 Loading binaries &amp; addresses</a>.
+        </p>
+      </section>
+
+      <section id="reading">
+        <h2>Reading guide and glossary</h2>
+        <p>
+          Read in pipeline order if you want to follow one function; read by layer if you want to
+          work on the architecture. The two natural entry points are
+          <a href="loaders.html">02</a> (how bytes become an image) and
+          <a href="project-cache.html">10</a> (how a request becomes durable work).
+        </p>
+        <div class="cards">
+          <a class="card" href="loaders.html">
+            <h3>02 · Loading binaries &amp; addresses</h3>
+            <p>Mach-O, PE and ELF parsing, slice selection and file/rva/va translation.</p>
+          </a>
+          <a class="card" href="discovery.html">
+            <h3>03 · Function discovery &amp; CFG</h3>
+            <p>Seeds, boundary proofs, block construction and gaps.</p>
+          </a>
+          <a class="card" href="decode-lift-ir.html">
+            <h3>04 · Decoding, lifting &amp; IR</h3>
+            <p>Instruction decoding and the typed register-form IR.</p>
+          </a>
+          <a class="card" href="ssa-values.html">
+            <h3>05 · SSA, values &amp; stack</h3>
+            <p>SSA construction, value simplification and stack recovery.</p>
+          </a>
+          <a class="card" href="calls-abi.html">
+            <h3>06 · ABIs, calls &amp; callee summaries</h3>
+            <p>Call layouts, clobbers, argument/result recovery and summaries.</p>
+          </a>
+          <a class="card" href="types-metadata.html">
+            <h3>07 · Types &amp; metadata</h3>
+            <p>DWARF/CodeView, library contracts and source type recovery.</p>
+          </a>
+          <a class="card" href="reconstruction.html">
+            <h3>08 · Source reconstruction</h3>
+            <p>Source evidence, proof-carrying rewrites and local validation.</p>
+          </a>
+          <a class="card" href="structuring-emission.html">
+            <h3>09 · Structuring &amp; emission</h3>
+            <p>Region structuring, the shared renderer and both dialects.</p>
+          </a>
+          <a class="card" href="project-cache.html">
+            <h3>10 · Projects, cache &amp; execution</h3>
+            <p>SQLite revisions, artifacts, jobs, workers and the query path.</p>
+          </a>
+        </div>
+
+        <dl class="terms">
+          <dt>Image</dt>
+          <dd>
+            One SHA-256-addressed container, with all slices, mappings and native facts. Stored once
+            per project.
+          </dd>
+          <dt>Slice</dt>
+          <dd>
+            A selectable architecture region of a universal/fat container; the selected slice is
+            part of image identity and of every cache key.
+          </dd>
+          <dt>Project</dt>
+          <dd>
+            A SQLite database under a cache root, named
+            <code>&lt;sha256&gt;.&lt;slice|default&gt;</code>, with revisions, jobs and artifacts.
+          </dd>
+          <dt>Revision</dt>
+          <dd>
+            A monotonically increasing snapshot number. Mutations advance it by exactly one;
+            analyses publish into the revision they read.
+          </dd>
+          <dt>Artifact</dt>
+          <dd>
+            An immutable published blob (media type
+            <code>application/vnd.open-decomp.function+json</code>) indexed by a cache key and
+            readable in bounded pages.
+          </dd>
+          <dt>CacheIdentity</dt>
+          <dd>
+            The complete tuple that authorizes a cache hit: image, slice, target, versions, both
+            revisions, options, budget and function.
+          </dd>
+          <dt>Coverage</dt>
+          <dd>
+            Per-layer completeness (<code>decode</code>, <code>lift</code>, <code>abi</code>,
+            <code>analysis</code>, <code>reconstruction</code>) with completed/total units and
+            reasons.
+          </dd>
+          <dt>Evidence</dt>
+          <dd>
+            A revisioned, typed proof record. Analysis, debug, library, binary and assertion origins
+            stay distinct.
+          </dd>
+          <dt>Presentation status</dt>
+          <dd>
+            Confidence in a source construct (<code>established</code> … <code>unresolved</code>),
+            not a proof of semantic coverage.
+          </dd>
+          <dt>Pass</dt>
+          <dd>
+            A bounded transformation returning <code>{ value, state, diagnostics }</code>;
+            <code>requirePass</code> is the gate to the next stage.
+          </dd>
+        </dl>
+      </section>
+
+      <section id="limitations">
+        <h2>Limitations &amp; extension points</h2>
+        <p>
+          Global gaps visible in code and tests, plus the roadmap items the repository tracks. Items
+          marked <strong>roadmap</strong> come from
+          <a class="src" href="../../TODO.md">TODO.md</a> and
+          <a class="src" href="../../CONTINUE.md">CONTINUE.md</a> and are not current capabilities.
+        </p>
+
+        <h3>Known gaps</h3>
+        <ul>
+          <li>
+            <strong>Three target triples only.</strong> <code>targetSchema</code> rejects every
+            other combination, and <code>pipelineComponents</code> throws
+            <code>unsupported_target</code>. There is no 32-bit, big-endian, ARM64 PE or x86-64
+            Mach-O path.
+          </li>
+          <li>
+            <strong>Discovery is bounded and evidence-based, not exhaustive.</strong>
+            <code>FunctionRecord.boundary</code> can be <code>candidate</code> or
+            <code>conflicting</code>, and <code>analysis</code> can be <code>not_analyzed</code>. On
+            the fixture used above, <code>functions</code> reports
+            <code>partial (incomplete_index)</code> even though every listed function is established
+            — the index describes its documented seeded subset, not all code. See
+            <a href="discovery.html">03</a>.
+          </li>
+          <li>
+            <strong>Open call interfaces stay open.</strong> Unresolved calls retain
+            <code>...</code> and conservative effects; <code>AbiCallLayout.state</code> can be
+            <code>partial</code> or <code>unsupported</code>. The tool does not guess arity. See
+            <a href="calls-abi.html">06</a>.
+          </li>
+          <li>
+            <strong>Deep provenance can be shed.</strong> An artifact larger than 16 MiB first loses
+            its incremental-reuse readset, then whole provenance classes in
+            <code>EMISSION_METADATA_SHED_ORDER</code>; each omission is named in
+            <code>emission.omitted</code> and produces a partial <code>provenance</code>
+            coverage entry. Pseudocode, signature and the annotation catalog are never shed.
+            <a class="src" href="../../src/project/cache/index.ts">src/project/cache/index.ts</a>.
+          </li>
+          <li>
+            <strong>An output-limit envelope is not a semantic partial.</strong> It carries
+            <code>state: 'partial'</code>, <code>reason: 'output_limit'</code> and an artifact
+            handle; consumers that only look at <code>state</code> will misread it. See Figure 7.
+          </li>
+          <li>
+            <strong>Roadmap:</strong> per-slot stack promotion (today an escaped frame address can
+            keep every slot as <code>*(T *)(entry_sp - N)</code>); region-collapse structuring to
+            remove gotos; a unified expression rewrite pool; image-wide pointer inference; and an
+            opt-in <code>likely</code> inference mode. TODO.md labels these R1–R5 and explicitly
+            says they are planned, not current.
+          </li>
+          <li>
+            <strong>Roadmap:</strong> resumable per-root whole-image discovery, ObjC super/ivar
+            coverage, and additional benchmark binaries (CONTINUE.md).
+          </li>
+        </ul>
+
+        <h3>Adding a new target</h3>
+        <p>
+          The integration seams are ordinary interfaces in
+          <a class="src" href="../../src/core/contracts.ts">src/core/contracts.ts</a>. A new
+          <em>format</em> needs a <code>Loader</code>; a new <em>ISA</em> needs a
+          <code>Decoder</code> and a <code>Lifter&lt;RegisterIR&gt;</code>; a new
+          <em>convention</em> needs an <code>AbiProfile</code>; a new <em>dialect</em> needs an
+          <code>Emitter&lt;Presentation&gt;</code>. Concretely:
+        </p>
+        <ol class="steps">
+          <li>
+            <strong>Loader.</strong> Implement <code>inspect(bytes, imageId, context)</code> and
+            <code>load({ image_id, sha256, bytes, slice_id }, context)</code>, returning slices,
+            mappings, symbols, hints, evidence and diagnostics. Give it a stable
+            <code>name</code>/<code>version</code>.
+          </li>
+          <li>
+            <strong>Registration.</strong> Extend <code>targetSchema</code>'s enums and its
+            format/ISA/ABI refinement, add the pair to <code>components</code> and
+            <code>targetPipeline</code> in
+            <a class="src" href="../../src/service/analysis/versions.ts"
+              >src/service/analysis/versions.ts</a
+            >, extend <code>versionRecords</code>, and add the magic sniff in
+            <code>workers/runtime.ts</code>. Update <code>pipelineComponents</code>'s error path
+            only if the diagnostic text changes.
+          </li>
+          <li>
+            <strong>Decoder selection.</strong> <code>reconstructFunctionGraph</code> and
+            <code>prepareQueryImport</code> choose a decoder by
+            <code>image.target.architecture</code>; a third architecture needs a branch there (and a
+            <code>dispose()</code> call on every path). The decoder's <code>version</code> becomes
+            part of <code>versions.decoder</code>.
+          </li>
+          <li>
+            <strong>Lifter + ABI.</strong> Return a <code>RegisterIR</code> with lift coverage and
+            diagnostics; implement <code>classifyCall</code> returning an
+            <code>AbiCallLayout</code> whose <code>state</code> is honest about unsupported
+            aggregates. <code>boundIR</code> and <code>requirePass</code> enforce the rest.
+          </li>
+          <li>
+            <strong>Bump versions.</strong> Any semantic change to a stage group must bump its entry
+            in the <code>analysis</code> composition string; otherwise a stale artifact can be
+            reused under the old key. This is the repository's stated cache contract.
+          </li>
+        </ol>
+        <div class="callout refusal">
+          <span class="title">Refusal</span>
+          <p>
+            Until every component exists, the correct behaviour is to throw
+            <code>unsupported_target</code> from <code>pipelineComponents</code> rather than
+            assemble a partial pipeline. The same rule applies per operation: a loader that cannot
+            establish a slice returns <code>ambiguous_slice</code> diagnostics with the candidate
+            list, and a discovery seed that is not an indexed virtual root is
+            <code>invalid_address</code>.
+          </p>
+        </div>
+      </section>
+
+      <footer class="pager">
+        <a class="next" href="loaders.html">Next: Loading binaries &amp; addresses →</a>
+      </footer>
+    </main>
+  </body>
+</html>

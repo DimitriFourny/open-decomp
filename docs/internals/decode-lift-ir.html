@@ -1,0 +1,2736 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Decoding, lifting &amp; IR — Open Decomp internals</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- Shared SVG defs: every diagram on the page references url(#arrow) / url(#arrow-accent). Keep exactly this block once per page. -->
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true" focusable="false">
+      <defs>
+        <marker
+          id="arrow"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" class="arrowhead" />
+        </marker>
+        <marker
+          id="arrow-accent"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" class="arrowhead accent" />
+        </marker>
+      </defs>
+    </svg>
+
+    <nav class="sidebar" aria-label="Internals pages">
+      <a class="brand" href="index.html">Open Decomp internals</a>
+      <p class="brand-sub">How the decompiler works</p>
+      <ol>
+        <li><a href="index.html">Architecture overview</a></li>
+        <li><a href="loaders.html">Loading binaries &amp; addresses</a></li>
+        <li><a href="discovery.html">Function discovery &amp; CFG</a></li>
+        <li><a href="decode-lift-ir.html" aria-current="page">Decoding, lifting &amp; IR</a></li>
+        <li><a href="ssa-values.html">SSA, values &amp; stack</a></li>
+        <li><a href="calls-abi.html">ABIs, calls &amp; callee summaries</a></li>
+        <li><a href="types-metadata.html">Types &amp; metadata</a></li>
+        <li><a href="reconstruction.html">Source reconstruction</a></li>
+        <li><a href="structuring-emission.html">Structuring &amp; emission</a></li>
+        <li><a href="project-cache.html">Projects, cache &amp; execution</a></li>
+      </ol>
+      <a class="back" href="../README.md">← User documentation</a>
+    </nav>
+
+    <main>
+      <header>
+        <p class="eyebrow">Stage 04 · Lifting</p>
+        <h1>Decoding, lifting &amp; IR</h1>
+        <p class="lede">
+          This stage turns machine bytes into a typed, verified semantic graph. A per-architecture
+          decoder produces structured operands and control-flow facts without ever treating assembly
+          text as input; a lifter expands each instruction into explicit dataflow, state effects and
+          a terminator; an IR verifier then proves the graph is well-formed before SSA construction
+          begins.
+        </p>
+        <p class="sources">
+          Sources:
+          <a class="src" href="../../src/core/contracts.ts">src/core/contracts.ts</a>
+          <a class="src" href="../../src/core/decoder.ts">src/core/decoder.ts</a>
+          <a class="src" href="../../src/ir/model.ts">src/ir/model.ts</a>
+          <a class="src" href="../../src/ir/verify.ts">src/ir/verify.ts</a>
+          <a class="src" href="../../src/lifters/arm64/index.ts">src/lifters/arm64/index.ts</a>
+          <a class="src" href="../../src/lifters/x86_64/index.ts">src/lifters/x86_64/index.ts</a>
+        </p>
+      </header>
+
+      <nav class="toc" aria-label="On this page">
+        <strong>On this page</strong>
+        <ol>
+          <li><a href="#position">Where this sits in the pipeline</a></li>
+          <li><a href="#decoder-contract">The decoder contract</a></li>
+          <li><a href="#decoders">Wrapping a64js and iced-x86</a></li>
+          <li><a href="#ir-model">The IR type system and object model</a></li>
+          <li><a href="#builder">Building IR: identity, effects and blocks</a></li>
+          <li><a href="#lifting">The lifting algorithm, per architecture</a></li>
+          <li>
+            <a href="#worked-example">Worked example: <code>fixture_maximum</code></a>
+          </li>
+          <li><a href="#dominance">Dominance and derived register state</a></li>
+          <li><a href="#verify">Every invariant the verifier checks</a></li>
+          <li><a href="#semantics-interpreter">Reference semantics and the interpreter</a></li>
+          <li><a href="#budgets">Budgets and refusal points</a></li>
+          <li><a href="#limitations">Limitations &amp; extension points</a></li>
+        </ol>
+      </nav>
+
+      <section id="position">
+        <h2>Where this sits in the pipeline</h2>
+        <p>
+          The stage consumes two things that stage 03 already established: a
+          <code>LoadedImage</code> (bytes plus the address map that translates file offsets, RVAs
+          and VAs) and, per function, a <code>FunctionGraph</code>. A graph is not raw bytes: it
+          holds the discovered <code>CFGBlock</code> boundaries, every
+          <code>DecodedInstruction</code> those blocks reference, decode gaps, coverage,
+          diagnostics, and — when discovery proved them — <code>ResolvedJumpTable</code> facts.
+          Discovery owns block boundaries; calls are reference edges, not intraprocedural
+          successors.
+        </p>
+        <p>
+          Decoding happens <em>inside</em> discovery: <code>discoverFunctions</code> calls
+          <code>decoder.decode</code> with the image, the regions it wants decoded, the target's
+          feature list and the mode (<code>a64</code> or <code>long64</code>). The lifter is invoked
+          later by analysis (<code>prepareNativeUnit</code> and the analysis service), which passes
+          the finished graph plus an <code>AbiProfile</code>. The lifter returns
+          <code>RegisterIR</code> — register-form IR with explicit reads and writes — never SSA. SSA
+          construction, value analysis and simplification are separate passes on
+          <a href="ssa-values.html#position">the next page</a>. The call nodes and physical clobbers
+          produced here are interpreted on
+          <a href="calls-abi.html#position">the calls &amp; ABI page</a>, and the machine types
+          defined here are refined into source types on
+          <a href="types-metadata.html#position">the types &amp; metadata page</a>.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 300" role="img" aria-labelledby="fig-position-title">
+            <title id="fig-position-title">
+              Where decoding, lifting and IR verification sit in the analysis pipeline
+            </title>
+            <rect class="box muted" x="10" y="30" width="190" height="60" rx="8" />
+            <text x="105" y="52" text-anchor="middle" class="title">LoadedImage</text>
+            <text x="105" y="70" text-anchor="middle" class="small">regions + features</text>
+
+            <path class="edge" d="M200,60 L248,60" marker-end="url(#arrow)" />
+            <text x="224" y="22" text-anchor="middle" class="edge-label">DecodeRequest</text>
+
+            <rect class="box accent" x="250" y="30" width="190" height="60" rx="8" />
+            <text x="345" y="52" text-anchor="middle" class="title">Decoder.decode</text>
+            <text x="345" y="70" text-anchor="middle" class="small mono">decode(request, ctx)</text>
+
+            <path class="edge accent" d="M440,60 L488,60" marker-end="url(#arrow-accent)" />
+            <text x="464" y="22" text-anchor="middle" class="edge-label">DecodeResult</text>
+
+            <rect class="box" x="490" y="30" width="210" height="60" rx="8" />
+            <text x="595" y="52" text-anchor="middle" class="title">DecodedInstruction[]</text>
+            <text x="595" y="70" text-anchor="middle" class="small">payload · flow · gaps</text>
+
+            <path class="edge" d="M700,60 L748,60" marker-end="url(#arrow)" />
+            <text x="724" y="22" text-anchor="middle" class="edge-label">discovery</text>
+
+            <rect class="box" x="750" y="30" width="180" height="60" rx="8" />
+            <text x="840" y="52" text-anchor="middle" class="title">FunctionGraph</text>
+            <text x="840" y="70" text-anchor="middle" class="small">blocks, edges, tables</text>
+
+            <path class="edge" d="M840,90 L840,178" marker-end="url(#arrow)" />
+            <text x="850" y="138" class="edge-label">graph</text>
+
+            <rect class="box accent" x="750" y="180" width="180" height="60" rx="8" />
+            <text x="840" y="202" text-anchor="middle" class="title">Lifter.lift</text>
+            <text x="840" y="220" text-anchor="middle" class="small mono">
+              lift(graph, abi, ctx)
+            </text>
+
+            <path class="edge accent" d="M750,210 L702,210" marker-end="url(#arrow-accent)" />
+            <text x="726" y="202" text-anchor="middle" class="edge-label">lift()</text>
+
+            <rect class="box ok" x="490" y="180" width="210" height="60" rx="8" />
+            <text x="595" y="202" text-anchor="middle" class="title">RegisterIR</text>
+            <text x="595" y="220" text-anchor="middle" class="small mono">form: 'register'</text>
+
+            <path class="edge" d="M490,210 L442,210" marker-end="url(#arrow)" />
+            <text x="466" y="202" text-anchor="middle" class="edge-label">verified</text>
+
+            <rect class="box" x="250" y="180" width="190" height="60" rx="8" />
+            <text x="345" y="202" text-anchor="middle" class="title">assertValidIR</text>
+            <text x="345" y="220" text-anchor="middle" class="small">verifyIR + dominance</text>
+
+            <path class="edge" d="M250,210 L202,210" marker-end="url(#arrow)" />
+            <text x="226" y="202" text-anchor="middle" class="edge-label">RegisterIR</text>
+
+            <rect class="box accent" x="10" y="180" width="190" height="60" rx="8" />
+            <text x="105" y="202" text-anchor="middle" class="title">constructSSA</text>
+            <text x="105" y="220" text-anchor="middle" class="small">→ SSAForm (page 05)</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 1.</strong> Decoding is requested by discovery; lifting consumes the
+            already-built graph, so a lifter reuses discovery's block boundaries and only adds
+            synthetic guard or exit blocks. <code>IRBuilder.finish</code> calls
+            <code>assertValidIR</code>; SSA construction is a separate pass, which is why a
+            <code>Lifter</code> is typed against <code>RegisterIR</code>, not
+            <code>FunctionIR</code>.
+          </figcaption>
+        </figure>
+
+        <p>
+          The boundary is enforced by the contracts themselves. <code>Decoder.decode</code> returns
+          instructions and gaps; it cannot create IR. <code>Lifter.lift</code> accepts a
+          <code>FunctionGraph</code> and returns <code>{ ir, coverage, diagnostics }</code>; it maps
+          each discovered block to one IR block and may add synthetic guard or exit blocks, but it
+          cannot rename, merge or re-split a discovered boundary. Every identity is
+          content-addressed: <code>entityIdentity(slice, kind, birth)</code> hashes the slice, a
+          kind tag and a stable birth key, so re-running the same pass on the same inputs mints the
+          same IDs.
+        </p>
+        <p class="sources">
+          Contracts in
+          <a class="src" href="../../src/core/contracts.ts">src/core/contracts.ts</a>
+          (<code>DecodeRequest</code>, <code>Decoder</code>, <code>Lifter</code>,
+          <code>FunctionGraph</code>); identity in
+          <a class="src" href="../../src/core/identity.ts">src/core/identity.ts</a>
+          (<code>entityIdentity</code>, <code>fingerprint</code>); call sites in
+          <a class="src" href="../../src/analysis/discovery/index.ts"
+            >src/analysis/discovery/index.ts</a
+          >
+          and
+          <a class="src" href="../../src/service/analysis/index.ts">src/service/analysis/index.ts</a
+          >.
+        </p>
+      </section>
+
+      <section id="decoder-contract">
+        <h2>The decoder contract</h2>
+        <p>
+          A decoder is an architectural fact producer. It reports what the bytes mean for a chosen
+          feature set and where control goes; it does not build IR, infer types, or name variables.
+          The whole contract is six declarations:
+        </p>
+        <pre><code>export interface DecodeRequest {
+  readonly image: LoadedImage;
+  readonly regions: readonly AddressRange[];
+  readonly features: readonly string[];
+  readonly mode: 'a64' | 'long64';
+}
+export interface DecodeResult {
+  readonly instructions: readonly DecodedInstruction[];
+  readonly gaps: readonly DecodeGap[];
+  readonly coverage: z.infer&lt;typeof coverageSchema&gt;;
+  readonly diagnostics: readonly Diagnostic[];
+}
+export interface Decoder extends ComponentIdentity {
+  readonly architecture: Target['architecture'];
+  decode(request: DecodeRequest, context: OperationContext): DecodeResult;
+  format?(instruction: DecodedInstruction): { readonly mnemonic: string; readonly operands: string };
+  dispose(): void;
+}</code></pre>
+        <p class="sources">
+          Defined in
+          <a class="src" href="../../src/core/contracts.ts">src/core/contracts.ts</a>
+          (<code>DecodeRequest</code>, <code>DecodeResult</code>, <code>Decoder</code>).
+        </p>
+
+        <h3><code>DecodedInstruction</code></h3>
+        <pre><code>export interface DecodedInstruction {
+  readonly id: string;
+  readonly address: Address;
+  readonly bytes: AddressRange;
+  readonly size: number;
+  readonly validity: 'valid' | 'invalid' | 'undefined' | 'reserved' | 'feature_disabled';
+  readonly payload: Arm64Payload | X86Payload | null;
+  readonly flow: DecodedFlow;
+  readonly diagnostics: readonly Diagnostic[];
+  readonly evidence_ids: readonly string[];
+}
+export interface DecodeGap {
+  readonly range: AddressRange;
+  readonly reason: 'truncated' | 'unmapped' | 'data' | 'budget';
+  readonly diagnostics: readonly Diagnostic[];
+}</code></pre>
+        <p>
+          Three invariants are enforced by the Zod schema itself, not by convention: a
+          <code>valid</code> instruction must carry a structured payload; an ARM64 instruction is
+          exactly four bytes; and the <code>bytes</code> reference must have the same size as
+          <code>size</code>. The payload is a discriminated union on <code>architecture</code>, so a
+          consumer cannot accidentally read ARM fields from an x86 instruction. The
+          <code>validity</code> enum reserves <code>reserved</code>, which the current two adapters
+          do not emit (upstream folds those words into <code>undefined</code>).
+        </p>
+        <p>
+          <code>bytes</code> is the byte reference used for display and provenance. It is normally
+          in the <code>file</code> space, but for an instruction whose bytes cross two adjacent
+          virtual mappings with non-contiguous backing, both adapters fall back to a VA reference
+          rather than inventing contiguous file bytes. Provenance later copies this range verbatim,
+          so the original container offsets survive into the IR.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/core/decoder.ts">src/core/decoder.ts</a>
+          (<code>instructionSchema</code>, <code>DecodedInstruction</code>, <code>DecodeGap</code>).
+        </p>
+
+        <h3><code>DecodedFlow</code></h3>
+        <p>
+          Flow is a small sum type with two cross-field rules: only a conditional transfer may have
+          a fallthrough (so <code>conditional === (fallthrough !== null)</code>), and an indirect
+          call must have a <code>null</code> target while a direct call must have a decoded target.
+          The kinds are:
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Kind</th>
+              <th>Fields</th>
+              <th>Meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>fallthrough</code></td>
+              <td><code>next</code></td>
+              <td>Ordinary next instruction.</td>
+            </tr>
+            <tr>
+              <td><code>branch</code></td>
+              <td><code>target</code>, <code>conditional</code>, <code>fallthrough</code></td>
+              <td>Direct intraprocedural transfer.</td>
+            </tr>
+            <tr>
+              <td><code>call</code></td>
+              <td><code>target | null</code>, <code>fallthrough</code>, <code>indirect</code></td>
+              <td>Call is a reference edge; execution resumes at <code>fallthrough</code>.</td>
+            </tr>
+            <tr>
+              <td><code>indirect_branch</code></td>
+              <td><code>conditional</code>, <code>fallthrough</code></td>
+              <td>Target unknown to the decoder; discovery may prove a jump table separately.</td>
+            </tr>
+            <tr>
+              <td><code>return</code></td>
+              <td>—</td>
+              <td>Architectural return.</td>
+            </tr>
+            <tr>
+              <td><code>trap</code></td>
+              <td><code>reason</code>, <code>conditional</code>, <code>fallthrough</code></td>
+              <td>
+                Deliberate trap (e.g. <code>BRK</code>/<code>UDF</code>/<code>HLT</code> on ARM64,
+                <code>ud2</code>/<code>int3</code>/<code>int</code> on x86-64).
+              </td>
+            </tr>
+            <tr>
+              <td><code>unknown</code></td>
+              <td><code>reason</code>, <code>may_fallthrough</code></td>
+              <td>Semantics not established; no invented edges.</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          A trap is a fact about the instruction, not a catch-all. Invalid encodings, feature-gated
+          instructions and exception-generating system calls become <code>unknown</code> with an
+          explanation; this prevents a decoder bug or a missing CPU feature from masquerading as
+          proven unreachable code.
+        </p>
+
+        <h3>Register descriptors</h3>
+        <p>
+          Register identity is ISA-qualified and independent of any decoder library's enum. A
+          descriptor is a <em>slice</em> of a physical root:
+        </p>
+        <pre><code>{
+  id: string;                 // e.g. "x86_64:ah" or "arm64:w0"
+  root: string;               // e.g. "x86_64:rax" or "arm64:x0"
+  bank: 'integer' | 'float' | 'vector' | 'flags' | 'segment' | 'control';
+  offset_bits: number;        // bit offset inside the root
+  width_bits: number;
+  root_width_bits: number;
+  role: 'general' | 'stack_pointer' | 'program_counter' | 'zero' | 'flags';
+  write_rule: 'preserve_other_bits' | 'zero_extend_root' | 'replace_root' | 'discard';
+}</code></pre>
+        <p>
+          The schema rejects a slice that exceeds its root and a zero register whose writes are not
+          discarded. The verifier adds two more rules: <code>replace_root</code> must cover the
+          whole root (offset 0, equal width), and <code>zero_extend_root</code> must start at bit
+          zero. These rules make a partial write's effect on the root unambiguous for SSA.
+        </p>
+        <p>
+          Register <em>access</em> metadata (<code>read</code>, <code>write</code>,
+          <code>read_write</code>, <code>conditional_read</code>, <code>conditional_write</code>,
+          <code>read_conditional_write</code>, <code>none</code>, <code>unknown</code>) is
+          dependency information used by discovery and diagnostics. Lifters deliberately do not use
+          it to decide semantics: an instruction's architectural behaviour is written down
+          explicitly in the lifter.
+        </p>
+
+        <h3>Payloads</h3>
+        <table>
+          <thead>
+            <tr>
+              <th><code>Arm64Payload</code></th>
+              <th><code>X86Payload</code></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>encoding</code>, <code>canonical_encoding</code>, <code>alias</code></td>
+              <td><code>encoding</code> (iced <code>Code</code> name), <code>mnemonic</code></td>
+            </tr>
+            <tr>
+              <td><code>word</code>, <code>fields: Record&lt;string, bigint&gt;</code></td>
+              <td><code>operand_bits</code>, <code>address_bits</code>, <code>prefixes</code></td>
+            </tr>
+            <tr>
+              <td><code>operands</code> (≤32 structured operands)</td>
+              <td>
+                <code>operands</code> (≤16), <code>registers</code> (≤256),
+                <code>memory</code> (≤64)
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>availability</code>, <code>required_features</code>, <code>behavior</code>
+              </td>
+              <td>
+                <code>flags</code>, <code>fpu_flags</code>, <code>required_features</code>,
+                <code>privileged</code>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          ARM operands are a discriminated union of <code>register</code>, <code>immediate</code>,
+          <code>relative</code>, <code>memory</code>, <code>condition</code>, <code>system</code>,
+          <code>modifier</code>, <code>floating_immediate</code>, <code>opaque</code>, and the
+          scalable/SME forms. An <code>opaque</code> operand preserves upstream text for
+          presentation only; the lifter refuses to read it. x86 memory operands carry segment, base,
+          index, scale, displacement, address width, access width, RIP-relative target, broadcast
+          and access mode; immediates carry both encoded and effective widths plus a
+          <code>sign_extended</code> flag.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/core/decoder.ts">src/core/decoder.ts</a>
+          (<code>armPayloadSchema</code>, <code>x86PayloadSchema</code>,
+          <code>armOperandSchema</code>, <code>x86OperandSchema</code>, <code>registerSchema</code>,
+          <code>flowSchema</code>).
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 470" role="img" aria-labelledby="fig-decoded-title">
+            <title id="fig-decoded-title">Object model of a decoded instruction</title>
+            <rect class="box" x="20" y="30" width="210" height="66" rx="8" />
+            <text x="125" y="52" text-anchor="middle" class="title">AddressRange</text>
+            <text x="125" y="70" text-anchor="middle" class="small mono">start: Address</text>
+            <text x="125" y="87" text-anchor="middle" class="small mono">size: bigint</text>
+
+            <rect class="box accent" x="310" y="20" width="300" height="130" rx="8" />
+            <text x="460" y="44" text-anchor="middle" class="title">DecodedInstruction</text>
+            <text x="460" y="64" text-anchor="middle" class="small mono">id · address · bytes</text>
+            <text x="460" y="81" text-anchor="middle" class="small mono">size · validity</text>
+            <text x="460" y="98" text-anchor="middle" class="small mono">flow · payload</text>
+            <text x="460" y="115" text-anchor="middle" class="small mono">diagnostics</text>
+            <text x="460" y="132" text-anchor="middle" class="small mono">evidence_ids</text>
+
+            <rect class="box" x="680" y="20" width="240" height="160" rx="8" />
+            <text x="800" y="44" text-anchor="middle" class="title">DecodedFlow</text>
+            <text x="800" y="64" text-anchor="middle" class="small mono">fallthrough</text>
+            <text x="800" y="81" text-anchor="middle" class="small mono">branch</text>
+            <text x="800" y="98" text-anchor="middle" class="small mono">call</text>
+            <text x="800" y="115" text-anchor="middle" class="small mono">indirect_branch</text>
+            <text x="800" y="132" text-anchor="middle" class="small mono">return</text>
+            <text x="800" y="149" text-anchor="middle" class="small mono">trap</text>
+            <text x="800" y="166" text-anchor="middle" class="small mono">unknown</text>
+
+            <rect class="box" x="20" y="140" width="210" height="150" rx="8" />
+            <text x="125" y="162" text-anchor="middle" class="title">RegisterDescriptor</text>
+            <text x="125" y="182" text-anchor="middle" class="small mono">id · root</text>
+            <text x="125" y="199" text-anchor="middle" class="small mono">bank · role</text>
+            <text x="125" y="216" text-anchor="middle" class="small mono">offset_bits</text>
+            <text x="125" y="233" text-anchor="middle" class="small mono">width_bits</text>
+            <text x="125" y="250" text-anchor="middle" class="small mono">root_width_bits</text>
+            <text x="125" y="267" text-anchor="middle" class="small mono">write_rule</text>
+
+            <rect class="box" x="310" y="200" width="300" height="120" rx="8" />
+            <text x="460" y="222" text-anchor="middle" class="title">Arm64Payload</text>
+            <text x="460" y="242" text-anchor="middle" class="small mono">
+              encoding · canonical_encoding
+            </text>
+            <text x="460" y="259" text-anchor="middle" class="small mono">
+              alias · word · fields
+            </text>
+            <text x="460" y="276" text-anchor="middle" class="small mono">
+              operands · availability
+            </text>
+            <text x="460" y="293" text-anchor="middle" class="small mono">
+              required_features · behavior
+            </text>
+
+            <rect class="box" x="310" y="340" width="300" height="100" rx="8" />
+            <text x="460" y="362" text-anchor="middle" class="title">X86Payload</text>
+            <text x="460" y="382" text-anchor="middle" class="small mono">
+              encoding · mnemonic · prefixes
+            </text>
+            <text x="460" y="399" text-anchor="middle" class="small mono">
+              operands · registers
+            </text>
+            <text x="460" y="416" text-anchor="middle" class="small mono">
+              memory · flags · features
+            </text>
+
+            <rect class="box" x="680" y="210" width="240" height="90" rx="8" />
+            <text x="800" y="232" text-anchor="middle" class="title">DecodeGap</text>
+            <text x="800" y="252" text-anchor="middle" class="small mono">range: AddressRange</text>
+            <text x="800" y="269" text-anchor="middle" class="small mono">
+              reason: truncated | unmapped
+            </text>
+            <text x="800" y="286" text-anchor="middle" class="small mono">data | budget</text>
+
+            <rect class="box" x="680" y="330" width="240" height="100" rx="8" />
+            <text x="800" y="352" text-anchor="middle" class="title">Diagnostic</text>
+            <text x="800" y="372" text-anchor="middle" class="small mono">code · severity</text>
+            <text x="800" y="389" text-anchor="middle" class="small mono">message · address</text>
+            <text x="800" y="406" text-anchor="middle" class="small mono">evidence_ids</text>
+
+            <path class="edge" d="M308,50 L232,50" marker-end="url(#arrow)" />
+            <text x="270" y="42" text-anchor="middle" class="edge-label">bytes</text>
+            <path class="edge" d="M612,50 L678,50" marker-end="url(#arrow)" />
+            <text x="645" y="42" text-anchor="middle" class="edge-label">flow</text>
+            <path class="edge" d="M460,152 L460,198" marker-end="url(#arrow)" />
+            <text x="468" y="178" class="edge-label">payload: one architecture</text>
+            <path class="edge dashed" d="M308,240 L232,240" marker-end="url(#arrow)" />
+            <text x="270" y="232" text-anchor="middle" class="edge-label">operands</text>
+            <path class="edge dashed" d="M800,302 L800,328" marker-end="url(#arrow)" />
+            <text x="808" y="318" class="edge-label">reported per gap</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 2.</strong> A decoded instruction is a fact bundle: the machine bytes it
+            consumed, a validity, a structured architecture payload, control-flow facts and
+            diagnostics. Gaps carry no instruction and are a separate list, so “no bytes decoded” is
+            never confused with “decoded to unknown”.
+          </figcaption>
+        </figure>
+
+        <div class="callout invariant">
+          <span class="title">Invariant</span>
+          <p>
+            <code>valid</code> implies a non-null architecture payload, and ARM64 implies
+            <code>size === 4</code>. The schema rejects violations before a lifter or discovery pass
+            can observe them.
+          </p>
+        </div>
+        <div class="callout caveat">
+          <span class="title">Presentation is not semantics</span>
+          <p>
+            <code>format?()</code> exists for diagnostics and UI. The ARM adapter can format a word
+            by re-decoding it; the x86 adapter can format only instructions decoded by the same
+            formatting-enabled instance. No lifter calls it, and no lifter parses operand text.
+          </p>
+        </div>
+      </section>
+
+      <section id="decoders">
+        <h2>Wrapping a64js and iced-x86</h2>
+        <p>
+          Both adapters follow the same shape: normalize the requested regions to virtual addresses,
+          partition them at data and mapping boundaries, walk only backed bytes, convert each native
+          instruction into the neutral payload, and report every byte they did not decode as a typed
+          gap. The differences are in the native library and in what “one decode step” means.
+        </p>
+
+        <h3><code>Arm64Decoder</code></h3>
+        <p>
+          The ARM adapter is pinned to the vendored <code>a64js</code> snapshot and reports its
+          version as the upstream commit plus an adapter suffix. It creates a decoder with
+          <code>createDecoder({ features })</code>, then walks each mapped span four bytes at a
+          time:
+        </p>
+        <ol class="steps">
+          <li>
+            <strong>Normalize regions.</strong> Requests in file space are mapped through
+            <code>image.mappings</code> into VA ranges; holes and merged ranges become
+            <code>unmapped</code> gaps. RVA requests add <code>image_base</code>. Decoding regions
+            must belong to the image.
+          </li>
+          <li>
+            <strong>Prepare data boundaries once.</strong> Data hints are normalized once per
+            <code>LoadedImage</code> object and cached in a <code>WeakMap</code>; the cache is keyed
+            by the snapshot object, because another snapshot of the same bytes can have different
+            data boundaries. Failed preparation never publishes a partial entry.
+          </li>
+          <li>
+            <strong>Segment.</strong> Each mapped span is split at data-hint ends and at non-mapped
+            span kinds. Data and unmapped segments become gaps of reason <code>data</code> or
+            <code>unmapped</code>.
+          </li>
+          <li>
+            <strong>Decode words.</strong> Alignment fragments become <code>truncated</code> gaps.
+            Each four-byte word is decoded from the file bytes; when a word crosses adjacent
+            mappings with non-contiguous backing, the adapter gathers the four bytes across parts
+            and emits a VA byte reference. The instruction budget is checked before every word.
+          </li>
+          <li>
+            <strong>Convert and classify.</strong> Native encodings, fields and operands become the
+            neutral payload; the native status and availability become <code>validity</code>; flow
+            is derived from mnemonics and structured relative operands.
+          </li>
+        </ol>
+        <p>
+          Two adapter-specific completions sit outside the generated tables.
+          <code>completeLogical</code> recognises missing logical shifted-register words
+          (<code>AND</code>/<code>ORR</code>/<code>EOR</code>/<code>ANDS</code> and their
+          <code>BIC</code>/<code>ORN</code>/<code>EON</code>/<code>BICS</code> inverses) from their
+          fields, including the 32-bit shift-limit failure. <code>structuredOperands</code> replaces
+          text-only representations of common families (memory addressing, SP/WSP versus XZR/WZR,
+          vector arrangements) with structured operands derived from fields. An operand the adapter
+          cannot structure is preserved as <code>opaque</code>, with an
+          <code>unavailable_semantics</code> diagnostic and the coverage reason
+          <code>opaque_operands</code>.
+        </p>
+        <p>
+          The native ARM result carries an availability and a status. Availability
+          <code>unavailable</code> becomes <code>feature_disabled</code>; otherwise native status
+          <code>undefined</code> becomes <code>undefined</code>, native <code>unknown</code> becomes
+          <code>invalid</code>, and the rest is <code>valid</code>. Required features are the union
+          of the encoding's features, its feature guards and the feature checks inside its encoding
+          guards. When an instruction is feature-disabled but its encoding is known, the adapter
+          re-decodes the same word with those features enabled <em>only to extract operands</em>;
+          the original availability, diagnostics and behaviour remain authoritative. This is why a
+          disabled instruction can still show useful operands without pretending it is executable.
+        </p>
+
+        <h3><code>X86Decoder</code></h3>
+        <p>
+          The x86 adapter wraps iced-x86 in long mode. It creates one iced <code>Decoder</code> per
+          bounded window, with <code>WINDOW = 64 * 1024</code> bytes plus up to 14 bytes of
+          lookahead so an instruction beginning at the end of a window can finish. Metadata comes
+          from <code>InstructionInfoFactory</code> (used registers and memory, operand access) and
+          <code>getConstantOffsets</code> (encoded immediate widths); both are freed in
+          <code>finally</code> blocks.
+        </p>
+        <ol class="steps">
+          <li>
+            <strong>Normalize and partition.</strong> File regions are translated through the
+            <code>AddressMap</code>; a file region with no static VA becomes an
+            <code>unmapped</code> hole with a diagnostic. Data hints are preprocessed into ordered,
+            disjoint intervals with a sweep line, and a binary search skips unrelated data while
+            partitioning.
+          </li>
+          <li>
+            <strong>Gather contiguous backing.</strong> Decode runs consist of adjacent non-gap
+            parts. <code>windowBytes</code> copies at most <code>WINDOW + 14</code> bytes, gathering
+            across adjacent mappings even when their file backing is disjoint.
+          </li>
+          <li>
+            <strong>Decode.</strong> <code>decoder.ip</code> is set to the VA, and each
+            <code>decodeOut</code> advances the cursor. <code>NoMoreBytes</code> at a backed-region
+            boundary is a <code>truncated</code> gap; an invalid encoding produces an invalid
+            instruction with a null payload, an <code>unknown</code> flow with
+            <code>may_fallthrough: false</code>, and an <code>invalid_input</code> diagnostic.
+          </li>
+          <li>
+            <strong>Convert.</strong> <code>payload()</code> synthesizes the neutral payload:
+            registers as architectural slices with root and write rule, memory as
+            segment/base/index/scale/displacement plus resolved RIP target, flags as bit masks in
+            RFLAGS positions, x87 status bits in a separate namespace, and prefixes including
+            REX/VEX/EVEX/XOP/MVEX kind, mask, zeroing and rounding.
+          </li>
+          <li>
+            <strong>Classify flow.</strong> iced's <code>FlowControl</code> maps almost one-to-one
+            to <code>DecodedFlow</code>; segmented far transfers become <code>unknown</code>, and
+            <code>XbeginXabortXend</code> becomes a conditional branch when a near target exists.
+          </li>
+        </ol>
+        <p>
+          Feature validity is explicit: <code>required_features</code> is the list of iced
+          <code>CpuidFeature</code> names. If the request supplies a non-empty feature list and any
+          required feature is absent, the instruction is still fully decoded and a payload is kept,
+          but its <code>validity</code> becomes <code>feature_disabled</code> with an
+          <code>unsupported_target</code> diagnostic. <code>privileged</code> is recorded
+          separately; the lifter refuses privileged instructions rather than silently modelling
+          them.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/decoders/arm64/index.ts">src/decoders/arm64/index.ts</a>
+          (<code>Arm64Decoder.decode</code>, <code>featureNames</code>,
+          <code>enableExpressions</code>),
+          <a class="src" href="../../src/decoders/arm64/completion.ts"
+            >src/decoders/arm64/completion.ts</a
+          >
+          (<code>completeLogical</code>),
+          <a class="src" href="../../src/decoders/arm64/operands.ts"
+            >src/decoders/arm64/operands.ts</a
+          >
+          (<code>structuredOperands</code>, <code>gpRegister</code>, <code>relativeAddress</code>),
+          <a class="src" href="../../src/decoders/arm64/flow.ts">src/decoders/arm64/flow.ts</a>
+          (<code>instructionFlow</code>), and
+          <a class="src" href="../../src/decoders/x86_64/index.ts">src/decoders/x86_64/index.ts</a>
+          (<code>X86Decoder.decode</code>, <code>windowBytes</code>),
+          <a class="src" href="../../src/decoders/x86_64/metadata.ts"
+            >src/decoders/x86_64/metadata.ts</a
+          >
+          (<code>payload</code>, <code>flow</code>, <code>register</code>).
+        </p>
+
+        <h3>Aliases</h3>
+        <p>
+          ARM keeps the distinction between the matched encoding and its canonical form.
+          <code>encoding</code> is the upstream encoding ID, <code>canonical_encoding</code> is the
+          canonical ID, and when those differ the adapter stores
+          <code>alias: encoding.instructionId</code>. Lifting keys on
+          <code>canonical_encoding.split('_')[0]</code>, so an alias is lifted as its canonical
+          operation (for example a <code>MOV</code> that is really an <code>ORR</code> with
+          <code>Rn == Rm</code>), while the payload retains the alias name for presentation. x86 has
+          no separate alias field: iced resolves the encoding and reports <code>Code</code> plus a
+          lowercase <code>Mnemonic</code>, and the lifter switches on that mnemonic.
+        </p>
+
+        <div class="callout invariant">
+          <span class="title">Invariant</span>
+          <p>
+            No assembly text participates in semantics. The ARM adapter derives operands and fields
+            from the canonical word; the x86 adapter derives them from iced's structured operand
+            model. <code>opaque</code> text is preserved but never parsed; format strings are only
+            used by <code>format?()</code>.
+          </p>
+        </div>
+        <div class="callout refusal">
+          <span class="title">Refusal</span>
+          <p>
+            Both decoders throw <code>TypeError</code>/<code>RangeError</code> when asked to decode
+            a mismatched architecture or mode, when a region belongs to another image, or after
+            <code>dispose()</code>. Budget exhaustion does not throw: it truncates at the
+            instruction limit and reports a <code>budget</code> gap.
+          </p>
+        </div>
+      </section>
+
+      <section id="ir-model">
+        <h2>The IR type system and object model</h2>
+        <p>
+          The IR is a typed, immutable semantic graph. It is deliberately not an AST: operands
+          always refer to preceding local definitions by <code>Value</code>, never to nested
+          expression text. The type system is a machine type system, not a recovered source type
+          system.
+        </p>
+
+        <h3>Types</h3>
+        <pre><code>export interface IntegerType { readonly kind: 'integer'; readonly bits: number; }
+export interface FloatType   { readonly kind: 'float'; readonly bits: 32 | 64; }
+export interface VectorType  {
+  readonly kind: 'vector';
+  readonly element: IntegerType | FloatType;
+  readonly lanes: number;
+}
+export type DataType = IntegerType | FloatType | VectorType;
+export type IRType = DataType | { readonly kind: 'effect' };</code></pre>
+        <p>
+          Integers are signless bit vectors; signedness belongs to the operation, not the type.
+          <code>integer(bits)</code> accepts 1..2048, <code>floating(bits)</code> accepts only 32 or
+          64, and <code>vector(element, lanes)</code> accepts 1..256 lanes with a total width of at
+          most 2048 bits. <code>bitWidth</code> multiplies element width by lane count for vectors;
+          <code>sameType</code> compares kind, width and, for vectors, lanes recursively.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/ir/model.ts">src/ir/model.ts</a>
+          (<code>DataType</code>, <code>IRType</code>, <code>integer</code>, <code>floating</code>,
+          <code>vector</code>, <code>bitWidth</code>, <code>validType</code>,
+          <code>sameType</code>).
+        </p>
+
+        <h3>Values, effects and origins</h3>
+        <pre><code>export interface Value { readonly id: EntityId; readonly type: DataType; }
+export interface Effect { readonly id: EntityId; readonly type: { readonly kind: 'effect' }; }
+export interface Provenance {
+  readonly instruction_ids: readonly DecodedInstruction['id'][];
+  readonly ranges: readonly AddressRange[];
+  readonly evidence_ids: readonly Evidence['id'][];
+  /** A nonempty justification is required for nodes without machine instruction origins. */
+  readonly synthetic: readonly string[];
+}
+export interface Origin { readonly id: EntityId; readonly provenance: Provenance; }</code></pre>
+        <p>
+          <code>Provenance</code> is the audit trail. A node produced from an instruction carries
+          that instruction's ID, its byte range and its evidence IDs. A node invented by a pass (for
+          example a synthetic exit block, or a trusted-fixture program) must carry a non-empty
+          <code>synthetic</code> reason instead; the verifier rejects an origin with neither.
+          Merging provenance is an ordered union of all sources, so a rewrite keeps every
+          contributing instruction rather than only the last one.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/ir/provenance.ts">src/ir/provenance.ts</a>
+          (<code>instructionProvenance</code>, <code>syntheticProvenance</code>,
+          <code>mergeProvenanceSources</code>, <code>withOrigins</code>).
+        </p>
+
+        <h3>Expressions</h3>
+        <p>
+          Every expression is pure and has exactly one result type. The variants group as follows:
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Group</th>
+              <th>Kinds</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Leaves</td>
+              <td><code>constant</code>, <code>address</code>, <code>indeterminate</code></td>
+              <td>
+                Constants are canonical for their width; addresses are 64-bit memory coordinates;
+                indeterminate carries <code>undefined</code> or <code>unknown</code> plus a reason.
+              </td>
+            </tr>
+            <tr>
+              <td>Integer</td>
+              <td>
+                <code>integer</code> (<code
+                  >add sub mul udiv sdiv urem srem and or xor shl lshr ashr rol ror</code
+                >), <code>integer_unary</code> (<code>not neg clz ctz popcount</code>)
+              </td>
+              <td>
+                Result type equals the left operand; shifts/rotates may take a different right
+                width.
+              </td>
+            </tr>
+            <tr>
+              <td>Comparison</td>
+              <td><code>compare</code> (<code>eq ne ult ule ugt uge slt sle sgt sge</code>)</td>
+              <td>Always <code>i1</code>; operands have identical types.</td>
+            </tr>
+            <tr>
+              <td>Bits</td>
+              <td>
+                <code>cast</code>, <code>extract</code>, <code>insert</code>, <code>concat</code>
+              </td>
+              <td>Explicit truncate/extend/bitcast, bit slices, low-bits-first concatenation.</td>
+            </tr>
+            <tr>
+              <td>Selection</td>
+              <td><code>select</code></td>
+              <td>Condition is <code>i1</code>; both arms have the result type.</td>
+            </tr>
+            <tr>
+              <td>Flags</td>
+              <td><code>flag</code></td>
+              <td>
+                <code>add</code> or <code>sub</code>, a named flag, left/right and an explicit
+                carry/borrow input; result <code>i1</code>.
+              </td>
+            </tr>
+            <tr>
+              <td>Floating</td>
+              <td><code>float</code>, <code>float_unary</code>, <code>float_compare</code></td>
+              <td>
+                FP32/64 only; comparisons return <code>i1</code> and include ordered/unordered.
+              </td>
+            </tr>
+            <tr>
+              <td>Vector</td>
+              <td>
+                <code>vector</code>, <code>vector_lane</code>, <code>vector_insert</code>,
+                <code>vector_integer</code>, <code>vector_float</code>
+              </td>
+              <td>Fixed typed lanes, lane 0 in the least-significant bits.</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          The meaning of a <code>flag</code> is fixed: for <code>add</code>, the carry input is a
+          carry-in; for <code>sub</code>, it is a borrow-in. The <code>carry</code> flag means “no
+          borrow” for subtraction, while <code>borrow</code> means “borrow”. Shift counts are not
+          implicitly masked; a lifter must encode its ISA's masking explicitly. Division by zero and
+          signed overflow produce <code>undefined</code> values rather than traps, because an ISA
+          lifter decides whether the architecture traps.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/ir/model.ts">src/ir/model.ts</a>
+          (<code>Expression</code>, <code>IntegerOp</code>, <code>IntegerPredicate</code>,
+          <code>CastOp</code>, <code>ArithmeticFlag</code>);
+          <a class="src" href="../../src/ir/index.ts">src/ir/index.ts</a> (module contract notes).
+        </p>
+
+        <h3>Instructions, effects and memory</h3>
+        <pre><code>export type Instruction =
+  | (Origin &amp; { readonly kind: 'assign'; readonly result: Value; readonly expression: Expression })
+  | (Origin &amp; EffectOrder &amp; { readonly kind: 'read_register'; readonly result: Value; readonly register: RegisterDescriptor })
+  | (Origin &amp; EffectOrder &amp; { readonly kind: 'write_register'; readonly register: RegisterDescriptor; readonly value: Value })
+  | (Origin &amp; EffectOrder &amp; RegisterInputs &amp; { readonly kind: 'load'; readonly result: Value; readonly address: Value; readonly access: MemoryAccess })
+  | (Origin &amp; EffectOrder &amp; RegisterInputs &amp; { readonly kind: 'store'; readonly address: Value; readonly value: Value; readonly access: MemoryAccess })
+  | (Origin &amp; EffectOrder &amp; { readonly kind: 'memory_fence'; readonly scope: 'inner_shareable'; readonly ordering: 'acquire_release'; readonly accesses: 'reads_writes' })
+  | (Origin &amp; EffectOrder &amp; RegisterBoundary &amp; { readonly kind: 'call'; readonly target: CallTarget; readonly arguments: readonly Value[]; readonly results: readonly Value[]; readonly clobbers: CallClobbers; readonly contract_evidence: readonly Evidence['id'][] })
+  | (Origin &amp; EffectOrder &amp; RegisterBoundary &amp; { readonly kind: 'unknown_effect'; readonly reason: string; readonly clobbers: CallClobbers });</code></pre>
+        <p>
+          Every state access — register read/write, load, store, fence, call, unknown effect —
+          carries
+          <code>EffectOrder { effect_in, effect_out }</code>. <code>assign</code> is the only pure
+          instruction and has no effect token. A block owns one linear effect chain: each state
+          access consumes the current token and produces the next; the terminator and every outgoing
+          edge carry the final token. This makes reordering across state accesses impossible without
+          a rewrite that explicitly rewires the chain, and it keeps calls and unknown effects from
+          being silently moved.
+        </p>
+        <p>
+          <code>MemoryAccess</code> is
+          <code>{ endian: 'little' | 'big'; alignment: number; volatile: boolean }</code>.
+          Endianness is explicit rather than assumed; alignment must be a power of two from 1 to
+          4096 (1 permits unaligned access); volatility is carried but does not by itself add
+          ordering. <code>CallTarget</code> is either a direct <code>Address</code> or an indirect
+          <code>Value</code>.
+        </p>
+        <p>
+          <code>RegisterInputs</code> and <code>RegisterBoundary</code> exist for SSA form. A
+          <code>call</code> or <code>unknown_effect</code> snapshots the register cells it reads
+          (<code>register_inputs</code>) and the ones it rebinds (<code>register_outputs</code>)
+          without confusing them with source-level arguments and results. Loads and stores use
+          <code>register_inputs</code> for the same reason: if the access faults, the state at that
+          point still describes the physical writes that preceded it. In register form these lists
+          are empty; the verifier rejects non-empty lists there.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/ir/model.ts">src/ir/model.ts</a>
+          (<code>Instruction</code>, <code>EffectOrder</code>, <code>MemoryAccess</code>,
+          <code>CallTarget</code>, <code>RegisterBinding</code>, <code>RegisterInputs</code>,
+          <code>RegisterBoundary</code>).
+        </p>
+
+        <h3>Terminators, edges and blocks</h3>
+        <pre><code>export interface Edge {
+  readonly target: EntityId;
+  readonly arguments: readonly Value[];
+  readonly effect: Effect;
+}
+export type Terminator = Origin &amp; { readonly effect: Effect } &amp; (
+  | { readonly kind: 'jump'; readonly edge: Edge }
+  | { readonly kind: 'branch'; readonly condition: Value; readonly when_true: Edge; readonly when_false: Edge }
+  | { readonly kind: 'switch'; readonly value: Value; readonly cases: readonly { readonly bits: bigint; readonly edge: Edge }[]; readonly otherwise: Edge; readonly jump_table?: JumpTableOrigin }
+  | { readonly kind: 'return'; readonly values: readonly Value[] }
+  | { readonly kind: 'indirect'; readonly target: Value; readonly reason: string; readonly tail_call?: true }
+  | { readonly kind: 'trap'; readonly reason: string }
+  | { readonly kind: 'unknown'; readonly reason: string }
+);
+export interface BasicBlock extends Origin {
+  readonly parameters: readonly Value[];
+  readonly effect_parameter: Effect;
+  readonly instructions: readonly Instruction[];
+  readonly terminator: Terminator;
+}</code></pre>
+        <p>
+          Edges pass all data arguments simultaneously plus the final effect token. This is the
+          mechanism for loop-carried values and for joins: there is no implicit phi and no
+          fall-through state. A block has data parameters and its own effect parameter;
+          register-form lifters normally create zero parameters, but they may when a value must
+          cross a synthetic boundary — the x86 divide guard does exactly that, passing the numerator
+          and divisor into its continue block. (The FP guard's continue block has no parameters.)
+          SSA construction later gives blocks parameters for architectural cells.
+        </p>
+        <p>
+          <code>JumpTableOrigin</code> is proof metadata attached to a <code>switch</code> lifted
+          from a discovery-proven table: <code>load_instruction</code> names the load whose bytes
+          are immutable table entries under the dominating guard, and the optional
+          <code>exact_guard_instruction</code> records that the guard's out-of-range edge is taken
+          exactly when the selector exceeds the largest case.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/ir/model.ts">src/ir/model.ts</a>
+          (<code>Edge</code>, <code>Terminator</code>, <code>BasicBlock</code>,
+          <code>JumpTableOrigin</code>).
+        </p>
+
+        <h3><code>RegisterIR</code> versus SSA form</h3>
+        <pre><code>export interface RegisterIR extends FunctionBody { readonly form: 'register'; }
+export interface SSAForm extends FunctionBody {
+  readonly form: 'ssa';
+  readonly register_states: readonly {
+    readonly block: EntityId;
+    readonly entry: readonly RegisterBinding[];
+    readonly exit: readonly RegisterBinding[];
+  }[];
+}
+export type FunctionIR = RegisterIR | SSAForm;</code></pre>
+        <p>
+          <code>RegisterIR</code> is the lifter's output: architectural register operations are
+          explicit, and the graph is stateful. <code>SSAForm</code> has no
+          <code>read_register</code>/<code>write_register</code> at all; architectural state is
+          represented by sparse <code>register_states</code> rows. At dominator-tree roots an entry
+          row binds every tracked cell to a distinct block parameter; elsewhere it lists only merged
+          or rebound cells. Exit rows bind every cell at function exits and only cells rebound in
+          other blocks. Unlisted cells inherit the immediate dominator's exit through
+          <code>registerStateAt</code>, so full per-block state is derived, never materialized. The
+          lifter is forbidden from doing any of this: construction is a separate pass
+          (<code>constructSSA</code>), linked on the next page.
+        </p>
+        <p>
+          <code>FunctionBody.returns</code> is the list of source-level return types, not
+          architectural return registers. Lifters pass an empty list: call/return ABI interpretation
+          belongs to later stages, and both worked examples below have
+          <code>ir.returns = []</code> while still reading <code>x0</code>/<code>d0</code> (ARM64)
+          or the return slot (x86-64) for their own reasons.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/ir/model.ts">src/ir/model.ts</a>
+          (<code>FunctionBody</code>, <code>RegisterIR</code>, <code>SSAForm</code>,
+          <code>SSAConstruction</code>);
+          <a class="src" href="../../src/analysis/ssa/index.ts">src/analysis/ssa/index.ts</a>
+          (<code>constructSSA</code>).
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 600" role="img" aria-labelledby="fig-ir-model-title">
+            <title id="fig-ir-model-title">Object model of the typed IR</title>
+            <rect class="box accent" x="330" y="20" width="280" height="80" rx="8" />
+            <text x="470" y="44" text-anchor="middle" class="title">FunctionIR</text>
+            <text x="470" y="64" text-anchor="middle" class="small mono">
+              entry · returns · blocks
+            </text>
+            <text x="470" y="81" text-anchor="middle" class="small mono">
+              form: 'register' | 'ssa'
+            </text>
+
+            <rect class="box" x="330" y="140" width="280" height="130" rx="8" />
+            <text x="470" y="164" text-anchor="middle" class="title">BasicBlock</text>
+            <text x="470" y="184" text-anchor="middle" class="small mono">parameters: Value[]</text>
+            <text x="470" y="201" text-anchor="middle" class="small mono">
+              effect_parameter: Effect
+            </text>
+            <text x="470" y="218" text-anchor="middle" class="small mono">
+              instructions: Instruction[]
+            </text>
+            <text x="470" y="235" text-anchor="middle" class="small mono">
+              terminator: Terminator
+            </text>
+            <text x="470" y="252" text-anchor="middle" class="small mono">id · provenance</text>
+
+            <rect class="box" x="670" y="140" width="250" height="100" rx="8" />
+            <text x="795" y="164" text-anchor="middle" class="title">Edge</text>
+            <text x="795" y="184" text-anchor="middle" class="small mono">target: EntityId</text>
+            <text x="795" y="201" text-anchor="middle" class="small mono">arguments: Value[]</text>
+            <text x="795" y="218" text-anchor="middle" class="small mono">effect: Effect</text>
+
+            <rect class="box" x="20" y="140" width="260" height="160" rx="8" />
+            <text x="150" y="164" text-anchor="middle" class="title">Expression</text>
+            <text x="150" y="184" text-anchor="middle" class="small mono">constant · address</text>
+            <text x="150" y="201" text-anchor="middle" class="small mono">
+              integer · compare · cast
+            </text>
+            <text x="150" y="218" text-anchor="middle" class="small mono">
+              extract · insert · concat
+            </text>
+            <text x="150" y="235" text-anchor="middle" class="small mono">select · flag</text>
+            <text x="150" y="252" text-anchor="middle" class="small mono">float · vector</text>
+            <text x="150" y="269" text-anchor="middle" class="small mono">indeterminate</text>
+
+            <rect class="box" x="330" y="320" width="280" height="160" rx="8" />
+            <text x="470" y="344" text-anchor="middle" class="title">Instruction</text>
+            <text x="470" y="364" text-anchor="middle" class="small mono">assign (pure)</text>
+            <text x="470" y="381" text-anchor="middle" class="small mono">
+              read_register · write_register
+            </text>
+            <text x="470" y="398" text-anchor="middle" class="small mono">
+              load · store · memory_fence
+            </text>
+            <text x="470" y="415" text-anchor="middle" class="small mono">
+              call · unknown_effect
+            </text>
+            <text x="470" y="432" text-anchor="middle" class="small mono">
+              Origin (+ EffectOrder)
+            </text>
+            <text x="470" y="449" text-anchor="middle" class="small mono">
+              register_inputs / outputs
+            </text>
+
+            <rect class="box" x="670" y="320" width="250" height="160" rx="8" />
+            <text x="795" y="344" text-anchor="middle" class="title">Terminator</text>
+            <text x="795" y="364" text-anchor="middle" class="small mono">jump · branch</text>
+            <text x="795" y="381" text-anchor="middle" class="small mono">
+              switch (jump_table?)
+            </text>
+            <text x="795" y="398" text-anchor="middle" class="small mono">return · indirect</text>
+            <text x="795" y="415" text-anchor="middle" class="small mono">trap · unknown</text>
+            <text x="795" y="432" text-anchor="middle" class="small mono">effect: Effect</text>
+
+            <rect class="box" x="20" y="350" width="260" height="110" rx="8" />
+            <text x="150" y="374" text-anchor="middle" class="title">Value | Effect</text>
+            <text x="150" y="394" text-anchor="middle" class="small mono">id · type</text>
+            <text x="150" y="411" text-anchor="middle" class="small mono">DataType: integer</text>
+            <text x="150" y="428" text-anchor="middle" class="small mono">float | vector</text>
+            <text x="150" y="445" text-anchor="middle" class="small mono">effect</text>
+
+            <rect class="box" x="330" y="510" width="280" height="70" rx="8" />
+            <text x="470" y="534" text-anchor="middle" class="title">Provenance</text>
+            <text x="470" y="554" text-anchor="middle" class="small mono">
+              instruction_ids · ranges
+            </text>
+            <text x="470" y="571" text-anchor="middle" class="small mono">
+              evidence_ids · synthetic
+            </text>
+
+            <path class="edge" d="M470,102 L470,138" marker-end="url(#arrow)" />
+            <text x="478" y="124" class="edge-label">blocks</text>
+            <path class="edge" d="M612,180 L668,180" marker-end="url(#arrow)" />
+            <text x="640" y="172" text-anchor="middle" class="edge-label">edges</text>
+            <path class="edge" d="M470,272 L470,318" marker-end="url(#arrow)" />
+            <text x="478" y="298" class="edge-label">instructions</text>
+            <path class="edge" d="M610,262 L700,262 L700,318" marker-end="url(#arrow)" />
+            <path class="edge" d="M328,360 L282,360" marker-end="url(#arrow)" />
+            <text x="305" y="352" text-anchor="middle" class="edge-label">expression</text>
+            <path class="edge" d="M328,410 L282,410" marker-end="url(#arrow)" />
+            <text x="305" y="402" text-anchor="middle" class="edge-label">operands</text>
+            <path class="edge" d="M795,318 L795,242" marker-end="url(#arrow)" />
+            <text x="803" y="284" class="edge-label">Edge</text>
+            <path class="edge dashed" d="M470,482 L470,508" marker-end="url(#arrow)" />
+            <text x="478" y="500" class="edge-label">Origin</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 3.</strong> The graph is a tree of ownership with explicit
+            cross-references: blocks own instruction and terminator lists; terminators own edges;
+            instructions and terminators own provenance. Values and effects are referenced by ID,
+            never embedded, which is what makes SSA rewriting and dominance checking possible
+            without cloning code.
+          </figcaption>
+        </figure>
+
+        <div class="callout invariant">
+          <span class="title">Invariant</span>
+          <p>
+            Operands refer to preceding local definitions only. A cross-block reference is legal
+            only when the definition's block strictly dominates the use; joins and loops merge
+            exclusively through simultaneous edge arguments. Effect tokens are block-local and never
+            cross an edge except as the edge's single final token.
+          </p>
+        </div>
+      </section>
+
+      <section id="builder">
+        <h2>Building IR: identity, effects and blocks</h2>
+        <p>
+          Lifters never construct raw objects. <code>IRBuilder</code> and <code>BlockBuilder</code>
+          enforce identity, type and effect discipline at the point of creation, and every builder
+          emits node IDs in a deterministic sequence.
+        </p>
+        <pre><code>#identity(kind: string): EntityId {
+  if (this.#terminator) throw new TypeError('Cannot append after a terminator');
+  return entityIdentity(this.slice_id, `ir.${kind}`, [this.id, this.#sequence++]);
+}
+#order(): { effect_in: Effect; effect_out: Effect } {
+  const effect_in = this.#effect;
+  const effect_out: Effect = { id: this.#identity('effect'), type: effectType };
+  this.#effect = effect_out;
+  return { effect_in, effect_out };
+}
+assign(type: DataType, expression: Expression): Value {
+  this.budget?.nodes();
+  const errors = expressionProblems(type, expression);
+  if (errors.length &gt; 0) throw new TypeError(errors.join('; '));
+  const result: Value = { id: this.#identity('value'), type };
+  this.#instructions.push({
+    kind: 'assign',
+    id: this.#identity('instruction'),
+    provenance: this.#source,
+    result,
+    expression,
+  });
+  return result;
+}</code></pre>
+        <p>
+          The sequence is per block and shared by values, instructions, effects and the terminator,
+          so IDs are stable across a rebuild. Blocks are different: their identity comes from a
+          caller-owned birth key. <code>block(birth, parameters)</code> hashes
+          <code>['ir.block', [function_id, birth]]</code>; a duplicate birth key throws. The lifters
+          use <code>['discovered', block.id]</code> for discovered blocks, so an IR block is
+          traceable to its CFG block; guard blocks use instruction-derived births (<code
+            >[instruction.id, reason, 'continue']</code
+          >).
+        </p>
+        <p>
+          <code>source(provenance)</code> changes the origin attached to subsequent nodes. Lifters
+          call it once per decoded instruction. <code>finish()</code> on the builder merges the
+          function provenance with every block's, freezes the block list, creates empty SSA state
+          rows only if the builder was created with form <code>'ssa'</code>, and calls
+          <code>assertValidIR</code>. A block that was never terminated throws
+          <code>TypeError('Block has no terminator')</code>.
+        </p>
+        <p>
+          The high-level helpers are thin and typed: <code>constant</code> masks its bits with
+          <code>BigInt.asUintN</code>; <code>int</code>/<code>unary</code>/<code>compare</code>/
+          <code>cast</code>/<code>extract</code>/<code>insert</code>/<code>concat</code>/
+          <code>select</code>/<code>flag</code>/<code>fp</code>/<code>vectorInt</code> all call
+          <code>assign</code> after checking the expression; <code>readRegister</code> defaults the
+          result type to <code>integer(register.width_bits)</code>; <code>load</code>/<code
+            >store</code
+          >
+          default to little-endian, alignment 1, non-volatile.
+          <code>edge(target, args)</code> captures the current effect token, so an edge
+          automatically carries the final effect of its block.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/ir/builder.ts">src/ir/builder.ts</a>
+          (<code>IRBuilder</code>, <code>BlockBuilder</code>, <code>#order</code>,
+          <code>assign</code>, <code>terminate</code>, <code>finish</code>).
+        </p>
+
+        <div class="callout invariant">
+          <span class="title">Enforced at construction</span>
+          <p>
+            <code>assign</code> rejects an ill-typed expression before allocating a value;
+            <code>#identity</code> refuses to append after a terminator; <code>finish</code> refuses
+            a block without a terminator; <code>IRBuilder.finish</code> refuses any graph that fails
+            <code>verifyIR</code>. Build-time checks are not a substitute for verification: they
+            only see the current node, while the verifier sees cross-block references and dominance.
+          </p>
+        </div>
+      </section>
+
+      <section id="lifting">
+        <h2>The lifting algorithm, per architecture</h2>
+        <p>
+          Both lifters share the same driver shape, because the hard part is the same: expand one
+          instruction, then decide how the graph continues.
+        </p>
+        <ol class="steps">
+          <li>
+            <strong>Preflight.</strong> Reject an ABI for the wrong architecture; charge
+            <code>context.checkpoint(0)</code>; reject graphs whose instruction count, block count
+            or minimum node requirement (<code>blocks.length * 3</code>) already exceed the budget.
+          </li>
+          <li>
+            <strong>Build the function provenance.</strong> Merge every decoded instruction's
+            provenance, or use a synthetic origin for an instruction-less function. This is the
+            function-level audit trail; block and node provenance adds to it.
+          </li>
+          <li>
+            <strong>Create one block per discovered block.</strong> Each block is born from
+            <code>['discovered', block.id]</code>, has no parameters, and gets provenance merged
+            from its instructions. Map both CFG block IDs and first-instruction addresses to IR
+            blocks.
+          </li>
+          <li>
+            <strong>Lift instructions in order.</strong> Set the source provenance, reject
+            invalid/unavailable payloads, optionally insert an FP-environment guard, then let the
+            architecture semantics append nodes. A jump-table selector is captured just before its
+            selecting load executes.
+          </li>
+          <li>
+            <strong>Dispatch control flow.</strong> Calls, returns, indirect branches, conditional
+            branches and traps have driver-level handling; otherwise the semantics method must
+            return <code>true</code>. Anything it declines becomes a boundary.
+          </li>
+          <li>
+            <strong>Terminate.</strong> If the block was not terminated by an instruction, use its
+            single non-call CFG successor as a jump, or a proven noreturn call as a trap, or an
+            <code>unknown</code> boundary. Missing entries and unresolved continuations get
+            synthetic blocks rather than invented edges.
+          </li>
+        </ol>
+
+        <h3>Register model</h3>
+        <p>
+          The IR has no special notion of sub-registers; it knows only roots, slices and write
+          rules. The lifter chooses the descriptors, and therefore encodes the ISA's aliasing rules.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th>ARM64</th>
+              <th>x86-64</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>General roots</td>
+              <td><code>arm64:x0</code>..<code>x30</code>, <code>arm64:sp</code></td>
+              <td>
+                <code>x86_64:rax</code>, <code>rbx</code>, <code>rcx</code>, <code>rdx</code>,
+                <code>rsi</code>, <code>rdi</code>, <code>rbp</code>, <code>rsp</code>,
+                <code>r8</code>..<code>r15</code>
+              </td>
+            </tr>
+            <tr>
+              <td>32-bit write</td>
+              <td><code>wN</code>: offset 0, width 32, <code>zero_extend_root</code></td>
+              <td>
+                <code>eN</code>/<code>rNd</code>: offset 0, width 32, <code>zero_extend_root</code>
+              </td>
+            </tr>
+            <tr>
+              <td>Narrow write</td>
+              <td>—</td>
+              <td>
+                <code>ax</code>/<code>al</code>/<code>ah</code>: <code>preserve_other_bits</code>;
+                <code>ah</code> has <code>offset_bits = 8</code>
+              </td>
+            </tr>
+            <tr>
+              <td>Zero register</td>
+              <td>
+                <code>xzr</code>/<code>wzr</code>: <code>role: 'zero'</code>,
+                <code>write_rule: 'discard'</code>
+              </td>
+              <td>—</td>
+            </tr>
+            <tr>
+              <td>Stack pointer</td>
+              <td><code>arm64:sp</code> / <code>wsp</code>, <code>role: 'stack_pointer'</code></td>
+              <td><code>x86_64:rsp</code>, <code>role: 'stack_pointer'</code></td>
+            </tr>
+            <tr>
+              <td>Flags</td>
+              <td>
+                <code>arm64:nzcv</code>: 32-bit flags root, <code>replace_root</code>; N/Z/C/V are
+                bits 31/30/29/28
+              </td>
+              <td>
+                six 1-bit slices of <code>x86_64:rflags</code> at offsets CF 0, PF 2, AF 4, ZF 6, SF
+                7, OF 11; <code>preserve_other_bits</code>
+              </td>
+            </tr>
+            <tr>
+              <td>FP/vector</td>
+              <td>
+                <code>arm64:v0</code>..<code>v31</code> (128-bit root); <code>sN</code> (32) and
+                <code>dN</code> (64) are <code>zero_extend_root</code> slices
+              </td>
+              <td>
+                <code>x86_64:xmmN</code> (128-bit root); <code>zmmN</code> (512) in the unknown
+                clobber set; legacy scalar writes use a preserving low slice
+              </td>
+            </tr>
+            <tr>
+              <td>Control/status</td>
+              <td><code>arm64:fpcr</code>, <code>arm64:fpsr</code></td>
+              <td>
+                <code>x86_64:mxcsr</code>, FS/GS base roots read as explicit control registers
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          ARM64 has no general-purpose PC operand: <code>ADR</code>/<code>ADRP</code> materialize
+          PC-relative addresses as <code>address</code> constants, and literal loads use the decoded
+          relative target. x86-64's <code>RIP</code> is a real decoder descriptor, but the lifter
+          prefers the decoder's resolved RIP-relative target, so the address is a constant rather
+          than an expression over a PC root.
+        </p>
+        <p>
+          ARM64 exposes <code>NZCV</code> as one 32-bit register, and the lifter packs four computed
+          <code>i1</code> flags into bits 31..28 with <code>insert</code>. x86 flags are six
+          separate 1-bit descriptors over a shared 64-bit root, each write preserving the other
+          bits; the decoder's <code>flags</code> payload (<code>read</code>, <code>written</code>,
+          <code>cleared</code>, <code>set</code>, <code>undefined</code>, <code>preserved</code>) is
+          dependency metadata, while the lifter writes each flag explicitly. x87 status bits
+          (<code>fpu_flags</code>) are a separate namespace, not RFLAGS bits.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 520" role="img" aria-labelledby="fig-registers-title">
+            <title id="fig-registers-title">
+              Register roots, slices and write rules in both lifters
+            </title>
+            <rect class="group" x="10" y="10" width="440" height="500" />
+            <text x="20" y="30" class="lane">ARM64 roots</text>
+
+            <rect class="box" x="40" y="50" width="170" height="50" rx="8" />
+            <text x="125" y="72" text-anchor="middle" class="title">x0 (64)</text>
+            <text x="125" y="90" text-anchor="middle" class="small mono">replace_root</text>
+            <rect class="box" x="40" y="130" width="170" height="50" rx="8" />
+            <text x="125" y="152" text-anchor="middle" class="title">w0 (32)</text>
+            <text x="125" y="170" text-anchor="middle" class="small mono">zero_extend_root</text>
+            <path class="edge" d="M125,128 L125,102" marker-end="url(#arrow)" />
+
+            <rect class="box" x="40" y="210" width="170" height="50" rx="8" />
+            <text x="125" y="232" text-anchor="middle" class="title">sp (64)</text>
+            <text x="125" y="250" text-anchor="middle" class="small mono">stack_pointer</text>
+            <rect class="box" x="40" y="290" width="170" height="50" rx="8" />
+            <text x="125" y="312" text-anchor="middle" class="title">wsp (32)</text>
+            <text x="125" y="330" text-anchor="middle" class="small mono">zero_extend_root</text>
+            <path class="edge" d="M125,288 L125,262" marker-end="url(#arrow)" />
+
+            <rect class="box" x="240" y="50" width="190" height="50" rx="8" />
+            <text x="335" y="72" text-anchor="middle" class="title">v0 (128)</text>
+            <text x="335" y="90" text-anchor="middle" class="small mono">vector root</text>
+            <rect class="box" x="240" y="130" width="190" height="50" rx="8" />
+            <text x="335" y="152" text-anchor="middle" class="title">d0 (64)</text>
+            <text x="335" y="170" text-anchor="middle" class="small mono">zero_extend_root</text>
+            <path class="edge" d="M335,128 L335,102" marker-end="url(#arrow)" />
+            <rect class="box" x="240" y="210" width="190" height="50" rx="8" />
+            <text x="335" y="232" text-anchor="middle" class="title">s0 (32)</text>
+            <text x="335" y="250" text-anchor="middle" class="small mono">zero_extend_root</text>
+            <path class="edge" d="M335,208 L335,182" marker-end="url(#arrow)" />
+
+            <rect class="box" x="240" y="300" width="190" height="60" rx="8" />
+            <text x="335" y="322" text-anchor="middle" class="title">nzcv (32)</text>
+            <text x="335" y="340" text-anchor="middle" class="small mono">
+              flags · replace_root
+            </text>
+
+            <rect class="group" x="470" y="10" width="460" height="500" />
+            <text x="480" y="30" class="lane">x86-64 roots</text>
+
+            <rect class="box" x="490" y="50" width="180" height="50" rx="8" />
+            <text x="580" y="72" text-anchor="middle" class="title">rax (64)</text>
+            <text x="580" y="90" text-anchor="middle" class="small mono">replace_root</text>
+            <rect class="box" x="490" y="130" width="180" height="50" rx="8" />
+            <text x="580" y="152" text-anchor="middle" class="title">eax (32)</text>
+            <text x="580" y="170" text-anchor="middle" class="small mono">zero_extend_root</text>
+            <path class="edge" d="M580,128 L580,102" marker-end="url(#arrow)" />
+            <rect class="box" x="490" y="210" width="180" height="50" rx="8" />
+            <text x="580" y="232" text-anchor="middle" class="title">ax (16)</text>
+            <text x="580" y="250" text-anchor="middle" class="small mono">preserve_other_bits</text>
+            <path class="edge" d="M580,208 L580,182" marker-end="url(#arrow)" />
+            <rect class="box" x="490" y="290" width="85" height="50" rx="8" />
+            <text x="532" y="312" text-anchor="middle" class="title">al (8)</text>
+            <text x="532" y="330" text-anchor="middle" class="small mono">offset 0</text>
+            <path class="edge" d="M532,288 L532,262" marker-end="url(#arrow)" />
+            <rect class="box" x="585" y="290" width="85" height="50" rx="8" />
+            <text x="627" y="312" text-anchor="middle" class="title">ah (8)</text>
+            <text x="627" y="330" text-anchor="middle" class="small mono">offset 8</text>
+            <path class="edge" d="M627,288 L627,262" marker-end="url(#arrow)" />
+
+            <rect class="box" x="700" y="50" width="210" height="50" rx="8" />
+            <text x="805" y="72" text-anchor="middle" class="title">rflags (64)</text>
+            <text x="805" y="90" text-anchor="middle" class="small mono">preserve_other_bits</text>
+            <rect class="box" x="700" y="120" width="210" height="36" rx="6" />
+            <text x="805" y="143" text-anchor="middle" class="small mono">cf [0:1]</text>
+            <rect class="box" x="700" y="164" width="210" height="36" rx="6" />
+            <text x="805" y="187" text-anchor="middle" class="small mono">pf [2:3]</text>
+            <rect class="box" x="700" y="208" width="210" height="36" rx="6" />
+            <text x="805" y="231" text-anchor="middle" class="small mono">af [4:5]</text>
+            <rect class="box" x="700" y="252" width="210" height="36" rx="6" />
+            <text x="805" y="275" text-anchor="middle" class="small mono">zf [6:7]</text>
+            <rect class="box" x="700" y="296" width="210" height="36" rx="6" />
+            <text x="805" y="319" text-anchor="middle" class="small mono">sf [7:8]</text>
+            <rect class="box" x="700" y="340" width="210" height="36" rx="6" />
+            <text x="805" y="363" text-anchor="middle" class="small mono">of [11:12]</text>
+
+            <rect class="box" x="490" y="420" width="420" height="60" rx="8" />
+            <text x="700" y="444" text-anchor="middle" class="title">xmm0 / zmm0</text>
+            <text x="700" y="462" text-anchor="middle" class="small mono">
+              128-bit root · legacy scalar writes keep upper bits
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 4.</strong> A register is always a slice of a named root with an explicit
+            write rule. That is how <code>w0</code> clearing the top of <code>x0</code> and
+            <code>ah</code> replacing only bits 8..15 are represented without special cases in SSA.
+            The six x86 flags are independent 1-bit slices of the RFLAGS root, not a packed
+            register.
+          </figcaption>
+        </figure>
+
+        <h3>Memory accesses</h3>
+        <p>
+          ARM ordinary loads and stores are recognised by mnemonic family (<code
+            >LDR/STR/LDUR/STUR/LDP/STP/LDNP/STNP/LDPSW</code
+          >
+          plus byte/half/signed suffixes, and <code>LDRAA/LDRAB</code>). The lifter finds the single
+          memory or relative operand and the register operands, rejects constrained-unpredictable
+          pair or writeback overlap, computes <code>base + displacement</code> plus an optional
+          extended/shifted index, and chooses the pre/post-index address. Literal loads use the
+          decoded relative target. Each element is a typed <code>load</code>/<code>store</code>;
+          signed loads are extended to the destination width; writeback is a normal register write.
+          The real loop example below contains <code>ldr w10, [x8], #4</code>: one load at
+          <code>x8</code>, then <code>x8 + 4</code> written back.
+        </p>
+        <p>
+          x86 addressing starts from the decoder's resolved RIP-relative target when present;
+          otherwise it builds <code>displacement + base + index * scale</code> at the operand's
+          address width and zero-extends to 64 bits. An FS or GS segment adds its base root, except
+          for <code>LEA</code>, which computes an address without accessing memory.
+          <code>read</code>/<code>write</code> attach <code>MemoryAccess</code>; alignment-sensitive
+          moves (<code>movaps</code>, <code>movapd</code>, <code>movdqa</code>) request alignment
+          16, unaligned variants request 1.
+        </p>
+
+        <h3>Calls and returns</h3>
+        <p>
+          ARM <code>BL</code>/<code>BLR</code> writes the fallthrough address to
+          <code>x30</code> and emits a <code>call</code> with no source arguments or results and
+          <code>abi.unknown_call_clobbers</code>. A direct call uses the decoded target; an indirect
+          call reads <code>Rn</code>. Calls continue in the same block at the fallthrough
+          instruction. <code>RET</code> with <code>Rn == 30</code> reads the ABI's return-register
+          capacity (the result registers for a pointer return and an FP64 return) and terminates
+          with <code>return</code> and no values; <code>RET</code> through another register becomes
+          <code>indirect</code> with reason <code>'Return through non-link register'</code>.
+        </p>
+        <p>
+          x86 <code>call</code> reads <code>rsp</code>, pushes the address of the next instruction
+          (decrement stack pointer, store), emits the <code>call</code>, then writes the original
+          <code>rsp</code> back: the callee's stack effects are summarized by the call node, not by
+          leaving a modelled push in the caller. <code>ret</code> reads <code>rsp</code>, loads the
+          return slot, adds 8 plus any immediate, and terminates with <code>return</code>. The
+          loaded target is deliberately unused: representing it as a guessed intra-function edge
+          would invent control flow. A discovered tail call emits <code>call</code> without the push
+          and then <code>return</code>; an ARM branch to an external tail-call exit reads the
+          clobbered registers and stack pointer so a bounded callee observer can see untouched
+          argument cells.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/lifters/arm64/index.ts">src/lifters/arm64/index.ts</a>
+          (<code>Arm64Lifter.lift</code>);
+          <a class="src" href="../../src/lifters/arm64/semantics.ts"
+            >src/lifters/arm64/semantics.ts</a
+          >
+          (<code>ArmSemantics.memory</code>, <code>gp</code>, <code>fpRegister</code>);
+          <a class="src" href="../../src/lifters/x86_64/index.ts">src/lifters/x86_64/index.ts</a>
+          (<code>X86Lifter.lift</code>);
+          <a class="src" href="../../src/lifters/x86_64/semantics.ts"
+            >src/lifters/x86_64/semantics.ts</a
+          >
+          (<code>X86Semantics.address</code>, <code>stackPush</code>, <code>call</code>).
+        </p>
+
+        <h3>Conditional branches</h3>
+        <p>
+          ARM conditional transfers compute an <code>i1</code> from explicit state.
+          <code>CBZ</code>/<code>CBNZ</code> compare <code>Rt</code> with zero;
+          <code>TBZ</code>/<code>TBNZ</code> extract a bit from <code>Rt</code>;
+          <code>B.cond</code> decodes NZCV. The condition decoder reads <code>nzcv</code>, extracts
+          N/Z/C/V, and selects a predicate from <code>cond &gt;&gt; 1</code>: Z, C, N, V for 0..3,
+          then <code>C &amp;&amp; !Z</code>, <code>N == V</code>,
+          <code>N == V &amp;&amp; !Z</code> for 4..6, with inverted forms for the odd codes and
+          constant true for code 7. <code>CSEL</code> uses the same predicate.
+        </p>
+        <p>
+          x86 conditional jumps map the mnemonic suffix to a predicate over the six flag slices
+          (<code>e/z</code> → ZF, <code>ne/nz</code> → !ZF, <code>b/c/nae</code> → CF,
+          <code>l/nge</code> → SF xor OF, and so on). <code>jrcxz</code>/<code>jecxz</code>/<code
+            >jcxz</code
+          >
+          compare RCX/ECX/CX with zero; <code>loop*</code> decrements the address-width RCX and ANDs
+          the loop condition with ZF/!ZF for <code>loope</code>/<code>loopne</code>. The driver
+          builds both edges explicitly; there is no implicit fall-through in IR.
+        </p>
+
+        <h3>Unsupported instructions and boundaries</h3>
+        <p>
+          Semantics methods signal “I do not model this” by throwing <code>Unsupported</code>. The
+          drivers turn that into an <code>unknown_effect</code> carrying
+          <code>unknownClobbers</code> — for ARM64 all general, vector and control registers plus
+          NZCV/FPSR and memory; for x86 all GPRs, 32 zmm roots, MXCSR, six flags and memory — plus
+          an <code>unavailable_semantics</code>
+          diagnostic at the instruction address and a coverage reason. Coverage becomes
+          <code>partial</code>; the graph is still valid. ARM then terminates the block with
+          <code>unknown</code> only when the instruction's decoded flow is not a fallthrough or
+          call; x86 terminates immediately. Nothing is silently dropped and nothing is turned into
+          an invented trap: an <code>unknown_effect</code> is a real node, not a no-op.
+        </p>
+
+        <h3>Provenance and jump tables</h3>
+        <p>
+          Every node produced for an instruction inherits that instruction's provenance, including
+          its byte range. Block and function provenance are the ordered union of their members. The
+          real dump below shows <code>prov_ranges = 588+4</code> on the nodes from
+          <code>0x100000588</code>, <code>58c+4</code> on those from <code>0x10000058c</code>, and
+          <code>590+4</code> on the return nodes.
+        </p>
+        <p>
+          When discovery proves a jump table, the driver records the selector just before the
+          selecting load, and at the indirect branch emits a <code>switch</code> with exactly the
+          proven targets, the guard's out-of-range target as <code>otherwise</code>, and a
+          <code>jump_table</code> origin. It requires the selector and branch to be in the same
+          block and every target to be a discovered block; otherwise the branch remains
+          <code>indirect</code>. The <code>otherwise</code> edge is kept even when the guard is
+          exact, because the IR should still be well-formed if the proof is later invalidated.
+        </p>
+
+        <div class="callout invariant">
+          <span class="title">Invariant</span>
+          <p>
+            A lifter never invents an architectural trap from missing semantics, and never drops an
+            instruction. Unsupported means <code>unknown_effect</code> + coverage reason; malformed
+            graph input means <code>unknown</code>/synthetic boundary; a proven trap is emitted only
+            for an instruction whose decoded flow is a trap.
+          </p>
+        </div>
+      </section>
+
+      <section id="worked-example">
+        <h2>Worked example: <code>fixture_maximum</code></h2>
+        <p>
+          The fixture source is
+          <code>API NOINLINE i32 fixture_maximum(i32 a, i32 b) { return a &gt; b ? a : b; }</code>
+          (<a class="src" href="../../fixtures/source/corpus.c">fixtures/source/corpus.c</a>). I
+          loaded <code>fixtures/bin/macho-arm64-symbols</code> and
+          <code>fixtures/bin/elf-x86_64-symbols</code>, ran <code>discoverFunctions</code>, selected
+          the function, and lifted it with <code>Arm64Lifter</code> +
+          <code>DarwinArm64Abi</code> and <code>X86Lifter</code> + <code>SysVAMD64Abi</code>.
+          Nothing was executed. The numbers and text below are the script's output.
+        </p>
+
+        <h3>ARM64: three instructions, thirty-one register instructions and a return</h3>
+        <table>
+          <thead>
+            <tr>
+              <th class="num">Address</th>
+              <th>Bytes</th>
+              <th>Text (presentation)</th>
+              <th>Canonical encoding</th>
+              <th>Flow</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="num"><code>0x100000588</code></td>
+              <td><code>file:0x588+4</code></td>
+              <td><code>subs wzr, w0, w1</code></td>
+              <td><code>SUBS_32_addsub_shift</code>, word <code>0x6b01001f</code></td>
+              <td><code>fallthrough</code> → <code>0x10000058c</code></td>
+            </tr>
+            <tr>
+              <td class="num"><code>0x10000058c</code></td>
+              <td><code>file:0x58c+4</code></td>
+              <td><code>csel w0, w0, w1, gt</code></td>
+              <td><code>CSEL_32_condsel</code>, word <code>0x1a81c000</code></td>
+              <td><code>fallthrough</code> → <code>0x100000590</code></td>
+            </tr>
+            <tr>
+              <td class="num"><code>0x100000590</code></td>
+              <td><code>file:0x590+4</code></td>
+              <td><code>ret</code></td>
+              <td><code>RET_64R_branch_reg</code>, word <code>0xd65f03c0</code></td>
+              <td><code>return</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          Discovery reports one block, complete coverage, no gaps. The lifted graph is
+          <code>form: 'register'</code>, one block, <code>returns: []</code>. The real IR, rendered
+          readably by an ad-hoc formatter, is:
+        </p>
+        <pre><code>FUNCTION _fixture_maximum form=register blocks=1 returns=[] coverage=complete
+BLOCK entity_aef @0x100000588..0x100000594 params=[]
+  ; 0x100000588
+  [read_register] v1:i32 = read arm64:w0 [0:32] of arm64:x0 (zero_extend_root)
+  [read_register] v2:i32 = read arm64:w1 [0:32] of arm64:x1 (zero_extend_root)
+  [assign] v3:i1 = 0
+  [assign] v4:i32 = sub(v1, v2)
+  [assign] v5:i32 = zero_extend&lt;i1&gt;(v3)
+  [assign] v6:i32 = sub(v4, v5)
+  [assign] v7:i1 = flag.sub.negative(v1, v2, v3)
+  [assign] v8:i1 = flag.sub.zero(v1, v2, v3)
+  [assign] v9:i1 = flag.sub.carry(v1, v2, v3)
+  [assign] v10:i1 = flag.sub.overflow(v1, v2, v3)
+  [assign] v11:i32 = 0
+  [assign] v12:i32 = insert&lt;31&gt;(v11, v7)
+  [assign] v13:i32 = insert&lt;30&gt;(v12, v8)
+  [assign] v14:i32 = insert&lt;29&gt;(v13, v9)
+  [assign] v15:i32 = insert&lt;28&gt;(v14, v10)
+  [write_register] write arm64:nzcv [0:32] of arm64:nzcv (replace_root) &lt;- v15
+  [write_register] write arm64:wzr [0:32] of arm64:xzr (discard) &lt;- v6
+  ; 0x10000058c
+  [read_register] v16:i32 = read arm64:w1 [0:32] of arm64:x1 (zero_extend_root)
+  [read_register] v17:i32 = read arm64:nzcv [0:32] of arm64:nzcv (replace_root)
+  [assign] v18:i1 = extract&lt;31&gt;(v17)
+  [assign] v19:i1 = extract&lt;30&gt;(v17)
+  [assign] v20:i1 = extract&lt;29&gt;(v17)
+  [assign] v21:i1 = extract&lt;28&gt;(v17)
+  [assign] v22:i1 = eq(v18, v21)
+  [assign] v23:i1 = not(v19)
+  [assign] v24:i1 = and(v22, v23)
+  [read_register] v25:i32 = read arm64:w0 [0:32] of arm64:x0 (zero_extend_root)
+  [assign] v26:i32 = select(v24, v25, v16)
+  [write_register] write arm64:w0 [0:32] of arm64:x0 (zero_extend_root) &lt;- v26
+  ; 0x100000590
+  [read_register] v27:i64 = read arm64:x0 [0:64] of arm64:x0 (replace_root)
+  [read_register] v28:i64 = read arm64:d0 [0:64] of arm64:v0 (zero_extend_root)
+  [terminator] return values=[]</code></pre>
+        <p>
+          <code>SUBS</code> computes the subtraction twice: once for the value and once with the
+          carry input so the four flag expressions are explicit. <code>Rd = 31</code> is
+          <code>wzr</code>, so the result write is present but discarded; the flag write is not. The
+          <code>CSEL</code> instruction then reads <code>w1</code> and <code>nzcv</code>, extracts
+          N/Z/C/V, builds <code>N == V &amp;&amp; !Z</code> for <code>gt</code>, selects between
+          <code>w0</code> and <code>w1</code>, and writes <code>w0</code>. <code>RET</code> reads
+          <code>x0</code> and <code>d0</code> (the ABI's return-register capacity) and returns.
+        </p>
+        <p>
+          Per-instruction node counts from provenance: <code>SUBS</code> 17 nodes (2 reads, 13
+          assigns, 2 writes), <code>CSEL</code> 12 (3 reads, 8 assigns, 1 write), <code>RET</code> 3
+          (2 reads and the terminator). Every one of those nodes carries the byte range of its
+          source instruction.
+        </p>
+
+        <h3>x86-64: four instructions, thirty-nine register instructions and a return</h3>
+        <table>
+          <thead>
+            <tr>
+              <th class="num">Address</th>
+              <th>Bytes</th>
+              <th>Text</th>
+              <th>Payload</th>
+              <th>Flow</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="num"><code>0x401880</code></td>
+              <td><code>file:0x880+2</code></td>
+              <td><code>mov eax, esi</code></td>
+              <td><code>Mov_rm32_r32</code>, 32-bit</td>
+              <td><code>fallthrough</code> → <code>0x401882</code></td>
+            </tr>
+            <tr>
+              <td class="num"><code>0x401882</code></td>
+              <td><code>file:0x882+2</code></td>
+              <td><code>cmp edi, esi</code></td>
+              <td><code>Cmp_rm32_r32</code>, flags read 0, written <code>0x8d5</code></td>
+              <td><code>fallthrough</code> → <code>0x401884</code></td>
+            </tr>
+            <tr>
+              <td class="num"><code>0x401884</code></td>
+              <td><code>file:0x884+3</code></td>
+              <td><code>cmovg eax, edi</code></td>
+              <td><code>Cmovg_r32_rm32</code>, flags read <code>0x8c0</code></td>
+              <td><code>fallthrough</code> → <code>0x401887</code></td>
+            </tr>
+            <tr>
+              <td class="num"><code>0x401887</code></td>
+              <td><code>file:0x887+1</code></td>
+              <td><code>ret</code></td>
+              <td><code>Retnq</code>, 64-bit</td>
+              <td><code>return</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          The x86 lifter reads <code>esi</code> and writes <code>eax</code> for the move,
+          <code>cmp</code> materializes the subtraction plus CF/OF/AF/ZF/SF/PF as six 1-bit register
+          writes, <code>cmovg</code> reads ZF/SF/OF, computes <code>!(ZF || (SF != OF))</code>,
+          selects <code>edi</code> versus the old <code>eax</code>, and <code>ret</code> reads
+          <code>rsp</code>, loads the return slot, computes <code>rsp + 8</code> and returns. The
+          real IR starts with the move and the comparison's first flags (trimmed with
+          <code>…</code>):
+        </p>
+        <pre><code>FUNCTION fixture_maximum form=register blocks=1 returns=[] coverage=complete
+BLOCK entity_330 @0x401880..0x401888 params=[]
+  ; 0x401880
+  [read_register] v1:i32 = read x86_64:esi [0:32] of x86_64:rsi (zero_extend_root)
+  [write_register] write x86_64:eax [0:32] of x86_64:rax (zero_extend_root) &lt;- v1
+  ; 0x401882
+  [read_register] v2:i32 = read x86_64:edi [0:32] of x86_64:rdi (zero_extend_root)
+  [read_register] v3:i32 = read x86_64:esi [0:32] of x86_64:rsi (zero_extend_root)
+  [assign] v4:i1 = 0
+  [assign] v5:i32 = sub(v2, v3)
+  [assign] v6:i32 = zero_extend&lt;i1&gt;(v4)
+  [assign] v7:i32 = sub(v5, v6)
+  [assign] v8:i1 = flag.sub.borrow(v2, v3, v4)
+  [write_register] write x86_64:cf [0:1] of x86_64:rflags (preserve_other_bits) &lt;- v8
+  [assign] v9:i1 = flag.sub.overflow(v2, v3, v4)
+  [write_register] write x86_64:of [11:12] of x86_64:rflags (preserve_other_bits) &lt;- v9
+  …
+  ; 0x401884
+  [read_register] v18:i1 = read x86_64:zf [6:7] of x86_64:rflags (preserve_other_bits)
+  [read_register] v19:i1 = read x86_64:sf [7:8] of x86_64:rflags (preserve_other_bits)
+  [read_register] v20:i1 = read x86_64:of [11:12] of x86_64:rflags (preserve_other_bits)
+  [assign] v21:i1 = xor(v19, v20)
+  [assign] v22:i1 = or(v18, v21)
+  [assign] v23:i1 = not(v22)
+  [read_register] v24:i32 = read x86_64:edi [0:32] of x86_64:rdi (zero_extend_root)
+  [read_register] v25:i32 = read x86_64:eax [0:32] of x86_64:rax (zero_extend_root)
+  [assign] v26:i32 = select(v23, v24, v25)
+  [write_register] write x86_64:eax [0:32] of x86_64:rax (zero_extend_root) &lt;- v26
+  …
+  ; 0x401887
+  [read_register] v27:i64 = read x86_64:rsp [0:64] of x86_64:rsp (replace_root)
+  [load] v28:i64 = load(v27) align=1 endian=little
+  [assign] v29:i64 = 8
+  [assign] v30:i64 = add(v27, v29)
+  [write_register] write x86_64:rsp [0:64] of x86_64:rsp (replace_root) &lt;- v30
+  [terminator] return values=[]</code></pre>
+        <p>
+          Node counts: <code>mov</code> 2, <code>cmp</code> 22 (2 reads, 14 assigns, 6 flag writes),
+          <code>cmovg</code> 10 (5 reads, 4 assigns, 1 write), <code>ret</code> 6 (1 read, 1 load, 2
+          assigns, 1 write, plus the terminator). The block has 39 register instructions total.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 440" role="img" aria-labelledby="fig-worked-title">
+            <title id="fig-worked-title">
+              Real instruction to IR mapping for fixture_maximum on ARM64 and x86-64
+            </title>
+            <rect class="box muted" x="20" y="40" width="240" height="76" rx="8" />
+            <text x="140" y="60" text-anchor="middle" class="title">0x100000588</text>
+            <text x="140" y="79" text-anchor="middle" class="mono">subs wzr, w0, w1</text>
+            <text x="140" y="97" text-anchor="middle" class="small">17 nodes</text>
+            <rect class="box muted" x="300" y="40" width="240" height="76" rx="8" />
+            <text x="420" y="60" text-anchor="middle" class="title">0x10000058c</text>
+            <text x="420" y="79" text-anchor="middle" class="mono">csel w0, w0, w1, gt</text>
+            <text x="420" y="97" text-anchor="middle" class="small">12 nodes</text>
+            <rect class="box muted" x="580" y="40" width="240" height="76" rx="8" />
+            <text x="700" y="60" text-anchor="middle" class="title">0x100000590</text>
+            <text x="700" y="79" text-anchor="middle" class="mono">ret</text>
+            <text x="700" y="97" text-anchor="middle" class="small">3 nodes + return</text>
+
+            <path class="edge" d="M260,78 L298,78" marker-end="url(#arrow)" />
+            <path class="edge" d="M540,78 L578,78" marker-end="url(#arrow)" />
+
+            <rect class="box accent" x="20" y="150" width="240" height="110" rx="8" />
+            <text x="140" y="172" text-anchor="middle" class="title">lifted IR</text>
+            <text x="140" y="192" text-anchor="middle" class="small mono">read w0, read w1</text>
+            <text x="140" y="209" text-anchor="middle" class="small mono">
+              sub · zero-extend · sub
+            </text>
+            <text x="140" y="226" text-anchor="middle" class="small mono">4 flag nodes → nzcv</text>
+            <text x="140" y="243" text-anchor="middle" class="small mono">write wzr (discard)</text>
+            <rect class="box accent" x="300" y="150" width="240" height="110" rx="8" />
+            <text x="420" y="172" text-anchor="middle" class="title">lifted IR</text>
+            <text x="420" y="192" text-anchor="middle" class="small mono">read w1, read nzcv</text>
+            <text x="420" y="209" text-anchor="middle" class="small mono">extract N, Z, C, V</text>
+            <text x="420" y="226" text-anchor="middle" class="small mono">
+              N == V &amp;&amp; !Z
+            </text>
+            <text x="420" y="243" text-anchor="middle" class="small mono">select → write w0</text>
+            <rect class="box accent" x="580" y="150" width="240" height="110" rx="8" />
+            <text x="700" y="172" text-anchor="middle" class="title">lifted IR</text>
+            <text x="700" y="192" text-anchor="middle" class="small mono">read x0, read d0</text>
+            <text x="700" y="209" text-anchor="middle" class="small mono">return values: []</text>
+
+            <path class="edge accent" d="M140,116 L140,148" marker-end="url(#arrow-accent)" />
+            <path class="edge accent" d="M420,116 L420,148" marker-end="url(#arrow-accent)" />
+            <path class="edge accent" d="M700,116 L700,148" marker-end="url(#arrow-accent)" />
+
+            <text x="20" y="300" class="lane">x86-64 · ELF fixture_maximum</text>
+            <rect class="box muted" x="20" y="320" width="200" height="100" rx="8" />
+            <text x="120" y="342" text-anchor="middle" class="title">0x401880</text>
+            <text x="120" y="361" text-anchor="middle" class="mono">mov eax, esi</text>
+            <text x="120" y="380" text-anchor="middle" class="small">2 nodes</text>
+            <text x="120" y="398" text-anchor="middle" class="small mono">read → write</text>
+            <rect class="box muted" x="250" y="320" width="200" height="100" rx="8" />
+            <text x="350" y="342" text-anchor="middle" class="title">0x401882</text>
+            <text x="350" y="361" text-anchor="middle" class="mono">cmp edi, esi</text>
+            <text x="350" y="380" text-anchor="middle" class="small">22 nodes</text>
+            <text x="350" y="398" text-anchor="middle" class="small mono">
+              14 assigns · 6 flags
+            </text>
+            <rect class="box muted" x="480" y="320" width="200" height="100" rx="8" />
+            <text x="580" y="342" text-anchor="middle" class="title">0x401884</text>
+            <text x="580" y="361" text-anchor="middle" class="mono">cmovg eax, edi</text>
+            <text x="580" y="380" text-anchor="middle" class="small">10 nodes</text>
+            <text x="580" y="398" text-anchor="middle" class="small mono">5 reads · select</text>
+            <rect class="box muted" x="710" y="320" width="200" height="100" rx="8" />
+            <text x="810" y="342" text-anchor="middle" class="title">0x401887</text>
+            <text x="810" y="361" text-anchor="middle" class="mono">ret</text>
+            <text x="810" y="380" text-anchor="middle" class="small">6 nodes</text>
+            <text x="810" y="398" text-anchor="middle" class="small mono">load slot · rsp + 8</text>
+
+            <path class="edge" d="M220,370 L248,370" marker-end="url(#arrow)" />
+            <path class="edge" d="M450,370 L478,370" marker-end="url(#arrow)" />
+            <path class="edge" d="M680,370 L708,370" marker-end="url(#arrow)" />
+          </svg>
+          <figcaption>
+            <strong>Figure 5.</strong> The same source function lowers differently but lands in the
+            same IR vocabulary: explicit register slices, explicit flag computation, a
+            <code>select</code> for both <code>csel</code> and <code>cmovg</code>, and a return with
+            no source-level values. Counts are real provenance counts, not estimates.
+          </figcaption>
+        </figure>
+
+        <div class="callout caveat">
+          <span class="title">Reading the dump</span>
+          <p>
+            Both blocks above are a readable rendering produced by an ad-hoc formatter from the real
+            lifted graph: values are numbered in definition order, types are abbreviated
+            (<code>i32</code>, <code>i1</code>), slices are written
+            <code>[offset:offset+width]</code>, and block IDs are shortened. Operations, register
+            descriptors, write rules, provenance comments and terminators are unchanged;
+            <code>…</code> marks omitted nodes. Raw node IDs are 64-hex content hashes.
+          </p>
+        </div>
+      </section>
+
+      <section id="dominance">
+        <h2>Dominance and derived register state</h2>
+        <p>
+          Dominance is needed for two things: the verifier must decide whether a cross-block value
+          reference is legal, and SSA construction needs immediate dominators and a dominator tree.
+          The implementation is in <code>computeDominance</code>. It works on every block, including
+          unreachable components, because the IR must stay valid even when the graph is not
+          reducible or when a component has no path from the entry.
+        </p>
+        <ol class="steps">
+          <li>
+            <strong>Build edges.</strong> Successors come from <code>successors(terminator)</code>;
+            predecessors are accumulated per block. Edges to missing targets are ignored here — the
+            verifier reports them separately — which keeps the algorithm total on malformed graphs.
+          </li>
+          <li>
+            <strong>Iterative DFS, shared postorder.</strong> Start at the entry, then start a new
+            root at every still-unvisited block in block order. Each root is recorded. The DFS is
+            iterative and assigns postorder numbers shared by all components; the virtual root
+            receives the largest number.
+          </li>
+          <li>
+            <strong>Initialize the virtual root.</strong> A virtual node precedes all roots. Every
+            root's immediate dominator is the virtual node, so no block in one component dominates a
+            block in another.
+          </li>
+          <li>
+            <strong>Intersect predecessors to a fixpoint.</strong> Process blocks in reverse
+            postorder. For a non-root block, take the first processed predecessor with a known idom
+            as a candidate, then intersect each further predecessor by walking both idom chains
+            upward while their postorder numbers differ. Repeat the sweep until no idom changes.
+          </li>
+          <li>
+            <strong>Compress queries.</strong> Build the dominator tree's child lists and number
+            each node on entry and exit. <code>dominates(a, b)</code> is then the interval test
+            <code>enter[a] &lt;= enter[b] &amp;&amp; leave[b] &lt;= leave[a]</code>;
+            <code>idom</code> returns <code>null</code> for roots and unknown blocks.
+          </li>
+        </ol>
+        <p>
+          This is essentially the iterative dominance algorithm popularised by Cooper, Harvey and
+          Kennedy: reverse-postorder sweeps with the postorder-number intersection over
+          predecessors. It is not Lengauer–Tarjan, and the code does not claim a linear-time bound.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/ir/dominance.ts">src/ir/dominance.ts</a>
+          (<code>computeDominance</code>, <code>Dominance</code>, <code>registerStateAt</code>).
+        </p>
+
+        <p>
+          The worked example above, <code>_fixture_maximum</code>, is a single block, so its
+          dominator tree is one root with no children. A second real function,
+          <code>_fixture_loop</code> (ARM64), shows the interesting case. It has eleven instructions
+          in five blocks: an entry <code>cbz</code>, a preheader, a loop body ending in
+          <code>b.ne</code>
+          back to itself, and two returns. The CFG and the dominator tree below use the real
+          addresses and immediate dominators produced by the script.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 640 430" role="img" aria-labelledby="fig-cfg-title">
+            <title id="fig-cfg-title">Real CFG of ARM64 fixture_loop</title>
+            <rect class="box muted" x="40" y="30" width="240" height="80" rx="8" />
+            <text x="160" y="50" text-anchor="middle" class="title">0x100000594</text>
+            <text x="160" y="69" text-anchor="middle" class="mono">cbz w1, 0x1000005b8</text>
+            <text x="160" y="88" text-anchor="middle" class="small">3 nodes + branch</text>
+
+            <rect class="box" x="40" y="170" width="240" height="80" rx="8" />
+            <text x="160" y="190" text-anchor="middle" class="title">0x100000598</text>
+            <text x="160" y="209" text-anchor="middle" class="mono">mov x8,x0 · movz w0,#0</text>
+            <text x="160" y="228" text-anchor="middle" class="mono">mov w9,w1</text>
+
+            <rect class="box" x="40" y="310" width="240" height="80" rx="8" />
+            <text x="160" y="330" text-anchor="middle" class="title">0x1000005a4</text>
+            <text x="160" y="349" text-anchor="middle" class="mono">ldr w10,[x8],#4</text>
+            <text x="160" y="368" text-anchor="middle" class="mono">add · subs · b.ne</text>
+
+            <rect class="box ok" x="380" y="30" width="210" height="80" rx="8" />
+            <text x="485" y="50" text-anchor="middle" class="title">0x1000005b8</text>
+            <text x="485" y="69" text-anchor="middle" class="mono">movz w0, #0</text>
+            <text x="485" y="88" text-anchor="middle" class="mono">ret</text>
+
+            <rect class="box ok" x="380" y="310" width="210" height="80" rx="8" />
+            <text x="485" y="330" text-anchor="middle" class="title">0x1000005b4</text>
+            <text x="485" y="349" text-anchor="middle" class="mono">ret</text>
+
+            <path class="edge" d="M160,110 L160,168" marker-end="url(#arrow)" />
+            <text x="168" y="145" class="edge-label">false (w1 ≠ 0)</text>
+            <path class="edge" d="M280,60 L378,60" marker-end="url(#arrow)" />
+            <text x="329" y="52" text-anchor="middle" class="edge-label">true (w1 = 0)</text>
+            <path class="edge" d="M160,250 L160,308" marker-end="url(#arrow)" />
+            <text x="168" y="285" class="edge-label">jump</text>
+            <path class="edge" d="M280,350 L378,350" marker-end="url(#arrow)" />
+            <text x="329" y="342" text-anchor="middle" class="edge-label">false (Z=1)</text>
+            <path
+              class="edge accent"
+              d="M40,330 C2,330 2,370 38,370"
+              marker-end="url(#arrow-accent)"
+            />
+            <text x="6" y="300" class="edge-label">true (b.ne)</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 6.</strong> The decoded flow, not a heuristic, produces these edges.
+            <code>cbz</code> exits on zero; <code>b.ne</code> is the loop backedge and is the only
+            cycle. The two returns are separate blocks because discovery splits at terminators.
+          </figcaption>
+        </figure>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 640 470" role="img" aria-labelledby="fig-dom-title">
+            <title id="fig-dom-title">Real dominator tree of ARM64 fixture_loop</title>
+            <rect class="box accent" x="230" y="20" width="180" height="56" rx="8" />
+            <text x="320" y="42" text-anchor="middle" class="title">0x100000594</text>
+            <text x="320" y="60" text-anchor="middle" class="small">entry · idom = null</text>
+
+            <rect class="box" x="80" y="140" width="180" height="56" rx="8" />
+            <text x="170" y="162" text-anchor="middle" class="title">0x100000598</text>
+            <text x="170" y="180" text-anchor="middle" class="small">idom 0x100000594</text>
+            <rect class="box" x="380" y="140" width="180" height="56" rx="8" />
+            <text x="470" y="162" text-anchor="middle" class="title">0x1000005b8</text>
+            <text x="470" y="180" text-anchor="middle" class="small">idom 0x100000594</text>
+
+            <rect class="box" x="80" y="260" width="180" height="56" rx="8" />
+            <text x="170" y="282" text-anchor="middle" class="title">0x1000005a4</text>
+            <text x="170" y="300" text-anchor="middle" class="small">idom 0x100000598</text>
+
+            <rect class="box" x="80" y="380" width="180" height="56" rx="8" />
+            <text x="170" y="402" text-anchor="middle" class="title">0x1000005b4</text>
+            <text x="170" y="420" text-anchor="middle" class="small">idom 0x1000005a4</text>
+
+            <path class="edge" d="M320,76 L320,105 L170,105 L170,138" marker-end="url(#arrow)" />
+            <path class="edge" d="M320,76 L320,105 L470,105 L470,138" marker-end="url(#arrow)" />
+            <path class="edge" d="M170,196 L170,258" marker-end="url(#arrow)" />
+            <path class="edge" d="M170,316 L170,378" marker-end="url(#arrow)" />
+          </svg>
+          <figcaption>
+            <strong>Figure 7.</strong> The dominator tree is a Hasse diagram of the reflexive
+            dominance relation: the loop body's only entry from outside is the preheader, even
+            though it has two predecessors. This is the fact that lets SSA place parameters only
+            where definitions actually meet.
+          </figcaption>
+        </figure>
+
+        <h3>Derived register state</h3>
+        <p>
+          SSA rows are intentionally sparse.
+          <code>registerStateAt(rows, block, cell, boundary)</code> walks from the requested block
+          up the immediate-dominator chain, looking for a row that binds exactly the requested
+          <code>root</code>/<code>offset_bits</code>/<code>width_bits</code> cell. For an exit query
+          it checks the block's exit row and then its entry row; for an entry query it checks the
+          entry row. If the cell is not listed, it moves to the idom and considers that block's exit
+          state, and so on. Returning <code>null</code> means no row on the chain binds the cell.
+          This is why unlisted cells can “inherit the immediate dominator's exit” without
+          materializing a full state vector per block.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/ir/dominance.ts">src/ir/dominance.ts</a>
+          (<code>registerStateAt</code>); used by
+          <a class="src" href="../../src/reconstruction/source-requirements.ts"
+            >src/reconstruction/source-requirements.ts</a
+          >
+          and by SSA consumers.
+        </p>
+      </section>
+
+      <section id="verify">
+        <h2>Every invariant the verifier checks</h2>
+        <p>
+          <code>verifyIR</code> returns an array of <code>IRProblem</code> values with a stable
+          <code>code</code>, the offending node ID and a message. <code>assertValidIR</code> throws
+          <code>IRValidationError</code> if any problem exists. Problems are grouped by code:
+          <code>identity</code>, <code>type</code>, <code>reference</code>,
+          <code>control_flow</code>, <code>effect_order</code>, <code>provenance</code>,
+          <code>register</code> and <code>semantic</code>. The verifier charges work through
+          <code>checkpoint</code> and caches immutable provenance/descriptor facts, but it never
+          caches success here: only <code>assertValidIR</code> remembers a verified object, in a
+          <code>WeakSet</code>.
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Invariant</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>identity</code></td>
+              <td>
+                Every entity ID is well-formed and unique across the whole function (function,
+                blocks, instructions, terminators, values and effects).
+              </td>
+            </tr>
+            <tr>
+              <td rowspan="4"><code>provenance</code></td>
+              <td>
+                Every <code>Origin</code> has either an instruction ID or a non-empty synthetic
+                justification.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                Instruction IDs, evidence IDs, synthetic reasons and ranges are well-formed; ranges
+                are nonzero-sized and do not overflow the 64-bit address space.
+              </td>
+            </tr>
+            <tr>
+              <td>An instruction origin includes at least one source range.</td>
+            </tr>
+            <tr>
+              <td><code>contract_evidence</code> on a call contains only valid evidence IDs.</td>
+            </tr>
+            <tr>
+              <td rowspan="9"><code>register</code></td>
+              <td>
+                Every descriptor passes <code>registerSchema</code> (slice within root; zero writes
+                discarded).
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>replace_root</code> covers the root (offset 0, full width);
+                <code>zero_extend_root</code> starts at bit 0.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                One root name always has one <code>root_width_bits</code>; one descriptor ID always
+                has identical fields.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                In SSA form, exactly one <code>register_states</code> row exists per block, and
+                every row names an existing block.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                SSA bindings use <code>preserve_other_bits</code>, are not zero-register writes,
+                bind equal-width integer values, and never overlap within a root.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                Root entry rows and function-exit rows cover exactly the tracked cell layout; other
+                rows list only tracked cells.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                At a root, entry bindings are distinct block parameters; elsewhere they are only
+                merged/rebound cells.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                Register-form call/unknown boundaries have empty
+                <code>register_inputs</code>/<code>register_outputs</code>; SSA form has no
+                <code>read_register</code>/<code>write_register</code>.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                Call/unknown <code>register_inputs</code> cover the tracked layout; their
+                <code>register_outputs</code> cover exactly the tracked cells intersected with the
+                declared clobbers.
+              </td>
+            </tr>
+            <tr>
+              <td rowspan="9"><code>type</code></td>
+              <td>Every definition has a valid <code>IRType</code>.</td>
+            </tr>
+            <tr>
+              <td>Every reference has the same type as its definition.</td>
+            </tr>
+            <tr>
+              <td>
+                Conditions are <code>i1</code>; memory addresses and indirect call/branch targets
+                are <code>i64</code>.
+              </td>
+            </tr>
+            <tr>
+              <td>Register access width equals the read/written value width.</td>
+            </tr>
+            <tr>
+              <td>
+                Load/store values have a byte width and alignment is a power of two from 1 to 4096.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                Expression typing (<code>expressionProblems</code>): integer ops need integers,
+                result equals left, right equals left except shifts/rotates; unary, compare and
+                select result shapes; cast width directions; bitcast width preservation;
+                extract/insert bounds; concat exact total width; flag carry/result <code>i1</code>;
+                float widths 32/64; vector arity and lane types; canonical constants; address
+                constants are 64-bit non-file coordinates; indeterminate has a reason.
+              </td>
+            </tr>
+            <tr>
+              <td>Switch selectors are integers; switch cases fit the selector width.</td>
+            </tr>
+            <tr>
+              <td>Return types match <code>FunctionBody.returns</code>.</td>
+            </tr>
+            <tr>
+              <td>Edge argument types match the target block's parameters.</td>
+            </tr>
+            <tr>
+              <td rowspan="3"><code>reference</code></td>
+              <td>
+                Local references must refer to a definition earlier in the same block; forward
+                references are rejected.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                A non-local value must have a definition whose block strictly dominates the use;
+                dominance covers unreachable components, each rooted separately.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                Effect tokens must be defined earlier in the same block; an effect token cannot be
+                imported from another block.
+              </td>
+            </tr>
+            <tr>
+              <td rowspan="5"><code>effect_order</code></td>
+              <td>
+                Each state access consumes the current effect and produces a new one whose type is
+                <code>effect</code>.
+              </td>
+            </tr>
+            <tr>
+              <td>The terminator consumes the block's final effect.</td>
+            </tr>
+            <tr>
+              <td>Every outgoing edge carries that same final effect.</td>
+            </tr>
+            <tr>
+              <td>
+                A block's <code>effect_parameter</code> has type <code>effect</code> and starts the
+                chain.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                An effect cannot be skipped: a state access whose <code>effect_in</code> is not the
+                current token is rejected.
+              </td>
+            </tr>
+            <tr>
+              <td rowspan="5"><code>control_flow</code></td>
+              <td><code>FunctionIR.entry</code> names an existing block.</td>
+            </tr>
+            <tr>
+              <td>Every edge target names an existing block.</td>
+            </tr>
+            <tr>
+              <td>Edge argument count matches the target block's parameter count.</td>
+            </tr>
+            <tr>
+              <td>Return value count matches <code>FunctionBody.returns</code>.</td>
+            </tr>
+            <tr>
+              <td>Switch cases are unique and within the selector's width.</td>
+            </tr>
+            <tr>
+              <td rowspan="6"><code>semantic</code></td>
+              <td>
+                <code>memory_fence</code> must be exactly <code>inner_shareable</code> /
+                <code>acquire_release</code> / <code>reads_writes</code>.
+              </td>
+            </tr>
+            <tr>
+              <td>A direct call target is a memory address, not a file-space address.</td>
+            </tr>
+            <tr>
+              <td>
+                A call with restricted memory effects (<code>read_only</code> or <code>none</code>)
+                must carry contract evidence; unrestricted calls need not.
+              </td>
+            </tr>
+            <tr>
+              <td><code>unknown_effect</code> has a non-empty reason.</td>
+            </tr>
+            <tr>
+              <td>
+                <code>trap</code>, <code>unknown</code> and <code>indirect</code> terminators have
+                non-empty reasons.
+              </td>
+            </tr>
+            <tr>
+              <td>An indirect call's target is an <code>i64</code> value.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout refusal">
+          <span class="title">Refusal</span>
+          <p>
+            A graph with any problem never reaches SSA: <code>assertValidIR</code> throws
+            <code>IRValidationError</code> carrying every problem, aborting the pass rather than
+            publishing a malformed artifact. Builder misuse fails earlier with
+            <code>TypeError</code>
+            (ill-typed expression, duplicate block birth, append after terminator, missing
+            terminator).
+          </p>
+        </div>
+      </section>
+
+      <section id="semantics-interpreter">
+        <h2>Reference semantics and the interpreter</h2>
+        <p>
+          <code>src/ir/semantics.ts</code> is the single reference evaluator for IR expressions. It
+          is a pure function of a type, an expression and a lookup for operand values; it never
+          touches memory or registers itself. That makes it usable for constant folding, not just
+          for tests.
+        </p>
+        <h3>What is modelled</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Area</th>
+              <th>Behaviour</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Runtime values</td>
+              <td>
+                <code>bits</code> (a bigint normalized to the width), <code>unknown</code> and
+                <code>undefined</code> with a reason. Unknown/undefined propagate through operands;
+                <code>select</code> evaluates only the chosen arm.
+              </td>
+            </tr>
+            <tr>
+              <td>Integers</td>
+              <td>
+                Wrapping add/sub/mul, unsigned and signed division/remainder, bitwise ops, shifts,
+                rotates, count-leading/trailing-zeros and popcount. Shift counts are not masked;
+                too-large counts follow the documented rules. Division by zero or signed
+                <code>MIN / -1</code> yields <code>undefined</code>, not a trap.
+              </td>
+            </tr>
+            <tr>
+              <td>Flags</td>
+              <td>
+                Carry, borrow, overflow, zero, negative and parity computed at the operation's
+                width; the carry input participates in the full-width addition/subtraction.
+              </td>
+            </tr>
+            <tr>
+              <td>Floats</td>
+              <td>
+                IEEE 754 nearest-even with gradual underflow; FP32/64 arithmetic, neg/abs/sqrt,
+                ordered/unordered comparisons, conversions. Arithmetic NaNs canonicalize to quiet
+                NaNs; bitcasts, loads/stores, abs and neg preserve payload bits.
+              </td>
+            </tr>
+            <tr>
+              <td>Vectors</td>
+              <td>
+                Fixed lanes packed low-first; lane extract/insert; per-lane integer/float
+                arithmetic; bitcast between vector and integer of equal width.
+              </td>
+            </tr>
+            <tr>
+              <td>Memory</td>
+              <td>
+                Endianness and alignment are explicit; loads/stores are typed;
+                <code>OracleMemory</code> is bounded and rejects unmapped, read-only or misaligned
+                accesses.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="sources">
+          <a class="src" href="../../src/ir/semantics.ts">src/ir/semantics.ts</a>
+          (<code>RuntimeValue</code>, <code>evaluateExpression</code>, <code>evaluateInteger</code>,
+          <code>floatBits</code>, <code>integerFloat</code>).
+        </p>
+
+        <h3>Callers</h3>
+        <p>
+          <code>evaluateExpression</code> is the shared constant folder. The values analysis uses it
+          to collapse expressions when all inputs are constant; stack recovery uses it to evaluate
+          address arithmetic and stack slots; reconstruction uses it for constant folding (including
+          the flag-to-compare simplification that keeps <code>undefined</code> results explicit);
+          source emission uses it for flag reconstruction, and variadic source inference uses it for
+          argument observations.
+        </p>
+        <p>
+          <code>evaluateIR</code> is different: it is a
+          <em>bounded offline oracle for trusted fixture IR</em>, not a service path for executing
+          user binaries. It is used by <code>test/ir/*</code>, the lifter corpus tests, and
+          value-analysis tests. It never loads or calls native code. A call is executed only if the
+          test supplies a <code>TrustedCall</code>
+          keyed by the exact call node ID.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/ir/interpreter.ts">src/ir/interpreter.ts</a>
+          (<code>evaluateIR</code>, <code>OracleMemory</code>, <code>TrustedCall</code>);
+          <a class="src" href="../../src/analysis/values/index.ts">src/analysis/values/index.ts</a>;
+          <a class="src" href="../../src/analysis/stack/index.ts">src/analysis/stack/index.ts</a>;
+          <a class="src" href="../../src/reconstruction/expressions.ts"
+            >src/reconstruction/expressions.ts</a
+          >; <a class="src" href="../../test/ir/fixtures.test.ts">test/ir/fixtures.test.ts</a>.
+        </p>
+
+        <h3>The interpreter's execution model</h3>
+        <ol class="steps">
+          <li>
+            <strong>Verify first.</strong> <code>evaluateIR</code> calls <code>assertValidIR</code>;
+            it will not execute an unverified graph.
+          </li>
+          <li>
+            <strong>Initialize roots.</strong> Every register root mentioned by the IR must be
+            supplied (or is zero-initialized by the test helper). A supplied root that the IR never
+            uses is a <code>TypeError</code>, which catches typos. Each root holds
+            <code>{bits, known, undefined, width}</code>, so partial knowledge and undefined slices
+            are distinct from uninitialized ones.
+          </li>
+          <li>
+            <strong>Enter the entry block.</strong> Parameters whose entry row binds a register read
+            that register; remaining parameters consume <code>options.arguments</code>; arity must
+            match exactly.
+          </li>
+          <li>
+            <strong>Execute instructions.</strong> Pure assigns evaluate; register reads/writes
+            update root state according to <code>write_rule</code>; loads/stores go through
+            <code>OracleMemory</code>; calls use the trusted oracle and then invalidate declared
+            clobbers; unknown effects stop.
+          </li>
+          <li>
+            <strong>Apply SSA state rows.</strong> <code>register_inputs</code> are written before a
+            boundary; <code>register_outputs</code> are read after it; exit rows write rebound cells
+            before the terminator.
+          </li>
+          <li>
+            <strong>Choose an edge.</strong> A branch observes the condition; a switch observes the
+            selector; a jump is direct. Edge arguments are evaluated simultaneously and become the
+            next block's parameters. Return/trap/unknown/indirect stop with a status.
+          </li>
+        </ol>
+        <p>
+          The result is a <code>EvaluationResult</code> with a status (<code>returned</code>,
+          <code>trap</code>, <code>unknown</code>, <code>undefined</code>,
+          <code>memory_fault</code> or <code>step_limit</code>), the returned values, the stopping
+          node, the step count, a register snapshot, a memory snapshot and an effect trace. The step
+          limit defaults to <code>100_000</code> and may be set from 1 to <code>1_000_000</code>.
+        </p>
+        <p>
+          Trusted calls are deliberately narrow. Inputs are the target, arguments and callbacks to
+          read memory/registers; outputs are results, memory writes and register writes. Memory
+          writes are rejected unless the call declares <code>unknown_read_write</code>; register
+          writes must fall inside the declared clobber mask and obey the descriptor rules. Writes
+          are applied <em>after</em> clobbers are invalidated, so a callee can overwrite a clobbered
+          slice without the invalidation erasing it.
+        </p>
+
+        <div class="callout caveat">
+          <span class="title">Not a hardware emulator</span>
+          <p>
+            <code>OracleMemoryFault</code> is an oracle fault, not a proven ISA trap. The
+            interpreter does not model concurrency, signals, precise fault delivery, the OS, or the
+            real FP exception environment. A <code>memory_fault</code> status says “the fixture
+            memory model rejected this access”, which is why tests treat it as a test outcome rather
+            than an architectural conclusion.
+          </p>
+        </div>
+      </section>
+
+      <section id="budgets">
+        <h2>Budgets and refusal points</h2>
+        <p>
+          Every layer charges the same cumulative work counter and checks cancellation and the
+          deadline. On top of that, the IR has its own node and block capacity, because a small
+          instruction can expand into dozens of nodes: the real <code>cmp</code> above expands to 22
+          register instructions before its flag writes. Defaults come from
+          <code>DEFAULT_BUDGET</code>:
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Resource</th>
+              <th>Default</th>
+              <th>Enforced by</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>instructions</code></td>
+              <td>10,000</td>
+              <td>Decoder word/instruction loops; lifter preflight against the graph.</td>
+            </tr>
+            <tr>
+              <td><code>blocks</code></td>
+              <td>10,000</td>
+              <td>Lifter preflight; <code>IRConstructionBudget.block</code>.</td>
+            </tr>
+            <tr>
+              <td><code>ir_nodes</code></td>
+              <td>100,000</td>
+              <td>
+                Lifter preflight (<code>blocks * 3</code> minimum), builder node charges, post-pass
+                <code>boundIR</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>work</code></td>
+              <td>10,000,000</td>
+              <td>
+                <code>OperationContext.checkpoint</code> in decoders, lifters, builder, verifier,
+                dominance and interpreter.
+              </td>
+            </tr>
+            <tr>
+              <td><code>deadline_ms</code></td>
+              <td>30,000</td>
+              <td>Same checkpoint; expiry is latched.</td>
+            </tr>
+            <tr>
+              <td><code>output_bytes</code></td>
+              <td>1,048,576</td>
+              <td>Presentation/emission stages, not this stage.</td>
+            </tr>
+          </tbody>
+        </table>
+        <pre><code>export class IRConstructionBudget {
+  #nodes = 0;
+  #blocks = 0;
+  constructor(readonly limits: IRConstructionLimits = {}) {
+    for (const limit of [limits.max_ir_nodes, limits.max_blocks])
+      if (limit !== undefined &amp;&amp; (!Number.isSafeInteger(limit) || limit &lt; 0))
+        throw new RangeError('IR construction limits must be nonnegative safe integers');
+  }
+  block(parameters: number): void {
+    this.limits.checkpoint?.(0);
+    const blocks = this.#blocks + 1;
+    if (blocks &gt; (this.limits.max_blocks ?? Infinity))
+      this.#exceeded('blocks', this.limits.max_blocks!, blocks);
+    // Reserve the block, effect parameter and eventual terminator before allocation.
+    this.nodes(3 + parameters);
+    this.#blocks = blocks;
+  }
+  nodes(count = 1): void {
+    this.limits.checkpoint?.(count);
+    const nodes = this.#nodes + count;
+    if (nodes &gt; (this.limits.max_ir_nodes ?? Infinity))
+      this.#exceeded('ir_nodes', this.limits.max_ir_nodes!, nodes);
+    this.#nodes = nodes;
+  }
+}</code></pre>
+        <p>
+          The builder reserves three nodes per block (the block's own allocation, its effect
+          parameter and its terminator) plus one per parameter, before any instruction is emitted.
+          That is why an empty block still has a nonzero cost. <code>#exceeded</code> throws
+          <code>OperationError</code> with code <code>resource_limit</code> and
+          <code>details: { kind: 'limit', resource, limit, consumed }</code>; the partially built
+          block remains structurally usable (the test suite deliberately terminates it and verifies
+          the result), because the failed operation did not mutate the chain.
+        </p>
+        <p>
+          After lifting, analysis calls <code>boundIR</code>, which charges
+          <code>3 + parameters + instructions</code> per block and re-checks
+          <code>ir_nodes</code>/<code>blocks</code> before <code>assertValidIR</code>. This catches
+          expansions that a lifter's preflight only estimated. The verifier and dominance
+          computation also charge work per node, so a large but within-capacity graph still consumes
+          the shared clock and can be cancelled.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/ir/budget.ts">src/ir/budget.ts</a>
+          (<code>IRConstructionBudget</code>);
+          <a class="src" href="../../src/core/primitives.ts">src/core/primitives.ts</a>
+          (<code>DEFAULT_BUDGET</code>, <code>budgetSchema</code>);
+          <a class="src" href="../../src/core/operation.ts">src/core/operation.ts</a>
+          (<code>createOperationContext</code>);
+          <a class="src" href="../../src/service/analysis/passes.ts"
+            >src/service/analysis/passes.ts</a
+          >
+          (<code>boundIR</code>, <code>requirePass</code>); tests in
+          <a class="src" href="../../test/ir/bounds.test.ts">test/ir/bounds.test.ts</a> and
+          <a class="src" href="../../test/lifters/bounds.test.ts">test/lifters/bounds.test.ts</a>.
+        </p>
+
+        <div class="callout invariant">
+          <span class="title">Why reserve before allocate</span>
+          <p>
+            The budget is checked before the node is appended, so an over-budget operation cannot
+            leave a half-linked effect chain or a block with an uncharged instruction. The builder's
+            sequence counter is advanced only by successful identities; the failed call throws
+            before mutating <code>#instructions</code>.
+          </p>
+        </div>
+      </section>
+
+      <section id="limitations">
+        <h2>Limitations &amp; extension points</h2>
+
+        <h3>Known gaps visible in the code</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Area</th>
+              <th>Gap</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>ARM64 decode</td>
+              <td>
+                A pinned <code>a64js</code> snapshot plus one field-based logical completion.
+                Instructions the snapshot does not recognise are <code>invalid</code> even if a
+                newer Arm XML knows them. Opaque operands are preserved but cannot be lifted.
+              </td>
+            </tr>
+            <tr>
+              <td>ARM64 lift</td>
+              <td>
+                SVE/SME scalable state, atomics, barriers other than <code>DMB ISH</code>,
+                privileged/system state, fused FP, FP16, saturating/rounding conversions and
+                unimplemented SIMD become unknown-effect boundaries. Pointer authentication is
+                abstracted to logical pointers: PAC bits, key/modifier checks, failure poisoning and
+                authentication traps are not modelled. FP arithmetic requires an FPCR environment
+                with nearest-even, gradual underflow and masked traps; otherwise an explicit unknown
+                exit is taken. Arithmetic NaNs are canonicalized and FPSR status is explicitly
+                unknown.
+              </td>
+            </tr>
+            <tr>
+              <td>x86-64 decode</td>
+              <td>
+                Bounded 64 KiB decode windows; an instruction crossing a window with non-contiguous
+                backing can still be decoded by lookahead, but regions with no static VA are holes.
+                Invalid encodings are facts, not traps.
+              </td>
+            </tr>
+            <tr>
+              <td>x86-64 lift</td>
+              <td>
+                x87/MMX, string/REP operations, <code>LOCK</code>/atomic memory, RCL/RCR, SHLD/SHRD,
+                bit-test/scan/BMI/ADX, saturating/shuffle/conversion SIMD, AVX and later encodings,
+                crypto, privileged/transactional instructions and CET enforcement are unsupported.
+                VEX/EVEX/XOP/MVEX and masked/rounding instructions are rejected even though the
+                decoder can describe them. FP requires MXCSR[6:16] = <code>0x7e</code>; otherwise an
+                unknown exit. MXCSR exception status is abstracted, and precise fault delivery is
+                not modelled.
+              </td>
+            </tr>
+            <tr>
+              <td>IR</td>
+              <td>
+                Integers are signless; shifts are not auto-masked; division by zero is
+                <code>undefined</code> rather than a trap; FP is FP32/64 only with no ambient
+                exception state; vectors are fixed-lane and at most 2048 bits; effect tokens are
+                block-local and model ordering, not a concurrent memory model;
+                <code>memory_fence</code> has exactly one supported meaning.
+              </td>
+            </tr>
+            <tr>
+              <td>Interpreter</td>
+              <td>
+                A test oracle only: bounded owned memory, no native calls, no OS, no signals, no
+                precise faults, no real FP environment, explicit trusted-call oracles keyed by node
+                ID.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Adding a new instruction</h3>
+        <ol class="steps">
+          <li>
+            <strong>Make the decoder describe it.</strong> For ARM64, ensure the canonical encoding,
+            fields and structured operands exist (add a completion only if the fields are sufficient
+            and the table is genuinely missing). For x86-64, the iced payload already carries
+            operands, memory, flags and prefixes; do not add a text parser.
+          </li>
+          <li>
+            <strong>Add semantics, not metadata cases.</strong> ARM64: add a branch in
+            <code>ArmSemantics.execute</code> (or <code>memory</code>/<code>simd</code>) keyed by
+            <code>canonical_encoding</code> and fields. x86-64: add a mnemonic branch in
+            <code>X86Semantics.execute</code>, using
+            <code>read</code
+            >/<code>write</code>/<code>address</code>/<code>flag</code>/<code>condition</code>/<code>resize</code>.
+            Throw <code>Unsupported</code> for forms you do not model; never fall through to a
+            guess.
+          </li>
+          <li>
+            <strong>Model faults explicitly.</strong> Use <code>X86Semantics.guard</code> for an
+            architectural fault path (it creates a trap or unknown block and passes live values as
+            parameters). Use <code>fpEnvironment</code>/<code>fpStatus</code> for FP environment and
+            status effects.
+          </li>
+          <li>
+            <strong>Test at both levels.</strong> A decoder test asserts fields, widths, operands
+            and flow; a lifter test builds real bytes with <code>fromWords</code> (ARM) or
+            <code>liftBytes</code> (x86), lifts, verifies, evaluates with <code>evaluateIR</code>,
+            and checks a register/memory result. Corpus tests then check that no previously
+            supported function regressed.
+          </li>
+          <li>
+            <strong>Expect partial coverage to be visible.</strong> If the instruction is recognized
+            but not lifted, it must produce an <code>unknown_effect</code>, an
+            <code>unavailable_semantics</code> diagnostic and a coverage reason — never a silent
+            skip.
+          </li>
+        </ol>
+
+        <h3>Adding a new architecture lifter</h3>
+        <ol class="steps">
+          <li>
+            <strong>Implement <code>Decoder</code>.</strong> Produce structured payloads, neutral
+            <code>RegisterDescriptor</code>s, <code>DecodedFlow</code> and typed gaps. Do not import
+            decoder-library objects into core; convert at the boundary. Respect the instruction
+            budget and charge work.
+          </li>
+          <li>
+            <strong>Implement <code>Lifter&lt;RegisterIR&gt;</code>.</strong> Consume
+            <code>FunctionGraph</code> boundaries rather than rediscovering them; create one block
+            per discovered block with stable birth keys; emit explicit register and memory
+            operations; use <code>unknown_effect</code> for gaps; return coverage and diagnostics.
+          </li>
+          <li>
+            <strong>Supply an <code>AbiProfile</code>.</strong> Define the stack pointer, link
+            register (if any), preserved registers, return-address size, red zone, unknown-call
+            clobbers and <code>classifyCall</code>. Calls carry physical clobbers, not invented
+            source signatures.
+          </li>
+          <li>
+            <strong>Register the components and versions.</strong> Add the loader/lifter/ABI triple
+            to <code>components</code>, extend <code>targetPipeline</code>, and add a version record
+            whose <code>analysis</code> string is bumped when any downstream pass changes; the
+            emitter versions are part of the same cache identity.
+          </li>
+          <li>
+            <strong>Add corpus and bounds tests.</strong> The lifter must be deterministic, respect
+            tiny budgets and cancellation, retain every instruction's provenance, and verify its own
+            output through <code>IRBuilder.finish</code>.
+          </li>
+        </ol>
+        <p>
+          The invariant to preserve across all of this is the separation of concerns: decoding
+          states facts about bytes, lifting states their semantics, verification proves the graph,
+          and SSA construction changes the representation. A change that violates that split (for
+          example a lifter that builds SSA, or a decoder that guesses a trap) breaks the audit trail
+          that the rest of the decompiler depends on.
+        </p>
+        <p class="sources">
+          <a class="src" href="../../src/service/analysis/versions.ts"
+            >src/service/analysis/versions.ts</a
+          >
+          (<code>components</code>, <code>targetPipeline</code>, <code>pipelineVersions</code>);
+          <a class="src" href="../../src/core/contracts.ts">src/core/contracts.ts</a>
+          (<code>AbiProfile</code>, <code>ComponentRegistry</code>); tests in
+          <a class="src" href="../../test/lifters/arm64/corpus.test.ts"
+            >test/lifters/arm64/corpus.test.ts</a
+          >
+          and
+          <a class="src" href="../../test/decoders/x86_64/decoder.test.ts"
+            >test/decoders/x86_64/decoder.test.ts</a
+          >.
+        </p>
+      </section>
+
+      <footer class="pager">
+        <a class="prev" href="discovery.html">← Function discovery &amp; CFG</a>
+        <a class="next" href="ssa-values.html">SSA, values &amp; stack →</a>
+      </footer>
+    </main>
+  </body>
+</html>

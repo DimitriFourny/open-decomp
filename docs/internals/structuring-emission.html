@@ -1,0 +1,2103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Structuring &amp; emission — Open Decomp internals</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- Shared SVG defs: every diagram on the page references url(#arrow) / url(#arrow-accent). Keep exactly this block once per page. -->
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true" focusable="false">
+      <defs>
+        <marker
+          id="arrow"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" class="arrowhead" />
+        </marker>
+        <marker
+          id="arrow-accent"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" class="arrowhead accent" />
+        </marker>
+      </defs>
+    </svg>
+
+    <nav class="sidebar" aria-label="Internals pages">
+      <a class="brand" href="index.html">Open Decomp internals</a>
+      <p class="brand-sub">How the decompiler works</p>
+      <ol>
+        <li><a href="index.html">Architecture overview</a></li>
+        <li><a href="loaders.html">Loading binaries &amp; addresses</a></li>
+        <li><a href="discovery.html">Function discovery &amp; CFG</a></li>
+        <li><a href="decode-lift-ir.html">Decoding, lifting &amp; IR</a></li>
+        <li><a href="ssa-values.html">SSA, values &amp; stack</a></li>
+        <li><a href="calls-abi.html">ABIs, calls &amp; callee summaries</a></li>
+        <li><a href="types-metadata.html">Types &amp; metadata</a></li>
+        <li><a href="reconstruction.html">Source reconstruction</a></li>
+        <li>
+          <a href="structuring-emission.html" aria-current="page">Structuring &amp; emission</a>
+        </li>
+        <li><a href="project-cache.html">Projects, cache &amp; execution</a></li>
+      </ol>
+      <a class="back" href="../README.md">← User documentation</a>
+    </nav>
+
+    <main>
+      <header>
+        <p class="eyebrow">Stage 09 · Emission</p>
+        <h1>Structuring &amp; emission</h1>
+        <p class="lede">
+          Turn the validated SSA graph into a printable region tree, then print that tree as C-like
+          or Python-like pseudocode while recording exactly which machine ranges, entities and
+          proofs produced every span of text.
+        </p>
+        <p class="sources">
+          Sources:
+          <a class="src" href="../../src/presentation/index.ts">src/presentation/index.ts</a>
+          <a class="src" href="../../src/presentation/model.ts">src/presentation/model.ts</a>
+          <a class="src" href="../../src/emitters/renderer.ts">src/emitters/renderer.ts</a>
+          <a class="src" href="../../src/emitters/source-control.ts"
+            >src/emitters/source-control.ts</a
+          >
+          <a class="src" href="../../src/emitters/writer.ts">src/emitters/writer.ts</a>
+          <a class="src" href="../../src/core/emission-limits.ts">src/core/emission-limits.ts</a>
+        </p>
+      </header>
+
+      <nav class="toc" aria-label="On this page">
+        <strong>On this page</strong>
+        <ol>
+          <li><a href="#position">Where this sits in the pipeline</a></li>
+          <li><a href="#model">The presentation model</a></li>
+          <li><a href="#structuring">Structuring the CFG</a></li>
+          <li><a href="#renderer">The renderer and its phases</a></li>
+          <li><a href="#layout">Planning control-flow layout</a></li>
+          <li><a href="#expressions">Expression rendering</a></li>
+          <li><a href="#declarations">Declarations and evidence-driven spellings</a></li>
+          <li><a href="#dialects">C-like, Python-like and Objective-C</a></li>
+          <li><a href="#example">A real function end to end</a></li>
+          <li><a href="#provenance">Writer, mappings, evidence and limits</a></li>
+          <li><a href="#limitations">Limitations &amp; extension points</a></li>
+        </ol>
+      </nav>
+
+      <section id="position">
+        <h2>Where this sits in the pipeline</h2>
+        <p>
+          Stage 09 has two halves that are deliberately kept apart. The first, in
+          <a class="src" href="../../src/presentation/index.ts">src/presentation/index.ts</a>, is a
+          pure graph transformation: <code>structureControlFlow</code> consumes the validated
+          <code>SSAForm</code> produced by <a href="ssa-values.html">SSA, values &amp; stack</a> and
+          returns a <code>StructuredFunction</code> whose body is a tree of blocks, sequences and
+          loops. It knows nothing about C, Python, identifiers or types.
+        </p>
+        <p>
+          The second half is the renderer in
+          <a class="src" href="../../src/emitters/renderer.ts">src/emitters/renderer.ts</a>. Its
+          constructor calls <code>reconstruct(input, context, view)</code> from
+          <a class="src" href="../../src/reconstruction/index.ts">src/reconstruction/index.ts</a> —
+          the stage described in <a href="reconstruction.html">Source reconstruction</a> — and then
+          runs its own presentation planning. <code>render()</code> walks the resulting region tree
+          and writes text through <code>Writer</code>. Both dialect entry points are thin wrappers
+          around the same function: <code>emitC</code> in
+          <a class="src" href="../../src/emitters/c/index.ts">src/emitters/c/index.ts</a> and
+          <code>emitPythonLike</code> in
+          <a class="src" href="../../src/emitters/python-like/index.ts"
+            >src/emitters/python-like/index.ts</a
+          >
+          call <code>renderSource</code> with only a different language tag and version string. As
+          the comment on <code>Renderer</code> says, “Only syntax lives here: both dialects consume
+          the same reconstructed program.”
+        </p>
+        <p>
+          The coordinator is
+          <a class="src" href="../../src/service/analysis/index.ts">src/service/analysis/index.ts</a
+          >. It recovers types, calls
+          <code>structureControlFlow(ir, context, { max_work: context.budget.work })</code>,
+          escalates a partial structuring through <code>requirePass</code>, and then calls the
+          selected emitter with
+          <code>{ function: structured.value, types, names, annotations, source }</code>. The result
+          is an <code>Emission</code>: text plus interned identity, proof and range tables, source
+          mappings, declaration span, helper explanations, local-validation records, inference
+          records and requirement proofs.
+        </p>
+
+        <figure class="diagram" id="fig-pipeline">
+          <svg viewBox="0 0 900 190" role="img" aria-labelledby="fig-pipeline-title">
+            <title id="fig-pipeline-title">
+              From SSA through structuring, reconstruction and the renderer to an emission
+            </title>
+
+            <rect class="box muted" x="10" y="20" width="160" height="58" rx="8" />
+            <text x="90" y="42" text-anchor="middle" class="title">SSAForm</text>
+            <text x="90" y="62" text-anchor="middle" class="small">blocks + phi values</text>
+
+            <path class="edge" d="M170,49 L198,49" marker-end="url(#arrow)" />
+
+            <rect class="box accent" x="200" y="20" width="200" height="58" rx="8" />
+            <text x="300" y="42" text-anchor="middle" class="title">structureControlFlow</text>
+            <text x="300" y="62" text-anchor="middle" class="small mono">
+              presentation/index.ts
+            </text>
+
+            <path class="edge accent" d="M400,49 L448,49" marker-end="url(#arrow-accent)" />
+
+            <rect class="box ok" x="450" y="20" width="190" height="58" rx="8" />
+            <text x="545" y="42" text-anchor="middle" class="title">StructuredFunction</text>
+            <text x="545" y="62" text-anchor="middle" class="small">regions + coverage</text>
+
+            <rect class="box muted" x="20" y="115" width="180" height="54" rx="8" />
+            <text x="110" y="137" text-anchor="middle" class="title">types · names · source</text>
+            <text x="110" y="157" text-anchor="middle" class="small">ABI and runtime evidence</text>
+
+            <path class="edge" d="M200,142 L223,142" marker-end="url(#arrow)" />
+
+            <rect class="box c2" x="225" y="115" width="200" height="54" rx="8" />
+            <text x="325" y="137" text-anchor="middle" class="title">EmissionInput</text>
+            <text x="325" y="157" text-anchor="middle" class="small">function + evidence</text>
+
+            <path class="edge" d="M425,142 L448,142" marker-end="url(#arrow)" />
+
+            <rect class="box accent" x="450" y="115" width="200" height="54" rx="8" />
+            <text x="550" y="137" text-anchor="middle" class="title">Renderer</text>
+            <text x="550" y="157" text-anchor="middle" class="small mono">
+              reconstruct() in ctor
+            </text>
+
+            <path class="edge accent" d="M650,142 L673,142" marker-end="url(#arrow-accent)" />
+
+            <rect class="box ok" x="675" y="115" width="180" height="54" rx="8" />
+            <text x="765" y="137" text-anchor="middle" class="title">Emission</text>
+            <text x="765" y="157" text-anchor="middle" class="small">text + mappings</text>
+
+            <path
+              class="edge dashed"
+              d="M545,78 L545,96 L325,96 L325,113"
+              marker-end="url(#arrow)"
+            />
+            <text x="435" y="90" text-anchor="middle" class="edge-label">
+              the tree is the input
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 1.</strong> Structuring is upstream of every spelling decision. The
+            renderer's constructor re-runs source reconstruction over the structured tree, so the
+            printed text, mappings and validations all describe one immutable program.
+          </figcaption>
+        </figure>
+
+        <div class="callout caveat">
+          <span class="title">Two views</span>
+          <p>
+            <code>options.view</code> selects <code>'source'</code> (the default, pretty view) or
+            <code>'checked'</code> (the unsimplified view). <code>sourceView</code> is simply
+            <code>options.view !== 'checked'</code>, and <code>planSourceControl</code> is called
+            only in the source view. The checked view prints the structured body unchanged, with
+            every reduction, helper call and explicit cast spelled out.
+          </p>
+        </div>
+      </section>
+
+      <section id="model">
+        <h2>The presentation model</h2>
+        <p>
+          <code>StructuredFunction</code> is a <code>Region</code> tree, not a list of basic blocks
+          with edges. A <code>Region</code> is one of three things: a
+          <code>BlockRegion</code> (statements plus one control), a <code>SequenceRegion</code> (an
+          ordered lexical list), or a <code>LoopRegion</code> (a header identity plus a body). Each
+          block's control is a <code>jump</code>, an <code>if</code>, a <code>switch</code>, or one
+          of the original terminal terminators (<code>return</code>, <code>indirect</code>,
+          <code>trap</code>, <code>unknown</code>). Every non-terminal edge is a
+          <code>ParallelTransfer</code>.
+        </p>
+
+        <pre><code>export interface BlockRegion extends Origin {
+  readonly kind: 'block';
+  readonly parameters: readonly Value[];
+  readonly effect_parameter: Effect;
+  readonly dominator: EntityId | null;
+  readonly register_entry: readonly RegisterBinding[];
+  readonly register_exit: readonly RegisterBinding[];
+  readonly statements: readonly Instruction[];
+  readonly control: Control;
+}
+export interface SequenceRegion {
+  readonly kind: 'sequence';
+  readonly regions: readonly Region[];
+}
+export interface LoopRegion {
+  readonly kind: 'loop';
+  readonly header: EntityId;
+  readonly body: Region;
+  readonly form?: LoopForm;
+  readonly once?: true;
+}</code></pre>
+        <p class="sources">
+          Defined in
+          <a class="src" href="../../src/presentation/model.ts">src/presentation/model.ts</a>
+          (<code>Region</code>, <code>LoopRegion</code>, <code>LoopForm</code>).
+        </p>
+
+        <p>
+          <code>ParallelTransfer</code> is the semantic centre of the model. It carries a target
+          block, a mode (<code>goto</code>, <code>next</code>, <code>break</code>,
+          <code>continue</code>), the loop identity a break/continue refers to, the edge copies as
+          destination/source pairs, and the effect transfer. The copies are simultaneous: “All
+          sources are read before any destination is written, including the effect.” This is why a
+          swap of two loop-carried values prints correctly even when it cannot be printed as two
+          sequential assignments.
+        </p>
+        <p>
+          <code>LoopForm</code> is deliberately absent from the structurer's output. The comment on
+          <code>LoopForm</code> says it is “chosen after reconstruction (never by the structurer)”.
+          Structuring produces a generic loop whose body starts at the header; the renderer's
+          <code>planLoopForms</code> may later prove that the same region can be printed as
+          <code>while</code>, <code>do_while</code>, or <code>for</code>. If no form is chosen, the
+          generic loop prints as <code>while (true)</code> with explicit transfers. A
+          <code>once</code> loop is not a loop at all: it is a block run once, printed as
+          <code>do { … } while (0)</code> in C-like output.
+        </p>
+
+        <div class="callout invariant">
+          <span class="title">Invariants the renderer relies on</span>
+          <p>
+            From the <code>structureControlFlow</code> contract: every block label is addressable,
+            including labels nested in arms; a sequence is lexical order and <em>not</em> implicit
+            fallthrough; a loop body starts at the header and repeats only on an explicit
+            <code>continue</code>; break/continue identify both their loop and exact
+            destination/copies; statements retain identity, provenance, effect tokens and boundary
+            snapshots. No untouched CFG is embedded in the output.
+          </p>
+        </div>
+
+        <dl class="terms">
+          <dt>Atom</dt>
+          <dd>
+            Structuring's intermediate unit: one region plus its owned members and a
+            <code>tail</code>
+            block whose control is the only place a successor can still be absorbed.
+          </dd>
+          <dt>Arm body</dt>
+          <dd>
+            A region owned by one <code>ControlArm</code>, entered only after that arm's transfer.
+            Its presence is what makes a test own a subtree instead of merely jumping.
+          </dd>
+          <dt>Printed copy</dt>
+          <dd>
+            An edge copy that actually appears in text after phi/variable coalescing and
+            <code>for</code>-header hoisting. <code>printedCopies</code> is the renderer's single
+            source for these.
+          </dd>
+          <dt>Silent block</dt>
+          <dd>
+            A block that prints nothing: no retained statements, no inlined result of its own, no
+            notes, no deferred stores, and no source definitions anchored at it. Many layout rules
+            require silence because they move or merge controls.
+          </dd>
+        </dl>
+      </section>
+
+      <section id="structuring">
+        <h2>Structuring the CFG</h2>
+        <p>
+          <code>structureControlFlow</code> is a recursive, budgeted SCC reduction. It takes an
+          <code>SSAForm</code>, an <code>OperationContext</code> and
+          <code>StructuringOptions { max_work?, max_depth? }</code>. <code>max_depth</code>
+          defaults to 32 and must be an integer in 1..64; anything else throws
+          <code>RangeError('Structuring depth must be 1..64')</code>. <code>max_work</code> is
+          passed to <code>AnalysisBudget</code>, whose own default is 1,000,000 work units; the
+          service supplies the operation budget instead.
+        </p>
+
+        <ol class="steps">
+          <li>
+            <strong>Index the graph.</strong> Every block, parameter, instruction, edge and edge
+            argument is charged to the budget. Predecessor lists and successors are built;
+            register-state rows are keyed by block, and <code>computeDominance</code> records every
+            block's immediate dominator, from which derived register state is read.
+          </li>
+          <li>
+            <strong>Convert edges to transfers.</strong> The local <code>transfer</code> helper maps
+            an <code>Edge</code> to a <code>ParallelTransfer</code>. It walks the current loop
+            scopes from innermost outward: an edge to a scope's header is <code>continue</code>; an
+            edge leaving a scope is <code>break</code>; everything else is <code>goto</code>. Edge
+            arguments become copies paired with the target block's parameters; the edge effect
+            becomes the effect transfer.
+          </li>
+          <li>
+            <strong>Find SCCs.</strong> The local <code>components</code> function is an iterative
+            Kosaraju traversal (the code says so explicitly: “Iterative Kosaraju avoids call-stack
+            dependence on adversarial CFG size”). Loop headers of the surrounding scopes are
+            suppressed as targets while walking, so a header backedge does not make the parent
+            component cyclic and nested loops become visible. At the depth limit, groups are
+            singleton blocks instead.
+          </li>
+          <li>
+            <strong>Build regions bottom-up.</strong> Groups are reduced in reverse order
+            (successors before owners). A group is cyclic when it has more than one member, or when
+            one member has an unsuppressed self-edge. If it is cyclic, has exactly one entry (the
+            function entry or a block with an outside predecessor), and there is depth headroom, it
+            becomes a <code>LoopRegion</code> and is recursively built with a new scope. Otherwise
+            every member becomes a leaf <code>BlockRegion</code>.
+          </li>
+          <li>
+            <strong>Absorb unique-entry successors.</strong> The fixpoint loop inspects each atom's
+            tail control. Only a bodyless <code>goto</code> arm is a candidate. The target atom must
+            exist, must not be the current atom, must begin exactly at the transfer target, and must
+            not already contain the current region's entry. The target must have exactly one
+            incoming edge from outside its own members. Under those conditions a jump becomes a
+            <code>next</code> transfer and concatenates a sequence; an <code>if</code> or
+            <code>switch</code> arm owns the target region as its body. The pass repeats until
+            nothing changes.
+          </li>
+          <li>
+            <strong>Order and record coverage.</strong> The entry atom's region is emitted first,
+            then the remaining atoms in map order, joined as a sequence. <code>coverage</code>
+            records every original block, its statement ids and its terminator id, including blocks
+            that were unreachable from the entry.
+          </li>
+        </ol>
+
+        <pre><code>const cyclic =
+  group.length &gt; 1 ||
+  edges.get(group[0]!)!.some((edge) =&gt; {
+    return edge.target === group[0] &amp;&amp; !scopes.some((scope) =&gt; scope.header === edge.target);
+  });
+if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
+  const header = entries.values().next().value!;
+  const body = build(members, header, [...scopes, { header, members }], depth + 2);
+  const atom: Atom = {
+    entry: header, members, region: { kind: 'loop', header, body }, tail: undefined,
+    depth: regionDepth(body) + 1,
+  };
+  atoms.set(header, atom);
+  for (const id of group) owner.set(id, atom);
+} else
+  for (const id of group) {
+    const block = leaf(id, scopes), atom: Atom = { … region: block, tail: block … };
+    atoms.set(id, atom); owner.set(id, atom);
+  }</code></pre>
+        <p class="sources">
+          Abridged from <code>build</code> in
+          <a class="src" href="../../src/presentation/index.ts">src/presentation/index.ts</a>.
+        </p>
+
+        <p>
+          The absorption test is intentionally conservative. It never absorbs an arm that already
+          owns a body, and it never absorbs a <code>break</code> or <code>continue</code>: those
+          transfers carry loop identity and exact destinations that a lexical concatenation would
+          lose. It also enforces a depth estimate before accepting a merge:
+          <code>regionDepth</code> counts loop bodies, sequence nesting and owned arm bodies, and
+          the candidate is skipped when <code>depth + nextDepth &gt;= maxDepth</code>. A deeper
+          shape therefore keeps labelled transfers rather than failing.
+        </p>
+
+        <div class="callout refusal">
+          <span class="title">Refusal and partial states</span>
+          <p>
+            Work exhaustion and cancellation are transactional. The outer <code>catch</code> calls
+            <code>budget.result(null, error)</code>, yielding
+            <code>{ state: 'partial', value: null, diagnostics, work }</code>; it never returns a
+            truncated tree. <code>AnalysisBudget.result</code> rethrows any error that is not an
+            <code>OperationError</code> with code <code>resource_limit</code> or
+            <code>cancelled</code>. The service's <code>requirePass</code> converts such a partial
+            result into an <code>OperationError</code> (and any other partial pass into
+            <code>unavailable_semantics</code>), so no partial pseudocode is published from the
+            native pipeline.
+          </p>
+        </div>
+
+        <figure class="diagram" id="fig-cfg">
+          <svg viewBox="0 0 900 470" role="img" aria-labelledby="fig-cfg-tree-title">
+            <title id="fig-cfg-tree-title">
+              Real CFG of fixture_loop and the structured region tree it becomes
+            </title>
+
+            <rect class="group" x="10" y="10" width="440" height="450" rx="10" />
+            <text x="230" y="32" text-anchor="middle" class="lane">real CFG · _fixture_loop</text>
+
+            <rect class="box muted" x="30" y="50" width="160" height="54" rx="8" />
+            <text x="110" y="72" text-anchor="middle" class="mono">0x100000594</text>
+            <text x="110" y="91" text-anchor="middle" class="small">if (count == 0)</text>
+
+            <rect class="box warn" x="250" y="50" width="160" height="54" rx="8" />
+            <text x="330" y="72" text-anchor="middle" class="mono">0x1000005b8</text>
+            <text x="330" y="91" text-anchor="middle" class="small">return 0</text>
+
+            <rect class="box" x="30" y="140" width="160" height="54" rx="8" />
+            <text x="110" y="162" text-anchor="middle" class="mono">0x100000598</text>
+            <text x="110" y="181" text-anchor="middle" class="small">init copies</text>
+
+            <rect class="box accent" x="30" y="240" width="160" height="70" rx="8" />
+            <text x="110" y="263" text-anchor="middle" class="mono">0x1000005a4</text>
+            <text x="110" y="282" text-anchor="middle" class="small">loop body</text>
+            <text x="110" y="299" text-anchor="middle" class="small">+ test</text>
+
+            <rect class="box ok" x="250" y="250" width="160" height="54" rx="8" />
+            <text x="330" y="272" text-anchor="middle" class="mono">0x1000005b4</text>
+            <text x="330" y="291" text-anchor="middle" class="small">return accumulator</text>
+
+            <path class="edge" d="M190,72 L248,72" marker-end="url(#arrow)" />
+            <text x="219" y="64" text-anchor="middle" class="edge-label">zero</text>
+
+            <path class="edge" d="M110,104 L110,138" marker-end="url(#arrow)" />
+            <text x="110" y="126" text-anchor="middle" class="edge-label">fallthrough</text>
+
+            <path class="edge" d="M110,194 L110,238" marker-end="url(#arrow)" />
+
+            <path
+              class="edge accent"
+              d="M30,265 L18,265 L18,230 L28,230"
+              marker-end="url(#arrow-accent)"
+            />
+            <text x="72" y="230" text-anchor="middle" class="edge-label">not 1</text>
+
+            <path class="edge" d="M190,288 L248,278" marker-end="url(#arrow)" />
+            <text x="219" y="312" text-anchor="middle" class="edge-label">remaining == 1</text>
+
+            <text x="30" y="350" class="small mono">function VA 0x100000594</text>
+            <text x="30" y="370" class="small">5 blocks · 5 edges · 11 instructions</text>
+            <text x="30" y="392" class="small">mappings cite file offsets 0x594…0x5bc</text>
+            <text x="30" y="412" class="small">0x5a4 branches both to itself and to 0x5b4</text>
+
+            <rect class="group" x="470" y="10" width="420" height="450" rx="10" />
+            <text x="680" y="32" text-anchor="middle" class="lane">structured tree · sequence</text>
+
+            <rect class="box accent" x="490" y="64" width="380" height="54" rx="8" />
+            <text x="510" y="86" class="mono">block 0x100000594</text>
+            <text x="510" y="105" class="small">if (count == 0) → 0x5b8 : 0x598</text>
+
+            <rect class="box warn" x="500" y="128" width="150" height="44" rx="8" />
+            <text x="575" y="147" text-anchor="middle" class="mono">block 0x5b8</text>
+            <text x="575" y="164" text-anchor="middle" class="small">return 0</text>
+
+            <rect class="box" x="500" y="182" width="360" height="48" rx="8" />
+            <text x="515" y="201" class="small">when_false: sequence</text>
+            <text x="515" y="219" class="small mono">[block 0x598, loop 0x5a4]</text>
+
+            <rect class="box" x="520" y="240" width="320" height="44" rx="8" />
+            <text x="535" y="258" class="mono">block 0x100000598</text>
+            <text x="535" y="274" class="small">accumulator = 0; remaining = count</text>
+
+            <rect class="box accent" x="520" y="294" width="320" height="100" rx="8" />
+            <text x="535" y="313" class="mono">loop header 0x1000005a4</text>
+            <text x="535" y="331" class="small">body: block 0x1000005a4</text>
+            <text x="535" y="349" class="small">if (remaining == 1) break</text>
+            <text x="535" y="367" class="small">else continue 0x5a4</text>
+
+            <rect class="box ok" x="520" y="406" width="260" height="44" rx="8" />
+            <text x="535" y="424" class="mono">block 0x1000005b4</text>
+            <text x="535" y="440" class="small">return accumulator</text>
+
+            <path class="edge" d="M540,118 L540,126" marker-end="url(#arrow)" />
+            <path class="edge" d="M850,118 L850,180" marker-end="url(#arrow)" />
+            <path class="edge" d="M560,230 L560,238" marker-end="url(#arrow)" />
+            <path class="edge accent" d="M560,284 L560,292" marker-end="url(#arrow-accent)" />
+            <path class="edge dashed" d="M680,394 L680,404" marker-end="url(#arrow)" />
+            <text x="688" y="402" class="edge-label">break</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 2.</strong> A real CFG, read from the fixture with
+            <code>discoverFunctions</code>, and the region tree that
+            <code>structureControlFlow</code> builds from it. Notice that the loop is the
+            self-branching block 0x5a4, that the initialisation block 0x598 is a sibling inside the
+            false arm, and that the loop's exit block 0x5b4 is a sibling after the <code>if</code> —
+            which is exactly why its <code>break</code> is lexically valid.
+          </figcaption>
+        </figure>
+
+        <p>
+          Figure 2 also explains a detail that can look surprising: there is no
+          <code>else</code> in the emitted text even though the tree has a false arm. The arm's body
+          ends in a loop that can fall through, while the true arm returns.
+          <code>sourceIf</code> recognises an arm that cannot fall through (<code>terminates</code>)
+          and prints the other arm at the same indentation after the closing brace. The tree still
+          owns it; the syntax merely omits the redundant <code>else</code>.
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>CFG block</th>
+              <th>Tree role</th>
+              <th>Why</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>0x100000594</code></td>
+              <td><code>BlockRegion</code>, <code>if</code></td>
+              <td>Two successors, one of which is a terminal return owned as the true arm.</td>
+            </tr>
+            <tr>
+              <td><code>0x100000598</code></td>
+              <td>Block in the false-arm sequence</td>
+              <td>Unique external entry, jump into the loop; absorbed as <code>next</code>.</td>
+            </tr>
+            <tr>
+              <td><code>0x1000005a4</code></td>
+              <td><code>LoopRegion</code> header and body</td>
+              <td>Single block with an unsuppressed self-edge and exactly one entry.</td>
+            </tr>
+            <tr>
+              <td><code>0x1000005b4</code></td>
+              <td>Sibling block after the <code>if</code></td>
+              <td>
+                Reached by the loop's break transfer; it is the lexical follow of the loop inside
+                the false arm.
+              </td>
+            </tr>
+            <tr>
+              <td><code>0x1000005b8</code></td>
+              <td>True-arm body</td>
+              <td>Return block with one outside predecessor; owned by the arm.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="renderer">
+        <h2>The renderer and its phases</h2>
+        <p>
+          <code
+            >new Renderer(input, options, context, language, version, inlineCalls = true, metadata =
+            'full')</code
+          >
+          is ordered in four groups.
+        </p>
+
+        <ol class="steps">
+          <li>
+            <strong>Reconstruct.</strong> <code>reconstruct(input, context, view)</code> validates
+            the structured tree, computes liveness and use counts, rewrites pure expressions,
+            projects ABI boundaries and builds the <code>Reconstruction</code> maps: blocks, values,
+            expressions, inline set, live set, retained statements, transfers, origins, parameters,
+            calls, returns, tails, physical inputs/exits and memory views.
+          </li>
+          <li>
+            <strong>Index and name.</strong> The constructor builds <code>origins</code>,
+            <code>statements</code> and <code>controls</code>; it rejects duplicate structured
+            statement or control identities with <code>OperationError('invalid_input')</code>.
+            <code>planSourceNames</code> assigns source-role names and distinguishes loop-carried
+            header phis from initial values. Globals are planned with <code>planGlobals</code>,
+            characters with <code>characterEvidence</code>, and C integer-storage presentation is
+            checked through the local validator.
+          </li>
+          <li>
+            <strong>Plan the source view.</strong> Only when <code>sourceView</code> is true,
+            <code>planSourceControl()</code> runs. It is the ordered pipeline described in the next
+            section; its output is a new <code>body: Region</code> plus maps such as
+            <code>variables</code>, <code>loopTests</code>, <code>flagTests</code>,
+            <code>exitFlags</code> and <code>actions</code>.
+          </li>
+          <li>
+            <strong>Prepare printing.</strong> <code>findLabels</code> decides the lexical action of
+            every transfer occurrence and records which targets need a label.
+            <code>validateReconstruction</code> checks the program invariants before a byte is
+            written.
+          </li>
+        </ol>
+
+        <p>
+          <code>render()</code> itself writes in a fixed order: the
+          <code>reconstruction_model</code> helper explanation; the dialect/source comment; FP
+          requirement comments or the compact requirement note; the signature and parameter
+          mappings; stack-frame and local declarations; the body via
+          <code>region(this.body, 1)</code>; the closing brace or Python suite check; then deferred
+          insertions. The insertions matter because several preludes depend on the finished body:
+          structure bodies, global declarations, function-pointer typedefs, C scalar-support macros
+          and the ABI-scratch note are inserted at recorded offsets with
+          <code>writer.insertLines</code>, which shifts every mapping at or after the boundary.
+        </p>
+
+        <figure class="diagram" id="fig-phases">
+          <svg viewBox="0 0 900 245" role="img" aria-labelledby="fig-phases-title">
+            <title id="fig-phases-title">
+              Renderer constructor and render phase order, including the snaking second row
+            </title>
+
+            <rect class="box accent" x="10" y="50" width="190" height="64" rx="8" />
+            <text x="105" y="72" text-anchor="middle" class="title">reconstruct()</text>
+            <text x="105" y="91" text-anchor="middle" class="small">checked or source view</text>
+            <text x="105" y="106" text-anchor="middle" class="small mono">in the constructor</text>
+
+            <path class="edge accent" d="M200,82 L238,82" marker-end="url(#arrow-accent)" />
+
+            <rect class="box" x="240" y="50" width="190" height="64" rx="8" />
+            <text x="335" y="72" text-anchor="middle" class="title">index + names</text>
+            <text x="335" y="91" text-anchor="middle" class="small">origins, statements</text>
+            <text x="335" y="106" text-anchor="middle" class="small">globals, characters</text>
+
+            <path class="edge" d="M430,82 L468,82" marker-end="url(#arrow)" />
+
+            <rect class="box accent" x="470" y="50" width="190" height="64" rx="8" />
+            <text x="565" y="72" text-anchor="middle" class="title">planSourceControl()</text>
+            <text x="565" y="91" text-anchor="middle" class="small">14 ordered passes</text>
+            <text x="565" y="106" text-anchor="middle" class="small mono">source view only</text>
+
+            <path class="edge" d="M660,82 L698,82" marker-end="url(#arrow)" />
+
+            <rect class="box" x="700" y="50" width="190" height="64" rx="8" />
+            <text x="795" y="72" text-anchor="middle" class="title">findLabels</text>
+            <text x="795" y="91" text-anchor="middle" class="small">transfer actions</text>
+            <text x="795" y="106" text-anchor="middle" class="small">label targets</text>
+
+            <path class="edge" d="M795,114 L795,138 L795,148" marker-end="url(#arrow)" />
+
+            <rect class="box" x="700" y="150" width="190" height="64" rx="8" />
+            <text x="795" y="172" text-anchor="middle" class="title">render prelude</text>
+            <text x="795" y="191" text-anchor="middle" class="small">helpers, comments</text>
+            <text x="795" y="206" text-anchor="middle" class="small">signature + locals</text>
+
+            <path class="edge" d="M700,182 L662,182" marker-end="url(#arrow)" />
+
+            <rect class="box ok" x="470" y="150" width="190" height="64" rx="8" />
+            <text x="565" y="172" text-anchor="middle" class="title">region(body)</text>
+            <text x="565" y="191" text-anchor="middle" class="small">print statements,</text>
+            <text x="565" y="206" text-anchor="middle" class="small">controls and copies</text>
+
+            <path class="edge" d="M470,182 L432,182" marker-end="url(#arrow)" />
+
+            <rect class="box" x="240" y="150" width="190" height="64" rx="8" />
+            <text x="335" y="172" text-anchor="middle" class="title">deferred inserts</text>
+            <text x="335" y="191" text-anchor="middle" class="small">structs, globals,</text>
+            <text x="335" y="206" text-anchor="middle" class="small">tables, C support</text>
+
+            <path class="edge" d="M240,182 L202,182" marker-end="url(#arrow)" />
+
+            <rect class="box" x="10" y="150" width="190" height="64" rx="8" />
+            <text x="105" y="172" text-anchor="middle" class="title">validate + record</text>
+            <text x="105" y="191" text-anchor="middle" class="small">edges, coverage,</text>
+            <text x="105" y="206" text-anchor="middle" class="small">mappings, proofs</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 3.</strong> The two halves of a render. Planning happens before any text
+            exists; printing walks the planned tree; validation and provenance collection happen
+            after the text is complete, when every emitted edge and span can be checked against the
+            reconstruction.
+          </figcaption>
+        </figure>
+
+        <h3>Call inlining and the retry</h3>
+        <p>
+          A call with exactly one live result that is read once by the next printed statement (or by
+          the return) is printed as an operand of that reader, at the call's original position. This
+          is not a syntax trick: <code>admitInlinedCall</code> also requires that the printed result
+          type is the result variable's type. The call is <em>held</em> when its block is reached;
+          the text is not emitted yet. When the reader is about to print,
+          <code>reader()</code> checks that no code line was printed in between:
+        </p>
+        <pre><code>private reader(print: () =&gt; void): void {
+  const start = this.writer.offset,
+    held = [...this.pendingCalls.keys()].map((id) =&gt; this.inlinedCalls.get(id)!);
+  if (held.length &amp;&amp; this.writer.codeLines !== this.heldLines) throw new CallInliningRetry();
+  print();
+  …
+}</code></pre>
+        <p>
+          If the assumption was wrong, the exception unwinds the whole render and
+          <code>renderSource</code> retries with call inlining disabled. The outer fallback handles
+          a different limit: if provenance metadata exceeds its bound,
+          <code>MetadataLimitError</code> is thrown, the same text is rendered in
+          <code>metadata: 'omitted'</code> mode, and the emission records the omission.
+        </p>
+
+        <pre><code>export function renderSource(
+  input: EmissionInput, options: ConstructorParameters&lt;typeof Renderer&gt;[1],
+  context: OperationContext, language: 'c-like' | 'python-like', version: string,
+): EmissionResult {
+  const attempt = (metadata: 'full' | 'omitted'): EmissionResult =&gt; {
+    try {
+      return new Renderer(input, options, context, language, version, true, metadata).render();
+    } catch (error) {
+      if (!(error instanceof CallInliningRetry)) throw error;
+      return new Renderer(input, options, context, language, version, false, metadata).render();
+    }
+  };
+  try {
+    return attempt('full');
+  } catch (error) {
+    if (!(error instanceof MetadataLimitError)) throw error;
+    return attempt('omitted');
+  }
+}</code></pre>
+        <p class="sources">
+          <a class="src" href="../../src/emitters/renderer.ts">src/emitters/renderer.ts</a>
+          (<code>renderSource</code>, <code>CallInliningRetry</code>, <code>Renderer.reader</code>).
+        </p>
+
+        <div class="callout invariant">
+          <span class="title">Text is validated, not trusted</span>
+          <p>
+            Before <code>render()</code> returns, <code>validateRenderedTransfers</code> re-derives
+            every emitted edge from the printed body, and <code>validateEmittedControl</code> checks
+            loop/switch scopes, break/continue targets and exit guards. Every structured coverage
+            entry must have been mapped; an unmapped block, control or statement throws
+            <code>invalid_input</code>. A control-validation record with status rejected is itself
+            rejected through <code>rejectTranslation</code>.
+          </p>
+        </div>
+      </section>
+
+      <section id="layout">
+        <h2>Planning control-flow layout</h2>
+        <p>
+          Source layout is where the printed program is allowed to become more readable than the
+          literal tree, but never more permissive. Every rewrite goes through
+          <code>LocalValidationSession.presentation(rule, subject, scope, subjectIds?)</code>. It
+          records a <code>presentation</code> validation record and returns false when its record
+          bound is exhausted; the caller then keeps the explicit form. The pass order in
+          <code>planSourceControl</code> is:
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Pass</th>
+              <th>Effect on the printed tree</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>1</td>
+              <td><code>indexedDataAccesses</code></td>
+              <td>
+                Recognises exact table/index address arithmetic and supplies alternative index
+                values to liveness and inlining.
+              </td>
+            </tr>
+            <tr>
+              <td>2</td>
+              <td><code>planSourceInlining</code></td>
+              <td>Chooses single-use expression, load, copy and call expansion sites.</td>
+            </tr>
+            <tr>
+              <td>3</td>
+              <td><code>chooseLocalTypes</code></td>
+              <td>
+                Chooses pointer types for connected local sets from definition and use evidence.
+              </td>
+            </tr>
+            <tr>
+              <td>4</td>
+              <td><code>new VariableLiveness</code></td>
+              <td>Solves printed-variable liveness over the reconstruction CFG.</td>
+            </tr>
+            <tr>
+              <td>5</td>
+              <td><code>coalescePhiCopies</code></td>
+              <td>
+                Merges non-interfering edge-copy values and widening assignments into one printed
+                variable.
+              </td>
+            </tr>
+            <tr>
+              <td>6</td>
+              <td><code>coalesceValues</code></td>
+              <td>
+                Merges in-place updates (<code>y = f(x)</code> with <code>x</code> dead) into
+                <code>x = f(x)</code>.
+              </td>
+            </tr>
+            <tr>
+              <td>7</td>
+              <td><code>foldSwitchGuards</code></td>
+              <td>Prints a proven range guard and the switch it alone enters as one switch.</td>
+            </tr>
+            <tr>
+              <td>8</td>
+              <td><code>planLayout</code></td>
+              <td>
+                Orders siblings, duplicates bounded tails, places terminal blocks, merges loop
+                exits, forces goto-path tails.
+              </td>
+            </tr>
+            <tr>
+              <td>9</td>
+              <td><code>planFlagTests</code></td>
+              <td>
+                Reconstructs <code>&amp;&amp;</code>/<code>||</code> chains lowered through a
+                promoted flag local.
+              </td>
+            </tr>
+            <tr>
+              <td>10</td>
+              <td><code>planLoopForms</code></td>
+              <td>
+                Chooses <code>for</code>, <code>while</code> or <code>do-while</code> where side
+                conditions hold.
+              </td>
+            </tr>
+            <tr>
+              <td>11</td>
+              <td><code>planSharedArms</code></td>
+              <td>
+                Prints a short-circuit test whose operands share one arm as <code>if/else</code>.
+              </td>
+            </tr>
+            <tr>
+              <td>12</td>
+              <td><code>planBreakableBlocks</code></td>
+              <td>
+                Wraps a forward-goto range in a <code>do { } while (0)</code> block when it removes
+                gotos.
+              </td>
+            </tr>
+            <tr>
+              <td>13</td>
+              <td>loop-target normalisation</td>
+              <td>
+                Re-derives break/continue by lexical scope instead of trusting structurer
+                annotations.
+              </td>
+            </tr>
+            <tr>
+              <td>14</td>
+              <td><code>planLoopExits</code></td>
+              <td>Routes multi-level exits through one boolean per target loop.</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="sources">
+          Passes and conditions live in
+          <a class="src" href="../../src/emitters/source-control.ts"
+            >src/emitters/source-control.ts</a
+          >
+          (<code>planLayout</code>, <code>planLoopForms</code>, <code>planLoopExits</code>,
+          <code>coalescePhiCopies</code>, <code>VariableLiveness</code>).
+        </p>
+
+        <h3>Lexical transfer actions</h3>
+        <p>
+          <code
+            >transferAction(transfer, nesting, destination, language, sourceView, sourceProgram,
+            normalizeLoopTargets)</code
+          >
+          answers one question: does this edge print a <code>goto</code>, a <code>break</code>, a
+          <code>continue</code>, or nothing at all? In the source view, any transfer whose target is
+          already the lexical destination is <code>fallthrough</code>. With normalisation, a
+          transfer to the nearest enclosing loop's header is <code>continue</code>, and a transfer
+          to that loop's follow is <code>break</code> — but only when the follow is actually the
+          loop's lexical successor and, for C, only when no switch intervenes. The renderer computes
+          <code>normalizeLoopTargets</code> by comparing both derivations over every transfer; if
+          any differ, the normalisation is recorded as a presentation rule. If its record cannot be
+          kept, the structurer's annotations win.
+        </p>
+        <p>
+          <code>visitTransfers</code> supplies the lexical destination and nesting. It treats a
+          sequence as successive lexical entries, a loop body as falling into the loop header, and
+          an owned arm body as falling into the arm's own body (or the shared-arm body for a
+          <code>joins</code> operand). <code>gotoOccurrences</code> is just this walk filtered to
+          actions equal to <code>goto</code>.
+        </p>
+
+        <h3>Layout: ordering, tails and exits</h3>
+        <p>
+          <code>planLayout</code> is the largest layout pass. Its comments number the steps; the
+          important conditions are:
+        </p>
+        <ul>
+          <li>
+            <strong>Dependency ordering.</strong> Acyclic sibling regions are topologically ordered
+            by their outgoing targets, with a loop header backedge ignored (the enclosing loop
+            performs it). A successor whose external incoming edges all belong to one owned region
+            is moved into the smallest region containing all those edges, after any containing loop.
+            Cycles are not reordered; they retain labels. Newly ready continuations are preferred,
+            so a loop's sole exit lands immediately after it.
+          </li>
+          <li>
+            <strong>Exit merging.</strong> <code>joinExits</code> chooses the exit reached by most
+            edges of a loop as the loop's lexical successor, so those edges become breaks. Every
+            other exit must either be a duplicable tail or a terminal/jump block entered by one loop
+            edge; that block is embedded at the edge (moved onto the break path). The pass then
+            re-walks the result and requires every edge from the loop or moved blocks to the shared
+            exit to print as <code>break</code>; otherwise the candidate is rejected.
+          </li>
+          <li>
+            <strong>Tail duplication.</strong> A tail is at most four blocks, each at most four
+            assignments/loads/stores/calls, with at most four printed copies per edge, ending in a
+            return, indirect or trap terminator. A total budget of 128 copied blocks bounds the
+            expansion (<code>budget = 128</code>). A labelled edge into such a tail ends in an owned
+            copy of the tail instead of a label. After duplication, any tail home no longer
+            reachable lexically is pruned; its copies remain.
+          </li>
+          <li>
+            <strong>Terminal placement.</strong> A terminal block whose only CFG edge is a labelled
+            edge moves onto that edge. A terminal block entered by one loop edge and no other
+            predecessor may move right after that loop when every other exit is a duplicable tail.
+          </li>
+          <li>
+            <strong>Forced tails.</strong> If the only code lexically between a goto and its target
+            is tail homes, those tails are copied onto every incoming edge, fallthroughs included,
+            so the goto becomes a fallthrough. This is an optional search: it charges at most
+            <code>1/16</code> of the remaining work (<code>optionalWork(context, 16)</code>), its
+            total copy cost must be at most 64, and the rewrite is kept only if the number of gotos
+            actually falls.
+          </li>
+        </ul>
+        <p>
+          Optional searches stop at a fixed share of the remaining work, so they cannot starve the
+          emission: <code>planBreakableBlocks</code> and <code>planSharedArms</code> use share 16;
+          <code>coalesceValues</code> uses <code>remainingWork / 8</code>.
+        </p>
+
+        <h3>Loop forms</h3>
+        <p>
+          <code>planLoopForms</code> only assigns a <code>LoopForm</code>; the region tree keeps
+          every transfer. A form is refused whenever its syntax would move an effect across an
+          observable boundary. The exact gates are:
+        </p>
+        <ul>
+          <li>
+            The loop must have a known lexical follow and no entry edge that prints as a
+            <code>goto</code>.
+          </li>
+          <li>
+            <strong>while.</strong> The header block must print nothing. Its <code>if</code> must be
+            an ordinary condition (<code>facts.plain</code>) and one arm must be a copy-free exit to
+            the follow. Additional tests may chain while each stage is the leading lexical region,
+            single-entry, silent and copy-free on exit, with a copy-free staying arm, and the next
+            lexical region begins at the staying transfer's target. If the chain has more than one
+            test, the whole chain prints as one <code>while (a &amp;&amp; b &amp;&amp; …)</code>.
+          </li>
+          <li>
+            <strong>for.</strong> In C-like output only, a <code>while</code>-shaped header may
+            become <code>for</code> when exactly one external entry edge falls into the loop, the
+            body's lexical end is the only repeat edge, and <code>facts.induction</code> proves that
+            the entry and repeat copies only initialize and step induction variables (<code
+              >x = x ± c</code
+            >) that nothing else inside the loop writes, with the test reading one of them. A
+            bottom-tested <code>for</code> additionally requires the first test to be implied on
+            entry by an enclosing <code>if</code> guard.
+          </li>
+          <li>
+            <strong>do-while.</strong> C-like only. The lexically last block must end in an
+            <code>if</code> whose repeat arm is the only <code>continue</code> to the header, and
+            the other arm must be the copy-free exit. Every other entry must fall through from
+            outside. The repeat copies' written variables must not be live at the exit, must not be
+            read by the exit copies, and if the test reads them, <code>restateTest</code> must prove
+            an exact restatement over the pre-copy values.
+          </li>
+        </ul>
+
+        <figure class="diagram" id="fig-loop-form">
+          <svg viewBox="0 0 900 360" role="img" aria-labelledby="fig-loop-form-title">
+            <title id="fig-loop-form-title">
+              Loop form choice: a generic loop for fixture_loop and a recovered for loop for
+              fixture_variadic
+            </title>
+
+            <text x="450" y="22" text-anchor="middle" class="lane">
+              planLoopForms.choose(): same tree, different provable syntax
+            </text>
+
+            <rect class="group" x="10" y="40" width="430" height="300" rx="10" />
+            <text x="225" y="62" text-anchor="middle" class="title">fallback: while (true)</text>
+            <text x="30" y="88" class="mono">while (true) {</text>
+            <text x="46" y="108" class="mono">accumulator = *address + accumulator;</text>
+            <text x="46" y="128" class="mono">if (remaining == 1) {</text>
+            <text x="62" y="148" class="mono">break;</text>
+            <text x="46" y="168" class="mono">}</text>
+            <text x="46" y="188" class="mono">address = address + 1;</text>
+            <text x="46" y="208" class="mono">remaining = (uint32_t)(remaining - 1);</text>
+            <text x="30" y="228" class="mono">}</text>
+            <text x="30" y="258" class="small">header 0x5a4 prints before its test,</text>
+            <text x="30" y="276" class="small">so while (cond) is refused;</text>
+            <text x="30" y="294" class="small">the bottom-test form's remaining gates</text>
+            <text x="30" y="312" class="small">(repeat edge, dead copies, restated</text>
+            <text x="30" y="330" class="small">test) are not all met either.</text>
+
+            <rect class="group" x="460" y="40" width="430" height="300" rx="10" />
+            <text x="675" y="62" text-anchor="middle" class="title">accepted: for</text>
+            <text x="480" y="88" class="mono">for (remaining = count;</text>
+            <text x="501" y="108" class="mono">remaining != 0;</text>
+            <text x="501" y="128" class="mono">remaining = remaining - 1) {</text>
+            <text x="496" y="148" class="mono">…</text>
+            <text x="480" y="168" class="mono">}</text>
+            <text x="480" y="200" class="small">One external entry edge falls into the loop;</text>
+            <text x="480" y="218" class="small">the lexical end is the only repeat edge;</text>
+            <text x="480" y="236" class="small">entry writes remaining = count, the step</text>
+            <text x="480" y="254" class="small">writes remaining = remaining - 1, and</text>
+            <text x="480" y="272" class="small">the test reads remaining: induction.</text>
+            <text x="480" y="304" class="small mono">_fixture_variadic</text>
+            <text x="30" y="246" class="small mono">_fixture_loop</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 4.</strong> Real output from two fixtures. The generic loop is not a
+            failure to recognise a loop; it is the only form whose semantics the planner can prove
+            for this layout. In <code>fixture_variadic</code> the entry and step are pure induction
+            updates, so the same machinery prints <code>for</code>.
+          </figcaption>
+        </figure>
+
+        <h3>Breakable blocks, shared arms and switch guards</h3>
+        <p>
+          <code>planBreakableBlocks</code> attacks forward gotos inside one enclosing statement
+          list. For a goto to a later sibling, it wraps the elements from the goto's own index up to
+          (not including) the target in a <code>once</code> loop. It refuses any wrap whose head is
+          already a scope identity (an exit-flag or guard header) or whose body can re-enter the
+          head. The candidate is kept only if the total number of printed gotos decreases; an edge
+          that would newly cross the wrap to an outer loop counts as one. Up to 32 attempts are
+          made, under the shared optional-work allowance.
+        </p>
+        <p>
+          <code>planSharedArms</code> handles the shape
+          <code>if (a &amp;&amp; b) { F } X</code> where every operand's leaving edge reaches
+          <code>X</code>, <code>X</code> is entered by those edges only, and <code>F</code> leaves
+          for the statement after <code>X</code>. Operands must be copy-free tests that the
+          condition can print (silent, no flags, no requirement predicates, no anchored
+          notes/definitions), with at most copy-free silent jumps between them. The chain must
+          contain at least two members and the target's incoming count must equal the number of
+          leaving arms. The rewrite marks the head's arm <code>shared</code> and the other operands'
+          arms <code>joins</code>; the renderer then prints one <code>if (…)</code> with an
+          <code>else</code> for <code>X</code> (form <code>all</code>) or swaps the arms (form
+          <code>any</code>). No statement, copy or effect moves.
+        </p>
+        <p>
+          <code>foldSwitchGuards</code> is narrower than it looks. A guard <code>if</code> folds
+          into the switch it enters only when the switch's
+          <code>jump_table.exact_guard_instruction</code> names an instruction that the guard's
+          provenance contains; the entering arm is copy-free and targets the switch block exactly;
+          the switch block prints nothing and is otherwise eligible; the switch has no
+          <code>otherwise</code> body; and the guard's other arm goes to the switch's own
+          <code>otherwise</code> target. The switch then prints in the guard's place with that other
+          arm as its <code>default</code>. This is a proof-carrying rewrite, not a heuristic range
+          guess.
+        </p>
+
+        <h3>Phi copies and variable liveness</h3>
+        <p>
+          <code>VariableLiveness</code> works on the values that will actually be printed as
+          variables. It indexes live values that are not inline-expanded, not single-use calls and
+          not stack-address values, plus every formal. Its bit-set summary per block is built from
+          ordered <code>events</code>: uses before definitions, definitions as events, and reads
+          from control conditions, returns, physical exits, tail boundaries and edge copies.
+          Liveness is solved by a backward fixed point over successors, removing a successor's bound
+          parameters at the edge. It is monotone over a finite lattice; if it needs more than
+          <code>blocks.length + 2</code> rounds it throws
+          <code>Error('Liveness did not converge')</code>. The analysis marks itself incomplete when
+          there are more than 4096 values or blocks, and coalescing then returns nothing.
+        </p>
+        <p><code>coalescePhiCopies</code> builds an interference graph:</p>
+        <ol class="steps">
+          <li>
+            Candidate pairs come from every reconstructed transfer's copies plus the renderer's
+            widening assignments. Both endpoints must be indexed, compatible, and the source must
+            not be an inline value.
+          </li>
+          <li>
+            Each block is scanned backwards from its exit-live set. A definition kills its
+            destination, then conflicts it with every other value in the same definition event and
+            with every candidate still live. An exception is an equal-value assignment (<code
+              >y = x</code
+            >
+            where the source and destination hold the same value at that definition).
+          </li>
+          <li>
+            Block parameters and formals are bound simultaneously on entry, so they conflict with
+            each other and with values live at entry.
+          </li>
+          <li>
+            Candidate classes are joined greedily in pair order. A join is accepted only when no
+            member of one class interferes with any member of the other and every cross pair is
+            <code>compatible</code>. The representative is a formal if the class has one; otherwise
+            the earliest widest declaration.
+          </li>
+        </ol>
+        <p>
+          <code>compatible</code> in the renderer compares storage width and type identity, plus
+          source role names: machine storage type must match, type ids and printed spellings must
+          match, and any supplied name must agree. Pointer formals can match if the spellings match
+          after dropping a top-level <code>const</code>. If the classes merge, the renderer declares
+          the representative once and prints every member under it. The result is real: the checked
+          view of <code>_fixture_loop</code> has separate <code>accumulator</code> and
+          <code>accumulator_1</code> values and explicit copies; the source view prints one
+          <code>accumulator</code>.
+        </p>
+
+        <figure class="diagram" id="fig-coalesce">
+          <svg viewBox="0 0 900 330" role="img" aria-labelledby="fig-coalesce-title">
+            <title id="fig-coalesce-title">
+              Before and after single-use inlining and phi-copy coalescing for fixture_loop
+            </title>
+
+            <rect class="group" x="10" y="10" width="410" height="310" rx="10" />
+            <text x="220" y="34" text-anchor="middle" class="lane">checked view · SSA names</text>
+
+            <rect class="box muted" x="30" y="52" width="380" height="38" rx="6" />
+            <text x="42" y="76" class="mono">element = load(address_1)</text>
+            <rect class="box muted" x="30" y="100" width="380" height="38" rx="6" />
+            <text x="42" y="124" class="mono">accumulator_1 = element + accumulator</text>
+            <rect class="box muted" x="30" y="148" width="380" height="38" rx="6" />
+            <text x="42" y="172" class="mono">if (remaining != 1) {</text>
+            <rect class="box muted" x="30" y="196" width="380" height="38" rx="6" />
+            <text x="42" y="220" class="mono">accumulator = accumulator_1;</text>
+            <rect class="box muted" x="30" y="244" width="380" height="38" rx="6" />
+            <text x="42" y="268" class="mono">continue;</text>
+
+            <rect class="group" x="480" y="10" width="410" height="310" rx="10" />
+            <text x="685" y="34" text-anchor="middle" class="lane">source view · one variable</text>
+
+            <rect class="box ok" x="500" y="76" width="380" height="38" rx="6" />
+            <text x="512" y="100" class="mono">accumulator = *address + accumulator;</text>
+            <rect class="box ok" x="500" y="148" width="380" height="38" rx="6" />
+            <text x="512" y="172" class="mono">if (remaining == 1) break;</text>
+            <rect class="box ok" x="500" y="244" width="380" height="38" rx="6" />
+            <text x="512" y="268" class="mono">address = address + 1;</text>
+
+            <path class="edge accent" d="M410,94 L498,94" marker-end="url(#arrow-accent)" />
+            <text x="444" y="84" text-anchor="middle" class="edge-label">inline</text>
+            <path
+              class="edge accent"
+              d="M410,215 L470,215 L470,132 L510,132 L510,116"
+              marker-end="url(#arrow-accent)"
+            />
+            <text x="449" y="232" text-anchor="middle" class="edge-label">merge</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 5.</strong> Both columns are actual output. <code>element</code> is a
+            single-use pure load expanded at its reader; <code>accumulator_1</code> is a phi value
+            coalesced with <code>accumulator</code>, so the backedge copy disappears and the update
+            prints as an in-place assignment.
+          </figcaption>
+        </figure>
+
+        <p>
+          <code>coalesceValues</code> then handles in-place updates. Candidates are definitions
+          whose last reader is an operand variable, such as <code>y = f(x)</code>. Two classes join
+          only if no member of one is live where a member of the other is defined, every member pair
+          is <code>sharedStorage</code>-compatible, and existing phi classes only grow. Unlike
+          <code>coalescePhiCopies</code>, the interference matrix is optional work: the pass spends
+          at most <code>remainingWork / 8</code>. If it cannot afford the matrix, or nothing merged,
+          it returns <code>undefined</code> and the renderer keeps the previous map.
+        </p>
+
+        <h3>Multi-level loop exits</h3>
+        <p>
+          An irreducible-looking “break out of two loops” is not printed as a goto when the target
+          is an enclosing loop's exact lexical continuation. <code>planLoopExits</code> records a
+          <code>LoopExitRoute</code> for an edge that must cross two or more breakable scopes to
+          reach that continuation. The route names the target loop and every intervening loop or
+          switch. The renderer allocates one <code>uint8_t</code> flag per target loop
+          (<code>loop_exit_N</code>), initialises it before each entry to that loop, sets it on the
+          edge and breaks; immediately after each intervening loop or switch,
+          <code>propagateLoopExit</code> prints <code>if (flag) { break; }</code> before any
+          following effect. Arbitrary target jumps, loop entries and irreducible edges are never
+          rewritten this way.
+        </p>
+      </section>
+
+      <section id="expressions">
+        <h2>Expression rendering</h2>
+        <p>
+          <code>SourcePrinter</code> in
+          <a class="src" href="../../src/emitters/expressions.ts">src/emitters/expressions.ts</a>
+          turns IR expressions into <code>Printed</code> values. A <code>Printed</code> is not just
+          text:
+        </p>
+        <pre><code>export interface Printed {
+  readonly text: string;
+  readonly precedence: number;
+  readonly ctype: IntegerCType | null;
+  readonly unreduced?: Printed;
+  readonly widened?: Printed;
+  readonly from?: { readonly operand: Printed; readonly bits: number };
+  readonly negated?: Printed;
+  readonly pointer?: { readonly text: string; readonly type: string };
+}</code></pre>
+        <p>
+          Those extra fields let later contexts avoid casts without changing semantics:
+          <code>unreduced</code> is the value before its final modular reduction, so a C assignment
+          or return to exactly that unsigned type may print it; <code>widened</code> is the same
+          value at a narrower unsigned type; <code>from</code> remembers the operand of a cast so a
+          second cast that keeps no more bits can collapse; <code>negated</code> makes double
+          negation the identity; <code>pointer</code> lets a pointer context print the declared
+          lvalue instead of an integer round trip.
+        </p>
+
+        <h3>Precedence and parenthesisation</h3>
+        <p>
+          Both dialects share <code>PRIMARY = 16</code>, <code>UNARY = 14</code> and
+          <code>CONDITIONAL = 3</code>, but binary precedence differs: C has <code>* / %</code> at
+          13, <code>+ -</code> at 12, shifts at 11, relational at 10, equality at 9,
+          <code>&amp;</code> at 8, <code>^</code> at 7 and <code>|</code> at 6; Python places
+          bitwise operators above comparisons. <code>SourcePrinter.binary</code> prints operands
+          with <code>group(value, minimum)</code>:
+        </p>
+        <pre><code>group(value: Printed, minimum: number): string {
+  return value.precedence &lt; minimum ? `(${value.text})` : value.text;
+}</code></pre>
+        <p>
+          It groups more than strict precedence requires. Within a bitwise operator, a lower-
+          precedence operand is parenthesised; shifts are similarly protected; a comparison operand
+          that binds more weakly than a shift is grouped even in C, because compilers warn
+          (<code>-Wparentheses</code>) about mixed comparison and bitwise expressions. In Python,
+          comparisons at the same precedence are also grouped so Python's comparison chaining can
+          never change meaning. Logical connectives are printed by <code>logical</code>:
+          <code>&amp;&amp;</code>/<code>||</code> in C, <code>and</code>/<code>or</code> in Python,
+          with C's <code>&amp;&amp;</code> inside <code>||</code> grouped.
+        </p>
+        <p>
+          The checked view uses a different printer. Every reduction is spelled with an explicit C
+          cast or a Python-like helper, every compound form is fully parenthesised, and every
+          semantic helper is accompanied by an explanation recorded in
+          <code>Emission.helpers</code> (for example <code>bit_pattern</code>,
+          <code>image_address</code>, <code>uintN</code>, <code>intN</code>). The source view
+          prefers ordinary C operators where the same value is provable.
+        </p>
+
+        <h3>Casts and conversions</h3>
+        <p>
+          <code>cast(bits, signed, value)</code> returns the value unchanged when its
+          <code>ctype</code> already has that width and signedness. It collapses a reinterpretation
+          of a signed word as unsigned and back into the original typed spelling. It also recurses
+          through <code>widened</code> and <code>from</code> under the
+          <code>conversion_collapse</code> rule: converting to no more bits than an inner conversion
+          already kept needs only the inner operand; a zero extension preserves the value itself, so
+          any outer conversion may start from the narrow operand. Python-like signed formals are the
+          exception: <code>int32(uint32(x))</code> is retained because the signed spelling is
+          carrying the bit pattern, not merely a conversion.
+        </p>
+        <p>
+          <code>usualArithmetic</code> and <code>promote</code> model C integer promotions for
+          choosing result types; they are not inferred source types. By contrast,
+          <code>machineType</code> is the storage spelling (<code>bits32_t</code>,
+          <code>ieee64_t</code>, <code>vector_f32x4_t</code>) used when no source type is proven.
+        </p>
+
+        <h3>Single-use expansion</h3>
+        <p>
+          <code>planSourceInlining</code>
+          (<a class="src" href="../../src/emitters/source-inlining.ts"
+            >src/emitters/source-inlining.ts</a
+          >) decides which values are not printed as variables. Its gates are semantic, not
+          cosmetic:
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Kind</th>
+              <th>Required evidence</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Pure integer/IEEE definition</td>
+              <td>
+                Exactly one recorded use, integer or float scalar type, not preserved, not already
+                inline. Recursively scalar operands only.
+              </td>
+            </tr>
+            <tr>
+              <td>FP-environment-dependent value</td>
+              <td>
+                Same as above, plus no call, unknown effect or register write on any path from
+                definition to the final use without re-executing it. The scan stops at 128 levels;
+                the reach walk stops after 65536 blocks.
+              </td>
+            </tr>
+            <tr>
+              <td>Nonvolatile load</td>
+              <td>
+                Integer result of 8/16/32/64 bits, one use, source reconstruction present,
+                unconditional same-block use after the load, and every intervening statement is an
+                assign, a nested dependency, or a private-local access. Independent potentially
+                faulting loads never become unsequenced operands.
+              </td>
+            </tr>
+            <tr>
+              <td>Plain copy propagation</td>
+              <td>
+                Multiple uses of a copy whose expression is just a same-presented-type variable.
+                Every reader prints the source; phi coalescing and liveness treat each read as a
+                read of the source, so storage cannot change in between.
+              </td>
+            </tr>
+            <tr>
+              <td>Private-local reuse</td>
+              <td>
+                A load of a private local with exactly two same-block readers; the intervening write
+                is a pure function of the loaded value alone, has no register input, and writes only
+                that local. The write either follows both readers or is printed right after the
+                later reader.
+              </td>
+            </tr>
+            <tr>
+              <td>Single-use call</td>
+              <td>
+                One live result, read once unconditionally by the next printed statement or return;
+                no other memory read/call/FP-environment read in the reader; non-result clobbers
+                print nothing; printed result type equals the variable's type.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          A propagated copy is not free: the renderer records
+          <code>copy_propagation</code> with every propagated site, and if the record cannot be kept
+          it removes those sites and the call-inlining candidates that depend on them. The same
+          pattern applies to <code>local_load_reuse</code>, <code>single_use_inlining</code> and
+          <code>single_use_call_inlining</code>.
+        </p>
+      </section>
+
+      <section id="declarations">
+        <h2>Declarations and evidence-driven spellings</h2>
+
+        <h3>Unsigned bounds and flag tests</h3>
+        <p>
+          <code>UnsignedBounds</code>
+          (<a class="src" href="../../src/emitters/source-bounds.ts"
+            >src/emitters/source-bounds.ts</a
+          >) derives an inclusive unsigned upper bound from immutable definitions only: constants,
+          masks, zero extensions, truncations, logical right shifts, remainders, and bounded sums or
+          products that cannot wrap. A parameter, phi or load is bounded by its width. The recursion
+          stops at depth 24. The result is used to elide a mask that covers every possible bit and
+          to treat a masked shift count as an ordinary C shift, never to assert a value.
+        </p>
+        <p>
+          <code>planFlagTests</code>
+          (<a class="src" href="../../src/emitters/source-flags.ts">src/emitters/source-flags.ts</a
+          >) recognises a typical <code>-O0</code> short circuit. Every flag is a promoted private
+          local whose retained accesses are exactly its chain's zero/one stores and one load; every
+          stage store is the last retained statement of its block; stage blocks are entered only
+          through the chain and the merge only from it; all edges are copy-free; the merge prints
+          only its test, which reads only the flag and is the exact one-bit test over 0 and 1. The
+          chain is limited to <code>MAX_STAGES = 64</code> and nesting to
+          <code>MAX_NESTING = 8</code>. Later stage blocks print nothing, and the dead flag storage
+          disappears from the declarations.
+        </p>
+
+        <h3>Literals and character spellings</h3>
+        <p>
+          A pointer-width constant is printed as a string literal only when source evidence
+          establishes an immutable NUL-terminated string with a known encoding at that address; an
+          interior address denotes its suffix. The scope named in
+          <code>STRING_LITERAL_SCOPE</code> limits this to values (argument, store, return, copy,
+          select arm, identity comparison), never arbitrary arithmetic.
+          <code>stringLiteral</code> shows at most
+          <code>STRING_LITERAL_LIMIT = 200</code> characters and reports the omitted byte count
+          separately. Escaping is dialect-specific and defensive: controls, format/bidi controls,
+          line/paragraph separators, private-use and unassigned code points are escaped; C avoids
+          trigraphs (<code>??x</code>) with <code>\?</code> and comment terminators
+          (<code>*/</code>) with <code>\057</code>; Python uses <code>\u</code>/<code>\U</code>.
+        </p>
+        <p>
+          Character literals require more evidence than a small integer.
+          <code>characterEvidence</code> marks a value as a character code only when it is a byte
+          loaded through a proven byte pointer (an inferred byte-pointer formal, a typed value, a
+          library <code>char *</code> parameter or result), possibly widened or narrowed losslessly.
+          Even then, <code>characterLiteral</code> prints a character constant only for printable
+          ASCII or (where <code>escapes</code> is allowed) NUL and standard C escapes. Python has no
+          character type, so it prints <code>ord('a')</code>.
+        </p>
+
+        <h3>Globals, tables, structures and local pointers</h3>
+        <p>
+          <code>planGlobals</code>
+          (<a class="src" href="../../src/emitters/source-globals.ts"
+            >src/emitters/source-globals.ts</a
+          >) binds retained scalar memory accesses to the object they touch. An object is
+          <code>scalar</code> (one element at offset 0), <code>array</code> (unbounded elements of
+          one scalar type) or <code>bytes</code> (every access an explicit cast dereference). The
+          shape follows only the accesses observed in this function; the extent stays unknown unless
+          the image established one, and a use never invents an array bound. Import slots are folded
+          into the imported symbol's address where the ABI makes that exact.
+        </p>
+        <p>
+          <code>indexedDataAccesses</code>
+          (<a class="src" href="../../src/emitters/source-tables.ts"
+            >src/emitters/source-tables.ts</a
+          >) recognises an exact mapped data base plus nonwrapping integer index arithmetic. Each
+          term is <code>index × stride</code>; masks, zero extensions and dominating comparisons
+          bound the largest index (<code>last</code>). <code>declareDataTables</code> then emits one
+          declaration per (object, element width). A read-only table whose bytes and extent are
+          established prints its contents in full up to <code>TABLE_FULL_BYTES = 512</code> bytes;
+          larger tables show a <code>TABLE_PREFIX_BYTES = 256</code> prefix, and an unsized table
+          with unbounded indices shows its first <code>TABLE_UNKNOWN_ELEMENTS = 16</code> elements.
+          Otherwise it stays an <code>extern</code> view of unknown extent, never an allocation.
+        </p>
+        <p>
+          <code>SourceStructs</code>
+          (<a class="src" href="../../src/emitters/source-structs.ts"
+            >src/emitters/source-structs.ts</a
+          >) synthesises member names from byte offsets in unambiguous hexadecimal
+          (<code>field_0x1d</code>, <code>pad_0x0</code>). <code>layout</code> accepts only an
+          established, asserted or analysis-candidate structure with 1..64 fields, a storage type
+          for every field and no scalar view; members are emitted only for the offsets this function
+          actually accesses. It never claims an array bound or a <code>sizeof</code> that the image
+          did not establish. A one-field structure may print as a scalar pointer when the stride and
+          nested pointee chain prove it.
+        </p>
+        <p>
+          <code>planLocalTypes</code>
+          (<a class="src" href="../../src/emitters/source-local-types.ts"
+            >src/emitters/source-local-types.ts</a
+          >) chooses pointer types for connected sets of locals from every definition and use: typed
+          call parameters, typed globals, slots and results, identity tests, dereferences. A set
+          keeps its integer declaration when pointee types conflict, a member is scalar-typed, or
+          the integer conversions it would need cost more than the typed uses it saves. The choice
+          never changes semantics: every needed conversion is still printed, so a pointer read as an
+          integer is <code>(uintptr_t)p</code>.
+        </p>
+        <p>
+          The C scalar-support prelude is computed from the finished text rather than planned in
+          advance. <code>cScalarSupport</code> scans code only (comments and literals are stripped),
+          then emits only the <code>#include</code>s, typedefs and helper macros the text actually
+          references, in a fixed order. The real <code>fixture_loop</code> output shows an indirect
+          consequence: the word <code>true</code> in <code>while (true)</code> causes
+          <code>#include &lt;stdbool.h&gt;</code>.
+        </p>
+      </section>
+
+      <section id="dialects">
+        <h2>C-like, Python-like and Objective-C</h2>
+        <p>
+          Both dialects consume the same <code>Reconstruction</code>. The differences live in
+          <code>Writer</code>, <code>SourcePrinter</code>, and a handful of renderer branches (<a
+            class="src"
+            href="../../src/emitters/c/index.ts"
+            >src/emitters/c/index.ts</a
+          >,
+          <a class="src" href="../../src/emitters/python-like/index.ts"
+            >src/emitters/python-like/index.ts</a
+          >). The Python-like output is explicitly “Python-shaped high-level pseudocode, never
+          ordinary executable Python”.
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Construct</th>
+              <th>C-like</th>
+              <th>Python-like</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Statement end</td>
+              <td><code>;</code></td>
+              <td>newline</td>
+            </tr>
+            <tr>
+              <td>Declaration</td>
+              <td><code>uint32_t count</code></td>
+              <td><code>count: uint32_t</code></td>
+            </tr>
+            <tr>
+              <td>Compound / empty suite</td>
+              <td><code>{ … }</code></td>
+              <td>indentation, <code>pass</code> when empty</td>
+            </tr>
+            <tr>
+              <td>Boolean operators</td>
+              <td><code>!</code>, <code>&amp;&amp;</code>, <code>||</code></td>
+              <td><code>not</code>, <code>and</code>, <code>or</code></td>
+            </tr>
+            <tr>
+              <td>Cast</td>
+              <td><code>(uint32_t)x</code></td>
+              <td><code>uint32(x)</code> helper</td>
+            </tr>
+            <tr>
+              <td>Typed load</td>
+              <td><code>*address</code></td>
+              <td><code>memory.u32[address]</code></td>
+            </tr>
+            <tr>
+              <td>Pointer step</td>
+              <td><code>address + 1</code> (element units)</td>
+              <td><code>address + 4</code> (byte units, explicit)</td>
+            </tr>
+            <tr>
+              <td>Character</td>
+              <td><code>'a'</code></td>
+              <td><code>ord('a')</code></td>
+            </tr>
+            <tr>
+              <td>Switch labels</td>
+              <td><code>case 1:</code> / <code>default:</code></td>
+              <td><code>case 1 | 2:</code> / <code>case _:</code></td>
+            </tr>
+            <tr>
+              <td>String literal</td>
+              <td><code>"text"</code></td>
+              <td><code>"text"</code> (different escape rules)</td>
+            </tr>
+            <tr>
+              <td>Function header</td>
+              <td><code>T name(args) {</code></td>
+              <td><code>def name(args) -&gt; T:</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>
+          The pointer-step difference is visible in the real
+          <code>fixture_loop</code>: C prints <code>address = address + 1</code> because
+          <code>address</code> is <code>const uint32_t*</code>; Python-like prints
+          <code>address = uint64(address + 4)</code>, where the address is a byte-addressed value.
+          Python-like also spells the load as
+          <code>uint32(memory.u32[address] + accumulator)</code>. The analysis is identical; only
+          the spelling differs.
+        </p>
+        <p>
+          Control-flow spelling also differs. In C, a <code>switch</code> adds a scope to
+          <code>transferAction</code> so a loop <code>break</code> is never captured by the switch.
+          Python-like has no fallthrough, so <code>sourceSwitch</code> groups labels with
+          <code>|</code> in one <code>case</code>. A <code>do { } while (0)</code> breakable block
+          becomes <code>while True:</code> ending in an explicit <code>break</code> if its body can
+          fall off the end. Every empty suite gets <code>pass</code>.
+        </p>
+
+        <h3>Objective-C presentation</h3>
+        <p>
+          Objective-C is not a third emitter. It is a presentation of C-like or Python-like output
+          when <code>input.source.objc</code> is present. The function header becomes the method
+          record, not the symbol:
+        </p>
+        <pre><code>-[Class selector]
++[Class selector]        /* class methods */</code></pre>
+        <p>
+          <code>render()</code> takes <code>method.selector</code> and
+          <code>method.owner</code> from <code>input.source.objc.method</code>, checks the selector
+          against <code>OBJC_SELECTOR</code>, and names the first two integer argument registers
+          <code>self</code> and <code>_cmd</code>. Python-like heads the function with
+          <code>Owner.selector_with_underscores</code> and adds <code>@classmethod</code> for class
+          methods.
+        </p>
+        <p>
+          At expression level (<a class="src" href="../../src/emitters/objc.ts"
+            >src/emitters/objc.ts</a
+          >), a 64-bit load from a compiler-emitted selector or class-reference slot prints as
+          <code>@selector(name)</code> or <code>[Name class]</code> in C-like output; Python-like
+          uses the <code>selector(...)</code> / <code>objc_class(...)</code> helpers or the bare
+          class name. A call whose projected arguments exactly match the selector's keyword count
+          prints as a message send:
+        </p>
+        <pre><code>/* C-like */
+[receiver doThing:first with:second]
+
+# Python-like
+receiver.doThing_with(first, second)</code></pre>
+        <p>
+          Objective-C string constants print as <code>@"text"</code> in C-like and
+          <code>NSString("text")</code> in Python-like, using the same escaping discipline as
+          ordinary literals. All of this requires runtime metadata: without
+          <code>source.objc.messages</code>, an indirect call remains a function-pointer call with
+          an opaque interface.
+        </p>
+      </section>
+
+      <section id="example">
+        <h2>A real function end to end</h2>
+        <p>
+          The fixture source is
+          <a class="src" href="../../fixtures/source/corpus.c">fixtures/source/corpus.c</a>; the
+          binary is <code>fixtures/bin/macho-arm64-symbols</code> at VA <code>0x100000594</code>.
+          The original C is:
+        </p>
+        <pre><code>API NOINLINE u32 fixture_loop(const u32 *p, u32 n) {
+    u32 result = 0;
+    for (u32 i = 0; i &lt; n; ++i) result += p[i];
+    return result;
+}</code></pre>
+        <p>The actual default emission (source view, C-like) is:</p>
+        <pre><code>/* C-like */
+#include &lt;stdbool.h&gt;
+uint32_t fixture_loop(const uint32_t* address, uint32_t count) {
+  uint32_t accumulator;
+  uint64_t remaining;
+  if (count == 0) {
+    return 0;
+  }
+  accumulator = 0;
+  remaining = count;
+  while (true) {
+    accumulator = *address + accumulator;
+    if (remaining == 1) {
+      break;
+    }
+    address = address + 1;
+    remaining = (uint32_t)(remaining - 1);
+  }
+  return accumulator;
+}</code></pre>
+        <p>
+          Command used (<code>--cache</code> keeps the project directory out of
+          <code>fixtures/bin/</code>):
+        </p>
+        <pre><code>node dist/src/cli/entry.js decompile fixtures/bin/macho-arm64-symbols \
+  --function _fixture_loop --cache /tmp/od-cache</code></pre>
+        <p>Every line has a mechanism behind it:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Printed construct</th>
+              <th>Producing mechanism</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>#include &lt;stdbool.h&gt;</code></td>
+              <td>
+                <code>cScalarSupport</code> scans the finished C text; <code>true</code> in
+                <code>while (true)</code> requires <code>bool</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>uint32_t fixture_loop(const uint32_t* address, uint32_t count)</code></td>
+              <td>
+                Signature from the reconstruction projection; <code>sourceIdentifier</code> uses the
+                C spelling of the linkage name; <code>const uint32_t*</code> comes from the proven
+                pointee of the first argument (<code>natural_scalar_pointee</code>), and the source
+                projection supplies the parameter spellings <code>address</code>/<code>count</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>uint32_t accumulator; uint64_t remaining;</code></td>
+              <td>
+                Locals are declared from the reconstruction's <code>source.locals</code> and live
+                values. <code>accumulator</code> is the representative of the coalesced loop-carried
+                class. <code>remaining</code> is a widening class that keeps its widest unsigned
+                declaration (64-bit) while the original narrow reads and definitions retain their
+                <code>(uint32_t)</code> conversions.
+              </td>
+            </tr>
+            <tr>
+              <td><code>if (count == 0) { return 0; }</code></td>
+              <td>
+                <code>sourceIf</code> prints the true arm; because it terminates, the false arm
+                follows at the same depth without <code>else</code> (<code>branch_layout</code>).
+              </td>
+            </tr>
+            <tr>
+              <td><code>accumulator = 0; remaining = count;</code></td>
+              <td>
+                Entry edge copies from block 0x598. The copies are printed through
+                <code>transfer</code>, which orders multiple copies so all sources are read before
+                destinations are written.
+              </td>
+            </tr>
+            <tr>
+              <td><code>while (true) { … }</code></td>
+              <td>
+                No <code>LoopForm</code> was accepted. The header 0x5a4 prints statements before its
+                test, so <code>planLoopForms</code>' <code>while</code> branch fails the
+                silent-header requirement, and the bottom-test form's remaining side conditions are
+                not all met. The generic loop prints as <code>while (true)</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>accumulator = *address + accumulator;</code></td>
+              <td>
+                <code>element</code> is a single-use pure load inlined at its reader
+                (<code>single_use_inlining</code>); <code>accumulator_1</code> is phi-coalesced with
+                <code>accumulator</code> (<code>phi_copy_coalescing</code>);
+                <code>*address</code> is the typed dereference from
+                <code>scaled_pointer_arithmetic</code>/<code>typed_dereference</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>if (remaining == 1) { break; }</code></td>
+              <td>
+                The loop body's branch. The true arm jumps to the loop's follow 0x5b4, so
+                <code>transferAction</code> classifies it as <code>break</code>; the false arm stays
+                in the loop and prints nothing.
+              </td>
+            </tr>
+            <tr>
+              <td><code>address = address + 1;</code></td>
+              <td>
+                Pointer arithmetic over <code>uint32_t</code>; the checked view spells the byte step
+                and cast explicitly, the source view uses element units
+                (<code>scaled_pointer_arithmetic</code>).
+              </td>
+            </tr>
+            <tr>
+              <td><code>remaining = (uint32_t)(remaining - 1);</code></td>
+              <td>
+                The edge copy narrows the 64-bit subtraction back to 32 bits; the explicit cast is
+                the exact modular reduction, not a type guess.
+              </td>
+            </tr>
+            <tr>
+              <td><code>return accumulator;</code></td>
+              <td>
+                The return projection maps <code>accumulator</code> to the ABI result. The mapping
+                covers UTF-16 span 401–423 and cites instruction
+                <code>entity_9b909ae60673f3a8…</code> and file range <code>0x5b4</code>, size 4.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          The mapping for that last line is a concrete look at the provenance model. In the emitted
+          JSON, one mapping record for the span <code>[401, 423)</code> has text
+          <code>" return accumulator;\n"</code>, semantic subjects including the return/function
+          entities, one instruction ref, one range
+          <code>{ space: "file", value: "0x5b4", size: "0x4" }</code>, and one evidence ref; a
+          second contributor record shares the same span with its own semantic refs. The range is a
+          file-space offset, not the virtual address <code>0x1000005b4</code>; the image id
+          disambiguates the address space.
+        </p>
+        <p>
+          The checked view of the same function is the “before” side of Figures 4 and 5: it prints
+          <code>element</code>, <code>accumulator_1</code>, the explicit backedge copies and the
+          <code>continue</code>/<code>break</code> pair, with every cast and memory view spelled
+          out. Comparing the two outputs is the clearest way to see which constructs are analysis
+          facts and which are presentation: the loop-form choice and the coalescing before/after are
+          separate decisions over the same reconstruction.
+        </p>
+      </section>
+
+      <section id="provenance">
+        <h2>Writer, mappings, evidence and limits</h2>
+        <p>
+          <code>Writer</code>
+          (<a class="src" href="../../src/emitters/writer.ts">src/emitters/writer.ts</a>) is an
+          append-only UTF-16 text buffer with three interned tables: <code>ids</code>,
+          <code>evidence</code> (called <code>proofs</code> internally) and <code>ranges</code>.
+          Every identity, proof and binary range is stated once; mappings cite them by index. The
+          text offset is measured in UTF-16 code units, matching <code>span_unit: 'utf16'</code>.
+          Resource accounting uses UTF-8 byte lengths, a deliberately different unit.
+        </p>
+        <p>
+          <code>line(depth, text, code = true)</code> refuses nesting deeper than 256, charges the
+          indentation and text bytes, appends to the part list and advances the offset;
+          <code>statement</code> adds a semicolon only in C-like output;
+          <code>declaration</code> swaps the type/name order by dialect; <code>comment</code> uses
+          <code>/* … */</code> or <code># …</code>. <code>insertLines</code> inserts whole depth-0
+          lines at a recorded line boundary, shifts every mapping at or after it, and refuses an
+          offset that splits a mapping. This is how preludes can depend on the final body without
+          invalidating spans.
+        </p>
+
+        <figure class="diagram" id="fig-mapping">
+          <svg viewBox="0 0 900 310" role="img" aria-labelledby="fig-mapping-title">
+            <title id="fig-mapping-title">
+              One source mapping span and the interned tables it cites
+            </title>
+
+            <rect class="box accent" x="20" y="36" width="260" height="70" rx="8" />
+            <text x="36" y="58" class="title">Emission.text</text>
+            <text x="36" y="78" class="mono">" return accumulator;\n"</text>
+            <text x="36" y="96" class="small">UTF-16 span [401, 423)</text>
+
+            <path class="edge accent" d="M280,72 L318,72" marker-end="url(#arrow-accent)" />
+
+            <rect class="box c2" x="320" y="26" width="300" height="140" rx="8" />
+            <text x="336" y="48" class="title">mappings[i]</text>
+            <text x="336" y="68" class="mono">start, end</text>
+            <text x="336" y="86" class="mono">semantic_refs[0]</text>
+            <text x="336" y="104" class="mono">instruction_refs</text>
+            <text x="336" y="122" class="mono">range_refs</text>
+            <text x="336" y="140" class="mono">evidence_refs</text>
+            <text x="336" y="158" class="small">the mapped statement is refs[0]</text>
+
+            <path class="edge" d="M620,72 L658,72" marker-end="url(#arrow)" />
+
+            <rect class="group" x="660" y="20" width="230" height="210" rx="10" />
+            <text x="675" y="42" class="title">interned tables</text>
+            <rect class="box" x="675" y="54" width="200" height="40" rx="6" />
+            <text x="687" y="79" class="mono">ids[]</text>
+            <rect class="box" x="675" y="104" width="200" height="40" rx="6" />
+            <text x="687" y="129" class="mono">evidence[]</text>
+            <rect class="box" x="675" y="154" width="200" height="40" rx="6" />
+            <text x="687" y="179" class="mono">ranges[]</text>
+
+            <path class="edge dashed" d="M470,166 L470,218" marker-end="url(#arrow)" />
+
+            <rect class="box ok" x="320" y="222" width="300" height="66" rx="8" />
+            <text x="336" y="245" class="title">expandEmission()</text>
+            <text x="336" y="265" class="small">ref → id / proof / address range</text>
+            <text x="336" y="281" class="small">a view: nothing added or reordered</text>
+
+            <rect class="box" x="660" y="244" width="230" height="44" rx="8" />
+            <text x="675" y="263" class="title">review</text>
+            <text x="675" y="281" class="small mono">function_get · metadata</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 6.</strong> Provenance is relational, not textual. A mapping states a
+            text span once and cites interned tables by index; <code>expandEmission</code> is a pure
+            consumer view that replaces indexes with identities, proofs and address ranges.
+          </figcaption>
+        </figure>
+
+        <p>
+          <code>Renderer.mapped</code> and <code>Renderer.map</code> populate mappings at every
+          printed statement and control. They add the origin id, every contributor recorded in
+          <code>program.origins</code>, the semantic ids from <code>semanticIds</code>, type ids and
+          their evidence, and data-object evidence. The writer adds
+          <code>origin.provenance.instruction_ids</code>, ranges and evidence, and records
+          <code>semantic_refs</code> with the mapped origin first. Coverage counts how many
+          statements and controls were actually mapped; <code>render()</code> refuses to return if
+          any structured coverage entry is missing.
+        </p>
+        <p>
+          <code>local_validation</code> is the audit trail of presentation rules. Each
+          <code>LocalValidationRecord</code> is a <code>bitvector</code>,
+          <code>parallel-copy</code>, <code>stack-promotion</code>, <code>control</code> or
+          <code>presentation</code> record with status <code>verified</code>,
+          <code>unverified</code> or <code>rejected</code>. The real
+          <code>fixture_loop</code> emission includes verified <code>single_use_inlining</code>,
+          <code>phi_copy_coalescing</code> and <code>loop_exit_layout</code> records, plus
+          independent bitvector and parallel-copy checks.
+        </p>
+        <p>
+          The wire form is defined by <code>emissionSchema</code> in
+          <a class="src" href="../../src/core/tools.ts">src/core/tools.ts</a> and encoded by
+          <code>encodeEmission</code> in
+          <a class="src" href="../../src/core/serialization.ts">src/core/serialization.ts</a>.
+          <code>encodeEmission</code> only converts ranges to their hex wire form;
+          <code>expandEmission</code> resolves every reference and is a view — “nothing is added,
+          dropped or reordered”. The schema enforces that ranges are duplicate-free, that every ref
+          is inside its table, and that no mapping or declaration span exceeds the text.
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Bound</th>
+              <th>Value</th>
+              <th>Enforced by</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Text bytes</td>
+              <td><code>min(context.budget.output_bytes, 16_777_216)</code></td>
+              <td><code>Writer.limit</code>; schema text max <code>16_777_216</code></td>
+            </tr>
+            <tr>
+              <td>Indent</td>
+              <td>1..8 spaces</td>
+              <td><code>Writer</code> constructor</td>
+            </tr>
+            <tr>
+              <td>Emission nesting</td>
+              <td>256</td>
+              <td><code>Writer.line</code></td>
+            </tr>
+            <tr>
+              <td>Mappings</td>
+              <td>100,000</td>
+              <td><code>Writer.map</code></td>
+            </tr>
+            <tr>
+              <td>Semantic refs per mapping</td>
+              <td>10,000</td>
+              <td><code>Writer.map</code></td>
+            </tr>
+            <tr>
+              <td>Evidence refs per mapping</td>
+              <td>1,000</td>
+              <td><code>Writer.map</code></td>
+            </tr>
+            <tr>
+              <td>Identity / range tables</td>
+              <td>1,000,000 each</td>
+              <td><code>InternTable</code></td>
+            </tr>
+            <tr>
+              <td>Evidence table</td>
+              <td>10,000</td>
+              <td><code>InternTable</code></td>
+            </tr>
+            <tr>
+              <td>Helpers</td>
+              <td>1,000</td>
+              <td><code>Writer.helper</code></td>
+            </tr>
+            <tr>
+              <td>Diagnostics</td>
+              <td>1,000 (999 + omission summary)</td>
+              <td><code>MAX_RESULT_DIAGNOSTICS</code>, <code>Renderer.report</code></td>
+            </tr>
+            <tr>
+              <td>Citations per diagnostic</td>
+              <td>1,000</td>
+              <td><code>Renderer.report</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout caveat">
+          <span class="title">Metadata can be shed; text cannot</span>
+          <p>
+            If provenance exceeds the byte budget, <code>Writer.metadata</code> throws
+            <code>MetadataLimitError</code>. <code>renderSource</code> then re-renders the same text
+            with metadata omitted and records <code>omitted</code> entries in the order
+            <code>EMISSION_METADATA_SHED_ORDER</code>: <code>inferences</code>, then
+            <code>mappings</code>, then <code>requirements</code>. The text is complete and
+            identical; <code>provenanceCoverage</code> reports the layer as partial. Text overflow,
+            by contrast, is a hard <code>resource_limit</code> failure.
+          </p>
+        </div>
+
+        <p>
+          <code>MAX_RESULT_DIAGNOSTICS</code> bounds the wire diagnostic list. The renderer keeps at
+          most 999 records and replaces the rest with one <code>omittedDiagnosticsSummary</code>;
+          the summary uses code <code>unavailable_semantics</code> if any semantic limitation was
+          among the shed records, so a truncated list can never look cleaner than the truth. A
+          single diagnostic's evidence list is also capped at 1,000 citations, with the surplus
+          counted in the summary.
+        </p>
+      </section>
+
+      <section id="limitations">
+        <h2>Limitations &amp; extension points</h2>
+
+        <h3>What the structurer does not do</h3>
+        <p>
+          The current algorithm is an SCC/unique-entry reduction, not a global region collapse. A
+          cyclic SCC with more than one entry, an irreducible cycle, or a shared join that does not
+          satisfy the single-incoming-edge test keeps labelled transfers. That is deliberate
+          correctness: every edge and every copy remains representable. The visible cost is goto
+          density on adversarial reducible graphs and on some switch/loop combinations.
+        </p>
+        <p>
+          Later passes reduce the number of gotos without changing the structurer: bounded return
+          tail duplication, terminal-block placement, loop-exit merging, goto-path tail duplication,
+          <code>do { } while (0)</code> wraps for forward gotos, and boolean exit flags for
+          multi-level breaks. Each is optional work and each is kept only when it does not increase
+          the printed goto count or lose a <code>continue</code>/outer break. The roadmap in
+          <a href="../../TODO.md">TODO.md</a> (R2, “Region-collapse structuring”) plans to replace
+          the SCC/unique-entry structurer with an iterative collapse over the whole CFG: sequence,
+          if-then, if-then-else, short-circuit <code>&amp;&amp;</code>/<code>||</code>,
+          while/do-while/infinite loops with break/continue, and switch; when no rule applies, pick
+          the goto edge that unblocks the most collapses. It also plans to recover loop forms from
+          the collapsed regions and delete the repair passes the new structurer makes redundant,
+          including tail duplication, forced tail copies, <code>do{}while(0)</code> wraps and
+          <code>loop_exit_layout</code>.
+        </p>
+        <p>
+          Loop-form recovery is intentionally conservative. The real
+          <code>fixture_loop</code> output is <code>while (true)</code> rather than a
+          <code>for</code> or a bottom-tested <code>while</code> because its header prints before
+          its test, and the bottom-test side conditions are not all met; the original source's
+          <code>for</code> is not recoverable by the current proof rules. This is visible in the
+          output, not hidden.
+        </p>
+        <p>
+          Switches are only those already established in the IR. The structurer does not build a
+          switch from an if-chain, and guard folding requires the
+          <code>jump_table.exact_guard_instruction</code> proof produced during discovery. The
+          layout pass groups copy-free case arms that share a body and omits a default that merely
+          reaches the same fallback, but it will not invent case ranges or a default target.
+        </p>
+
+        <h3>What the renderer refuses to simplify</h3>
+        <p>
+          Every source-view rewrite is gated by
+          <code>LocalValidationSession.presentation</code>. If the record bound is exhausted, the
+          call returns false and the caller keeps the explicit form; the same applies to the
+          optional-work searches, which keep the rewrites found so far when they exhaust their
+          share. The renderer never edits emitted text with regexes and never special-cases
+          fixtures: the only repair is the call-inlining retry, which re-renders from scratch
+          without inlining.
+        </p>
+        <p>
+          Remaining readability costs are known and measurable: open arities (<code>...</code>),
+          integer addresses with casts where pointer evidence is insufficient, frame memory that
+          could not be promoted per slot, extra temporaries that failed the single-use gates, and
+          helper preludes for exact bit-vector semantics. TODO.md tracks these as R1, R3, R4 and R5.
+          None of them are patched in the emitter; they are fixed in the owning reconstruction,
+          analysis or type layer so both dialects benefit.
+        </p>
+        <p>
+          Emission limits are hard limits, not target sizes. A function whose text exceeds
+          <code>output_bytes</code> fails with <code>resource_limit</code> rather than being
+          truncated. Provenance has its own budget and its own graceful degradation. The maximum
+          structurer depth is 64, the maximum renderer nesting is 128 for label planning and 256 for
+          line writing, and liveness/coalescing turn themselves off rather than approximate when
+          their tables would exceed 4096 values or blocks.
+        </p>
+
+        <h3>Adding an emitter dialect</h3>
+        <p>
+          A new dialect is a syntax layer over the same reconstruction, but it is not just a new
+          class. The steps, in the order the types force them:
+        </p>
+        <ol class="steps">
+          <li>
+            Extend the language unions. <code>Emission.language</code> and
+            <code>analysisOptionsSchema.emitter</code> are currently
+            <code>'c-like' | 'python-like'</code> in
+            <a class="src" href="../../src/core/contracts.ts">src/core/contracts.ts</a> and the
+            <code>emissionSchema</code>/<code>analysisOptionsSchema</code> in
+            <a class="src" href="../../src/core/tools.ts">src/core/tools.ts</a> and
+            <a class="src" href="../../src/core/primitives.ts">src/core/primitives.ts</a>.
+            <code>Renderer</code>, <code>Writer</code>, <code>SourcePrinter</code>,
+            <code>transferAction</code>, <code>sourceIf</code> and <code>sourceSwitch</code> all
+            branch on the union, so each branch needs a deliberate decision.
+          </li>
+          <li>
+            Implement <code>Emitter&lt;EmissionInput&gt;</code> with a stable <code>id</code>,
+            <code>name</code>, <code>version</code> and <code>language</code>, and an
+            <code>emit</code> that returns
+            <code>renderSource(input, options, context, language, version).emission</code>. Follow
+            <a class="src" href="../../src/emitters/python-like/index.ts"
+              >src/emitters/python-like/index.ts</a
+            >; it is 31 lines because everything substantial is shared.
+          </li>
+          <li>
+            Register the version in
+            <a class="src" href="../../src/service/analysis/versions.ts"
+              >src/service/analysis/versions.ts</a
+            >
+            and add the selection branch in
+            <a class="src" href="../../src/service/analysis/index.ts"
+              >src/service/analysis/index.ts</a
+            >, which today is a binary <code>options.emitter === 'python-like' ? … : …</code>.
+            Update the CLI/MCP option schema and documentation at the same time; the cache identity
+            includes the emitter version.
+          </li>
+          <li>
+            Add dialect tests at the same level as
+            <code>test/emitters/c</code>: render the shared reconstruction and assert the syntax,
+            not a second analysis. If the dialect changes control syntax, exercise
+            <code>validateRenderedTransfers</code> and <code>validateEmittedControl</code>; they are
+            dialect-aware and reject a spelling whose scopes do not match the emitted edges.
+          </li>
+        </ol>
+        <p>
+          Objective-C demonstrates a cheaper extension pattern: presentation metadata
+          (<code>input.source.objc</code>) changes headers, literals and call spelling without
+          touching control-flow structure or the region tree. If a new syntax can be expressed that
+          way, prefer it over a third full dialect; if it cannot spell the same transfers correctly,
+          do not ship it, because a prettier program that misplaces an edge is worse than a labelled
+          one.
+        </p>
+
+        <div class="callout caveat">
+          <span class="title">Roadmap labels are plans, not capabilities</span>
+          <p>
+            The R1–R5 items in TODO.md are explicitly “planned items, not current capabilities”.
+            This page describes the code as it stands: region-collapse structuring, per-slot stack
+            promotion, the larger expression rule pool and opt-in inference are not implemented yet.
+          </p>
+        </div>
+      </section>
+
+      <footer class="pager">
+        <a class="prev" href="reconstruction.html">← Source reconstruction</a>
+        <a class="next" href="project-cache.html">Projects, cache &amp; execution →</a>
+      </footer>
+    </main>
+  </body>
+</html>

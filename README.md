@@ -38,6 +38,7 @@ Set defaults once (cache root, analysis cache, decompile/export language, view, 
 - [JavaScript / TypeScript API](docs/API.md)
 - [Remote MCP and security](docs/REMOTE.md)
 - [Core contracts](docs/CORE.md), [fixtures](docs/FIXTURES.md) and [performance](docs/PERFORMANCE.md)
+- [Internals: architecture and algorithms](docs/internals/index.html) (static HTML with diagrams; open locally in a browser)
 
 ## License
 

@@ -1,0 +1,2230 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Projects, cache &amp; execution — Open Decomp internals</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- Shared SVG defs: every diagram on the page references url(#arrow) / url(#arrow-accent). Keep exactly this block once per page. -->
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true" focusable="false">
+      <defs>
+        <marker
+          id="arrow"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" class="arrowhead" />
+        </marker>
+        <marker
+          id="arrow-accent"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" class="arrowhead accent" />
+        </marker>
+      </defs>
+    </svg>
+
+    <nav class="sidebar" aria-label="Internals pages">
+      <a class="brand" href="index.html">Open Decomp internals</a>
+      <p class="brand-sub">How the decompiler works</p>
+      <ol>
+        <li><a href="index.html">Architecture overview</a></li>
+        <li><a href="loaders.html">Loading binaries &amp; addresses</a></li>
+        <li><a href="discovery.html">Function discovery &amp; CFG</a></li>
+        <li><a href="decode-lift-ir.html">Decoding, lifting &amp; IR</a></li>
+        <li><a href="ssa-values.html">SSA, values &amp; stack</a></li>
+        <li><a href="calls-abi.html">ABIs, calls &amp; callee summaries</a></li>
+        <li><a href="types-metadata.html">Types &amp; metadata</a></li>
+        <li><a href="reconstruction.html">Source reconstruction</a></li>
+        <li><a href="structuring-emission.html">Structuring &amp; emission</a></li>
+        <li>
+          <a href="project-cache.html" aria-current="page">Projects, cache &amp; execution</a>
+        </li>
+      </ol>
+      <a class="back" href="../README.md">← User documentation</a>
+    </nav>
+
+    <main>
+      <header>
+        <p class="eyebrow">Infrastructure</p>
+        <h1>Projects, cache &amp; execution</h1>
+        <p class="lede">
+          How an immutable binary snapshot, a global revision counter, a content-addressed analysis
+          cache and a pool of persistent worker processes turn a CLI or MCP request into a
+          snapshot-bound result — and how the same query runs when the result is already published.
+        </p>
+        <p class="sources">
+          Sources:
+          <a class="src" href="../../src/project/store/index.ts">src/project/store/index.ts</a>
+          <a class="src" href="../../src/project/store/encoding.ts"
+            >src/project/store/encoding.ts</a
+          >
+          <a class="src" href="../../src/project/cache/index.ts">src/project/cache/index.ts</a>
+          <a class="src" href="../../src/project/cache/dependencies.ts"
+            >src/project/cache/dependencies.ts</a
+          >
+          <a class="src" href="../../src/project/annotations/index.ts"
+            >src/project/annotations/index.ts</a
+          >
+          <a class="src" href="../../src/service/analysis/native-summaries.ts"
+            >src/service/analysis/native-summaries.ts</a
+          >
+          <a class="src" href="../../src/workers/index.ts">src/workers/index.ts</a>
+          <a class="src" href="../../src/workers/runtime.ts">src/workers/runtime.ts</a>
+          <a class="src" href="../../src/service/queries/handler.ts"
+            >src/service/queries/handler.ts</a
+          >
+          <a class="src" href="../../src/core/validation.ts">src/core/validation.ts</a>
+          <a class="src" href="../../src/settings/index.ts">src/settings/index.ts</a>
+          <a class="src" href="../../src/cli/export.ts">src/cli/export.ts</a>
+        </p>
+      </header>
+
+      <nav class="toc" aria-label="On this page">
+        <strong>On this page</strong>
+        <ol>
+          <li><a href="#position">Where this sits in the pipeline</a></li>
+          <li><a href="#identity">Projects: identity, location, lifecycle</a></li>
+          <li><a href="#store">The SQLite store</a></li>
+          <li><a href="#revisions">Revisions, snapshots &amp; annotations</a></li>
+          <li><a href="#cache">The analysis cache</a></li>
+          <li><a href="#execution">Execution: pools, frames, jobs</a></li>
+          <li><a href="#queries">Queries, MCP &amp; settings</a></li>
+          <li><a href="#limitations">Limitations &amp; extension points</a></li>
+        </ol>
+      </nav>
+
+      <section id="position">
+        <h2>Where this sits in the pipeline</h2>
+        <p>
+          Every other page in this set describes code that transforms a decoded image into
+          pseudocode. This page describes the container around that work: where the immutable input
+          lives, how derived state is made durable, what makes a stored result reusable, and which
+          process executes it. The boundary is deliberate and enforced by process separation.
+          Frontends (the CLI, the MCP server, the JS API) live in a <em>host</em> process that
+          authorizes paths and schedules jobs. All native decoding, analysis, store access and
+          artifact bytes live in a persistent <em>child</em> process, one per canonical project
+          directory. The host never deserializes target bytes and the child never accepts SQL,
+          module names or executable source over the transport.
+        </p>
+        <p>
+          What comes in: a binary path (or an already-imported project path), a requested revision,
+          a tool request with a work/output budget, and — for mutations — an
+          <code>expected_revision</code>. What goes out: a schema-validated
+          <code>ToolResult</code> bound to a project and revision, optionally carrying a published
+          artifact handle, plus a durable <code>Job</code> record that survives the transport
+          connection. The CLI's <code>openBinary</code> and <code>BinarySession</code> compose this
+          layer (<a class="src" href="../../src/api/index.ts">src/api/index.ts</a>); MCP registers
+          the same tool names over the same <code>QueryService</code> (<a
+            class="src"
+            href="../../src/mcp/server.ts"
+            >src/mcp/server.ts</a
+          >).
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 300" role="img" aria-labelledby="fig-position-title">
+            <title id="fig-position-title">Host and child process boundary for every query</title>
+            <rect class="group" x="10" y="10" width="610" height="280" rx="10" />
+            <text x="22" y="30" class="lane">
+              host process — path authorization, scheduling, result delivery
+            </text>
+
+            <rect class="box muted" x="30" y="42" width="150" height="44" rx="8" />
+            <text x="105" y="69" text-anchor="middle" class="title">CLI</text>
+            <rect class="box muted" x="30" y="100" width="150" height="44" rx="8" />
+            <text x="105" y="127" text-anchor="middle" class="title">MCP server</text>
+            <rect class="box muted" x="30" y="158" width="150" height="44" rx="8" />
+            <text x="105" y="185" text-anchor="middle" class="title">JS API</text>
+
+            <path class="edge" d="M180,64 L204,64 L204,113 L228,113" marker-end="url(#arrow)" />
+            <path class="edge" d="M180,122 L228,122" marker-end="url(#arrow)" />
+            <path class="edge" d="M180,180 L204,180 L204,131 L228,131" marker-end="url(#arrow)" />
+
+            <rect class="box accent" x="230" y="92" width="170" height="60" rx="8" />
+            <text x="315" y="117" text-anchor="middle" class="title">QueryService</text>
+            <text x="315" y="136" text-anchor="middle" class="small">
+              tool schemas, wait policy
+            </text>
+
+            <path class="edge accent" d="M400,122 L426,122" marker-end="url(#arrow-accent)" />
+
+            <rect class="box accent" x="430" y="92" width="160" height="60" rx="8" />
+            <text x="510" y="117" text-anchor="middle" class="title">Worker pool</text>
+            <text x="510" y="136" text-anchor="middle" class="small">one owner per project</text>
+
+            <rect class="group" x="630" y="10" width="300" height="280" rx="10" />
+            <text x="642" y="30" class="lane">child process — decode &amp; analyze</text>
+
+            <rect class="box" x="650" y="42" width="260" height="44" rx="8" />
+            <text x="780" y="60" text-anchor="middle" class="title">ProjectWorker runtime</text>
+            <text x="780" y="76" text-anchor="middle" class="small">
+              framed commands and events
+            </text>
+
+            <rect class="box c2" x="650" y="100" width="260" height="44" rx="8" />
+            <text x="780" y="118" text-anchor="middle" class="title">queryWorkerHandler</text>
+            <text x="780" y="134" text-anchor="middle" class="small">
+              validates, dispatches, marks result
+            </text>
+
+            <rect class="box c3" x="650" y="158" width="260" height="44" rx="8" />
+            <text x="780" y="176" text-anchor="middle" class="title">analysis pipeline</text>
+            <text x="780" y="192" text-anchor="middle" class="small">
+              pages 03–09: discovery → emission
+            </text>
+
+            <rect class="box c4" x="650" y="224" width="260" height="44" rx="8" />
+            <text x="780" y="242" text-anchor="middle" class="title">SQLite store + cache</text>
+            <text x="780" y="258" text-anchor="middle" class="small">
+              exclusive connection, immutable files
+            </text>
+
+            <path class="edge" d="M590,112 L616,112 L616,64 L648,64" marker-end="url(#arrow)" />
+            <path class="edge" d="M780,86 L780,98" marker-end="url(#arrow)" />
+            <path class="edge accent" d="M780,144 L780,156" marker-end="url(#arrow-accent)" />
+            <path class="edge" d="M780,202 L780,222" marker-end="url(#arrow)" />
+            <path class="edge dashed" d="M776,222 L776,202" />
+          </svg>
+          <figcaption>
+            <strong>Figure 1.</strong> The host selects the tool and owns authorization; the child
+            owns the SQLite connection, decoded images and all analysis. The only cross-boundary
+            values are wire-validated requests and events.
+          </figcaption>
+        </figure>
+
+        <p>
+          The ordering matters. A request is schema-validated in the host, authorized against
+          configured roots, admitted as a durable job in the child, and only then executed. The
+          child wraps CPU work in one <code>OperationContext</code> whose work counter, deadline and
+          cancellation signal are never reset by an inner pass (<a
+            class="src"
+            href="../../src/core/operation.ts"
+            >src/core/operation.ts</a
+          >, <code>createOperationContext</code>). A published analysis artifact is a side effect of
+          that same job, so a cache hit is still a job: it updates the job's terminal state and
+          artifact list before returning.
+        </p>
+      </section>
+
+      <section id="identity">
+        <h2>Projects: identity, location, lifecycle</h2>
+        <p>
+          A project is a directory, not a database row. Its identity is derived from the input bytes
+          and the selected slice, so two callers that hash the same file and request the same slice
+          necessarily converge on the same directory. <code>hashInput</code> opens the file with
+          <code>O_NOFOLLOW</code>, requires a regular file of at most 512 MiB, hashes in bounded
+          chunks, and re-stats it afterwards; any size, mtime or ctime change is rejected as
+          <code>invalid_input</code>. <code>projectDirectoryName</code> then returns
+          <code>`${sha256}.${sliceId ?? 'default'}`</code>
+          (<a class="src" href="../../src/service/queries/input-identity.ts"
+            >src/service/queries/input-identity.ts</a
+          >).
+        </p>
+        <p>
+          The cache root defaults to the sidecar <code>&lt;binary&gt;.open-decomp</code>; the CLI
+          <code>--cache PATH</code> overrides it. <code>BinarySession.open</code> creates it with
+          mode <code>0o700</code>, resolves symlinks with <code>realpath</code>, and rejects a
+          non-directory or a symlink (<a class="src" href="../../src/api/index.ts"
+            >src/api/index.ts</a
+          >). The project directory itself is created by <code>SqliteProjectStore.open</code>, which
+          also creates <code>images/</code> and <code>artifacts/</code>; a project database must be
+          a regular non-symlink file. Everything the store writes is either an immutable
+          content-addressed file (image bytes named by SHA-256, artifacts named by random artifact
+          ID) or the SQLite database.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 420" role="img" aria-labelledby="fig-identity-title">
+            <title id="fig-identity-title">
+              Content-addressed project location and import lifecycle
+            </title>
+
+            <rect class="box muted" x="15" y="30" width="150" height="60" rx="8" />
+            <text x="90" y="55" text-anchor="middle" class="title">binary file</text>
+            <text x="90" y="73" text-anchor="middle" class="small">≤ 512 MiB, no symlink</text>
+
+            <path class="edge" d="M165,60 L188,60" marker-end="url(#arrow)" />
+
+            <rect class="box c1" x="190" y="30" width="160" height="60" rx="8" />
+            <text x="270" y="55" text-anchor="middle" class="title">SHA-256</text>
+            <text x="270" y="73" text-anchor="middle" class="small mono">hashInput</text>
+
+            <path class="edge" d="M350,60 L373,60" marker-end="url(#arrow)" />
+
+            <rect class="box c1" x="375" y="30" width="250" height="60" rx="8" />
+            <text x="500" y="52" text-anchor="middle" class="title">project directory name</text>
+            <text x="500" y="72" text-anchor="middle" class="small mono">
+              &lt;sha256&gt;.&lt;slice|default&gt;
+            </text>
+
+            <path class="edge" d="M625,60 L653,60" marker-end="url(#arrow)" />
+
+            <rect class="box accent" x="655" y="30" width="270" height="60" rx="8" />
+            <text x="790" y="55" text-anchor="middle" class="title">project directory</text>
+            <text x="790" y="73" text-anchor="middle" class="small">
+              one exclusive SQLite owner
+            </text>
+
+            <rect class="box muted" x="15" y="115" width="430" height="34" rx="6" />
+            <text x="25" y="137" class="mono">
+              project.sqlite — metadata, records, jobs, artifacts
+            </text>
+            <rect class="box muted" x="15" y="155" width="430" height="34" rx="6" />
+            <text x="25" y="177" class="mono">images/&lt;sha256&gt; — immutable input bytes</text>
+            <rect class="box muted" x="15" y="195" width="430" height="34" rx="6" />
+            <text x="25" y="217" class="mono">
+              artifacts/&lt;artifact_id&gt; — published payloads
+            </text>
+            <text x="15" y="253" class="small">Observed: /private/tmp/od-cache/</text>
+            <text x="15" y="269" class="small mono">82680f1e…c9adf.default/</text>
+
+            <text x="15" y="310" class="lane">
+              project_open(import) — two revisions, no readable in-between state
+            </text>
+
+            <rect class="box" x="10" y="325" width="140" height="70" rx="8" />
+            <text x="80" y="348" text-anchor="middle" class="title">read image</text>
+            <text x="80" y="365" text-anchor="middle" class="small">O_NOFOLLOW</text>
+            <text x="80" y="381" text-anchor="middle" class="small">loader by magic</text>
+
+            <path class="edge" d="M150,360 L163,360" marker-end="url(#arrow)" />
+
+            <rect class="box" x="165" y="325" width="140" height="70" rx="8" />
+            <text x="235" y="348" text-anchor="middle" class="title">open store</text>
+            <text x="235" y="365" text-anchor="middle" class="small">create | resume</text>
+            <text x="235" y="381" text-anchor="middle" class="small">recover jobs</text>
+
+            <path class="edge" d="M305,360 L318,360" marker-end="url(#arrow)" />
+
+            <rect class="box c2" x="320" y="325" width="140" height="70" rx="8" />
+            <text x="390" y="348" text-anchor="middle" class="title">importImage</text>
+            <text x="390" y="365" text-anchor="middle" class="small">revision + 1</text>
+            <text x="390" y="381" text-anchor="middle" class="small">images/&lt;sha256&gt;</text>
+
+            <path class="edge" d="M460,360 L473,360" marker-end="url(#arrow)" />
+
+            <rect class="box c2" x="475" y="325" width="140" height="70" rx="8" />
+            <text x="545" y="348" text-anchor="middle" class="title">prepareImport</text>
+            <text x="545" y="365" text-anchor="middle" class="small">discovery, indexes</text>
+            <text x="545" y="381" text-anchor="middle" class="small">outside SQLite</text>
+
+            <path class="edge accent" d="M615,360 L628,360" marker-end="url(#arrow-accent)" />
+
+            <rect class="box accent" x="630" y="325" width="140" height="70" rx="8" />
+            <text x="700" y="348" text-anchor="middle" class="title">transaction</text>
+            <text x="700" y="365" text-anchor="middle" class="small">revision + 1</text>
+            <text x="700" y="381" text-anchor="middle" class="small">facts + job</text>
+
+            <path class="edge" d="M770,360 L783,360" marker-end="url(#arrow)" />
+
+            <rect class="box ok" x="785" y="325" width="140" height="70" rx="8" />
+            <text x="855" y="348" text-anchor="middle" class="title">snapshot</text>
+            <text x="855" y="365" text-anchor="middle" class="small">state: loaded</text>
+            <text x="855" y="381" text-anchor="middle" class="small">rev 2 in the run</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 2.</strong> The directory name is a pure function of content and slice.
+            Import commits twice — once for the immutable image, once for decoded metadata and
+            indexes — so a fresh project's first readable snapshot is revision 2, as observed.
+          </figcaption>
+        </figure>
+
+        <h3>Import, step by step</h3>
+        <p>
+          <code>project_open</code> with <code>source.kind: "import"</code> is handled by the host
+          facade, which opens a worker for the project path and submits a worker
+          <code>import</code> request. In the child, <code>runProjectWorker</code> admits a durable
+          job with <code>input_revision</code> equal to the current snapshot (0 for a new project),
+          then:
+        </p>
+        <ol class="steps">
+          <li>
+            <strong>Read and hash.</strong> The source path is re-resolved after authorization so a
+            path swap between host and child is rejected (<code>permission_denied</code>). The file
+            is opened <code>O_NOFOLLOW</code>, checked as a regular file of at most 512 MiB, read in
+            1 MiB chunks with a checkpoint per chunk, and hashed.
+          </li>
+          <li>
+            <strong>Load metadata.</strong> The loader is chosen by magic bytes (<code>MZ</code> →
+            PE, <code>\x7fELF</code> → ELF, otherwise Mach-O). It decodes headers, slices, sections,
+            mappings, symbols, imports, exports, relocations, hints, diagnostics and capabilities.
+          </li>
+          <li>
+            <strong>Persist the immutable image.</strong> <code>importImage</code> re-hashes the
+            bytes, writes <code>images/&lt;sha256&gt;</code> through a temporary file plus
+            <code>fsync</code> and <code>rename</code>, inserts <code>images</code> and
+            <code>image_imports</code>, and advances the revision by one. Progress
+            <code>image_snapshot</code> is saved and sent.
+          </li>
+          <li>
+            <strong>Prepare derived native facts.</strong> <code>prepareQueryImport</code> runs
+            runtime metadata, name decoration, <code>discoverFunctions</code>, the string index, the
+            reference index and import-stub classification — all outside SQLite so a failed
+            preparation publishes nothing.
+          </li>
+          <li>
+            <strong>Publish atomically.</strong> One store transaction writes the loaded image,
+            every function/symbol/import/export/string/reference record, index states, evidence and
+            the completed job, then advances the revision again.
+          </li>
+          <li>
+            <strong>Describe.</strong> <code>describeProject</code> reports each image as
+            <code>loaded</code> or <code>snapshot_without_metadata</code>; the host then issues a
+            <code>binary_info</code> summary request and returns it with <code>data.resumed</code>.
+          </li>
+        </ol>
+        <p>
+          The index states are not guesses about completeness. After publication,
+          <code>symbol</code> and <code>export</code> are <code>complete</code> unless the native
+          name tables (or derived name decoration) were partial; <code>import</code> follows
+          metadata completeness; <code>function</code> follows discovery coverage;
+          <code>string</code> and <code>reference</code> take the states reported by their builders.
+          In the real <code>macho-arm64-symbols</code> run used on this page, the function and
+          reference indexes are <code>partial</code>, while the other four are
+          <code>complete</code> — and a function decompilation can still be <code>complete</code>,
+          because those are independent facts.
+        </p>
+        <div class="callout caveat">
+          <span class="title">Resume never replays an import</span>
+          <p>
+            A plain resume of a project with no image, or with an image whose metadata was never
+            loaded, returns <code>partial</code> / <code>incomplete_index</code> with
+            <code>data.image: null</code> and a diagnostic; it does not retry. Repair is explicit:
+            <code>source.kind: "import"</code> with <code>mode: "resume"</code> is accepted only for
+            an empty project or one unfinished snapshot, and the bytes and selected slice must match
+            the saved snapshot. The import-repair checks are in <code>runProjectWorker</code> and
+            <code>QueryService.execute</code>.
+          </p>
+        </div>
+      </section>
+
+      <section id="store">
+        <h2>The SQLite store</h2>
+        <p>
+          <code>SqliteProjectStore</code> owns exactly one exclusive connection (<code
+            >node:sqlite</code
+          >
+          <code>DatabaseSync</code>) and exposes a domain interface: snapshots, images, records,
+          indexes, evidence/types/signatures/lineage, annotations, jobs, artifacts, native summaries
+          and transactions. It takes the lock with <code>PRAGMA locking_mode=EXCLUSIVE</code> and
+          <code>BEGIN EXCLUSIVE</code>, enables foreign keys, then switches to WAL. The OS releases
+          the lock if the worker crashes; the next resume reconciles jobs rather than leaving a
+          half-owned database. Prepared statements are compiled per SQL text and cached up to 256
+          entries because statement compilation costs more than most indexed reads.
+        </p>
+
+        <h3>Schema version and migration chain</h3>
+        <p>
+          Persistence has its own version, independent of the wire schema. The code defines
+          <code>STORE_SCHEMA_VERSION = 6</code>, while <code>SCHEMA_VERSION</code> for results and
+          artifacts remains <code>1</code> (<a class="src" href="../../src/project/store/index.ts"
+            >src/project/store/index.ts</a
+          >). A resume first probes <code>PRAGMA user_version</code> on a read-only connection and
+          rejects anything below 1 or above 6 with <code>unsupported_version</code>. Under the
+          exclusive lock it re-checks the version and applies every missing step inside one
+          <code>BEGIN IMMEDIATE</code>; failure rolls the whole chain back.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th class="num">From</th>
+              <th class="num">To</th>
+              <th>Change</th>
+              <th>Why it cannot be lossy</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>1</td>
+              <td>2</td>
+              <td><code>annotation_removals(id, revision, author, origin)</code></td>
+              <td>Removal events get an actor; old snapshots are not retroactively attributed.</td>
+            </tr>
+            <tr>
+              <td>2</td>
+              <td>3</td>
+              <td><code>analysis_artifacts(revision, analysis_id, artifact_id)</code></td>
+              <td>Missing artifacts are simply not indexed; no artifact bytes are invented.</td>
+            </tr>
+            <tr>
+              <td>3</td>
+              <td>4</td>
+              <td>
+                <code>loaded_image_records</code>; decode each stored image and write its ordered
+                collections
+              </td>
+              <td>
+                Each old payload is decoded and checked against
+                <code>image_id</code>/<code>slice_id</code>; a mismatch aborts the migration.
+              </td>
+            </tr>
+            <tr>
+              <td>4</td>
+              <td>5</td>
+              <td>
+                indexes <code>records_scope_revision</code>, <code>loaded_images_revision</code>;
+                table <code>analysis_reuse</code>
+              </td>
+              <td>
+                Indexes are derived; the reuse table starts empty, so nothing becomes reusable by
+                accident.
+              </td>
+            </tr>
+            <tr>
+              <td>5</td>
+              <td>6</td>
+              <td>
+                <code>native_summaries(…)</code> plus its <code>(revision, seq, bytes)</code> index
+              </td>
+              <td>
+                An empty summary cache is a valid cold state; units are re-prepared on demand.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Tables and columns</h3>
+        <p>
+          All tables are <code>STRICT</code>. Payload columns contain the tagged encoding described
+          below, not JSON text; entity identifiers are opaque strings with a fixed prefix and 32
+          random bytes, or content-derived for images. The ER diagram groups tables by the question
+          they answer.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Table</th>
+              <th>Columns (primary key in bold)</th>
+              <th>Purpose</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>metadata</code></td>
+              <td><strong>singleton</strong>, project_id, revision</td>
+              <td>One row: random project identity and the global revision counter.</td>
+            </tr>
+            <tr>
+              <td><code>images</code></td>
+              <td><strong>image_id</strong>, sha256 UNIQUE</td>
+              <td>Immutable binary snapshots; <code>image_id = image_&lt;sha256&gt;</code>.</td>
+            </tr>
+            <tr>
+              <td><code>image_imports</code></td>
+              <td><strong>image_id, slice_id</strong>, revision</td>
+              <td>Which slice of which image became part of the project at which revision.</td>
+            </tr>
+            <tr>
+              <td><code>loaded_images</code></td>
+              <td><strong>image_id, slice_id, revision</strong>, payload</td>
+              <td>
+                Header envelope of a decoded image at a revision; collections live in the next
+                table.
+              </td>
+            </tr>
+            <tr>
+              <td><code>loaded_image_records</code></td>
+              <td><strong>image_id, slice_id, revision, collection, ordinal</strong>, payload</td>
+              <td>
+                Ordered slices, mappings, headers, sections, entry points, symbols, imports,
+                exports, relocations, hints, evidence, diagnostics, capabilities. FK to
+                <code>loaded_images</code>, cascade delete.
+              </td>
+            </tr>
+            <tr>
+              <td><code>records</code></td>
+              <td>
+                <strong>kind, id, revision</strong>, image_id, text_value, address_space,
+                address_value, payload
+              </td>
+              <td>
+                Native navigation facts: function, string, reference, symbol, import, export.
+                Lowercased text and a zero-padded hex address support indexed filters; the payload
+                is the full record.
+              </td>
+            </tr>
+            <tr>
+              <td><code>indexes</code></td>
+              <td><strong>image_id, kind, revision</strong>, state</td>
+              <td>
+                Explicit <code>complete</code>/<code>partial</code>/<code>not_started</code> state
+                per record kind. An empty filtered page never implies completeness.
+              </td>
+            </tr>
+            <tr>
+              <td><code>evidence</code></td>
+              <td><strong>id, revision</strong>, payload</td>
+              <td>Durable proofs at a revision; historical rows remain readable.</td>
+            </tr>
+            <tr>
+              <td><code>types</code></td>
+              <td><strong>id, revision</strong>, payload</td>
+              <td>Recovered type definitions plus their evidence IDs.</td>
+            </tr>
+            <tr>
+              <td><code>signatures</code></td>
+              <td><strong>id, revision</strong>, payload</td>
+              <td>Function signatures; asserted annotations never overwrite this fact table.</td>
+            </tr>
+            <tr>
+              <td><code>lineage</code></td>
+              <td><strong>id</strong>, revision, payload</td>
+              <td>
+                Split/merge history. IDs are minted at birth and never renamed; lineage records
+                previous/next identities.
+              </td>
+            </tr>
+            <tr>
+              <td><code>annotations</code></td>
+              <td><strong>id, revision</strong>, entity_id, payload</td>
+              <td>
+                Versioned annotation rows. A <code>NULL</code> payload is a removal tombstone;
+                retraction is a payload with status <code>retracted</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>annotation_removals</code></td>
+              <td><strong>id, revision</strong>, author, origin CHECK IN ('user','llm')</td>
+              <td>Who removed an annotation. FK to <code>annotations(id, revision)</code>.</td>
+            </tr>
+            <tr>
+              <td><code>jobs</code></td>
+              <td><strong>id</strong>, payload</td>
+              <td>
+                Durable job state, progress, diagnostics, artifact handles and
+                <code>published_revision</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>artifacts</code></td>
+              <td><strong>id</strong>, revision, job_id, cache_key UNIQUE, payload</td>
+              <td>
+                Published artifact metadata; <code>cache_key</code> is the exact
+                <code>CacheIdentity</code> fingerprint. The bytes live in
+                <code>artifacts/&lt;id&gt;</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>analysis_artifacts</code></td>
+              <td><strong>revision, analysis_id, artifact_id</strong></td>
+              <td>Inverted index: which artifacts mention a function, subject, type or proof.</td>
+            </tr>
+            <tr>
+              <td><code>analysis_reuse</code></td>
+              <td><strong>scope, revision DESC, artifact_id</strong></td>
+              <td>
+                Reuse index keyed by identity with both revisions zeroed; lets a newer annotation
+                revision try a readset check.
+              </td>
+            </tr>
+            <tr>
+              <td><code>native_summaries</code></td>
+              <td>
+                <strong>scope, function_id</strong>, revision, seq, allowance, work, bytes, digest,
+                payload
+              </td>
+              <td>
+                Brotli-compressed prepared callee units with their replay ledger and deterministic
+                eviction order.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 725" role="img" aria-labelledby="fig-er-title">
+            <title id="fig-er-title">Entity-relationship diagram of the project store</title>
+
+            <rect class="group" x="8" y="14" width="450" height="302" rx="10" />
+            <text x="20" y="32" class="lane">revision &amp; image snapshots</text>
+            <rect class="box c1" x="20" y="42" width="200" height="66" rx="6" />
+            <text x="30" y="61" class="title">metadata</text>
+            <text x="30" y="80" class="small mono">singleton, project_id</text>
+            <text x="30" y="97" class="small mono">revision</text>
+            <rect class="box c1" x="20" y="124" width="200" height="66" rx="6" />
+            <text x="30" y="143" class="title">images</text>
+            <text x="30" y="162" class="small mono">image_id PK, sha256 UQ</text>
+            <rect class="box c1" x="20" y="204" width="200" height="66" rx="6" />
+            <text x="30" y="223" class="title">image_imports</text>
+            <text x="30" y="242" class="small mono">image_id, slice_id</text>
+            <text x="30" y="259" class="small mono">revision</text>
+            <rect class="box c2" x="240" y="124" width="200" height="66" rx="6" />
+            <text x="250" y="143" class="title">loaded_images</text>
+            <text x="250" y="162" class="small mono">image_id, slice_id,</text>
+            <text x="250" y="179" class="small mono">revision</text>
+            <rect class="box c2" x="240" y="204" width="200" height="66" rx="6" />
+            <text x="250" y="223" class="title">loaded_image_records</text>
+            <text x="250" y="242" class="small mono">collection, ordinal,</text>
+            <text x="250" y="259" class="small mono">payload</text>
+
+            <path class="edge" d="M120,190 L120,202" marker-end="url(#arrow)" />
+            <path class="edge" d="M220,157 L238,157" marker-end="url(#arrow)" />
+            <path class="edge" d="M340,190 L340,202" marker-end="url(#arrow)" />
+            <text x="138" y="199" class="edge-label">1:N</text>
+
+            <rect class="group" x="470" y="14" width="462" height="168" rx="10" />
+            <text x="482" y="32" class="lane">native facts &amp; index state</text>
+            <rect class="box c3" x="485" y="42" width="210" height="58" rx="6" />
+            <text x="495" y="61" class="title">records</text>
+            <text x="495" y="81" class="small mono">kind, id, revision, payload</text>
+            <text x="495" y="95" class="small">FK image_id → images</text>
+            <rect class="box c3" x="710" y="42" width="205" height="58" rx="6" />
+            <text x="720" y="61" class="title">indexes</text>
+            <text x="720" y="81" class="small mono">image_id, kind, revision</text>
+            <text x="720" y="95" class="small mono">state</text>
+            <text x="485" y="132" class="small">
+              records are read latest-per-id at or before the revision;
+            </text>
+            <text x="485" y="148" class="small">
+              index state is explicit and never inferred from a page.
+            </text>
+
+            <rect class="group" x="8" y="330" width="450" height="196" rx="10" />
+            <text x="20" y="348" class="lane">durable knowledge</text>
+            <rect class="box c4" x="20" y="356" width="200" height="56" rx="6" />
+            <text x="30" y="375" class="title">evidence</text>
+            <text x="30" y="395" class="small mono">id, revision, payload</text>
+            <rect class="box c4" x="240" y="356" width="200" height="56" rx="6" />
+            <text x="250" y="375" class="title">types</text>
+            <text x="250" y="395" class="small mono">id, revision, payload</text>
+            <rect class="box c4" x="20" y="430" width="200" height="56" rx="6" />
+            <text x="30" y="449" class="title">signatures</text>
+            <text x="30" y="469" class="small mono">id, revision, payload</text>
+            <rect class="box c4" x="240" y="430" width="200" height="56" rx="6" />
+            <text x="250" y="449" class="title">lineage</text>
+            <text x="250" y="469" class="small mono">id, revision, payload</text>
+
+            <rect class="group" x="470" y="330" width="462" height="196" rx="10" />
+            <text x="482" y="348" class="lane">annotations</text>
+            <rect class="box c5" x="485" y="356" width="205" height="64" rx="6" />
+            <text x="495" y="375" class="title">annotations</text>
+            <text x="495" y="395" class="small mono">id, revision, entity_id</text>
+            <text x="495" y="411" class="small mono">payload NULL = removed</text>
+            <rect class="box c5" x="710" y="356" width="205" height="64" rx="6" />
+            <text x="720" y="375" class="title">annotation_removals</text>
+            <text x="720" y="395" class="small mono">id, revision, author,</text>
+            <text x="720" y="411" class="small mono">origin</text>
+            <path class="edge" d="M690,388 L708,388" marker-end="url(#arrow)" />
+            <text x="699" y="380" text-anchor="middle" class="edge-label">1:N</text>
+
+            <rect class="group" x="8" y="540" width="450" height="172" rx="10" />
+            <text x="20" y="558" class="lane">jobs &amp; artifacts</text>
+            <rect class="box c6" x="20" y="566" width="195" height="56" rx="6" />
+            <text x="30" y="585" class="title">jobs</text>
+            <text x="30" y="605" class="small mono">id PK, payload</text>
+            <rect class="box c6" x="240" y="566" width="200" height="70" rx="6" />
+            <text x="250" y="585" class="title">artifacts</text>
+            <text x="250" y="605" class="small mono">id, revision, job_id,</text>
+            <text x="250" y="621" class="small mono">cache_key UQ, payload</text>
+            <rect class="box c6" x="20" y="636" width="200" height="70" rx="6" />
+            <text x="30" y="655" class="title">analysis_artifacts</text>
+            <text x="30" y="675" class="small mono">revision, analysis_id,</text>
+            <text x="30" y="691" class="small mono">artifact_id</text>
+            <rect class="box c6" x="240" y="650" width="200" height="62" rx="6" />
+            <text x="250" y="669" class="title">analysis_reuse</text>
+            <text x="250" y="689" class="small mono">scope, revision,</text>
+            <text x="250" y="705" class="small mono">artifact_id</text>
+            <path class="edge" d="M240,601 L222,601 L222,634" marker-end="url(#arrow)" />
+            <path class="edge" d="M340,636 L340,648" marker-end="url(#arrow)" />
+
+            <rect class="group" x="470" y="540" width="462" height="172" rx="10" />
+            <text x="482" y="558" class="lane">prepared callee summaries</text>
+            <rect class="box c2" x="485" y="566" width="415" height="88" rx="6" />
+            <text x="495" y="585" class="title">native_summaries</text>
+            <text x="495" y="605" class="small mono">
+              scope, function_id, revision, seq, allowance, work
+            </text>
+            <text x="495" y="621" class="small mono">bytes, digest, payload (Brotli)</text>
+            <text x="495" y="637" class="small mono">PK(scope, function_id)</text>
+            <text x="482" y="668" class="small">
+              payload is the tagged graph encoding; digest binds
+            </text>
+            <text x="482" y="684" class="small">
+              scope + function + revision + compressed bytes.
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 3.</strong> Durable state is partitioned by revision. Only
+            <code>metadata</code> is singleton; artifacts and summaries have their own content keys;
+            annotations and navigation records keep history rather than overwriting it.
+          </figcaption>
+        </figure>
+
+        <h3>Transactions and the revision guard</h3>
+        <p>
+          The store's general domain-mutation entry point is
+          <code>transaction(expectedRevision, mutate)</code> (image import and artifact publication
+          have their own guarded paths). It first compares the expected revision with the current
+          one; a mismatch returns a typed conflict without opening a transaction. Otherwise it
+          stamps <code>revision = current + 1</code>, exposes a <code>StoreTransaction</code> whose
+          methods validate their domain object, runs the callback synchronously, updates
+          <code>metadata</code> and commits. Asynchronous callbacks and escaped handles are
+          rejected: the callback's promise check and the <code>guard()</code>
+          after return make a partial commit impossible.
+        </p>
+        <pre><code>export function nextRevision(current: number): number {
+  revisionSchema.parse(current);
+  return revisionSchema.parse(current + 1);
+}</code></pre>
+        <p>The store repeats that precondition atomically before opening its transaction:</p>
+        <pre><code>const current = this.#current();
+if (current !== expectedRevision)
+  return { state: 'conflict', expected_revision: expectedRevision, current_revision: current };
+if (this.#transaction) fail('invalid_input', 'Nested transactions are forbidden');</code></pre>
+        <p class="sources">
+          <a class="src" href="../../src/core/validation.ts">src/core/validation.ts</a>
+          (<code>nextRevision</code>, <code>assertRevision</code>) and
+          <a class="src" href="../../src/project/store/index.ts">src/project/store/index.ts</a>
+          (<code>transaction</code>).
+        </p>
+        <div class="callout invariant">
+          <span class="title">Invariant</span>
+          <p>
+            One successful domain mutation advances the global revision by exactly one. The response
+            validator enforces it: a complete mutation result must report
+            <code>nextRevision(expected_revision)</code>
+            (<a class="src" href="../../src/core/validation.ts">src/core/validation.ts</a>,
+            <code>validateToolResponse</code>). A new-image import is the deliberate exception: it
+            uses two transactions (image bytes, then metadata) and lands at
+            <code>current + 2</code>.
+          </p>
+        </div>
+        <p>
+          A rejected mutation rolls back and returns <code>state: "rejected"</code> with the
+          diagnostic; an annotation bridge turns that into a failed tool result rather than a throw.
+          Artifact publication cannot nest in a transaction: it writes the payload file first, then
+          inserts the artifact, its inverted-index rows, any reuse row, the completed job and queued
+          native summaries in one <code>BEGIN IMMEDIATE</code>. If the transaction fails, the file
+          is unlinked. Job invariants are checked in <code>saveJob</code>: a job cannot change its
+          input revision or operation, a terminal job cannot restart, a running job cannot return to
+          <code>queued</code>, and every artifact handle must already be published at the job's
+          input revision.
+        </p>
+
+        <h3>Record encoding</h3>
+        <p>
+          Domain records never go into SQLite as free-form JSON. <code>encodeStored</code> wraps a
+          tagged value in <code>{ version: 1, value }</code>; arrays and objects become
+          <code>['array', …]</code> and <code>['object', [[key, value], …]]</code>, and bigints
+          become <code>['bigint', decimal]</code>. This keeps identities type-tagged: the number
+          <code>1n</code> cannot collide with the string <code>"1"</code>. The encoder drops
+          <code>undefined</code> object properties and rejects class instances, non-finite numbers
+          and <code>undefined</code> array elements. It caps records at
+          <code>MAX_RECORD_BYTES = 16 MiB</code>, one million nodes and depth 128. The decoder
+          rejects duplicate object keys and defines <code>__proto__</code> as an own property rather
+          than mutating a prototype (<a class="src" href="../../src/project/store/encoding.ts"
+            >src/project/store/encoding.ts</a
+          >).
+        </p>
+        <p>
+          Prepared callee units use <code>encodeStoredGraph</code>, which extends the same scheme
+          with <code>Map</code>, object identity (<code>['ref', n]</code>) and string interning
+          (<code>['s', n]</code>). Shared substructure — copy-on-write analysis state, a
+          <code>types.calls</code> object aliased by <code>analysis</code> — is written once and
+          reconstructed aliased. Property names are interned from their third use, long string
+          values from their second. Graph records have their own limits:
+          <code>MAX_GRAPH_BYTES = 128 MiB</code> and twelve million nodes. Summaries are then Brotli
+          compressed at quality 4 and stored as a BLOB.
+        </p>
+      </section>
+
+      <section id="revisions">
+        <h2>Revisions, snapshots &amp; annotations</h2>
+        <p>
+          The project revision is a single integer. It is not a per-table version: it names one
+          complete, immutable view of every fact. Reads take a revision explicitly; a query for
+          revision 2 must return the same answers forever, regardless of revisions committed later.
+          The store implements that with "latest row at or before the requested revision" for
+          images, records, types, signatures, evidence, annotations and loaded images. A record
+          inserted at revision 3 is invisible to a revision-2 query; a deletion at revision 3 is
+          represented by a tombstone, so revision 2 still sees the earlier payload.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 270" role="img" aria-labelledby="fig-revisions-title">
+            <title id="fig-revisions-title">
+              Revision timeline and what each kind of read sees
+            </title>
+            <text x="20" y="30" class="lane">writes</text>
+            <path class="edge thick" d="M40,90 L900,90" />
+            <rect class="box c1" x="55" y="68" width="70" height="44" rx="8" />
+            <text x="90" y="95" text-anchor="middle" class="mono">rev 0</text>
+            <rect class="box c2" x="230" y="68" width="110" height="44" rx="8" />
+            <text x="285" y="95" text-anchor="middle" class="mono">rev 1</text>
+            <rect class="box c2" x="430" y="68" width="110" height="44" rx="8" />
+            <text x="485" y="95" text-anchor="middle" class="mono">rev 2</text>
+            <rect class="box c3" x="640" y="68" width="110" height="44" rx="8" />
+            <text x="695" y="95" text-anchor="middle" class="mono">rev 3</text>
+            <text x="230" y="52" class="small">image_imports +1</text>
+            <text x="430" y="52" class="small">image metadata + indexes +1</text>
+            <text x="640" y="52" class="small">annotations_apply +1</text>
+
+            <path class="edge accent" d="M485,112 L485,156" marker-end="url(#arrow-accent)" />
+            <rect class="box accent" x="250" y="160" width="310" height="74" rx="8" />
+            <text x="405" y="181" text-anchor="middle" class="title">
+              artifact published at revision 2
+            </text>
+            <text x="405" y="200" text-anchor="middle" class="small">
+              cache_key = fingerprint(CacheIdentity)
+            </text>
+            <text x="405" y="217" text-anchor="middle" class="small">
+              served only while both revisions are 2
+            </text>
+
+            <path class="edge warn" d="M695,112 L695,156" marker-end="url(#arrow)" />
+            <rect class="box warn" x="580" y="160" width="350" height="74" rx="8" />
+            <text x="755" y="181" text-anchor="middle" class="title">revision 3 read</text>
+            <text x="755" y="200" text-anchor="middle" class="small">
+              exact artifact key no longer matches
+            </text>
+            <text x="755" y="217" text-anchor="middle" class="small">
+              reuse candidate + readset check, else compute
+            </text>
+
+            <text x="20" y="258" class="small">
+              Every read names its revision; snapshots are immutable answers, not “current state”
+              pointers.
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 4.</strong> Revision 2 is the first readable snapshot after an import. A
+            later annotation commit invalidates exact cache authority without destroying the old
+            artifact: the old payload can still be reused if its dependency readset fingerprints
+            still match.
+          </figcaption>
+        </figure>
+
+        <p>
+          Two different preconditions appear in requests. Read-only tools carry
+          <code>revision</code>; mutations carry <code>expected_revision</code>. The host's
+          <code>validateToolRequest</code> can assert either against the current revision before
+          work begins, and throws <code>RevisionConflict</code> (code <code>stale_revision</code>)
+          with both numbers. The store repeats the check atomically because time passes between
+          admission and commit. Annotation batches are the richest example:
+        </p>
+        <ol class="steps">
+          <li>
+            <strong>Preflight.</strong> <code>AnnotationService.apply</code> compares
+            <code>expected_revision</code> with the current snapshot and returns a conflict without
+            reading more.
+          </li>
+          <li>
+            <strong>Validate against the old snapshot.</strong> Edits must name a durable subject or
+            a trusted catalog subject; evidence and type closures must resolve at the current
+            revision; signature ABI must match the subject image; annotation IDs may not move to
+            another entity, even after removal or lineage changes.
+          </li>
+          <li>
+            <strong>Prepare assertion evidence.</strong> An edit with no evidence gets a
+            deterministic <code>assertion</code> proof derived from project, revision, annotation,
+            author, origin and status.
+          </li>
+          <li>
+            <strong>One synchronous transaction.</strong> The complete response — including evidence
+            and the completed job — is validated inside the commit hook. A failure there rolls back
+            annotations, evidence and the job together.
+          </li>
+          <li>
+            <strong>Return the new revision.</strong> The result reports
+            <code>previous_revision</code>, <code>revision</code>, applied/removed IDs and
+            <code>invalidation.derived_before_revision</code>. If the precondition fails at commit
+            time, no edits are committed; the tool result is <code>failed</code> with
+            <code>stale_revision</code>, <code>current_revision</code> set, and the job saved as
+            <code>stale</code>.
+          </li>
+        </ol>
+        <div class="callout refusal">
+          <span class="title">Refusal</span>
+          <p>
+            A stale annotation batch is not retried, merged or partially applied. The
+            <code>stale_revision</code> diagnostic and <code>current_revision</code> are the
+            contract; callers must inspect and resubmit against the new snapshot.
+          </p>
+        </div>
+      </section>
+
+      <section id="cache">
+        <h2>The analysis cache</h2>
+        <p>
+          The cache stores the semantic result of <code>function_decompile</code>, not the emitted
+          text alone. An artifact payload contains a format version, the full
+          <code>CacheIdentity</code>, the inline decompilation result (state, signature, emission,
+          capabilities, evidence), an internal semantic catalog (subjects, supplied types, proofs)
+          and, optionally, the dependency readset. The media type is
+          <code>application/vnd.open-decomp.function+json</code>; the format version is
+          <code>ANALYSIS_ARTIFACT_VERSION = 2</code>; the artifact bound is
+          <code>MAX_ANALYSIS_ARTIFACT_BYTES = 16 MiB</code>
+          (<a class="src" href="../../src/project/cache/model.ts">src/project/cache/model.ts</a>).
+          The exported <code>readAnalysisArtifact</code> is that exact reader for trusted consumers
+          (investigation and catalog assembly), not a second cache path.
+        </p>
+
+        <h3>Identity: what makes a result reusable</h3>
+        <p>
+          <code>CacheIdentity</code> is a strict object. It includes the image hash and slice, the
+          complete target contract, all pipeline component versions, both revisions, the function
+          ID, the presentation options and the original request budget. The budget is part of the
+          key on purpose: a result computed under a smaller work or output budget is not the result
+          a larger request would produce.
+        </p>
+        <pre><code>export const cacheIdentitySchema = z.strictObject({
+  image_sha256: digestSchema,
+  slice_id: sliceIdSchema,
+  target: targetSchema,
+  versions: versionsSchema,
+  evidence_revision: revisionSchema,
+  annotation_revision: revisionSchema,
+  options: analysisOptionsSchema,
+  budget: budgetSchema,
+  function_id: entityIdSchema,
+});</code></pre>
+        <p class="sources">
+          <a class="src" href="../../src/core/validation.ts">src/core/validation.ts</a>
+          (<code>cacheIdentitySchema</code>, <code>cacheIdentityKey</code>). The service builds it
+          in
+          <a class="src" href="../../src/service/analysis/index.ts"
+            >src/service/analysis/index.ts</a
+          >
+          (<code>executeDecompilation</code>); versions come from
+          <a class="src" href="../../src/service/analysis/versions.ts"
+            >src/service/analysis/versions.ts</a
+          >
+          (<code>pipelineVersions</code>).
+        </p>
+        <p>
+          <code>pipelineVersions</code> composes a version record from the loader, decoder, lifter,
+          ABI, emitter and one explicit analysis string:
+          <code
+            >pipeline/25;discovery/5;targets/2;ssa/5;values-effects/4;stack-calls/9;debug/1;library/8;types/8;annotations/1;structure/3;reconstruction/49</code
+          >. Those numbers are a contract, not a package version: changing any stage's semantics
+          requires bumping its entry, which invalidates old artifacts instead of silently serving
+          them. <code>acceptsAnalysisIdentity</code> checks the stored components against the
+          current composition before an annotation catalog may be trusted.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 330" role="img" aria-labelledby="fig-identity-keys-title">
+            <title id="fig-identity-keys-title">
+              CacheIdentity and the three keys derived from it
+            </title>
+            <rect class="box accent" x="20" y="20" width="360" height="290" rx="8" />
+            <text x="35" y="42" class="title">CacheIdentity</text>
+            <text x="35" y="66" class="mono">image_sha256</text>
+            <text x="35" y="84" class="mono">slice_id</text>
+            <text x="35" y="102" class="mono">target {format, architecture,</text>
+            <text x="35" y="118" class="mono">abi, endian, bits, features}</text>
+            <text x="35" y="136" class="mono">versions {backend, loader,</text>
+            <text x="35" y="152" class="mono">decoder, lifter, analysis,</text>
+            <text x="35" y="168" class="mono">abi, emitter}</text>
+            <text x="35" y="186" class="mono">evidence_revision</text>
+            <text x="35" y="204" class="mono">annotation_revision</text>
+            <text x="35" y="222" class="mono">options {emitter, view, …}</text>
+            <text x="35" y="240" class="mono">budget {work, output_bytes, …}</text>
+            <text x="35" y="258" class="mono">function_id</text>
+
+            <path class="edge accent" d="M380,55 L426,55" marker-end="url(#arrow-accent)" />
+            <rect class="box ok" x="430" y="25" width="480" height="64" rx="8" />
+            <text x="445" y="47" class="title">artifacts.cache_key — UNIQUE</text>
+            <text x="445" y="67" class="small mono">fingerprint(identity)</text>
+            <text x="445" y="82" class="small">
+              exact hit, but only when both revisions are current
+            </text>
+
+            <path class="edge" d="M380,150 L426,150" marker-end="url(#arrow)" />
+            <rect class="box c3" x="430" y="118" width="480" height="64" rx="8" />
+            <text x="445" y="140" class="title">analysis_reuse.scope</text>
+            <text x="445" y="160" class="small mono">fingerprint(identity with revisions = 0)</text>
+            <text x="445" y="175" class="small">
+              candidate index only; never permission to serve a hit
+            </text>
+
+            <path class="edge" d="M380,250 L426,250" marker-end="url(#arrow)" />
+            <rect class="box c1" x="430" y="213" width="480" height="90" rx="8" />
+            <text x="445" y="235" class="title">analysis artifact payload</text>
+            <text x="445" y="255" class="small mono">
+              format_version 2 + identity + result + catalog
+            </text>
+            <text x="445" y="271" class="small mono">
+              + dependencies (ordered selector/fingerprint reads)
+            </text>
+            <text x="445" y="290" class="small">
+              bytes verified against artifacts.sha256 on every load
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 5.</strong> One identity yields an exact key, a revision-independent
+            reuse scope and the payload's own self-description. The reuse scope never authorizes
+            delivery; it only finds candidates whose readset must still be revalidated.
+          </figcaption>
+        </figure>
+
+        <h3>Lookup, hit and publication</h3>
+        <p>
+          <code>runCachedDecompilation</code> is the only path that decides hit versus compute. It
+          first validates the durable job: the job must exist, belong to this project, be a
+          <code>function_decompile</code> job, be at the current revision, and be
+          <code>queued</code> or <code>running</code>. Then it takes one of five paths:
+        </p>
+        <ol class="steps">
+          <li>
+            <strong>Exact hit.</strong> If caching is enabled and
+            <code>store.findArtifact(identity)</code> returns a row, the payload is loaded, parsed
+            (memoized by its verified SHA-256), checked against the artifact metadata and index key,
+            and passed through <code>validateComputation</code>. The job is completed with the
+            existing artifact handle; no analysis runs.
+          </li>
+          <li>
+            <strong>Reuse hit.</strong> Otherwise up to eight earlier artifacts with the same
+            revision-independent scope are tried. A candidate is usable only if it has a complete
+            readset and <code>validateAnalysisReadset</code> observes every selector with the same
+            fingerprint at the current revision. Its result is re-stamped with the current revision;
+            the catalog and readset are kept. It is reported as <code>cache: "hit"</code>.
+          </li>
+          <li>
+            <strong>Compute.</strong> The pipeline callback runs, and the collector returns the
+            ordered readset. Validation checks the snapshot image, target, function, result
+            metadata, emitter dialect/version, catalog trust, type closure and proof closure.
+          </li>
+          <li>
+            <strong>Size and delivery.</strong> The payload is serialized and sized before commit.
+            Delivery is inline when it fits the output limit, otherwise an artifact envelope points
+            at the published handle.
+          </li>
+          <li>
+            <strong>Publish.</strong> <code>store.publishArtifact</code> rechecks the job and
+            current revision, then writes the bytes, indexes analysis IDs, records the reuse scope,
+            completes the job and flushes queued native summaries.
+          </li>
+        </ol>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 570" role="img" aria-labelledby="fig-lookup-title">
+            <title id="fig-lookup-title">Decision tree for one decompilation cache lookup</title>
+            <rect class="box accent" x="20" y="25" width="300" height="54" rx="8" />
+            <text x="170" y="47" text-anchor="middle" class="title">identity parsed</text>
+            <text x="170" y="65" text-anchor="middle" class="small">
+              job running at current revision?
+            </text>
+            <path class="edge bad" d="M320,52 L436,52" marker-end="url(#arrow)" />
+            <text x="378" y="44" text-anchor="middle" class="edge-label">no</text>
+            <rect class="box bad" x="440" y="30" width="300" height="44" rx="8" />
+            <text x="590" y="57" text-anchor="middle" class="small">
+              fail stale_revision / invalid_input
+            </text>
+
+            <path class="edge" d="M170,79 L170,103" marker-end="url(#arrow)" />
+            <rect class="box accent" x="20" y="105" width="300" height="54" rx="8" />
+            <text x="170" y="127" text-anchor="middle" class="title">analysis_cache enabled?</text>
+            <text x="170" y="145" text-anchor="middle" class="small">
+              trusted host setting, not a request field
+            </text>
+            <path class="edge warn" d="M320,132 L436,132" marker-end="url(#arrow)" />
+            <text x="378" y="124" text-anchor="middle" class="edge-label">no</text>
+            <rect class="box warn" x="440" y="110" width="340" height="44" rx="8" />
+            <text x="610" y="137" text-anchor="middle" class="small">
+              compute; transient artifact; no reuse
+            </text>
+
+            <path class="edge" d="M170,159 L170,183" marker-end="url(#arrow)" />
+            <rect class="box accent" x="20" y="185" width="300" height="54" rx="8" />
+            <text x="170" y="207" text-anchor="middle" class="title">findArtifact(identity)?</text>
+            <text x="170" y="225" text-anchor="middle" class="small">
+              exact cache_key at current revision
+            </text>
+            <path class="edge ok" d="M320,212 L436,212" marker-end="url(#arrow)" />
+            <text x="378" y="204" text-anchor="middle" class="edge-label">yes</text>
+            <rect class="box ok" x="440" y="190" width="340" height="44" rx="8" />
+            <text x="610" y="217" text-anchor="middle" class="small">
+              load + validateComputation → hit
+            </text>
+
+            <path class="edge" d="M170,239 L170,263" marker-end="url(#arrow)" />
+            <rect class="box accent" x="20" y="265" width="300" height="54" rx="8" />
+            <text x="170" y="287" text-anchor="middle" class="title">reuse candidate valid?</text>
+            <text x="170" y="305" text-anchor="middle" class="small">
+              ≤ 8 rows; readset must validate
+            </text>
+            <path class="edge ok" d="M320,292 L436,292" marker-end="url(#arrow)" />
+            <text x="378" y="284" text-anchor="middle" class="edge-label">yes</text>
+            <rect class="box ok" x="440" y="270" width="340" height="44" rx="8" />
+            <text x="610" y="297" text-anchor="middle" class="small">
+              re-stamp revision → hit (reused)
+            </text>
+
+            <path class="edge" d="M170,319 L170,343" marker-end="url(#arrow)" />
+            <text x="178" y="336" class="edge-label">no</text>
+            <rect class="box muted" x="20" y="345" width="300" height="54" rx="8" />
+            <text x="170" y="367" text-anchor="middle" class="title">compute</text>
+            <text x="170" y="385" text-anchor="middle" class="small">
+              dependency collector records reads
+            </text>
+
+            <path class="edge" d="M170,399 L170,423" marker-end="url(#arrow)" />
+            <rect class="box accent" x="20" y="425" width="300" height="54" rx="8" />
+            <text x="170" y="447" text-anchor="middle" class="title">serialize; &gt; 16 MiB?</text>
+            <text x="170" y="465" text-anchor="middle" class="small">
+              dependencies, then metadata classes
+            </text>
+            <path class="edge warn" d="M320,452 L436,452" marker-end="url(#arrow)" />
+            <text x="378" y="444" text-anchor="middle" class="edge-label">yes</text>
+            <rect class="box warn" x="440" y="405" width="480" height="86" rx="8" />
+            <text x="455" y="427" class="title">shed in order, never the pseudocode</text>
+            <text x="455" y="447" class="small">
+              1. drop the readset (exact-revision reuse only)
+            </text>
+            <text x="455" y="463" class="small">2. inferences, 3. mappings, 4. requirements</text>
+            <text x="455" y="479" class="small">still larger → resource_limit, no publication</text>
+
+            <path class="edge" d="M170,479 L170,515" marker-end="url(#arrow)" />
+            <text x="178" y="500" class="edge-label">fits</text>
+            <rect class="box ok" x="20" y="517" width="300" height="44" rx="8" />
+            <text x="170" y="544" text-anchor="middle" class="small">
+              publishArtifact / transient → job completed
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 6.</strong> The expensive validation is deliberately placed before
+            delivery: a hit must still prove it belongs to this exact snapshot, image, target,
+            function and component composition. Only the compute edge runs the pipeline.
+          </figcaption>
+        </figure>
+
+        <pre><code>const enabled = input.analysis_cache !== false;
+const existing = enabled ? store.findArtifact(identity) : null;
+if (existing) {
+  const payload = loadPayload(store, existing, context, identity, false, existing);
+  const response = delivery(payload.result, existing, 'hit', limit, input.delivery ?? 'auto', true);
+  const job = activeJob(store, job_id, identity, context);
+  store.saveJob({ ...job, state: 'completed', progress: { phase: 'complete', completed: 1, total: 1 },
+    artifacts: [existing], published_revision: identity.annotation_revision });
+  return markSchemaValidated(response);
+}</code></pre>
+        <p class="sources">
+          <a class="src" href="../../src/project/cache/index.ts">src/project/cache/index.ts</a>
+          (<code>runCachedDecompilation</code>). The early return is legitimate because the payload
+          was parsed, size-bounded and validated by <code>loadPayload</code>; no later stage repeats
+          the parse.
+        </p>
+
+        <div class="callout invariant">
+          <span class="title">Invariant</span>
+          <p>
+            A stored artifact is not trusted because it exists. <code>loadPayload</code> checks the
+            media type, project and size; verifies the bytes against the stored SHA-256; parses
+            once; checks that the payload identity revisions equal the artifact revision and that
+            the exact cache key matches; then, except for the artifact just located by its exact
+            key, resolves the identity again through
+            <code>findArtifact</code>/<code>findHistoricalArtifact</code>. Every hit re-runs
+            <code>validateComputation</code>; reuse candidates additionally validate their readset
+            before they are accepted.
+          </p>
+        </div>
+
+        <h3>The dependency readset</h3>
+        <p>
+          Reuse across revisions is only safe if the computation that produced the result depended
+          on nothing that changed. <code>AnalysisDependencyCollector</code> is a
+          <code>ProjectStore</code> proxy. Every store read it sees at the preparing revision is
+          converted into a typed selector and a canonical fingerprint; reads at other revisions are
+          not captured. The selector union is closed: <code>signature</code>, <code>type</code>,
+          <code>proof</code>, <code>annotations</code>, <code>type_annotations</code>,
+          <code>all_annotations</code>, <code>record_scope</code>, <code>function</code>,
+          <code>function_address</code>.
+        </p>
+        <pre><code>case 'queryRecords':
+  return (query) =&gt; {
+    const result = target.queryRecords(query);
+    if (query.revision === revision) {
+      if (query.kind === 'function' &amp;&amp; query.ids !== undefined)
+        for (const id of query.ids) this.recordFunction(query.image_id, id);
+      else this.recordRecordScope(query.image_id, query.kind);
+    }
+    return result;
+  };</code></pre>
+        <p class="sources">
+          <a class="src" href="../../src/project/cache/dependencies.ts"
+            >src/project/cache/dependencies.ts</a
+          >
+          (<code>AnalysisDependencyCollector</code>, <code>recordRecordScope</code>,
+          <code>createAnalysisReadset</code>). The excerpt is trimmed; the real proxy also wraps
+          signatures, types, evidence and annotation queries.
+        </p>
+        <p>
+          <code>recordRecordScope</code> captures a negative read: not the functions found, but the
+          version of the whole record/index/image scope, computed by
+          <code>readRecordScopeVersion</code> from the latest record revision, the latest index
+          state and the latest loaded-image revision. That is what makes an empty result reusable —
+          if no function exists at revision 2, and the scope token is unchanged at revision 3, the
+          absence is still valid. <code>recordFunction</code> additionally records the function's
+          evidence and signature closure; <code>recordProof</code> and <code>recordType</code> walk
+          <code>derived_from</code>/<code>conflicts_with</code> and type references to a fixed
+          point, not just one hop. Duplicate selectors are captured once; a re-read costs nothing.
+        </p>
+        <p>
+          Validation replays the ledger against the new revision:
+          <code>validateAnalysisReadset</code> requires a well-formed selector, recomputes its
+          fingerprint from the store and returns false on the first mismatch. It reports progress
+          (<code>dependency-validation</code>) and bounds the ledger at
+          <code>MAX_READS = 100000</code>. If a candidate has no readset, it is not reusable across
+          revisions at all. <code>replay</code> and <code>verifyTracedReads</code> do the same for
+          persisted callee units, with a per-store/revision memo so shared closures are checked
+          once.
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Situation</th>
+              <th>Outcome</th>
+              <th>Enforced by</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Exact identity exists at current revision</td>
+              <td>Hit; result delivered from the stored payload</td>
+              <td><code>findArtifact</code> + <code>loadPayload</code></td>
+            </tr>
+            <tr>
+              <td>Exact identity exists only at an older revision</td>
+              <td>Never served as current; considered for reuse</td>
+              <td><code>findArtifact</code> revision equality</td>
+            </tr>
+            <tr>
+              <td>Reuse candidate has complete readset and all fingerprints match</td>
+              <td>Hit; result revision re-stamped</td>
+              <td><code>findReuseCandidates</code> + <code>validateAnalysisReadset</code></td>
+            </tr>
+            <tr>
+              <td>Candidate lacks a readset or any selector differs</td>
+              <td>Miss; compute normally</td>
+              <td><code>runCachedDecompilation</code></td>
+            </tr>
+            <tr>
+              <td>Component version, target, options or budget differ</td>
+              <td>Different identity; no hit</td>
+              <td><code>cacheIdentityKey</code></td>
+            </tr>
+            <tr>
+              <td>Artifact bytes damaged, wrong project, wrong media type, oversized</td>
+              <td><code>invalid_input</code>; never served</td>
+              <td><code>loadPayload</code></td>
+            </tr>
+            <tr>
+              <td>Publication loses the current job/revision</td>
+              <td><code>stale_revision</code> or <code>cancelled</code>; no artifact</td>
+              <td><code>publishArtifact</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Size limits and shedding</h3>
+        <p>
+          The 16 MiB artifact bound can never cost the pseudocode. When the serialized payload is
+          too large and a readset is present, the readset is dropped first; the artifact then serves
+          only its exact revision. Then whole emission metadata classes are shed in
+          <code>EMISSION_METADATA_SHED_ORDER</code>: <code>inferences</code>, <code>mappings</code>,
+          then <code>requirements</code>. Each shed is recorded in <code>emission.omitted</code> and
+          in a partial <code>provenance</code> coverage/capability; an otherwise complete result
+          becomes <code>partial</code> with reason <code>output_limit</code>. The text, signature
+          and annotation catalog remain. If even the stripped payload exceeds the bound, the
+          operation fails with <code>resource_limit</code> and names the pseudocode size — nothing
+          is published.
+        </p>
+        <p>
+          Separate caps bound the store and the readers: artifacts are at most 64 MiB at the store
+          boundary (<code>MAX_ARTIFACT_BYTES</code>), parsed payload memoization is 16 MiB
+          (<code>MAX_PARSED_PAYLOAD_BYTES</code>), and annotation-catalog reconstruction reads at
+          most 128 artifacts and 32 MiB. A decompilation response is inline only if it fits the
+          smaller of the request's <code>output_bytes</code>, the transport's
+          <code>max_result_bytes</code> and the frame budget; otherwise the caller receives an
+          artifact handle and must page the bytes.
+        </p>
+
+        <h3><code>--no-analysis-cache</code></h3>
+        <p>
+          This is a trusted host setting, not a tool-request field. It reaches the worker in the
+          <code>open</code> command and is passed to the handler scope as
+          <code>analysis_cache: false</code>. With it, <code>runCachedDecompilation</code> skips
+          <code>findArtifact</code> and <code>findReuseCandidates</code>, never calls
+          <code>publishArtifact</code>, and delivers any artifact-shaped response from
+          <code>publishTransientArtifact</code> — memory only, newest within 64 MiB, readable like a
+          published handle for this session but never indexed or written. Native unit persistence
+          returns <code>undefined</code>, and the in-process prepared-unit cache returns an empty
+          identity, so nothing is read or left behind. The dependency collector still runs, which
+          keeps work charges and therefore results identical. Imports, indexes, annotations and jobs
+          still persist.
+        </p>
+
+        <h3>The persisted callee-summary tier</h3>
+        <p>
+          Decompiling one function can prepare many callee bodies. Those units are much larger than
+          the final artifact and are the dominant cold cost. There are two reuse tiers: an
+          in-process <code>WeakMap</code> keyed by the loaded image
+          (<code>preparedUnitCache</code>), and the durable <code>native_summaries</code> table.
+          <code>createNativeUnitPersistence</code> supplies the durable tier's
+          <code>load</code>/<code>save</code> pair. The durable tier is keyed by a digest of the
+          format version, project revision, image hash, slice, target, pipeline versions, lifter,
+          ABI and supplied native types — the emitter dimension is fixed to the preparation
+          pipeline's <code>c-like</code> version record because preparation happens before emission.
+          The row key is <code>(scope, function_id)</code>.
+        </p>
+        <p>
+          A row is offered only if its envelope parses, its identity fields equal the request, its
+          dependency targets resolve in the current function list, its call analysis is complete,
+          and <code>verifyTracedReads</code> revalidates every dependency read. The payload uses
+          <code>encodeStoredGraph</code> and Brotli quality 4. It is not stored when it exceeds
+          <code>MAX_PERSISTED_UNIT_SIZE = 8192</code> prepared-size units (instructions + IR nodes +
+          evidence + traced reads): the comment records that a 32k-unit is roughly 30 MB of JSON,
+          ~330 ms to write and ~260 ms to load against ~450 ms to prepare, while smaller units take
+          a few milliseconds. A single compressed row above
+          <code>MAX_NATIVE_SUMMARY_ROW_BYTES = 16 MiB</code> is rejected; the per-project cap is
+          <code>DEFAULT_NATIVE_SUMMARY_BYTES = 64 MiB</code>. Queued writes flush at the next
+          publication, when they exceed <code>MAX_PENDING_SUMMARY_BYTES = 8 MiB</code>, or at store
+          close. Eviction is deterministic: superseded revisions are dropped first, then the oldest
+          <code>(revision, seq)</code> rows until the cap is met.
+        </p>
+        <div class="callout caveat">
+          <span class="title">Cache writes never fail a request</span>
+          <p>
+            <code>#writeNativeSummaries</code> runs inside a SAVEPOINT; a failure rolls back only
+            the summaries and leaves the enclosing publication intact. Undecodable or
+            digest-mismatched rows are reported as misses and replaced by the next preparation,
+            never served.
+          </p>
+        </div>
+      </section>
+
+      <section id="execution">
+        <h2>Execution: pools, frames, jobs</h2>
+        <p>
+          <code>ProjectWorkerPool</code> keeps at most <code>max_workers</code> persistent child
+          processes (default 2, allowed 1–32) and a queue of at most
+          <code>max_queued</code> admitted jobs per project (default 16, allowed 0–1024). One
+          canonical project path has exactly one owner in a pool; opening the same path twice is
+          rejected. Admission capacity is reserved before source authorization, so a flood cannot
+          create an unbounded backlog. Exhaustion is immediate <code>resource_limit</code>, not an
+          infinite wait; closing an idle project releases its slot. The comment is explicit that
+          processes provide fault containment, not a filesystem sandbox against a malicious local
+          host.
+        </p>
+        <p>
+          The transport is a length-prefixed JSON stream, not Node IPC. Each frame is a 4-byte
+          big-endian length followed by UTF-8 JSON; the decoder checks
+          <code>2 ≤ length ≤ MAX_FRAME_BYTES</code> before allocating or parsing. The host also caps
+          its write queue at 4 MiB and its pending control requests at <code>max_queued + 4</code>;
+          the child serializes commands through a promise chain and rejects more than 1028 pending
+          ones. Stdout is exclusively framed IPC; stderr is not protocol, and more than 64 KiB of it
+          kills the child. Artifact reads are capped at 512 KiB of raw bytes per response because
+          hex doubles the size, with <code>next_offset</code> for continuation.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 420" role="img" aria-labelledby="fig-exec-title">
+            <title id="fig-exec-title">Worker frame format and durable job states</title>
+            <rect class="group" x="8" y="10" width="450" height="400" rx="10" />
+            <text x="20" y="30" class="lane">transport — length-prefixed JSON frames</text>
+            <rect class="box c1" x="25" y="50" width="90" height="40" rx="6" />
+            <text x="70" y="75" text-anchor="middle" class="mono">u32 BE</text>
+            <rect class="box c1" x="115" y="50" width="320" height="40" rx="6" />
+            <text x="275" y="75" text-anchor="middle" class="mono">JSON command or event</text>
+            <text x="25" y="110" class="small">
+              length checked before allocation; 2..2,097,152 bytes
+            </text>
+            <text x="25" y="128" class="small">
+              no Node IPC deserialization; stdout is protocol only
+            </text>
+
+            <text x="25" y="160" class="title">commands</text>
+            <text x="25" y="181" class="mono">open · admit · run · cancel</text>
+            <text x="25" y="199" class="mono">status · snapshot · artifact_read · close</text>
+            <text x="25" y="229" class="title">events</text>
+            <text x="25" y="250" class="mono">opened · job · progress · closed</text>
+            <text x="25" y="268" class="mono">artifact · error</text>
+
+            <text x="25" y="300" class="small">
+              host write queue ≤ 4 MiB; ≤ max_queued + 4 control requests
+            </text>
+            <text x="25" y="318" class="small">artifact page ≤ 512 KiB raw (hex doubles it)</text>
+            <text x="25" y="336" class="small">
+              stderr &gt; 64 KiB ⇒ SIGKILL; a blocked JS loop cannot
+            </text>
+            <text x="25" y="354" class="small">
+              observe cancellation, so the host restarts the child
+            </text>
+            <text x="25" y="384" class="small">
+              Every admitted job is saved before its acknowledgement.
+            </text>
+
+            <rect class="group" x="470" y="10" width="462" height="400" rx="10" />
+            <text x="482" y="30" class="lane">durable job states</text>
+            <rect class="box accent" x="500" y="55" width="140" height="40" rx="8" />
+            <text x="570" y="80" text-anchor="middle" class="mono">queued</text>
+            <rect class="box accent" x="500" y="125" width="140" height="40" rx="8" />
+            <text x="570" y="150" text-anchor="middle" class="mono">running</text>
+            <rect class="box ok" x="740" y="105" width="150" height="40" rx="8" />
+            <text x="815" y="130" text-anchor="middle" class="mono">completed</text>
+            <rect class="box warn" x="740" y="165" width="150" height="40" rx="8" />
+            <text x="815" y="190" text-anchor="middle" class="mono">cancelled</text>
+            <rect class="box bad" x="500" y="205" width="140" height="40" rx="8" />
+            <text x="570" y="230" text-anchor="middle" class="mono">failed</text>
+            <rect class="box muted" x="500" y="275" width="140" height="40" rx="8" />
+            <text x="570" y="300" text-anchor="middle" class="mono">stale</text>
+
+            <path class="edge accent" d="M570,95 L570,123" marker-end="url(#arrow-accent)" />
+            <text x="578" y="114" class="edge-label">run</text>
+            <path
+              class="edge ok"
+              d="M640,137 L700,137 L700,125 L738,125"
+              marker-end="url(#arrow)"
+            />
+            <path
+              class="edge warn"
+              d="M640,157 L700,157 L700,185 L738,185"
+              marker-end="url(#arrow)"
+            />
+            <path class="edge bad" d="M570,165 L570,203" marker-end="url(#arrow)" />
+            <path
+              class="edge dashed"
+              d="M500,75 L480,75 L480,295 L498,295"
+              marker-end="url(#arrow)"
+            />
+            <text x="487" y="190" class="edge-label" transform="rotate(-90 487 190)">
+              revision moved
+            </text>
+
+            <text x="482" y="340" class="small">
+              terminal states never restart; a running job cannot
+            </text>
+            <text x="482" y="356" class="small">
+              return to queued. Recovered nonterminal jobs are
+            </text>
+            <text x="482" y="372" class="small">
+              saved failed, or cancelled only when the interruption
+            </text>
+            <text x="482" y="388" class="small">was explicit and the revision did not change.</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 7.</strong> Durability precedes acknowledgement: <code>admit</code>
+            writes the queued job, so a lost host connection leaves an inspectable job rather than
+            an orphaned computation.
+          </figcaption>
+        </figure>
+
+        <h3>Job lifecycle, progress and cancellation</h3>
+        <p>
+          <code>submit</code> reserves a queue slot, authorizes the source path, validates the
+          request schema and sends <code>admit</code>. The child writes the queued job and replies;
+          only then does <code>ticket.accepted</code> resolve. The host keeps one running job per
+          project and calls <code>run</code> when it is ready; <code>status</code> reads durable
+          state. <code>JobTicket.result</code> resolves with the terminal job and, when still in
+          memory, its result. A completed recovered job may omit the transient result; callers must
+          inspect artifacts or repeat a read-only query. Annotation and decompilation results are
+          parsed against their tool output schema at the child boundary, and decompilation results
+          may be marked schema-validated so the host does not parse them again.
+        </p>
+        <p>
+          Progress is written through <code>OperationContext.progress</code>. The runtime throttles
+          saved/written updates to at most one per 100 ms and writes a progress frame only when
+          stdout has no buffered bytes, so a slow reader cannot grow an unbounded queue. Phases seen
+          in a real import are <code>queued</code>, <code>running</code>,
+          <code>image_snapshot</code>, <code>discovery</code> and <code>complete</code>; analysis
+          uses <code>decode</code>, <code>lift</code>, <code>ssa</code>, <code>metadata</code> and
+          later stages with totals. The durable job, not the notification stream, is authoritative.
+        </p>
+        <p>
+          Deadlines exist twice. The host sets a timer for the request's
+          <code>budget.deadline_ms</code> and calls <code>#interrupt(id, 'deadline')</code>. The
+          child checks the absolute deadline before starting (it may have waited in queue) and
+          clamps the context deadline to <code>min(request.deadline_ms, deadline - now)</code>.
+          <code>checkpoint</code> samples the clock every 32 charges and latches expiry, so later
+          checkpoints fail even if the clock is not read again. Work above
+          <code>budget.work</code> fails with a <code>resource_limit</code> diagnostic carrying
+          <code>details.resource: "work"</code> or <code>"deadline_ms"</code>.
+        </p>
+        <p>
+          Cancellation is cooperative where possible and process-level where necessary. For a job
+          that has not started, the host sends <code>cancel</code> instead of <code>run</code>; the
+          child marks it cancelled and never executes it. For a running job the host marks it
+          cancelled and restarts the child: SIGTERM, then SIGKILL after
+          <code>cancel_grace_ms</code> (default 100 ms), then <code>open</code> with
+          <code>interrupted: { id, reason }</code>. On startup the child marks every nonterminal job
+          terminal — <code>cancelled</code> only when the interruption was explicit and the revision
+          is unchanged, otherwise <code>failed</code> with <code>worker_failed</code>/<code
+            >resource_limit</code
+          >
+          and a diagnostic saying the operation was not retried. If a mutation committed before
+          interruption, it is never mislabeled cancelled.
+        </p>
+
+        <h3>Cold miss and warm hit, measured</h3>
+        <p>
+          The sequence below is the actual CLI path: <code>openBinary</code> hashes and opens the
+          project, then <code>BinarySession.decompile</code> first resolves the selector through
+          <code>functions_find</code> and then submits <code>function_decompile</code> with
+          <code>wait: true</code>. On a cold project, the worker hashes, imports, discovers,
+          indexes, publishes the image, runs the analysis pipeline, serializes, publishes the
+          artifact and writes native summaries. On a warm run, the same admission sequence happens,
+          but the store returns the exact artifact and the pipeline is never entered.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 610" role="img" aria-labelledby="fig-sequence-title">
+            <title id="fig-sequence-title">
+              CLI decompile sequence on a cold miss and a warm hit
+            </title>
+
+            <text x="12" y="18" class="lane">(a) cold miss — new project directory</text>
+            <text x="60" y="42" text-anchor="middle" class="mono">CLI</text>
+            <text x="230" y="42" text-anchor="middle" class="mono">QueryService</text>
+            <text x="440" y="42" text-anchor="middle" class="mono">child worker</text>
+            <text x="650" y="42" text-anchor="middle" class="mono">store</text>
+            <text x="860" y="42" text-anchor="middle" class="mono">pipeline</text>
+            <path class="edge dashed" d="M60,50 L60,285" />
+            <path class="edge dashed" d="M230,50 L230,285" />
+            <path class="edge dashed" d="M440,50 L440,285" />
+            <path class="edge dashed" d="M650,50 L650,285" />
+            <path class="edge dashed" d="M860,50 L860,285" />
+
+            <path class="edge" d="M60,72 L228,72" marker-end="url(#arrow)" />
+            <text x="144" y="66" text-anchor="middle" class="edge-label">execute</text>
+            <path class="edge" d="M230,96 L438,96" marker-end="url(#arrow)" />
+            <text x="334" y="90" text-anchor="middle" class="edge-label">admit</text>
+            <path class="edge" d="M440,120 L648,120" marker-end="url(#arrow)" />
+            <text x="544" y="114" text-anchor="middle" class="edge-label">saveJob(queued)</text>
+            <path class="edge" d="M230,144 L438,144" marker-end="url(#arrow)" />
+            <text x="334" y="138" text-anchor="middle" class="edge-label">run</text>
+            <path class="edge" d="M440,168 L648,168" marker-end="url(#arrow)" />
+            <text x="544" y="162" text-anchor="middle" class="edge-label">findArtifact → null</text>
+            <path class="edge accent" d="M440,192 L858,192" marker-end="url(#arrow-accent)" />
+            <text x="745" y="186" text-anchor="middle" class="edge-label">analyze</text>
+            <path class="edge" d="M860,216 L442,216" marker-end="url(#arrow)" />
+            <text x="745" y="210" text-anchor="middle" class="edge-label">result</text>
+            <path class="edge" d="M440,240 L648,240" marker-end="url(#arrow)" />
+            <text x="544" y="234" text-anchor="middle" class="edge-label">publishArtifact</text>
+            <path class="edge ok" d="M440,264 L62,264" marker-end="url(#arrow)" />
+            <text x="320" y="258" text-anchor="middle" class="edge-label">cache: computed</text>
+            <text x="650" y="282" class="small">cold median 0.635 s over five fresh runs</text>
+
+            <text x="12" y="318" class="lane">
+              (b) warm hit — same project, same artifact identity
+            </text>
+            <text x="60" y="342" text-anchor="middle" class="mono">CLI</text>
+            <text x="230" y="342" text-anchor="middle" class="mono">QueryService</text>
+            <text x="440" y="342" text-anchor="middle" class="mono">child worker</text>
+            <text x="650" y="342" text-anchor="middle" class="mono">store</text>
+            <text x="860" y="342" text-anchor="middle" class="mono">pipeline</text>
+            <path class="edge dashed" d="M60,350 L60,570" />
+            <path class="edge dashed" d="M230,350 L230,570" />
+            <path class="edge dashed" d="M440,350 L440,570" />
+            <path class="edge dashed" d="M650,350 L650,570" />
+            <path class="edge dashed" d="M860,350 L860,570" />
+
+            <path class="edge" d="M60,372 L228,372" marker-end="url(#arrow)" />
+            <text x="144" y="366" text-anchor="middle" class="edge-label">execute</text>
+            <path class="edge" d="M230,396 L438,396" marker-end="url(#arrow)" />
+            <text x="334" y="390" text-anchor="middle" class="edge-label">admit</text>
+            <path class="edge" d="M440,420 L648,420" marker-end="url(#arrow)" />
+            <text x="544" y="414" text-anchor="middle" class="edge-label">saveJob(queued)</text>
+            <path class="edge" d="M230,444 L438,444" marker-end="url(#arrow)" />
+            <text x="334" y="438" text-anchor="middle" class="edge-label">run</text>
+            <path class="edge" d="M440,468 L648,468" marker-end="url(#arrow)" />
+            <text x="544" y="462" text-anchor="middle" class="edge-label">findArtifact → hit</text>
+            <path class="edge ok" d="M650,492 L442,492" marker-end="url(#arrow)" />
+            <text x="546" y="486" text-anchor="middle" class="edge-label">bytes + validate</text>
+            <path class="edge" d="M440,516 L648,516" marker-end="url(#arrow)" />
+            <text x="544" y="510" text-anchor="middle" class="edge-label">saveJob(completed)</text>
+            <path class="edge ok" d="M440,540 L62,540" marker-end="url(#arrow)" />
+            <text x="320" y="534" text-anchor="middle" class="edge-label">cache: hit</text>
+            <text x="650" y="566" class="small">warm median 0.403 s over five runs</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 8.</strong> Both paths pay host startup, project open, selector
+            resolution, admission and SQLite validation. The warm path avoids the entire analysis
+            pipeline and artifact publication; the measured difference is the analysis, not the
+            protocol.
+          </figcaption>
+        </figure>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Project state</th>
+              <th>Wall times (s)</th>
+              <th>Median</th>
+              <th>Reported cache</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Cold</td>
+              <td>fresh <code>--cache</code> directory; import + analysis + publication</td>
+              <td>0.649, 0.635, 0.641, 0.617, 0.610</td>
+              <td>0.635</td>
+              <td><code>computed</code></td>
+            </tr>
+            <tr>
+              <td>Warm</td>
+              <td>same directory; exact artifact at revision 2</td>
+              <td>0.444, 0.403, 0.437, 0.400, 0.397</td>
+              <td>0.403</td>
+              <td><code>hit</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          Measured with
+          <code
+            >node dist/src/cli/entry.js decompile fixtures/bin/macho-arm64-symbols --function
+            _fixture_loop --cache /tmp/od-cache</code
+          >, five independent cold directories and five warm runs, wall time from process spawn. The
+          difference is <strong>0.232 s (36.5%)</strong> on this tiny fixture. The warm run still
+          takes about 0.4 s, almost all of it fixed host/child/startup cost — consistent with the
+          roadmap note that the CLI cold path pays a fixed per-process cost regardless of cache
+          hits. The cold run's real JSON reported <code>cache: "computed"</code>, revision
+          <code>2</code>; the warm run reported <code>cache: "hit"</code> with the identical
+          artifact <code>artifact_ed2f7548…f905</code> (656,172 bytes, media type
+          <code>application/vnd.open-decomp.function+json</code>). The project was
+          <code>82680f1e…c9adf.default</code>, project ID <code>project_24254788…c3b42</code>; it
+          held 18 function records, 144 references, 22 symbols, 21 exports, 3 imports and one
+          string. Eleven jobs were durably recorded for the two decompilations, but only one
+          artifact was published: the hit reused the existing artifact instead of writing a second
+          one. One persisted summary row held <code>381,471</code> compressed bytes for the prepared
+          unit of <code>entity_8d3179…eec5e</code>.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 270" role="img" aria-labelledby="fig-summaries-title">
+            <title id="fig-summaries-title">Two tiers of prepared-callee reuse</title>
+            <rect class="box muted" x="20" y="30" width="170" height="54" rx="8" />
+            <text x="105" y="52" text-anchor="middle" class="title">callee needed</text>
+            <text x="105" y="70" text-anchor="middle" class="small">decompile asks for a body</text>
+
+            <path class="edge" d="M190,57 L228,57" marker-end="url(#arrow)" />
+            <rect class="box c1" x="230" y="30" width="200" height="54" rx="8" />
+            <text x="330" y="52" text-anchor="middle" class="title">in-process WeakMap</text>
+            <text x="330" y="70" text-anchor="middle" class="small">per loaded image identity</text>
+
+            <path class="edge" d="M430,57 L468,57" marker-end="url(#arrow)" />
+            <text x="449" y="49" text-anchor="middle" class="edge-label">miss</text>
+            <rect class="box c2" x="470" y="30" width="220" height="54" rx="8" />
+            <text x="580" y="52" text-anchor="middle" class="title">native_summaries row</text>
+            <text x="580" y="70" text-anchor="middle" class="small">scope + function revision</text>
+
+            <path class="edge" d="M690,57 L728,57" marker-end="url(#arrow)" />
+            <text x="709" y="49" text-anchor="middle" class="edge-label">row</text>
+            <rect class="box c2" x="730" y="30" width="190" height="54" rx="8" />
+            <text x="825" y="52" text-anchor="middle" class="title">verify + rebuild</text>
+            <text x="825" y="70" text-anchor="middle" class="small">digest, trace, targets</text>
+
+            <path class="edge ok" d="M825,84 L825,118" marker-end="url(#arrow)" />
+            <text x="833" y="105" class="edge-label">ok</text>
+            <rect class="box ok" x="730" y="122" width="190" height="44" rx="8" />
+            <text x="825" y="149" text-anchor="middle" class="small">prepared unit hit</text>
+
+            <path class="edge bad" d="M580,84 L580,122" marker-end="url(#arrow)" />
+            <text x="588" y="108" class="edge-label">miss / damaged</text>
+            <rect class="box warn" x="470" y="126" width="220" height="54" rx="8" />
+            <text x="580" y="148" text-anchor="middle" class="title">prepare normally</text>
+            <text x="580" y="166" text-anchor="middle" class="small">worklist + analysis</text>
+
+            <path class="edge" d="M470,153 L432,153" marker-end="url(#arrow)" />
+            <rect class="box c3" x="230" y="126" width="200" height="54" rx="8" />
+            <text x="330" y="148" text-anchor="middle" class="title">queue summary</text>
+            <text x="330" y="166" text-anchor="middle" class="small">only if trace + size fit</text>
+
+            <path class="edge" d="M230,153 L192,153" marker-end="url(#arrow)" />
+            <rect class="box c3" x="20" y="126" width="170" height="54" rx="8" />
+            <text x="105" y="148" text-anchor="middle" class="title">batched flush</text>
+            <text x="105" y="166" text-anchor="middle" class="small">publish / 8 MiB / close</text>
+
+            <text x="20" y="222" class="small">
+              Per-project cap 64 MiB; eviction by revision, then seq. Encoding is graph-tagged and
+              Brotli q4.
+            </text>
+            <text x="20" y="240" class="small">
+              A unit is never offered unless every dependency read still fingerprints identically.
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 9.</strong> The durable tier sits behind the in-process map and obeys the
+            same validity contract: a row is a candidate, never a fact, until its trace is replayed.
+          </figcaption>
+        </figure>
+      </section>
+
+      <section id="queries">
+        <h2>Queries, MCP &amp; settings</h2>
+        <p>
+          Fourteen tool names exist. Four are host-level control operations; ten cross the worker
+          boundary and are dispatched by <code>queryWorkerHandler</code>. The worker schema
+          explicitly excludes <code>project_open</code>, <code>project_close</code>,
+          <code>analysis_cancel</code> and <code>analysis_status</code>, because they manage the
+          pool or durable job state rather than target analysis.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Tool</th>
+              <th>Where it executes</th>
+              <th>Implementation</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>project_open</code></td>
+              <td>host + child import</td>
+              <td>
+                <code>QueryService.execute</code> → <code>pool.open</code> →
+                <code>submit(import)</code>
+              </td>
+              <td>
+                Creates or resumes; import is durable, <code>wait</code> controls whether the
+                terminal result is awaited.
+              </td>
+            </tr>
+            <tr>
+              <td><code>project_close</code></td>
+              <td>host</td>
+              <td><code>QueryService.execute</code> → <code>ProjectWorker.close(policy)</code></td>
+              <td>
+                Reconciles a newer committed revision; policy
+                <code>wait</code>/<code>cancel</code>/<code>reject</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>analysis_status</code></td>
+              <td>host → child status</td>
+              <td><code>inspectJob</code></td>
+              <td>
+                Returns the durable job and the last acknowledged revision; for an active job it
+                answers from the last acknowledged state without waiting for the owner to finish.
+              </td>
+            </tr>
+            <tr>
+              <td><code>analysis_cancel</code></td>
+              <td>host → child cancel</td>
+              <td><code>cancelJob</code></td>
+              <td>
+                Distinguishes <code>cancelled</code>, <code>cancellation_requested</code>,
+                <code>already_finished</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>binary_info</code></td>
+              <td>child</td>
+              <td><code>dispatch</code> case</td>
+              <td>
+                Image summary/headers/sections/mappings/entry
+                points/relocations/hints/capabilities/types; one-image ambiguity is
+                <code>ambiguous_slice</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>symbols_find</code></td>
+              <td>child</td>
+              <td><code>dispatch</code> case</td>
+              <td>
+                Symbols/imports/exports; native name or C source spelling; presentation names from
+                unique asserted renames.
+              </td>
+            </tr>
+            <tr>
+              <td><code>strings_find</code></td>
+              <td>child</td>
+              <td><code>dispatch</code> case</td>
+              <td>Text/encoding/status/range filters over the persisted string index.</td>
+            </tr>
+            <tr>
+              <td><code>functions_find</code></td>
+              <td>child</td>
+              <td><code>dispatch</code> case</td>
+              <td>
+                Name/id/prefix/boundary/analysis/address filters; page order is address then ID.
+              </td>
+            </tr>
+            <tr>
+              <td><code>function_get</code></td>
+              <td>child</td>
+              <td><code>dispatch</code> case</td>
+              <td>
+                Metadata, disassembly, CFG or investigation; investigation requires an artifact and
+                reads its catalog.
+              </td>
+            </tr>
+            <tr>
+              <td><code>function_decompile</code></td>
+              <td>child</td>
+              <td><code>executeDecompilation</code> → <code>runCachedDecompilation</code></td>
+              <td>
+                Cache-aware; <code>wait:true|false|"auto"</code>,
+                <code>delivery:auto|artifact</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>xrefs_get</code></td>
+              <td>child</td>
+              <td><code>dispatch</code> case</td>
+              <td>
+                Entity or address target, incoming/outgoing/both, kind filters; absent target is
+                <code>not_found</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>evidence_get</code></td>
+              <td>child</td>
+              <td><code>dispatch</code> case</td>
+              <td>
+                By ID, optionally transitive closure; bound 10,000; absent derived proofs become a
+                warning.
+              </td>
+            </tr>
+            <tr>
+              <td><code>memory_read</code></td>
+              <td>child</td>
+              <td><code>readMemory</code></td>
+              <td>
+                Typed interpretations over the immutable image; length is clamped before allocation.
+              </td>
+            </tr>
+            <tr>
+              <td><code>annotations_apply</code></td>
+              <td>child</td>
+              <td><code>executeAnnotations</code></td>
+              <td>
+                Atomic batch with <code>expected_revision</code>; commit hook validates the response
+                before commit.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          Every worker result passes the same envelope validation. The handler parses against
+          <code>toolSchemas[operation].output</code>, enforces the frame limit, and returns a marked
+          result; the host re-checks the operation/project/revision relationship with
+          <code>validateToolResponse</code>, including the one-revision mutation rule and the output
+          byte budget. A decompilation hit may skip the second parse because
+          <code>runCachedDecompilation</code> already validated the stored payload and sized the
+          response.
+        </p>
+
+        <h3>MCP mapping and function handles</h3>
+        <p>
+          MCP is a transport adapter, not a second implementation.
+          <code>createMcpServer</code> registers every name in <code>toolNameSchema</code> and calls
+          the same <code>QueryService.execute</code> with
+          <code>max_result_bytes = MCP_CORE_RESULT_BYTES</code> (693,589 bytes, leaving room for
+          text projection and the 2 MiB MCP message). Artifact resources call
+          <code>QueryService.readArtifact</code>, which goes to the owning child; no resource read
+          resolves a filesystem path.
+        </p>
+        <p>
+          MCP adds three conveniences that are removed before core validation. A function handle may
+          be a name, a <code>va:</code>/<code>rva:</code>/<code>file:</code> address, or an entity
+          ID/prefix of at least 12 hex digits. <code>prepareRequest</code> replaces it with
+          <code>HANDLE_PLACEHOLDER</code> (<code>entity_</code> plus 64 zeros) so the core schema
+          can validate every other field, and so host authorization never reads an untrusted
+          selector. After authorization, <code>selectFunction</code> resolves the handle through the
+          function index (name/address/prefix) and <code>site.bind</code> substitutes the full
+          entity ID. The same mechanism covers <code>function_get.function_id</code>,
+          <code>function_decompile.function_id</code> and <code>xrefs_get.target.id</code> when the
+          target kind is <code>entity</code>. An ambiguous or unresolved handle is a tool failure
+          with candidate paths/IDs, never a guess. <code>function_decompile</code> also defaults
+          <code>wait</code> to <code>"auto"</code> and accepts <code>detail: "text"|"full"</code>;
+          the advertised JSON schema is patched to match.
+        </p>
+
+        <h3>Settings precedence</h3>
+        <p>
+          Settings are optional defaults, never a second source of truth. The library does not read
+          the file implicitly; entry points call <code>loadSettings</code>, which validates a strict
+          versioned JSON object and reports the source of every effective value. Precedence is
+          built-in default &lt; settings file &lt; explicit CLI flag / API option / MCP request
+          argument. An explicit settings path that is missing is an error; the default path being
+          missing is not. Invalid JSON, an unknown key, a wrong type or an unsupported version is a
+          <code>SettingsError</code> naming the path and key, never a silent fallback.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Setting</th>
+              <th>Built-in default</th>
+              <th>File key</th>
+              <th>Flag / option</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Cache root</td>
+              <td><code>null</code> → <code>&lt;binary&gt;.open-decomp</code></td>
+              <td><code>cache_root</code> (absolute)</td>
+              <td><code>--cache PATH</code>, <code>cachePath</code></td>
+            </tr>
+            <tr>
+              <td>Analysis cache</td>
+              <td><code>true</code></td>
+              <td><code>analysis_cache</code></td>
+              <td>
+                <code>--analysis-cache</code> / <code>--no-analysis-cache</code>,
+                <code>analysisCache</code>, <code>analysis_cache</code>
+              </td>
+            </tr>
+            <tr>
+              <td>Decompile language</td>
+              <td><code>"c-like"</code></td>
+              <td><code>decompile.language</code></td>
+              <td><code>--language</code></td>
+            </tr>
+            <tr>
+              <td>Decompile view</td>
+              <td><code>"source"</code></td>
+              <td><code>decompile.view</code></td>
+              <td><code>--view source|checked</code></td>
+            </tr>
+            <tr>
+              <td>Export language</td>
+              <td><code>"c-like"</code></td>
+              <td><code>export.language</code></td>
+              <td><code>--language</code></td>
+            </tr>
+            <tr>
+              <td>Export jobs</td>
+              <td><code>null</code> → exporter CPU default</td>
+              <td><code>export.jobs</code> (1–32)</td>
+              <td><code>--jobs N</code> (1–32)</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="sources">
+          <a class="src" href="../../src/settings/index.ts">src/settings/index.ts</a>
+          (<code>settingsFileSchema</code>, <code>DEFAULT_SETTINGS</code>,
+          <code>loadSettings</code>) and
+          <a class="src" href="../../src/cli/commands.ts">src/cli/commands.ts</a> (<code
+            >parsed.cachePath ?? settings.cache_root</code
+          >, <code>parsed.emitter ?? settings.decompile.language</code>).
+        </p>
+
+        <h3>Parallel export</h3>
+        <p>
+          <code>exportBinary</code> is the one operation that intentionally opens several projects
+          at once. A SQLite database has one owner, so the exporter does not submit parallel jobs to
+          one project. Instead it finishes the primary import, closes it, and lets worker 0 reopen
+          the original project while workers 1..N-1 open private copies. Each copy is made with
+          <code>cp(..., { recursive: true, mode: COPYFILE_FICLONE })</code> under
+          <code
+            >&lt;cache&gt;/.export-&lt;pid&gt;-&lt;timestamp&gt;/w&lt;index&gt;/&lt;project&gt;</code
+          >; scratch copies are removed in <code>finally</code>. The worker count is
+          <code
+            >max(1, min(options.jobs ?? max(1, min(4, availableParallelism() &gt;&gt; 1)),
+            rows.length || 1))</code
+          >, so it never exceeds the number of functions. A shared iterator hands rows to whichever
+          session is free; the first real error aborts the controller, every worker stops, and the
+          error is rethrown. Per-function failures are recorded in <code>index.tsv</code> instead of
+          aborting the export. Extra workers inherit <code>--no-analysis-cache</code> when set.
+        </p>
+        <div class="callout caveat">
+          <span class="title">Why copies, not a shared cache</span>
+          <p>
+            The exclusive connection is a correctness boundary: a project store trusts that no
+            second writer can move the revision under a transaction. Copy-on-write clones preserve
+            the finished import without duplicating disk blocks where the filesystem supports it,
+            and each worker's summary/artifact writes stay private.
+          </p>
+        </div>
+      </section>
+
+      <section id="limitations">
+        <h2>Limitations &amp; extension points</h2>
+        <p>
+          The design intentionally trades flexibility for reproducible snapshots. Some consequences
+          are permanent; others are roadmap items from <code>CONTINUE.md</code>. The code is the
+          authority where the two disagree; in particular, the store is at schema 6 even though some
+          prose still says schema 5.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Area</th>
+              <th>Current behavior (verified in code)</th>
+              <th>Remaining work (roadmap)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>stdio cancellation</td>
+              <td>
+                Connection end or abort interrupts a job; cancellation of running work restarts the
+                child.
+              </td>
+              <td>A pending-ID leak on cancellation in the stdio transport is still listed.</td>
+            </tr>
+            <tr>
+              <td>Per-job cancellation</td>
+              <td>
+                Queued jobs are dropped; running jobs are stopped by terminating the owner and
+                reconciling SQLite.
+              </td>
+              <td>
+                Cooperative per-job cancellation inside a long synchronous pass is not universal.
+              </td>
+            </tr>
+            <tr>
+              <td>Poisoned cache rows</td>
+              <td>
+                Native-summary digest, decode and trace failures are misses and are replaced by the
+                next preparation; damaged analysis artifacts are rejected as
+                <code>invalid_input</code>, never served.
+              </td>
+              <td>
+                Broader poisoning cases still rely on recomputation; the roadmap keeps this item
+                open.
+              </td>
+            </tr>
+            <tr>
+              <td>Foreign project directory</td>
+              <td>
+                Resume checks schema range, path canonicality and file type; artifacts/images are
+                hash-checked.
+              </td>
+              <td>
+                A full trust check before resuming a directory produced elsewhere is still listed.
+              </td>
+            </tr>
+            <tr>
+              <td>HTTP throttling</td>
+              <td>Authenticated principals have configured quotas and deadlines.</td>
+              <td>
+                A global rate limit is applied only after authentication; pre-auth flooding is a
+                deployment concern.
+              </td>
+            </tr>
+            <tr>
+              <td>Control-character escaping</td>
+              <td>Text projections escape the characters used by the CLI/export writers.</td>
+              <td>C1 control escaping in emitted strings remains on the reliability list.</td>
+            </tr>
+            <tr>
+              <td>Stale prose</td>
+              <td>
+                <code>STORE_SCHEMA_VERSION = 6</code>; migration 5→6 creates
+                <code>native_summaries</code>.
+              </td>
+              <td>Docs that say schema 5 or “summaries are not yet persisted” are stale.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout caveat">
+          <span class="title">Structural limits</span>
+          <p>
+            One owner per project caps intra-project parallelism; export works around it with
+            clones. Exact cache hits are current-revision only, so an annotation edit immediately
+            loses exact reuse and must pass a readset check. Prepared units above 8,192 size are
+            never persisted, so large functions stay cold. The host is not a sandbox: worker
+            processes contain faults, not a malicious local host. MCP messages and frames are capped
+            at 2 MiB, so large results must be paged through artifacts.
+          </p>
+        </div>
+
+        <h3>Adding a new tool</h3>
+        <ol class="steps">
+          <li>
+            <strong>Declare the name and schemas.</strong> Add the name to
+            <code>toolNameSchema</code> in
+            <a class="src" href="../../src/core/tools.ts">src/core/tools.ts</a> and add its input
+            and output schemas to <code>toolSchemas</code>. Strict objects are the convention; every
+            request carries <code>project_id</code>, <code>revision</code> (or
+            <code>expected_revision</code>) and a budget.
+          </li>
+          <li>
+            <strong>Choose the execution path.</strong> Analysis/navigation tools automatically
+            become worker operations because <code>workerOperationSchema</code> excludes only the
+            four control names. Add a <code>case</code> to <code>dispatch</code> in
+            <a class="src" href="../../src/service/queries/handler.ts"
+              >src/service/queries/handler.ts</a
+            >. Control tools that manage the pool belong in
+            <code>QueryService.execute</code> instead.
+          </li>
+          <li>
+            <strong>Use the shared envelope and limits.</strong> Return
+            <code>queryEnvelope</code> metadata, page with <code>paginate</code>, call
+            <code>context.checkpoint</code>, and enforce the same
+            <code>min(output_bytes, max_result_bytes, MAX_FRAME_BYTES - 16384)</code> bound. If the
+            result is already schema-validated, mark it so the runtime does not parse it twice.
+          </li>
+          <li>
+            <strong>Make it cacheable only with an identity and a readset.</strong> Wrap the
+            computation in <code>runCachedDecompilation</code> with a complete
+            <code>CacheIdentity</code> and pass the dependency collector; do not invent an alternate
+            key.
+          </li>
+          <li>
+            <strong>Wire the transports.</strong> MCP advertises every schema automatically; add a
+            handle site in <code>prepareRequest</code> only if the tool accepts a short function
+            handle, and update <code>advertisedInputSchema</code>. Add CLI/API plumbing only if the
+            tool is user-facing there.
+          </li>
+          <li>
+            <strong>Test the boundaries.</strong> Cover schema rejection, project/revision mismatch,
+            page cursor binding, output-budget failure and worker recovery. The existing suites in
+            <code>test/workers</code>, <code>test/service</code> and <code>test/project</code> show
+            the fixture patterns.
+          </li>
+        </ol>
+
+        <h3>Adding a schema migration</h3>
+        <ol class="steps">
+          <li>
+            <strong>Bump persistence, not the wire.</strong> Increment
+            <code>STORE_SCHEMA_VERSION</code> in
+            <a class="src" href="../../src/project/store/index.ts">src/project/store/index.ts</a>.
+            Do not change <code>SCHEMA_VERSION</code> for a persistence-only change; the two are
+            deliberately independent.
+          </li>
+          <li>
+            <strong>Update both creation and upgrade paths.</strong> Add the new table/index to the
+            <code>mode === 'create'</code> DDL so a fresh database is born at the new version, and
+            add an <code>if (version &lt; N)</code> block to the resume chain. The chain runs inside
+            one <code>BEGIN IMMEDIATE</code>; a throw rolls everything back.
+          </li>
+          <li>
+            <strong>Backfill only from verified data.</strong> The 3→4 migration is the model:
+            decode each stored image, check its identity against the row, and abort on mismatch
+            instead of inventing metadata. Derived tables may start empty; historical facts may not
+            be guessed.
+          </li>
+          <li>
+            <strong>Prove both directions.</strong> Open a database created at version N-1, run the
+            migration and verify every historical row; then verify that an older application refuses
+            the new version with <code>unsupported_version</code>. Tests such as
+            <code>test/project/store/history.test.ts</code> and
+            <code>test/project/store/image-metadata.test.ts</code> build the old schema explicitly.
+          </li>
+          <li>
+            <strong>Keep the version in the snapshot.</strong>
+            <code>ProjectSnapshot.schema_version</code>
+            reports the store version; do not substitute the wire schema.
+          </li>
+        </ol>
+      </section>
+
+      <footer class="pager">
+        <a class="prev" href="structuring-emission.html">← Structuring &amp; emission</a>
+      </footer>
+    </main>
+  </body>
+</html>

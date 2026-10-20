@@ -1,0 +1,1738 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Function discovery &amp; CFG — Open Decomp internals</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- Shared SVG defs: every diagram on the page references url(#arrow) / url(#arrow-accent). Keep exactly this block once per page. -->
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true" focusable="false">
+      <defs>
+        <marker
+          id="arrow"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" class="arrowhead" />
+        </marker>
+        <marker
+          id="arrow-accent"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" class="arrowhead accent" />
+        </marker>
+      </defs>
+    </svg>
+
+    <nav class="sidebar" aria-label="Internals pages">
+      <a class="brand" href="index.html">Open Decomp internals</a>
+      <p class="brand-sub">How the decompiler works</p>
+      <ol>
+        <li><a href="index.html">Architecture overview</a></li>
+        <li><a href="loaders.html">Loading binaries &amp; addresses</a></li>
+        <li><a href="discovery.html" aria-current="page">Function discovery &amp; CFG</a></li>
+        <li><a href="decode-lift-ir.html">Decoding, lifting &amp; IR</a></li>
+        <li><a href="ssa-values.html">SSA, values &amp; stack</a></li>
+        <li><a href="calls-abi.html">ABIs, calls &amp; callee summaries</a></li>
+        <li><a href="types-metadata.html">Types &amp; metadata</a></li>
+        <li><a href="reconstruction.html">Source reconstruction</a></li>
+        <li><a href="structuring-emission.html">Structuring &amp; emission</a></li>
+        <li><a href="project-cache.html">Projects, cache &amp; execution</a></li>
+      </ol>
+      <a class="back" href="../README.md">← User documentation</a>
+    </nav>
+
+    <main>
+      <header>
+        <p class="eyebrow">Stage 03 · Discovery</p>
+        <h1>Function discovery &amp; CFG</h1>
+        <p class="lede">
+          Discovery turns an immutable loaded image into a set of grounded function roots, decodes
+          only code reachable from those roots, resolves a narrow class of indirect transfers, and
+          emits per-function basic-block graphs, control-flow references, boundary claims, overlaps
+          and coverage verdicts.
+        </p>
+        <p class="sources">
+          Sources:
+          <a class="src" href="../../src/analysis/discovery/index.ts"
+            >src/analysis/discovery/index.ts</a
+          >
+          <a class="src" href="../../src/analysis/discovery/jump-tables.ts"
+            >src/analysis/discovery/jump-tables.ts</a
+          >
+          <a class="src" href="../../src/analysis/cfg/index.ts">src/analysis/cfg/index.ts</a>
+          <a class="src" href="../../src/service/queries/prepare.ts"
+            >src/service/queries/prepare.ts</a
+          >
+          <a class="src" href="../../src/service/queries/graphs.ts"
+            >src/service/queries/graphs.ts</a
+          >
+        </p>
+      </header>
+
+      <nav class="toc" aria-label="On this page">
+        <strong>On this page</strong>
+        <ol>
+          <li><a href="#position">Where this sits in the pipeline</a></li>
+          <li><a href="#seeds">Seeds, trust and indexed evidence</a></li>
+          <li><a href="#workspace">The traversal workspace</a></li>
+          <li><a href="#algorithm">The discovery algorithm</a></li>
+          <li><a href="#boundaries">Boundaries, conflicts, gaps and overlaps</a></li>
+          <li><a href="#jump-tables">Jump-table recovery</a></li>
+          <li><a href="#cfg">Building the CFG</a></li>
+          <li><a href="#targets">Xrefs and indirect target recovery</a></li>
+          <li><a href="#strings">String discovery</a></li>
+          <li><a href="#stubs">Import stubs</a></li>
+          <li><a href="#lineage">Split and merge lineage</a></li>
+          <li><a href="#limitations">Limitations &amp; extension points</a></li>
+        </ol>
+      </nav>
+
+      <section id="position">
+        <h2>Where this sits in the pipeline</h2>
+        <p>
+          The loader has already produced a <code>LoadedImage</code>: mappings and an
+          <code>AddressMap</code>, native symbols, exports, imports, relocations, section metadata,
+          entry points and <code>LoaderHint</code> records. Discovery does not parse bytes into
+          sections or guess addresses from file offsets; it consumes that image together with an
+          architecture-matching <code>Decoder</code> and a nonnegative <code>revision</code>. Its
+          outputs are <code>FunctionGraph</code> values (function record, instructions, blocks,
+          gaps, diagnostics, coverage, optional resolved jump tables), a
+          <code>ReferenceRecord</code> list, <code>Evidence</code>, lineage records, jump-table
+          candidates, overlaps, boundary claims and an overall coverage verdict — the
+          <code>DiscoveryResult</code> interface in
+          <a class="src" href="../../src/analysis/discovery/index.ts"
+            >src/analysis/discovery/index.ts</a
+          >.
+        </p>
+        <p>
+          There are two service entry points. During project open/import,
+          <code>prepareQueryImport</code> in
+          <a class="src" href="../../src/service/queries/prepare.ts"
+            >src/service/queries/prepare.ts</a
+          >
+          decorates names, constructs the architecture decoder, calls
+          <code>discoverFunctions</code>, then builds the string index and the reference index and
+          classifies import stubs. The published function index state is <code>complete</code> only
+          when discovery's own coverage is complete. For navigation and decompilation of an already
+          published function, <code>reconstructFunctionGraph</code> in
+          <a class="src" href="../../src/service/queries/graphs.ts"
+            >src/service/queries/graphs.ts</a
+          >
+          reuses a cached <code>DiscoveryIndex</code> and calls <code>discoverFunctions</code> with
+          <code>selected_entry</code>, which decodes only that root and treats every other known
+          root as a boundary. That selected-local graph is cached per project, revision, slice and
+          function, keyed additionally by instruction/block budgets and presentation mode.
+        </p>
+        <p>
+          The read side avoids decoding during identity lookup:
+          <code>loadFunctionScope</code> in
+          <a class="src" href="../../src/service/queries/scope.ts">src/service/queries/scope.ts</a>
+          resolves the stored function ID, <code>loadFunctionGraph</code> materializes native
+          name/function arrays once per live <code>LoadedImage</code> and revision in a
+          <code>WeakMap</code>, and <code>loadFunctionIndex</code> reuses those arrays for
+          presentation and xref queries.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 900 210" role="img" aria-labelledby="fig-position-title">
+            <title id="fig-position-title">
+              Discovery's position between the loader and later analysis
+            </title>
+            <rect class="box muted" x="10" y="70" width="180" height="66" rx="8" />
+            <text x="100" y="94" text-anchor="middle" class="title">LoadedImage</text>
+            <text x="100" y="113" text-anchor="middle" class="small">plus Decoder + revision</text>
+            <text x="100" y="128" text-anchor="middle" class="small">immutable for the slice</text>
+
+            <path class="edge" d="M190,103 L228,103" marker-end="url(#arrow)" />
+
+            <rect class="box accent" x="230" y="70" width="200" height="66" rx="8" />
+            <text x="330" y="94" text-anchor="middle" class="title">prepareDiscoveryIndex</text>
+            <text x="330" y="113" text-anchor="middle" class="small">
+              seeds · data · exec ranges
+            </text>
+            <text x="330" y="128" text-anchor="middle" class="small">no body decoding</text>
+
+            <path class="edge accent" d="M430,103 L478,103" marker-end="url(#arrow-accent)" />
+
+            <rect class="box accent" x="480" y="70" width="190" height="66" rx="8" />
+            <text x="575" y="94" text-anchor="middle" class="title">discoverFunctions</text>
+            <text x="575" y="113" text-anchor="middle" class="small">worklist traversal</text>
+            <text x="575" y="128" text-anchor="middle" class="small">
+              per-seed graph extraction
+            </text>
+
+            <path class="edge accent" d="M670,103 L718,103" marker-end="url(#arrow-accent)" />
+
+            <rect class="box ok" x="720" y="70" width="170" height="66" rx="8" />
+            <text x="805" y="94" text-anchor="middle" class="title">DiscoveryResult</text>
+            <text x="805" y="113" text-anchor="middle" class="small">graphs · refs · evidence</text>
+            <text x="805" y="128" text-anchor="middle" class="small">claims · coverage</text>
+
+            <text x="30" y="180" class="small">
+              Callers: prepareQueryImport (project open/import)
+            </text>
+            <text x="30" y="196" class="small">
+              and reconstructFunctionGraph (selected_entry, per function query)
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 1.</strong> Discovery is a pure analysis over immutable image facts. The
+            preparation step builds indexes but decodes nothing; the traversal step is the only
+            place that touches executable bytes, and the result is what the project publishes.
+          </figcaption>
+        </figure>
+
+        <div class="callout invariant">
+          <span class="title">Invariant</span>
+          <p>
+            Discovery never scans for prologues and never sweeps an enclosing address range. It
+            starts from evidence-bearing roots and follows decoded control flow. A side effect is
+            that dead bytes between functions stay undecoded by design; the comments above
+            <code>discoverFunctions</code> state this explicitly, and the discovery tests assert
+            that unseeded prologue bytes produce no function.
+          </p>
+        </div>
+      </section>
+
+      <section id="seeds">
+        <h2>Seeds, trust and indexed evidence</h2>
+        <p>
+          <code>prepareDiscoveryIndex</code> collapses everything the loader knows into an
+          <code>IndexedSeed</code> per virtual entry address. A seed carries a set of evidence IDs,
+          optional native names, any boundary claims, and one boolean, <code>established</code>.
+          Multiple loader facts for the same address are merged: the ELF fixture carries two
+          function-symbol evidence records for each function, so 36 such records collapse to 18
+          seeds. On <code>macho-arm64-symbols</code>, 18 seeds carry 17 function-symbol, 17
+          export-candidate, 17 loader-function-start, 8 unwind, one entry and one import-callable
+          proof records. Evidence is additive; an <code>established</code> fact can never be
+          downgraded by a candidate fact.
+        </p>
+        <pre><code>interface IndexedSeed {
+  readonly entry: Address;
+  readonly evidence: ReadonlySet&lt;string&gt;;
+  readonly names: ReadonlySet&lt;string&gt;;
+  readonly claims: readonly AddressRange[];
+  readonly established: boolean;
+}</code></pre>
+        <p class="sources">
+          Defined in
+          <a class="src" href="../../src/analysis/discovery/index.ts"
+            >src/analysis/discovery/index.ts</a
+          >.
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Seed rule</th>
+              <th>Source</th>
+              <th>Established?</th>
+              <th>Name / claims</th>
+              <th>Filter</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>image entry</code></td>
+              <td><code>image.entry_points</code></td>
+              <td>yes</td>
+              <td>no name, no claim</td>
+              <td>executable backing required</td>
+            </tr>
+            <tr>
+              <td><code>function symbol</code></td>
+              <td><code>symbols</code> with kind <code>function</code></td>
+              <td>yes</td>
+              <td>native name; symbol size becomes a claim</td>
+              <td>executable backing required</td>
+            </tr>
+            <tr>
+              <td><code>executable symbol candidate</code></td>
+              <td><code>symbols</code> with kind <code>unknown</code></td>
+              <td>no</td>
+              <td>native name; size becomes a claim</td>
+              <td>data regions and object-symbol addresses are excluded</td>
+            </tr>
+            <tr>
+              <td><code>executable export candidate</code></td>
+              <td><code>exports</code> with no forwarder</td>
+              <td>no</td>
+              <td>export name; no claim</td>
+              <td>data regions and object-symbol addresses are excluded</td>
+            </tr>
+            <tr>
+              <td><code>import callable entry</code></td>
+              <td><code>imports</code> with <code>callable_entry</code></td>
+              <td>yes</td>
+              <td>import name; no claim</td>
+              <td>executable backing required</td>
+            </tr>
+            <tr>
+              <td><code>loader function start</code></td>
+              <td><code>hints</code> of kind <code>function</code></td>
+              <td>yes</td>
+              <td>hint size becomes a claim</td>
+              <td>executable backing required</td>
+            </tr>
+            <tr>
+              <td><code>unwind region candidate</code></td>
+              <td><code>hints</code> of kind <code>unwind</code></td>
+              <td>no</td>
+              <td>only the range start is used; the range is not a claim</td>
+              <td>executable backing required</td>
+            </tr>
+            <tr>
+              <td><code>asserted function</code></td>
+              <td>caller-supplied <code>FunctionAssertion</code></td>
+              <td>no</td>
+              <td>optional ranges become claims</td>
+              <td>assertion-origin evidence; retracted assertions do not seed</td>
+            </tr>
+            <tr>
+              <td><code>published function root</code></td>
+              <td><code>DiscoveryInput.functions</code></td>
+              <td>if that record's boundary is <code>established</code></td>
+              <td>original name</td>
+              <td>executable backing required</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>
+          Two loader constructs are deliberately <em>not</em> seeds. A data hint becomes a
+          <code>DataRegion</code> in the index; if its encoding is <code>jump_table</code> it also
+          becomes a <code>JumpTableCandidate</code> with a concrete range. An object symbol with a
+          size becomes a data region and its address is added to <code>objectAddresses</code>. The
+          <code>seed</code> gate then refuses to turn an export or an unknown-kind symbol into a
+          function when its address lies in such a region. The test suite calls this out directly:
+          constants in an executable Mach-O <code>__const</code> section are not functions, and a
+          zero-sized object symbol defeats an export-only code guess.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 900 330" role="img" aria-labelledby="fig-seeds-title">
+            <title id="fig-seeds-title">Loader facts flowing through the seed gate</title>
+            <rect class="group" x="10" y="18" width="220" height="282" rx="10" />
+            <text x="24" y="38" class="lane">grounded roots</text>
+            <rect class="box muted" x="24" y="50" width="190" height="28" rx="5" />
+            <text x="34" y="69" class="small mono">entry_points</text>
+            <rect class="box muted" x="24" y="86" width="190" height="28" rx="5" />
+            <text x="34" y="105" class="small mono">symbols(function|unknown)</text>
+            <rect class="box muted" x="24" y="122" width="190" height="28" rx="5" />
+            <text x="34" y="141" class="small mono">exports</text>
+            <rect class="box muted" x="24" y="158" width="190" height="28" rx="5" />
+            <text x="34" y="177" class="small mono">imports.callable_entry</text>
+            <rect class="box muted" x="24" y="194" width="190" height="28" rx="5" />
+            <text x="34" y="213" class="small mono">hints: function | unwind</text>
+            <rect class="box muted" x="24" y="230" width="190" height="28" rx="5" />
+            <text x="34" y="249" class="small mono">assertions</text>
+            <rect class="box muted" x="24" y="266" width="190" height="28" rx="5" />
+            <text x="34" y="285" class="small mono">published functions</text>
+
+            <path class="edge" d="M230,160 L298,160" marker-end="url(#arrow)" />
+            <text x="264" y="150" text-anchor="middle" class="edge-label">each root</text>
+
+            <rect class="box accent" x="300" y="105" width="250" height="120" rx="8" />
+            <text x="425" y="128" text-anchor="middle" class="title">seed() gate</text>
+            <text x="425" y="150" text-anchor="middle" class="small">normalize to a VA</text>
+            <text x="425" y="168" text-anchor="middle" class="small">
+              require executable backing
+            </text>
+            <text x="425" y="186" text-anchor="middle" class="small">
+              exclude data / object addresses
+            </text>
+            <text x="425" y="204" text-anchor="middle" class="small">
+              derive evidence, merge by address
+            </text>
+
+            <path class="edge accent" d="M550,160 L628,160" marker-end="url(#arrow-accent)" />
+
+            <rect class="box ok" x="630" y="90" width="250" height="145" rx="8" />
+            <text x="755" y="114" text-anchor="middle" class="title">IndexedSeed</text>
+            <text x="755" y="136" text-anchor="middle" class="small mono">evidence ids</text>
+            <text x="755" y="154" text-anchor="middle" class="small mono">names</text>
+            <text x="755" y="172" text-anchor="middle" class="small mono">claims</text>
+            <text x="755" y="190" text-anchor="middle" class="small mono">established</text>
+            <text x="755" y="214" text-anchor="middle" class="small">ordered by entry address</text>
+
+            <path class="edge dashed" d="M230,280 L298,280" marker-end="url(#arrow)" />
+            <rect class="box muted" x="300" y="258" width="580" height="42" rx="6" />
+            <text x="590" y="275" text-anchor="middle" class="small">
+              data hints + sized object symbols → data interval index (not function roots)
+            </text>
+            <text x="590" y="291" text-anchor="middle" class="small">
+              jump_table hints additionally become jump-table candidates
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 2.</strong> Every loader fact passes through one gate. The gate is where
+            data-shaped facts are rejected as code, not a later cleanup pass; claims survive on the
+            seed and are checked again per graph.
+          </figcaption>
+        </figure>
+
+        <p>
+          <code>prepareDiscoveryIndex</code> also builds two interval indexes over the immutable
+          image. <code>executableEnd(value)</code> merges mappings that carry the
+          <code>execute</code> permission and a nonzero file size, and returns the end of the
+          containing range or the input value when unmapped. <code>dataAfter(value)</code> binary
+          searches a prefix-maximum array of data-region ends; the prefix maxima are what make a
+          long outer data claim visible even when a nested claim starts later. Both lookups charge
+          the <em>current</em> operation, never the preparation operation, so a reused index cannot
+          hide work from the caller's budget.
+        </p>
+
+        <div class="callout caveat">
+          <span class="title">Assertions are claims, not facts</span>
+          <p>
+            An assertion must carry evidence whose <code>origin.kind</code> is
+            <code>assertion</code>; otherwise preparation throws <code>invalid_input</code>.
+            Retracted assertions do not seed. A live assertion seeds with
+            <code>established = false</code>, and its ranges become boundary claims. Its extents do
+            not grant permission to decode unreachable bytes; they only constrain what may be
+            claimed around reachable code.
+          </p>
+        </div>
+      </section>
+
+      <section id="workspace">
+        <h2>The traversal workspace</h2>
+        <p>
+          Discovery is a single worklist traversal followed by one graph-extraction pass per seed.
+          The workspace is small and explicit:
+        </p>
+        <dl class="terms">
+          <dt>seeds</dt>
+          <dd>
+            Mutable copies of the indexed seeds for this call, including roots discovered from
+            direct calls.
+          </dd>
+          <dt>queue / queued</dt>
+          <dd>
+            An array and a membership set; initial entries are sorted by virtual address, later
+            successors append in flow order.
+          </dd>
+          <dt>decoded / gaps</dt>
+          <dd>
+            One decoded instruction per address, or one <code>DecodeGap</code> with reason
+            <code>data</code>, <code>unmapped</code>, <code>budget</code> or <code>truncated</code>.
+          </dd>
+          <dt>incoming</dt>
+          <dd>
+            Decoded control predecessors by target address, including proven jump-table edges; this
+            is the input to single-entry proof validation.
+          </dd>
+          <dt>tables</dt>
+          <dd>
+            Provisional <code>JumpTableProof</code> records keyed by branch address; each graph
+            revalidates them on its final members.
+          </dd>
+          <dt>owners</dt>
+          <dd>
+            After reconciliation, instruction ID → owning function IDs. More than one owner means
+            shared code.
+          </dd>
+        </dl>
+        <p>
+          Evidence is content-addressed rather than minted as a counter.
+          <code>evidenceDeriver</code> fingerprints the selected slice, the literal
+          <code>discovery/1</code> version, a rule string, the address value and the sorted parent
+          evidence IDs. The same proof reached by the same path therefore produces the same ID
+          across runs, and rule strings are the vocabulary you see in diagnostics:
+          <code>direct call target</code>, <code>loader function start</code>,
+          <code>decoded control flow</code>,
+          <code
+            >indirect branch targets from immutable table entries under a dominating unsigned index
+            bound</code
+          >, and so on.
+        </p>
+
+        <div class="callout invariant">
+          <span class="title">Revision and slice ownership</span>
+          <p>
+            The decoder architecture must equal <code>image.target.architecture</code>, the revision
+            must be a nonnegative safe integer, every previous graph must belong to the selected
+            slice, and a supplied <code>DiscoveryIndex</code> must carry the same image ID, slice ID
+            and revision. Any mismatch is an <code>OperationError</code> with
+            <code>unsupported_target</code> or <code>invalid_input</code>; there is no best-effort
+            mode that silently mixes revisions.
+          </p>
+        </div>
+      </section>
+
+      <section id="algorithm">
+        <h2>The discovery algorithm</h2>
+        <p>
+          The outer loop is a cursor over an append-only queue, not recursion. That matters for
+          ordering and for termination: successors are appended in the order the decoded flow
+          produces them, while the initial roots are sorted by address so the starting order is
+          deterministic. The queue can contain an address at most once because
+          <code>enqueue</code> also consults <code>queued</code>. The loop never revisits a decoded
+          address or a gap.
+        </p>
+
+        <ol class="steps">
+          <li>
+            <strong>Validate and prepare.</strong> Check decoder architecture, revision, previous
+            graphs and index identity. If no index was supplied, call
+            <code>prepareDiscoveryIndex</code>. In <code>selected_entry</code> mode, require that
+            the entry is a virtual address with an indexed seed, start with only that seed on the
+            queue, and do not copy the other seeds into the mutable seed map.
+          </li>
+          <li>
+            <strong>Sort the initial roots.</strong> Queue entries are sorted by address; discovered
+            successors keep structured flow order. Display names never influence scheduling.
+          </li>
+          <li>
+            <strong>Skip completed work.</strong> If the address is already decoded or already has a
+            gap, continue. If the next data region contains the address, record a
+            <code>data</code> gap with a <code>conflicting_evidence</code> warning and stop at that
+            address.
+          </li>
+          <li>
+            <strong>Check backing and instruction budget.</strong> No executable file backing
+            produces an <code>unmapped</code> gap and an <code>unmapped</code> warning. If the
+            number of decoded instructions has reached <code>context.budget.instructions</code>,
+            record a <code>budget</code> gap, set <code>exhausted = true</code>, and continue
+            draining. This path returns partial graphs rather than throwing.
+          </li>
+          <li>
+            <strong>Decode one bounded window.</strong> The window is at most 4 bytes on ARM64 and
+            15 bytes on x86-64, clipped by executable backing, by the next known data region and by
+            the 64-bit address limit. The decoder gets a derived context whose instruction budget is
+            one, so a single decode cannot consume the caller's whole budget; work, deadline and
+            cancellation still charge the original cumulative operation.
+          </li>
+          <li>
+            <strong>Record failure as a gap.</strong> If the decoder returns no instruction starting
+            at the address, use its own gap if present, otherwise a <code>truncated</code> gap with
+            the decoder diagnostics. A decoded instruction is stored immediately; a non-<code
+              >valid</code
+            >
+            instruction is stored too, but no successors are followed.
+          </li>
+          <li>
+            <strong>Seed direct calls.</strong> A valid direct call with a target calls
+            <code>seed(target, 'direct call target', [flowEvidence], true)</code>, which adds
+            evidence and marks the target established even if it was not a loader root. In normal
+            mode it is also enqueued; in selected mode it is not decoded, because every known root
+            is a boundary.
+          </li>
+          <li>
+            <strong>Follow intraprocedural successors.</strong>
+            <code>instructionSuccessors</code> contributes the fallthrough of a call, both edges of
+            a conditional branch, the target of an unconditional branch, the fallthrough of an
+            indirect branch or trap, and nothing for returns. Every successor gets an entry in
+            <code>incoming</code> and is enqueued; in selected mode, a successor that is another
+            indexed root is refused by <code>enqueue</code> and remains a boundary.
+          </li>
+          <li>
+            <strong>Attempt indirect-table proof.</strong> A non-conditional indirect branch is
+            offered to <code>proveJumpTable</code>. On success, the proof's targets are enqueued and
+            recorded as incoming edges from the branch, and the proof is stored provisionally in
+            <code>tables</code>. Separately, architecture-shaped heuristics append
+            <code>JumpTableCandidate</code> records (x86 indexed indirect operand with scale at
+            least 4; ARM64 indexed load immediately before a register branch); candidates never
+            create edges.
+          </li>
+        </ol>
+
+        <pre><code>queue.sort((a, b) =&gt; (a.value &lt; b.value ? -1 : a.value &gt; b.value ? 1 : 0));
+for (let cursor = 0; cursor &lt; queue.length; cursor++) {
+  const address = queue[cursor]!;
+  if (decoded.has(address.value) || gaps.has(address.value)) continue;
+  // … data, executable-backing and instruction-budget gaps …
+  const result = decoder.decode({ image, regions: [{ start: address, size: length }],
+    mode: image.target.architecture === 'arm64' ? 'a64' : 'long64',
+    features: image.target.features }, decodeContext);
+  const instruction = result.instructions.find((item) =&gt; item.address.value === address.value);
+  if (!instruction) { /* record a gap and continue */ }
+  decoded.set(address.value, instruction);
+  const flowEvidence = derive('decoded control flow', address, instruction.evidence_ids);
+  if (instruction.validity !== 'valid') continue;
+  if (instruction.flow.kind === 'call' &amp;&amp; instruction.flow.target) {
+    seed(instruction.flow.target, 'direct call target', [flowEvidence], true);
+    if (!selected) enqueue(instruction.flow.target);
+  }
+  for (const successor of instructionSuccessors(instruction, input.noreturn_calls)) {
+    addIncoming(successor.value, instruction);
+    enqueue(successor);
+  }
+  // … proveJumpTable / append indirect-transfer candidates …
+}</code></pre>
+        <p class="sources">
+          Trimmed from
+          <a class="src" href="../../src/analysis/discovery/index.ts"
+            >src/analysis/discovery/index.ts</a
+          >
+          (<code>discoverFunctions</code>). The full loop also handles data gaps, budget gaps and
+          the two candidate heuristics.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 900 400" role="img" aria-labelledby="fig-worklist-title">
+            <title id="fig-worklist-title">Worklist state machine and side exits</title>
+            <rect class="box accent" x="20" y="40" width="180" height="60" rx="8" />
+            <text x="110" y="64" text-anchor="middle" class="title">Seeds → queue</text>
+            <text x="110" y="84" text-anchor="middle" class="small">sorted by VA</text>
+
+            <path class="edge" d="M200,70 L238,70" marker-end="url(#arrow)" />
+
+            <rect class="box" x="240" y="40" width="170" height="60" rx="8" />
+            <text x="325" y="64" text-anchor="middle" class="title">Pop address</text>
+            <text x="325" y="84" text-anchor="middle" class="small">skip decoded / gap</text>
+
+            <path class="edge" d="M410,70 L448,70" marker-end="url(#arrow)" />
+
+            <rect class="box" x="450" y="40" width="170" height="60" rx="8" />
+            <text x="535" y="64" text-anchor="middle" class="title">Decode 4 / 15 B</text>
+            <text x="535" y="84" text-anchor="middle" class="small">one bounded window</text>
+
+            <path class="edge" d="M620,70 L658,70" marker-end="url(#arrow)" />
+
+            <rect class="box" x="660" y="40" width="220" height="60" rx="8" />
+            <text x="770" y="64" text-anchor="middle" class="title">Classify flow</text>
+            <text x="770" y="84" text-anchor="middle" class="small">
+              call · branch · return · trap
+            </text>
+
+            <path class="edge dashed" d="M325,100 L325,158" marker-end="url(#arrow)" />
+            <rect class="box warn" x="220" y="160" width="210" height="92" rx="8" />
+            <text x="325" y="182" text-anchor="middle" class="title">Gap side exit</text>
+            <text x="325" y="202" text-anchor="middle" class="small mono">data · unmapped</text>
+            <text x="325" y="220" text-anchor="middle" class="small mono">
+              budget (sets exhausted)
+            </text>
+            <text x="325" y="238" text-anchor="middle" class="small">
+              no instruction is decoded
+            </text>
+
+            <path class="edge dashed" d="M535,100 L535,158" marker-end="url(#arrow)" />
+            <rect class="box warn" x="440" y="160" width="190" height="74" rx="8" />
+            <text x="535" y="182" text-anchor="middle" class="title">Gap side exit</text>
+            <text x="535" y="202" text-anchor="middle" class="small mono">truncated</text>
+            <text x="535" y="220" text-anchor="middle" class="small">decoder diagnostics kept</text>
+
+            <path class="edge dashed" d="M770,100 L770,158" marker-end="url(#arrow)" />
+            <rect class="box ok" x="650" y="160" width="230" height="92" rx="8" />
+            <text x="765" y="182" text-anchor="middle" class="title">Enqueue / prove</text>
+            <text x="765" y="202" text-anchor="middle" class="small">
+              direct call → seed + enqueue
+            </text>
+            <text x="765" y="220" text-anchor="middle" class="small">
+              successors → incoming + queue
+            </text>
+            <text x="765" y="238" text-anchor="middle" class="small">
+              indirect branch → table proof
+            </text>
+
+            <path
+              class="edge"
+              d="M880,206 L890,206 L890,320 L210,320 L210,70 L238,70"
+              marker-end="url(#arrow)"
+            />
+            <text x="550" y="334" text-anchor="middle" class="edge-label">
+              successors appended · loop continues
+            </text>
+
+            <rect class="box muted" x="280" y="340" width="340" height="48" rx="8" />
+            <text x="450" y="362" text-anchor="middle" class="title">Queue exhausted</text>
+            <text x="450" y="379" text-anchor="middle" class="small">
+              per-seed graph extraction + revalidation
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 3.</strong> Every side exit is a gap, not a fabricated instruction or
+            synthetic trap. The loop continues after gaps; only block, work, deadline and
+            cancellation limits abort the whole call.
+          </figcaption>
+        </figure>
+
+        <h3>Successors, calls and tail calls</h3>
+        <p>
+          Successor policy lives in <code>instructionSuccessors</code> in
+          <a class="src" href="../../src/analysis/cfg/index.ts">src/analysis/cfg/index.ts</a>. It is
+          shared by the discovery worklist and by <code>buildCFG</code>, so the reachable
+          instruction set and the block edges cannot drift apart. Calls intentionally contribute
+          only their continuation: a call is an interprocedural reference, not an intraprocedural
+          edge. The kinds themselves come from <code>instructionFlow</code> in
+          <a class="src" href="../../src/decoders/arm64/flow.ts">src/decoders/arm64/flow.ts</a> and
+          <code>flow</code> in
+          <a class="src" href="../../src/decoders/x86_64/metadata.ts"
+            >src/decoders/x86_64/metadata.ts</a
+          >, both returning the <code>DecodedFlow</code> union declared in
+          <a class="src" href="../../src/core/decoder.ts">src/core/decoder.ts</a>.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th><code>DecodedFlow.kind</code></th>
+              <th>Discovery successors</th>
+              <th>CFG edge(s)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>fallthrough</code></td>
+              <td><code>next</code></td>
+              <td><code>fallthrough</code></td>
+            </tr>
+            <tr>
+              <td><code>call</code></td>
+              <td>fallthrough, unless a direct target is in <code>noreturn_calls</code></td>
+              <td><code>fallthrough</code>, or <code>trap</code> when noreturn</td>
+            </tr>
+            <tr>
+              <td><code>branch</code></td>
+              <td>target, plus fallthrough when conditional</td>
+              <td>
+                <code>branch</code> (conditional flag from the decoder), plus
+                <code>fallthrough</code> when conditional
+              </td>
+            </tr>
+            <tr>
+              <td><code>indirect_branch</code></td>
+              <td>fallthrough if present; proven table targets replace this</td>
+              <td>
+                <code>unknown</code> or one <code>branch</code> per proven target, plus fallthrough
+              </td>
+            </tr>
+            <tr>
+              <td><code>trap</code></td>
+              <td>fallthrough if conditional</td>
+              <td><code>trap</code>, plus fallthrough if conditional</td>
+            </tr>
+            <tr>
+              <td><code>unknown</code></td>
+              <td>the next byte/instruction address only when <code>may_fallthrough</code></td>
+              <td>
+                <code>unknown</code> plus a conditional <code>fallthrough</code> for each successor
+              </td>
+            </tr>
+            <tr>
+              <td><code>return</code></td>
+              <td>none</td>
+              <td><code>return</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>
+          A direct call to a root that is already known merges evidence rather than creating a
+          second root. A direct call to an address that is not known becomes a new established seed;
+          this is how local helper functions appear in stripped and symbol-bearing images. In
+          selected mode the call target is still seeded as evidence, but it is not enqueued, so the
+          selected graph stops at the call continuation and leaves the callee to its own graph.
+        </p>
+        <p>
+          An unconditional branch whose target is another function entry is a tail call. It appears
+          as a <code>ReferenceRecord</code> of kind <code>tail_call</code> and as a CFG
+          <code>tail_call</code> edge whose <code>to</code> block is null. It is never pushed into
+          the current function's pending set. A conditional branch into another entry, or a call
+          continuation that equals another entry, is treated as a boundary conflict instead: that is
+          evidence that the two claimed extents disagree. A real case is
+          <code>fixture_entry</code> in <code>fixtures/bin/elf-x86_64-symbols</code>: its branch at
+          <code>0x401e89</code> targets <code>fixture_native_call</code> at <code>0x401e70</code>,
+          and the reference index records it as <code>tail_call</code>.
+        </p>
+
+        <h3>Noreturn calls</h3>
+        <p>
+          <code>noreturn_calls</code> is a map from direct call-target virtual address to the
+          evidence IDs that justify the claim. The production caller obtains it from
+          <code>libraryNoreturnCalls</code> in
+          <a class="src" href="../../src/metadata/library-contracts/index.ts"
+            >src/metadata/library-contracts/index.ts</a
+          >: only non-weak imports with an exact library declaration, a callable entry and matching
+          library identity qualify. The map affects two places. <code>instructionSuccessors</code>
+          returns no continuation for such a call, so traversal does not absorb the next bytes. In
+          <code>buildCFG</code>, the same call becomes a <code>trap</code> edge with the noreturn
+          proof added to its evidence. This is what keeps a final
+          <code>bl ___stack_chk_fail</code> from making the following function's entry look like
+          intraprocedural flow. The discovery test for this case runs the same bytes with and
+          without the declaration: without it the caller becomes <code>conflicting</code> with a
+          <code>fallthrough</code> edge; with it the edge is <code>trap</code> and the caller stays
+          <code>established</code>.
+        </p>
+        <div class="callout caveat">
+          <span class="title">Only direct, contract-backed calls</span>
+          <p>
+            Indirect calls are never noreturn, and an unknown or conflicted library contract is not
+            a noreturn fact. The evidence stays conditional on the named library implementation, and
+            discovery records it as derived analysis evidence rather than a binary fact.
+          </p>
+        </div>
+
+        <h3>Budgets and partial results</h3>
+        <p>
+          Default budgets come from <code>DEFAULT_BUDGET</code> in
+          <a class="src" href="../../src/core/primitives.ts">src/core/primitives.ts</a>:
+          <code>instructions: 10_000</code>, <code>blocks: 10_000</code>,
+          <code>ir_nodes: 100_000</code>, <code>work: 10_000_000</code>,
+          <code>deadline_ms: 30_000</code>, <code>output_bytes: 1_048_576</code>. Discovery treats
+          them differently. Exceeding the instruction budget produces a gap, sets
+          <code>exhausted</code>, adds the reason <code>instruction budget</code> to the overall
+          coverage, and returns partial graphs. Exceeding <code>budget.blocks</code> while
+          accumulating blocks throws <code>resource_limit</code>, with
+          <code>details.resource = 'blocks'</code>. Work, deadline and cancellation are enforced by
+          <code>context.checkpoint</code> and also throw, so no result is published. An instruction
+          cap reports how much code was observed; a work or deadline cap means the operation did not
+          finish.
+        </p>
+      </section>
+
+      <section id="boundaries">
+        <h2>Boundaries, conflicts, gaps and overlaps</h2>
+        <p>
+          The traversal produces a global set of reachable instructions, but each function graph is
+          extracted independently with its own pending stack, visited set, gaps and diagnostics. For
+          each seed, the extractor walks successors from the entry and stops at another function
+          entry. It then builds the graph's local predecessor relation, revalidates any provisional
+          jump-table proof against exactly those members, and only after rejection converges does it
+          sort members and derive observed ranges.
+        </p>
+        <p>
+          Claim checking has two directions. If a seed carries claims, every decoded member must lie
+          entirely inside at least one claim. If it does not, the graph is conflicting.
+          Independently, each claim is checked against the next seed entry: a claim that contains
+          another seed's entry is a conflict, because two roots claim the same bytes. In selected
+          mode, the check is widened to every seed in the index, because even roots that are not
+          decoded in this call remain real boundaries.
+        </p>
+        <p>
+          Two reachability rules set the conflict flag. A reachable instruction landing in a known
+          data region is a <code>data</code> gap and a conflict. A successor that reaches another
+          function entry is a conflict unless the edge came from a proven jump table or is an
+          unconditional branch (a tail call). The diagnostics preserve both sides' evidence IDs, so
+          a consumer can inspect the disputed proof rather than trusting a boolean.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 900 350" role="img" aria-labelledby="fig-boundary-title">
+            <title id="fig-boundary-title">How a function's boundary state is decided</title>
+            <rect class="box accent" x="320" y="20" width="260" height="44" rx="8" />
+            <text x="450" y="47" text-anchor="middle" class="title">
+              candidate graph for one seed
+            </text>
+
+            <path class="edge" d="M450,64 L450,84" marker-end="url(#arrow)" />
+
+            <rect class="group" x="20" y="86" width="860" height="158" rx="10" />
+            <text x="34" y="104" class="lane">conflict checks · any true</text>
+
+            <rect class="box warn" x="40" y="114" width="240" height="50" rx="7" />
+            <text x="160" y="136" text-anchor="middle" class="small">
+              intraprocedural successor
+            </text>
+            <text x="160" y="153" text-anchor="middle" class="small">reaches another entry?</text>
+            <rect class="box warn" x="330" y="114" width="240" height="50" rx="7" />
+            <text x="450" y="136" text-anchor="middle" class="small">decoded member outside</text>
+            <text x="450" y="153" text-anchor="middle" class="small">every boundary claim?</text>
+            <rect class="box warn" x="620" y="114" width="240" height="50" rx="7" />
+            <text x="740" y="136" text-anchor="middle" class="small">claim contains another</text>
+            <text x="740" y="153" text-anchor="middle" class="small">seed or claim?</text>
+            <rect class="box warn" x="330" y="182" width="240" height="50" rx="7" />
+            <text x="450" y="204" text-anchor="middle" class="small">reachable target lies in</text>
+            <text x="450" y="221" text-anchor="middle" class="small">a known data region?</text>
+
+            <path class="edge bad" d="M240,244 L240,268" marker-end="url(#arrow)" />
+            <text x="248" y="260" class="edge-label">any check true</text>
+            <rect class="box bad" x="120" y="270" width="240" height="60" rx="7" />
+            <text x="240" y="295" text-anchor="middle" class="title">boundary: conflicting</text>
+            <text x="240" y="314" text-anchor="middle" class="small">
+              evidence conflict retained
+            </text>
+
+            <path class="edge ok" d="M660,244 L660,268" marker-end="url(#arrow)" />
+            <text x="668" y="260" class="edge-label">all false</text>
+            <rect class="box ok" x="520" y="270" width="280" height="60" rx="7" />
+            <text x="660" y="291" text-anchor="middle" class="title">established or candidate</text>
+            <text x="660" y="308" text-anchor="middle" class="small">
+              established if the seed is established
+            </text>
+            <text x="660" y="323" text-anchor="middle" class="small">
+              and members exist; otherwise candidate
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 4.</strong> Boundary state is about ownership and contradiction; analysis
+            state is about how much flow was resolved. A graph can be <code>established</code> and
+            still <code>partial</code> when it contains an unresolved indirect call.
+          </figcaption>
+        </figure>
+
+        <p>
+          The enums are independent. <code>boundary</code> is one of the real schema values
+          <code>candidate</code>, <code>established</code> and <code>conflicting</code> from
+          <code>functionSchema</code> in
+          <a class="src" href="../../src/core/model.ts">src/core/model.ts</a>.
+          <code>analysis</code> is one of <code>not_analyzed</code>, <code>partial</code>,
+          <code>complete</code> and <code>unsupported</code>; discovery writes
+          <code>partial</code> or <code>complete</code>. The graph coverage uses the same
+          complete/partial split and carries human-readable reasons.
+        </p>
+        <p>
+          Observed <code>function.ranges</code> are merged from reachable instructions, not from a
+          claimed envelope. Adjacent or overlapping instruction ranges collapse; a function with no
+          members still gets a zero-sized range at its entry. Claimed extents remain separately in
+          <code>DiscoveryResult.boundary_claims</code>, including the seed, range and evidence IDs.
+          This separation lets a caller distinguish "what discovery actually observed" from "what
+          the loader or a user asserts the function owns".
+        </p>
+        <p>
+          Gaps are collected per graph. Besides traversal failures, the extractor materializes data
+          gaps for every data region intersecting the union of the seed's claims and the observed
+          envelope (first reachable instruction start to last reachable instruction end). Those
+          extras represent embedded literal pools or data inside a claimed extent; they are not
+          decoded instructions and do not create blocks.
+        </p>
+        <p>
+          After all graphs are reconciled, discovery scans decoded instructions by address for
+          overlaps. An instruction owned by more than one graph produces a
+          <code>shared_tail</code> overlap. Two instructions whose byte ranges intersect produce an
+          <code>overlapping_instructions</code> overlap; the functions listed in that overlap are
+          downgraded to <code>boundary: conflicting</code>, <code>analysis: partial</code>, and get
+          a <code>conflicting_evidence</code> diagnostic. Shared tails are reported but do not by
+          themselves make either function conflicting — a real shared epilogue is legal.
+        </p>
+      </section>
+
+      <section id="jump-tables">
+        <h2>Jump-table recovery</h2>
+        <p>
+          There are three different objects in this area, and only one of them contributes control
+          flow. A <code>JumpTableCandidate</code> is an inventory item with
+          <code>status: 'candidate'</code>: a loader hint with encoding <code>jump_table</code>, or
+          an architecture-shaped heuristic. A <code>ResolvedJumpTable</code> is a proof: one
+          indirect branch with an exact target set, guard and byte layout.
+          <code>proveJumpTable</code> in
+          <a class="src" href="../../src/analysis/discovery/jump-tables.ts"
+            >src/analysis/discovery/jump-tables.ts</a
+          >
+          produces the proof; only proofs create edges, while candidates stay inventory.
+        </p>
+        <pre><code>export interface ResolvedJumpTable {
+  readonly branch: string;
+  readonly selector: { readonly instruction: string; readonly register: RegisterDescriptor };
+  readonly table: AddressRange;
+  readonly entry: { bytes: 1 | 2 | 4 | 8; signed: boolean; stride: number };
+  readonly targets: readonly Address[];
+  readonly guard: string;
+  readonly otherwise: Address;
+  readonly guard_exact: boolean;
+  readonly chain: readonly string[];
+  readonly evidence_ids: readonly string[];
+}</code></pre>
+        <p class="sources">
+          Defined in <a class="src" href="../../src/core/contracts.ts">src/core/contracts.ts</a>;
+          produced by <code>proveJumpTable</code>.
+        </p>
+
+        <h3>The single-entry chain</h3>
+        <p>
+          Proof starts from the branch and walks backwards. The chain stops at a function entry, at
+          a branch with zero or more than one decoded predecessor, at an invalid instruction, or at
+          a predecessor that is not <code>fallthrough</code> or <code>branch</code>. It also stops
+          if the predecessor is already in the chain. The maximum is <code>MAX_CHAIN = 64</code>;
+          fewer than three instructions is an immediate rejection. Each instruction is replayed
+          forward through a symbolic interpreter over 64-bit values. Registers begin as opaque
+          symbols; constants, zero-extension, sign-extension, addition and shifting are hash-consed
+          so equal expressions compare by key. A conditional branch on the chain can establish a
+          fact about the compared left-hand side; the fact records the maximum and the guard
+          instruction that produces the out-of-range edge.
+        </p>
+
+        <h3>What is modelled in each architecture</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Ingredient</th>
+              <th>ARM64 recognition</th>
+              <th>x86-64 recognition</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Constants</td>
+              <td>
+                <code>MOVZ</code>/<code>MOVN</code>, <code>ADR</code>/<code>ADRP</code> with a
+                relative target
+              </td>
+              <td><code>mov</code> immediate, <code>lea</code>, RIP-relative memory constants</td>
+            </tr>
+            <tr>
+              <td>Index extension</td>
+              <td>
+                <code>UBFM</code>/<code>SBFM</code> with <code>immr = 0</code> for 8/16/32-bit
+                widths; register width zero-extension on reads
+              </td>
+              <td>
+                <code>movzx</code>, <code>movsx</code>, <code>movsxd</code>, <code>and</code> with a
+                2<sup>k</sup>−1 mask
+              </td>
+            </tr>
+            <tr>
+              <td>Address arithmetic</td>
+              <td>
+                <code>ADD</code>/<code>SUB</code> immediate, shifted register and extended register;
+                <code>LDR/STR</code> with index and shift
+              </td>
+              <td>
+                <code>lea</code>, <code>mov</code>, <code>add</code>, <code>sub</code>; memory
+                operands with base, index and scale
+              </td>
+            </tr>
+            <tr>
+              <td>Guard</td>
+              <td>
+                flag-setting <code>ADDS</code>/<code>SUBS</code>, then a conditional
+                <code>B.cond</code> while those flags survive; unsigned conditions map to
+                <code>&gt;=</code>, <code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>
+              </td>
+              <td>
+                <code>cmp</code>/<code>sub</code>/<code>add</code>, then an unsigned
+                <code>ja/jae/jb/jbe</code> form while the comparison flags survive
+              </td>
+            </tr>
+            <tr>
+              <td>Entry load</td>
+              <td>
+                <code>LDR</code>/<code>LDRS</code> byte, halfword, word or 64-bit load with an
+                indexed address; signed load marks a signed entry
+              </td>
+              <td>
+                64-bit <code>mov</code>/<code>movzx</code>/<code>movsx</code> from an indexed memory
+                operand
+              </td>
+            </tr>
+            <tr>
+              <td>Transfer</td>
+              <td><code>BR_64_branch_reg</code> only</td>
+              <td>
+                <code>jmp</code> register, or <code>jmp</code> through a 64-bit memory operand
+              </td>
+            </tr>
+            <tr>
+              <td>Unknown instructions</td>
+              <td>
+                Forget every register, flag and stack slot the instruction may change; most opcodes
+                reset all state
+              </td>
+              <td>
+                Kill written registers or, for arbitrary memory-writing instructions, all slots
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          Both interpreters forward stack and register slots keyed by an affine base, offset and
+          size; a store to an overlapping key kills the forwarded value. On x86-64 the segment base
+          must not be <code>fs</code> or <code>gs</code> and the memory operand's address size must
+          be 64-bit; otherwise the address is opaque. Those restrictions prevent the proof from
+          treating a thread-local or window-relative address as a table base.
+        </p>
+
+        <h3>Deriving base, bound, entry width and targets</h3>
+        <p>
+          A load is recognized as a table entry only when its effective address is affine with
+          exactly one non-constant term, that term is the same symbolic node as the index register,
+          and the shift matches, and the index node already has a guard fact. The affine constant is
+          the table base. The entry width is the access width in bytes; the stride is
+          <code>2^shift</code> on ARM64 and the memory operand's scale on x86-64; signedness comes
+          from the signed-load form. The bound is the maximum established by the guard. The count is
+          <code>max + 1</code>, and the proof rejects if that maximum is at least
+          <code>max_entries</code>; discovery passes <code>MAX_JUMP_TABLE_ENTRIES = 256</code>.
+          <code>guard_exact</code> records whether the bound is the fact attached directly to the
+          index node itself, as opposed to a structural bound inherited from a wider expression.
+        </p>
+        <pre><code>if (chain.length &lt; 3) return undefined;
+const limit = bound(entry.index);
+if (!limit.guard || limit.max &gt;= BigInt(input.max_entries)) return undefined;
+const count = Number(limit.max) + 1;
+const length = (count - 1) * entry.stride + entry.bytes;
+const table: Address = { image_id: image.id, space: 'va', value: entry.table };
+const bytes = recoverDataBytes(image, table, length, context);
+if (!bytes) return undefined;</code></pre>
+        <p class="sources">
+          Trimmed from
+          <a class="src" href="../../src/analysis/discovery/jump-tables.ts"
+            >src/analysis/discovery/jump-tables.ts</a
+          >
+          (<code>proveJumpTable</code>).
+        </p>
+        <p>
+          Table bytes are read little-endian from <code>recoverDataBytes</code> in
+          <a class="src" href="../../src/analysis/strings/source-data.ts"
+            >src/analysis/strings/source-data.ts</a
+          >. That function is intentionally strict: the table range must lie in exactly one
+          containing section, the section must be readable and not writable, the range must fit both
+          the virtual and file extent, no overlapping mapping may be writable or unreadable, no
+          relocation may intersect the range, and the address must map to exactly one file-backed
+          span of exactly the requested length. Zero-fill and synthetic bytes are never accepted.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 900 380" role="img" aria-labelledby="fig-table-title">
+            <title id="fig-table-title">Resolved ARM64 switch table with real test addresses</title>
+            <text x="24" y="22" class="lane">single-entry chain</text>
+            <rect class="box muted" x="20" y="32" width="330" height="28" rx="4" />
+            <text x="30" y="51" class="mono">0x1000 cmp w0, #2</text>
+            <rect class="box warn" x="20" y="64" width="330" height="28" rx="4" />
+            <text x="30" y="83" class="mono">0x1004 b.hi 0x1038 ; guard</text>
+            <rect class="box muted" x="20" y="96" width="330" height="28" rx="4" />
+            <text x="30" y="115" class="mono">0x1008 mov w8, w0</text>
+            <rect class="box muted" x="20" y="128" width="330" height="28" rx="4" />
+            <text x="30" y="147" class="mono">0x100c adr x9, 0x1040</text>
+            <rect class="box muted" x="20" y="160" width="330" height="28" rx="4" />
+            <text x="30" y="179" class="mono">0x1010 adr x10, 0x1020</text>
+            <rect class="box accent" x="20" y="192" width="330" height="28" rx="4" />
+            <text x="30" y="211" class="mono">0x1014 ldrb w11, [x9, x8]</text>
+            <rect class="box muted" x="20" y="224" width="330" height="28" rx="4" />
+            <text x="30" y="243" class="mono">0x1018 add x10, x10, x11, lsl #2</text>
+            <rect class="box accent" x="20" y="256" width="330" height="28" rx="4" />
+            <text x="30" y="275" class="mono">0x101c br x10</text>
+
+            <path class="edge accent" d="M350,206 L418,180" marker-end="url(#arrow-accent)" />
+            <text x="382" y="176" text-anchor="middle" class="edge-label">entry load</text>
+
+            <rect class="box ok" x="420" y="110" width="200" height="92" rx="8" />
+            <text x="520" y="134" text-anchor="middle" class="title">table @ 0x1040</text>
+            <text x="520" y="156" text-anchor="middle" class="mono">[0, 2, 4]</text>
+            <text x="520" y="176" text-anchor="middle" class="small">
+              1-byte unsigned · stride 1
+            </text>
+            <text x="520" y="192" text-anchor="middle" class="small">bytes 00 02 04</text>
+
+            <path class="edge" d="M620,140 L698,80" marker-end="url(#arrow)" />
+            <path class="edge" d="M620,156 L698,140" marker-end="url(#arrow)" />
+            <path class="edge" d="M620,172 L698,200" marker-end="url(#arrow)" />
+
+            <rect class="box" x="700" y="56" width="180" height="40" rx="6" />
+            <text x="790" y="81" text-anchor="middle" class="mono">0x1020 mov x0, #1</text>
+            <rect class="box" x="700" y="120" width="180" height="40" rx="6" />
+            <text x="790" y="145" text-anchor="middle" class="mono">0x1028 mov x0, #2</text>
+            <rect class="box" x="700" y="184" width="180" height="40" rx="6" />
+            <text x="790" y="209" text-anchor="middle" class="mono">0x1030 mov x0, #3</text>
+
+            <path
+              class="edge warn"
+              d="M350,78 L350,104 L650,104 L650,291 L696,291"
+              marker-end="url(#arrow)"
+            />
+            <rect class="box warn" x="700" y="272" width="180" height="44" rx="6" />
+            <text x="790" y="291" text-anchor="middle" class="title">otherwise 0x1038</text>
+            <text x="790" y="308" text-anchor="middle" class="small">w0 &gt; 2</text>
+
+            <text x="24" y="330" class="small">targets[i] = 0x1020 + 4 * table[i]</text>
+            <text x="24" y="348" class="small">guard max = 2 → count = 3, guard_exact = true</text>
+            <text x="24" y="366" class="small">
+              reconstructed with discoverFunctions on the ARM64 test image in
+              test/analysis/jump-tables.test.ts
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 5.</strong> A real proof produced by the current code, though on the
+            test-constructed image from
+            <a class="src" href="../../test/analysis/jump-tables.test.ts"
+              >test/analysis/jump-tables.test.ts</a
+            >
+            rather than a fixture binary (none of the shipped fixtures contains a switch). The index
+            is <code>w8</code>; <code>ldrb</code> establishes one table entry;
+            <code>add ... lsl #2</code> scales the byte offset to four-byte case addresses; the
+            guard's out-of-range edge is the explicit <code>otherwise</code> address.
+          </figcaption>
+        </figure>
+
+        <h3>Rejections and graph revalidation</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Rejection</th>
+              <th>Why</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Chain shorter than 3, loops, multiple predecessors, invalid instruction</td>
+              <td>The straight-line single-entry premise does not hold.</td>
+            </tr>
+            <tr>
+              <td>
+                Branch is not ARM64 <code>BR</code> or x86-64 <code>jmp</code> register/memory
+              </td>
+              <td>The target expression cannot be evaluated exactly.</td>
+            </tr>
+            <tr>
+              <td>Target has zero table-entry nodes, or more than one distinct entry node</td>
+              <td>A target must be a function of exactly one table load.</td>
+            </tr>
+            <tr>
+              <td>No guard fact, or bound at least 256 entries</td>
+              <td>
+                An enumeration without an exact unsigned bound is a guess; the cap bounds work.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                Table bytes not one immutable, readable, non-writable, relocation-free section span
+              </td>
+              <td>The initial bytes would not be proven immutable at run time.</td>
+            </tr>
+            <tr>
+              <td>Computed target not executable, or unaligned on ARM64</td>
+              <td>Not a possible instruction address.</td>
+            </tr>
+            <tr>
+              <td>
+                Final graph: chain member has another predecessor, selector and branch do not share
+                a block, or a target/otherwise is outside the function
+              </td>
+              <td>
+                The proof is valid only for this single-entry graph; rejection removes edges and the
+                loop retries, which terminates.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          Revalidation is the key soundness step. The worklist proves a table against decoded
+          predecessors, but a later-discovered edge can add a second predecessor into the chain. The
+          extractor therefore re-runs the proof's shape check on the final graph: every chain member
+          after the first must have exactly one predecessor, that predecessor must be the previous
+          chain member, the selector read and branch must share a block, and every target plus the
+          guard's <code>otherwise</code> edge must be inside the graph. Failed proofs are added to a
+          rejected set and edges are removed; the extraction loop repeats until no proof is
+          rejected.
+        </p>
+        <div class="callout caveat">
+          <span class="title">What counts as a candidate</span>
+          <p>
+            Discovery appends a candidate for an x86-64 indirect branch whose operand has an index
+            and scale at least 4, and for an ARM64 <code>BR</code> immediately preceded by an
+            indexed load into the same register. These candidates have <code>range: null</code> and
+            never become edges. Target recovery can enumerate only candidates that came from a
+            loader data hint with a concrete range and a multiple-of-eight size; even then its
+            entries are candidate references, not established edges.
+          </p>
+        </div>
+      </section>
+
+      <section id="cfg">
+        <h2>Building the CFG</h2>
+        <p>
+          <code>buildCFG</code> receives the reachable instruction list for exactly one function,
+          the set of function entries, the evidence map, the proven table targets by branch address
+          and the noreturn-call map. It sorts the instructions by address and derives leaders with
+          three rules: the function entry is a leader; every successor of a non-fallthrough
+          instruction is a leader; and every address with an incoming count other than exactly one
+          is a leader. The second rule is why a conditional branch's fallthrough terminates a block
+          even though it has only one predecessor, while a plain fallthrough does not.
+        </p>
+        <pre><code>const leaders = new Set&lt;bigint&gt;([input.entry.value]);
+for (const instruction of sorted) {
+  for (const successor of tableTargets(instruction) ??
+    instructionSuccessors(instruction, input.noreturn_calls)) {
+    incoming.set(successor.value, (incoming.get(successor.value) ?? 0) + 1);
+    if (instruction.flow.kind !== 'fallthrough') leaders.add(successor.value);
+  }
+}
+for (const [address, count] of incoming) if (count !== 1) leaders.add(address);</code></pre>
+        <p class="sources">
+          Trimmed from
+          <a class="src" href="../../src/analysis/cfg/index.ts">src/analysis/cfg/index.ts</a>
+          (<code>buildCFG</code>).
+        </p>
+        <p>
+          A single sorted pass then groups instructions. A new group starts at a leader, after an
+          invalid instruction, after a non-fallthrough instruction, or when the previous
+          fallthrough's <code>next</code> is not the current address. Blocks are maximal only with
+          respect to that linear order; the CFG is not reordered to look nice. Block IDs are
+          <code>entityIdentity(slice, 'block', { function, entry })</code>, and a block's range
+          spans from its first instruction to the end of its last.
+        </p>
+        <p>
+          Edges are emitted from the last instruction of each block, and the target block lookup is
+          local to the function. A target absent from this graph keeps its address with
+          <code>to: null</code>; tail calls and returns also have <code>to: null</code>. A call
+          contributes only a <code>fallthrough</code> edge, or a <code>trap</code> edge when the
+          call is direct and in <code>noreturn_calls</code> (the trap edge carries the call proof's
+          evidence as well as the instruction's). A proven jump table contributes one
+          <code>branch</code> edge per distinct target, all marked conditional, replacing the
+          <code>unknown</code> edge. An unresolved indirect branch gets an
+          <code>unknown</code> edge, with a conditional fallthrough only if the decoder reports one.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 900 470" role="img" aria-labelledby="fig-cfg-title">
+            <title id="fig-cfg-title">Real CFG of _fixture_loop in macho-arm64-symbols</title>
+
+            <rect class="box accent" x="30" y="40" width="240" height="68" rx="8" />
+            <text x="44" y="61" class="title">0x100000594 · 4 B</text>
+            <text x="44" y="82" class="mono">cbz w1, 0x1000005b8</text>
+            <text x="44" y="99" class="small">entry · block 0</text>
+
+            <rect class="box" x="330" y="40" width="280" height="86" rx="8" />
+            <text x="344" y="61" class="title">0x100000598 · 12 B</text>
+            <text x="344" y="82" class="mono">mov x8, x0</text>
+            <text x="344" y="99" class="mono">movz w0, #0</text>
+            <text x="344" y="116" class="mono">mov w9, w1</text>
+
+            <rect class="box" x="690" y="40" width="190" height="68" rx="8" />
+            <text x="704" y="61" class="title">0x1000005b8 · 8 B</text>
+            <text x="704" y="82" class="mono">movz w0, #0</text>
+            <text x="704" y="99" class="mono">ret</text>
+
+            <rect class="box accent" x="330" y="190" width="300" height="118" rx="8" />
+            <text x="344" y="211" class="title">0x1000005a4 · 16 B</text>
+            <text x="344" y="232" class="mono">ldr w10, [x8], #4</text>
+            <text x="344" y="249" class="mono">add w0, w10, w0</text>
+            <text x="344" y="266" class="mono">subs x9, x9, #1</text>
+            <text x="344" y="283" class="mono">b.ne 0x1000005a4</text>
+
+            <rect class="box" x="330" y="360" width="190" height="62" rx="8" />
+            <text x="344" y="381" class="title">0x1000005b4 · 4 B</text>
+            <text x="344" y="402" class="mono">ret</text>
+
+            <rect class="box muted" x="690" y="360" width="120" height="42" rx="6" />
+            <text x="750" y="386" text-anchor="middle" class="small">exit</text>
+
+            <path class="edge" d="M150,40 L150,20 L785,20 L785,38" marker-end="url(#arrow)" />
+            <text x="470" y="15" text-anchor="middle" class="edge-label">
+              branch (cond) · w1 == 0
+            </text>
+
+            <path class="edge" d="M270,74 L328,74" marker-end="url(#arrow)" />
+            <text x="299" y="66" text-anchor="middle" class="edge-label">fallthrough</text>
+
+            <path class="edge" d="M470,126 L470,188" marker-end="url(#arrow)" />
+            <text x="478" y="162" class="edge-label">fallthrough</text>
+
+            <path
+              class="edge accent"
+              d="M630,240 L660,240 L660,205 L632,205"
+              marker-end="url(#arrow-accent)"
+            />
+            <text x="668" y="226" class="edge-label">branch</text>
+            <text x="668" y="240" class="edge-label">(cond)</text>
+
+            <path class="edge" d="M430,308 L430,358" marker-end="url(#arrow)" />
+            <text x="438" y="338" class="edge-label">fallthrough (cond)</text>
+
+            <path class="edge" d="M520,390 L688,390" marker-end="url(#arrow)" />
+            <text x="604" y="382" text-anchor="middle" class="edge-label">return</text>
+
+            <path class="edge" d="M785,108 L785,358" marker-end="url(#arrow)" />
+            <text x="794" y="238" class="edge-label">return</text>
+
+            <text x="30" y="430" class="small">
+              function range 0x100000594 + 44 B · 11 instructions · 5 blocks · coverage complete
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 6.</strong> Real output for <code>_fixture_loop</code> in
+            <code>fixtures/bin/macho-arm64-symbols</code>, obtained through
+            <code>discoverFunctions</code>. Notice that the loop header <code>0x1000005a4</code> has
+            two edges into it (the entry fallthrough and its own backedge), so it is a leader and
+            the backedge does not split the block. The <code>cbz</code> block has both edges marked
+            conditional; the two return edges are non-conditional.
+          </figcaption>
+        </figure>
+
+        <h3>The worked example end to end</h3>
+        <p>
+          <code>_fixture_loop</code> enters at <code>0x100000594</code>. The loader supplied a
+          function symbol, an export and a function-start hint at that address. Discovery decodes
+          <code>cbz w1, 0x1000005b8</code>; its two successors are the target and the fallthrough,
+          so both are enqueued. The fallthrough decodes three moves and falls into the loop body.
+          The body's <code>b.ne 0x1000005a4</code> targets an address already decoded, so the
+          worklist does not decode it again; the graph extractor's own traversal also stops because
+          the address is visited. The two returns terminate their paths. The resulting observed
+          range is 44 bytes, and the graph coverage is <code>complete</code> because there is no
+          gap, no invalid instruction and no unresolved indirect flow. The two branch references are
+          <code>branch/established</code> to <code>0x1000005b8</code> and <code>0x1000005a4</code>;
+          neither target is a function entry, so neither is a tail call.
+        </p>
+      </section>
+
+      <section id="targets">
+        <h2>Xrefs and indirect target recovery</h2>
+        <p>
+          Discovery itself emits control-flow references while it walks the reconciled graphs. For
+          each instruction it classifies calls, branches, tail calls and unknown transfers, and for
+          a resolved table it emits one <code>branch</code> reference per distinct target with the
+          table proof's evidence. Direct calls carry <code>target_role: 'code'</code> and resolve to
+          the callee function ID when that function is in the discovery result; a call to an import
+          callable entry resolves later to the import record with
+          <code>target_role: 'callable_stub'</code>. These references are intentionally
+          conservative: unresolved indirect transfers are retained as
+          <code>status: 'unresolved'</code>, <code>to: null</code>.
+        </p>
+        <p>
+          <code>recoverTargets</code> in
+          <a class="src" href="../../src/analysis/targets/index.ts"
+            >src/analysis/targets/index.ts</a
+          >
+          adds non-control and indirect-target references with a deliberately scoped analysis. It
+          walks each discovery block independently, keeps a value per 64-bit register root, and
+          never lets a value cross a block boundary, a call, an unknown instruction or a store.
+          Values have status <code>candidate</code> or <code>established</code>, origins that name
+          the derivation, optional storage address, optional table base and an optional entity (an
+          import). Memory reads are resolved from relocations or file-backed pointer bytes; those
+          reads are <code>candidate</code> values even when the bytes are known, because the slot
+          may be writable at run time.
+        </p>
+        <p>
+          The x86-64 path handles RIP-relative and absolute operands, <code>LEA</code> address
+          formation, <code>MOV</code> immediate/register/pointer, <code>ADD</code>/<code>SUB</code>
+          immediate, indirect register calls and IAT calls/jumps. The ARM64 path handles
+          <code>ADR</code>/<code>ADRP</code>, <code>ADD</code> base plus immediate, ordinary 64-bit
+          <code>LDR</code> pointer and stub sequences, <code>BR</code>/<code>BLR</code> and indexed
+          absolute-u64 tables. The table path is narrower than <code>proveJumpTable</code>: it
+          accepts only a discovery candidate with a concrete range, requires that range's size to be
+          a multiple of eight and at most 256 entries, and emits <code>candidate</code> branch
+          references for executable entries. It never asserts index feasibility; that is the table
+          proof's job.
+        </p>
+        <p>
+          <code>buildReferenceIndex</code> in
+          <a class="src" href="../../src/analysis/references/index.ts"
+            >src/analysis/references/index.ts</a
+          >
+          merges discovery references, target-recovery references and explicit loader relocation
+          relationships. Relocation references are data xrefs with
+          <code>from_function: null</code>, <code>from_instruction: null</code> and kind
+          <code>address</code>. The merge deduplicates by function, instruction, source address,
+          kind, target, target entity, status and target role. An unresolved discovery edge is
+          dropped only when another reference for the same instruction and owner has an established
+          control target; a candidate cannot discharge an unresolved edge. The record cap defaults
+          to <code>100_000</code> and adds <code>resource_limit</code> when hit.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 900 320" role="img" aria-labelledby="fig-xrefs-title">
+            <title id="fig-xrefs-title">
+              Reference and string index construction and persistence
+            </title>
+            <rect class="group" x="10" y="18" width="880" height="92" rx="10" />
+            <text x="24" y="38" class="lane">inputs</text>
+            <rect class="box muted" x="24" y="50" width="190" height="44" rx="6" />
+            <text x="119" y="69" text-anchor="middle" class="small">discovery.references</text>
+            <text x="119" y="85" text-anchor="middle" class="small">branch · call · tail_call</text>
+            <rect class="box muted" x="232" y="50" width="180" height="44" rx="6" />
+            <text x="322" y="69" text-anchor="middle" class="small">recoverTargets</text>
+            <text x="322" y="85" text-anchor="middle" class="small">read · write · address</text>
+            <rect class="box muted" x="430" y="50" width="170" height="44" rx="6" />
+            <text x="515" y="69" text-anchor="middle" class="small">StringIndex</text>
+            <text x="515" y="85" text-anchor="middle" class="small">candidate strings</text>
+            <rect class="box muted" x="618" y="50" width="250" height="44" rx="6" />
+            <text x="743" y="69" text-anchor="middle" class="small">loader relocations</text>
+            <text x="743" y="85" text-anchor="middle" class="small">
+              explicit pointer relationships
+            </text>
+
+            <path class="edge accent" d="M450,110 L450,142" marker-end="url(#arrow-accent)" />
+            <rect class="box accent" x="280" y="144" width="340" height="56" rx="8" />
+            <text x="450" y="168" text-anchor="middle" class="title">buildReferenceIndex</text>
+            <text x="450" y="187" text-anchor="middle" class="small">
+              dedupe · discharge · promote strings
+            </text>
+
+            <path class="edge" d="M380,200 L180,238" marker-end="url(#arrow)" />
+            <path class="edge" d="M450,200 L450,238" marker-end="url(#arrow)" />
+            <path class="edge" d="M520,200 L720,238" marker-end="url(#arrow)" />
+
+            <rect class="box ok" x="60" y="240" width="240" height="56" rx="6" />
+            <text x="180" y="261" text-anchor="middle" class="title">records / reference</text>
+            <text x="180" y="280" text-anchor="middle" class="small">
+              xrefs_get reads by address or entity
+            </text>
+            <rect class="box ok" x="330" y="240" width="240" height="56" rx="6" />
+            <text x="450" y="261" text-anchor="middle" class="title">records / string</text>
+            <text x="450" y="280" text-anchor="middle" class="small">candidate → referenced</text>
+            <rect class="box ok" x="600" y="240" width="240" height="56" rx="6" />
+            <text x="720" y="261" text-anchor="middle" class="title">indexes</text>
+            <text x="720" y="280" text-anchor="middle" class="small">
+              complete or partial per kind
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 7.</strong> The in-memory reference index is a merge, not a second
+            decode. Publication writes ordinary records and an index state; queries read the
+            persisted records. A partial string index stays partial independently of the reference
+            state.
+          </figcaption>
+        </figure>
+
+        <p>
+          Persistence uses the generic <code>records</code> table keyed by kind, ID and revision,
+          plus an <code>indexes</code> table holding one state per image, kind and revision. The
+          record kinds are declared by <code>StoredRecordKinds</code> in
+          <a class="src" href="../../src/core/contracts.ts">src/core/contracts.ts</a>:
+          <code>function</code>, <code>string</code>, <code>reference</code>, <code>symbol</code>,
+          <code>import</code> and <code>export</code>. Queries do not search the analyzer's arrays
+          directly. <code>xrefs_get</code> in
+          <a class="src" href="../../src/service/queries/handler.ts"
+            >src/service/queries/handler.ts</a
+          >
+          loads the persisted <code>reference</code> records, filters by incoming/outgoing
+          direction, target address or entity, kind and <code>include_unresolved</code> (default
+          true), then pages the result. <code>strings_find</code> reads persisted string records and
+          filters by text, encoding, status and address range.
+        </p>
+        <p>
+          The in-memory <code>searchReferences</code> and <code>searchStrings</code> helpers apply
+          the same shape of query to an index returned by the analyzers. Their shared
+          <code>searchIndex</code> caps the page at 100 by default, examines at most
+          <code>100_000</code> records, and binds cursors to the revision, index identity and query
+          fingerprint. A cursor from another revision raises <code>stale_cursor</code>; a malformed
+          or mismatched cursor raises <code>invalid_cursor</code>.
+        </p>
+        <p>
+          On the Mach-O fixture, discovery produced 144 references from 18 graphs. The reference
+          index state was <code>partial</code>, with diagnostics including “Unresolved indirect
+          targets” and “Discovery coverage is incomplete”. A concrete resolved call is
+          <code>_main</code> at <code>0x100000aa8</code>, whose reference kind is <code>call</code>,
+          status <code>established</code>, target <code>0x100000abc</code>, target entity the
+          <code>_puts</code> import, target role <code>callable_stub</code>. A concrete data
+          reference is <code>_fixture_string</code> at <code>0x10000070c</code>, kind
+          <code>address</code>, status <code>established</code>, target <code>0x100000ad0</code>,
+          which resolves to the fixture's one string record.
+        </p>
+      </section>
+
+      <section id="strings">
+        <h2>String discovery</h2>
+        <p>
+          <code>buildStringIndex</code> in
+          <a class="src" href="../../src/analysis/strings/index.ts"
+            >src/analysis/strings/index.ts</a
+          >
+          is independent of discovery and runs after it in <code>prepareQueryImport</code>. It scans
+          only sections that are ordinary sections with file backing and that are not executable:
+          Mach-O excludes sections whose flags contain <code>0x80000400</code> (pure/some
+          instructions), while PE and ELF require a non-executable permission set. Each virtual
+          range is translated to file spans; zero-fill and unmapped spans are skipped rather than
+          synthesized.
+        </p>
+        <p>
+          The scanner is conservative about encodings. It starts at a non-NUL byte, looks for a
+          NUL-delimited record, and requires at least four characters by default. At an even
+          address, UTF-16LE is recognized only when the section name matches
+          <code>/ustring|utf16/i</code>, a BOM is present, or two consecutive printable-ASCII/zero
+          pairs occur outside a Mach-O C-string section (a C-string section never combines adjacent
+          one-character records into UTF-16). Decoding is fatal: an invalid UTF-8 or UTF-16LE
+          sequence rejects the entire record, not just an inconvenient suffix. The printable test
+          also requires nonempty trimmed text.
+        </p>
+        <p>
+          Defaults are <code>max_bytes: 32 * 1024 * 1024</code>, <code>max_strings: 50_000</code>,
+          <code>max_string_bytes: 16 * 1024</code>, and <code>min_characters: 4</code>. Hitting the
+          byte or record budget stops the scan and adds a <code>resource_limit</code> diagnostic;
+          overlapping section aliases and unavailable mappings do too. <code>state</code> is
+          <code>partial</code> exactly when such a reason exists.
+        </p>
+        <p>
+          A record starts as <code>status: 'candidate'</code>. The reference index promotes it to
+          <code>status: 'referenced'</code> only when an established <code>read</code> or
+          <code>address</code> reference with a non-null instruction points inside the record's byte
+          range. Promotion adds the reference's evidence to the string record and re-fingerprints
+          the index identity. Each record's ID is
+          <code>entityIdentity(slice, 'string', [address, encoding])</code>, so the ID follows the
+          address and encoding rather than the text or its reference status.
+        </p>
+        <div class="callout caveat">
+          <span class="title">What "complete" means here</span>
+          <p>
+            A complete string index means all eligible sections within the documented byte and
+            record budgets were scanned. It does not mean every byte sequence that a human would
+            call a string was found: arbitrary encoded, compressed or encrypted text, strings in
+            executable sections, and strings beyond the budgets are out of scope.
+          </p>
+        </div>
+      </section>
+
+      <section id="stubs">
+        <h2>Import stubs</h2>
+        <p>
+          Import stub recognition is a post-pass in
+          <a class="src" href="../../src/analysis/discovery/stubs.ts"
+            >src/analysis/discovery/stubs.ts</a
+          >
+          after discovery and reference construction. A stub must have one to four instructions, be
+          sorted from its function entry, end in a forwarding branch, and contain only inert
+          instructions before that branch. On ARM64 the forwarding branch is
+          <code>BR_64_branch_reg</code> and inert means <code>ADRP</code>, <code>ADR</code>,
+          <code>NOP</code>, a positive-offset 64-bit <code>LDR</code> or a 64-bit literal
+          <code>LDR</code>. On x86-64 the branch is <code>jmp</code> and inert means
+          <code>endbr64</code> or <code>nop</code>. This covers Mach-O
+          <code>__stubs</code> (<code>adrp</code>/<code>ldr</code>/<code>br</code>), ELF PLT entries
+          and PE import thunks (<code>jmp [IAT]</code>).
+        </p>
+        <p>
+          Shape alone is not enough. The function must have exactly one branch reference, that
+          reference must be <code>established</code>, have <code>to: null</code> and name an entity,
+          and every other reference owned by the function must be a <code>read</code> of role
+          <code>import_slot</code> to that same entity. The entity must resolve to an import with a
+          slot, a name, no weak binding, and either no callable entry or exactly the stub's entry.
+          Anything with other effects, references or a weak import remains an ordinary partial
+          function.
+        </p>
+        <p>
+          Publication changes the record rather than the graph: the function becomes
+          <code>kind: 'import_stub'</code>, boundary <code>established</code> unless it was already
+          conflicting, analysis <code>complete</code>, and if it had no native name it takes the
+          import's name. The stub's evidence is unioned with the function's evidence. On the Mach-O
+          fixture this is how <code>_puts</code> at <code>0x100000abc</code> is published: before
+          classification its three-instruction graph is <code>partial</code> because the
+          <code>br</code> is unresolved; after classification the persisted record is
+          <code>[established, complete, import stub]</code>.
+        </p>
+      </section>
+
+      <section id="lineage">
+        <h2>Split and merge lineage</h2>
+        <p>
+          Discovery can be called with the previous revision's graphs.
+          <code>reconcileGraphs</code> in
+          <a class="src" href="../../src/analysis/discovery/lineage.ts"
+            >src/analysis/discovery/lineage.ts</a
+          >
+          preserves identity where the ownership shape is unchanged and mints new IDs where it is
+          genuinely split, merged or replaced. A function's shape is its entry plus the sorted list
+          of member instruction IDs; names are not part of the shape, so a rename preserves the ID.
+          An exact shape match reuses the old function ID. A block shape additionally includes the
+          owning function ID, so identical shared tails in two functions remain distinct blocks.
+        </p>
+        <p>
+          For unmatched entities, the reconciler groups old and new shapes by shared member
+          instructions. It builds a bipartite owner graph, then floods connected components. A
+          one-to-one component whose entry is unchanged is treated as an extension in place and
+          keeps the original ID. Otherwise the component's previous IDs and new shapes are hashed
+          into fresh IDs for all participants, and a <code>lineageSchema</code> record is emitted
+          with reason <code>split</code> (one old, several new), <code>merge</code> (several old,
+          one new) or <code>replacement</code> (many-to-many). When a function ID changes, block IDs
+          are rebased deterministically from the new function ID and the block entry, and every
+          edge's <code>from</code>/<code>to</code> is rewritten to match.
+        </p>
+        <div class="callout caveat">
+          <span class="title">Lineage is computed, not currently published by prepare</span>
+          <p>
+            <code>discoverFunctions</code> returns the lineage records, and the project store has a
+            <code>lineage</code> table plus <code>putLineage</code>/<code>readLineage</code>, but
+            the service's initial import path calls discovery without <code>previous</code> and does
+            not call <code>putLineage</code>. In the current code the lineage path is exercised by
+            direct API/test calls that pass previous graphs; it is not part of persisted project
+            import.
+          </p>
+        </div>
+      </section>
+
+      <section id="limitations">
+        <h2>Limitations &amp; extension points</h2>
+        <p>
+          The most important limitation is intentional: discovery is recursive traversal from
+          evidence. Unseeded functions are invisible, even if they sit in executable sections and
+          look like prologues. Dead bytes are not swept, and a function reachable only through an
+          unresolved indirect edge stays undiscovered. An image with no grounded roots returns no
+          graphs and coverage <code>partial</code> with reason
+          <code>no grounded function seeds</code>. Conversely, unresolved indirect flow is never
+          guessed away: any <code>unknown</code> flow, unresolved indirect branch or indirect call
+          adds <code>unresolved control flow</code> to the function's coverage reasons and makes the
+          overall result <code>partial</code>. The Mach-O fixture demonstrates both sides: 18 graphs
+          are discovered, 16 are complete, and <code>_fixture_indirect</code> and the pre-stub
+          <code>_puts</code> graph are partial because of their indirect control transfer.
+        </p>
+        <p>
+          Real images therefore stay <code>partial</code>. The project publishes
+          <code>indexes.function = 'partial'</code> whenever
+          <code>discovery.coverage.state</code> is not <code>complete</code>. That is why the CLI's
+          <code>functions</code> command prints a warning such as
+          <code>functions: partial (incomplete_index)</code> on the fixture, and why query envelopes
+          can carry reason <code>incomplete_index</code>. The roadmap in
+          <a href="../../CONTINUE.md">CONTINUE.md</a> names the remedy: “resumable per-root
+          whole-image discovery as a background job so real images stop being permanently
+          <code>partial</code>”. Discovery already supports per-root work through
+          <code>selected_entry</code> and a reusable <code>DiscoveryIndex</code>; the missing piece
+          is scheduling and persistence, not a different traversal rule.
+        </p>
+        <p>Other concrete gaps visible in the code:</p>
+        <ul>
+          <li>
+            Instruction-budget exhaustion returns partial graphs, but work, deadline, block and
+            cancellation limits throw <code>OperationError</code> and publish nothing. There is no
+            resume cursor inside the worklist.
+          </li>
+          <li>
+            Jump tables must have a single-entry straight-line chain, an unsigned constant bound on
+            the exact index value, at most 256 entries, and immutable relocation-free bytes. Signed
+            guards, multi-entry chains, tables in writable sections and indirect dispatch without a
+            table proof remain unresolved.
+          </li>
+          <li>
+            <code>guard_exact</code> is recorded, but the final graph revalidation checks the chain,
+            selector block, targets and <code>otherwise</code>; it does not reject a proof merely
+            because the guard fact is not the fact attached directly to the index node.
+          </li>
+          <li>
+            Discovery's architectural jump-table candidates have no range, so they are inventory
+            only. Target recovery enumerates absolute-u64 tables only from loader data hints with a
+            concrete, eight-byte-multiple range.
+          </li>
+          <li>
+            Shared tails are reported as <code>shared_tail</code> overlaps but are not deduplicated:
+            each function keeps its own graph and blocks. Overlapping byte ranges (mostly possible
+            on variable-length x86) mark the participants <code>conflicting</code> rather than
+            choosing one decoding.
+          </li>
+          <li>
+            Import-stub classification relies on the reference index and on loader-provided import
+            slots and callable entries. A stub-like body without an established import reference
+            stays an ordinary partial function.
+          </li>
+          <li>
+            Selected-local rebuilding adds a synthetic
+            <code>selected-local graph reconstruction</code> evidence record to every selected
+            graph, and an <code>unavailable_semantics</code>
+            diagnostic only when the observed graph differs from the published record. It does not
+            mutate historical ranges.
+          </li>
+        </ul>
+        <div class="callout invariant">
+          <span class="title">Extension points</span>
+          <p>
+            A new architecture starts with a decoder flow classifier that produces the
+            <code>DecodedFlow</code> union and a payload whose operand kinds the symbolic
+            interpreter understands. A new seed source belongs in
+            <code>prepareDiscoveryIndex</code>, not in the traversal; it must state whether it is
+            established and whether it carries claims. A new jump-table pattern belongs in the ARM64
+            or x86-64 replay functions plus the guard and entry-load recognizers; it must still end
+            as one <code>entry</code> node with a guard fact and immutable bytes. A new xref source
+            belongs in <code>recoverTargets</code> (block-local values) or in
+            <code>buildReferenceIndex</code> (loader facts such as relocations), with a precise
+            <code>ReferenceRecord.kind</code>, status and target role. A new stub shape belongs in
+            <code>inertInstruction</code>/<code>forwardingBranch</code>. Finally, publishing
+            lineage, or resuming discovery per root, requires wiring existing data structures
+            through the service layer rather than changing the discovery result schema.
+          </p>
+        </div>
+      </section>
+
+      <footer class="pager">
+        <a class="prev" href="loaders.html">← Loading binaries &amp; addresses</a>
+        <a class="next" href="decode-lift-ir.html">Decoding, lifting &amp; IR →</a>
+      </footer>
+    </main>
+  </body>
+</html>

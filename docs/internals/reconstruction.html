@@ -1,0 +1,2166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Source reconstruction — Open Decomp internals</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- Shared SVG defs: every diagram on the page references url(#arrow) / url(#arrow-accent). Keep exactly this block once per page. -->
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true" focusable="false">
+      <defs>
+        <marker
+          id="arrow"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" class="arrowhead" />
+        </marker>
+        <marker
+          id="arrow-accent"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M0,0 L10,5 L0,10 z" class="arrowhead accent" />
+        </marker>
+      </defs>
+    </svg>
+
+    <nav class="sidebar" aria-label="Internals pages">
+      <a class="brand" href="index.html">Open Decomp internals</a>
+      <p class="brand-sub">How the decompiler works</p>
+      <ol>
+        <li><a href="index.html">Architecture overview</a></li>
+        <li><a href="loaders.html">Loading binaries &amp; addresses</a></li>
+        <li><a href="discovery.html">Function discovery &amp; CFG</a></li>
+        <li><a href="decode-lift-ir.html">Decoding, lifting &amp; IR</a></li>
+        <li><a href="ssa-values.html">SSA, values &amp; stack</a></li>
+        <li><a href="calls-abi.html">ABIs, calls &amp; callee summaries</a></li>
+        <li><a href="types-metadata.html">Types &amp; metadata</a></li>
+        <li><a href="reconstruction.html" aria-current="page">Source reconstruction</a></li>
+        <li><a href="structuring-emission.html">Structuring &amp; emission</a></li>
+        <li><a href="project-cache.html">Projects, cache &amp; execution</a></li>
+      </ol>
+      <a class="back" href="../README.md">← User documentation</a>
+    </nav>
+
+    <main>
+      <header>
+        <p class="eyebrow">Stage 08 · Reconstruction</p>
+        <h1>Source reconstruction</h1>
+        <p class="lede">
+          Reconstruction turns an immutable structured SSA program, recovered types and native
+          evidence into a second, source-shaped model: named values, expressions, a signature, call
+          and return interfaces, promoted stack storage and conditions. It never mutates the
+          analyzed program, never re-structures the CFG, and every rewrite is either an exact
+          bit-level identity or a recorded, proof-carrying presentation change.
+        </p>
+        <p class="sources">
+          Sources:
+          <a class="src" href="../../src/reconstruction/index.ts">src/reconstruction/index.ts</a>
+          <a class="src" href="../../src/reconstruction/source-planner.ts"
+            >src/reconstruction/source-planner.ts</a
+          >
+          <a class="src" href="../../src/reconstruction/source-model.ts"
+            >src/reconstruction/source-model.ts</a
+          >
+          <a class="src" href="../../src/reconstruction/local-validation.ts"
+            >src/reconstruction/local-validation.ts</a
+          >
+          <a class="src" href="../../src/reconstruction/validate.ts"
+            >src/reconstruction/validate.ts</a
+          >
+        </p>
+      </header>
+
+      <nav class="toc" aria-label="On this page">
+        <strong>On this page</strong>
+        <ol>
+          <li><a href="#position">Where this sits in the pipeline</a></li>
+          <li><a href="#model">Data model</a></li>
+          <li><a href="#pipeline">The sub-pipeline inside reconstruct()</a></li>
+          <li><a href="#views">Source vs checked view</a></li>
+          <li><a href="#signature">Signature recovery</a></li>
+          <li><a href="#naming">Naming precedence</a></li>
+          <li><a href="#stack">Stack promotion &amp; stack arguments</a></li>
+          <li><a href="#values">Results, conditions &amp; value rewrites</a></li>
+          <li><a href="#requirements">Requirements and validation</a></li>
+          <li><a href="#limitations">Limitations &amp; extension points</a></li>
+        </ol>
+      </nav>
+
+      <section id="position">
+        <h2>Where this sits in the pipeline</h2>
+        <p>
+          The stage consumes an <code>EmissionInput</code> (<a
+            class="src"
+            href="../../src/emitters/model.ts"
+            >src/emitters/model.ts</a
+          >): the already structured function (<code>StructuredFunction</code>), the optional
+          <code>TypeRecoveryResult</code>, display names and annotations, and — for native binaries
+          — a <code>SourceEvidence</code> record. That evidence is produced by
+          <code>recoverSourceEvidence</code> in
+          <a class="src" href="../../src/service/analysis/source-facts.ts"
+            >src/service/analysis/source-facts.ts</a
+          >
+          and contains the target ABI profile, observed and proven callee interfaces, address facts
+          (strings, immutable bytes, imports, Objective-C identities), positive caller return
+          demands, observed written result storage, variadic actual signatures and bounded
+          memory-shape transfers. The <a href="calls-abi.html">calls &amp; ABI</a> page explains how
+          those observations are gathered; reconstruction only consumes them. The structured tree
+          and SSA arrive from <a href="ssa-values.html">SSA, values &amp; stack</a> and the
+          <a href="structuring-emission.html">structuring</a> pass; types come from
+          <a href="types-metadata.html">Types &amp; metadata</a>.
+        </p>
+        <p>
+          The caller is the <code>Renderer</code> constructor in
+          <a class="src" href="../../src/emitters/renderer.ts">src/emitters/renderer.ts</a>:
+        </p>
+        <pre><code>this.program = reconstruct(input, context, options.view === 'checked' ? 'checked' : 'source');</code></pre>
+        <p>
+          <code>reconstruct(input, context, view)</code> is defined in
+          <a class="src" href="../../src/reconstruction/index.ts">src/reconstruction/index.ts</a>.
+          Its own default is <code>'checked'</code>; the renderer makes an explicit choice, and the
+          CLI default view is <code>source</code>. The result is a model object
+          (<code>Reconstruction</code>), not text. The renderer consumes it to choose variable
+          names, types, call spellings, requirements comments and mappings. Nothing in this stage
+          writes to the IR, the structured tree or the type result.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 900 250" role="img" aria-labelledby="fig-position-title">
+            <title id="fig-position-title">
+              Position of source reconstruction between analysis and emission
+            </title>
+            <rect class="box muted" x="10" y="30" width="190" height="52" rx="8" />
+            <text x="105" y="52" text-anchor="middle" class="title">Structured SSA</text>
+            <text x="105" y="70" text-anchor="middle" class="small mono">StructuredFunction</text>
+
+            <rect class="box muted" x="10" y="100" width="190" height="52" rx="8" />
+            <text x="105" y="122" text-anchor="middle" class="title">Types &amp; metadata</text>
+            <text x="105" y="140" text-anchor="middle" class="small mono">TypeRecoveryResult</text>
+
+            <rect class="box muted" x="10" y="170" width="190" height="52" rx="8" />
+            <text x="105" y="192" text-anchor="middle" class="title">Source evidence</text>
+            <text x="105" y="210" text-anchor="middle" class="small mono">SourceEvidence</text>
+
+            <path class="edge" d="M200,56 L235,56 L235,100 L268,100" marker-end="url(#arrow)" />
+            <path class="edge" d="M200,126 L268,126" marker-end="url(#arrow)" />
+            <path class="edge" d="M200,196 L235,196 L235,152 L268,152" marker-end="url(#arrow)" />
+
+            <rect class="box accent" x="270" y="80" width="270" height="90" rx="8" />
+            <text x="405" y="105" text-anchor="middle" class="title">reconstruct()</text>
+            <text x="405" y="125" text-anchor="middle" class="small mono">
+              input, context, view
+            </text>
+            <text x="405" y="143" text-anchor="middle" class="small mono">
+              index → plan → live → project
+            </text>
+            <text x="405" y="159" text-anchor="middle" class="small">source / checked</text>
+
+            <path
+              class="edge accent"
+              d="M540,100 L575,100 L575,92 L598,92"
+              marker-end="url(#arrow-accent)"
+            />
+
+            <rect class="box ok" x="600" y="60" width="220" height="64" rx="8" />
+            <text x="710" y="84" text-anchor="middle" class="title">Reconstruction</text>
+            <text x="710" y="103" text-anchor="middle" class="small mono">
+              source?: SourcePresentation
+            </text>
+
+            <path class="edge" d="M710,124 L710,158" marker-end="url(#arrow)" />
+
+            <rect class="box muted" x="600" y="160" width="220" height="64" rx="8" />
+            <text x="710" y="184" text-anchor="middle" class="title">Renderer</text>
+            <text x="710" y="203" text-anchor="middle" class="small">
+              C-like / Python-like text
+            </text>
+          </svg>
+          <figcaption>
+            <strong>Figure 1.</strong> Reconstruction sits between analysis and text emission. It
+            reads the same inputs the renderer receives and publishes one extra model; the
+            <code>view</code> argument selects how much presentation work that model contains.
+          </figcaption>
+        </figure>
+      </section>
+
+      <section id="model">
+        <h2>Data model</h2>
+        <p>
+          The central type is <code>Reconstruction</code>. Original SSA identities are preserved
+          everywhere: synthesized source values get deterministic ids of the form
+          <code>entity_&lt;fingerprint&gt;</code>, and every map that points at a value points at
+          the original identity when one exists.
+        </p>
+        <pre><code>export interface Reconstruction {
+  readonly function: StructuredFunction;
+  readonly view: PresentationView;
+  readonly source?: SourcePresentation;
+  readonly blocks: ReadonlyMap&lt;string, BlockRegion&gt;;
+  readonly values: ReadonlyMap&lt;string, Value&gt;;
+  /** Rewritten pure definitions. Operand identities remain original SSA IDs. */
+  readonly expressions: ReadonlyMap&lt;string, Expression&gt;;
+  readonly inline: ReadonlySet&lt;string&gt;;
+  readonly live: ReadonlySet&lt;string&gt;;
+  readonly use_counts: ReadonlyMap&lt;string, number&gt;;
+  readonly retained: ReadonlySet&lt;string&gt;;
+  readonly transfers: ReadonlyMap&lt;ParallelTransfer, readonly { readonly destination: Value; readonly source: Value }[]&gt;;
+  readonly origins: ReadonlyMap&lt;string, readonly Origin[]&gt;;
+  readonly parameters: readonly Value[];
+  readonly signature: SignatureAssociation | null;
+  readonly calls: ReadonlyMap&lt;string, BoundaryProjection&gt;;
+  readonly returns: ReadonlyMap&lt;string, BoundaryProjection&gt;;
+  readonly tails: ReadonlyMap&lt;string, TailProjection&gt;;
+  readonly physical_inputs: ReadonlyMap&lt;string, readonly { readonly register: RegisterDescriptor; readonly value: Value }[]&gt;;
+  readonly physical_exits: ReadonlyMap&lt;string, readonly { readonly register: RegisterDescriptor; readonly value: Value }[]&gt;;
+  readonly memory: ReadonlyMap&lt;string, MemoryView&gt;;
+  readonly local_validation?: readonly LocalValidationRecord[];
+  readonly local_validation_session?: LocalValidationSession;
+  readonly diagnostics: readonly Diagnostic[];
+}</code></pre>
+        <p class="sources">
+          Defined in
+          <a class="src" href="../../src/reconstruction/model.ts">src/reconstruction/model.ts</a>
+          (<code>Reconstruction</code>).
+        </p>
+
+        <p>
+          Two subsystems carry the parts that need explanation rather than a map:
+          <code>BoundaryProjection</code> (what a call or return means at source level) and
+          <code>SourcePresentation</code> (the syntax-neutral names, stack storage, types and
+          requirements the renderer will spell).
+        </p>
+        <pre><code>export interface BoundaryProjection {
+  readonly kind: 'source' | 'inferred' | 'physical';
+  readonly signature: SignatureAssociation | null;
+  readonly arguments: readonly Value[];
+  readonly argument_list_complete?: boolean;
+  readonly results: readonly Value[];
+  readonly inputs: readonly { readonly register: RegisterDescriptor; readonly value: Value }[];
+  readonly outputs: readonly { readonly register: RegisterDescriptor; readonly value: Value }[];
+  /** Source view only: possible-return slices not established as results. */
+  readonly exit_scratch?: readonly ExitScratchSlice[];
+}
+export interface ExitScratchSlice {
+  readonly register: RegisterDescriptor;
+  readonly value: Value;
+  readonly sources: readonly string[];
+  readonly entry: boolean;
+  readonly computed?: true;
+}</code></pre>
+        <p class="sources">
+          Defined in
+          <a class="src" href="../../src/reconstruction/model.ts">src/reconstruction/model.ts</a>
+          (<code>BoundaryProjection</code>, <code>ExitScratchSlice</code>). The interface is
+          expanded by
+          <a class="src" href="../../src/reconstruction/boundaries.ts"
+            >src/reconstruction/boundaries.ts</a
+          >
+          (<code>boundaryProjector</code>) when reconstruction does not have a stronger source
+          projection.
+        </p>
+
+        <pre><code>export interface SourcePresentation {
+  readonly inferred: boolean;
+  readonly parameter_names: ReadonlyMap&lt;string, string&gt;;
+  readonly return_type: DataType | null;
+  readonly return_types?: readonly DataType[];
+  readonly value_types?: ReadonlyMap&lt;string, SourceTypeView&gt;;
+  readonly formal_types?: ReadonlyMap&lt;string, SourceFormalType&gt;;
+  readonly formal_stack_offsets?: ReadonlyMap&lt;string, bigint&gt;;
+  readonly local_types?: ReadonlyMap&lt;string, SourceFormalType&gt;;
+  readonly float_values?: ReadonlyMap&lt;string, 32 | 64&gt;;
+  readonly float_locals?: ReadonlyMap&lt;string, 32 | 64&gt;;
+  readonly void_like_result?: 'incidental_result' | 'indirect_result';
+  readonly requirements?: readonly Requirement[];
+  readonly locals: ReadonlyMap&lt;string, SourceLocal&gt;;
+  readonly stack: SourceStackStorage | null;
+  readonly stack_addresses: ReadonlyMap&lt;string, bigint&gt;;
+  readonly frame_saves?: FrameSaves;
+  readonly call_results?: ReadonlyMap&lt;string, readonly Value[]&gt;;
+  readonly value_origins?: ReadonlyMap&lt;string, readonly string[]&gt;;
+  readonly definitions?: ReadonlyMap&lt;string, readonly Extract&lt;Instruction, { kind: 'assign' }&gt;[]&gt;;
+}</code></pre>
+        <p class="sources">
+          Defined in
+          <a class="src" href="../../src/reconstruction/source-model.ts"
+            >src/reconstruction/source-model.ts</a
+          >
+          (<code>SourcePresentation</code>). It is syntax-neutral: no C or Python spelling is chosen
+          here. The renderer owns keywords, declarations and formatting.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 900 460" role="img" aria-labelledby="fig-model-title">
+            <title id="fig-model-title">Object map of the Reconstruction result</title>
+            <rect class="box accent" x="330" y="185" width="240" height="86" rx="8" />
+            <text x="450" y="211" text-anchor="middle" class="title">Reconstruction</text>
+            <text x="450" y="231" text-anchor="middle" class="small mono">
+              view: source | checked
+            </text>
+            <text x="450" y="249" text-anchor="middle" class="small mono">
+              immutable input + source model
+            </text>
+
+            <rect class="box muted" x="10" y="20" width="270" height="50" rx="8" />
+            <text x="145" y="40" text-anchor="middle" class="title">blocks, values</text>
+            <text x="145" y="58" text-anchor="middle" class="small">
+              owned regions and every SSA value
+            </text>
+
+            <rect class="box muted" x="10" y="90" width="270" height="50" rx="8" />
+            <text x="145" y="110" text-anchor="middle" class="title">expressions, inline</text>
+            <text x="145" y="128" text-anchor="middle" class="small">
+              rewritten pure definitions
+            </text>
+
+            <rect class="box muted" x="10" y="160" width="270" height="50" rx="8" />
+            <text x="145" y="180" text-anchor="middle" class="title">
+              live, use_counts, retained
+            </text>
+            <text x="145" y="198" text-anchor="middle" class="small">
+              demand state for emission
+            </text>
+
+            <rect class="box muted" x="10" y="230" width="270" height="50" rx="8" />
+            <text x="145" y="250" text-anchor="middle" class="title">transfers</text>
+            <text x="145" y="268" text-anchor="middle" class="small">simultaneous edge copies</text>
+
+            <rect class="box muted" x="10" y="300" width="270" height="50" rx="8" />
+            <text x="145" y="320" text-anchor="middle" class="title">origins</text>
+            <text x="145" y="338" text-anchor="middle" class="small">
+              consumer → original statements
+            </text>
+
+            <rect class="box muted" x="10" y="370" width="270" height="50" rx="8" />
+            <text x="145" y="390" text-anchor="middle" class="title">parameters, signature</text>
+            <text x="145" y="408" text-anchor="middle" class="small">
+              entry storage + association
+            </text>
+
+            <rect class="box muted" x="620" y="20" width="270" height="50" rx="8" />
+            <text x="755" y="40" text-anchor="middle" class="title">calls, returns, tails</text>
+            <text x="755" y="58" text-anchor="middle" class="small mono">BoundaryProjection</text>
+
+            <rect class="box muted" x="620" y="90" width="270" height="50" rx="8" />
+            <text x="755" y="110" text-anchor="middle" class="title">physical inputs/exits</text>
+            <text x="755" y="128" text-anchor="middle" class="small">exact register snapshots</text>
+
+            <rect class="box muted" x="620" y="160" width="270" height="50" rx="8" />
+            <text x="755" y="180" text-anchor="middle" class="title">memory</text>
+            <text x="755" y="198" text-anchor="middle" class="small mono">
+              MemoryView (shape, field)
+            </text>
+
+            <rect class="box ok" x="620" y="230" width="270" height="50" rx="8" />
+            <text x="755" y="250" text-anchor="middle" class="title">source</text>
+            <text x="755" y="268" text-anchor="middle" class="small mono">SourcePresentation</text>
+
+            <rect class="box warn" x="620" y="300" width="270" height="50" rx="8" />
+            <text x="755" y="320" text-anchor="middle" class="title">
+              local_validation + session
+            </text>
+            <text x="755" y="338" text-anchor="middle" class="small">records, proof allowance</text>
+
+            <rect class="box muted" x="620" y="370" width="270" height="50" rx="8" />
+            <text x="755" y="390" text-anchor="middle" class="title">diagnostics</text>
+            <text x="755" y="408" text-anchor="middle" class="small mono">
+              unavailable_semantics
+            </text>
+
+            <path class="edge" d="M280,45 L328,200" marker-end="url(#arrow)" />
+            <path class="edge" d="M280,115 L328,215" marker-end="url(#arrow)" />
+            <path class="edge" d="M280,185 L328,228" marker-end="url(#arrow)" />
+            <path class="edge" d="M280,255 L328,242" marker-end="url(#arrow)" />
+            <path class="edge" d="M280,325 L328,255" marker-end="url(#arrow)" />
+            <path class="edge" d="M280,395 L328,266" marker-end="url(#arrow)" />
+
+            <path class="edge" d="M572,200 L618,45" marker-end="url(#arrow)" />
+            <path class="edge" d="M572,212 L618,115" marker-end="url(#arrow)" />
+            <path class="edge" d="M572,225 L618,185" marker-end="url(#arrow)" />
+            <path class="edge" d="M572,238 L618,255" marker-end="url(#arrow)" />
+            <path class="edge" d="M572,252 L618,325" marker-end="url(#arrow)" />
+            <path class="edge" d="M572,264 L618,395" marker-end="url(#arrow)" />
+          </svg>
+          <figcaption>
+            <strong>Figure 2.</strong> The published model. Everything on the left is demand and
+            ownership state used to decide what prints; everything on the right is an interface or
+            proof. The original <code>StructuredFunction</code> is retained unchanged as
+            <code>function</code>, so a consumer can always fall back to physical form.
+          </figcaption>
+        </figure>
+
+        <div class="callout invariant">
+          <span class="title">Invariant</span>
+          <p>
+            Reconstruction is a bounded <em>view</em>. The header comment in
+            <a class="src" href="../../src/reconstruction/index.ts">src/reconstruction/index.ts</a>
+            states the contract: “The original structured SSA remains immutable. Reconstruction is a
+            bounded view: pure expression folding, demand-driven live phi copies, exact physical
+            snapshots and conservative source projections. No CFG is structured twice.” The renderer
+            and the publication checks rely on this: they may print fewer statements than the IR
+            contains, but never a different control graph.
+          </p>
+        </div>
+
+        <div class="callout refusal">
+          <span class="title">Refusal</span>
+          <p>
+            Reconstruction throws <code>OperationError</code> with code
+            <code>invalid_input</code> when the structured tree owns a block twice, and with
+            <code>resource_limit</code> when <code>context.budget.blocks</code>,
+            <code>context.budget.ir_nodes</code> or the statement budget is exceeded. It never
+            silently truncates a function. Publication failures later use
+            <code>unavailable_semantics</code> (see
+            <a href="#requirements">Requirements and validation</a>).
+          </p>
+        </div>
+      </section>
+
+      <section id="pipeline">
+        <h2>The sub-pipeline inside <code>reconstruct()</code></h2>
+        <p>
+          <code>reconstruct</code> is one function with a long body, deliberately written as a
+          linear pipeline over shared maps. Every helper receives those maps explicitly; there is no
+          global state, and each pass is free to add synthesized values through the planner's
+          <code>make</code>/<code>alias</code> callbacks. The order below is the execution order in
+          the source.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 700" role="img" aria-labelledby="fig-pipeline-title">
+            <title id="fig-pipeline-title">
+              Execution order of the reconstruction sub-pipeline
+            </title>
+            <text x="215" y="14" text-anchor="middle" class="lane">setup and planning</text>
+            <text x="705" y="14" text-anchor="middle" class="lane">
+              demand, projection, publication
+            </text>
+
+            <rect class="box muted" x="20" y="20" width="390" height="52" rx="8" />
+            <text x="34" y="39" class="small">1</text>
+            <text x="50" y="40" class="mono">index structured regions</text>
+            <text x="50" y="58" class="small">
+              blocks, values, assignments, transfers, parameter sources
+            </text>
+
+            <rect class="box" x="20" y="105" width="390" height="52" rx="8" />
+            <text x="34" y="124" class="small">2</text>
+            <text x="50" y="125" class="mono">foldExpressions</text>
+            <text x="50" y="143" class="small">
+              pure SSA identities, constant chains (both views)
+            </text>
+
+            <rect class="box" x="20" y="190" width="390" height="52" rx="8" />
+            <text x="34" y="209" class="small">3</text>
+            <text x="50" y="210" class="mono">normalizeSourceRanges</text>
+            <text x="50" y="228" class="small">
+              edge-constrained unsigned intervals (needs input.source)
+            </text>
+
+            <rect class="box" x="20" y="275" width="390" height="52" rx="8" />
+            <text x="34" y="294" class="small">4</text>
+            <text x="50" y="295" class="mono">projectSourceConstants</text>
+            <text x="50" y="313" class="small">
+              source only: immutable image reads become literals
+            </text>
+
+            <rect class="box accent" x="20" y="360" width="390" height="52" rx="8" />
+            <text x="34" y="379" class="small">5</text>
+            <text x="50" y="380" class="mono">planSource</text>
+            <text x="50" y="398" class="small">
+              calls, tails, entry formals, results, signature, requirements
+            </text>
+
+            <rect class="box accent" x="20" y="445" width="390" height="52" rx="8" />
+            <text x="34" y="464" class="small">6</text>
+            <text x="50" y="465" class="mono">planSourceStack</text>
+            <text x="50" y="483" class="small">
+              offsets, saves, promotion, incoming stack, frame bounds
+            </text>
+
+            <rect class="box" x="20" y="530" width="390" height="52" rx="8" />
+            <text x="34" y="549" class="small">7</text>
+            <text x="50" y="550" class="mono">recombineSourceCells</text>
+            <text x="50" y="568" class="small">
+              source only: one value from independently allocated cells
+            </text>
+
+            <rect class="box" x="20" y="615" width="390" height="52" rx="8" />
+            <text x="34" y="634" class="small">8</text>
+            <text x="50" y="635" class="mono">arity_closure + requireAbi</text>
+            <text x="50" y="653" class="small">
+              tail, library and Objective-C closures; ABI assumptions
+            </text>
+
+            <rect class="box muted" x="510" y="20" width="390" height="52" rx="8" />
+            <text x="524" y="39" class="small">9</text>
+            <text x="540" y="40" class="mono">planVariadicStackArguments</text>
+            <text x="540" y="58" class="small">
+              source only: Darwin outgoing slots become trailing arguments
+            </text>
+
+            <rect class="box" x="510" y="105" width="390" height="52" rx="8" />
+            <text x="524" y="124" class="small">10</text>
+            <text x="540" y="125" class="mono">sourceExpressionDemand</text>
+            <text x="540" y="143" class="small">
+              conservative over-approximation of liveness roots
+            </text>
+
+            <rect class="box accent" x="510" y="190" width="390" height="52" rx="8" />
+            <text x="524" y="209" class="small">11</text>
+            <text x="540" y="210" class="mono">normalizeSourceExpressions</text>
+            <text x="540" y="228" class="small">
+              proof-carrying expression rules, then a worklist fixpoint
+            </text>
+
+            <rect class="box" x="510" y="275" width="390" height="52" rx="8" />
+            <text x="524" y="294" class="small">12</text>
+            <text x="540" y="295" class="mono">identity lattice + alias</text>
+            <text x="540" y="313" class="small">
+              unreached / exact identity / conflicting, then bitcasts
+            </text>
+
+            <rect class="box accent" x="510" y="360" width="390" height="52" rx="8" />
+            <text x="524" y="379" class="small">13</text>
+            <text x="540" y="380" class="mono">boundaryProjector + exit scratch</text>
+            <text x="540" y="398" class="small">
+              calls, returns, physical snapshots, possible-return slices
+            </text>
+
+            <rect class="box" x="510" y="445" width="390" height="52" rx="8" />
+            <text x="524" y="464" class="small">14</text>
+            <text x="540" y="465" class="mono">liveness, dead reloads, inline</text>
+            <text x="540" y="483" class="small">
+              retained/live/use counts, deferred loads, origins, bounds
+            </text>
+
+            <rect class="box ok" x="510" y="530" width="390" height="52" rx="8" />
+            <text x="524" y="549" class="small">15</text>
+            <text x="540" y="550" class="mono">types → floating → signature</text>
+            <text x="540" y="568" class="small">
+              value types, FP spelling, formal and return spellings
+            </text>
+
+            <path class="edge" d="M215,72 L215,103" marker-end="url(#arrow)" />
+            <path class="edge" d="M215,157 L215,188" marker-end="url(#arrow)" />
+            <path class="edge" d="M215,242 L215,273" marker-end="url(#arrow)" />
+            <path class="edge" d="M215,327 L215,358" marker-end="url(#arrow)" />
+            <path class="edge" d="M215,412 L215,443" marker-end="url(#arrow)" />
+            <path class="edge" d="M215,497 L215,528" marker-end="url(#arrow)" />
+            <path class="edge" d="M215,582 L215,613" marker-end="url(#arrow)" />
+
+            <path
+              class="edge accent"
+              d="M410,641 L470,641 L470,46 L508,46"
+              marker-end="url(#arrow-accent)"
+            />
+            <text x="410" y="668" class="edge-label">continues</text>
+
+            <path class="edge" d="M705,72 L705,103" marker-end="url(#arrow)" />
+            <path class="edge" d="M705,157 L705,188" marker-end="url(#arrow)" />
+            <path class="edge" d="M705,242 L705,273" marker-end="url(#arrow)" />
+            <path class="edge" d="M705,327 L705,358" marker-end="url(#arrow)" />
+            <path class="edge" d="M705,412 L705,443" marker-end="url(#arrow)" />
+            <path class="edge" d="M705,497 L705,528" marker-end="url(#arrow)" />
+          </svg>
+          <figcaption>
+            <strong>Figure 3.</strong> Real function names in execution order. Steps 4, 7 and 9
+            exist only in the <code>source</code> view; the rest run in both views with a
+            <code>view</code> parameter that disables individual presentation decisions. Step 13
+            also contains the source-only exit-scratch conversion, and step 15's last two helpers
+            run only for <code>source</code>.
+          </figcaption>
+        </figure>
+
+        <h3>1. Indexing: ownership, values and edge sources</h3>
+        <p>
+          The first pass walks the structured region tree with an explicit worklist. For every block
+          it records the region, its parameters and every defined value: statement results, call
+          results and <code>register_outputs</code>. Assignment nodes are indexed separately because
+          expression folding needs only pure definitions. Each control transfer is recorded with its
+          owning block; after all blocks are known, every transfer copy is attached to its
+          destination block parameter in <code>parameterSources</code>. That map is the phi-source
+          view used by later passes and by the identity lattice.
+        </p>
+        <p>
+          Budgeting is part of the pass, not an afterthought: <code>context.checkpoint</code> is
+          called per region, statement, value and transfer copy; the block count, statement count
+          and value count are compared with <code>context.budget.blocks</code> and
+          <code>context.budget.ir_nodes</code>. Duplicate block ownership is a hard
+          <code>invalid_input</code> error because it would make every later map ambiguous.
+        </p>
+
+        <h3>2. Pure folding and range normalization</h3>
+        <p>
+          <code>foldExpressions</code>
+          (<a class="src" href="../../src/reconstruction/expressions.ts"
+            >src/reconstruction/expressions.ts</a
+          >) folds only pure SSA expressions. It resolves identity bitcasts, applies
+          <code>integerIdentity</code> (neutral operands such as <code>x+0</code>, <code>x|0</code>,
+          <code>x*1</code>, <code>x&lt;&lt;0</code> and same-type <code>x&amp;ones</code>), and
+          rewrites subtract/flag patterns into comparisons. It deliberately refuses
+          <code>x-x</code>, <code>x*0</code> and <code>x^x</code>, because those would erase an
+          operand that may be indeterminate. This pass runs in both views: it is semantic
+          simplification, not presentation.
+        </p>
+        <p>
+          <code>normalizeSourceRanges</code>
+          (<a class="src" href="../../src/reconstruction/source-ranges.ts"
+            >src/reconstruction/source-ranges.ts</a
+          >) runs whenever native evidence exists. It computes forward, edge-constrained unsigned
+          intervals over the values that reach the upper lanes of <code>concat</code> operations —
+          the ARM64 pattern where an upper 32-bit cell is known to be zero or a narrow result.
+          Parallel copies are evaluated before destination facts are joined; a branch contributes
+          both the tested bit range and definedness on the selected edge; growing loop bounds widen
+          conservatively. Only a proof that the upper part is zero lets the concat collapse to a
+          narrower value. Failed proofs leave the expression untouched.
+        </p>
+
+        <h3>3. Source planning: calls, formals, results, signature</h3>
+        <p>
+          <code>planSource</code>
+          (<a class="src" href="../../src/reconstruction/source-planner.ts"
+            >src/reconstruction/source-planner.ts</a
+          >) is the largest single step. It creates the call/return/tail projections, entry
+          parameters, the function signature, the parameter-name map and the requirement list. It
+          also supplies three closures used by later passes: <code>make</code> (create a
+          deterministic synthesized value and register it), <code>alias</code> (replace a value's
+          expression with a bitcast and force it inline) and <code>materialize</code> (turn a
+          forced-inline arithmetic definition back into a statement when the renderer cannot expand
+          it).
+        </p>
+        <p>Call interfaces are resolved in this order of strength:</p>
+        <ol class="steps">
+          <li>
+            <strong>Established declaration.</strong> <code>signatureFor(subject)</code> accepts
+            exactly one established or asserted signature for the call and the function, whose ABI
+            id matches the evidence ABI and whose types resolve to ABI types. Conflicts and missing
+            pieces yield <code>null</code>.
+          </li>
+          <li>
+            <strong>Observed contracts.</strong> With <code>view === 'source'</code>, all
+            established call contracts may be used if they are identical
+            (<code>repeatedContract</code>). A variadic library rule
+            (<code>call_argument_signatures</code>) can supply stronger actual types.
+          </li>
+          <li>
+            <strong>Inferred callee.</strong> Otherwise an <code>InferredCallee</code> from
+            <code>SourceEvidence.callees</code> (and, in the source view,
+            <code>source_callees</code>) provides a register prefix plus optional stack parameters.
+            If a single register location is only partially covered by the observed bindings,
+            <code>bind</code> refuses rather than inventing bits.
+          </li>
+          <li>
+            <strong>Physical fallback.</strong> A projection with kind <code>physical</code> keeps
+            the original <code>node.arguments</code>, <code>node.results</code> and
+            <code>register_outputs</code>. This is what the renderer prints as an explicit
+            interface.
+          </li>
+        </ol>
+        <p>
+          The binding primitive is worth knowing because it fails conservatively. Given an ABI
+          location and the register bindings at that boundary, <code>bind</code> walks the
+          overlapping cells in offset order, requires them to tile the location exactly from low to
+          high, extracts a sub-slice when a cell is wider than its contribution, concatenates when
+          several cells contribute, and finally checks that the assembled width equals the expected
+          type width. A gap, an overlap, or a width mismatch returns <code>null</code>. The
+          companion <code>result</code> function then validates coverage <em>before</em> replacing
+          cells, and aliases each original cell to a bitcast/extract of the whole result (or to an
+          <code>insert</code> when only part of a cell is consumed). This is how a returned
+          <code>uint64_t</code> can be reassembled from <code>w0</code> while the high half of the
+          register remains independently observable.
+        </p>
+        <p>
+          Entry formals are not guessed from register spelling. The planner asks the target ABI to
+          classify a synthetic call with sixteen pointer-width integer parameters and a second one
+          with sixteen <code>double</code> parameters; the resulting register locations are the
+          candidates. A candidate becomes a formal only if the entry block actually binds one of its
+          cells and the value survives to the demand phase. In the source view, an untyped
+          scalar-width floating-bank argument is presented as the IEEE value of its lane (<code
+            >{ kind: 'float', bits: 32 | 64 }</code
+          >), because every supported C ABI passes such an argument as
+          <code>float</code>/<code>double</code>. A hidden-result pointer register outside the
+          argument registers (AAPCS64 <code>x8</code>) becomes the incoming indirect result location
+          under the <code>indirect_result</code> rule.
+        </p>
+        <p>
+          If an established, completely classifiable, non-variadic function signature exists, every
+          parameter and every return location must bind; only then are the synthetic formals
+          discarded in favour of the declared ones, and the declared parameter names are copied into
+          <code>parameter_names</code>. The <code>functionSignature</code> also suppresses inferred
+          result rules: a declaration is stronger evidence than any observation.
+        </p>
+
+        <h3>4. Stack planning, cell recombination and closure</h3>
+        <p>
+          <code>planSourceStack</code>
+          (<a class="src" href="../../src/reconstruction/source-stack.ts"
+            >src/reconstruction/source-stack.ts</a
+          >) receives the call and return projections from <code>planSource</code> because outgoing
+          stack arguments and return storage decide what may be private. Its first job is an address
+          fixed point: entry-SP is offset zero; bitcasts, recombined cell halves,
+          <code>add</code>/<code>sub</code> with a constant, and agreeing phi inputs propagate
+          offsets. Only accesses with a known offset can be classified.
+        </p>
+        <p>
+          <code>recombineSourceCells</code>
+          (<a class="src" href="../../src/reconstruction/source-cells.ts"
+            >src/reconstruction/source-cells.ts</a
+          >) runs next, and only in the source view. It recognizes complete contiguous root cells
+          that are read together as a phi group, and whose cells are all written on an edge by
+          corresponding slices of one value, by a constant, by an unknown of one reason, or by the
+          unchanged cells of another group. When every incoming edge agrees, the group is
+          transported as one whole bitvector and the per-cell edge copies are replaced by one copy
+          of the synthesized value. The original copies stay in the checked view.
+        </p>
+        <p>
+          After that, <code>reconstruct</code> validates tail-call arity closure and records ABI
+          assumptions. A tail whose boundary claims a complete argument list is downgraded unless
+          <code>presentation('arity_closure', …)</code> admits the proof. Library-contract and
+          Objective-C-selector closures additionally call <code>requireAbi</code>. In the source
+          view, <code>SourceEvidence.source_callees</code> closures are validated inside
+          <code>planSourceStack</code> so that frame classification sees the final answer; a refused
+          closure reopens the conservative area.
+        </p>
+
+        <h3>5. Demand, normalization and the identity lattice</h3>
+        <p>
+          Before rewriting expressions, reconstruction computes a conservative demand set. It roots
+          every parameter, every boundary argument/result/input/output, every effectful operand
+          (loads, stores, calls, unknown effects, controls and return values), the entry storage
+          base and every indirect target. If it encounters a consumer kind it does not model, it
+          sets <code>complete = false</code> and disables demand filtering entirely.
+          <code>sourceExpressionDemand</code> then walks phi inputs and expressions to close the
+          set. The comment in the code is explicit that this is an over-approximation: it is only
+          used to avoid undemanded pure rewrites, never to remove an effect.
+        </p>
+        <p>
+          <code>normalizeSourceExpressions</code>
+          (<a class="src" href="../../src/reconstruction/source-expressions.ts"
+            >src/reconstruction/source-expressions.ts</a
+          >) is a worklist fixpoint over definitions. It resolves identity chains, rewrites
+          same-type truncations to extracts, folds constant expressions, and — in the source view
+          only — applies the presentation rules listed in
+          <a href="#values">Results, conditions &amp; value rewrites</a>. Dependencies include every
+          inspected definition, so a rewrite invalidates its readers and their cached resolutions.
+          Each candidate is either proved by a rule-specific argument, checked by the local
+          bitvector validator, or rejected and left in its original form.
+        </p>
+        <p>
+          The identity lattice is a three-level analysis: a value is
+          <em>unreached</em> (<code>undefined</code>), an <em>exact identity</em> (a value id), or
+          <em>conflicting</em> (<code>null</code>). It starts from entry parameters and copy
+          sources, and iterates a worklist: a destination joins the identities of its sources; any
+          disagreement becomes <code>null</code> and never recovers. Ignoring unreached backedges is
+          what lets a loop-carried register be recognized as unchanged on the paths that actually
+          execute. Every demanded, non-trivial identity is published as a bitcast alias, and the
+          expression worklist is drained again.
+        </p>
+
+        <h3>6. Physical snapshots, exit scratch and liveness</h3>
+        <p>
+          Register snapshots are reduced against the entry identity: a binding whose value is still
+          identical to its entry value is omitted. This snapshot path is used when there is no
+          source plan (for example, synthetic IR callers). With native evidence,
+          <code>physical_inputs</code> is deliberately empty: <code>planSource</code>'s call and
+          return projections carry the interface explicitly. A projected return stores only its
+          uncertain outputs. The checked view's visible difference here is that those uncertain
+          return outputs stay results, while the source view may move ABI-scratch slices to
+          <code>exit_scratch</code>.
+        </p>
+        <p>
+          The source view then converts possible-return slices into <code>exit_scratch</code>. This
+          is the careful part of the return model. For each inferred return, an output slice that
+          overlaps positive result evidence stays a result. Otherwise
+          <code>scratch(root, start)</code> walks backward through lossless transport (identity
+          bitcasts, extracts, concats, phis) and classifies the slice as:
+        </p>
+        <dl class="terms">
+          <dt>ABI scratch</dt>
+          <dd>
+            The slice reaches only entry values of the same register root and/or unprojected call
+            clobbers, and no result cell. It is moved out of line under
+            <code>presentation('exit_scratch', …)</code> plus <code>requireAbi</code>.
+          </dd>
+          <dt>computed scratch</dt>
+          <dd>
+            The slice is locally computed but outside an established primary, or above its narrow
+            integer width, and either the interface is approved as void-like or the established
+            primary makes it non-result storage. It is recorded with <code>computed: true</code>
+            and the note that no result-use evidence was gathered.
+          </dd>
+          <dt>real result</dt>
+          <dd>
+            Anything else — a projected call result, an unknown computation, a slice of a register
+            that callers may read — stays an output, and the return is marked unresolved if it
+            cannot be expressed.
+          </dd>
+        </dl>
+        <p>
+          Liveness is demand-driven. Every retained statement and control contributes operand uses;
+          <code>use</code> records a count and the set of blocks. Roots include call arguments,
+          projected inputs, branch conditions, switch values, return results and physical exit
+          overlays. Incoming phi sources are demanded only when the destination is live; this is the
+          “demand-driven live phi copies” part of the contract. Source aliases are immutable
+          expressions, so an alias destination does not demand an edge copy.
+        </p>
+        <p>
+          Two source-only deletions are handled here. A load marked
+          <code>deadReloadCandidates</code> (non-volatile, dominated by a store covering its bytes)
+          is deferred: if its result becomes live through another path it is restored, and the loop
+          repeats until stable. What remains dead is dropped only if
+          <code>presentation('dead_frame_reload', …)</code> admits the argument that the store
+          covers the bytes, so the load cannot fault. Proven jump-table reads in a switch block are
+          handled the same way under <code>dead_jump_table_load</code>, because the dominating
+          unsigned guard bounds the index and the table bytes are immutable.
+        </p>
+
+        <h3>7. Inlining, origins and final projections</h3>
+        <p>
+          A value is inlined only when it is a constant, an address, or a pure single-use expression
+          in the same block as its owner, with an expansion size of at most 48 operand occurrences
+          and depth at most 10. Values forced inline by <code>alias</code> (ABI transport, stack
+          addresses, source identities) bypass those limits but are still checked for def-use
+          cycles. Constant rotations are excluded from inlining because the renderer prints them as
+          two shifts that read the operand twice. Every retained statement gets a real owner; if a
+          definition is folded into a consumer, that consumer's origin list includes the folded
+          statements. Unmapped statements are attached to the nearest surviving anchor (their block
+          control, or the consuming call for variadic stores).
+        </p>
+        <p>
+          The final signature is <code>sourcePlan.signature</code>, but it is dropped when a
+          physical parameter was not represented by the projection, or when the entry stack base is
+          live (in which case the function is presented with an explicit <code>entry_sp</code>).
+          Memory views come from type-recovery shapes and are removed when the same node is claimed
+          by two fields (<code>ambiguous</code>), when the field is conflicting, or when the field
+          width does not equal the access width. Diagnostics are emitted for live unknown
+          expressions, unknown effects, physical or incomplete call interfaces, incomplete return
+          storage, and unresolved control boundaries — always as
+          <code>unavailable_semantics</code> warnings with the origin's evidence ids.
+        </p>
+        <p>
+          Finally, <code>projectSourceTypes</code> (<a
+            class="src"
+            href="../../src/reconstruction/source-types.ts"
+            >src/reconstruction/source-types.ts</a
+          >) attaches complete source type views to values and fields. In the source view only,
+          <code>projectSourceFloating</code> decides which values have native float/double spelling,
+          and <code>projectSourceSignature</code> decides formal pointer/narrow-integer spellings,
+          slot pointer types and narrow return words. Both run after the model exists because they
+          depend on liveness, boundaries and promoted slots.
+        </p>
+
+        <div class="callout caveat">
+          <span class="title">Ordering matters</span>
+          <p>
+            Stack planning must follow call planning (closures decide what may be private); cell
+            recombination must follow stack planning (it consumes the address facts) and precede
+            expression normalization (which may then see whole values); the identity lattice must
+            follow STACK and call aliasing (aliases are inputs to identities); and
+            floating/signature projections must come last (they inspect final formals and promoted
+            slots). Changing this order changes output, so the code keeps the passes in one visible
+            sequence rather than hiding them behind hooks.
+          </p>
+        </div>
+      </section>
+
+      <section id="views">
+        <h2>Source vs checked view</h2>
+        <p>
+          Both views run the whole reconstruction pipeline. The difference is a small, explicit set
+          of <code>view === 'source'</code> gates. The checked view is not “raw assembly”: it still
+          folds pure identities, recomputes ranges, projects boundaries from types and records
+          diagnostics. It simply refuses every rewrite whose justification is a presentation
+          argument rather than a semantic identity.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Transformation</th>
+              <th><code>checked</code></th>
+              <th><code>source</code></th>
+              <th>Gate</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Frame save/restore elision</td>
+              <td>stores and reloads retained</td>
+              <td>hidden; <code>frame_saves</code> published</td>
+              <td><code>frame_save</code></td>
+            </tr>
+            <tr>
+              <td>Call return-address push</td>
+              <td>store retained</td>
+              <td>hidden as call mechanics</td>
+              <td><code>call_return_address</code></td>
+            </tr>
+            <tr>
+              <td>Dead frame reload / dead jump-table load</td>
+              <td>retained</td>
+              <td>dropped when proven non-faulting</td>
+              <td><code>dead_frame_reload</code>, <code>dead_jump_table_load</code></td>
+            </tr>
+            <tr>
+              <td>Register cell recombination</td>
+              <td>machine cells</td>
+              <td>whole value from matching slices</td>
+              <td><code>register_cell_recombination</code></td>
+            </tr>
+            <tr>
+              <td>Constant-pool loads</td>
+              <td>explicit load</td>
+              <td>literal, load hidden</td>
+              <td><code>constant_pool_literal</code></td>
+            </tr>
+            <tr>
+              <td>Possible-return ABI slices</td>
+              <td>return outputs</td>
+              <td><code>exit_scratch</code>, out of line</td>
+              <td><code>exit_scratch</code></td>
+            </tr>
+            <tr>
+              <td>Darwin variadic outgoing slots</td>
+              <td>stores</td>
+              <td>trailing call arguments</td>
+              <td><code>variadic_stack_arguments</code></td>
+            </tr>
+            <tr>
+              <td>Condition-flag folding</td>
+              <td>explicit flag algebra</td>
+              <td>relational predicates joined by <code>&amp;&amp;</code>/<code>||</code></td>
+              <td><code>condition_flags</code></td>
+            </tr>
+            <tr>
+              <td>Shift/rotate and strength-reduction idioms</td>
+              <td>explicit operations</td>
+              <td>plain shifts, multiplies, field extracts</td>
+              <td><code>shift_idiom</code>, <code>strength_reduced_multiply</code></td>
+            </tr>
+            <tr>
+              <td>Slice/extension reselection, same-type identities</td>
+              <td>conservative subset</td>
+              <td>full structural set</td>
+              <td><code>integer_identity</code>, <code>extension_fold</code></td>
+            </tr>
+            <tr>
+              <td>Native FP spelling and environment guards</td>
+              <td>bit patterns, explicit guards</td>
+              <td>float/double values, accepted guard edge</td>
+              <td>
+                <code>fp_literal</code>, <code>fp_environment_guard</code>,
+                <code>fp_native_operations</code>
+              </td>
+            </tr>
+            <tr>
+              <td>Promoted pointer formals / narrow formals</td>
+              <td>integer machine types</td>
+              <td>C pointer and narrow integer spellings</td>
+              <td>
+                <code>formal_pointer</code>, <code>formal_low_slice</code>,
+                <code>slot_pointer_type</code>, <code>return_low_word</code>
+              </td>
+            </tr>
+            <tr>
+              <td>Void-like interface</td>
+              <td>observed written storage</td>
+              <td><code>incidental_result</code> / <code>indirect_result</code></td>
+              <td>
+                <code>primary_result</code>, <code>incidental_result</code>,
+                <code>indirect_result</code>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="sources">
+          The gates are the <code>view === 'source'</code> checks in
+          <a class="src" href="../../src/reconstruction/index.ts">src/reconstruction/index.ts</a>,
+          <a class="src" href="../../src/reconstruction/source-planner.ts"
+            >src/reconstruction/source-planner.ts</a
+          >,
+          <a class="src" href="../../src/reconstruction/source-stack.ts"
+            >src/reconstruction/source-stack.ts</a
+          >
+          and
+          <a class="src" href="../../src/reconstruction/source-expressions.ts"
+            >src/reconstruction/source-expressions.ts</a
+          >.
+        </p>
+
+        <h3>A real side-by-side: <code>_fixture_loop</code> at <code>0x100000594</code></h3>
+        <p>
+          The fixture is Mach-O ARM64. Its C source is
+          <code
+            >u32 fixture_loop(const u32 *p, u32 n) { u32 result = 0; for (u32 i = 0; i &lt; n; ++i)
+            result += p[i]; return result; }</code
+          >
+          (<a class="src" href="../../fixtures/source/corpus.c">fixtures/source/corpus.c</a>). Both
+          outputs below are real, produced by the built CLI with the same project cache; only the
+          view flag differs.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 440" role="img" aria-labelledby="fig-views-title">
+            <title id="fig-views-title">
+              Checked and source decompilation of the same fixture function
+            </title>
+            <text x="470" y="17" text-anchor="middle" class="mono">
+              _fixture_loop @ 0x100000594 — same function, two views
+            </text>
+
+            <rect class="group" x="10" y="30" width="450" height="390" rx="8" />
+            <text x="26" y="52" class="title">checked — 28 lines</text>
+
+            <text x="24" y="78" class="mono">uint64_t fn__fixture_loop(uint64_t address,</text>
+            <text x="24" y="94" class="mono">
+              &#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;uint64_t
+              count) {
+            </text>
+            <text x="24" y="110" class="mono">&#160;&#160;uint32_t remaining;</text>
+            <text x="24" y="126" class="mono">&#160;&#160;uint32_t element;</text>
+            <text x="24" y="142" class="mono">&#160;&#160;uint32_t accumulator_1;</text>
+            <text x="24" y="158" class="mono">&#160;&#160;…</text>
+            <text x="24" y="186" class="mono">
+              &#160;&#160;&#160;&#160;&#160;&#160;element = (*(unaligned_uint32_t *)
+            </text>
+            <text x="24" y="202" class="mono">
+              &#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;(uintptr_t)(field_view(((uintptr_t)
+            </text>
+            <text x="24" y="218" class="mono">
+              &#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;(address_1)), 0, 32)));
+            </text>
+            <text x="24" y="234" class="mono">
+              &#160;&#160;&#160;&#160;&#160;&#160;accumulator_1 = ((uint32_t)((element +
+            </text>
+            <text x="24" y="250" class="mono">
+              &#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;accumulator)));
+            </text>
+            <text x="24" y="266" class="mono">&#160;&#160;&#160;&#160;&#160;&#160;…</text>
+            <text x="24" y="294" class="mono">&#160;&#160;return ((uint64_t)(accumulator_1));</text>
+            <text x="24" y="310" class="mono">}</text>
+            <text x="24" y="340" class="small">Machine cells, field_view, explicit casts,</text>
+            <text x="24" y="356" class="small">machine-width formals.</text>
+            <text x="24" y="378" class="small">No presentation rewrite is applied.</text>
+
+            <rect class="group" x="480" y="30" width="450" height="390" rx="8" />
+            <text x="496" y="52" class="title">source — 20 lines</text>
+
+            <text x="494" y="78" class="mono">uint32_t fixture_loop(const uint32_t* address,</text>
+            <text x="494" y="94" class="mono">
+              &#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;uint32_t
+              count) {
+            </text>
+            <text x="494" y="110" class="mono">&#160;&#160;uint32_t accumulator;</text>
+            <text x="494" y="126" class="mono">&#160;&#160;uint64_t remaining;</text>
+            <text x="494" y="142" class="mono">&#160;&#160;if (count == 0) {</text>
+            <text x="494" y="158" class="mono">&#160;&#160;&#160;&#160;return 0;</text>
+            <text x="494" y="174" class="mono">&#160;&#160;}</text>
+            <text x="494" y="190" class="mono">&#160;&#160;accumulator = 0;</text>
+            <text x="494" y="206" class="mono">&#160;&#160;remaining = count;</text>
+            <text x="494" y="222" class="mono">&#160;&#160;while (true) {</text>
+            <text x="494" y="238" class="mono">
+              &#160;&#160;&#160;&#160;accumulator = *address + accumulator;
+            </text>
+            <text x="494" y="254" class="mono">
+              &#160;&#160;&#160;&#160;if (remaining == 1) break;
+            </text>
+            <text x="494" y="270" class="mono">&#160;&#160;&#160;&#160;address = address + 1;</text>
+            <text x="494" y="286" class="mono">
+              &#160;&#160;&#160;&#160;remaining = (uint32_t)(remaining - 1);
+            </text>
+            <text x="494" y="302" class="mono">&#160;&#160;}</text>
+            <text x="494" y="318" class="mono">&#160;&#160;return accumulator;</text>
+            <text x="494" y="334" class="mono">}</text>
+            <text x="494" y="364" class="small">Pointer formal + loop-carried variables,</text>
+            <text x="494" y="380" class="small">
+              direct load, one result of the declared width.
+            </text>
+            <text x="494" y="398" class="small">Pointer/narrow formal projection, identity</text>
+            <text x="494" y="414" class="small">coalescing, role-derived names.</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 4.</strong> Real output for the same function. The checked view exposes
+            every machine cell and cast; the source view has eliminated register-cell recombination,
+            recovered a <code>const uint32_t *</code> formal, named the loop variables by role
+            (<code>remaining</code> is a decreasing count) and narrowed the result to the observed
+            32-bit width. Both are generated from the same <code>Reconstruction</code> pipeline.
+          </figcaption>
+        </figure>
+
+        <p>
+          The difference is not text post-processing. In <code>_fixture_loop</code> the source view
+          records a pointer interpretation for <code>address</code> and a narrow width for the count
+          and result, and the loop identity lattice coalesces the loop-carried copies; the renderer
+          then prints declarations for those <code>Reconstruction</code> values. The checked view
+          keeps the <code>field_view</code> and <code>unaligned_uint32_t</code> lvalue because it
+          never ran the source-only formal and cell projections.
+        </p>
+
+        <h3>A frame-save example: <code>_main</code></h3>
+        <p>
+          Frame traffic is the clearest single rule. <code>_main</code> at
+          <code>0x100000a8c</code> saves four registers in its frame. The checked view prints:
+        </p>
+        <pre><code>(*(unaligned_uint64_t *)(uintptr_t)(stack_slot(((uintptr_t)(entry_sp - 32)), -32, 64))) = unknown_value("bits64_t", "non-argument entry register");
+(*(unaligned_uint64_t *)(uintptr_t)(stack_slot(((uintptr_t)(entry_sp - 24)), -24, 64))) = unknown_value("bits64_t", "non-argument entry register");
+(*(unaligned_uint64_t *)(uintptr_t)(stack_slot(((uintptr_t)(entry_sp - 16)), -16, 64))) = unknown_value("bits64_t", "non-argument entry register");
+(*(unaligned_uint64_t *)(uintptr_t)(stack_slot(((uintptr_t)(entry_sp - 8)), -8, 64))) = unknown_value("bits64_t", "non-argument entry register");
+…
+(*(unaligned_uint64_t *)(uintptr_t)(stack_slot(((uintptr_t)(entry_sp - 16)), -16, 64)));
+(*(unaligned_uint64_t *)(uintptr_t)(stack_slot(((uintptr_t)(entry_sp - 8)), -8, 64)));
+(*(unaligned_uint64_t *)(uintptr_t)(stack_slot(((uintptr_t)(entry_sp - 32)), -32, 64)));
+(*(unaligned_uint64_t *)(uintptr_t)(stack_slot(((uintptr_t)(entry_sp - 24)), -24, 64)));</code></pre>
+        <p>
+          The source view prints none of these (13 lines instead of 63) and never declares
+          <code>entry_sp</code>. The slots were classified as frame saves: each is an exact,
+          non-overlapping, negative entry-SP group holding one preserved register or the link
+          register, restored from that slot on every return/tail exit, not an established outgoing
+          argument area, and not exposed by an escaping frame pointer. The stores and reloads are
+          added to <code>SourcePresentation.frame_saves</code>; the rewrite is admitted by
+          <code>presentation('frame_save', …)</code> and carries an
+          <code>abi_conformance</code> requirement stating that callees preserve callee-saved
+          registers and do not write their caller's frame outside outgoing arguments.
+        </p>
+      </section>
+
+      <section id="signature">
+        <h2>Signature recovery</h2>
+        <p>
+          A source signature has three independent sources, and reconstruction always prefers the
+          strongest one rather than merging them:
+        </p>
+        <ol class="steps">
+          <li>
+            <strong>A declaration from type recovery.</strong>
+            <code>signatureFor(input.function.id)</code> accepts one established or asserted
+            signature whose ABI matches and whose return and parameter types resolve to
+            <code>void</code>, integer, float, pointer or vector ABI types. The parameter locations
+            are classified with <code>abi.classifyCall</code>; the signature is accepted only if
+            every parameter location binds exactly at entry and every return location binds at every
+            return block.
+          </li>
+          <li>
+            <strong>Observed interface.</strong> With no declaration, the ABI classification of
+            sixteen integer and sixteen floating candidates produces the entry formals. Return types
+            are then chosen from, in order: an observed written-result interface
+            (<code>SourceEvidence.function_returns</code>) when it binds on every exit; the
+            <code>selectSourcePrimaryResult</code> decision (<a
+              class="src"
+              href="../../src/reconstruction/source-results.ts"
+              >src/reconstruction/source-results.ts</a
+            >); a typed floating exit slice; or a changed low ABI return cell. Typed slices come
+            from
+            <a class="src" href="../../src/reconstruction/source-register-types.ts"
+              >src/reconstruction/source-register-types.ts</a
+            >
+            (<code>registerTypeSlices</code>, <code>registerTypes</code>,
+            <code>unchangedStorage</code>), which tracks storage per register root rather than
+            assuming one interpretation. If all return paths agree on one integer width, the width
+            is unified with a zero extension; if every path returns the same tuple of types, it is
+            published as <code>return_types</code>.
+          </li>
+          <li>
+            <strong>Tail interface.</strong> A tail call may determine the result type only when
+            every tail agrees and the type agrees with the ordinary return type. A proven-void
+            callee suppresses a result only if no return path yields one.
+          </li>
+        </ol>
+        <p>
+          Pointer results are not inferred from width. <code>sourceDataValues</code> resolves a
+          returned address against immutable address facts; if every return yields the same string,
+          the presentation records <code>return_pointer: 'char'</code>, and if every return yields
+          an object (but not all strings) it records <code>'byte'</code>. Otherwise the result stays
+          an integer <code>uintptr_t</code>-like value.
+        </p>
+        <p>
+          <code>projectSourceSignature</code>
+          (<a class="src" href="../../src/reconstruction/source-signature.ts"
+            >src/reconstruction/source-signature.ts</a
+          >) then adds spelling-only types. Its rules are deliberately local:
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>Rule</th>
+              <th>Evidence required</th>
+              <th>Result</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>formal_pointer</code></td>
+              <td>
+                whole-value pointer lineage reaches only 8/16/32/64-bit integer or 32/64-bit float
+                accesses
+              </td>
+              <td>
+                C pointer with pointee kind and width; <code>const</code> only with no write, call
+                escape or unknown effect
+              </td>
+            </tr>
+            <tr>
+              <td><code>formal_low_slice</code></td>
+              <td>
+                every live use through copies, slots and bitcasts reads only the low 8/16/32 bits
+              </td>
+              <td>
+                narrow integer formal; signed only if a signed
+                comparison/extension/division/remainder/arithmetic shift consumes that slice
+              </td>
+            </tr>
+            <tr>
+              <td><code>slot_pointer_type</code></td>
+              <td>
+                every value stored to a promoted slot is the same pointer formal, a reload of such a
+                slot, or a whole-element constant step
+              </td>
+              <td>the slot and its reloads share the pointer type</td>
+            </tr>
+            <tr>
+              <td><code>return_low_word</code></td>
+              <td>
+                the high result slice is provably the zero extension of the low word, no result
+                demand above 32 bits, no pointer/void/tail interface
+              </td>
+              <td>narrow return type</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          Every rule is a presentation record, and the ones that assume ABI behaviour also call
+          <code>requireAbi</code>. A rule that cannot prove its side conditions simply does not run;
+          the machine type remains.
+        </p>
+      </section>
+
+      <section id="naming">
+        <h2>Naming precedence</h2>
+        <p>
+          Names are display data, never identities or constraints. The planner
+          <code>planSourceNames</code>
+          (<a class="src" href="../../src/reconstruction/source-names.ts"
+            >src/reconstruction/source-names.ts</a
+          >) receives the renderer's <code>supplied</code> name map, which was built from native
+          symbol names and asserted name annotations (debug/prototype parameter names arrive
+          separately, through <code>source.parameter_names</code>). It returns a preferred name per
+          value/local, plus loop-carried and initial-value maps for the source view. The precedence
+          in the code is:
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 900 520" role="img" aria-labelledby="fig-naming-title">
+            <title id="fig-naming-title">Naming precedence for a source value</title>
+            <text x="450" y="16" text-anchor="middle" class="small">
+              SP / entry-storage value is named entry_sp before this chain; a supplied null
+              (conflict) becomes a neutral name
+            </text>
+
+            <rect class="box muted" x="60" y="30" width="150" height="36" rx="6" />
+            <text x="135" y="53" text-anchor="middle" class="mono">value</text>
+
+            <rect class="box accent" x="120" y="90" width="330" height="44" rx="6" />
+            <text x="136" y="108" class="mono">supplied display name?</text>
+            <text x="136" y="126" class="small">symbol / asserted annotation, whole storage</text>
+
+            <rect class="box" x="120" y="160" width="330" height="44" rx="6" />
+            <text x="136" y="178" class="mono">declared parameter name?</text>
+            <text x="136" y="196" class="small">debug/prototype name; argN only if declared</text>
+
+            <rect class="box" x="120" y="230" width="330" height="44" rx="6" />
+            <text x="136" y="248" class="mono">declared struct field?</text>
+            <text x="136" y="266" class="small">
+              from an established or asserted structure type
+            </text>
+
+            <rect class="box warn" x="120" y="300" width="330" height="44" rx="6" />
+            <text x="136" y="318" class="mono">two or more independent roles?</text>
+            <text x="136" y="336" class="small">neutral: no name (null)</text>
+
+            <rect class="box" x="120" y="370" width="330" height="44" rx="6" />
+            <text x="136" y="388" class="mono">library-declared name?</text>
+            <text x="136" y="406" class="small">
+              result role, result type, header param, callee stem
+            </text>
+
+            <rect class="box" x="120" y="440" width="330" height="44" rx="6" />
+            <text x="136" y="458" class="mono">one structural role?</text>
+            <text x="136" y="476" class="small">
+              address, count, index, accumulator, shift_count
+            </text>
+
+            <text x="120" y="505" class="small">
+              else: generic stem (condition, call_result, element, result), then renderer fallback
+              valueN
+            </text>
+
+            <rect class="box ok" x="560" y="90" width="300" height="40" rx="6" />
+            <text x="576" y="115" class="mono">supplied name</text>
+
+            <rect class="box ok" x="560" y="160" width="300" height="40" rx="6" />
+            <text x="576" y="185" class="mono">declared parameter name</text>
+
+            <rect class="box ok" x="560" y="230" width="300" height="40" rx="6" />
+            <text x="576" y="255" class="mono">field name</text>
+
+            <text x="560" y="325" class="mono">null → neutral</text>
+
+            <rect class="box ok" x="560" y="370" width="300" height="40" rx="6" />
+            <text x="576" y="395" class="mono">library stem (unless role wins)</text>
+
+            <rect class="box ok" x="560" y="440" width="300" height="40" rx="6" />
+            <text x="576" y="465" class="mono">role stem; count → remaining</text>
+
+            <path class="edge" d="M135,66 L135,88" marker-end="url(#arrow)" />
+            <path class="edge" d="M285,134 L285,158" marker-end="url(#arrow)" />
+            <text x="292" y="149" class="edge-label">no</text>
+            <path class="edge" d="M285,204 L285,228" marker-end="url(#arrow)" />
+            <text x="292" y="219" class="edge-label">no</text>
+            <path class="edge" d="M285,274 L285,298" marker-end="url(#arrow)" />
+            <text x="292" y="289" class="edge-label">no</text>
+            <path class="edge" d="M285,344 L285,368" marker-end="url(#arrow)" />
+            <text x="292" y="359" class="edge-label">no</text>
+            <path class="edge" d="M285,414 L285,438" marker-end="url(#arrow)" />
+            <text x="292" y="429" class="edge-label">no</text>
+
+            <path class="edge ok" d="M450,112 L558,110" marker-end="url(#arrow)" />
+            <text x="470" y="103" class="edge-label">yes</text>
+            <path class="edge ok" d="M450,182 L558,180" marker-end="url(#arrow)" />
+            <text x="470" y="173" class="edge-label">yes</text>
+            <path class="edge ok" d="M450,252 L558,250" marker-end="url(#arrow)" />
+            <text x="470" y="243" class="edge-label">yes</text>
+            <path class="edge bad" d="M450,322 L558,322" marker-end="url(#arrow)" />
+            <text x="470" y="313" class="edge-label">yes</text>
+            <path class="edge ok" d="M450,392 L558,390" marker-end="url(#arrow)" />
+            <text x="470" y="383" class="edge-label">yes</text>
+            <path class="edge ok" d="M450,462 L558,460" marker-end="url(#arrow)" />
+            <text x="470" y="453" class="edge-label">yes</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 5.</strong> The real order in <code>planSourceNames</code>. “Supplied”
+            names (symbols and asserted annotations) outrank everything; declared parameter names
+            from debug/prototype signatures come next; library interface names outrank recovered
+            roles; generic stems are last. A role conflict deliberately yields no name rather than
+            picking one.
+          </figcaption>
+        </figure>
+
+        <p>
+          The distinction the task asks about is real: debug/prototype parameter names are not
+          “supplied” entity names. They arrive through <code>source.parameter_names</code>, which
+          <code>planSource</code> fills from a declared signature (or from
+          <code>argN</code> positionally). The renderer only accepts the positional
+          <code>argN</code> fallback when the function is not <code>inferred</code>; otherwise it
+          lets the role/library machinery name the value. Generic names are a small fixed set
+          (<code>condition</code>, <code>call_result</code>, <code>element</code>,
+          <code>result</code>), not <code>valueN</code>: the <code>valueN</code> spelling is the
+          renderer's last-resort identifier for a value (a promoted local falls back to
+          <code>local_&lt;hex offset&gt;</code> or <code>localN</code>) when nothing at all named
+          it. Final identifiers are sanitized by <code>sourceIdentifierStem</code>, which prefixes
+          reserved words and runtime helper names with <code>value_</code>.
+        </p>
+        <p>
+          Two subtleties are encoded in the ordering. First, a library name is skipped when the
+          value has a role other than <code>address</code>, or when it is an <code>element</code> or
+          <code>condition</code>: a loop element or a control predicate is a stronger description
+          than “the <code>strlen</code> result”. Second, a <code>count</code> role that is not a
+          parameter and is proven decreasing (from loop shape analysis) prints as
+          <code>remaining</code>. The library part is implemented in
+          <a class="src" href="../../src/reconstruction/library-names.ts"
+            >src/reconstruction/library-names.ts</a
+          >
+          (<code>libraryCallNames</code>, <code>libraryParameterStem</code>). That is why the
+          fixture loop declares <code>uint64_t remaining;</code> rather than <code>count</code>.
+        </p>
+        <div class="callout caveat">
+          <span class="title">Names do not imply semantics</span>
+          <p>
+            The header of <code>source-names.ts</code> is explicit: these are “presentation-only
+            suggestions: no source intent, type, identity or expression is inferred from an
+            identifier.” A recovery rule must never read a chosen name to decide a type or a
+            rewrite.
+          </p>
+        </div>
+      </section>
+
+      <section id="stack">
+        <h2>Stack promotion &amp; stack arguments</h2>
+        <p>
+          Stack handling is the most conservative part of reconstruction. The stack analysis
+          supplies entry-SP-relative byte offsets; reconstruction never invents an offset for an
+          unknown pointer. The classification of one access group is a decision chain:
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 480" role="img" aria-labelledby="fig-stack-title">
+            <title id="fig-stack-title">
+              Classification of a memory access with a known entry-SP offset
+            </title>
+            <rect class="box accent" x="20" y="190" width="180" height="60" rx="8" />
+            <text x="110" y="214" text-anchor="middle" class="title">known entry-SP</text>
+            <text x="110" y="232" text-anchor="middle" class="small">address offset</text>
+
+            <rect class="box muted" x="20" y="330" width="200" height="70" rx="8" />
+            <text x="120" y="354" text-anchor="middle" class="title">unknown / escaped</text>
+            <text x="120" y="372" text-anchor="middle" class="small">shared frame,</text>
+            <text x="120" y="388" text-anchor="middle" class="small">printed explicitly</text>
+
+            <rect class="box" x="250" y="30" width="250" height="62" rx="8" />
+            <text x="375" y="52" text-anchor="middle" class="title">exact save slot?</text>
+            <text x="375" y="70" text-anchor="middle" class="small">
+              restored on every exit, nonescaping
+            </text>
+
+            <rect class="box" x="250" y="130" width="250" height="62" rx="8" />
+            <text x="375" y="152" text-anchor="middle" class="title">private slot?</text>
+            <text x="375" y="170" text-anchor="middle" class="small">
+              negative, exact, nonoverlapping
+            </text>
+
+            <rect class="box" x="250" y="230" width="250" height="62" rx="8" />
+            <text x="375" y="252" text-anchor="middle" class="title">incoming ABI slot?</text>
+            <text x="375" y="270" text-anchor="middle" class="small">
+              one pointer-width ABI slot
+            </text>
+
+            <rect class="box" x="250" y="330" width="250" height="62" rx="8" />
+            <text x="375" y="352" text-anchor="middle" class="title">return-address push?</text>
+            <text x="375" y="370" text-anchor="middle" class="small">
+              SP+0, call's own code address
+            </text>
+
+            <rect class="box muted" x="560" y="30" width="250" height="62" rx="8" />
+            <text x="685" y="52" text-anchor="middle" class="mono">frame_save</text>
+            <text x="685" y="70" text-anchor="middle" class="small">
+              hidden + abi_conformance requirement
+            </text>
+
+            <rect class="box muted" x="560" y="130" width="250" height="62" rx="8" />
+            <text x="685" y="152" text-anchor="middle" class="mono">private_stack_promotion</text>
+            <text x="685" y="170" text-anchor="middle" class="small">
+              scalar local; narrow loads as parts
+            </text>
+
+            <rect class="box muted" x="560" y="230" width="250" height="62" rx="8" />
+            <text x="685" y="252" text-anchor="middle" class="mono">incomingStack</text>
+            <text x="685" y="270" text-anchor="middle" class="small">
+              formal_stack_offsets → formals
+            </text>
+
+            <rect class="box muted" x="560" y="330" width="250" height="62" rx="8" />
+            <text x="685" y="352" text-anchor="middle" class="mono">call_return_address</text>
+            <text x="685" y="370" text-anchor="middle" class="small">hidden call mechanics</text>
+
+            <text x="560" y="435" class="small">
+              otherwise: entry-backed storage, printed as entry_sp ± N
+            </text>
+
+            <path class="edge" d="M200,205 L218,205 L218,61 L248,61" marker-end="url(#arrow)" />
+            <text x="222" y="125" class="edge-label">save</text>
+            <path class="edge" d="M200,218 L230,218 L230,161 L248,161" marker-end="url(#arrow)" />
+            <text x="234" y="195" class="edge-label">private</text>
+            <path class="edge" d="M200,231 L248,261" marker-end="url(#arrow)" />
+            <text x="222" y="255" class="edge-label">incoming</text>
+            <path class="edge" d="M200,244 L242,244 L242,361 L248,361" marker-end="url(#arrow)" />
+            <text x="246" y="300" class="edge-label">RA</text>
+            <path class="edge" d="M110,250 L110,328" marker-end="url(#arrow)" />
+            <text x="118" y="295" class="edge-label">else</text>
+
+            <path class="edge" d="M500,61 L558,61" marker-end="url(#arrow)" />
+            <path class="edge" d="M500,161 L558,161" marker-end="url(#arrow)" />
+            <path class="edge" d="M500,261 L558,261" marker-end="url(#arrow)" />
+            <path class="edge" d="M500,361 L558,361" marker-end="url(#arrow)" />
+            <text x="508" y="55" class="edge-label">yes</text>
+            <text x="508" y="155" class="edge-label">yes</text>
+            <text x="508" y="255" class="edge-label">yes</text>
+            <text x="508" y="355" class="edge-label">yes</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 6.</strong> One access group can be a save, a private local, an incoming
+            formal, a return-address push, or only entry-backed frame memory. Each branch has its
+            own rule name and its own proof; a refusal on any condition keeps the group explicit.
+          </figcaption>
+        </figure>
+
+        <h3>Escape analysis and the frame-wide gate</h3>
+        <p>
+          The planner first computes a taint set: every value derived from a stack address, through
+          expressions, phis and memory dependencies. It then walks calls, unknown effects, loads,
+          stores and returns. Any tainted value in possible argument or result storage exposes the
+          frame. In the source view, only an address whose offset is unknown exposes the whole
+          frame; an escaped address of known offset designates its own object, never a
+          compiler-owned save slot elsewhere. This distinction is what allows a single promoted
+          local to survive a call that receives its address.
+        </p>
+        <p>
+          Promotion itself has a frame-wide prerequisite. In the checked view it requires
+          <code>!escaped &amp;&amp; !unknownCallStorage &amp;&amp; !aliased</code>. In the source
+          view it requires <code>!saveEscaped</code>, adds the disjoint-store premise
+          (<code>frame_private_to_activation</code>), and additionally refuses accesses in blocks
+          that reach an open-arity call, or before one in the same block (the call may read that
+          area), slots overlapping established outgoing argument storage, volatile accesses, and any
+          group that is not a negative, exact, non-overlapping interval. Each promoted group is
+          independently checked by
+          <code>validateStackPromotion</code>
+          (<a class="src" href="../../src/reconstruction/local-storage-validation.ts"
+            >src/reconstruction/local-storage-validation.ts</a
+          >), which enumerates small acyclic paths over a byte-addressed trace and requires every
+          read to be definitely initialized. A rejected trace keeps the memory operations.
+        </p>
+        <p>
+          This is deliberately all-or-nothing per frame when a frame address escapes: the original
+          code notes the escape in <code>saveEscaped</code>, and promotion is skipped. The
+          readability roadmap calls this out as R1 (see <a href="#limitations">Limitations</a>).
+        </p>
+
+        <h3>Incoming and outgoing stack arguments</h3>
+        <p>
+          Incoming stack parameters are only inferred for a whole scalar word in an actual ABI
+          parameter slot, and only when there is no declared signature:
+          <code>incomingStack(offset, type, contributors)</code> searches the classified call layout
+          for exactly one stack location at that offset with the same size. It then creates one
+          formal per offset, records the offset in <code>formal_stack_offsets</code>, and
+          <code>finalize</code> appends the demanded incoming formals sorted by offset. Entry return
+          addresses, home space and alignment padding are explicitly not source inputs even though
+          their offsets may be non-negative.
+        </p>
+        <p>
+          Outgoing stack arguments are recovered the other way, from stored SSA values at a call
+          boundary. <code>sourceStackArgumentParts</code> (<a
+            class="src"
+            href="../../src/reconstruction/source-stack-arguments.ts"
+            >src/reconstruction/source-stack-arguments.ts</a
+          >) walks byte facts back to their owning stores. A byte merged at a block entry resolves
+          only when, on every incoming edge, the exact owning store wrote the same value or concat
+          component at the same bit offset, or when the copies agree on one shared block parameter.
+          Anything else leaves the part unresolved, and <code>bindStack</code> returns
+          <code>null</code> rather than adding a fake argument. The call then remains
+          <code>argument_list_complete: false</code> or physical.
+        </p>
+        <p>
+          Darwin arm64 variadic arguments are a separate rule.
+          <code>planVariadicStackArguments</code> (<a
+            class="src"
+            href="../../src/reconstruction/source-variadic.ts"
+            >src/reconstruction/source-variadic.ts</a
+          >) recognizes the ABI convention that every variadic argument occupies an 8-byte outgoing
+          stack slot starting at SP+0. A contiguous run of slots is presented as anonymous trailing
+          arguments only if each slot is written by exactly one store that reaches the call on every
+          path, starts at the slot, is not a frame save, private local or hidden traffic, holds no
+          stack address, is read by no load, and is visible at no other call or tail call. The run
+          stops at the first failing slot; later stores stay explicit and the remainder marker
+          stays, so no argument is dropped and the arity remains open.
+        </p>
+      </section>
+
+      <section id="values">
+        <h2>Results, conditions &amp; value rewrites</h2>
+
+        <h3>Results and return values</h3>
+        <p>
+          <code>selectSourcePrimaryResult</code>
+          (<a class="src" href="../../src/reconstruction/source-results.ts"
+            >src/reconstruction/source-results.ts</a
+          >) decides whether an undeclared function returns through the ABI integer or FP result
+          register. It is consulted only when the structured returns carry no explicit value (the
+          lifter's register-result shape). A register qualifies only when it is defined on every
+          exit path; unknown entry values, unprojected call clobbers and addresses into the dead
+          frame disqualify it. FP additionally needs typed IEEE evidence. When both qualify, the
+          decision uses positive caller demand, then the register written last on every exit path,
+          then a native written-result interface naming exactly one. An integer-only qualification
+          keeps the explicit form if the untyped FP register is written after it on every exit path.
+        </p>
+        <p>
+          Two void-like outcomes are possible. <code>incidental_result</code> means the integer
+          result register qualifies but no exit path establishes it deliberately, no caller demands
+          it, the FP carrier is unchanged or undefined on every exit and there is no tail transfer.
+          <code>indirect_result</code> means the function returns through its incoming hidden-result
+          pointer. Both are presentation decisions under <code>presentation</code> plus
+          <code>requireAbi</code>; the exact exit slices remain in metadata and in the checked view.
+          <code>permitsVoidSourceSignature</code> additionally requires the absence of any positive
+          result evidence before the signature layer accepts a void interface.
+        </p>
+
+        <h3>Condition reconstruction</h3>
+        <p>
+          <code>foldSourceCondition</code>
+          (<a class="src" href="../../src/reconstruction/source-conditions.ts"
+            >src/reconstruction/source-conditions.ts</a
+          >) is a source-view rule that turns a one-bit condition assembled from compare flags (NZCV
+          or EFLAGS insertion/extraction, condition-code logic, conditional compares, FP compare
+          flags) into direct relational predicates joined by <code>&amp;&amp;</code> and
+          <code>||</code>. It is exact by enumeration, not by matching surface syntax: each flag is
+          a function of a few outcomes of its operands (equal, unsigned and signed order, wrapped
+          sign; for IEEE, less/equal/greater/unordered). The condition is tabulated over every
+          feasible outcome and every opaque one-bit leaf, and a decomposition is accepted only if it
+          reproduces all rows. If a condition depends on the wrapped sign or overflow alone, or the
+          table cannot be built within its bound (128 nodes, depth 48), the explicit flag form
+          stays.
+        </p>
+
+        <h3>Bit slices, cells and shifts</h3>
+        <p>
+          ARM64 sub-register accesses naturally produce many narrow SSA cells for one source value.
+          Two independent mechanisms recombine them. <code>recombineSourceCells</code> works at
+          phi-group level (described above): it replaces simultaneous per-cell edge copies with one
+          whole-value copy. <code>recombineBitSlices</code> (<a
+            class="src"
+            href="../../src/reconstruction/source-bit-slices.ts"
+            >src/reconstruction/source-bit-slices.ts</a
+          >) works at expression level. It traces the bits of a <code>concat</code>,
+          <code>insert</code>, <code>or</code>, <code>xor</code> or <code>shl</code> DAG and
+          rebuilds the value from contiguous extracts of one base, optionally zero-extended. It is a
+          wiring analysis: opaque leaves keep their identity and their ordered indeterminate
+          dependencies. Its bounds are 128-bit width, 128 visited nodes and depth 24; failure keeps
+          the original expression. <code>wholeValueConcat</code> is the narrower special case where
+          consecutive slices tile a whole value exactly.
+        </p>
+        <p>
+          <code>foldShiftIdiom</code>
+          (<a class="src" href="../../src/reconstruction/source-shifts.ts"
+            >src/reconstruction/source-shifts.ts</a
+          >) handles the shift/rotate shapes produced by bitfield-move lowering. A constant rotation
+          masked to exactly its non-wrapped bits is the plain shift (<code
+            >ror(x,k) &amp; (ones&gt;&gt;k) = x&gt;&gt;k</code
+          >, and symmetrically for <code>rol</code>); a logical shift OR-ed with the sign bit
+          replicated into exactly the vacated top bits is the arithmetic shift; a field entirely
+          inside the non-wrapped or wrapped part of a rotation is the same field of the rotated
+          operand. A true rotate keeps its rotate. The rule requires
+          <code>0 &lt; k &lt; w</code> and exact masks, and its scope string says so in the
+          validation record.
+        </p>
+        <p>
+          <code>constantRotationOperands</code> complements this for printing: a rotation by a
+          constant is printed as two shifts that each read the operand, so the operand must be a
+          printed variable and is excluded from inlining.
+        </p>
+
+        <h3>Floating point</h3>
+        <p>
+          FP presentation is split in two. <code>projectSourceFloating</code> (<a
+            class="src"
+            href="../../src/reconstruction/source-fp.ts"
+            >src/reconstruction/source-fp.ts</a
+          >,
+          <a class="src" href="../../src/reconstruction/source-signature.ts"
+            >src/reconstruction/source-signature.ts</a
+          >) decides which values may be spelled <code>float</code>/<code>double</code> from typed
+          IEEE evidence: a closed component of whole-bit transports, typed literals, typed
+          arguments, and ordinary 32/64-bit memory accesses whose consumers are IEEE
+          reinterpretations or transports. It refuses when a declaration or conflict exists, and it
+          never retypes an integer consumer silently. <code>sourceFpPresentation</code> handles
+          guards and literals: literals become round-tripping decimals, and an exact lifter
+          environment guard may be omitted on its supported edge when the FPCR/MXCSR state is an
+          unchanged entry value or a call clobber, no explicit environment writer exists, and the
+          unsupported arm is exclusively owned. The guard is then rewritten to a jump on its
+          supported edge and the failure block becomes empty; both stay in the checked view and in
+          requirement metadata.
+        </p>
+
+        <h3>Ranges and constant data</h3>
+        <p>
+          <code>normalizeSourceRanges</code> is described in the pipeline section. Two other helpers
+          keep values exact without changing effects: <code>sourceDataValues</code> maps an address
+          value to its <code>SourceAddress</code> fact (exact-address lookup only; a nearby literal
+          is never used as a base for another object), and <code>projectSourceConstants</code> (<a
+            class="src"
+            href="../../src/reconstruction/source-data.ts"
+            >src/reconstruction/source-data.ts</a
+          >) replaces an exact-width, aligned, non-volatile load from immutable file-backed bytes
+          with a constant, provided no store can overlap the bytes and no relocation slot is
+          involved. The load statement is hidden; the checked view keeps it.
+        </p>
+      </section>
+
+      <section id="requirements">
+        <h2>Requirements and validation</h2>
+        <p>
+          Reconstruction publishes two different kinds of uncertainty. <em>Requirements</em> are
+          statements about the machine environment or the ABI that a presentation relies on.
+          <em>Validation records</em> are the local proofs (or failures) behind individual rewrites.
+          Both are data; neither changes the emitted text except through explicit rendering rules.
+        </p>
+
+        <h3>Requirement records</h3>
+        <pre><code>export interface RequirementSite {
+  readonly id: string;
+  readonly subject_ids: readonly string[];
+  readonly evidence_ids: readonly string[];
+  readonly instruction_ids: readonly string[];
+  readonly state_epoch: string;
+  readonly predicate_value_id?: string;
+  readonly supported_predicate_value?: boolean;
+}
+export interface Requirement {
+  readonly id: string;
+  readonly kind: 'fp_environment' | 'abi_conformance' | 'unresolved';
+  // InferenceStatus; this producer uses 'assumption' or 'unresolved'.
+  readonly status: 'established' | 'inferred' | 'asserted' | 'hypothesis' | 'conflicting' | 'assumption' | 'unresolved';
+  readonly explanation: string;
+  readonly subject_ids: readonly string[];
+  readonly evidence_ids: readonly string[];
+  readonly instruction_ids: readonly string[];
+  readonly ranges: readonly AddressRange[];
+  readonly sites: readonly RequirementSite[];
+  readonly output_spans: readonly { readonly start: number; readonly end: number }[];
+}</code></pre>
+        <p class="sources">
+          Producer model in
+          <a class="src" href="../../src/core/inference.ts">src/core/inference.ts</a>
+          (<code>Requirement</code>, <code>RequirementSite</code>), constructed by
+          <a class="src" href="../../src/reconstruction/source-requirements.ts"
+            >src/reconstruction/source-requirements.ts</a
+          >
+          (<code>planSourceRequirements</code>, <code>abiConformanceRequirements</code>).
+        </p>
+        <p>There are three kinds:</p>
+        <dl class="terms">
+          <dt>fp_environment</dt>
+          <dd>
+            One function-level assumption for all FP arithmetic, conversions and environment guards.
+            Each site's <code>state_epoch</code> is the value id of the FPCR/MXCSR state at that
+            operation (entry state, a call clobber, or an unchanged transport of one). A computed or
+            loaded control state does not qualify, so the guard stays explicit. Sites also carry
+            <code>predicate_value_id</code> and <code>supported_predicate_value</code>
+            for the recognized lifter guard.
+          </dd>
+          <dt>abi_conformance</dt>
+          <dd>
+            One record per presentation rule that assumed ABI behaviour — status
+            <code>assumption</code>. Sites anchor at original statements/controls;
+            <code>state_epoch</code> is the rule name. These are produced from
+            <code>LocalValidationSession.abiConformance</code> by
+            <code>abiConformanceRequirements</code> and do not print as ordinary comments.
+          </dd>
+          <dt>unresolved</dt>
+          <dd>
+            An indeterminate expression, unknown effect, incomplete call interface, incomplete
+            return storage or unresolved control boundary. Status <code>unresolved</code>; these
+            explain why the text still contains explicit unknowns.
+          </dd>
+        </dl>
+        <p>
+          Record ids are fingerprints: <code>requirement_&lt;hash&gt;</code> and
+          <code>site_&lt;hash&gt;</code> over the function, kind and the identifying rule, site or
+          explanation. That makes them stable across runs of the same revision and prevents two
+          different explanations from sharing an id. Budgets are explicit: 1000 sites per record, 10
+          000 subject ids, 1000 evidence ids, 10 000 instruction ids. The FP site list and the
+          reference sets throw <code>resource_limit</code> when exceeded; the ABI-conformance
+          builder stops admitting further sites at its bound.
+        </p>
+        <p>
+          In text, the checked view prints one comment per <code>fp_environment</code> requirement,
+          in the form <code>/* Requirement requirement_&lt;id&gt; (assumption): … */</code>, before
+          the signature. For <code>_main</code> the real first line is:
+        </p>
+        <pre><code>/* Requirement requirement_985231b20718e258c752fe590aa2ee7e6eaec534d6038514b9f4a8001411a67f (assumption): FP arithmetic requires nearest-even rounding, gradual underflow and disabled exception traps; … */</code></pre>
+        <p>
+          The source view replaces that block with a trailing signature comment,
+          <code
+            >/* assumes nearest-even rounding and masked FP traps (requirement_&lt;prefix&gt;…)
+            */</code
+          >, naming each requirement by an unambiguous id prefix. The renderer records that decision
+          as the presentation rule <code>requirement_note</code>. Full explanations and sites stay
+          in <code>emission.requirements</code>.
+        </p>
+
+        <h3>Local validation</h3>
+        <p>
+          <code>LocalValidationSession</code>
+          (<a class="src" href="../../src/reconstruction/local-validation.ts"
+            >src/reconstruction/local-validation.ts</a
+          >) has a deliberately separate work allowance. <code>ValidationAllowance</code> is
+          <code>Math.min(8000, Math.floor((context.remainingWork?.() ?? 8000) / 64))</code>, so
+          local proofs cannot starve the outer operation and cannot claim more than 8000 units.
+          <code>charge()</code> throws a private <code>Unsupported</code> error when exhausted; only
+          that exception is caught by <code>bounded()</code> and converted to an
+          <code>unverified</code> record. Cancellation, deadline and outer budget errors propagate.
+        </p>
+        <p>
+          The bitvector checker is an independent reduced ordered BDD implementation. Bits are
+          ordered least-significant first and interleaved across symbolic leaves; leaves are capped
+          at 64, operations at 12 000, expression expansion at depth 24, 128 memoized values and
+          1..64-bit integer fragments. It supports constants, bitcasts/truncate/zero-extend/sign-
+          extend, extract/concat/insert, unary <code>not</code>/<code>neg</code>, and/or/xor,
+          add/sub, constant shifts and multiplies, equality/inequality, and the zero flag of an add.
+          Anything outside that fragment returns <code>unverified</code>, never a false proof.
+        </p>
+        <p>
+          The session also has global record bounds. <code>records.length</code> is capped at 256;
+          when the 257th candidate arrives, one summary record with subject <code>*</code> is
+          written and later candidates are not attempted. Verified records with identical
+          kind/rule/scope/reason are grouped, with subject ids chunked in groups of 64. ABI
+          conformance sites are grouped the same way. These are metadata bounds only: they never
+          change the text except through the presentation gate below.
+        </p>
+        <pre><code>presentation(rule, subject, scope, subjectIds?, reason?): boolean {
+  if (this.recordVerified({ kind: 'presentation', rule, subject, scope,
+                            status: 'verified', ...(reason ? { reason } : {}) }, subjectIds))
+    return true;
+  this.check('presentation', subject, scope, () => ({
+    kind: 'presentation', rule, subject, scope,
+    status: 'unverified', reason: 'local validation record bound exceeded',
+  }));
+  return false;
+}</code></pre>
+        <p>
+          That boolean is the admission control for source-view rewrites. A rule whose record cannot
+          be stored returns <code>false</code>, and the caller must keep the checked form. Pure
+          semantic folds do not call it: they have no presentation record, only their bitvector
+          check. <code>requireAbi(rule, anchors, explanation)</code> is separate: it records the
+          assumption attached to an <em>applied</em> rewrite and never refuses it.
+        </p>
+
+        <figure class="diagram">
+          <svg viewBox="0 0 940 520" role="img" aria-labelledby="fig-validation-title">
+            <title id="fig-validation-title">
+              How a reconstruction rewrite is proved, admitted or refused
+            </title>
+            <rect class="box accent" x="20" y="140" width="160" height="60" rx="8" />
+            <text x="100" y="164" text-anchor="middle" class="title">candidate</text>
+            <text x="100" y="182" text-anchor="middle" class="small">
+              expression / slot / formal
+            </text>
+
+            <rect class="group" x="210" y="20" width="280" height="260" rx="8" />
+            <text x="350" y="42" text-anchor="middle" class="lane">rule-specific proof</text>
+
+            <rect class="box" x="225" y="54" width="250" height="54" rx="8" />
+            <text x="350" y="75" text-anchor="middle" class="mono">validateBitvectorCandidate</text>
+            <text x="350" y="93" text-anchor="middle" class="small">
+              BDD equivalence, integer fragment
+            </text>
+
+            <rect class="box" x="225" y="122" width="250" height="54" rx="8" />
+            <text x="350" y="143" text-anchor="middle" class="mono">validateStackPromotion</text>
+            <text x="350" y="161" text-anchor="middle" class="small">
+              byte trace, small acyclic paths
+            </text>
+
+            <rect class="box" x="225" y="190" width="250" height="54" rx="8" />
+            <text x="350" y="211" text-anchor="middle" class="small">
+              outcome table or structural proof
+            </text>
+            <text x="350" y="229" text-anchor="middle" class="small">
+              conditions, slices, shifts, formals
+            </text>
+
+            <rect class="box warn" x="520" y="120" width="140" height="60" rx="8" />
+            <text x="590" y="146" text-anchor="middle" class="title">rejected?</text>
+            <text x="590" y="164" text-anchor="middle" class="small">counterexample</text>
+
+            <rect class="box bad" x="700" y="40" width="220" height="66" rx="8" />
+            <text x="810" y="63" text-anchor="middle" class="title">keep original</text>
+            <text x="810" y="81" text-anchor="middle" class="small">record rejected;</text>
+            <text x="810" y="97" text-anchor="middle" class="small">rejectedRewrites.add(id)</text>
+
+            <rect class="box warn" x="520" y="230" width="150" height="70" rx="8" />
+            <text x="595" y="255" text-anchor="middle" class="title">presentation()</text>
+            <text x="595" y="273" text-anchor="middle" class="small">admits the record?</text>
+            <text x="595" y="289" text-anchor="middle" class="small">verified, under 256</text>
+
+            <rect class="box ok" x="700" y="220" width="220" height="66" rx="8" />
+            <text x="810" y="243" text-anchor="middle" class="title">apply rewrite</text>
+            <text x="810" y="261" text-anchor="middle" class="small">
+              requireAbi(rule, anchors, …)
+            </text>
+            <text x="810" y="277" text-anchor="middle" class="small">
+              text uses the source form
+            </text>
+
+            <rect class="box" x="700" y="320" width="220" height="60" rx="8" />
+            <text x="810" y="344" text-anchor="middle" class="title">keep checked form</text>
+            <text x="810" y="362" text-anchor="middle" class="small">record bound reached</text>
+
+            <rect class="box muted" x="20" y="360" width="250" height="62" rx="8" />
+            <text x="145" y="384" text-anchor="middle" class="mono">validateReconstruction</text>
+            <text x="145" y="402" text-anchor="middle" class="small">
+              coverage, liveness, locals
+            </text>
+
+            <rect class="box bad" x="340" y="360" width="270" height="62" rx="8" />
+            <text x="475" y="382" text-anchor="middle" class="title">OperationError</text>
+            <text x="475" y="401" text-anchor="middle" class="small mono">
+              unavailable_semantics
+            </text>
+
+            <rect class="box muted" x="20" y="445" width="250" height="58" rx="8" />
+            <text x="145" y="468" text-anchor="middle" class="small">
+              renderer: validateRenderedTransfers /
+            </text>
+            <text x="145" y="484" text-anchor="middle" class="small">validateEmittedControl</text>
+
+            <rect class="box bad" x="340" y="445" width="270" height="58" rx="8" />
+            <text x="475" y="468" text-anchor="middle" class="mono">rejectTranslation</text>
+            <text x="475" y="486" text-anchor="middle" class="small">
+              rejected parallel-copy or control record
+            </text>
+
+            <path class="edge" d="M180,170 L205,170 L205,81 L223,81" marker-end="url(#arrow)" />
+            <path class="edge" d="M180,172 L223,149" marker-end="url(#arrow)" />
+            <path class="edge" d="M180,178 L205,178 L205,217 L223,217" marker-end="url(#arrow)" />
+
+            <path class="edge" d="M475,81 L500,81 L500,140 L518,140" marker-end="url(#arrow)" />
+            <path class="edge" d="M475,149 L518,149" marker-end="url(#arrow)" />
+            <path class="edge" d="M475,217 L500,217 L500,160 L518,160" marker-end="url(#arrow)" />
+
+            <path class="edge bad" d="M660,132 L680,132 L680,73 L698,73" marker-end="url(#arrow)" />
+            <text x="664" y="118" class="edge-label">yes</text>
+            <path class="edge" d="M590,180 L590,228" marker-end="url(#arrow)" />
+            <text x="598" y="205" class="edge-label">no</text>
+            <path class="edge ok" d="M670,253 L698,253" marker-end="url(#arrow)" />
+            <text x="674" y="245" class="edge-label">yes</text>
+            <path class="edge bad" d="M595,300 L595,318 L698,318" marker-end="url(#arrow)" />
+            <text x="603" y="313" class="edge-label">no</text>
+
+            <path class="edge bad" d="M270,391 L338,391" marker-end="url(#arrow)" />
+            <text x="278" y="383" class="edge-label">fails</text>
+            <path class="edge bad" d="M270,474 L338,474" marker-end="url(#arrow)" />
+            <text x="278" y="466" class="edge-label">rejected</text>
+          </svg>
+          <figcaption>
+            <strong>Figure 7.</strong> A rewrite is proved first, then admitted by the presentation
+            gate if it changes presentation. A rejection keeps the original form; exhaustion of the
+            proof allowance yields <code>unverified</code> (recorded, not a rejection). Publication
+            checks are separate and fatal: an inconsistent projection throws
+            <code>unavailable_semantics</code> rather than printing a wrong program.
+          </figcaption>
+        </figure>
+
+        <h3>What is checked, and what happens on failure</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Check</th>
+              <th>Question</th>
+              <th>Failure behaviour</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>validateBitvectorCandidate</code></td>
+              <td>
+                does the candidate expression equal the original for all inputs in the modeled
+                integer fragment?
+              </td>
+              <td>
+                <code>rejected</code> → keep original, record a counterexample;
+                <code>unverified</code> → record reason and continue (the rule has its own side
+                conditions)
+              </td>
+            </tr>
+            <tr>
+              <td><code>validateStackPromotion</code></td>
+              <td>
+                does a byte-addressed trace agree for small acyclic paths; is every read definitely
+                initialized?
+              </td>
+              <td>
+                <code>rejected</code> → slot stays explicit; <code>unverified</code> → the caller
+                still applies the source presentation gate and keeps the record
+              </td>
+            </tr>
+            <tr>
+              <td><code>foldSourceCondition</code></td>
+              <td>does the decomposition reproduce every feasible flag row?</td>
+              <td>no decomposition → explicit flag form stays</td>
+            </tr>
+            <tr>
+              <td><code>presentation(rule, …)</code></td>
+              <td>can the verified, rule-specific proof be stored under the metadata bound?</td>
+              <td><code>false</code> → caller keeps checked form</td>
+            </tr>
+            <tr>
+              <td><code>validateReconstruction</code></td>
+              <td>
+                coverage ownership, live definitions, edge-copy destinations, return widths, stack
+                base, initialized promoted locals, inlining cycles
+              </td>
+              <td>
+                throws <code>unavailable_semantics</code> with the origin's address and evidence ids
+              </td>
+            </tr>
+            <tr>
+              <td><code>validateRenderedTransfers</code> / <code>validateEmittedControl</code></td>
+              <td>
+                does each rendered <code>goto</code>/<code>break</code>/<code>continue</code>/edge
+                mean the executable edge it claims?
+              </td>
+              <td>
+                record <code>rejected</code>; the renderer then calls
+                <code>rejectTranslation</code> (<code>unavailable_semantics</code>)
+              </td>
+            </tr>
+            <tr>
+              <td><code>validateEmittedUses</code></td>
+              <td>
+                is every used value emitted at a dominated site, including shared locals and
+                coalesced copies?
+              </td>
+              <td><code>unavailable_semantics</code> via the same publication path</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="sources">
+          Publication checks live in
+          <a class="src" href="../../src/reconstruction/validate.ts"
+            >src/reconstruction/validate.ts</a
+          >
+          (<code>validateReconstruction</code>, <code>validateRenderedTransfers</code>),
+          <a class="src" href="../../src/reconstruction/validate-uses.ts"
+            >src/reconstruction/validate-uses.ts</a
+          >
+          (<code>validateEmittedUses</code>) and
+          <a class="src" href="../../src/reconstruction/local-control-validation.ts"
+            >src/reconstruction/local-control-validation.ts</a
+          >
+          (<code>validateEmittedControl</code>).
+        </p>
+        <p>
+          There is no “fall back to unchecked text” path. A refused <em>presentation</em> keeps the
+          more explicit form; a failed <em>publication invariant</em> aborts the emission. That
+          asymmetry is intentional: a missing prettiness is acceptable, a wrong program is not.
+          Validation records are published as <code>emission.local_validation</code> and feed the
+          inference records the coordinator resolves, so every applied rewrite remains auditable.
+        </p>
+        <div class="callout invariant">
+          <span class="title">Invariant</span>
+          <p>
+            A rewrite's validation subject is the published value, not merely the input SSA. The
+            header of <code>validateReconstruction</code>: “Check the published projection, not
+            merely the verified input SSA. Unknown values are legitimate expressions; missing
+            definitions and result bits are not.”
+          </p>
+        </div>
+      </section>
+
+      <section id="limitations">
+        <h2>Limitations &amp; extension points</h2>
+        <p>
+          The design intentionally prefers an explicit physical form to a guess. The consequences
+          are visible in real output and are tracked in
+          <a class="src" href="../../TODO.md">TODO.md</a>’s readability roadmap; the labels below
+          are roadmap items, not current capabilities.
+        </p>
+        <ul>
+          <li>
+            <strong>Frame-wide promotion gate (roadmap R1).</strong> One escaped frame address sets
+            <code>saveEscaped</code> and skips every private slot in the function. The roadmap
+            proposes per-slot escape analysis so escaped slots stay explicit while the rest are
+            promoted. Until then, a function that hands out one interior pointer may print the whole
+            frame as <code>entry_sp ± N</code>.
+          </li>
+          <li>
+            <strong>Expression rules are a hand-picked set (roadmap R3).</strong>
+            <code>normalizeSourceExpressions</code> has a bounded worklist and a fixed collection of
+            named rewrites (condition flags, slice reconnection, shift idioms, strength reduction,
+            identity, extension). There is no general rule pool applied to a fixpoint with
+            cost-based selection. Adding a rule means adding a proof, not just a pattern.
+          </li>
+          <li>
+            <strong>Proof allowance is finite.</strong> The local BDD allowance is shared across one
+            function and is capped at 8000 units (and 12 000 operations per BDD). When it is
+            exhausted, later bitvector candidates are recorded as <code>unverified</code> and
+            skipped (<code>skipExhaustedBitvector</code>), and the more explicit form remains.
+            Verified records are grouped, and the record count is capped at 256.
+          </li>
+          <li>
+            <strong>Pointer and type recovery is per function (roadmap R4).</strong>
+            <code>projectSourceSignature</code> requires positive local evidence for a pointer
+            formal and drops a type on any conflict. It does not run image-wide propagation, so
+            integer-typed locals that are clearly dereferenced may still print as integers with
+            casts. <code>type_N</code> names survive when no stronger evidence exists.
+          </li>
+          <li>
+            <strong>Open arities remain open (roadmap R5).</strong> Only proven interfaces close an
+            argument list. Library contracts, complete callee reads and Objective-C selectors may
+            set <code>argument_list_complete</code>; everything else keeps the remainder marker. The
+            roadmap's opt-in <code>inference: "likely"</code> mode does not exist in this stage.
+          </li>
+          <li>
+            <strong>Rewrites only see one function.</strong> Requirements, caller demands and callee
+            closures come from available native units; absence of a caller is never treated as proof
+            that a result is unused. The comments on <code>function_return_demands</code> say this
+            explicitly.
+          </li>
+          <li>
+            <strong>Source view is a presentation, not a proof of source equivalence.</strong>
+            Frame-save elision, exit-scratch hiding and void-like interfaces all rest on
+            <code>abi_conformance</code> assumptions. The checked view exists precisely so a
+            reviewer can inspect the machine-level form without those assumptions.
+          </li>
+        </ul>
+
+        <h3>Adding a new reconstruction rule safely</h3>
+        <ol class="steps">
+          <li>
+            <strong>Decide which layer owns it.</strong> If it is an exact semantic identity, put it
+            in <code>foldExpressions</code> or the base path of
+            <code>normalizeSourceExpressions</code>
+            so both views share it. If it is a presentation change, gate it on
+            <code>sourceCells</code>/<code>view === 'source'</code> and give it a rule name.
+          </li>
+          <li>
+            <strong>State the proof in the scope string.</strong> The <code>scope</code> argument of
+            <code>check</code>/<code>presentation</code> is the human-readable contract used by the
+            validator table and the docs. Write the side conditions there, as the existing rules do
+            (“0 &lt; k &lt; w and every mask must equal …”).
+          </li>
+          <li>
+            <strong>Use the narrowest proof.</strong> Prefer a structural bit-for-bit argument
+            (<code>wholeValueConcat</code>, <code>recombineBitSlices</code>) or an exhaustive
+            outcome table (<code>foldSourceCondition</code>) over the shared BDD. Use
+            <code>validateBitvectorCandidate</code> only for the modeled integer fragment, and
+            handle <code>unverified</code> honestly: either keep the explicit form or document why
+            the rule's own side conditions are sufficient.
+          </li>
+          <li>
+            <strong
+              >Admit presentation through <code>presentation()</code>, then record ABI assumptions
+              with <code>requireAbi()</code>.</strong
+            >
+            Do not apply a source rewrite when <code>presentation()</code> returns
+            <code>false</code>; do not silently assume an ABI fact.
+          </li>
+          <li>
+            <strong>Keep the checked view unchanged.</strong> Add a test that asserts the rule is
+            present in <code>local_validation</code> for <code>source</code> and absent for
+            <code>checked</code>, as the existing tests in
+            <a class="src" href="../../test/reconstruction/">test/reconstruction/</a> do. Bump the
+            component version when the output identity changes (the roadmap and
+            <code>docs/CORE.md</code> require it).
+          </li>
+          <li>
+            <strong>Measure on the dev loop, not on one fixture.</strong> The roadmap's rule is to
+            fix the owning shared layer and tune on <code>scripts/bench/quality-dev-loop.py</code>;
+            a prettier wrong program is a regression.
+          </li>
+        </ol>
+        <p>
+          The extension points are deliberately few: a new ABI profile enters through
+          <code>source.abi.classifyCall</code>; a new address fact enters through
+          <code>SourceAddress</code> and <code>sourceDataValues</code>; a new stack pattern enters
+          through the address fixed point and <code>classifyStackRegion</code>; a new expression
+          idiom belongs in <code>normalizeSourceExpressions</code> with its own proof. None of them
+          requires changing the renderer or the IR.
+        </p>
+      </section>
+
+      <footer class="pager">
+        <a class="prev" href="types-metadata.html">← Types &amp; metadata</a>
+        <a class="next" href="structuring-emission.html">Structuring &amp; emission →</a>
+      </footer>
+    </main>
+  </body>
+</html>
