@@ -45,10 +45,10 @@ Root causes found in the code, in the order we plan to address them:
   - Done (`wt/r3temps`):
     - Single-use call results inline into `if`/`switch` tests, and loads addressed through the call result share the reader (`strerror(*__error())`).
     - Cheap single-reader integer operations repeat at their reader (`repeated_operation`).
-    - Phi copies through inline zero extensions share widened unsigned storage (`value0 = ~arg0; value1 = value0` in Mach-O `crc32_z`).
-  - Dev loop: 1357 → 1305 local declarations and 8605 → 8463 lines. Brotli CLI export: 131,052 → 126,307 bytes.
-  - Loss: 22 more casts on the dev loop, because narrow reads of widened storage print their conversion (`(uint64_t)(uint32_t)value0` in `matrix_multi_exit`, which also loses its `accumulator` name).
-  - Left to other items: pointer/integer copies with different presented types (`address_1`/`address_2`, R4); O0 frame-slot loads, which stay temporaries until promoted (R1); truncating copies stay separate.
+    - Phi copies through inline zero extensions share widened unsigned storage (`value0 = ~arg0; value1 = value0` in Mach-O `crc32_z`). This applies only when the extensions are the narrow value's only reads, it is at least `int` wide, and no role name is lost, so no conversion is added.
+    - Arms whose blocks print nothing are dropped.
+  - Dev loop: 1357 → 1317 local declarations, 8605 → 8504 lines, casts unchanged (3077), no empty arms.
+  - Left to other items: pointer/integer copies with different presented types (`address_1`/`address_2`, R4); O0 frame-slot loads, which stay temporaries until promoted (R1). Truncating copies and narrow values read elsewhere stay separate.
 - [ ] Measure the BDD validator allowance on the dev loop. Raise efficiency (memoize per value, validate rule classes once) rather than silently skipping validation when the allowance runs out.
   - Acceptance: the dev loop shows fewer temporaries and no helper preambles for supported idioms. Every rule carries its own bit-precise validation or proof, with counterexample tests at width/sign boundaries.
 
