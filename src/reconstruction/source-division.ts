@@ -523,7 +523,7 @@ function biasOf(site: RuleSite, value: Value): { x: Value; k: number } | null {
   if (definition.op === 'lshr') {
     const count = site.constant(definition.right);
     if (count === null || count < 1n || count >= BigInt(width)) return null;
-    const x = signMask(definition.left);
+    const x = count >= 2n ? signMask(definition.left) : null;
     if (x) return { x, k: width - Number(count) };
     return count === BigInt(width - 1) ? { x: definition.left, k: 1 } : null;
   }
@@ -536,7 +536,7 @@ function biasOf(site: RuleSite, value: Value): { x: Value; k: number } | null {
         x = signMask(mask);
       if (constant === null || !x) continue;
       const k = constant.toString(2).length;
-      if (constant === (1n << BigInt(k)) - 1n && k < width) return { x, k };
+      if (constant === (1n << BigInt(k)) - 1n && k < width - 1) return { x, k };
     }
   return null;
 }
@@ -655,7 +655,7 @@ function biased(site: RuleSite, value: Value): { x: Value; k: number } | null {
           x = site.resolve(plain);
         if (constant === null || !sameValue(site, term, x)) continue;
         const k = (constant + 1n).toString(2).length - 1;
-        if (constant + 1n !== 1n << BigInt(k) || k < 1 || k >= width) continue;
+        if (constant + 1n !== 1n << BigInt(k) || k < 1 || k >= width - 1) continue;
         const min = -(1n << BigInt(width - 1)),
           max = (1n << BigInt(width - 1)) - 1n;
         const below = [[min, -1n]] as const,
@@ -1091,7 +1091,7 @@ function selectedRemainder(
       const mask = site.constant(maskValue);
       if (mask === null) continue;
       const k = mask.toString(2).length;
-      if (mask === (1n << BigInt(k)) - 1n && k < width) return { x: site.resolve(x), k };
+      if (mask === (1n << BigInt(k)) - 1n && k < width - 1) return { x: site.resolve(x), k };
     }
     return null;
   };
