@@ -170,6 +170,38 @@ for (const language of ['c-like', 'python-like'] as const)
         assert.deepEqual(actual.events, expected.events);
       }
     });
+
+    test('a loop swapping two carried values keeps them in separate variables', () => {
+      // loop(a, b, i): store a; t = a; a = b; b = t; i++ while i != 3; return a - b.
+      const b = program('coalesce-swap'),
+        entry = b.block('entry'),
+        loop = b.block('loop', [i32, i32, i32]),
+        exit = b.block('exit', [i32, i32]);
+      entry.jump(loop, [entry.constant(i32, 5n), entry.constant(i32, 2n), entry.constant(i32, 0n)]);
+      const [first, second, index] = loop.parameters as [Value, Value, Value];
+      loop.store(
+        loop.int('add', loop.constant(i64, 0x2000n), loop.cast('zero_extend', i64, index)),
+        first,
+      );
+      const next = loop.int('add', index, loop.constant(i32, 1n));
+      loop.branch(
+        loop.compare('ne', next, loop.constant(i32, 3n)),
+        loop.edge(loop, [second, first, next]),
+        loop.edge(exit, [second, first]),
+      );
+      const [left, right] = exit.parameters as [Value, Value];
+      exit.return([exit.int('sub', left, right)]);
+      const input = b.finish(entry, [i32]);
+      const source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      assert.notEqual(name(source, first), name(source, second), source.emission.text);
+      const expected = observe(checked),
+        actual = observe(source);
+      assert.deepEqual(actual.values, expected.values);
+      assert.deepEqual([...actual.memory], [...expected.memory]);
+      // Three iterations swap (5, 2) twice; the exit edge swaps once more: 2 - 5.
+      assert.equal(BigInt.asUintN(32, actual.values[0]!), 0xfffffffdn);
+    });
   });
 
 const rdi = register('rdi', 64, 0, 'replace_root', 'x86_64:rdi');

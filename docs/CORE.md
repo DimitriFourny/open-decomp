@@ -283,6 +283,28 @@ map to their consuming expression. `copy_propagation` reads a plain multi-use
 copy (same presented type) as its source variable at every use; liveness and
 phi coalescing treat each read as a read of the source.
 
+`repeated_operation` prints a cheap pure integer operation of one printed
+variable (add, subtract, bitwise or shift with a constant; negation, complement,
+integer conversion) at each occurrence in its single reader instead of a
+temporary, at most four occurrences: `t = x >> 1; x = c ? t : t ^ k` becomes
+`x = c ? x >> 1 : (x >> 1) ^ k`. The reader is one statement, test or edge copy
+(the copy only through one consumer); a value also read by a second statement
+or another copy stays a variable. Liveness counts every occurrence as a read at
+the reader.
+
+`single_use_call_inlining` prints a call whose one live result is read once by
+the next printed statement, return, `if` test or `switch` selector as that
+reader's operand (`if (fseek(stream, 0, 2) == 0)`). Its text must occur exactly
+once in the reader's first printed line: an `if` header before its arms and edge
+copies. A do-while test printed after its repeat copies, or any other layout that
+separates the call from its reader, re-renders with that call as a statement;
+after four such retries every call prints as a statement. A load addressed
+through the call's own result is sequenced after it and may share the reader
+(`strerror(*__error())`); an independent load keeps the call a statement.
+Measured on the Homebrew brotli 1.2.0 CLI export (64 functions): 131,052 →
+126,589 bytes, `main` 1,688 → 1,592 lines; one do-while test call
+(`BrotliEncoderIsFinished`) stays a statement through the retry.
+
 `local_load_reuse` prints a load of a private local that exactly one write to
 that local and one other same-block statement read as the local itself at both
 readers (`t = i; i = t + 1; out[t] = x` becomes `out[i] = x; i = i + 1`). The
