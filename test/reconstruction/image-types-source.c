@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 /* One context object reaches two callees through the same pointer flow. */
 struct context { uint32_t flags, pad; uint64_t total; uint32_t count; };
 __attribute__((noinline)) void context_set(struct context *p, uint32_t flags) { p->flags = flags; }
@@ -26,6 +27,26 @@ __attribute__((noinline)) void release_all(struct database *db) {
     if (node && node->shared && --node->wanted == 0) node_unlock(node);
   }
 }
+/* A callee that dereferences its argument and returns it: the caller's call result
+ * is that object's pointer although the caller never dereferences it. */
+__attribute__((noinline)) struct context *context_touch(struct context *p) { p->count++; return p; }
+__attribute__((noinline)) struct context *context_pass(struct context *p) { return context_touch(p); }
+/* Integer arithmetic on a parameter never makes the caller's argument a pointer. */
+__attribute__((noinline)) uint64_t scale_value(uint64_t v) { return v * 3 + 7; }
+__attribute__((noinline)) uint64_t scale_drive(uint64_t h) { return scale_value(h) + 1; }
+/* A constant-size allocation, used and freed locally: named by site and size. */
+struct pair { uint64_t a; uint32_t b; double c; };
+__attribute__((noinline)) uint64_t pair_sum(uint32_t b) {
+  struct pair *p = malloc(sizeof *p);
+  if (!p) return 0;
+  p->a = 1;
+  p->b = b;
+  p->c = 2.5;
+  uint64_t sum = p->a + p->b + (uint64_t)p->c;
+  free(p);
+  return sum;
+}
+volatile uint64_t image_types_sink;
 int main(void) {
   struct context context = {0, 0, 40, 2};
   printf("%llu %u\n", (unsigned long long)context_drive(&context, 7), context.flags);
@@ -37,5 +58,6 @@ int main(void) {
   release_all(&db);
   printf("%u %u %u %u %u %u\n", nodes[0].wanted, nodes[0].locked, nodes[1].wanted, nodes[1].locked,
          nodes[2].wanted, nodes[2].locked);
+  image_types_sink = context_pass(&context)->count + scale_drive(5) + pair_sum(4);
   return 0;
 }

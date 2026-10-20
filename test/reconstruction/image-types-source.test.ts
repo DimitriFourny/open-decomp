@@ -106,6 +106,22 @@ test(
     });
     assert.equal(header.status, 0, header.stderr);
 
+    // context_touch dereferences and returns its argument: context_pass's call
+    // result (never dereferenced there) is that object's pointer, so the
+    // function returns the callee's structure pointer in both dialects.
+    assert.match((await decompile('context_pass')).text, /^(\w+)\* context_pass\(\1\* \w+\)/m);
+    assert.match((await decompile('context_pass', 'python-like')).text, /-> pointer\[\w+\]/);
+    // scale_value only does integer arithmetic on its parameter: no pointer flows back.
+    const scale = (await decompile('scale_drive')).text;
+    assert.match(scale, /^uint64_t scale_drive\(uint64_t \w+\)/m, scale);
+    assert.doesNotMatch(scale, /\w\* /, scale);
+    // malloc(sizeof(struct pair)) used locally: the allocator's header alloc_size
+    // names the object by allocation site and size; members print as fields.
+    const pair = (await decompile('pair_sum')).text;
+    assert.match(pair, /^struct pair_sum_alloc_0x18 \{/m, pair);
+    assert.match(pair, /pair_sum_alloc_0x18\* \w+;/, pair);
+    assert.doesNotMatch(pair, /\(uintptr_t\)/, pair);
+
     // views_wide reads 64 bits at +0, views_high 32 bits at +4: one object,
     // but incompatible overlapping views never share a name or a layout.
     const high = (await decompile('views_high')).text;

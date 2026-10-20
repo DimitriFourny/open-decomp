@@ -43,6 +43,7 @@ import {
 } from './memory-shapes.js';
 import type {
   MemoryShape,
+  ObjectAllocation,
   ObservedField,
   SignatureAssociation,
   SuppliedSignature,
@@ -864,6 +865,82 @@ export function recoverTypes(
           );
       }
     }
+    // A library allocator (`alloc_size`) called with constant size arguments
+    // returns null or a fresh object of exactly their product in bytes.
+    const allocators = new Map<string, readonly number[]>();
+    for (const contract of options.library?.contracts ?? []) {
+      budget.charge();
+      if (
+        contract.abi_state !== 'supported' ||
+        contract.conflicts_with.length ||
+        !contract.effects.allocates?.length
+      )
+        continue;
+      allocators.set(contract.id, contract.effects.allocates);
+      if (contract.callable_entry)
+        allocators.set(`${contract.id}:entry`, contract.effects.allocates);
+    }
+    const allocations = new Map<string, ObjectAllocation>();
+    for (const call of allocators.size ? calls.calls : []) {
+      budget.charge();
+      const node = nodes.get(call.node_id);
+      // The import and its callable entry may both match: they must all agree.
+      const observation = call.contracts[0];
+      const sizes = observation && allocators.get(observation.contract.id);
+      if (
+        node?.kind !== 'call' ||
+        !sizes ||
+        call.contracts.some(
+          (item) =>
+            item.status !== 'established' ||
+            allocators.get(item.contract.id)?.join(',') !== sizes.join(','),
+        )
+      )
+        continue;
+      let size: bigint | null = 1n;
+      for (const index of sizes) {
+        const locations =
+          observation.parameters.find((parameter) => parameter.index === index)?.locations ?? [];
+        const fact = locations.length === 1 ? locations[0]!.fact.value : undefined;
+        size = fact?.kind === 'constant' && size !== null ? size * fact.bits : null;
+      }
+      const result = observation.returns.length === 1 ? observation.returns[0]!.location : null;
+      // The whole result: one 64-bit cell, or the concatenation of its exact cells.
+      const cells =
+        result?.kind === 'register'
+          ? node.register_outputs
+              .filter((binding) => binding.register.root === result.register.root)
+              .sort((a, b) => a.register.offset_bits - b.register.offset_bits)
+          : [];
+      let value =
+        cells.length === 1 && cells[0]!.register.offset_bits === 0 ? cells[0]!.value : undefined;
+      if (cells.length > 1) {
+        const key = cells.map((cell) => cell.value.id).join(',');
+        for (const [id, expression] of definitions) {
+          budget.charge();
+          if (
+            expression.kind === 'concat' &&
+            expression.values.map((part) => part.id).join(',') === key
+          ) {
+            value = values.get(id);
+            break;
+          }
+        }
+      }
+      if (value && bitWidth(value.type) !== 64) value = undefined;
+      if (size === null || size <= 0n || size >= 1n << 64n || !value) continue;
+      allocations.set(value.id, {
+        value_id: value.id,
+        call_id: node.id,
+        size,
+        evidence_ids: [
+          reason('library allocator result with constant size arguments', node.id, [
+            ...observation.contract.evidence_ids,
+            ...node.provenance.evidence_ids,
+          ]),
+        ],
+      });
+    }
 
     const affine = createAffineResolver(
       definitions,
@@ -1055,6 +1132,9 @@ export function recoverTypes(
           },
           array_type: (element, field) =>
             generated({ kind: 'array', element, count: null }, field.evidence_ids),
+          ...(group.base.kind === 'value' && allocations.has(group.base.value_id)
+            ? { allocation: allocations.get(group.base.value_id)! }
+            : {}),
         },
         budget,
       );
@@ -1262,7 +1342,9 @@ export function recoverTypes(
         for (const field of shape.fields) {
           budget.charge();
           const displacement = field.offset - offset;
-          const objectSize = layouts.size(type_id);
+          const object = layouts.definition(type_id);
+          // `void *` declares an address, not a zero-byte object.
+          const objectSize = object?.kind === 'void' ? null : layouts.size(type_id);
           // Separate stack objects do not constrain one another's adjacent bytes.
           if (
             shape.base.kind === 'stack' &&
@@ -1270,7 +1352,6 @@ export function recoverTypes(
           )
             continue;
           const fieldTypes = layouts.fields(type_id, displacement, field.width_bits);
-          const object = layouts.definition(type_id);
           const exactMember =
             object?.kind === 'structure'
               ? object.fields.find((member) => member.offset === displacement)
@@ -1449,6 +1530,13 @@ export function recoverTypes(
       evidence: [...evidence.values()].sort((a, b) => a.id.localeCompare(b.id)),
       diagnostics,
       calls,
+      ...(allocations.size
+        ? {
+            allocations: [...allocations.values()].sort((a, b) =>
+              a.value_id.localeCompare(b.value_id),
+            ),
+          }
+        : {}),
     };
   } catch (error) {
     const result = budget.result(null, error);

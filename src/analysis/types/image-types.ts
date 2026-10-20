@@ -12,11 +12,22 @@ export interface ImageTypeField {
 
 /** Exact image-level identity of one pointer flow at displacement zero: the
  * value a function receives in an integer argument register, returns in its
- * result register, or the address of one entry-SP-relative stack object. */
+ * result register, the address of one entry-SP-relative stack object, or the
+ * fresh object one constant-size library allocator call returns. */
 export type ImageTypeAnchor =
   | { readonly kind: 'argument'; readonly function_id: string; readonly index: number }
   | { readonly kind: 'return'; readonly function_id: string }
-  | { readonly kind: 'stack'; readonly function_id: string; readonly offset: bigint };
+  | { readonly kind: 'stack'; readonly function_id: string; readonly offset: bigint }
+  | {
+      readonly kind: 'allocation';
+      readonly function_id: string;
+      readonly call_id: string;
+      readonly size: bigint;
+    };
+
+/** Stack and allocation anchors name one object of one body: no flow to explore. */
+export const localImageAnchor = (anchor: ImageTypeAnchor): boolean =>
+  anchor.kind === 'stack' || anchor.kind === 'allocation';
 
 /** One function-local object view: a recovered memory shape, or a pointer value
  * that flows between functions. Fields are relative to the anchored pointer. */
@@ -84,7 +95,9 @@ export function imageAnchorKey(anchor: ImageTypeAnchor): string {
     ? `argument:${anchor.function_id}:${anchor.index}`
     : anchor.kind === 'return'
       ? `return:${anchor.function_id}`
-      : `stack:${anchor.function_id}:${anchor.offset}`;
+      : anchor.kind === 'stack'
+        ? `stack:${anchor.function_id}:${anchor.offset}`
+        : `allocation:${anchor.function_id}:${anchor.call_id}`;
 }
 
 const pointeeKey = (offset: bigint, stride: bigint | null): string => `${offset}:${stride ?? ''}`;
@@ -175,17 +188,18 @@ export function solveImageTypes(
   const byKey = new Map(sorted.map((object) => [object.key, object]));
   const anchored = new Map<string, string[]>();
   const owners = new Map<string, string[]>();
+  const confirmed = new Set<string>();
   for (const object of sorted)
     for (const { anchor, own } of object.anchors) {
       budget.charge();
       const key = imageAnchorKey(anchor);
       (anchored.get(key) ?? anchored.set(key, []).get(key)!).push(object.key);
       if (own) (owners.get(key) ?? owners.set(key, []).get(key)!).push(object.key);
+      if (localImageAnchor(anchor)) confirmed.add(key);
     }
-  // Least fixpoint: a stack anchor is local; an argument/result anchor needs a
-  // callee-side object that dereferences the value or forwards it to one.
-  const confirmed = new Set<string>();
-  for (const key of anchored.keys()) if (key.startsWith('stack:')) confirmed.add(key);
+  // Least fixpoint: stack and allocation anchors are local; an argument/result
+  // anchor needs a callee-side object that dereferences the value or forwards it
+  // to one.
   for (let changed = true; changed;) {
     changed = false;
     for (const [key, list] of owners) {
@@ -299,7 +313,8 @@ export function solveImageTypes(
   // A flow is unexplored when its callee body is unavailable or its callers
   // were not all visited; the class may then miss members.
   const unexplored = (key: string, anchor: ImageTypeAnchor): boolean =>
-    anchor.kind !== 'stack' && (options.open.has(key) || options.unloaded.has(anchor.function_id));
+    !localImageAnchor(anchor) &&
+    (options.open.has(key) || options.unloaded.has(anchor.function_id));
   interface Pending {
     root: string;
     id: string;
@@ -363,21 +378,29 @@ export function solveImageTypes(
         budget.charge();
         // Arguments/results name a class only through the callee's own view
         // in it: a caller's use may have been refused as a conflict.
-        if (anchor.kind !== 'stack' && !own) continue;
+        if (!localImageAnchor(anchor) && !own) continue;
         const fn = functionName(anchor.function_id),
           order = functionOrder(anchor.function_id);
-        // Interface roles name a type before a caller's stack slot does.
+        // Interface roles name a type before the allocation site (allocating
+        // function plus allocated size), which names it before a stack slot.
         const candidate: Candidate =
           anchor.kind === 'stack'
             ? {
-                rank: 2,
+                rank: 3,
                 order,
                 tie: `${anchor.offset}`,
                 name: `${fn}_local_${(anchor.offset < 0n ? -anchor.offset : anchor.offset).toString(16)}`,
               }
-            : anchor.kind === 'argument'
-              ? { rank: 0, order, tie: `${anchor.index}`, name: `${fn}_arg${anchor.index}` }
-              : { rank: 1, order, tie: '', name: `${fn}_ret` };
+            : anchor.kind === 'allocation'
+              ? {
+                  rank: 2,
+                  order,
+                  tie: anchor.call_id,
+                  name: `${fn}_alloc_0x${anchor.size.toString(16)}`,
+                }
+              : anchor.kind === 'argument'
+                ? { rank: 0, order, tie: `${anchor.index}`, name: `${fn}_arg${anchor.index}` }
+                : { rank: 1, order, tie: '', name: `${fn}_ret` };
         if (better(candidate, best)) best = candidate;
       }
     }

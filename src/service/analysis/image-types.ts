@@ -27,6 +27,7 @@ import {
 import {
   compareImageFields,
   imageAnchorKey,
+  localImageAnchor,
   solveImageTypes,
   type ImageTypeAnchor,
   type ImageTypeClass,
@@ -38,6 +39,7 @@ import {
 import type {
   ImageTypeBinding,
   SuppliedTypeRecord,
+  TypeAssociation,
   TypeRecoveryResult,
 } from '../../analysis/types/index.js';
 import { cSourceName } from '../../metadata/symbols/c-names.js';
@@ -212,9 +214,20 @@ export function functionTypeObjects(
           });
       }
     }
+    // A constant-size allocation names its object by allocation site and size.
+    const anchors = new Map<string, { anchor: ImageTypeAnchor; own: boolean }>();
+    if (shape.allocation) {
+      const anchor: ImageTypeAnchor = {
+        kind: 'allocation',
+        function_id: fn.id,
+        call_id: shape.allocation.call_id,
+        size: shape.allocation.size,
+      };
+      anchors.set(imageAnchorKey(anchor), { anchor, own: true });
+    }
     objects.set(objectKey(shape.base.value_id, 0n), {
       fields,
-      anchors: new Map(),
+      anchors,
       pointees,
     });
   }
@@ -472,7 +485,7 @@ export function exploreImageTypes(
     if (previous !== undefined && previous <= depth) return;
     interesting.set(object.key, depth);
     for (const { anchor } of object.anchors)
-      if (anchor.kind !== 'stack') pending.push({ key: imageAnchorKey(anchor), depth });
+      if (!localImageAnchor(anchor)) pending.push({ key: imageAnchorKey(anchor), depth });
   };
   const objectsOf = (id: string) => facts.get(id)?.objects ?? [];
   const byObject = new Map<string, ImageTypeObject>();
@@ -532,7 +545,11 @@ export function exploreImageTypes(
   const unloaded = new Set<string>();
   for (const object of objects)
     for (const { anchor } of object.anchors)
-      if (anchor.kind !== 'stack' && byId.has(anchor.function_id) && !facts.get(anchor.function_id))
+      if (
+        !localImageAnchor(anchor) &&
+        byId.has(anchor.function_id) &&
+        !facts.get(anchor.function_id)
+      )
         unloaded.add(anchor.function_id);
   // Flows of loaded objects that were never expanded are unexplored as well,
   // and every flow is when the image's reference index is incomplete: callers
@@ -546,7 +563,7 @@ export function exploreImageTypes(
   for (const object of objects)
     for (const { anchor } of object.anchors) {
       const key = imageAnchorKey(anchor);
-      if (anchor.kind !== 'stack' && (!expanded.has(key) || references !== 'complete'))
+      if (!localImageAnchor(anchor) && (!expanded.has(key) || references !== 'complete'))
         open.add(key);
     }
   const budget = new AnalysisBudget({
@@ -742,7 +759,10 @@ export function applyImageTypes(
         type_id: memberType(item, field, proofIds, field.offset === last && last > 0n),
       });
     fields.sort((a, b) => (a.offset < b.offset ? -1 : a.offset > b.offset ? 1 : 0));
-    return { kind: 'structure', size: null, alignment: null, fields };
+    // A known allocation size stays only while every merged member fits in it.
+    const size =
+      base.size !== null && occupied.every((range) => range.end <= base.size!) ? base.size : null;
+    return { kind: 'structure', size, alignment: null, fields };
   };
   const declared: [string, string][] = [];
   for (const [class_id, list] of localTypes)
@@ -762,6 +782,69 @@ export function applyImageTypes(
       records[at] = { ...record, definition, evidence_ids: proofIds };
       byId.set(type_id, records[at]!);
     }
+  // A value of this body that flows (as an argument or result, at displacement
+  // zero) into a class some view dereferences holds that object's address,
+  // even where no local access or callee-summary transfer typed it.
+  const shapeBases = new Set(
+    types.shapes.flatMap((shape) => (shape.base.kind === 'value' ? [shape.base.value_id] : [])),
+  );
+  const prefix = `${input.ir.id}|`;
+  const flows: { value_id: string; class_id: string }[] = [];
+  for (const [key, class_id] of solution.class_of) {
+    context.checkpoint(1);
+    if (!key.startsWith(prefix) || !key.endsWith('|0')) continue;
+    const value_id = key.slice(prefix.length, -2);
+    if (value_id === 'stack' || shapeBases.has(value_id) || !classes.get(class_id)?.fields.length)
+      continue;
+    flows.push({ value_id, class_id });
+  }
+  const associations: TypeAssociation[] = [];
+  if (flows.length) {
+    const values = new Map<string, Value>();
+    const constants = new Set<string>();
+    for (const block of input.ir.blocks) {
+      for (const value of block.parameters) values.set(value.id, value);
+      for (const node of block.instructions) {
+        context.checkpoint(1);
+        if ('result' in node) values.set(node.result.id, node.result);
+        if (node.kind === 'call') for (const value of node.results) values.set(value.id, value);
+        if ('register_outputs' in node)
+          for (const binding of node.register_outputs) values.set(binding.value.id, binding.value);
+        if (node.kind === 'assign' && node.expression.kind === 'constant')
+          constants.add(node.result.id);
+      }
+    }
+    for (const state of input.ir.register_states)
+      for (const binding of [...state.entry, ...state.exit])
+        values.set(binding.value.id, binding.value);
+    for (const { value_id, class_id } of flows.sort((a, b) =>
+      a.value_id.localeCompare(b.value_id),
+    )) {
+      context.checkpoint(1);
+      const value = values.get(value_id);
+      if (
+        value?.type.kind !== 'integer' ||
+        value.type.bits !== 64 ||
+        constants.has(value_id) ||
+        types.calls?.stack.values.get(value_id)?.value.kind === 'constant'
+      )
+        continue;
+      const item = classes.get(class_id)!,
+        proofIds = [proof(item)];
+      associations.push({
+        id: entityIdentity(slice, 'image-type-association', [input.ir.id, value_id, class_id]),
+        subject_id: value_id,
+        type_id: generated({ kind: 'pointer', bits: 64, to: typeOf(class_id) }, proofIds),
+        source: 'analysis',
+        status: 'candidate',
+        evidence_ids: proofIds,
+        machine_type: value.type,
+        value_offset_bits: 0,
+        machine_offset_bits: 0,
+        width_bits: 64,
+      });
+    }
+  }
   for (const class_id of pendingClasses) {
     const item = classes.get(class_id)!,
       proofIds = [proof(item)];
@@ -811,7 +894,16 @@ export function applyImageTypes(
   return {
     ...types,
     types: records,
-    subjects: [...new Set([...types.subjects, ...records.map((record) => record.id)])].sort(),
+    associations: associations.length
+      ? [...types.associations, ...associations].sort((a, b) => a.id.localeCompare(b.id))
+      : types.associations,
+    subjects: [
+      ...new Set([
+        ...types.subjects,
+        ...records.map((record) => record.id),
+        ...associations.map((association) => association.subject_id),
+      ]),
+    ].sort(),
     evidence: [...types.evidence, ...evidence].sort((a, b) => a.id.localeCompare(b.id)),
     image_types: bindings.sort((a, b) => a.type_id.localeCompare(b.type_id)),
   };
@@ -975,7 +1067,7 @@ export function imageTypeDump(
   const open = new Set<string>();
   for (const object of objects)
     for (const { anchor } of object.anchors)
-      if (anchor.kind !== 'stack' && (!complete || references !== 'complete'))
+      if (!localImageAnchor(anchor) && (!complete || references !== 'complete'))
         open.add(imageAnchorKey(anchor));
   const unloaded = new Set(input.functions.filter((fn) => !analyzed.has(fn.id)).map((fn) => fn.id));
   const solution = solveImageTypes(

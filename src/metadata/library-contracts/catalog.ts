@@ -45,6 +45,10 @@ export interface CatalogEntry {
   readonly memory?: readonly ArgumentMemory[];
   readonly captures?: readonly number[];
   readonly returns_argument?: number;
+  /** The result is null or a fresh object whose byte size is the product of these
+   * arguments (C `alloc_size`; ISO C 7.22.3 for malloc/calloc/realloc). The
+   * object's contents and lifetime are not described. */
+  readonly allocates?: readonly number[];
   readonly source: string;
 }
 const ptr = (to: TypeSpec): TypeSpec => ({ kind: 'pointer', to });
@@ -150,11 +154,16 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
     noreturn: true,
     source: 'https://github.com/apple-oss-distributions/objc4',
   }),
-  malloc: entry('c', V, [['size', 'size_t']]),
-  calloc: entry('c', V, [
-    ['count', 'size_t'],
-    ['size', 'size_t'],
-  ]),
+  malloc: entry('c', V, [['size', 'size_t']], { allocates: [0] }),
+  calloc: entry(
+    'c',
+    V,
+    [
+      ['count', 'size_t'],
+      ['size', 'size_t'],
+    ],
+    { allocates: [0, 1] },
+  ),
   realloc: entry(
     'c',
     V,
@@ -162,7 +171,7 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
       ['pointer', V],
       ['size', 'size_t'],
     ],
-    { memory: [footprint(0, 'read_write')] },
+    { memory: [footprint(0, 'read_write')], allocates: [1] },
   ),
   free: entry('c', 'void', [['pointer', V]], { memory: [footprint(0, 'read_write')] }),
   memcpy: entry(

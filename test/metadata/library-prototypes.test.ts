@@ -182,6 +182,24 @@ test('noreturn and variadic format rules come from the headers', () => {
   assert.equal(exitThread.noreturn, true);
 });
 
+test('allocator size parameters come from header alloc_size attributes and agree with curated entries', () => {
+  const darwinResult = contracts(darwin, [
+    binding(darwin, '_malloc_zone_calloc', SYSTEM),
+    binding(darwin, '_reallocf', SYSTEM),
+    binding(darwin, '_strdup', SYSTEM),
+  ]);
+  assert.deepEqual(named(darwinResult, '_malloc_zone_calloc').effects.allocates, [1, 2]);
+  assert.deepEqual(named(darwinResult, '_reallocf').effects.allocates, [1]);
+  // No `alloc_size` attribute (the size follows the string), so no allocation size.
+  assert.equal(named(darwinResult, '_strdup').effects.allocates, null);
+  // Curated ISO C allocators state the same parameters as their header declarations.
+  for (const name of ['malloc', 'calloc', 'realloc']) {
+    const curated = findDeclaration(name, SYSTEM, 'macho');
+    assert.ok(curated?.allocates);
+    assert.deepEqual(curated.allocates, generatedDeclaration('c', name)?.allocates);
+  }
+});
+
 test('declaration families bind only to their nominal library', () => {
   const lookup = (name: string, library: string, format: 'macho' | 'pe' | 'elf') =>
     findDeclaration(name, library, format) !== undefined;

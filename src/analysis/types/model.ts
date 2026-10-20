@@ -101,6 +101,19 @@ export interface MemoryShape {
   readonly escape: 'unknown' | 'observed';
   readonly dynamic: boolean;
   readonly evidence_ids: readonly string[];
+  /** The base value is a fresh allocation (see `TypeRecoveryResult.allocations`) and
+   * every constant-displacement access lies inside that object. */
+  readonly allocation?: ObjectAllocation;
+}
+/** A library allocator call (`alloc_size`) whose size arguments are constants:
+ * its result value is null or a fresh object of exactly `size` bytes. */
+export interface ObjectAllocation {
+  /** The whole machine-width result value. */
+  readonly value_id: string;
+  /** The allocating call node. */
+  readonly call_id: string;
+  readonly size: bigint;
+  readonly evidence_ids: readonly string[];
 }
 export interface TypeConflict {
   readonly subject_id: string;
@@ -138,6 +151,8 @@ export interface TypeRecoveryResult {
   readonly calls: CallAnalysisResult | null;
   /** Image-wide identities of the structure types used here (see image types). */
   readonly image_types?: readonly ImageTypeBinding[];
+  /** Constant-size library allocations whose results this body holds. */
+  readonly allocations?: readonly ObjectAllocation[];
 }
 /** One structure type's image-wide identity: the same name denotes the same
  * merged layout in every function's output. */
