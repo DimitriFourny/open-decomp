@@ -5268,7 +5268,7 @@ export class Renderer {
         )
       ) {
         this.conjunct = [...(pending ?? []), term(positive)];
-        this.transfer((positive ? no : yes).transfer, depth, control);
+        this.silentArm(positive ? no : yes, depth, control);
         this.arm(body, depth, control);
         if (this.conjunct) this.invalid('A merged condition was not printed');
         return;
@@ -5276,15 +5276,15 @@ export class Renderer {
     }
     if (shaped && this.emptyArm(no)) {
       open(true);
-      this.transfer(no.transfer, depth + 1, control);
+      this.silentArm(no, depth + 1, control);
       if (this.emptyArm(yes)) {
-        this.transfer(yes.transfer, depth + 1, control);
+        this.silentArm(yes, depth + 1, control);
         if (!c) this.writer.statement(depth + 1, 'pass');
       } else this.arm(yes, depth + 1, control);
       close();
     } else if (shaped && this.emptyArm(yes)) {
       open(false);
-      this.transfer(yes.transfer, depth + 1, control);
+      this.silentArm(yes, depth + 1, control);
       this.arm(no, depth + 1, control);
       close();
     } else if (pending) this.invalid('A merged condition reached an if with an else');
@@ -5409,7 +5409,7 @@ export class Renderer {
       printed++;
     }
     if (this.emptyArm(control.otherwise) && (c || printed)) {
-      this.transfer(control.otherwise.transfer, depth + 2, control);
+      this.silentArm(control.otherwise, depth + 2, control);
     } else {
       const scoped = c && this.armDeclares(control.otherwise);
       this.writer.line(depth + 1, c ? `default:${scoped ? ' {' : ''}` : 'case _:');
@@ -5451,8 +5451,56 @@ export class Renderer {
     );
   }
 
+  /** An arm that prints nothing: a silent edge, through blocks that print nothing
+   * and fall through silently (e.g. a branch whose only copy coalesced away). */
   private emptyArm(arm: ControlArm): boolean {
-    return !arm.body && this.silentTransfer(arm.transfer);
+    if (!this.silentTransfer(arm.transfer)) return false;
+    if (!arm.body) return true;
+    const blocks: BlockRegion[] = [];
+    const flatten = (region: Region): boolean => {
+      if (region.kind === 'sequence') return region.regions.every(flatten);
+      if (region.kind !== 'block') return false;
+      blocks.push(region);
+      return true;
+    };
+    return (
+      flatten(arm.body) &&
+      blocks.every(
+        (block) =>
+          this.quietBlock(block) &&
+          block.control.kind === 'jump' &&
+          this.silentTransfer(block.control.transfer),
+      )
+    );
+  }
+
+  /** Print an empty arm: its edge and silent blocks record their mappings and edges. */
+  private silentArm(arm: ControlArm, depth: number, origin: Control): void {
+    this.transfer(arm.transfer, depth, origin);
+    if (arm.body) this.region(arm.body, depth);
+  }
+
+  /** A block printing nothing before its control: no label, note, definition or
+   * printed statement. */
+  private quietBlock(block: BlockRegion): boolean {
+    const definitions = this.program.source?.definitions;
+    const printed = (anchor: string): boolean =>
+      definitions?.get(anchor)?.some((definition) => !this.inlined.has(definition.result.id)) ??
+      false;
+    return !(
+      this.notes.has(block.id) ||
+      this.notes.has(block.control.id) ||
+      (this.labels.has(block.id) && !this.clones.has(block)) ||
+      printed(block.id) ||
+      printed(block.control.id) ||
+      block.statements.some(
+        (node) =>
+          printed(node.id) ||
+          (this.program.retained.has(node.id) &&
+            !this.flagAccesses.has(node.id) &&
+            !('result' in node && this.inlined.has(node.result.id))),
+      )
+    );
   }
 
   /** A fallthrough edge whose printed copies all moved into a `for` header. */
@@ -5476,28 +5524,13 @@ export class Renderer {
       return true;
     };
     if (!flatten(arm.body) || !blocks.length) return null;
-    const definitions = this.program.source?.definitions;
-    const printed = (anchor: string): boolean =>
-      definitions?.get(anchor)?.some((definition) => !this.inlined.has(definition.result.id)) ??
-      false;
     for (const [index, block] of blocks.entries()) {
       const control = block.control;
       // A flag short-circuit head prints nothing; its merge test follows.
       const flag = this.flagHeads.get(block.id),
         head = flag !== undefined && flag.merge === blocks[index + 1]?.id;
       if (
-        this.notes.has(block.id) ||
-        this.notes.has(control.id) ||
-        (this.labels.has(block.id) && !this.clones.has(block)) ||
-        printed(block.id) ||
-        printed(control.id) ||
-        block.statements.some(
-          (node) =>
-            printed(node.id) ||
-            (this.program.retained.has(node.id) &&
-              !this.flagAccesses.has(node.id) &&
-              !('result' in node && this.inlined.has(node.result.id))),
-        ) ||
+        !this.quietBlock(block) ||
         (index < blocks.length - 1 &&
           !head &&
           (control.kind !== 'jump' || !this.silentTransfer(control.transfer)))
@@ -5935,22 +5968,51 @@ export class Renderer {
       widening.set(source.id, destination);
       assignments.push({ source, destination });
     };
+    // Narrow variables zero-extended by edge copies, with each extension's copy count.
+    const extended = new Map<string, { narrow: Value; copies: Map<string, Value[]> }>();
     for (const copies of program.transfers.values())
       for (const copy of copies) {
         const source = this.uncast(copy.source, ['bitcast']);
         if (source.id !== copy.source.id)
           assignments.push({ destination: copy.destination, source });
-        // An edge copy of an inline zero extension of a variable.
         const expression = this.inline.has(copy.source.id)
           ? program.expressions.get(copy.source.id)
           : undefined;
         if (
-          expression?.kind === 'cast' &&
-          expression.op === 'zero_extend' &&
-          !this.inline.has(expression.value.id)
+          expression?.kind !== 'cast' ||
+          expression.op !== 'zero_extend' ||
+          this.inline.has(expression.value.id)
         )
-          widen(expression.value, copy.destination);
+          continue;
+        const row = extended.get(expression.value.id) ?? {
+          narrow: expression.value,
+          copies: new Map<string, Value[]>(),
+        };
+        row.copies.set(copy.source.id, [
+          ...(row.copies.get(copy.source.id) ?? []),
+          copy.destination,
+        ]);
+        extended.set(expression.value.id, row);
       }
+    // A narrow variable joins the wide phi storage only when those edge copies
+    // are its only reads, so the merge adds no conversion at any read, and when
+    // it carries no role name the phi lacks (the merged variable keeps it).
+    for (const { narrow, copies } of extended.values()) {
+      const role = this.sourceRoleNames.get(narrow.id);
+      if (
+        program.use_counts.get(narrow.id) !== copies.size ||
+        [...copies].some(
+          ([id, destinations]) =>
+            program.use_counts.get(id) !== destinations.length ||
+            destinations.some(
+              (destination) => !!role && this.sourceRoleNames.get(destination.id) !== role,
+            ),
+        )
+      )
+        continue;
+      for (const destinations of copies.values())
+        for (const destination of destinations) widen(narrow, destination);
+    }
     for (const block of program.blocks.values())
       for (const node of block.statements) {
         if (node.kind !== 'assign' || !program.retained.has(node.id)) continue;
