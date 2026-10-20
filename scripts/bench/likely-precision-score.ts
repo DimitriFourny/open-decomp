@@ -261,7 +261,13 @@ export function guessableSites(calls: readonly CallRow[], truth: Truth): number 
   let count = 0;
   for (const call of calls) {
     const fact = call.target_name === null ? undefined : truth[call.target_name];
-    if (!call.arity_complete && call.target_address !== null && fact && !fact.variadic && !fact.complex)
+    if (
+      !call.arity_complete &&
+      call.target_address !== null &&
+      fact &&
+      !fact.variadic &&
+      !fact.complex
+    )
       count++;
   }
   return count;

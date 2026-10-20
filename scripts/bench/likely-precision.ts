@@ -75,7 +75,9 @@ const BROTLI_BINARY = '/opt/homebrew/bin/brotli';
 const MATRIX = '.local/performance/quality-matrix-reviewed';
 
 async function matrixBinaries(): Promise<Target['binaries']> {
-  const manifest = JSON.parse(await readFile(join(ROOT, MATRIX, 'build-manifest.json'), 'utf8')) as {
+  const manifest = JSON.parse(
+    await readFile(join(ROOT, MATRIX, 'build-manifest.json'), 'utf8'),
+  ) as {
     root: string;
     cells: { id: string; input: { path: string } }[];
   };
@@ -117,6 +119,11 @@ async function targets(): Promise<readonly Target[]> {
       binaries: [{ id: 'sqlite3-arm64', path: join(ROOT, SQLITE_BINARY) }],
       sources: [{ file: SQLITE_SOURCE }],
       sample: 250,
+      prepare: async () => {
+        const path = join(ROOT, SQLITE_SOURCE);
+        if (existsSync(path) && sha256(await readFile(path)) !== SQLITE_SHA256)
+          throw new Error(`${SQLITE_SOURCE} is not the pinned SQLite 3.54.0 amalgamation`);
+      },
     },
     {
       id: 'brotli',
@@ -168,23 +175,15 @@ async function groundTruth(target: Target, work: string): Promise<Truth> {
     );
     const compiled = spawnSync(
       'clang',
-      [
-        '-g',
-        '-O1',
-        '-gdwarf-5',
-        '-w',
-        '-c',
-        ...include,
-        file.path,
-        '-o',
-        object,
-      ],
+      ['-g', '-O1', '-gdwarf-5', '-w', '-c', ...include, file.path, '-o', object],
       { encoding: 'utf8', maxBuffer: 1 << 28 },
     );
     if (compiled.status !== 0)
       throw new Error(`clang failed on ${file.path}: ${compiled.stderr.slice(0, 2000)}`);
     // The dump of SQLite is far larger than a string can be: read it line by line.
-    const dump = spawn('dwarfdump', ['--debug-info', object], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const dump = spawn('dwarfdump', ['--debug-info', object], {
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
     const reader = new DwarfReader();
     const exited = new Promise<number | null>((done) => dump.on('close', done));
     for await (const line of createInterface({ input: dump.stdout })) reader.feed(line);
@@ -249,7 +248,9 @@ async function runBinary(
   });
   try {
     const functions = await listFunctions(session);
-    const names = new Map(functions.map((fn) => [fn.address, fn.name === null ? null : cName(fn.name)]));
+    const names = new Map(
+      functions.map((fn) => [fn.address, fn.name === null ? null : cName(fn.name)]),
+    );
     // Callers: defined functions of the sources, in a deterministic order.
     const candidates = functions
       .filter((fn) => !fn.import_stub && fn.name !== null && truth[cName(fn.name)] !== undefined)
@@ -270,8 +271,7 @@ async function runBinary(
       for (const inference of expandEmission(result.data.emission).inferences ?? []) {
         const details = inference.details;
         if (details.kind === 'call') {
-          const address =
-            details.target.kind === 'direct' ? details.target.identity.address : null;
+          const address = details.target.kind === 'direct' ? details.target.identity.address : null;
           calls.push({
             caller,
             call_id: details.call_id,
@@ -317,7 +317,8 @@ function flag(name: string): string | undefined {
   return index < 0 ? undefined : process.argv[index + 1];
 }
 
-const pct = (value: number | null): string => (value === null ? 'n/a' : `${(value * 100).toFixed(1)}%`);
+const pct = (value: number | null): string =>
+  value === null ? 'n/a' : `${(value * 100).toFixed(1)}%`;
 
 async function main(): Promise<void> {
   const label = flag('--label');
@@ -337,7 +338,10 @@ async function main(): Promise<void> {
     try {
       await target.prepare?.(work);
       const truth = await groundTruth(target, work);
-      Object.assign(merged, Object.fromEntries(Object.entries(truth).map(([k, v]) => [`${target.id}:${k}`, v])));
+      Object.assign(
+        merged,
+        Object.fromEntries(Object.entries(truth).map(([k, v]) => [`${target.id}:${k}`, v])),
+      );
       const perBinary = [];
       for (const binary of target.binaries) {
         const report = await runBinary(

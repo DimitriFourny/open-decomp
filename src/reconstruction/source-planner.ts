@@ -617,9 +617,7 @@ export function planSource(
     if (control.kind !== 'indirect' || !control.tail_call || !callee?.target) continue;
     const args = observedArguments(callee, block.register_exit, control.id, block.id);
     const guess =
-      view === 'source' &&
-      !args.missing &&
-      callee.argument_list_closure === undefined
+      view === 'source' && !args.missing && callee.argument_list_closure === undefined
         ? evidence.likely_arity?.get(control.id)
         : undefined;
     tails.set(control.id, {
