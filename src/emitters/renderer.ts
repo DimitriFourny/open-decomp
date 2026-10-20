@@ -4600,6 +4600,23 @@ export class Renderer {
         if (hoisted.has(key(copy.destination)) && moves.length <= 128)
           moves.push({ destination: key(copy.destination), source: copy.source });
     if (this.program.transfers.get(transfer)!.length) {
+      // A dropped zero-extension self-copy reads the live narrow member `u` of a
+      // widened class: its storage holds exactly zero_extend(u), written by u's own
+      // definition with no other member defined while u is live (interference).
+      const widened = new Map<string, Value>();
+      for (const copy of this.program.transfers.get(transfer)!) {
+        const representative = this.variables.get(copy.destination.id);
+        const narrow = this.uncast(copy.source, ['bitcast', 'zero_extend']);
+        if (
+          representative &&
+          narrow.id !== copy.source.id &&
+          !this.inline.has(narrow.id) &&
+          this.variables.get(narrow.id) === representative &&
+          bitWidth(narrow.type) < bitWidth(representative.type)
+        )
+          widened.set(representative.id, narrow);
+      }
+      const assumed = new Set([...widened.values()].map((value) => value.id));
       const checked = this.localValidation.check(
         'parallel-copy',
         transfer.effect.destination.id,
@@ -4631,6 +4648,9 @@ export class Renderer {
             }),
             moves,
             (id) => {
+              const narrow = widened.get(id);
+              if (narrow) return { kind: 'cast', op: 'zero_extend', value: narrow };
+              if (assumed.has(id)) return undefined;
               // A coalesced value is read from its class's single variable.
               const representative = this.variables.get(id);
               if (representative && representative.id !== id && !this.inline.has(id))
@@ -4938,7 +4958,10 @@ export class Renderer {
     }
   }
 
-  /** Edge copies actually printed: a coalesced class's self-copy is no move. */
+  /** Edge copies actually printed: a coalesced class's self-copy is no move. A
+   * zero extension of a narrower member of the destination's class is one too:
+   * that class shares widened unsigned storage, which holds the zero-extended
+   * value (the parallel-copy validation states this assumption). */
   private printedCopies(
     transfer: ParallelTransfer,
   ): readonly { readonly destination: Value; readonly source: Value }[] {
@@ -4949,10 +4972,13 @@ export class Renderer {
     return copies.filter((copy) => {
       const destination = this.variables.get(copy.destination.id);
       const source = this.uncast(copy.source, ['bitcast']);
+      const narrow = this.uncast(source, ['bitcast', 'zero_extend']);
       return !(
         destination &&
-        !this.inline.has(source.id) &&
-        this.variables.get(source.id) === destination
+        ((!this.inline.has(source.id) && this.variables.get(source.id) === destination) ||
+          (!this.inline.has(narrow.id) &&
+            this.variables.get(narrow.id) === destination &&
+            bitWidth(narrow.type) < bitWidth(destination.type)))
       );
     });
   }
@@ -5890,31 +5916,47 @@ export class Renderer {
     // at every other definition; narrow reads retain their original C type.
     const widening = new Map<string, Value>();
     const assignments: { destination: Value; source: Value }[] = [];
+    /** `destination = zero_extend(source)` of a plain unsigned variable: one
+     * widest-declared storage holds both (a source widened to two different
+     * storage types keeps its own). */
+    const widen = (source: Value, destination: Value): void => {
+      const previous = widening.get(source.id);
+      if (
+        source.type.kind !== 'integer' ||
+        destination.type.kind !== 'integer' ||
+        source.type.bits >= destination.type.bits ||
+        formals.has(source.id) ||
+        this.inlinedCalls.has(source.id) ||
+        this.valueType(source) !== this.dataType(source.type) ||
+        this.valueType(destination) !== this.dataType(destination.type) ||
+        (previous && machineType(previous.type) !== machineType(destination.type))
+      )
+        return;
+      widening.set(source.id, destination);
+      assignments.push({ source, destination });
+    };
     for (const copies of program.transfers.values())
       for (const copy of copies) {
         const source = this.uncast(copy.source, ['bitcast']);
         if (source.id !== copy.source.id)
           assignments.push({ destination: copy.destination, source });
+        // An edge copy of an inline zero extension of a variable.
+        const expression = this.inline.has(copy.source.id)
+          ? program.expressions.get(copy.source.id)
+          : undefined;
+        if (
+          expression?.kind === 'cast' &&
+          expression.op === 'zero_extend' &&
+          !this.inline.has(expression.value.id)
+        )
+          widen(expression.value, copy.destination);
       }
     for (const block of program.blocks.values())
       for (const node of block.statements) {
         if (node.kind !== 'assign' || !program.retained.has(node.id)) continue;
         const expression = program.expressions.get(node.result.id) ?? node.expression;
-        if (expression.kind !== 'cast' || expression.op !== 'zero_extend') continue;
-        const source = expression.value,
-          destination = node.result;
-        if (
-          source.type.kind !== 'integer' ||
-          destination.type.kind !== 'integer' ||
-          source.type.bits >= destination.type.bits ||
-          formals.has(source.id) ||
-          this.inlinedCalls.has(source.id) ||
-          this.valueType(source) !== this.dataType(source.type) ||
-          this.valueType(destination) !== this.dataType(destination.type)
-        )
-          continue;
-        widening.set(source.id, destination);
-        assignments.push({ source, destination });
+        if (expression.kind === 'cast' && expression.op === 'zero_extend')
+          widen(expression.value, node.result);
       }
     const storageType = (value: Value): string =>
       machineType((widening.get(value.id) ?? value).type);
