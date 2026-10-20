@@ -32,7 +32,10 @@ const x = (index: number): RegisterDescriptor => {
 
 /** stp x19, x30, [sp, #-16]!; x19 = x0; bl f; x0 += x19; ldp x19, x30; ret —
  * the save survives an unresolved call and the callee clobbers x1. */
-function framed(name: string, options: { reloadX19?: boolean; closure?: boolean } = {}) {
+function framed(
+  name: string,
+  options: { reloadX19?: boolean; closure?: boolean; escape?: boolean } = {},
+) {
   const b = builder(name),
     block = b.block('entry');
   const sp = block.readRegister(abi.stack_pointer);
@@ -41,6 +44,7 @@ function framed(name: string, options: { reloadX19?: boolean; closure?: boolean 
   block.store(frame, block.readRegister(x(19)));
   block.store(block.int('add', frame, block.constant(u64, 8n)), block.readRegister(x(30)));
   block.writeRegister(x(19), block.readRegister(x(0)));
+  if (options.escape) block.writeRegister(x(0), frame);
   block.call(
     { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
     [],
@@ -142,17 +146,35 @@ test('source view hides frame saves surviving unresolved calls; checked view kee
 });
 
 test('a save not restored on every exit is not a frame save; its dead reload is dropped', () => {
-  const fixture = framed('frame-save-unrestored', { reloadX19: false });
-  const source = fixture.view('source'),
-    checked = fixture.view('checked');
-  // x19's slot is not restored into x19, so its store remains ordered memory; the
-  // frame record (x30) is still a save, as its slot does not overlap.
-  assert.ok(source.retained.has(fixture.memory[0]!));
-  assert.equal(source.source?.frame_saves?.stores.size, 1);
-  // The unused reload is dominated by that store, so it cannot fault.
-  assert.ok(checked.retained.has(fixture.memory[2]!));
-  assert.ok(!source.retained.has(fixture.memory[2]!));
-  assert.ok(rules(source).includes('dead_frame_reload'));
+  for (const escape of [false, true]) {
+    const fixture = framed(`frame-save-unrestored-${escape}`, { reloadX19: false, escape });
+    const source = fixture.view('source'),
+      checked = fixture.view('checked');
+    // x19's slot is not restored into x19, so it is no save; the frame record
+    // (x30) still is, as its slot does not overlap.
+    assert.equal(source.source?.frame_saves?.stores.size, 1);
+    assert.ok(!source.source?.frame_saves?.stores.has(fixture.memory[0]!));
+    assert.ok(checked.retained.has(fixture.memory[0]!));
+    assert.ok(checked.retained.has(fixture.memory[2]!));
+    // The unused reload disappears either way.
+    assert.ok(!source.retained.has(fixture.memory[2]!));
+    if (escape) {
+      // Its address reaches the call: the store remains ordered memory, and the
+      // reload, dominated by that store, cannot fault.
+      assert.ok(source.retained.has(fixture.memory[0]!));
+      assert.ok(rules(source).includes('dead_frame_reload'));
+      continue;
+    }
+    // Its pre-call contents are read back after the open call, so it lies above
+    // that call's argument area: a private slot whose unused value disappears.
+    assert.ok(!source.retained.has(fixture.memory[0]!));
+    assert.ok(rules(source).includes('private_stack_promotion'));
+    assert.ok(
+      source.local_validation_session?.abiConformance.some(
+        (site) => site.rule === 'open_call_argument_area',
+      ),
+    );
+  }
 });
 
 test('source view moves ABI-scratch exit clobbers out of line', () => {

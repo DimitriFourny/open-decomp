@@ -149,7 +149,9 @@ test(
           );
           assert.equal(observed.exit, 'machine_return', `${emitter}: variadic ${index}`);
           assert.deepEqual(observed.values, oracle.get(`variadic:${index}`));
-          assert.equal(observed.events[0], 'store');
+          // The va_list cursor lies below the incoming area its address reaches:
+          // a promoted local, not frame memory.
+          assert.ok(!observed.events.includes('store'));
           if (args.length === 0)
             assert.ok(
               !observed.events.includes('load'),
