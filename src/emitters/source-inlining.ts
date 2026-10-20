@@ -4,6 +4,7 @@ import {
   expressionOperands,
   type Expression,
   type Instruction,
+  type IntegerOp,
   type Value,
 } from '../ir/index.js';
 import type { BlockRegion } from '../presentation/index.js';
@@ -14,12 +15,15 @@ export type InlineInstruction = Extract<Instruction, { kind: 'assign' | 'load' }
 export interface InlineSite {
   readonly node: InlineInstruction;
   /** Original statement/control that evaluates this value exactly once (a
-   * propagated copy: its first reading statement; every reader prints its source). */
+   * propagated copy: its first reading statement; every reader prints its source;
+   * a repeated operation: its one reader, which evaluates it at every occurrence). */
   readonly anchor: string;
   /** Original anchor of a synthetic pure definition. */
   readonly origin?: string;
   /** A plain copy printed as its source variable at every reader. */
   readonly propagated?: boolean;
+  /** A cheap pure operation printed at each of its occurrences in its one reader. */
+  readonly repeated?: boolean;
   /** A load of a private local that every reader prints as the local itself:
    * `shared` (the local's next write follows every reader) or `sunk` (that write
    * is printed right after the reader that follows it). */
@@ -54,6 +58,24 @@ const ENVIRONMENT_CASTS: Partial<Record<CastOp, true>> = {
   float_to_signed: true,
   float_to_unsigned: true,
   float_convert: true,
+};
+
+/** Binary operations cheap enough to repeat at their reader (with a constant operand). */
+const REPEATABLE_OPERATIONS: Partial<Record<IntegerOp, true>> = {
+  add: true,
+  sub: true,
+  and: true,
+  or: true,
+  xor: true,
+  shl: true,
+  lshr: true,
+  ashr: true,
+};
+const REPEATABLE_CASTS: Partial<Record<CastOp, true>> = {
+  truncate: true,
+  zero_extend: true,
+  sign_extend: true,
+  bitcast: true,
 };
 
 function environmental(expression: Expression): boolean {
@@ -95,6 +117,8 @@ export function planSourceInlining(
     conditional: boolean;
     transfer: boolean;
     alternative?: boolean;
+    /** The edge copy a transfer use reads in. */
+    copy?: object;
   };
   /** The use of `operand` inside `expression`, evaluated at `at`. */
   const operandAt = (expression: Expression, operand: Value, at: Use): Use =>
@@ -249,7 +273,7 @@ export function planSourceInlining(
         : controlArms(control).map((arm) => arm.transfer);
     for (const transfer of transfers)
       for (const copy of program.transfers.get(transfer) ?? [])
-        use(copy.source, { ...at, transfer: true, conditional: control.kind !== 'jump' });
+        use(copy.source, { ...at, transfer: true, conditional: control.kind !== 'jump', copy });
     if (!complete) return { sites: new Map(), calls: new Map(), deferred: new Map() };
   }
   const result = new Map<string, InlineSite>();
@@ -273,6 +297,8 @@ export function planSourceInlining(
   /** Propagated multi-use copies (to their source): never a consumer of another expansion. */
   const shared = new Map<string, Value>();
   const sensitive: Candidate[] = [];
+  /** Multi-use integer definitions that may repeat at their one reader (see below). */
+  const repeatable: Candidate[] = [];
   for (const candidate of candidates) {
     const { node, origin } = candidate;
     const expression = program.expressions.get(node.result.id);
@@ -305,8 +331,10 @@ export function planSourceInlining(
         !source ||
         program.inline.has(source.id) ||
         program.source?.stack_addresses.has(source.id)
-      )
+      ) {
+        if (!environment && node.result.type.kind === 'integer') repeatable.push(candidate);
         continue;
+      }
       shared.set(node.result.id, source);
     }
     if (environment) sensitive.push(candidate);
@@ -549,6 +577,55 @@ export function planSourceInlining(
       result.set(node.result.id, { node, anchor: other.anchor, local: sunk ? 'sunk' : 'shared' });
       anchorOverride.set(node.result.id, other.anchor);
     }
+  // One cheap integer operation on a printed variable (with a constant: `x >> 1`,
+  // `x & 0xff`; or a conversion `(uint8_t)x`) read by exactly one statement, test
+  // or edge copy, at most four times (`y = c ? (x >> 1) ^ k : x >> 1`), repeats
+  // there instead of naming a temporary: it is pure and its operands are read
+  // where the reader reads them. An edge copy reads it only through one consumer
+  // statement, so every occurrence lies in that one copy.
+  const repeated = new Set<string>();
+  const constant = (value: Value): boolean =>
+    program.inline.has(value.id) && program.expressions.get(value.id)?.kind === 'constant';
+  const leaf = (value: Value): boolean =>
+    constant(value) ||
+    (!program.inline.has(value.id) &&
+      !result.has(value.id) &&
+      !program.source?.stack_addresses.has(value.id));
+  for (const { node, origin } of repeatable) {
+    context.checkpoint(1);
+    const expression = program.expressions.get(node.result.id)!,
+      row = uses.get(node.result.id)!;
+    const cheap =
+      expression.kind === 'integer'
+        ? REPEATABLE_OPERATIONS[expression.op] === true &&
+          leaf(expression.left) &&
+          leaf(expression.right) &&
+          constant(expression.left) !== constant(expression.right)
+        : expression.kind === 'integer_unary'
+          ? (expression.op === 'not' || expression.op === 'neg') && leaf(expression.value)
+          : expression.kind === 'cast'
+            ? REPEATABLE_CASTS[expression.op] === true && leaf(expression.value)
+            : expression.kind === 'extract' && leaf(expression.value);
+    // Every direct use lies in one edge copy, or none does.
+    const copies = new Set(row.all.map((use) => use.copy));
+    if (!cheap || row.count > 4 || row.all.length > 4 || copies.size !== 1) continue;
+    let anchor: string | undefined,
+      copied = false;
+    for (const use of row.all) {
+      const target = use.alternative ? null : resolve(use);
+      if (!target || (anchor !== undefined && target.at.anchor !== anchor)) {
+        anchor = undefined;
+        break;
+      }
+      anchor = target.at.anchor;
+      copied ||= target.at.transfer;
+    }
+    // An edge copy reached through consumers: all direct uses lie in one consumer.
+    if (anchor === undefined || (copied && copies.has(undefined) && row.anchors.size !== 1))
+      continue;
+    result.set(node.result.id, { node, anchor, repeated: true, ...(origin ? { origin } : {}) });
+    repeated.add(node.id);
+  }
   // Pure definitions were selected before loads, independent of block layout.
   // Resolve all mapping anchors to the final consuming statement/control.
   for (const [id, site] of result) {
@@ -612,7 +689,8 @@ export function planSourceInlining(
         !reader ||
         target.at.conditional ||
         target.at.transfer ||
-        omitted.has(reader.id)
+        omitted.has(reader.id) ||
+        [...target.nested].some((id) => repeated.has(id))
       )
         continue;
       const { at } = target;

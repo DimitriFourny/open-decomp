@@ -286,6 +286,8 @@ class Parser {
   private readonly tables = new Map<string, { readonly address: bigint; readonly bits: number }>();
   /** Declared scalar globals (`extern T name;`): the name is the object, not a pointer. */
   private readonly scalars = new Set<string>();
+  /** Declared result types of `extern R name(...);` functions. */
+  private readonly prototypes = new Map<string, CType>();
   returnType: CType = MATH;
   /** A `void` function: control falling off its end returns (C11 6.9.1p12). */
   readonly voidResult: boolean;
@@ -415,9 +417,13 @@ class Parser {
       else {
         this.take('extern');
         if (this.peek() === 'const') this.take('const');
-        assert.ok(this.bodyType(false));
+        const result = this.bodyType(false);
+        assert.ok(result);
         const name = this.take();
         if (this.peek() === '(') {
+          // A call's value has its declared result type (C11 6.5.2.2p5).
+          const type = this.cType(result);
+          if (type !== MATH) this.prototypes.set(name, type);
           while (this.take() !== ';') assert.ok(this.position < this.tokens.length);
           continue;
         }
@@ -1237,7 +1243,7 @@ class Parser {
         type = expression.type;
         break;
       case 'call':
-        type = expression.ctype ?? helperType(expression);
+        type = expression.ctype ?? this.prototypes.get(expression.name) ?? helperType(expression);
         break;
       case 'unary':
         type = expression.op === '!' ? INT : promote(this.typeOf(expression.value));

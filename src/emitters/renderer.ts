@@ -5828,6 +5828,17 @@ export class Renderer {
       deferred = new Map();
       for (const site of reused) candidates.delete(site.node.result.id);
     }
+    const repeated = [...candidates.values()].filter((site) => site.repeated);
+    if (
+      repeated.length &&
+      !this.localValidation.presentation(
+        'repeated_operation',
+        subject,
+        'a cheap pure integer operation of one printed variable (an add, subtract, bitwise or shift with a constant, a negation, complement or integer conversion) read only by one statement, test or edge copy (the copy only through one consumer statement), at most four times, is printed at each occurrence in that reader instead of a temporary; liveness treats each occurrence as a read of its operand at the reader, so the operand is never reassigned in between',
+        repeated.map(({ node }) => node.id),
+      )
+    )
+      for (const site of repeated) candidates.delete(site.node.result.id);
     if (
       candidates.size &&
       this.localValidation.presentation(

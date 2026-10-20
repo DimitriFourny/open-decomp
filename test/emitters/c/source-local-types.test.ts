@@ -246,10 +246,11 @@ for (const language of ['c-like', 'python-like'] as const) {
   test(`${language} equality of a signed library result drops the unsigned reinterpretation only in C`, () => {
     const emission = signedResult('eq', 0n)(language);
     // C converts the signed operand to the unsigned type of the same bits; Python
-    // integers do not, so the python-like text keeps its explicit reduction.
+    // integers do not, so the python-like text keeps its explicit reduction. The
+    // single-use result may print as the call itself.
     if (language === 'c-like')
-      assert.doesNotMatch(emission.text, /\(uint32_t\)\w+ ==/, emission.text);
-    else assert.match(emission.text, /uint32\(\w+\) == 0/, emission.text);
+      assert.doesNotMatch(emission.text, /\(uint32_t\)(?:\w+|fclose\(.*\)) ==/, emission.text);
+    else assert.match(emission.text, /uint32\((?:\w+|fclose\(.*\))\) == 0/, emission.text);
     for (const [value, expected] of [
       [0n, 1n],
       [1n, 2n],
@@ -264,7 +265,9 @@ for (const language of ['c-like', 'python-like'] as const) {
     const unsigned = signedResult('ult', 5n)(language);
     assert.match(
       unsigned.text,
-      language === 'c-like' ? /\(uint32_t\)\w+ < 5/ : /uint32\(\w+\) < 5/,
+      language === 'c-like'
+        ? /\(uint32_t\)(?:\w+|fclose\(.*\)) < 5/
+        : /uint32\((?:\w+|fclose\(.*\))\) < 5/,
       unsigned.text,
     );
     for (const [value, expected] of [
