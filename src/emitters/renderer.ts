@@ -5995,14 +5995,24 @@ export class Renderer {
         extended.set(expression.value.id, row);
       }
     // A narrow variable joins the wide phi storage only when those edge copies
-    // are its only reads, so the merge adds no conversion at any read; when it is
-    // at least `int` wide, since a narrower unsigned value promotes to signed `int`
-    // and its definition into wider storage would need a conversion; and when it
-    // carries no role name the phi lacks (the merged variable keeps it).
+    // are its only reads, so the merge adds no conversion at any read; when its
+    // value is at least `int` wide, since a narrower unsigned value (a narrow type
+    // or the zero extension of one) promotes to signed `int` and its definition
+    // into wider storage would need a conversion; and when it carries no role name
+    // the phi lacks (the merged variable keeps it).
+    const promoted = (value: Value): boolean => {
+      const expression = program.expressions.get(value.id);
+      return (
+        bitWidth(value.type) < 32 ||
+        (expression?.kind === 'cast' &&
+          expression.op === 'zero_extend' &&
+          bitWidth(expression.value.type) < 32)
+      );
+    };
     for (const { narrow, copies } of extended.values()) {
       const role = this.sourceRoleNames.get(narrow.id);
       if (
-        bitWidth(narrow.type) < 32 ||
+        promoted(narrow) ||
         program.use_counts.get(narrow.id) !== copies.size ||
         [...copies].some(
           ([id, destinations]) =>
