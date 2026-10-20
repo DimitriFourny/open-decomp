@@ -809,9 +809,9 @@ export interface LoopExitRoute {
 
 /** A boolean is needed only when a real edge bypasses two or more breakable
  * scopes to an enclosing loop's exact continuation. No arbitrary target, loop
- * entry, or irreducible edge is rewritten: a loop entered by a goto (at its
- * header or into its body) keeps its labeled exits, since the flag would not
- * be initialized on that entry. */
+ * entry, or irreducible edge is rewritten: a loop or block run once entered by
+ * a goto (at its header or into its body) keeps its labeled exits, since the
+ * flag, declared where it starts, would not be initialized on that entry. */
 export function planLoopExits(
   body: Region,
   language: 'c-like' | 'python-like',
@@ -822,8 +822,7 @@ export function planLoopExits(
   const scan = (region: Region, loops: readonly string[]): void => {
     context.checkpoint(1);
     if (region.kind === 'sequence') for (const child of region.regions) scan(child, loops);
-    else if (region.kind === 'loop')
-      scan(region.body, region.once ? loops : [...loops, region.header]);
+    else if (region.kind === 'loop') scan(region.body, [...loops, region.header]);
     else {
       enclosing.set(region.id, loops);
       for (const arm of controlArms(region.control)) if (arm.body) scan(arm.body, loops);
@@ -835,7 +834,7 @@ export function planLoopExits(
     if (occurrenceAction(occurrence, language) !== 'goto') return;
     const scopes = occurrence.nesting;
     const inside = new Set(
-      scopes.flatMap((scope) => (scope.kind === 'loop' && !scope.once ? [scope.header] : [])),
+      scopes.flatMap((scope) => (scope.kind === 'loop' ? [scope.header] : [])),
     );
     if (!inside.has(occurrence.transfer.target)) unsafe.add(occurrence.transfer.target);
     for (const loop of enclosing.get(occurrence.transfer.target) ?? [])
