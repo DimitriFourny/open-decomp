@@ -81,6 +81,12 @@ export interface ObservedField {
   /** Dynamic index evidence without a single representable stride. In this
    * case a null stride does not establish a constant-displacement access. */
   readonly dynamic?: boolean;
+  /** Every access is an IEEE binary32/binary64 read or write of the bytes (the
+   * loaded value is only reinterpreted as a float, or the stored value is a
+   * reinterpreted float). Floating and non-floating accesses of the same bytes
+   * are distinct fields, never a conflict: same offset and width, one
+   * anonymous union member each. */
+  readonly float?: true;
   /** Exact calls whose indirect target was read from this field. No prototype
    * or complete argument count is implied by observing a callable address. */
   readonly call_target_ids?: readonly string[];

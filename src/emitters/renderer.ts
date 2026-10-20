@@ -144,7 +144,13 @@ import {
   type InlineStore,
   type InlineSite,
 } from './source-inlining.js';
-import { memberName, paddingName, SourceStructs, type ObservedMember } from './source-structs.js';
+import {
+  paddingName,
+  SourceStructs,
+  structMemberName,
+  usedMemberKey,
+  type ObservedMember,
+} from './source-structs.js';
 import { planFlagTests, type FlagTest } from './source-flags.js';
 import { planLocalTypes, type Fact, type PointerFact } from './source-local-types.js';
 
@@ -309,7 +315,7 @@ export class Renderer {
   /** C integer type of each printed struct-member lvalue, by its text. */
   private readonly memberTypes = new Map<string, IntegerCType>();
   /** Offsets of each structure's members this function's text accesses, by structure name. */
-  private readonly usedMembers = new Map<string, Set<bigint>>();
+  private readonly usedMembers = new Map<string, Set<string>>();
   /** Where the structure bodies are inserted once the accessed members are known. */
   private structureSlot: { readonly at: number; readonly ids: readonly string[] } | null = null;
   private readonly sourceStructs: SourceStructs;
@@ -2818,7 +2824,7 @@ export class Renderer {
    * a declared partial structure with a member of exactly that offset and width.
    * The base may itself be an inline pointer member read (`p->f_20->f_8`), and
    * a loop counter proven by shape analysis indexes a strided element view. */
-  private memberAccess(address: Value, bits: number, node?: string): string | null {
+  private memberAccess(address: Value, bits: number, node?: string, float = false): string | null {
     let base = address,
       offset = 0n;
     let index: Value | undefined,
@@ -2912,7 +2918,9 @@ export class Renderer {
       const kind = this.typeRecords.get(item.typeId)?.definition.kind;
       if (
         item.bits !== bits ||
-        !(kind === 'integer' || (kind === 'pointer' && item.count === undefined))
+        !(float
+          ? kind === 'float'
+          : kind === 'integer' || (kind === 'pointer' && item.count === undefined))
       )
         return false;
       if (item.count === undefined) return (!index || indexedStruct) && item.offset === offset;
@@ -2939,10 +2947,10 @@ export class Renderer {
       if (!node) return null;
       this.memberPointers.set(node, member.typeId);
     }
-    const field = member.name ?? memberName(member.offset);
+    const field = structMemberName(member);
     const used = this.sourceStructs.name(pointer.to);
-    const offsets = this.usedMembers.get(used) ?? new Set<bigint>();
-    offsets.add(member.offset);
+    const offsets = this.usedMembers.get(used) ?? new Set<string>();
+    offsets.add(usedMemberKey(member));
     this.usedMembers.set(used, offsets);
     let access = indexedStruct
       ? `${baseText}[${this.value(index!)}].${field}`
@@ -3061,9 +3069,7 @@ export class Renderer {
       const parts: string[] = [];
       let end = 0n,
         packed = false;
-      for (const member of members) {
-        if (!used.has(member.offset)) continue;
-        if (member.offset > end) parts.push(`uint8_t ${paddingName(end)}[${member.offset - end}];`);
+      const declare = (member: ObservedMember): string => {
         const definition = this.typeRecords.get(member.typeId)?.definition;
         const spelling =
           definition?.kind === 'float'
@@ -3076,7 +3082,24 @@ export class Renderer {
                 : '__uint128_t'
               : this.sourceType(member.typeId);
         const array = member.count === undefined ? '' : `[${member.count ?? ''}]`;
-        parts.push(`${spelling} ${member.name ?? memberName(member.offset)}${array};`);
+        return `${spelling} ${structMemberName(member)}${array};`;
+      };
+      for (let index = 0; index < members.length; index++) {
+        const member = members[index]!;
+        // The integer member of an overlay is followed by its floating partner;
+        // both print as one anonymous union only when the text uses both.
+        const partner = member.overlaid && !member.float ? members[index + 1] : undefined;
+        if (partner) index++;
+        const printed = [member, ...(partner ? [partner] : [])].filter((item) =>
+          used.has(usedMemberKey(item)),
+        );
+        if (!printed.length) continue;
+        if (member.offset > end) parts.push(`uint8_t ${paddingName(end)}[${member.offset - end}];`);
+        parts.push(
+          printed.length === 2
+            ? `union { ${printed.map(declare).join(' ')} };`
+            : declare(printed[0]!),
+        );
         packed ||= member.offset % BigInt(member.bits / 8) !== 0n;
         end = member.offset + member.size;
       }
@@ -3706,8 +3729,13 @@ export class Renderer {
       )
         return indexed;
     }
-    if (this.language === 'c-like' && plain) {
-      const member = this.memberAccess(node.address, bitWidth(type), node.id);
+    if (this.language === 'c-like' && (plain || (type.kind === 'float' && scalar))) {
+      const member = this.memberAccess(
+        node.address,
+        bitWidth(type),
+        node.id,
+        type.kind === 'float',
+      );
       if (member && this.permitUnaligned(node)) return member;
     }
     let address = this.stringBaseSum(node.address) ?? this.sourceAddressPrinted(node.address);

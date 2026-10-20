@@ -626,7 +626,9 @@ export function buildMemoryShape(
   const end = (field: ObservedField): bigint =>
     field.offset + BigInt(Math.ceil(field.width_bits / 8));
   // Equal-width fixed/dynamic observations can be compatible views of the
-  // same element. Different widths or element periods remain alternatives.
+  // same element, and so are floating and non-floating accesses of the same
+  // bytes (one anonymous union member each). Different widths or element
+  // periods remain alternatives.
   const compatible = (a: ObservedField, b: ObservedField): boolean =>
     !a.dynamic &&
     !b.dynamic &&
@@ -672,9 +674,21 @@ export function buildMemoryShape(
       let type_id = options.field_type(field);
       if (field.width_bits % 8 === 0 && field.stride === BigInt(field.width_bits / 8))
         type_id = options.array_type(type_id, field);
+      // A floating member beside an integer access of the same bytes is the
+      // second member of one anonymous union.
+      const overlaid =
+        field.float === true &&
+        fields.some(
+          (other) =>
+            !other.float &&
+            !other.dynamic &&
+            !winners.has(other.id) &&
+            other.offset === field.offset &&
+            other.width_bits === field.width_bits,
+        );
       return {
         id: field.id,
-        name: `field_${(field.offset - base_offset).toString(16)}`,
+        name: `field_${(field.offset - base_offset).toString(16)}${overlaid ? '_f' : ''}`,
         offset: field.offset - base_offset,
         type_id,
       };
@@ -996,6 +1010,7 @@ export function refineMemoryShapes(
           field.width_bits,
           stride,
           ...(dynamic ? [true] : []),
+          ...(field.float ? ['float'] : []),
         ]);
         transferredSubjects.set(field.id, fieldId);
         const previous = group.fields.get(fieldId);
@@ -1126,9 +1141,11 @@ export function refineMemoryShapes(
         }
         if (alternatives.length) return alternatives[0]!.type_id;
         return generated(
-          field.width_bits <= 512
-            ? { kind: 'integer', bits: field.width_bits, signed: false }
-            : { kind: 'unknown', size: null },
+          field.float && (field.width_bits === 32 || field.width_bits === 64)
+            ? { kind: 'float', bits: field.width_bits }
+            : field.width_bits <= 512
+              ? { kind: 'integer', bits: field.width_bits, signed: false }
+              : { kind: 'unknown', size: null },
           field.evidence_ids,
         );
       };

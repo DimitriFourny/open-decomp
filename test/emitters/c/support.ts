@@ -39,6 +39,14 @@ interface StructLayout {
     { readonly offset: bigint; readonly type: CType; readonly array: boolean }
   >;
 }
+/** One parsed member declaration of a structure or of an anonymous union in it. */
+interface StructMemberDeclaration {
+  readonly name: string;
+  readonly type: CType;
+  readonly size: bigint;
+  readonly count: bigint;
+  readonly array: boolean;
+}
 const MATH: CType = { kind: 'math' };
 /** Decode the body of a C or Python-like string/character literal (octal and
  * \\u/\\U escapes included). */
@@ -468,18 +476,24 @@ class Parser {
     let offset = 0n,
       alignment = 1n;
     this.take('{');
-    const end = this.tokens.indexOf('}', this.position);
+    // The structure's closing brace, past any anonymous union bodies.
+    let end = this.position;
+    for (let depth = 1; depth > 0; end++) {
+      if (this.tokens[end] === '{') depth++;
+      else if (this.tokens[end] === '}') depth--;
+    }
+    end--;
     const packed = this.tokens[end + 1] === '__attribute__';
-    while (this.peek() !== '}') {
+    const member = (): StructMemberDeclaration => {
       const type = this.bodyType(false);
       assert.ok(type, 'Unsupported struct member type');
       const field = this.cType(type);
       assert.ok(
-        field.kind === 'pointer' || (field.kind === 'int' && !field.bool),
-        'Struct members are fixed-width integers or target pointers',
+        field.kind === 'pointer' || field.kind === 'float' || (field.kind === 'int' && !field.bool),
+        'Struct members are fixed-width integers, floats or target pointers',
       );
       const size = field.kind === 'pointer' ? 8n : BigInt(field.bits / 8),
-        member = this.take();
+        name = this.take();
       let count = 1n;
       const array = this.peek() === '[';
       if (this.peek() === '[') {
@@ -487,13 +501,37 @@ class Parser {
         count = this.peek() === ']' ? 0n : BigInt(this.take());
         this.take(']');
       }
-      if (!packed) {
-        offset = ((offset + size - 1n) / size) * size;
-        if (size > alignment) alignment = size;
-      }
-      fields.set(member, { offset, type: field, array });
-      offset += size * count;
       this.take(';');
+      return { name, type: field, size, count, array };
+    };
+    while (this.peek() !== '}') {
+      // An anonymous union: its members start at one offset and share storage.
+      if (this.peek() === 'union') {
+        this.take('union');
+        this.take('{');
+        const shared: StructMemberDeclaration[] = [];
+        while (this.peek() !== '}') shared.push(member());
+        this.take('}');
+        this.take(';');
+        const size = shared.reduce((max, item) => (item.size > max ? item.size : max), 0n);
+        if (!packed) {
+          offset = ((offset + size - 1n) / size) * size;
+          if (size > alignment) alignment = size;
+        }
+        for (const item of shared) {
+          assert.ok(!item.array, 'Union members are scalars');
+          fields.set(item.name, { offset, type: item.type, array: false });
+        }
+        offset += size;
+        continue;
+      }
+      const item = member();
+      if (!packed) {
+        offset = ((offset + item.size - 1n) / item.size) * item.size;
+        if (item.size > alignment) alignment = item.size;
+      }
+      fields.set(item.name, { offset, type: item.type, array: item.array });
+      offset += item.size * item.count;
     }
     this.take('}');
     if (packed)
@@ -1177,7 +1215,9 @@ class Parser {
         );
         const member = this.structs.get(type.to.name)?.fields.get(field);
         assert.ok(
-          member?.type.kind === 'int' || (member?.type.kind === 'pointer' && !member.array),
+          member?.type.kind === 'int' ||
+            member?.type.kind === 'float' ||
+            (member?.type.kind === 'pointer' && !member.array),
           `Undeclared struct member ${field}`,
         );
         const address: Expr = {
@@ -1188,7 +1228,7 @@ class Parser {
         };
         const memberType = member.type;
         expression =
-          memberType.kind !== 'int'
+          memberType.kind === 'pointer'
             ? // A pointer member is its 64-bit target address.
               { ...this.read(address, { kind: 'int', bits: 64, signed: false }), ctype: memberType }
             : member.array

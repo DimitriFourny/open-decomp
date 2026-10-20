@@ -108,16 +108,18 @@ export const compareImageFields = (a: ImageTypeField, b: ImageTypeField): number
     ? -1
     : a.offset > b.offset
       ? 1
-      : a.width_bits - b.width_bits || String(a.stride).localeCompare(String(b.stride));
+      : a.width_bits - b.width_bits ||
+        String(a.stride).localeCompare(String(b.stride)) ||
+        Number(a.kind === 'float') - Number(b.kind === 'float');
 
-/** Two observations of the same bytes are one member when offset, width and
- * any proven period agree and they are not float versus integer storage. */
+/** Two observations of the same bytes are one member (or, as a float and a
+ * non-float access, the two members of one anonymous union over the same
+ * bytes) when offset, width and any proven period agree. */
 function sameMember(a: ImageTypeField, b: ImageTypeField): boolean {
   return (
     a.offset === b.offset &&
     a.width_bits === b.width_bits &&
-    (a.stride === null || b.stride === null || a.stride === b.stride) &&
-    (a.kind === 'float') === (b.kind === 'float')
+    (a.stride === null || b.stride === null || a.stride === b.stride)
   );
 }
 

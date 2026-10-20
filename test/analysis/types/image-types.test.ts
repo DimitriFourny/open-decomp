@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AnalysisBudget } from '../../../src/analysis/ssa/budget.js';
+import { renderImageTypeDeclarations } from '../../../src/emitters/image-types.js';
 import {
   solveImageTypes,
   type ImageTypeAnchor,
@@ -112,6 +113,72 @@ test('overlapping incompatible views stay separate and record the conflict', () 
   // Each layout keeps only its own compatible members.
   assert.deepEqual(wide.fields, [word(0n, 64)]);
   assert.deepEqual(high.fields, [word(4n)]);
+});
+
+const floating = (offset: bigint, width_bits = 64): ImageTypeField => ({
+  ...word(offset, width_bits),
+  kind: 'float',
+});
+const flowing = (...fields: readonly (readonly ImageTypeField[])[]): ImageTypeObject[] => [
+  object(
+    'caller|p',
+    'caller',
+    [],
+    [
+      { anchor: argument('first'), own: false },
+      { anchor: argument('second'), own: false },
+    ],
+  ),
+  object('first|a0', 'first', fields[0]!, [{ anchor: argument('first'), own: true }]),
+  object('second|a0', 'second', fields[1]!, [{ anchor: argument('second'), own: true }]),
+];
+
+test('a float and an integer view of identical bytes merge into two members of one union', () => {
+  const solution = solve(flowing([word(16n, 64)], [floating(16n)]));
+  const merged = classOf(solution, 'first|a0');
+  assert.equal(merged, classOf(solution, 'second|a0'));
+  assert.deepEqual(merged.conflicts, []);
+  assert.deepEqual(
+    merged.fields.map((field) => [field.offset, field.width_bits, field.kind]),
+    [
+      [16n, 64, 'integer'],
+      [16n, 64, 'float'],
+    ],
+  );
+  // A union already in one view joins either member's view.
+  const triple = solve([
+    ...flowing([word(16n, 64), floating(16n)], [floating(16n)]),
+    object('third|a0', 'second', [word(16n, 64)], [{ anchor: argument('second'), own: true }]),
+  ]);
+  assert.equal(classOf(triple, 'first|a0').fields.length, 2);
+  assert.equal(classOf(triple, 'first|a0'), classOf(triple, 'third|a0'));
+  // Input order never changes the layout.
+  const reversed = solve(flowing([floating(16n)], [word(16n, 64)]));
+  assert.deepEqual(classOf(reversed, 'first|a0').fields, merged.fields);
+});
+
+test('a float view overlapping integer bytes of another width or offset still conflicts', () => {
+  for (const [integer, float] of [
+    [word(16n, 64), floating(16n, 32)],
+    [word(16n, 64), floating(20n, 32)],
+    [word(20n, 32), floating(16n, 64)],
+  ] as const) {
+    const solution = solve(flowing([integer], [float]));
+    const wide = classOf(solution, 'first|a0'),
+      other = classOf(solution, 'second|a0');
+    assert.notEqual(wide.id, other.id);
+    assert.deepEqual(wide.conflicts, [other.id]);
+  }
+});
+
+test('image-wide declarations print the float and integer views as one anonymous union', () => {
+  const solution = solve(flowing([word(0n, 64), word(16n, 64)], [floating(16n)]));
+  const text = renderImageTypeDeclarations(solution.classes, (id) => id);
+  assert.match(
+    text,
+    /struct \w+ \{[^}]*uint64_t field_0x0;[^}]*union \{ uint64_t field_0x10; double field_0x10_f; \};[^}]*\};/,
+    text,
+  );
 });
 
 test('a flow the callee never uses as an object joins nothing', () => {

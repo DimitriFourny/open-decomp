@@ -720,23 +720,41 @@ export function applyImageTypes(
     });
     const occupied = fields.map((field) => {
       const definition = byId.get(field.type_id)?.definition;
-      const element =
-        definition?.kind === 'array' ? byId.get(definition.element)?.definition : definition;
+      const array = definition?.kind === 'array';
+      const element = array ? byId.get(definition.element)?.definition : definition;
       const bits =
         element?.kind === 'integer' || element?.kind === 'float'
           ? element.bits
           : element?.kind === 'pointer'
             ? 64
             : 8;
-      return { start: field.offset, end: field.offset + BigInt(Math.ceil(bits / 8)) };
+      return {
+        start: field.offset,
+        end: field.offset + BigInt(Math.ceil(bits / 8)),
+        float: element?.kind === 'float',
+        array,
+      };
     });
-    const added: ImageTypeField[] = [];
+    const added: { field: ImageTypeField; overlay: boolean }[] = [];
     for (const field of item.fields) {
       context.checkpoint(1);
-      const end = field.offset + BigInt(Math.ceil(field.width_bits / 8));
-      if (occupied.some((range) => field.offset < range.end && range.start < end)) continue;
-      occupied.push({ start: field.offset, end });
-      added.push(field);
+      const end = field.offset + BigInt(Math.ceil(field.width_bits / 8)),
+        float = field.kind === 'float';
+      const overlapping = occupied.filter((range) => field.offset < range.end && range.start < end);
+      // The same bytes read as the other scalar kind are one more member of an
+      // anonymous union (a scalar member, never an array element view).
+      const overlay =
+        overlapping.length > 0 &&
+        overlapping.every(
+          (range) =>
+            range.start === field.offset &&
+            range.end === end &&
+            !range.array &&
+            range.float !== float,
+        );
+      if (overlapping.length && !overlay) continue;
+      occupied.push({ start: field.offset, end, float, array: false });
+      added.push({ field, overlay });
     }
     const last = occupied.reduce((max, range) => (range.start > max ? range.start : max), 0n);
     // C declares an unknown element count only as the last member: an earlier
@@ -746,17 +764,18 @@ export function applyImageTypes(
       if (definition?.kind === 'array' && definition.count === null && field.offset !== last)
         fields[index] = { ...field, type_id: definition.element };
     }
-    for (const field of added)
+    for (const { field, overlay } of added)
       fields.push({
         id: entityIdentity(slice, 'image-type-field', [
           item.id,
           field.offset,
           field.width_bits,
           field.stride,
+          ...(field.kind === 'float' ? ['float'] : []),
         ]),
-        name: `field_${field.offset.toString(16)}`,
+        name: `field_${field.offset.toString(16)}${overlay && field.kind === 'float' ? '_f' : ''}`,
         offset: field.offset,
-        type_id: memberType(item, field, proofIds, field.offset === last && last > 0n),
+        type_id: memberType(item, field, proofIds, !overlay && field.offset === last && last > 0n),
       });
     fields.sort((a, b) => (a.offset < b.offset ? -1 : a.offset > b.offset ? 1 : 0));
     // A known allocation size stays only while every merged member fits in it.
