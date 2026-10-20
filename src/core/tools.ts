@@ -907,7 +907,7 @@ const functionGetDataSchema = z
         )
         .max(10000),
       selection: z.strictObject({
-        kinds: z.array(z.string()).max(15).nullable(),
+        kinds: z.array(z.string()).max(16).nullable(),
         subject_id: entityIdSchema.nullable(),
         quotes: z.boolean(),
         counts: z.record(
