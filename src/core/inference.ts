@@ -89,6 +89,9 @@ const callContext = z.strictObject({
   aliases: z.array(z.array(contextRegister).min(2).max(64)).max(64),
   type_evidence_scope: z.string().regex(/^[a-f0-9]{64}$/),
 });
+/** The opt-in `likely`-mode heuristics (see docs/CORE.md, inference mode). */
+export const likelyHeuristicSchema = z.enum(['callee_reads', 'caller_consensus']);
+export type LikelyHeuristic = z.infer<typeof likelyHeuristicSchema>;
 /** Snake-case name of one source-view presentation rewrite rule. */
 export const presentationRuleSchema = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
 export const inferenceDetailsByKind = {
@@ -186,6 +189,24 @@ export const inferenceDetailsByKind = {
     signature_id: z.union([entityIdSchema, annotationIdSchema]).nullable(),
     context_assumptions: callContext.optional(),
   }),
+  /** An opt-in `likely`-mode guess, never an established fact. `argument_list`: the
+   * open argument list of `call_id` was closed after `arity` printed arguments on the
+   * strength of `heuristics`; `applied` is false when every firing heuristic is below
+   * its precision gate, so the text stays open and only this record states the guess.
+   * `sites` counts the call sites that agreed (caller consensus), else null. */
+  guess: z.strictObject({
+    kind: z.literal('guess'),
+    subject: z.literal('argument_list'),
+    call_id: entityIdSchema,
+    target: z.discriminatedUnion('kind', [
+      z.strictObject({ kind: z.literal('direct'), identity }),
+      z.strictObject({ kind: z.literal('indirect'), value_ids: ids }),
+    ]),
+    heuristics: z.array(likelyHeuristicSchema).min(1).max(16),
+    applied: z.boolean(),
+    arity: z.number().int().min(0).max(9999),
+    sites: z.number().int().min(1).max(1_000_000).nullable(),
+  }),
   rewrite: z.strictObject({
     kind: z.literal('rewrite'),
     validation_kind: z.enum([
@@ -222,6 +243,7 @@ export const inferenceDetailsSchema = z.discriminatedUnion('kind', [
   inferenceDetailsByKind.field,
   inferenceDetailsByKind.identity,
   inferenceDetailsByKind.call,
+  inferenceDetailsByKind.guess,
   inferenceDetailsByKind.rewrite,
   inferenceDetailsByKind.conflict,
   inferenceDetailsByKind.annotation,

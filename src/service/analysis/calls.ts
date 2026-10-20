@@ -46,6 +46,8 @@ interface NativeCallIndex {
     string,
     ReadonlyMap<string, readonly ReferenceRecord[]>
   >;
+  /** Call and tail-call references by exact target address key. */
+  readonly callers_by_target: ReadonlyMap<string, readonly ReferenceRecord[]>;
 }
 const nativeIndexes = new WeakMap<LoadedImage, NativeCallIndex>();
 const nativeAddressKey = (address: Address): string =>
@@ -92,8 +94,17 @@ export function nativeCallIndex(
     importsByAddress.set(key, list);
   }
   const referencesByFunction = new Map<string, Map<string, ReferenceRecord[]>>();
+  const callersByTarget = new Map<string, ReferenceRecord[]>();
   for (const reference of references) {
     context.checkpoint(1);
+    if (reference.kind === 'call' || reference.kind === 'tail_call') {
+      if (reference.to) {
+        const key = nativeAddressKey(reference.to),
+          callers = callersByTarget.get(key) ?? [];
+        callers.push(reference);
+        callersByTarget.set(key, callers);
+      }
+    }
     if (
       reference.from_function === null ||
       reference.from_instruction === null ||
@@ -116,6 +127,7 @@ export function nativeCallIndex(
     imports_by_address: importsByAddress,
     imports_by_id: importsById,
     references_by_function: referencesByFunction,
+    callers_by_target: callersByTarget,
   };
   nativeIndexes.set(image, indexed);
   return indexed;

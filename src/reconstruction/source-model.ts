@@ -8,10 +8,21 @@ import type {
 } from '../core/index.js';
 import type { DataType, Instruction, Value } from '../ir/index.js';
 import type { MemoryShapeTransfer } from '../analysis/types/memory-shapes.js';
-import type { Requirement } from '../core/inference.js';
+import type { LikelyHeuristic, Requirement } from '../core/inference.js';
 import type { NativeContext } from '../service/analysis/native-context.js';
 import type { TypeSpec } from '../metadata/library-contracts/spec.js';
 
+/** `likely` inference mode only: a guess that closes the open argument list of one call
+ * or tail transfer after its observed prefix. Never a proven fact. */
+export interface LikelyArity {
+  /** Every heuristic whose conditions held at this site, sorted. */
+  readonly heuristics: readonly LikelyHeuristic[];
+  /** Some firing heuristic passes its precision gate: the printed list closes, marked.
+   * Otherwise the list stays open and only the provenance record states the guess. */
+  readonly applied: boolean;
+  /** Call sites that agreed on the arity (`caller_consensus`). */
+  readonly sites?: number;
+}
 /** Observed native callee inputs, not a user-supplied or proven source prototype. */
 export interface InferredCallee {
   readonly call_id: string;
@@ -129,6 +140,8 @@ export interface SourceEvidence {
   /** Proven complete actual counts for contextual variadic calls (`open`
    * flags that take no mode on every possible value). */
   readonly call_argument_counts?: ReadonlyMap<string, number>;
+  /** Likely mode, source view: guessed argument-list closures by call or tail id. */
+  readonly likely_arity?: ReadonlyMap<string, LikelyArity>;
   /** Source-only actual types from an established variadic library rule over
    * every possible rule-argument value: immutable printf-family format
    * literals, or Darwin `open` flags that all set `O_CREAT`. */

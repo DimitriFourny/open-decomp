@@ -844,7 +844,12 @@ export function planSourceStack(
         (access) =>
           access.kind === 'store' && addresses.has(access.address.id) && !saveStores.has(access.id),
       );
-    if (writtenStack) calls.set(node.id, { ...projection, argument_list_complete: false });
+    if (writtenStack) {
+      // Caller-written outgoing stack bytes may be arguments (or the variadic tail):
+      // no heuristic may close the list over them.
+      const { likely: _guess, ...kept } = projection;
+      calls.set(node.id, { ...kept, argument_list_complete: false });
+    }
   }
   const predecessors = new Map<string, string[]>();
   for (const { transfer, block } of transfers) {

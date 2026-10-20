@@ -154,11 +154,11 @@ def command_ghidra(args):
 NOISE = ('project_open:', 'binary_info:', 'functions_find:', 'function_decompile:', 'Created project:', 'Reusing project:')
 
 
-def decompile(command, binary, address, cache, timeout):
+def decompile(command, binary, address, cache, timeout, inference='proven'):
     started = time.monotonic()
     try:
         done = subprocess.run([*command, 'decompile', str(binary), '--address', f'va:{address}', '--view', 'source',
-                               '--cache', str(cache)], capture_output=True, text=True, timeout=timeout,
+                               '--inference', inference, '--cache', str(cache)], capture_output=True, text=True, timeout=timeout,
                               env={**os.environ, 'NO_COLOR': '1'})
         code, text, stderr = done.returncode, done.stdout, done.stderr
     except subprocess.TimeoutExpired as error:
@@ -169,13 +169,13 @@ def decompile(command, binary, address, cache, timeout):
     return code, text, lines, round(time.monotonic() - started, 3)
 
 
-def run_cell(command, matrix, manifest, cell, output, timeout):
+def run_cell(command, matrix, manifest, cell, output, timeout, inference):
     binary = cell_binary(matrix, manifest, cell)
     cache = Path(tempfile.mkdtemp(prefix='od-devloop-cache-', dir='/tmp'))
     rows = {}
     try:
         for function in cell['functions']:
-            code, text, lines, elapsed = decompile(command, binary, function['address'], cache, timeout)
+            code, text, lines, elapsed = decompile(command, binary, function['address'], cache, timeout, inference)
             row = {'address': function['address'], 'exit_code': code, 'seconds': elapsed}
             if code in (0, 2) and text.strip():
                 row['status'] = 'complete' if code == 0 else 'partial'
@@ -205,7 +205,7 @@ def command_run(args):
     output.mkdir(parents=True)
     started = time.monotonic()
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = [pool.submit(run_cell, command, matrix, manifest, cell, output, args.timeout) for cell in manifest['cells']]
+        futures = [pool.submit(run_cell, command, matrix, manifest, cell, output, args.timeout, args.inference) for cell in manifest['cells']]
         results = dict(future.result() for future in futures)
     cells = cell_info(manifest)
     counts, failures = Counter(), []
@@ -216,7 +216,7 @@ def command_run(args):
                 failures.append({'cell': cell_id, 'function': name, 'status': row['status'], 'exit_code': row['exit_code'],
                                  'diagnostics': row['diagnostics']})
     summary = {'schema': 1, 'tool': 'open-decomp', 'label': args.label, 'entry': str(entry),
-               'entry_sha256': quality.digest(entry), 'view': 'source', 'budget': 'default',
+               'entry_sha256': quality.digest(entry), 'view': 'source', 'inference': args.inference, 'budget': 'default',
                'address_space': 'va', 'wall_seconds': round(time.monotonic() - started, 1), 'jobs': args.jobs,
                'texts': counts['complete'] + counts['partial'], 'statuses': dict(counts), 'failures': failures,
                'cells': {cell_id: {**cells[cell_id], 'functions': rows} for cell_id, rows in sorted(results.items())}}
@@ -520,6 +520,7 @@ def main():
     run.add_argument('--jobs', type=int, default=4, help='Cells decompiled in parallel (functions of a cell are serial)')
     run.add_argument('--timeout', type=int, default=300, help='Seconds per function')
     run.add_argument('--node', default='node')
+    run.add_argument('--inference', choices=('proven', 'likely'), default='proven', help='Inference mode of every decompile (TODO.md R5)')
     packets = commands.add_parser('packets', help='Seeded stratified blind X/Y packets')
     packets.add_argument('--label', required=True)
     packets.add_argument('--sample', type=int, required=True)

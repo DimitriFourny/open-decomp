@@ -264,9 +264,15 @@ export const analysisOptionsSchema = z.strictObject({
   /** `source` applies proof-carrying presentation rewrites (each recorded as a
    * `presentation` rewrite inference); `checked` prints every machine-level fact. */
   view: z.enum(['source', 'checked']).default('source'),
+  /** `proven` (default) prints only established interfaces and keeps every open
+   * argument list explicit. `likely` additionally applies gated heuristics that
+   * close an open argument list on a guess; each guess is marked in the text and
+   * recorded as a `guess` inference. Part of the cache identity. */
+  inference: z.enum(['proven', 'likely']).default('proven'),
 });
 export const DEFAULT_ANALYSIS_OPTIONS = Object.freeze(analysisOptionsSchema.parse({}));
 export type PresentationView = z.infer<typeof analysisOptionsSchema>['view'];
+export type InferenceMode = z.infer<typeof analysisOptionsSchema>['inference'];
 export const pageRequestSchema = z.strictObject({
   limit: z.number().int().min(1).max(1000).default(100),
   cursor: z.string().min(1).max(16_384).optional(),

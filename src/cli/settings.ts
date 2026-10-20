@@ -32,6 +32,7 @@ const KEYS: readonly SettingKey[] = [
   'analysis_cache',
   'decompile.language',
   'decompile.view',
+  'decompile.inference',
   'export.language',
   'export.jobs',
 ];
@@ -47,6 +48,8 @@ function valueOf(report: SettingsReport, key: SettingKey): string | number | boo
       return settings.decompile.language;
     case 'decompile.view':
       return settings.decompile.view;
+    case 'decompile.inference':
+      return settings.decompile.inference;
     case 'export.language':
       return settings.export.language;
     case 'export.jobs':

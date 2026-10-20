@@ -10,6 +10,7 @@ import type { Target, ToolResult } from '../core/index.js';
 export interface ExportOptions {
   readonly out: string;
   readonly language: 'c-like' | 'python-like';
+  readonly inference?: 'proven' | 'likely' | undefined;
   readonly jobs: number | undefined;
   readonly sliceId?: string | undefined;
   readonly name?: string | undefined;
@@ -459,6 +460,7 @@ class Exporter {
     const language = this.#options.language;
     const result = await session.decompileFunction(row.fn.id, {
       emitter: language,
+      ...(this.#options.inference === undefined ? {} : { inference: this.#options.inference }),
       signal: this.#signal,
     });
     this.#signal.throwIfAborted();

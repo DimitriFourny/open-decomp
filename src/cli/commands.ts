@@ -3,7 +3,7 @@ import type { BinarySession, FunctionSelector } from '../api/index.js';
 import { caveats, distinctDiagnostics, entityIdSchema, sliceIdSchema } from '../core/index.js';
 import type { ToolResult, WireDiagnostic, WireJob } from '../core/index.js';
 import { exportBinary } from './export.js';
-import { languageSchema, loadSettings, viewSchema } from '../settings/index.js';
+import { inferenceSchema, languageSchema, loadSettings, viewSchema } from '../settings/index.js';
 import type { Settings } from '../settings/index.js';
 
 type Command = 'functions' | 'decompile' | 'export' | 'types';
@@ -20,6 +20,7 @@ interface Arguments {
   selector?: FunctionSelector;
   emitter?: 'c-like' | 'python-like';
   view?: 'source' | 'checked';
+  inference?: 'proven' | 'likely';
   out?: string;
   jobs?: number;
 }
@@ -36,8 +37,8 @@ const settingsOption = '[--settings PATH]';
 const cacheOptions = '[--cache PATH] [--slice ID] [--analysis-cache|--no-analysis-cache]';
 const usage = {
   functions: `open-decomp functions BINARY [--name TEXT] [--json] ${cacheOptions} ${settingsOption}`,
-  decompile: `open-decomp decompile BINARY (--function NAME | --id ID | --address va:0x.../rva:0x.../file:0x...) [--language c-like|python-like] [--view source|checked] [--json] ${cacheOptions} ${settingsOption}`,
-  export: `open-decomp export BINARY --out DIR [--language c-like|python-like] [--jobs N] [--name SUBSTRING] ${cacheOptions} ${settingsOption}`,
+  decompile: `open-decomp decompile BINARY (--function NAME | --id ID | --address va:0x.../rva:0x.../file:0x...) [--language c-like|python-like] [--view source|checked] [--inference proven|likely] [--json] ${cacheOptions} ${settingsOption}`,
+  export: `open-decomp export BINARY --out DIR [--language c-like|python-like] [--inference proven|likely] [--jobs N] [--name SUBSTRING] ${cacheOptions} ${settingsOption}`,
   types: `open-decomp types BINARY [--json] ${cacheOptions} ${settingsOption}`,
 } as const;
 
@@ -100,6 +101,11 @@ function emitterOption(value: string): 'c-like' | 'python-like' {
   if (!language.success) throw new UsageError('--language must be c-like or python-like');
   return language.data;
 }
+function inferenceOption(value: string): 'proven' | 'likely' {
+  const inference = inferenceSchema.safeParse(value);
+  if (!inference.success) throw new UsageError('--inference must be proven or likely');
+  return inference.data;
+}
 function parse(args: readonly string[]): ParsedArguments {
   const command = args[0];
   if (
@@ -121,9 +127,9 @@ function parse(args: readonly string[]): ParsedArguments {
     ...(command === 'functions'
       ? ['--name']
       : command === 'export'
-        ? ['--name', '--out', '--language', '--jobs']
+        ? ['--name', '--out', '--language', '--inference', '--jobs']
         : command === 'decompile'
-          ? ['--function', '--id', '--address', '--language', '--view']
+          ? ['--function', '--id', '--address', '--language', '--view', '--inference']
           : []),
   ];
   let json = false,
@@ -190,6 +196,8 @@ function parse(args: readonly string[]): ParsedArguments {
     result.out = out;
     const language = values.get('--language');
     if (language !== undefined) result.emitter = emitterOption(language);
+    const inference = values.get('--inference');
+    if (inference !== undefined) result.inference = inferenceOption(inference);
     const jobs = values.get('--jobs');
     if (jobs !== undefined) {
       if (!/^[1-9][0-9]{0,2}$/.test(jobs) || Number(jobs) > 32)
@@ -226,6 +234,8 @@ function parse(args: readonly string[]): ParsedArguments {
     if (!parsedView.success) throw new UsageError('--view must be source or checked');
     result.view = parsedView.data;
   }
+  const inference = values.get('--inference');
+  if (inference !== undefined) result.inference = inferenceOption(inference);
   return result;
 }
 function help(command: Command): void {
@@ -234,9 +244,9 @@ function help(command: Command): void {
       command === 'functions'
         ? 'List every matching function; --name performs a case-insensitive substring search.\nJSON result is {pages:[...]} with the original schema envelope for each page.'
         : command === 'export'
-          ? 'Decompile every function in one process into a directory an agent can grep:\n  OUT/functions/NAME@0xADDR.c|.py  header comment + the pseudocode `decompile` prints\n  OUT/functions/NAME@0xADDR.asm    compact disassembly where decompilation failed (reason in header)\n  OUT/index.tsv  OUT/strings.tsv  OUT/imports.tsv  OUT/exports.tsv  OUT/README.txt\n--out DIR      Output directory (created; generated files are overwritten on re-run).\n--language     c-like (default) or python-like.\n--jobs N       Parallel workers (default min(4, CPUs/2)); extra workers analyze private copies of the project.\n--name TEXT    Only functions whose name contains TEXT (case-insensitive).\nPartial and failed functions are recorded in index.tsv and do not change the exit status.'
+          ? 'Decompile every function in one process into a directory an agent can grep:\n  OUT/functions/NAME@0xADDR.c|.py  header comment + the pseudocode `decompile` prints\n  OUT/functions/NAME@0xADDR.asm    compact disassembly where decompilation failed (reason in header)\n  OUT/index.tsv  OUT/strings.tsv  OUT/imports.tsv  OUT/exports.tsv  OUT/README.txt\n--out DIR      Output directory (created; generated files are overwritten on re-run).\n--language     c-like (default) or python-like.\n--inference    proven (default) or likely: likely also closes open argument lists by gated heuristics; each guess is marked `likely_arity(...)` and recorded as a guess inference.\n--jobs N       Parallel workers (default min(4, CPUs/2)); extra workers analyze private copies of the project.\n--name TEXT    Only functions whose name contains TEXT (case-insensitive).\nPartial and failed functions are recorded in index.tsv and do not change the exit status.'
           : command === 'decompile'
-            ? 'Decompile one exact, unambiguous function name, entity ID or address.\nText stdout contains only pseudocode; JSON preserves the result envelope.'
+            ? 'Decompile one exact, unambiguous function name, entity ID or address.\nText stdout contains only pseudocode; JSON preserves the result envelope.\n--inference proven|likely  proven (default) closes only established interfaces; likely also closes open argument lists by gated heuristics (each guess is marked `likely_arity(...)` and recorded as a guess inference; may be wrong).'
             : 'Print the image-wide merged structure types as C declarations (the names decompile uses).\nAnalyzes function bodies within the default budget; a partial result exits 2.'
     }\n\n--cache PATH  Override the sidecar cache root (default: BINARY.open-decomp).\n--slice ID    Select a binary slice.\n--analysis-cache     Force analysis caching on (overrides analysis_cache: false in a settings file).\n--no-analysis-cache  Read and write no derived analysis: no published results, reuse candidates or persisted callee summaries, and no in-process summary reuse. Import and indexes still persist. Output is identical; repeated and cross-process runs are slower.\n--settings PATH  Read settings from PATH instead of $XDG_CONFIG_HOME/open-decomp/settings.json (default ~/.config/open-decomp/settings.json). A flag beats the file; the file beats built-in defaults. See: open-decomp settings --help.\n${command === 'export' ? '' : '--json        Write {project_path,reused,result} JSON to stdout.\n'}--help        Show this help.\nProgress, project reuse and diagnostics go to stderr. Work stays in the foreground.\nExit: ${command === 'export' ? '0 all files written (even if some functions are partial/failed); 1 error/cancelled' : '0 complete/empty; 2 semantic partial; 1 error/unsupported/cancelled'}; 130 SIGINT; 143 SIGTERM.\n`,
   );
@@ -387,6 +397,7 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
         {
           out: parsed.out!,
           language: parsed.emitter ?? settings.export.language,
+          inference: parsed.inference ?? settings.decompile.inference,
           jobs: parsed.jobs ?? settings.export.jobs ?? undefined,
           sliceId: parsed.sliceId,
           name: parsed.name,
@@ -402,6 +413,7 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
       const result = await session.decompile(parsed.selector!, {
         emitter: parsed.emitter ?? settings.decompile.language,
         view: parsed.view ?? settings.decompile.view,
+        inference: parsed.inference ?? settings.decompile.inference,
         signal: controller.signal,
         onProgress,
       });
