@@ -347,6 +347,97 @@ for (const abi of targets) {
     }
   });
 
+  test(`${abi.id}: halves stored to possible argument storage reload as one concatenated value`, () => {
+    const b = builder(`argument-slot-halves-${abi.id}`),
+      block = b.block('entry');
+    const argument = block.readRegister(firstArgument(abi));
+    const sp = block.int('sub', block.readRegister(abi.stack_pointer), block.constant(u64, 32n));
+    block.writeRegister(abi.stack_pointer, sp);
+    const slot = block.int('add', sp, block.constant(u64, abi.stack_return_address_bytes));
+    block.store(slot, block.extract(argument, 0, 32));
+    // The high half carries the sign bit.
+    block.store(block.int('add', slot, block.constant(u64, 4n)), block.constant(u32, 0x80000000n));
+    const whole = block.load(u64, slot);
+    block.call(
+      { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+      [],
+      [],
+      { registers: [], flags: [], memory: 'unknown_read_write' },
+      [newIdentity('evidence')],
+    );
+    block.return([whole]);
+    const fixture = prepare(b.finish(block, [u64]), abi);
+    const source = fixture.view('source');
+    assert.deepEqual([...promoted(source)], []);
+    assert.ok(rules(source).includes('argument_slot_reload'));
+    for (const language of ['c-like', 'python-like'] as const) {
+      const output = emit(fixture.ir, fixture.extra, language).emission;
+      const inputs = new Map<string, bigint>();
+      for (const formal of emittedFormals(output))
+        inputs.set(formal.statement_id, formal.name === 'entry_sp' ? 0x8000n : 0xfedcba98n);
+      const memory = new Map(
+        Array.from({ length: 32 }, (_, index) => [0x8000n - 32n + BigInt(index), 0] as const),
+      );
+      const observation = execute(
+        output,
+        inputs,
+        memory,
+        0n,
+        new Map(),
+        new Map(),
+        new Map([['sub_2000', () => []]]),
+      );
+      assert.deepEqual(observation.values, [0x80000000fedcba98n]);
+      assert.deepEqual(
+        observation.events.filter((event) => event === 'store' || event === 'load'),
+        ['store', 'store'],
+      );
+    }
+  });
+
+  test(`${abi.id}: a slot written as integer and IEEE bits is one local read through exact reinterpretation`, () => {
+    for (const read of ['integer', 'float'] as const) {
+      const b = builder(`punned-local-${abi.id}-${read}`),
+        entry = b.block('entry'),
+        other = b.block('other'),
+        exit = b.block('exit');
+      const argument = entry.readRegister(firstArgument(abi));
+      const slot = entry.int(
+        'sub',
+        entry.readRegister(abi.stack_pointer),
+        entry.constant(u64, 24n),
+      );
+      entry.store(slot, argument);
+      entry.branch(
+        entry.compare('eq', argument, entry.constant(u64, 0n)),
+        entry.edge(other),
+        entry.edge(exit),
+      );
+      // Negative zero: only the sign bit is set.
+      other.store(slot, other.constant(f64, 0x8000000000000000n));
+      other.jump(exit);
+      exit.return([
+        read === 'integer' ? exit.load(u64, slot) : exit.cast('bitcast', u64, exit.load(f64, slot)),
+      ]);
+      const fixture = prepare(b.finish(entry, [u64]), abi);
+      assert.deepEqual([...promoted(fixture.view('source'))], ['-24:-16']);
+      for (const language of ['c-like', 'python-like'] as const) {
+        const output = emit(fixture.ir, fixture.extra, language).emission;
+        assert.doesNotMatch(output.text, /entry_sp|stack_frame/);
+        const formal = emittedFormals(output)[0]!;
+        // Zero takes the IEEE store; a NaN payload passes through unchanged.
+        for (const [input, expected] of [
+          [0n, 0x8000000000000000n],
+          [0x7ff8000000000001n, 0x7ff8000000000001n],
+          [0xffffffffffffffffn, 0xffffffffffffffffn],
+        ] as const) {
+          const observation = execute(output, new Map([[formal.statement_id, input]]), new Map());
+          assert.deepEqual(observation.values, [expected], `${read} ${language} ${input}`);
+        }
+      }
+    }
+  });
+
   test(`${abi.id}: an argument spill reloads as the argument only without an intervening write`, () => {
     for (const gate of ['clean', 'written', 'punned'] as const) {
       const b = builder(`argument-spill-${abi.id}-${gate}`),
@@ -440,9 +531,9 @@ for (const abi of targets) {
         alignment: 1,
         volatile: gate === 'volatile',
       });
-      // A narrower store into the slot is a partial write, not a part read.
+      // A store straddling the slot's end is neither inside it nor a whole slot.
       if (gate === 'overlap')
-        block.store(block.int('add', slot, block.constant(u64, 4n)), block.constant(u32, 5n));
+        block.store(block.int('add', slot, block.constant(u64, 4n)), block.constant(u64, 5n));
       if (gate === 'unknown')
         block.unknown('unmodeled effect', {
           registers: [],
@@ -503,8 +594,20 @@ for (const abi of targets) {
     }
   });
 
-  test(`${abi.id}: narrower loads inside a whole-slot integer read its bits`, () => {
-    for (const gate of ['parts', 'narrow-store', 'joined'] as const) {
+  test(`${abi.id}: narrower accesses inside a whole-slot integer read and write its bytes`, () => {
+    const input = 0x1122334455667788n;
+    const cases = {
+      // Narrower loads of a whole stored value read its bit ranges.
+      parts: 0x5566778811223344n,
+      // A narrower store replaces its bytes: the high half is all ones.
+      'narrow-store': 0x55667788ffffffffn,
+      // Two halves build the slot; the high half carries the sign bit.
+      built: 0x8000000055667788n,
+      // A middle store splits one value into three pieces.
+      split: 0x11223344ffff7788n,
+      joined: undefined,
+    } as const;
+    for (const [gate, expected] of Object.entries(cases)) {
       const b = builder(`slot-parts-${abi.id}-${gate}`),
         entry = b.block('entry');
       const argument = entry.readRegister(firstArgument(abi));
@@ -513,10 +616,18 @@ for (const abi of targets) {
         entry.readRegister(abi.stack_pointer),
         entry.constant(u64, 40n),
       );
-      entry.store(slot, argument);
+      const high = (block: typeof entry) => block.int('add', slot, block.constant(u64, 4n));
+      if (gate === 'built') {
+        entry.store(slot, entry.extract(argument, 0, 32));
+        entry.store(high(entry), entry.constant(u32, 0x80000000n));
+      } else entry.store(slot, argument);
+      if (gate === 'narrow-store') entry.store(high(entry), entry.constant(u32, 0xffffffffn));
+      if (gate === 'split')
+        entry.store(
+          entry.int('add', slot, entry.constant(u64, 2n)),
+          entry.constant(integer(16), 0xffffn),
+        );
       let exit = entry;
-      if (gate === 'narrow-store')
-        entry.store(entry.int('add', slot, entry.constant(u64, 4n)), entry.constant(u32, 5n));
       if (gate === 'joined') {
         // Differing reaching values: no forwarded value whose bits a part reads.
         const other = b.block('other');
@@ -529,13 +640,16 @@ for (const abi of targets) {
         other.store(slot, other.constant(u64, 0x0102030405060708n));
         other.jump(exit);
       }
-      const high = exit.load(u32, exit.int('add', slot, exit.constant(u64, 4n)));
-      exit.return([exit.concat([high, exit.load(u32, slot)])]);
+      exit.return([
+        gate === 'parts' || gate === 'narrow-store' || gate === 'joined'
+          ? exit.concat([exit.load(u32, high(exit)), exit.load(u32, slot)])
+          : exit.load(u64, slot),
+      ]);
       const fixture = prepare(b.finish(entry, [u64]), abi);
       const recorded = rules(fixture.view('source'));
-      assert.equal(recorded.includes('wide_slot_parts'), gate === 'parts');
+      assert.equal(recorded.includes('wide_slot_parts'), expected !== undefined);
       assert.ok(!rules(fixture.view('checked')).includes('wide_slot_parts'));
-      if (gate !== 'parts') {
+      if (expected === undefined) {
         assert.ok(!recorded.includes('private_stack_promotion'));
         continue;
       }
@@ -543,12 +657,10 @@ for (const abi of targets) {
         const output = emit(fixture.ir, fixture.extra, language).emission;
         assert.doesNotMatch(output.text, /entry_sp|stack_frame/);
         const formal = emittedFormals(output)[0]!;
-        const observation = execute(
-          output,
-          new Map([[formal.statement_id, 0x1122334455667788n]]),
-          new Map(),
-        );
-        assert.deepEqual(observation.values, [0x5566778811223344n]);
+        // Only the low half of the argument is read there: a 32-bit formal.
+        const value = gate === 'narrow-store' || gate === 'built' ? input & 0xffffffffn : input;
+        const observation = execute(output, new Map([[formal.statement_id, value]]), new Map());
+        assert.deepEqual(observation.values, [expected], `${gate} ${language}`);
       }
     }
   });

@@ -194,7 +194,7 @@ export function localValidationCounterexamples(): void {
   assert.equal(localValidationSchema.parse(uninitialized).status, 'rejected');
   assert.equal(uninitialized.counterexample!.original, 'uninitialized');
   const store = { kind: 'store' as const, offset: -4n, bytes: 4, value: 'x', promoted: true };
-  const load = { kind: 'load' as const, offset: -4n, bytes: 4, candidate: 'local' };
+  const load = { kind: 'load' as const, offset: -4n, bytes: 4, candidate: 'local' as const };
   assert.equal(validateStorageTrace('slot', [store, load], allowance()).status, 'verified');
   assert.equal(
     localValidationSchema.parse(

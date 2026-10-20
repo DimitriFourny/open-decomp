@@ -4,6 +4,7 @@ import { classifyStackRegion } from '../analysis/stack/index.js';
 import {
   bitWidth,
   expressionOperands,
+  integer,
   sameType,
   type DataType,
   type Expression,
@@ -16,7 +17,7 @@ import type { BoundaryProjection } from './model.js';
 import type { FrameSaves, SourceLocal, SourceStackStorage } from './source-model.js';
 import type { Requirement } from '../core/inference.js';
 import { LocalValidationSession } from './local-validation.js';
-import { validateStackPromotion } from './local-storage-validation.js';
+import { type ForwardedByte, validateStackPromotion } from './local-storage-validation.js';
 import { sourceRequirementPredicates } from './source-requirements.js';
 
 type MemoryNode = Extract<Instruction, { kind: 'load' | 'store' }>;
@@ -30,6 +31,8 @@ export function planSourceStack(
   calls: Map<string, BoundaryProjection>,
   returns: ReadonlyMap<string, BoundaryProjection>,
   alias: (value: Value, expression: Expression) => void,
+  /** A source-only value, defined in `block` by `expression`. */
+  make: (key: string, type: DataType, block: string, expression?: Expression) => Value,
   context: OperationContext,
   incomingStack: (offset: bigint, type: DataType, contributors: readonly Value[]) => Value | null,
   entryStack: () => Value,
@@ -870,8 +873,8 @@ export function planSourceStack(
             'integer' &&
           overlapping.every(
             (part) =>
-              part.node.kind === 'load' &&
-              part.node.result.type.kind === 'integer' &&
+              (part.node.kind === 'load' ? part.node.result.type : part.node.value.type).kind ===
+                'integer' &&
               !part.node.access.volatile &&
               part.node.access.endian === first.node.access.endian &&
               part.offset >= first.offset &&
@@ -889,19 +892,19 @@ export function planSourceStack(
           ),
       );
       if (punned && (view !== 'source' || overlapping.length)) continue;
+      if (overlapping.length) {
+        slotParts.set(key, overlapping);
+        for (const part of overlapping) partSlot.set(part.node.id, key);
+      }
       if (preceded.some((call) => call.bound === null || first.offset < call.bound)) {
         // Possible stack-argument storage keeps its stores in memory; its
-        // reloads may still read the value stored before them.
-        if (view === 'source' && !overlapping.length && !punned) argumentSlots.add(key);
+        // reloads may still read the bytes stored before them.
+        if (view === 'source') argumentSlots.add(key);
         continue;
       }
       if (punned) punnedSlots.add(key);
       eligible.add(key);
       if (preceded.length) boundedSlots.add(key);
-      if (overlapping.length) {
-        slotParts.set(key, overlapping);
-        for (const part of overlapping) partSlot.set(part.node.id, key);
-      }
     }
   // Source view: frame-private save/restore of an entry register. A slot is a
   // save when (i) its only store writes the entry value of a preserved register
@@ -1173,12 +1176,15 @@ export function planSourceStack(
       calls.set(node.id, { ...kept, argument_list_complete: false });
     }
   }
-  // State is exact reaching value / definitely initialized but differing values /
-  // uninitialized. Unvisited predecessors are ignored until reached, then joins
-  // can only lose precision, so backedges converge without inventing assignment.
-  type Cell = Value | null | undefined;
+  // State is exact reaching stored byte / definitely initialized but differing
+  // values / uninitialized. Unvisited predecessors are ignored until reached,
+  // then joins can only lose precision, so backedges converge without inventing
+  // assignment. A slot without parts keeps one cell for its whole value (byte
+  // significance 0 marks it); a slot with parts keeps one cell per byte.
+  type Cell = ForwardedByte | null | undefined;
   const outgoing = new Map<string, Map<string, Cell>>(),
-    before = new Map<string, Cell>();
+    // Reaching byte of each tracked load, least significant first.
+    before = new Map<string, readonly Cell[]>();
   for (const key of argumentSlots)
     if (
       groups
@@ -1186,7 +1192,19 @@ export function planSourceStack(
         .some((access) => saveStores.has(access.node.id) || saveReloads.has(access.node.id))
     )
       argumentSlots.delete(key);
-  const tracked = [...eligible, ...argumentSlots];
+  const tracked: string[] = [],
+    // State cells a call or unknown effect may overwrite.
+    argumentCells: string[] = [];
+  for (const key of [...eligible, ...argumentSlots]) {
+    const first = groups.get(key)![0]!,
+      cells = tracked.length;
+    if (!slotParts.has(key)) tracked.push(key);
+    else for (let byte = first.offset; byte < first.end; byte++) tracked.push(`${key}@${byte}`);
+    if (argumentSlots.has(key)) argumentCells.push(...tracked.slice(cells));
+  }
+  // Byte significance of memory byte `byte` within an access.
+  const significance = (access: (typeof accesses)[number], byte: bigint): number =>
+    Number(access.node.access.endian === 'big' ? access.end - 1n - byte : byte - access.offset);
   changed = true;
   const indegree = new Map([...blocks.keys()].map((id) => [id, 0]));
   for (const { transfer } of transfers)
@@ -1216,7 +1234,10 @@ export function planSourceStack(
           cell =
             cell === undefined || other === undefined
               ? undefined
-              : cell === null || other === null || cell.id !== other.id
+              : cell === null ||
+                  other === null ||
+                  cell.value.id !== other.value.id ||
+                  cell.index !== other.index
                 ? null
                 : cell;
         }
@@ -1226,20 +1247,45 @@ export function planSourceStack(
         context.checkpoint(1);
         // A call may write its own stack arguments; an unknown effect anything.
         if (node.kind === 'call' || node.kind === 'unknown_effect')
-          for (const key of argumentSlots) state.set(key, null);
+          for (const cell of argumentCells) state.set(cell, null);
         const access = byNode.get(node.id);
         const key = access && (partSlot.get(node.id) ?? access.key);
         if (!access || !key || !(eligible.has(key) || argumentSlots.has(key))) continue;
-        if (access.node.kind === 'load') before.set(node.id, state.get(key));
-        else state.set(key, access.node.value);
+        const width = Number(access.end - access.offset);
+        if (!slotParts.has(key)) {
+          if (access.node.kind === 'store') state.set(key, { value: access.node.value, index: 0 });
+          else {
+            const cell = state.get(key);
+            before.set(
+              node.id,
+              Array.from({ length: width }, (_, index) =>
+                cell ? { value: cell.value, index } : cell,
+              ),
+            );
+          }
+          continue;
+        }
+        const cells: Cell[] = new Array<Cell>(width);
+        for (let byte = access.offset; byte < access.end; byte++)
+          if (access.node.kind === 'store')
+            state.set(`${key}@${byte}`, {
+              value: access.node.value,
+              index: significance(access, byte),
+            });
+          else cells[significance(access, byte)] = state.get(`${key}@${byte}`);
+        if (access.node.kind === 'load') before.set(node.id, cells);
       }
       const old = outgoing.get(block.id);
       if (
         !old ||
-        [...state].some(
-          ([key, value]) =>
-            old.get(key)?.id !== value?.id || (old.get(key) === null) !== (value === null),
-        )
+        [...state].some(([key, cell]) => {
+          const previous = old.get(key);
+          return (
+            (previous === null) !== (cell === null) ||
+            previous?.value.id !== cell?.value.id ||
+            previous?.index !== cell?.index
+          );
+        })
       ) {
         outgoing.set(block.id, state);
         changed = true;
@@ -1291,34 +1337,97 @@ export function planSourceStack(
       }
     }
   const frameObjectBase = `An escaped frame address reaches only bytes at or above the lowest entry-SP offset it can take (here ${reachFloor}): callees, memory holding the address and code reached through it never step below the address they were given. Code that steps backward from an interior pointer (container_of, negative indexing) is outside this premise. Each slot this rewrite touches lies wholly below that offset.`;
+  // A reaching stored SSA value still holds the stored instance at the load:
+  // no loop can redefine it in between (acyclic CFG, a single block, or every
+  // store in an entry block no edge returns to).
+  const sameInstances = (members: readonly (typeof accesses)[number][], block: string) =>
+    acyclic ||
+    members.every((access) => access.block === block) ||
+    (view === 'source' &&
+      !predecessors.get(input.function.entry)?.length &&
+      members.every(
+        (access) => access.node.kind !== 'store' || access.block === input.function.entry,
+      ));
+  // The value a forwarded load reads from its reaching stored bytes: the whole
+  // stored value, a bit range of one integer value, or adjacent stored integer
+  // pieces concatenated low to high. Null when the bytes have no such spelling.
+  const forwardedRead = (
+    access: (typeof accesses)[number],
+    cells: readonly ForwardedByte[],
+  ): Expression | null => {
+    const load = access.node as Extract<Instruction, { kind: 'load' }>;
+    const runs: { value: Value; index: number; bytes: number }[] = [];
+    for (const cell of cells) {
+      const last = runs.at(-1);
+      if (last && last.value.id === cell.value.id && last.index + last.bytes === cell.index)
+        last.bytes++;
+      else runs.push({ value: cell.value, index: cell.index, bytes: 1 });
+    }
+    const whole = (run: (typeof runs)[number]): boolean =>
+      run.index === 0 && bitWidth(run.value.type) === run.bytes * 8;
+    if (runs.length === 1 && whole(runs[0]!))
+      return { kind: 'cast', op: 'bitcast', value: runs[0]!.value };
+    if (
+      load.result.type.kind !== 'integer' ||
+      runs.some((run) => run.value.type.kind !== 'integer')
+    )
+      return null;
+    if (runs.length === 1)
+      return { kind: 'extract', value: runs[0]!.value, offset: runs[0]!.index * 8 };
+    return {
+      kind: 'concat',
+      values: runs.map((run, index) =>
+        whole(run)
+          ? run.value
+          : make(`stack-part:${load.id}:${index}`, integer(run.bytes * 8), access.block, {
+              kind: 'extract',
+              value: run.value,
+              offset: run.index * 8,
+            }),
+      ),
+    };
+  };
   for (const key of eligible) {
     const group = groups.get(key)!,
       parts = slotParts.get(key) ?? [],
       members = parts.length ? [...group, ...parts] : group,
       loads = members.filter((access) => access.node.kind === 'load');
-    if (loads.some((access) => before.get(access.node.id) === undefined)) continue;
-    const forwarded =
-      loads.every((access) => before.get(access.node.id) !== null) &&
-      (acyclic ||
-        members.every((access) => access.block === group[0]!.block) ||
-        (view === 'source' &&
-          !predecessors.get(input.function.entry)?.length &&
-          members.every(
-            (access) => access.node.kind !== 'store' || access.block === input.function.entry,
-          )));
-    // A part reads bits of the reaching whole-slot value, and a punned load
-    // reinterprets it; neither has a scalar local spelling unless forwarded.
-    if ((parts.length || punnedSlots.has(key)) && !forwarded) continue;
+    if (
+      loads.some(
+        (access) => before.get(access.node.id)?.every((cell) => cell !== undefined) !== true,
+      )
+    )
+      continue;
+    const exact =
+      loads.every((access) => before.get(access.node.id)!.every((cell) => cell !== null)) &&
+      sameInstances(members, group[0]!.block);
+    const reads = new Map<string, Expression>();
+    if (exact)
+      for (const access of loads) {
+        const read = forwardedRead(access, before.get(access.node.id) as ForwardedByte[]);
+        if (!read) break;
+        reads.set(access.node.id, read);
+      }
+    const forwarded = exact && reads.size === loads.length;
+    // A part reads or writes some bytes of the slot value: no scalar local
+    // spelling exists for it unless every read forwards.
+    if (parts.length && !forwarded) continue;
+    // A punned local converts its other-typed accesses by exact bit
+    // reinterpretation: 32/64-bit integer and IEEE scalars only.
+    const punned = punnedSlots.has(key);
+    if (
+      punned &&
+      !forwarded &&
+      group.some((access) => {
+        const type = access.node.kind === 'load' ? access.node.result.type : access.node.value.type;
+        return (
+          (type.kind !== 'integer' && type.kind !== 'float') ||
+          (type.bits !== 32 && type.bits !== 64)
+        );
+      })
+    )
+      continue;
     const first = group[0]!;
-    // Byte significance of each part's low byte within the slot value.
-    const shifts = new Map(
-      parts.map((part) => [
-        part.node.id,
-        Number(
-          part.node.access.endian === 'big' ? first.end - part.end : part.offset - first.offset,
-        ),
-      ]),
-    );
     const subjects = [first.node.id];
     const checked = validation.check(
       'stack-promotion',
@@ -1326,13 +1435,13 @@ export function planSourceStack(
       'private stack promotion',
       () => {
         const ids = new Set<string>(),
-          proposed = new Map<string, Value>();
+          proposed = new Map<string, readonly ForwardedByte[]>();
         for (const access of members) {
           validation.allowance.charge();
           ids.add(access.node.id);
           if (subjects.length < 64 && access.node.id !== subjects[0]) subjects.push(access.node.id);
           if (forwarded && access.node.kind === 'load')
-            proposed.set(access.node.id, before.get(access.node.id)!);
+            proposed.set(access.node.id, before.get(access.node.id) as ForwardedByte[]);
         }
         return validateStackPromotion(
           `stack:${key}`,
@@ -1345,7 +1454,6 @@ export function planSourceStack(
           expressions,
           validation.allowance,
           disjointStores,
-          shifts,
         );
       },
       subjects,
@@ -1357,14 +1465,16 @@ export function planSourceStack(
         ? validation.presentation(
             'wide_slot_parts',
             `stack:${key}`,
-            'exact nonvolatile negative entry-SP integer slot written only by whole-slot stores; every other overlapping access is a narrower integer load wholly inside it, forwarded as its endian-determined bit range of the reaching slot value; no escaped frame address reaches it; definitely initialized reads; no established outgoing argument overlap; any access preceding an open-arity call lies above that call’s bounded argument area',
+            'exact nonvolatile negative entry-SP integer slot; every other overlapping access is a narrower integer load or store wholly inside it; each load forwards the endian-determined bytes the reaching stores wrote (a bit range of one value, or adjacent stored values concatenated low to high); no escaped frame address reaches it; definitely initialized reads; no established outgoing argument overlap; any access preceding an open-arity call lies above that call’s bounded argument area',
             subjects,
           )
         : validation.presentation(
             'private_stack_promotion',
             `stack:${key}`,
-            punnedSlots.has(key)
-              ? 'exact nonvolatile nonoverlapping negative entry-SP slot accessed with same-width types; every load forwards a bitcast of its reaching stored value; no escaped frame address reaches it; definitely initialized reads; no established outgoing argument overlap; any access preceding an open-arity call lies above that call’s bounded argument area'
+            punned
+              ? forwarded
+                ? 'exact nonvolatile nonoverlapping negative entry-SP slot accessed with same-width types; every load forwards a bitcast of its reaching stored value; no escaped frame address reaches it; definitely initialized reads; no established outgoing argument overlap; any access preceding an open-arity call lies above that call’s bounded argument area'
+                : 'exact nonvolatile nonoverlapping negative entry-SP slot accessed with same-width integer and IEEE types: one local of one type, every other-typed access converts by exact bit reinterpretation; no escaped frame address reaches it; definitely initialized reads; no established outgoing argument overlap; any access preceding an open-arity call lies above that call’s bounded argument area'
               : 'exact nonvolatile nonoverlapping negative entry-SP slot; no escaped frame address reaches it; definitely initialized reads; no established outgoing argument overlap; any access preceding an open-arity call lies above that call’s bounded argument area',
             subjects,
           ))
@@ -1387,19 +1497,22 @@ export function planSourceStack(
     if (forwarded) {
       for (const access of members) {
         hidden.add(access.node.id);
-        if (access.node.kind !== 'load') continue;
-        const shift = shifts.get(access.node.id);
-        alias(
-          access.node.result,
-          shift === undefined
-            ? { kind: 'cast', op: 'bitcast', value: before.get(access.node.id)! }
-            : { kind: 'extract', value: before.get(access.node.id)!, offset: shift * 8 },
-        );
+        if (access.node.kind === 'load') alias(access.node.result, reads.get(access.node.id)!);
       }
     } else {
+      // A punned local takes its stores' common type (else the first access's);
+      // every other-typed access converts by exact bit reinterpretation.
+      const stored = group.flatMap((access) =>
+        access.node.kind === 'store' ? [access.node.value.type] : [],
+      );
       const local: SourceLocal = {
         id: `entity_${fingerprint(['source-local', input.function.id, key])}`,
-        type: first.node.kind === 'load' ? first.node.result.type : first.node.value.type,
+        type:
+          stored.length && stored.every((type) => sameType(type, stored[0]!))
+            ? stored[0]!
+            : first.node.kind === 'load'
+              ? first.node.result.type
+              : first.node.value.type,
         ...(view === 'source' ? { stack_offset: first.offset } : {}),
       };
       for (const access of group) {
@@ -1413,26 +1526,35 @@ export function planSourceStack(
   // value of one store with no call, unknown effect or other write between
   // reads that value: an O0 spill/reload of an argument is the argument.
   for (const key of argumentSlots) {
-    const group = groups.get(key)!;
-    const reloads = group.filter(
-      (access) =>
-        access.node.kind === 'load' &&
-        before.get(access.node.id) !== null &&
-        before.get(access.node.id) !== undefined,
-    );
+    const group = groups.get(key)!,
+      members = [...group, ...(slotParts.get(key) ?? [])];
+    const reads = new Map<string, Expression>();
+    if (sameInstances(members, group[0]!.block))
+      for (const access of members) {
+        const cells = before.get(access.node.id);
+        if (
+          access.node.kind !== 'load' ||
+          !cells?.every((cell) => cell !== null && cell !== undefined)
+        )
+          continue;
+        const read = forwardedRead(access, cells as ForwardedByte[]);
+        if (read) reads.set(access.node.id, read);
+      }
+    const reloads = members.filter((access) => reads.has(access.node.id));
     if (!reloads.length) continue;
-    const subjects = [...group.filter((access) => access.node.kind === 'store'), ...reloads]
-      .map((access) => access.node.id)
-      .slice(0, 64);
+    const ids = [...members.filter((access) => access.node.kind === 'store'), ...reloads].map(
+        (access) => access.node.id,
+      ),
+      subjects = ids.slice(0, 64);
     const checked = validation.check(
       'stack-promotion',
       `stack:${key}`,
       'stack-argument slot reload forwarding',
       () => {
-        const proposed = new Map<string, Value>();
+        const proposed = new Map<string, readonly ForwardedByte[]>();
         for (const access of reloads) {
           validation.allowance.charge();
-          proposed.set(access.node.id, before.get(access.node.id)!);
+          proposed.set(access.node.id, before.get(access.node.id) as ForwardedByte[]);
         }
         return validateStackPromotion(
           `stack:${key}`,
@@ -1440,7 +1562,7 @@ export function planSourceStack(
           blocks,
           transfers,
           addresses,
-          new Set(subjects),
+          new Set(ids),
           proposed,
           expressions,
           validation.allowance,
@@ -1454,7 +1576,7 @@ export function planSourceStack(
       !validation.presentation(
         'argument_slot_reload',
         `stack:${key}`,
-        'exact nonvolatile nonoverlapping negative entry-SP slot that may be open-call stack-argument storage: its stores stay in memory; each forwarded reload reads the one stored value reaching it on every path, with no call, unknown effect or other write to the slot between; no escaped frame address reaches it',
+        'exact nonvolatile negative entry-SP slot that may be open-call stack-argument storage: its stores stay in memory; each forwarded reload reads the bytes the stores reaching it on every path wrote (one stored value, a bit range of one, or adjacent stored pieces), with no call, unknown effect or other write to the slot between; no escaped frame address reaches it',
         subjects,
       )
     )
@@ -1468,12 +1590,7 @@ export function planSourceStack(
       validation.requireAbi('frame_object_base', subjects, frameObjectBase);
     for (const access of reloads) {
       hidden.add(access.node.id);
-      if (access.node.kind === 'load')
-        alias(access.node.result, {
-          kind: 'cast',
-          op: 'bitcast',
-          value: before.get(access.node.id)!,
-        });
+      if (access.node.kind === 'load') alias(access.node.result, reads.get(access.node.id)!);
     }
   }
   const dynamicStorage = memory.some(

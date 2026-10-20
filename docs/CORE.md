@@ -379,11 +379,18 @@ above its base: when the lowest-addressed object escapes, as in optimized frames
 that place aggregates below scalars (SQLite `renameColumnFunc`, brotli `main`),
 all slots above it stay explicit; a 21-function SQLite/brotli sample of the LLM task set
 showed no change. Unknown effects and unbounded escapes keep the whole frame
-explicit. Mixed-width overlaps, outgoing argument slots and volatile accesses
-stay explicit. Same-width accesses of differing types (an O0 integer/IEEE pun
-through memory) promote only when every load forwards a bitcast of its reaching
-stored value. Narrower integer loads inside a whole-slot integer slot
-(`wide_slot_parts`) follow the same per-slot gate.
+explicit. Accesses straddling a slot's end, outgoing argument slots and volatile
+accesses stay explicit. Same-width accesses of differing types (an O0
+integer/IEEE pun through memory) forward a bitcast of the reaching stored value;
+when the reaching values differ, the slot is one local of its stores' common type
+(else its first access's type) and every other-typed 32/64-bit access converts by
+exact bit reinterpretation (C `__od_bitcast_*` under `c_bitcast`, Python-like
+`cast_bitcast`). Narrower integer loads and stores wholly inside a whole-slot
+integer slot (`wide_slot_parts`) are tracked per byte: each load forwards the
+bytes its reaching stores wrote, as a bit range of one stored value or adjacent
+stored pieces concatenated low to high (two 32-bit halves building a 64-bit slot,
+a 16-bit store inside a 64-bit value). A slot whose reaching bytes differ by path
+keeps its memory form; parts never become a scalar local.
 External-pointer stores are disjoint from an activation's nonescaping private
 frame only under the recorded `frame_private_to_activation` / `abi_conformance`
 requirement; the original alias facts remain in checked output. Open-arity

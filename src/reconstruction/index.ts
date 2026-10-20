@@ -193,6 +193,7 @@ export function reconstruct(
         sourcePlan.calls,
         sourcePlan.returns,
         sourcePlan.alias,
+        sourcePlan.make,
         context,
         sourcePlan.incomingStack,
         sourcePlan.entryStack,
