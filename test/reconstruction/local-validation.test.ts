@@ -82,6 +82,42 @@ test('ABI assumptions aggregate unique anchors without merging different explana
   );
 });
 
+test('a forked session continues the same state without sharing any later record', () => {
+  const session = new LocalValidationSession(createOperationContext(), true, 'function');
+  for (let index = 0; index < 70; index++)
+    session.presentation('rule', `node_${index}`, 'scope', [`value_${index}`]);
+  session.requireAbi('layout', ['anchor_0'], 'target layout');
+  session.check('presentation', 'checked', 'scope', () => ({
+    kind: 'presentation',
+    subject: 'checked',
+    scope: 'scope',
+    status: 'unverified',
+    reason: 'not applicable',
+  }));
+  const snapshot = JSON.stringify([session.records, session.abiConformance]);
+  const replay = (target: LocalValidationSession): string => {
+    target.presentation('rule', 'node_70', 'scope', ['value_70']);
+    target.presentation('rule', 'node_0', 'scope', ['value_0']);
+    target.requireAbi('layout', ['anchor_1'], 'target layout');
+    target.check('presentation', 'checked', 'scope', () => ({
+      kind: 'presentation',
+      subject: 'checked',
+      scope: 'scope',
+      status: 'unverified',
+      reason: 'not applicable',
+    }));
+    return JSON.stringify([target.records, target.abiConformance]);
+  };
+  const first = session.fork(),
+    second = session.fork();
+  const extended = replay(first);
+  // The open 64-subject chunk and the ABI chunk grew only in the fork.
+  assert.equal(JSON.stringify([session.records, session.abiConformance]), snapshot);
+  assert.equal(replay(second), extended, 'every fork continues from the same state');
+  assert.equal(replay(session), extended, 'a fork behaves as the original would have');
+  assert.equal(first.allowance.exhausted, session.allowance.exhausted);
+});
+
 test('source-only verified proof batching still executes every independent bitvector check', () => {
   for (const source of [false, true]) {
     const session = new LocalValidationSession(createOperationContext(), source);
