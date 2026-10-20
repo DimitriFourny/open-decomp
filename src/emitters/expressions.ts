@@ -413,6 +413,7 @@ const C_PRECEDENCE: Readonly<Record<string, number>> = {
 const PYTHON_PRECEDENCE: Readonly<Record<string, number>> = {
   '*': 13,
   '%': 13,
+  '//': 13,
   '+': 12,
   '-': 12,
   '<<': 11,
@@ -486,6 +487,10 @@ const simplifications = {
     'xor with the all-ones constant of the result width is the bitwise complement of the other operand',
   negative_addend:
     'adding a constant in the upper half of the result width is subtracting its two-complement magnitude: the same value modulo 2^width',
+  native_division:
+    'division or remainder by a constant divisor other than zero (and, signed, other than -1) is the native truncating operator: no zero-divisor or minimum/-1 case is reachable; Python-like prints only unsigned operands natively (floor division equals truncation for non-negative values)',
+  mask_insert:
+    'replacing bits [offset, offset+n) of a value is (base & ~(ones_n << offset)) | (value_n << offset) reduced to the result width: the kept mask clears exactly the replaced bits and the n-bit value occupies exactly them',
   rotate_inline:
     'a rotation of a w-bit unsigned bare variable by a constant 0<k<w is (x << k) | (x >> (w-k)) reduced to w bits, printed in the direction with the smaller count; the variable is pure, so reading it twice in one expression is exact',
   character_literal:
@@ -1124,6 +1129,56 @@ export function expressionText(
         }
         return printer.reduce(width, printer.binary(op, left, right, common));
       }
+      // Division by a constant other than 0 (and, signed, -1) reaches neither
+      // the undefined zero divisor nor the minimum/-1 overflow: the native
+      // truncating operator is the bit-vector operation. Python floors, so only
+      // unsigned operands (where flooring is truncation) print natively there.
+      if (
+        (expression.op === 'udiv' ||
+          expression.op === 'urem' ||
+          expression.op === 'sdiv' ||
+          expression.op === 'srem') &&
+        type.kind === 'integer' &&
+        [8, 16, 32, 64].includes(width) &&
+        bitWidth(expression.left.type) === width
+      ) {
+        const divisor = options.constant?.(expression.right),
+          signed = expression.op === 'sdiv' || expression.op === 'srem',
+          op = expression.op.endsWith('rem') ? '%' : python ? '//' : '/';
+        const negative = divisor === undefined ? 0n : BigInt.asIntN(width, divisor);
+        if (
+          divisor !== undefined &&
+          divisor !== 0n &&
+          (!signed || (!python && negative !== -1n)) &&
+          printer.simplify('native_division', [expression.left.id, expression.right.id])
+        ) {
+          if (!signed) {
+            let left = operand(expression.left);
+            if (range(left, width).signed) left = printer.cast(width, false, left);
+            const right = printer.literal(divisor, width),
+              known = range(left, width);
+            return printer.binary(
+              op,
+              left,
+              right,
+              python ? known : usualArithmetic(promote(known), right.ctype!),
+            );
+          }
+          const right =
+            negative >= -(1n << 31n) && negative < 1n << 31n
+              ? printer.signedLiteral(negative)
+              : printer.cast(width, true, printer.literal(divisor, width));
+          return printer.reduce(
+            width,
+            printer.binary(
+              op,
+              printer.cast(width, true, operand(expression.left)),
+              right,
+              promote({ bits: width, signed: true }),
+            ),
+          );
+        }
+      }
       const count = options.constant?.(expression.right);
       const shifting =
         (expression.op === 'shl' || expression.op === 'lshr' || expression.op === 'ashr') &&
@@ -1393,6 +1448,68 @@ export function expressionText(
         return { ...printer.cast(width, false, narrow), widened: narrow };
       }
       return result!;
+    }
+    case 'insert': {
+      // Replacing bits [offset, offset+n) is keeping the others and OR-ing in
+      // the value shifted into place: (base & ~(ones_n << offset)) | (value << offset),
+      // reduced to the result width. The value is masked to n bits first unless
+      // its type already holds no more.
+      const lane = bitWidth(expression.value.type);
+      if (
+        type.kind !== 'integer' ||
+        expression.base.type.kind !== 'integer' ||
+        expression.value.type.kind !== 'integer' ||
+        bitWidth(expression.base.type) !== width ||
+        expression.offset >= width ||
+        !printer.simplify('mask_insert', [expression.base.id, expression.value.id])
+      )
+        return helper();
+      const all = (1n << BigInt(width)) - 1n,
+        field = (((1n << BigInt(lane)) - 1n) << BigInt(expression.offset)) & all;
+      let value = operand(expression.value);
+      const known = range(value, lane);
+      if (known.signed || known.bits > lane)
+        value = printer.binary(
+          '&',
+          printer.cast(Math.max(lane, known.bits), false, value),
+          printer.literal((1n << BigInt(lane)) - 1n, lane, true),
+          python
+            ? { bits: lane, signed: false }
+            : promote({ bits: Math.max(lane, known.bits), signed: false }),
+        );
+      if (expression.offset) {
+        if (!python) value = printer.cast(Math.max(width, 32), false, value);
+        value = printer.binary(
+          '<<',
+          value,
+          printer.literal(BigInt(expression.offset), 32),
+          python
+            ? { bits: lane + expression.offset, signed: false }
+            : promote({ bits: Math.max(width, 32), signed: false }),
+        );
+      }
+      let base = operand(expression.base);
+      if (range(base, width).signed) base = printer.cast(width, false, base);
+      const kept = all ^ field;
+      const result =
+        kept === 0n
+          ? value
+          : printer.binary(
+              '|',
+              printer.binary(
+                '&',
+                base,
+                printer.literal(kept, width, true),
+                python ? { bits: width, signed: false } : promote({ bits: width, signed: false }),
+              ),
+              value,
+              python
+                ? { bits: Math.max(width, lane + expression.offset), signed: false }
+                : promote({ bits: Math.max(width, 32), signed: false }),
+            );
+      return lane + expression.offset > width || (!python && width < 32)
+        ? printer.reduce(width, result)
+        : result;
     }
     case 'select': {
       const condition = operand(expression.condition),

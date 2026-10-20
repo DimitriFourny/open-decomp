@@ -2,19 +2,15 @@ import type { OperationContext } from '../core/index.js';
 import { mapExpression } from '../analysis/effects/index.js';
 import {
   bitWidth,
-  evaluateExpression,
   expressionOperands,
   integer,
-  sameType,
   type DataType,
   type Expression,
   type Value,
 } from '../ir/index.js';
-import { identityOperand, integerIdentity } from './expressions.js';
+import { identityOperand } from './expressions.js';
 import { LocalValidationSession, validateBitvectorCandidate } from './local-validation.js';
-import { recombineBitSlices, wholeValueConcat } from './source-bit-slices.js';
-import { foldSourceCondition } from './source-conditions.js';
-import { foldShiftIdiom, shiftIdiomScope } from './source-shifts.js';
+import { viewRules, type ExpressionRule, type RuleSite } from './source-rules.js';
 
 export interface SourceExpressionDemand {
   /** Conservative value closure, extended for newly introduced definitions. */
@@ -23,8 +19,9 @@ export interface SourceExpressionDemand {
   readonly pending: string[];
 }
 
-const strengthReducedMultiplyScope =
-  'x + (x << k), x + x*c, (x << k) - x and x*c - x over one SSA value x of the result width are x*(2^k + 1), x*(c + 1), x*(2^k - 1) and x*(c - 1): distributivity modulo 2^width, so the printed width-bit product equals the sum or difference; both operands are the identical value x (no operand is duplicated or dropped), and the folded constant must lie in [2, 2^(width-1)) so it reads as a multiplier';
+/** Work bound of the rule fixpoint: rewrites of one value. Every applied step is
+ * itself established, so stopping keeps a correct (less reduced) form. */
+const REWRITES_PER_VALUE = 32;
 
 /** Conservative structural demand before normalization. Follow every phi input
  * even when the destination already has a source alias: this is a superset,
@@ -189,71 +186,34 @@ export function normalizeSourceExpressions(
     for (const prefix of path) resolutions.set(prefix.id, value);
     return value;
   };
-  const narrow = (value: Value, width: number, block: string): Value =>
-    bitWidth(value.type) === width
-      ? value
-      : create(`low-bits:${value.id}:${width}`, integer(width), block, {
-          kind: 'extract',
-          value,
-          offset: 0,
-        });
   const constant = (value: Value): bigint | null => {
     const expression = observe(resolve(value).id);
     return expression?.kind === 'constant'
       ? BigInt.asUintN(bitWidth(value.type), expression.bits)
       : null;
   };
-  const factor = (value: Value, coefficient: bigint, block: string): Value =>
-    create(
-      `integer-factor:${value.id}:${coefficient}`,
-      value.type,
-      block,
-      { kind: 'constant', bits: BigInt.asUintN(bitWidth(value.type), coefficient) },
-      [value],
-    );
-  const scaled = (value: Value): { value: Value; coefficient: bigint } | null => {
-    const expression = observe(resolve(value).id);
-    if (expression?.kind !== 'integer') return null;
-    if (expression.op === 'mul') {
-      const left = constant(expression.left),
-        right = constant(expression.right);
-      if (right !== null) return { value: resolve(expression.left), coefficient: right };
-      if (left !== null) return { value: resolve(expression.right), coefficient: left };
-    }
-    if (expression.op === 'shl') {
-      const count = constant(expression.right);
-      if (count !== null)
-        return {
-          value: resolve(expression.left),
-          coefficient: count >= BigInt(bitWidth(value.type)) ? 0n : 1n << count,
-        };
-    }
-    return null;
-  };
-  /** x + c*x, c*x + x and c*x - x over one value x of the result width are x*k
-   * modulo 2^width for the folded coefficient k; k must read as a multiplier
-   * (2 <= k < 2^(width-1)), never as a negated or wrapped one. */
-  const strengthReducible = (base: Value, coefficient: bigint, width: number): boolean =>
-    bitWidth(base.type) === width && coefficient >= 2n && coefficient < 1n << BigInt(width - 1);
+  const view: RuleSite['view'] = sourceCells ? 'source' : 'checked',
+    rules = viewRules(view),
+    rewrites = new Map<string, number>();
   const run = (): void => {
     context.checkpoint(0);
     for (let cursor = 0; cursor < queue.length; cursor++) {
       context.checkpoint(1);
       const id = queue[cursor]!;
       queued.delete(id);
-      if (validation.rejectedRewrites.has(id)) continue;
+      if (validation.rejectedRewrites.has(id) || (rewrites.get(id) ?? 0) >= REWRITES_PER_VALUE)
+        continue;
       current = id;
       const original = expressions.get(id)!,
-        value = values.get(id)!;
+        value = values.get(id)!,
+        block = owner.get(id)!;
       let operandsChanged = false;
       const expression = mapExpression(original, (operand) => {
         const resolved = resolve(operand);
         operandsChanged ||= resolved.id !== operand.id;
         return resolved;
       });
-      let replacement: Expression = expression;
-      let cellRewrite = false;
-      let strengthReduced = false;
+      // A join of lanes marks the products feeding it as packing shifts.
       if (
         sourceCells &&
         (expression.kind === 'concat' ||
@@ -271,395 +231,90 @@ export function normalizeSourceExpressions(
           }
         }
       }
-      if (expression.kind === 'cast' && value.type.kind === 'integer') {
-        if (
-          ['truncate', 'zero_extend', 'sign_extend'].includes(expression.op) &&
-          sameType(value.type, expression.value.type)
-        )
-          replacement = { kind: 'cast', op: 'bitcast', value: expression.value };
-        else if (expression.op === 'truncate')
-          replacement = { kind: 'extract', value: expression.value, offset: 0 };
-      }
-      if (expression.kind === 'integer' && value.type.kind === 'integer') {
-        const block = owner.get(id)!;
-        if (expression.op === 'mul' && packingShifts.has(id)) {
-          const coefficient = constant(expression.right);
-          if (
-            coefficient !== null &&
-            coefficient > 1n &&
-            (coefficient & (coefficient - 1n)) === 0n
-          ) {
-            replacement = {
-              kind: 'integer',
-              op: 'shl',
-              left: expression.left,
-              right: factor(value, BigInt(coefficient.toString(2).length - 1), block),
-            };
-            cellRewrite = true;
-          }
-        } else if (!sourceCells && expression.op === 'shl' && !packingShifts.has(id)) {
-          const count = constant(expression.right);
-          if (count !== null)
-            replacement = {
-              kind: 'integer',
-              op: 'mul',
-              left: expression.left,
-              right: factor(value, count >= BigInt(value.type.bits) ? 0n : 1n << count, block),
-            };
-        } else if (expression.op === 'add') {
-          const left = scaled(expression.left),
-            right = scaled(expression.right);
-          // Match only x + k*x (in either order), not arbitrary expression
-          // reassociation. SSA identity keeps repeated effectful definitions
-          // distinct, and no operand or shared DAG is duplicated.
-          const matched =
-            right?.value.id === expression.left.id
-              ? right
-              : left?.value.id === expression.right.id
-                ? left
-                : null;
-          if (matched && !sourceCells)
-            replacement = {
-              kind: 'integer',
-              op: 'mul',
-              left: matched.value,
-              right: factor(value, matched.coefficient + 1n, block),
-            };
-          else if (matched) {
-            const coefficient = BigInt.asUintN(value.type.bits, matched.coefficient + 1n);
-            if (strengthReducible(matched.value, coefficient, value.type.bits)) {
-              replacement = {
-                kind: 'integer',
-                op: 'mul',
-                left: matched.value,
-                right: factor(value, coefficient, block),
-              };
-              strengthReduced = true;
-            }
-          }
-        } else if (expression.op === 'sub' && sourceCells) {
-          const product = observe(expression.left.id);
-          const minuend =
-            product?.kind === 'integer' && (product.op === 'mul' || product.op === 'shl')
-              ? scaled(expression.left)
-              : null;
-          if (minuend?.value.id === expression.right.id) {
-            const coefficient = BigInt.asUintN(value.type.bits, minuend.coefficient - 1n);
-            if (strengthReducible(minuend.value, coefficient, value.type.bits)) {
-              replacement = {
-                kind: 'integer',
-                op: 'mul',
-                left: minuend.value,
-                right: factor(value, coefficient, block),
-              };
-              strengthReduced = true;
-            }
-          }
+      const site: RuleSite = {
+        value,
+        expression,
+        block,
+        view,
+        context,
+        observe,
+        resolve,
+        constant,
+        create,
+        narrow: (operand, width) =>
+          bitWidth(operand.type) === width
+            ? operand
+            : create(`low-bits:${operand.id}:${width}`, integer(width), block, {
+                kind: 'extract',
+                value: operand,
+                offset: 0,
+              }),
+        literal: (type, bits, key) => {
+          const masked = BigInt.asUintN(bitWidth(type), bits);
+          return create(`${key}:${masked}`, type, block, { kind: 'constant', bits: masked }, [
+            value,
+          ]);
+        },
+        packingShifts,
+        packedSources,
+      };
+      let rule: ExpressionRule | null = null,
+        replacement = expression;
+      for (const candidate of rules) {
+        const rewritten = candidate.apply(site);
+        if (rewritten) {
+          rule = candidate;
+          replacement = rewritten;
+          break;
         }
       }
-      if (expression.kind === 'extract') {
-        const observed = observe(expression.value.id),
-          source = packedSources.get(expression.value.id) ?? observed,
-          width = bitWidth(value.type);
-        if (expression.offset === 0 && sameType(value.type, expression.value.type))
-          replacement = { kind: 'cast', op: 'bitcast', value: expression.value };
-        else if (source?.kind === 'extract')
-          replacement = {
-            kind: 'extract',
-            value: source.value,
-            offset: source.offset + expression.offset,
-          };
-        else if (
-          source?.kind === 'cast' &&
-          (source.op === 'zero_extend' || source.op === 'sign_extend') &&
-          expression.offset + width <= bitWidth(source.value.type)
-        )
-          replacement = { kind: 'extract', value: source.value, offset: expression.offset };
-        else if (
-          source?.kind === 'insert' &&
-          expression.offset >= source.offset &&
-          expression.offset + width <= source.offset + bitWidth(source.value.type)
-        )
-          replacement = {
-            kind: 'extract',
-            value: source.value,
-            offset: expression.offset - source.offset,
-          };
-        else if (
-          expression.offset === 0 &&
-          source?.kind === 'integer' &&
-          ['add', 'sub', 'mul', 'and', 'or', 'xor'].includes(source.op)
-        ) {
-          const block = owner.get(id)!;
-          replacement = {
-            ...source,
-            left: narrow(source.left, width, block),
-            right: narrow(source.right, width, block),
-          };
-        } else if (
-          sourceCells &&
-          expression.offset === 0 &&
-          source?.kind === 'integer' &&
-          source.op === 'shl' &&
-          (constant(source.right) ?? BigInt(width)) < BigInt(width)
-        ) {
-          // The low bits of x << c (c below the narrow width) are the low bits
-          // of x shifted by c: the narrowed constant count keeps its value.
-          const block = owner.get(id)!;
-          replacement = {
-            ...source,
-            left: narrow(source.left, width, block),
-            right: narrow(source.right, width, block),
-          };
-        } else if (source?.kind === 'concat') {
-          let offset = 0;
-          for (const part of source.values) {
-            context.checkpoint(1);
-            if (
-              expression.offset >= offset &&
-              expression.offset + width <= offset + bitWidth(part.type)
-            ) {
-              replacement = { kind: 'extract', value: part, offset: expression.offset - offset };
-              break;
-            }
-            offset += bitWidth(part.type);
-          }
-        }
-      }
-      if (!sourceCells && expression.kind === 'concat' && expression.values.length) {
-        let offset = 0,
-          base: Value | null = null,
-          complete = true;
-        for (const part of expression.values) {
-          const extraction = observe(part.id);
-          if (
-            extraction?.kind !== 'extract' ||
-            extraction.offset !== offset ||
-            (base && base.id !== extraction.value.id)
-          ) {
-            complete = false;
-            break;
-          }
-          base = extraction.value;
-          offset += bitWidth(part.type);
-        }
-        if (complete && base && sameType(value.type, base.type))
-          replacement = { kind: 'cast', op: 'bitcast', value: base };
-        else if (
-          expression.values.slice(1).every((part) => {
-            const definition = observe(part.id);
-            return definition?.kind === 'constant' && definition.bits === 0n;
-          })
-        )
-          replacement = { kind: 'cast', op: 'zero_extend', value: expression.values[0]! };
-      }
-      if (expression.kind === 'flag' && expression.op === 'add' && expression.flag === 'zero') {
-        const right = observe(expression.right.id),
-          carry = observe(expression.carry.id);
-        if (right?.kind === 'constant' && carry?.kind === 'constant' && carry.bits === 0n) {
-          const compared = create(
-            `zero-add:${id}`,
-            expression.left.type,
-            owner.get(id)!,
-            { kind: 'constant', bits: BigInt.asUintN(bitWidth(expression.left.type), -right.bits) },
-            [value],
-          );
-          replacement = { kind: 'compare', op: 'eq', left: expression.left, right: compared };
-        }
-      }
-      // Source view: compare flags and their condition-code consumers become
-      // direct relational predicates; exact by outcome enumeration.
-      const condition = sourceCells
-        ? foldSourceCondition(value, expression, observe, resolve, create, owner.get(id)!, context)
-        : null;
-      if (condition) replacement = condition;
-      let recombined =
-        sourceCells && !condition
-          ? recombineBitSlices(
-              value,
-              expression,
-              observe,
-              create,
-              owner.get(id)!,
-              context,
-              packingShifts,
-            )
-          : null;
-      // The slices of one value joined back in order are that value, even when
-      // the value is arithmetic the lane analysis does not look through.
-      if (sourceCells && !condition && !recombined && replacement === expression)
-        recombined = wholeValueConcat(value, expression, observe);
-      if (recombined) {
-        replacement = recombined;
-        cellRewrite = true;
-      }
-      // Source view: a masked constant rotation is a plain shift and a logical
-      // shift joined with the replicated sign bit is an arithmetic shift.
-      const shiftIdiom =
-        sourceCells && !condition && !recombined && replacement === expression
-          ? foldShiftIdiom(value, expression, observe, resolve, constant, create, owner.get(id)!)
-          : null;
-      if (shiftIdiom) replacement = shiftIdiom;
-      // Source view only: exact same-type identities (x&x, x|x, ones&x and the
-      // constant neutral elements) leave the operand itself.
-      let identity = false;
-      if (sourceCells && replacement.kind === 'integer' && value.type.kind === 'integer') {
-        const operand = integerIdentity(
-          value.type,
-          replacement,
-          constant(replacement.left),
-          constant(replacement.right),
-          true,
+      if (replacement === expression && !operandsChanged) continue;
+      // Operand resolution alone is exact wiring. Structural rules carry their
+      // own proof; the independent BDD veto runs while its allowance remains
+      // (source view). Bitvector rules keep the original form once it is
+      // exhausted; checked sessions keep their per-candidate records. Rules
+      // with their own proof (outcome tables, side conditions the BDD does
+      // not model) are not re-proved by it.
+      const proof = rule?.proof ?? 'structural',
+        wiring = sourceCells && proof === 'structural';
+      if (proof !== 'own' && (!wiring || !validation.allowance.exhausted)) {
+        if (validation.skipExhaustedBitvector(id)) continue;
+        const checked = validation.check('bitvector', id, 'source expression rewrite', () =>
+          validateBitvectorCandidate(
+            value,
+            original,
+            replacement,
+            expressions,
+            validation.allowance,
+          ),
         );
-        if (operand) {
-          replacement = { kind: 'cast', op: 'bitcast', value: operand };
-          identity = true;
+        if (checked.status === 'rejected') {
+          validation.rejectedRewrites.add(id);
+          continue;
         }
       }
-      // A sign extension of a strictly narrower zero extension never sees a set
-      // sign bit: it is the zero extension of the original operand.
-      let extensionFold = false;
-      if (sourceCells && replacement.kind === 'cast' && replacement.op === 'sign_extend') {
-        const inner = observe(replacement.value.id);
-        if (
-          inner?.kind === 'cast' &&
-          inner.op === 'zero_extend' &&
-          bitWidth(inner.value.type) < bitWidth(replacement.value.type)
-        ) {
-          replacement = { kind: 'cast', op: 'zero_extend', value: inner.value };
-          extensionFold = true;
-        }
-      }
-      const operands = expressionOperands(replacement);
-      context.checkpoint(operands.length);
       if (
-        operands.length &&
-        operands.every((operand) => observe(operand.id)?.kind === 'constant')
-      ) {
-        const evaluated = evaluateExpression(value.type, replacement, (operand) => {
-          const constant = observe(operand.id)!;
-          return constant.kind === 'constant'
-            ? { kind: 'bits', bits: constant.bits }
-            : { kind: 'unknown', reason: 'nonconstant source operand' };
-        });
-        if (evaluated.kind === 'bits') replacement = { kind: 'constant', bits: evaluated.bits };
-      }
-      // Revisit this value for multi-step reductions as well as its readers.
-      if (replacement !== expression || operandsChanged) {
-        // The wiring rule has already proved every bit and ordered opaque
-        // dependency structurally. Shared BDD exhaustion must not undo that
-        // proof; retain the independent veto while it still has an allowance.
-        // Source view: exact wiring is not a speculative candidate either:
-        // same-type identity operand resolution, and slice/extension reselection
-        // that relocates existing bits without arithmetic. Nonstructural rewrites
-        // (arithmetic, narrowing, folding) keep the conservative exhausted
-        // fallback; checked sessions keep their original per-candidate records.
-        const wiring =
-          recombined !== null ||
-          (sourceCells &&
-            (replacement === expression ||
-              replacement.kind === 'extract' ||
-              (replacement.kind === 'cast' && replacement.op === 'bitcast')));
-        // A condition fold is proved by its own exhaustive outcome table; the
-        // bitvector checker models neither ordered compares nor selects.
-        // A shift idiom is proved by its own side conditions on the exact mask
-        // and count; the bitvector checker does not model rotates or selects.
-        // A strength-reduced multiply is proved by its own side conditions: the
-        // bit-vector checker would spend its whole shared allowance on one
-        // 64-bit constant multiplication.
-        if (
-          !condition &&
-          !shiftIdiom &&
-          !strengthReduced &&
-          (!wiring || !validation.allowance.exhausted)
-        ) {
-          if (validation.skipExhaustedBitvector(id)) continue;
-          const checked = validation.check('bitvector', id, 'source expression rewrite', () =>
-            validateBitvectorCandidate(
-              value,
-              original,
-              replacement,
-              expressions,
-              validation.allowance,
-            ),
-          );
-          if (checked.status === 'rejected') {
-            validation.rejectedRewrites.add(id);
-            continue;
-          }
-        }
-        if (
-          condition &&
-          !validation.presentation(
-            'condition_flags',
-            id,
-            'compare flags and their condition-code consumers (NZCV/EFLAGS bits, conditional compares, cset/csel/setcc/cmov selects, FP compare flags) as native relational predicates joined by && and ||; exact over every feasible equal/unsigned/signed/wrapped-sign outcome and IEEE less/equal/greater/unordered outcome; a condition depending on the wrapped sign or overflow alone keeps its flag helper',
-            expressionOperands(original).map((operand) => operand.id),
-          )
+        rule?.name &&
+        !validation.presentation(
+          rule.name,
+          id,
+          rule.scope,
+          expressionOperands(original).map((operand) => operand.id),
         )
-          continue;
-        if (
-          shiftIdiom &&
-          !validation.presentation(
-            'shift_idiom',
-            id,
-            shiftIdiomScope,
-            expressionOperands(original).map((operand) => operand.id),
-          )
-        )
-          continue;
-        if (
-          strengthReduced &&
-          !validation.presentation(
-            'strength_reduced_multiply',
-            id,
-            strengthReducedMultiplyScope,
-            expressionOperands(original).map((operand) => operand.id),
-          )
-        )
-          continue;
-        if (
-          cellRewrite &&
-          !validation.presentation(
-            'register_cell_recombination',
-            id,
-            'bounded integer DAG wiring preserves every bit and ordered opaque dependencies; contiguous slices, zero extension, masked inserts and power-of-two packing shifts only',
-            expressionOperands(original).map((operand) => operand.id),
-          )
-        )
-          continue;
-        if (
-          identity &&
-          !validation.presentation(
-            'integer_identity',
-            id,
-            'same-width integer operation with a proven neutral operand or two identical operands (x&x, x|x, x&ones, x|0, x+0, x^0, x*1, x<<0) is exactly that operand; operands that could carry an unknown (x^x, x-x, x*0) are never dropped',
-            expressionOperands(original).map((operand) => operand.id),
-          )
-        )
-          continue;
-        if (
-          extensionFold &&
-          !validation.presentation(
-            'extension_fold',
-            id,
-            'sign extension of a strictly narrower zero extension: the sign bit is zero, so it is the zero extension of the original operand',
-            expressionOperands(original).map((operand) => operand.id),
-          )
-        )
-          continue;
-        if (
-          cellRewrite &&
-          (expression.kind === 'concat' || expression.kind === 'insert') &&
-          replacement.kind === 'integer'
-        )
-          packedSources.set(id, expression);
-        expressions.set(id, replacement);
-        invalidate(id);
-        const oldAlias = identityOperand(value.type, original);
-        if (oldAlias) identityUsers.get(oldAlias.id)?.delete(id);
-        enqueue(id);
-      }
+      )
+        continue;
+      if (
+        rule?.cell &&
+        (expression.kind === 'concat' || expression.kind === 'insert') &&
+        replacement.kind === 'integer'
+      )
+        packedSources.set(id, expression);
+      rewrites.set(id, (rewrites.get(id) ?? 0) + 1);
+      expressions.set(id, replacement);
+      invalidate(id);
+      const oldAlias = identityOperand(value.type, original);
+      if (oldAlias) identityUsers.get(oldAlias.id)?.delete(id);
+      enqueue(id);
     }
     queue.length = 0;
     current = '';

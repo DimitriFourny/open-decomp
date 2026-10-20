@@ -27,6 +27,7 @@ import {
   terminatorOperands,
 } from '../effects/index.js';
 import { AnalysisBudget } from '../ssa/budget.js';
+import { foldValueRule, type ValueRuleScope } from './rules.js';
 import type { AnalysisOptions, AnalysisResult } from '../ssa/budget.js';
 
 export type ValueFact =
@@ -425,6 +426,30 @@ function rewrite(
     for (const node of block.instructions)
       if (node.kind === 'assign') definitions.set(node.result.id, node);
   const states = new Map(input.register_states.map((state) => [state.block, state]));
+  // Block parameter -> incoming edge values, for the value rules' determinacy scan.
+  const parameters = new Map<EntityId, Value[]>();
+  const byBlock = new Map(input.blocks.map((block) => [block.id, block]));
+  for (const block of input.blocks)
+    for (const edge of successors(block.terminator)) {
+      budget.charge();
+      const target = byBlock.get(edge.target);
+      target?.parameters.forEach((parameter, index) => {
+        const argument = edge.arguments[index];
+        if (!argument) return;
+        const list = parameters.get(parameter.id) ?? [];
+        list.push(argument);
+        parameters.set(parameter.id, list);
+      });
+    }
+  const scope: ValueRuleScope = {
+    definition: (id) => definitions.get(id)?.expression,
+    constant: (id) => {
+      const fact = analysis.facts.get(id);
+      return fact?.kind === 'constant' ? fact.bits : undefined;
+    },
+    incoming: (id) => parameters.get(id) ?? [],
+    charge: (work) => budget.charge(work),
+  };
   const rewritten: { block: BasicBlock; nodes: Instruction[]; terminator: Terminator }[] = [];
   for (const block of input.blocks) {
     budget.charge();
@@ -473,6 +498,7 @@ function rewrite(
           expression = { kind: 'cast', op: 'bitcast', value: expression.left };
         }
       }
+      expression = foldValueRule(node.result.type, expression, scope) ?? expression;
       if (expression !== node.expression) {
         changed = true;
         const origins = expressionOperands(node.expression).flatMap((value) => {
