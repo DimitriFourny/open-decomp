@@ -8,7 +8,12 @@ import type { LocalValidationRecord } from '../reconstruction/local-validation.j
 import { sourceConstantValues, sourceDataValues } from '../reconstruction/source-data.js';
 import type { SourceAddress } from '../reconstruction/source-model.js';
 import type { EmissionInput } from './model.js';
-import { MetadataLimitError, ReferenceUnions, type Writer } from './writer.js';
+import {
+  MetadataLimitError,
+  ReferenceUnions,
+  type ReferenceEncoding,
+  type Writer,
+} from './writer.js';
 
 type Mapping = Emission['mappings'][number];
 type Details = Inference['details'];
@@ -274,6 +279,39 @@ function gatherInferences(
     return rows;
   };
   const references = new ReferenceUnions(context);
+  /** The output spans and reference unions of one mapping list. Records of one
+   * subject (and every half of a split type cohort) reuse it instead of
+   * revisiting each mapping. */
+  interface LinkSummary {
+    readonly spans: ReadonlyMap<string, { readonly start: number; readonly end: number }>;
+    readonly instructions: ReferenceEncoding;
+    readonly proofs: ReferenceEncoding;
+    readonly ranges: ReferenceEncoding;
+  }
+  const linkSummaries = new WeakMap<readonly Mapping[], LinkSummary>();
+  const summarize = (links: readonly Mapping[]): LinkSummary => {
+    const previous = linkSummaries.get(links);
+    if (previous) return previous;
+    const spans = new Map<string, { start: number; end: number }>();
+    const instructions = references.begin(),
+      proofs = references.begin(),
+      ranges = references.begin();
+    for (const mapping of links) {
+      context.checkpoint(1);
+      spans.set(`${mapping.start}:${mapping.end}`, { start: mapping.start, end: mapping.end });
+      instructions.add(mapping.instruction_refs);
+      if (writer.evidence) proofs.add(mapping.evidence_refs);
+      ranges.add(mapping.range_refs);
+    }
+    const summary: LinkSummary = {
+      spans,
+      instructions: instructions.encoding(),
+      proofs: proofs.encoding(),
+      ranges: ranges.encoding(),
+    };
+    linkSummaries.set(links, summary);
+    return summary;
+  };
   interface Member {
     readonly subjects: readonly string[];
     readonly evidence: readonly string[];
@@ -328,31 +366,30 @@ function gatherInferences(
           spans.set(`${site.start}:${site.end}`, site);
         }
       }
-      for (const mapping of links) {
-        context.checkpoint(1);
-        if (!hasSites)
-          spans.set(`${mapping.start}:${mapping.end}`, { start: mapping.start, end: mapping.end });
-        // Fallback is per member, not per group: a field without an IR origin
-        // keeps its mapping provenance even beside a value with its own origin.
-        if (!hasInstructions) instructionUnion.add(mapping.instruction_refs);
-        if (writer.evidence) proofUnion.add(mapping.evidence_refs);
-        if (!hasRanges) rangeUnion.add(mapping.range_refs);
-      }
+      // Fallback is per member, not per group: a field without an IR origin
+      // keeps its mapping provenance even beside a value with its own origin.
+      const linked = summarize(links);
+      if (!hasSites)
+        for (const [key, span] of linked.spans) {
+          context.checkpoint(1);
+          spans.set(key, { start: span.start, end: span.end });
+        }
+      if (!hasInstructions) instructionUnion.merge(linked.instructions);
+      if (writer.evidence) proofUnion.merge(linked.proofs);
+      if (!hasRanges) rangeUnion.merge(linked.ranges);
     }
     if (!subjectIds.size) return;
     if (result.length >= 10000) {
       tally.skipped++;
       return;
     }
-    const instructions = instructionUnion.finish(),
-      proofs = proofUnion.finish(),
-      ranges = rangeUnion.finish();
+    // Bounds are checked on union sizes: an oversized union is never materialized.
     if (
       subjectIds.size > 10000 ||
-      instructions.length > 10000 ||
-      ranges.length > 10000 ||
-      proofs.length > 1000 ||
-      spans.size > 1000
+      spans.size > 1000 ||
+      proofUnion.size() > 1000 ||
+      instructionUnion.size() > 10000 ||
+      rangeUnion.size() > 10000
     ) {
       // Partition a large type cohort without weakening any wire bound. Every
       // attempted union above is charged, including when its cohort must split.
@@ -380,6 +417,9 @@ function gatherInferences(
     // Reference unions charge their word visits and materialize each immutable
     // result once. Only the subject list is newly copied for every record.
     context.checkpoint(subjectIds.size);
+    const instructions = instructionUnion.finish(),
+      proofs = proofUnion.finish(),
+      ranges = rangeUnion.finish();
     const record: Inference = {
       id: `inference:${result.length}`,
       status,

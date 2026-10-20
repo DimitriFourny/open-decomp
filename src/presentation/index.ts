@@ -233,28 +233,32 @@ export function structureControlFlow(
     };
     /** A short block chain ending the function within three jumps (at most four
      * stores/calls per block): an exit into it is a small tail that labeled
-     * transfers and source-view copies resolve. */
+     * transfers and source-view copies resolve. Edge selection asks for the
+     * same blocks repeatedly; the CFG never changes, so each answer is kept. */
+    const tailAnswers = new Map<string, boolean>();
     const tailBlock = (id: EntityId, hops: number): boolean => {
-      budget.charge(1 + blocks.get(id)!.instructions.length);
+      const key = `${hops}:${id}`,
+        known = tailAnswers.get(key);
+      budget.charge();
+      if (known !== undefined) return known;
+      budget.charge(blocks.get(id)!.instructions.length);
       const block = blocks.get(id)!,
         term = block.terminator;
       const effects = block.instructions.filter(
         (node) => node.kind === 'store' || node.kind === 'call' || node.kind === 'unknown_effect',
       ).length;
-      if (effects > 4) return false;
-      if (
-        term.kind === 'return' ||
-        term.kind === 'trap' ||
-        term.kind === 'unknown' ||
-        term.kind === 'indirect'
-      )
-        return true;
-      return (
-        term.kind === 'jump' &&
-        hops < 3 &&
-        term.edge.target !== id &&
-        tailBlock(term.edge.target, hops + 1)
-      );
+      const result =
+        effects <= 4 &&
+        (term.kind === 'return' ||
+          term.kind === 'trap' ||
+          term.kind === 'unknown' ||
+          term.kind === 'indirect' ||
+          (term.kind === 'jump' &&
+            hops < 3 &&
+            term.edge.target !== id &&
+            tailBlock(term.edge.target, hops + 1)));
+      tailAnswers.set(key, result);
+      return result;
     };
     /** Outgoing slots of a block: slot number and target. */
     const slots = (id: EntityId): { slot: number; target: EntityId }[] => {

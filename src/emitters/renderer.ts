@@ -363,19 +363,27 @@ export class Renderer {
     private readonly context: OperationContext,
     private readonly language: 'c-like' | 'python-like',
     private readonly version: string,
+    /** The function's reconstruction, shared by every attempt; it is never mutated. */
+    reconstruction: Reconstruction,
+    /** False when an earlier attempt already validated `reconstruction`. */
+    validate: boolean,
     /** Call results never printed as their reader's operand; null: no call is. */
     private readonly rejectedCalls: ReadonlySet<string> | null = new Set(),
     private readonly metadata: 'full' | 'omitted' = 'full',
   ) {
     this.writer = new Writer(context, options.indent, options.include_evidence, language, metadata);
-    this.program = reconstruct(input, context, options.view === 'checked' ? 'checked' : 'source');
+    // Rendering records presentation rewrites in the validation session; each
+    // attempt continues its own copy of the state reconstruction left.
+    const session = reconstruction.local_validation_session?.fork();
+    this.program = session
+      ? { ...reconstruction, local_validation: session.records, local_validation_session: session }
+      : reconstruction;
     this.inline = new Set(this.program.inline);
     this.bounds = new UnsignedBounds(this.program.expressions, context);
     this.sourceView = options.view !== 'checked';
     this.body = input.function.body;
     this.requirementPredicates = sourceRequirementPredicates(this.program.source?.requirements);
-    this.localValidation =
-      this.program.local_validation_session ?? new LocalValidationSession(context);
+    this.localValidation = session ?? new LocalValidationSession(context);
     let oddWidth = false;
     for (const value of this.program.values.values()) {
       context.checkpoint(1);
@@ -550,7 +558,7 @@ export class Renderer {
       this.invalid('Structured function has no entry block');
     if (this.sourceView) this.planSourceControl();
     this.findLabels(this.body, [], 0);
-    validateReconstruction(this.program, context);
+    if (validate) validateReconstruction(this.program, context);
   }
 
   private invalid(message: string): never {
@@ -7888,20 +7896,27 @@ export function renderSource(
   language: 'c-like' | 'python-like',
   version: string,
 ): EmissionResult {
+  // Reconstruction does not depend on the attempt (rejected calls, metadata).
+  const program = reconstruct(input, context, options.view === 'checked' ? 'checked' : 'source');
+  let validated = false;
   const attempt = (metadata: 'full' | 'omitted'): EmissionResult => {
     const rejected = new Set<string>();
     // Each retry prints the failed calls as statements.
     for (let retry = 0; ; retry++) {
       try {
-        return new Renderer(
+        const renderer = new Renderer(
           input,
           options,
           context,
           language,
           version,
+          program,
+          !validated,
           retry < 4 ? rejected : null,
           metadata,
-        ).render();
+        );
+        validated = true;
+        return renderer.render();
       } catch (error) {
         if (!(error instanceof CallInliningRetry) || retry >= 4) throw error;
         for (const id of error.results) rejected.add(id);

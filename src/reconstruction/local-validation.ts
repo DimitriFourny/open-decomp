@@ -65,6 +65,14 @@ export class ValidationAllowance {
     this.context.checkpoint(1);
     this.work++;
   }
+
+  /** The same allowance continued independently: limit, used work and proved shapes. */
+  fork(): ValidationAllowance {
+    const copy = new ValidationAllowance(this.context, this.limit);
+    copy.work = this.work;
+    for (const shape of this.provedShapes) copy.provedShapes.add(shape);
+    return copy;
+  }
 }
 
 /** Reduced ordered BDDs, independent of the IR interpreter and expression folder.
@@ -448,8 +456,57 @@ export class LocalValidationSession {
     context: OperationContext,
     private readonly aggregateBitvectors = false,
     private readonly functionSubject?: string,
+    allowance?: ValidationAllowance,
   ) {
-    this.allowance = new ValidationAllowance(context);
+    this.allowance = allowance ?? new ValidationAllowance(context);
+  }
+
+  /** An independent continuation of this session's state for another rendering
+   * of the same reconstruction: records, vetoes, published-outcome keys, batched
+   * groups and the allowance. Batched records share their subject chunk with the
+   * group that fills it, so each copied chunk replaces the original in both. */
+  fork(): LocalValidationSession {
+    const context = this.allowance.context;
+    context.checkpoint(1 + this.records.length + this.abiConformance.length);
+    const copy = new LocalValidationSession(
+      context,
+      this.aggregateBitvectors,
+      this.functionSubject,
+      this.allowance.fork(),
+    );
+    const chunks = new Map<readonly string[], string[]>();
+    const groups = (
+      from: ReadonlyMap<string, { readonly subjects: Set<string>; readonly chunks: string[][] }>,
+      to: Map<string, { readonly subjects: Set<string>; readonly chunks: string[][] }>,
+    ): void => {
+      for (const [key, group] of from) {
+        context.checkpoint(1 + group.chunks.length);
+        to.set(key, {
+          subjects: new Set(group.subjects),
+          chunks: group.chunks.map((chunk) => {
+            const copied = [...chunk];
+            chunks.set(chunk, copied);
+            return copied;
+          }),
+        });
+      }
+    };
+    groups(this.verifiedGroups, copy.verifiedGroups);
+    groups(this.abiGroups, copy.abiGroups);
+    for (const record of this.records) {
+      const subjects = record.subject_ids && chunks.get(record.subject_ids);
+      copy.records.push(subjects ? { ...record, subject_ids: subjects } : record);
+    }
+    for (const site of this.abiConformance)
+      copy.abiConformance.push({
+        ...site,
+        anchor_ids: chunks.get(site.anchor_ids) ?? site.anchor_ids,
+      });
+    for (const id of this.rejectedRewrites) copy.rejectedRewrites.add(id);
+    for (const key of this.#recorded) copy.#recorded.add(key);
+    copy.skippedBitvectors = this.skippedBitvectors;
+    copy.skippedRecord = this.skippedRecord;
+    return copy;
   }
 
   private skippedBitvectors = 0;

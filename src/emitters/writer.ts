@@ -74,17 +74,30 @@ class InternTable<T> {
 const rangeKey = (range: AddressRange): string =>
   `${range.start.image_id}:${range.start.space}:${range.start.value}:${range.size}`;
 
+/** References as sparse 32-bit words: word index to bit mask. */
+export type ReferenceEncoding = ReadonlyMap<number, number>;
 /** Set-valued inference references, canonicalized within one immutable render.
  * Sparse words avoid repeatedly visiting a large common proof set. Published
- * arrays are shared only after an exact word-key match, never a lossy hash. */
+ * arrays are shared only after an exact word-key match, never a lossy hash.
+ * Distinct arrays holding the same references share one encoding, so a union
+ * visits each distinct reference set once however many mappings carry it. */
 export class ReferenceUnions {
-  private readonly inputs = new WeakMap<readonly number[], ReadonlyMap<number, number>>();
+  private readonly inputs = new WeakMap<readonly number[], ReferenceEncoding>();
+  private readonly encodings = new Map<string, ReferenceEncoding>();
   private readonly outputs = new Map<string, readonly number[]>();
   constructor(private readonly context: OperationContext) {}
 
   begin() {
     const words = new Map<number, number>(),
-      seen = new Set<readonly number[]>();
+      seen = new Set<readonly number[] | ReferenceEncoding>();
+    const merge = (input: ReferenceEncoding): void => {
+      if (seen.has(input)) return;
+      seen.add(input);
+      for (const [word, bits] of input) {
+        this.context.checkpoint(1);
+        words.set(word, (words.get(word) ?? 0) | bits);
+      }
+    };
     return {
       add: (refs: readonly number[]): void => {
         this.context.checkpoint(0);
@@ -98,13 +111,32 @@ export class ReferenceUnions {
             const word = Math.floor(ref / 32);
             encoded.set(word, (encoded.get(word) ?? 0) | (1 << (ref % 32)));
           }
-          input = encoded;
+          this.context.checkpoint(encoded.size);
+          const key = [...encoded].map(([word, bits]) => `${word}:${bits}`).join(',');
+          input = this.encodings.get(key) ?? encoded;
+          this.encodings.set(key, input);
           this.inputs.set(refs, input);
         }
-        for (const [word, bits] of input) {
+        merge(input);
+      },
+      /** Add every reference of an encoding (another union's, see `encoding`). */
+      merge: (input: ReferenceEncoding): void => {
+        this.context.checkpoint(0);
+        merge(input);
+      },
+      /** The references added so far, as an encoding another union can merge. */
+      encoding: (): ReferenceEncoding => {
+        this.context.checkpoint(words.size);
+        return new Map(words);
+      },
+      /** The number of distinct references, without materializing them. */
+      size: (): number => {
+        let count = 0;
+        for (let bits of words.values()) {
           this.context.checkpoint(1);
-          words.set(word, (words.get(word) ?? 0) | bits);
+          for (; bits !== 0; bits &= bits - 1) count++;
         }
+        return count;
       },
       finish: (): readonly number[] => {
         const ordered = [...words].sort(([a], [b]) => {

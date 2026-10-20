@@ -117,6 +117,22 @@ test('inference reference unions share exact immutable sets across orders and sp
   const different = unions.begin();
   different.add([0, 31, 32, 63, 65534, 999999]);
   assert.notEqual(different.finish(), result);
+  // A distinct array holding the same references shares the encoding: no second visit.
+  const copies = unions.begin();
+  let mark = work;
+  copies.add([5, 6, 700]);
+  const firstVisit = work - mark;
+  mark = work;
+  copies.add(Object.freeze([5, 6, 700]));
+  // Encoding charges its 3 references and 2 words; merging would charge 2 more words.
+  assert.equal(firstVisit - (work - mark), 2, 'equal content is never merged twice');
+  assert.equal(copies.size(), 3);
+  // An encoding merges like the arrays it came from.
+  const merged = unions.begin();
+  merged.merge(first.encoding());
+  merged.add([5]);
+  assert.equal(merged.size(), result.length + 1);
+  assert.deepEqual(merged.finish(), [0, 5, 31, 32, 63, 65535, 999999]);
   controller.abort();
   assert.throws(() => second.add(a), { code: 'cancelled' });
 });

@@ -19,6 +19,8 @@ interface Case {
   readonly formals: number;
   /** C statements comparing `source_<name>` with `<name>`; `fail(...)` records a mismatch. */
   readonly driver: string;
+  /** Patterns the emitted C text must contain. */
+  readonly text?: readonly RegExp[];
 }
 
 function compile(args: readonly string[]): void {
@@ -63,6 +65,7 @@ async function checkEmittedC(
       if (emitter === 'python-like') continue;
       const emission: WireEmission = result.data.emission;
       assert.equal(emittedFormals(emission).length, item.formals, emission.text);
+      for (const pattern of item.text ?? []) assert.match(emission.text, pattern);
       const driver = join(root, `${item.name}.c`),
         binary = join(root, item.name);
       await writeFile(
@@ -168,6 +171,82 @@ __attribute__((noinline, used)) uint32_t pairs(const uint8_t *in, uint32_t n, ui
       fail("pairs(%s): %x/%u vs %x/%u", inputs[i], want, expected_pos, got, observed_pos);
     for (unsigned k = 0; k < sizeof expected; k++)
       if (expected[k] != observed[k]) fail("pairs(%s): byte %u", inputs[i], k);
+  }`,
+        },
+      ],
+      t,
+    );
+  },
+);
+
+test(
+  'a call-inlining retry reuses the reconstruction and still prints exact C',
+  { skip: nativeOracleSkip(), timeout: 120_000 },
+  async (t) => {
+    // The `verbose` comparison is held for its `if`, but a run-once block opens
+    // between them, so the render is retried with that call as a statement.
+    // Every attempt continues the same reconstruction and validation state.
+    const source = `#include <stdint.h>
+#include <string.h>
+__attribute__((noinline, used)) int params(int argc, const char **argv, int *flags) {
+  int verbose = 0, quality = -1, i;
+  const char *arg = 0;
+  for (i = 1; i < argc; i++) {
+    arg = argv[i];
+    if (strcmp("verbose", arg) == 0) {
+      if (verbose > 0) goto fail;
+      verbose = 1;
+      continue;
+    }
+    if (strcmp("version", arg) == 0) goto done;
+    const char *eq = strchr(arg, '=');
+    if (eq == 0) goto fail;
+    if (eq - arg == 7 && arg[0] == 'q') {
+      if (quality >= 0) goto fail;
+      quality = eq[1] - '0';
+      if (quality < 0 || quality > 9) goto fail;
+      continue;
+    }
+    if (eq - arg == 5 && arg[0] == 'l') {
+      flags[1] = eq[1];
+      if (flags[1] == 'z') goto done;
+      continue;
+    }
+    goto fail;
+  }
+  flags[2] = 4;
+done:
+  flags[0] = i;
+  flags[4] += verbose;
+  return verbose * 100 + quality;
+fail:
+  flags[3] = i;
+  flags[5] = arg ? arg[0] : 0;
+  flags[4] -= 1;
+  return -1;
+}
+`;
+    await checkEmittedC(
+      'open-decomp-inlining-retry-',
+      source,
+      [
+        {
+          name: 'params',
+          formals: 3,
+          text: [/^\s+\w+ = strcmp\("verbose"/m, /if \(strcmp\("version"/],
+          driver: `  const char *cases[][4] = {
+    {"p"}, {"p", "verbose"}, {"p", "verbose", "verbose"}, {"p", "version", "x"},
+    {"p", "quality=3"}, {"p", "quality=3", "quality=4"}, {"p", "quality=x"},
+    {"p", "large=a", "verbose"}, {"p", "large=z", "x"}, {"p", "x"}, {"p", "abc=1"},
+    {"p", "qualit=1"}, {"p", "verbose", "quality=9", "large=b"}};
+  const int counts[] = {1, 2, 3, 3, 2, 3, 2, 3, 3, 2, 2, 2, 4};
+  for (unsigned c = 0; c < sizeof counts / sizeof counts[0]; c++) {
+    int expected[6] = {7, 7, 7, 7, 7, 7}, observed[6] = {7, 7, 7, 7, 7, 7};
+    int want = source_params(counts[c], cases[c], expected);
+    int got = (int)params(counts[c], (void *)cases[c], (void *)observed);
+    if (want != got) fail("params case %u: %d vs %d", c, want, got);
+    for (unsigned k = 0; k < 6; k++)
+      if (expected[k] != observed[k]) fail("params case %u: flags[%u] %d vs %d", c, k, expected[k], observed[k]);
   }`,
         },
       ],
