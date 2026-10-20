@@ -1319,6 +1319,49 @@ for (const language of ['c-like', 'python-like'] as const)
       agree(source, checked, grid([a, d, e], choices));
     });
 
+    test('a shared-arm rewrite keeps the returned constants of the tail copies around it', () => {
+      // `early` is a small return tail entered with the constant 7 by two
+      // edges, so the source view copies it into both arms and each copy
+      // returns 7 directly (no carrier assignment). Rewriting the later
+      // short-circuit test as if/else rebuilds the regions on its path and
+      // must keep those copies, or their returns lose the constant.
+      const b = program('source-shared-return-constant'),
+        entry = b.block('entry', [i32, i32, i32, i32]),
+        h = b.block('h'),
+        k = b.block('k'),
+        s2 = b.block('s2'),
+        f = b.block('f'),
+        x = b.block('x'),
+        early = b.block('early', [i32]),
+        join = b.block('join', [i32]);
+      const [a, d, e, g] = entry.parameters as [Value, Value, Value, Value];
+      entry.branch(
+        entry.compare('eq', g, entry.constant(i32, 0n)),
+        entry.edge(early, [entry.constant(i32, 7n)]),
+        entry.edge(h),
+      );
+      h.branch(
+        h.compare('eq', e, h.constant(i32, 1n)),
+        h.edge(early, [h.constant(i32, 7n)]),
+        h.edge(k),
+      );
+      k.branch(k.compare('eq', a, k.constant(i32, 0n)), k.edge(s2), k.edge(x));
+      s2.branch(s2.compare('eq', d, s2.constant(i32, 0n)), s2.edge(f), s2.edge(x));
+      f.store(f.constant(i64, 0x1000n), a);
+      f.jump(join, [d]);
+      x.store(x.constant(i64, 0x1004n), e);
+      x.jump(join, [e]);
+      early.return(early.parameters);
+      continuation(join);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language, 'source', true),
+        checked = emit(input, language, 'checked', true),
+        text = source.emission.text;
+      assert.ok(rules(source).includes('shared_condition_arm'), text);
+      assert.ok(rules(source).includes('return_constant'), text);
+      agree(source, checked, grid([a, d, e, g], choices));
+    });
+
     test('operands leaving for different statements keep no shared arm', () => {
       const b = program('source-shared-diverge'),
         entry = b.block('entry', [i32, i32]),

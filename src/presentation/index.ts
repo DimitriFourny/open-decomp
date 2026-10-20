@@ -83,6 +83,8 @@ interface Graph {
   /** Nesting depth of the scope's region. */
   readonly base: number;
   readonly simulated: boolean;
+  /** The scope is a loop body entered at its header. */
+  readonly loop: boolean;
   alive: number;
   /** Nodes by the priority of their best rule (see classify). */
   readonly buckets: Set<CollapseNode>[];
@@ -235,6 +237,30 @@ export function structureControlFlow(
         term.edge.target !== id &&
         tailBlock(term.edge.target, hops + 1)
       );
+    };
+    /** Dominator-tree depth of a block's immediate dominator: the region a
+     * join closes; deeper is more inner. */
+    const depths = new Map<EntityId, number>();
+    const domDepth = (id: EntityId): number => {
+      const path: EntityId[] = [];
+      let current: EntityId | null = id,
+        depth = 0;
+      while (current !== null) {
+        budget.charge();
+        const known = depths.get(current);
+        if (known !== undefined) {
+          depth = known;
+          break;
+        }
+        path.push(current);
+        current = dominance.idom(current);
+      }
+      for (let index = path.length - 1; index >= 0; index--) depths.set(path[index]!, ++depth);
+      return depths.get(id)!;
+    };
+    const joinDepth = (id: EntityId): number => {
+      const parent = dominance.idom(id);
+      return parent === null ? 0 : domDepth(parent);
     };
     /** Outgoing slots of a block: slot number and target. */
     const slots = (id: EntityId): { slot: number; target: EntityId }[] => {
@@ -571,7 +597,7 @@ export function structureControlFlow(
           }
       }
       const entryNode = owner.get(entry)!;
-      collapse(nodes, entryNode, base);
+      collapse(nodes, entryNode, base, loopScope);
       return { root: entryNode.root, depth: entryNode.depth };
     };
 
@@ -588,6 +614,7 @@ export function structureControlFlow(
       budget.charge(1 + node.outs.length);
       if (!node.alive) return undefined;
       const outs = node.outs;
+      let best: { priority: number; rule: Rule } | undefined, exit: Rule | undefined;
       if (outs.length) {
         const target = outs[0]!.to;
         // A switch's last remaining case target stays its arm (a `default:`
@@ -602,10 +629,22 @@ export function structureControlFlow(
           target !== graph.entry &&
           outs.every((edge) => edge.to === target) &&
           target.ins.every((edge) => edge.from === node)
-        )
-          return { priority: 0, rule: { kind: 'sequence', target } };
+        ) {
+          const rule: Rule = { kind: 'sequence', target };
+          // In a loop body, a branch whose other arm repeats the loop owns a
+          // terminal successor (an exit path) as its arm, so the repeat edge
+          // stays the lexical end of the body (`if (c) { ...; break; }`).
+          if (
+            !graph.loop ||
+            outs.length !== 1 ||
+            !outs[0]!.arm ||
+            target.outs.length ||
+            !slots(outs[0]!.block).some((slot) => slot.target === graph.entry.entry)
+          )
+            return { priority: 0, rule };
+          exit = rule;
+        }
       }
-      let best: { priority: number; rule: Rule } | undefined;
       const targets = targetsOf(node);
       for (const edge of outs) {
         const target = edge.to;
@@ -673,6 +712,8 @@ export function structureControlFlow(
         if (!best || priority < best.priority)
           best = { priority, rule: { kind: edge.arm ? 'arm' : 'append', edge } };
       }
+      // Past the nesting bound the exit path follows the branch instead.
+      if (exit && (!best || best.priority > 1)) return { priority: 0, rule: exit };
       return best;
     };
     const refresh = (graph: Graph, node: CollapseNode): void => {
@@ -799,6 +840,7 @@ export function structureControlFlow(
       nodes: CollapseNode[],
       entry: CollapseNode,
       base: number,
+      loop: boolean,
       simulated: boolean,
     ): Graph => {
       const graph: Graph = {
@@ -806,6 +848,7 @@ export function structureControlFlow(
         entry,
         base,
         simulated,
+        loop,
         alive: nodes.filter((node) => node.alive).length,
         buckets: [0, 1, 2, 3, 4].map(() => new Set<CollapseNode>()),
         orphans: new Set(),
@@ -833,7 +876,13 @@ export function structureControlFlow(
           copy.outs.push(twin);
           twin.to.ins.push(twin);
         }
-      const copy = graphOf([...copies.values()], copies.get(graph.entry)!, graph.base, true),
+      const copy = graphOf(
+          [...copies.values()],
+          copies.get(graph.entry)!,
+          graph.base,
+          graph.loop,
+          true,
+        ),
         target = copies.get(group[0]!.to)!;
       let count = 0,
         nested = false;
@@ -845,11 +894,11 @@ export function structureControlFlow(
       selection -= copies.size + count;
       return { count, nested };
     };
-    /** Labels the edge group (all edges between two nodes) whose removal
-     * unblocks the most collapses; `tails` restricts targets to small function
-     * tails. Candidates are ranked by a one-step lookahead first; the best
-     * eight are simulated while the selection allowance lasts. */
-    const select = (graph: Graph, tails: boolean): boolean => {
+    type Candidate = { readonly group: CollapseEdge[]; readonly key: readonly number[] };
+    /** Edge groups (all edges between two nodes) ranked by a one-step
+     * lookahead, best first; `tails` restricts targets to small function
+     * tails. Undefined without candidates or past the selection allowance. */
+    const rank = (graph: Graph, tails: boolean): Candidate[] | undefined => {
       const groups = new Map<string, CollapseEdge[]>();
       let cost = 0;
       for (const node of graph.nodes) {
@@ -865,7 +914,7 @@ export function structureControlFlow(
       }
       budget.charge(cost + graph.nodes.length);
       selection -= cost + graph.nodes.length;
-      if (!groups.size || selection < 0) return false;
+      if (!groups.size || selection < 0) return undefined;
       const ranked = [...groups.values()].map((group) => {
         const source = group[0]!.from,
           target = group[0]!.to,
@@ -878,7 +927,8 @@ export function structureControlFlow(
         const near = new Set<CollapseNode>([source]);
         for (const edge of source.ins) near.add(edge.from);
         for (const edge of target.ins) near.add(edge.from);
-        let enabled = target.ins.length ? 0 : -1;
+        const orphan = !target.ins.length;
+        let enabled = 0;
         for (const node of near) if ((classify(graph, node)?.priority ?? 4) < 4) enabled++;
         source.outs = outs;
         target.ins = ins;
@@ -888,39 +938,57 @@ export function structureControlFlow(
           group,
           key: [
             tailBlock(target.entry, 0) ? 0 : 1,
+            // A node left without structured entry is laid out after some
+            // unrelated terminal node, so its other edges become labels too.
+            orphan ? 1 : 0,
+            // Joins closing the innermost region first: once it collapses,
+            // the enclosing joins can become ordinary follows.
+            -joinDepth(target.entry),
             -enabled,
             group.length,
             -sources,
             -target.rpo,
-            -source.rpo,
+            // The edge from a join's latest predecessor stays its fallthrough.
+            source.rpo,
           ],
         };
       });
       ranked.sort((a, b) => (before(a.key, b.key) ? -1 : before(b.key, a.key) ? 1 : 0));
+      return ranked;
+    };
+    const label = (graph: Graph, group: readonly CollapseEdge[]): void => {
+      const source = group[0]!.from,
+        target = group[0]!.to;
+      for (const edge of group) {
+        if (!graph.simulated) labeled.add(edge.key);
+        detach(edge);
+      }
+      touched(graph, source);
+      touched(graph, target);
+    };
+    /** Labels the edge group whose removal unblocks the most collapses (see
+     * rank and unblocked): the best eight are simulated while the selection
+     * allowance lasts. */
+    const select = (graph: Graph, tails: boolean): boolean => {
+      const ranked = rank(graph, tails);
+      if (!ranked) return false;
       let best = ranked[0]!,
         bestKey: number[] | undefined;
       for (const candidate of ranked.slice(0, 8)) {
         if (selection < 0) break;
         const outcome = unblocked(graph, candidate.group);
         const key = [
-          candidate.key[0]!,
+          ...candidate.key.slice(0, 3),
           outcome.nested ? 1 : 0,
           -outcome.count,
-          ...candidate.key.slice(1),
+          ...candidate.key.slice(3),
         ];
         if (!bestKey || before(key, bestKey)) {
           best = candidate;
           bestKey = key;
         }
       }
-      const source = best.group[0]!.from,
-        target = best.group[0]!.to;
-      for (const edge of best.group) {
-        labeled.add(edge.key);
-        detach(edge);
-      }
-      touched(graph, source);
-      touched(graph, target);
+      label(graph, best.group);
       return true;
     };
     /** Past the selection allowance: dependency order, each node after the last. */
@@ -961,8 +1029,29 @@ export function structureControlFlow(
         sequence(graph, graph.entry, node);
       }
     };
-    const collapse = (nodes: CollapseNode[], entry: CollapseNode, base: number): void => {
-      const graph = graphOf(nodes, entry, base, false);
+    /** A node entered only by labeled edges follows a node that does not
+     * fall through: the closest one before it, else the first after it. */
+    const placeOrphan = (graph: Graph): boolean => {
+      const orphan = [...graph.orphans].sort((a, b) => a.rpo - b.rpo)[0];
+      if (!orphan) return false;
+      const order = (node: CollapseNode): number[] =>
+        node.rpo < orphan.rpo ? [0, -node.rpo] : [1, node.rpo];
+      let host: CollapseNode | undefined;
+      for (const sink of graph.sinks) {
+        budget.charge();
+        if (sink !== orphan && (!host || before(order(sink), order(host)))) host = sink;
+      }
+      if (!host) return false;
+      sequence(graph, host, orphan);
+      return true;
+    };
+    const collapse = (
+      nodes: CollapseNode[],
+      entry: CollapseNode,
+      base: number,
+      loop: boolean,
+    ): void => {
+      const graph = graphOf(nodes, entry, base, loop, false);
       while (graph.alive > 1) {
         budget.charge();
         const found = pick(graph, 3);
@@ -970,24 +1059,10 @@ export function structureControlFlow(
           apply(graph, found.node, found.rule);
           continue;
         }
-        // A node entered only by labeled edges follows a node that does not
-        // fall through: the closest one before it, else the first after it.
-        const orphan = [...graph.orphans].sort((a, b) => a.rpo - b.rpo)[0];
-        let host: CollapseNode | undefined;
-        if (orphan)
-          for (const sink of graph.sinks) {
-            budget.charge();
-            if (sink === orphan) continue;
-            const rank = (node: CollapseNode): number[] =>
-              node.rpo < orphan.rpo ? [0, -node.rpo] : [1, node.rpo];
-            if (!host || before(rank(sink), rank(host))) host = sink;
-          }
-        if (host) sequence(graph, host, orphan!);
-        else if (!select(graph, true) && !select(graph, false)) {
-          const late = pick(graph, 4);
-          if (late) apply(graph, late.node, late.rule);
-          else linearize(graph);
-        }
+        if (placeOrphan(graph) || select(graph, true) || select(graph, false)) continue;
+        const late = pick(graph, 4);
+        if (late) apply(graph, late.node, late.rule);
+        else linearize(graph);
       }
     };
 
