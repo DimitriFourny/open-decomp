@@ -41,11 +41,14 @@ Root causes found in the code, in the order we plan to address them:
 
 - [ ] Introduce a single rule pool over SSA values, applied to a fixpoint with a work bound: constant/identity folding, extension/truncation fusion, sub-register extract/insert recombination into source-width values, shift/mask idioms, comparison/flag canonicalization, strength reduction (multiply/divide by constant, magic-number division to `/` and `%`), and 128-bit multiply-high to `(uint128_t)a * b >> 64`. Move existing scattered `presentation(...)` rewrites into it where they are value rewrites.
 - [ ] Replace helper calls with plain C where the exact semantics hold under the stated assumptions: bit-field insert/extract to mask-and-shift, division with a proven nonzero divisor to `/`. Keep the helper only when a trap or edge case is actually reachable.
-- [ ] Copy propagation and temporary elimination at source level: inline single-use pure values when evaluation order and expression size allow it; merge equivalent phi values into one variable.
-  - Partly done (`wt/r3temps`): single-use call results now inline into `if`/`switch` tests, and loads addressed through the call result share the reader (`strerror(*__error())`). Cheap single-reader integer operations repeat at their reader (`repeated_operation`). Dev loop: 1357 → 1333 local declarations and 8605 → 8557 lines, all from O2 `crc32_combine`/`adler32_z`. Brotli CLI export: 131,052 → 126,589 bytes. Still open:
-    - Phi copies through inline zero-extensions don't coalesce yet (`value0 = ~arg0; value1 = value0` in Mach-O `crc32_z`, `value10 = value0` in `adler32_z`).
-    - Pointer/integer copies with different presented types stay separate (`address_1`/`address_2`; that needs R4).
-    - O0 frame-slot loads stay temporaries until R1 promotes the slots.
+- [x] Copy propagation and temporary elimination at source level: inline single-use pure values when evaluation order and expression size allow it; merge equivalent phi values into one variable.
+  - Done (`wt/r3temps`):
+    - Single-use call results inline into `if`/`switch` tests, and loads addressed through the call result share the reader (`strerror(*__error())`).
+    - Cheap single-reader integer operations repeat at their reader (`repeated_operation`).
+    - Phi copies through inline zero extensions share widened unsigned storage (`value0 = ~arg0; value1 = value0` in Mach-O `crc32_z`).
+  - Dev loop: 1357 → 1305 local declarations and 8605 → 8463 lines. Brotli CLI export: 131,052 → 126,307 bytes.
+  - Loss: 22 more casts on the dev loop, because narrow reads of widened storage print their conversion (`(uint64_t)(uint32_t)value0` in `matrix_multi_exit`, which also loses its `accumulator` name).
+  - Left to other items: pointer/integer copies with different presented types (`address_1`/`address_2`, R4); O0 frame-slot loads, which stay temporaries until promoted (R1); truncating copies stay separate.
 - [ ] Measure the BDD validator allowance on the dev loop. Raise efficiency (memoize per value, validate rule classes once) rather than silently skipping validation when the allowance runs out.
   - Acceptance: the dev loop shows fewer temporaries and no helper preambles for supported idioms. Every rule carries its own bit-precise validation or proof, with counterexample tests at width/sign boundaries.
 

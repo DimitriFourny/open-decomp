@@ -225,7 +225,14 @@ retains the original labeled edge.
 
 Source presentation coalesces noninterfering unsigned widening copies with phi
 storage, retaining the original narrow definition/read conversions and choosing
-the widest declaration. Signed extensions, incompatible declarations and live-range
+the widest declaration. Widening copies are retained `zero_extend` assignments and
+edge copies whose source is an inline zero extension of a variable (`v = ~arg0;`
+then `p = (uint64_t)v` on each edge into a 64-bit phi prints `p = ~arg0;` with no
+edge copies). A dropped widening edge copy is validated under the stated invariant
+that the class storage holds exactly the zero extension of its live narrow member:
+that member's definition stores its narrow value with the narrow conversion
+(`(uint16_t)~(uint16_t)x`, never a promoted negative `int`), and no other member is
+defined while it is live. Signed extensions, truncations, incompatible declarations and live-range
 interference keep separate storage. The `phi_copy_coalescing` presentation record
 names the affected values; simultaneous edge copies still pass the existing move
 validator.
