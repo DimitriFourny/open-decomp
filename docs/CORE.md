@@ -228,14 +228,21 @@ storage, retaining the original narrow definition/read conversions and choosing
 the widest declaration. Widening copies are retained `zero_extend` assignments and
 edge copies whose source is an inline zero extension of a variable (`v = ~arg0;`
 then `p = (uint64_t)v` on each edge into a 64-bit phi prints `p = ~arg0;` with no
-edge copies). A dropped widening edge copy is validated under the stated invariant
-that the class storage holds exactly the zero extension of its live narrow member:
-that member's definition stores its narrow value with the narrow conversion
-(`(uint16_t)~(uint16_t)x`, never a promoted negative `int`), and no other member is
-defined while it is live. Signed extensions, truncations, incompatible declarations and live-range
-interference keep separate storage. The `phi_copy_coalescing` presentation record
-names the affected values; simultaneous edge copies still pass the existing move
-validator.
+edge copies). The edge-copy form applies only when those extensions are the
+narrow variable's only reads, so the merge never adds a conversion at a read; only
+when the narrow variable is at least 32 bits wide (a narrower unsigned value
+promotes to signed `int`, so its definition into wider storage would print one);
+and only when the narrow variable carries no role name (`accumulator`, `index`, ...)
+that the phi lacks. A dropped widening edge copy is validated under the stated
+invariant that the class storage holds exactly the zero extension of its live
+narrow member: that member's definition stores its narrow value with the narrow
+conversion (`(uint16_t)~(uint16_t)x`, never a promoted negative `int`), and no
+other member is defined while it is live. Signed extensions, truncations,
+incompatible declarations and live-range interference keep separate storage. The
+`phi_copy_coalescing` presentation record names the affected values; simultaneous
+edge copies still pass the existing move validator. An `if` or `switch` arm whose
+edge and blocks then print nothing is dropped like an arm without a body
+(`branch_layout`), in both dialects.
 
 `copy_coalescing` then shares storage for in-place updates: a value defined from
 a printed variable that is not read after that definition (`y = f(x)`, the next

@@ -203,7 +203,7 @@ for (const language of ['c-like', 'python-like'] as const)
       assert.equal(BigInt.asUintN(32, actual.values[0]!), 0xfffffffdn);
     });
 
-    test('a narrow value zero-extended into a wider phi shares its storage only when the extensions are its only reads; high bits stay zero', () => {
+    test('a narrow value zero-extended into a wider phi shares its storage only when it is int-wide and the extensions are its only reads; high bits stay zero', () => {
       for (const [bits, withSource, read] of [
         [16, false, false],
         [32, false, false],
@@ -212,8 +212,8 @@ for (const language of ['c-like', 'python-like'] as const)
         [32, true, true],
       ] as const) {
         // v = ~(uintN)word; odd words store v (`read`) or the word; both edges pass
-        // zext64(v); return it. In C a 16-bit `~` promotes to int: the definition must
-        // still store zeros above bit 15. The extra narrow read would need a conversion.
+        // zext64(v); return it. The extra narrow read would need a conversion, and a
+        // 16-bit `~` promotes to signed int in C, so its wide definition would too.
         const b = program(`coalesce-widen-${bits}-${withSource}-${read}`),
           entry = b.block('entry'),
           odd = b.block('odd'),
@@ -239,7 +239,8 @@ for (const language of ['c-like', 'python-like'] as const)
         const input = b.finish(entry, [i64]);
         const source = emit(input, language, 'source', withSource),
           checked = emit(input, language, 'checked', withSource);
-        if (read) assert.notEqual(name(source, v), name(source, merged), source.emission.text);
+        if (read || bits === 16)
+          assert.notEqual(name(source, v), name(source, merged), source.emission.text);
         else {
           assert.ok(rules(source).includes('phi_copy_coalescing'), source.emission.text);
           assert.equal(name(source, v), name(source, merged), source.emission.text);
