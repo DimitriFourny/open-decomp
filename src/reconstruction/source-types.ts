@@ -97,12 +97,12 @@ export function projectSourceTypes(
     if (result) keys.set(id, typeKey(result));
     return result;
   };
-  /** A pointer to `void`/unknown: an address of no particular object type. */
+  /** A pointer to `void`: an address of no particular object type. */
   const untyped = (id: string): boolean => {
     const type = definition(id);
     if (type?.kind !== 'pointer') return false;
-    const kind = definition(type.to)?.kind;
-    return kind === undefined || kind === 'void' || kind === 'unknown';
+    // An opaque declared pointee (`unknown`) is a specific named type, not `void`.
+    return definition(type.to)?.kind === 'void';
   };
   /** An analysis pointer whose pointee does not depend on a recovered layout. */
   const addressEvidence = (association: TypeAssociation): boolean =>
