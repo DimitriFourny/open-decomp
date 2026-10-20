@@ -838,21 +838,37 @@ export interface LoopExitRoute {
 
 /** A boolean is needed only when a real edge bypasses two or more breakable
  * scopes to an enclosing loop's exact continuation. No arbitrary target, loop
- * entry, or irreducible edge is rewritten. */
+ * entry, or irreducible edge is rewritten: a loop entered by a goto (at its
+ * header or into its body) keeps its labeled exits, since the flag would not
+ * be initialized on that entry. */
 export function planLoopExits(
   body: Region,
   language: 'c-like' | 'python-like',
   context: OperationContext,
 ): ReadonlyMap<ParallelTransfer, LoopExitRoute> {
   const routes = new Map<ParallelTransfer, LoopExitRoute>();
-  const unsafeEntries = new Set<string>();
+  const enclosing = new Map<string, readonly string[]>();
+  const scan = (region: Region, loops: readonly string[]): void => {
+    context.checkpoint(1);
+    if (region.kind === 'sequence') for (const child of region.regions) scan(child, loops);
+    else if (region.kind === 'loop')
+      scan(region.body, region.once ? loops : [...loops, region.header]);
+    else {
+      enclosing.set(region.id, loops);
+      for (const arm of controlArms(region.control)) if (arm.body) scan(arm.body, loops);
+    }
+  };
+  scan(body, []);
+  const unsafe = new Set<string>();
   visitTransfers(body, language, context, (occurrence) => {
     if (occurrenceAction(occurrence, language) !== 'goto') return;
     const scopes = occurrence.nesting;
-    if (
-      !scopes.some((scope) => scope.kind === 'loop' && scope.header === occurrence.transfer.target)
-    )
-      unsafeEntries.add(occurrence.transfer.target);
+    const inside = new Set(
+      scopes.flatMap((scope) => (scope.kind === 'loop' && !scope.once ? [scope.header] : [])),
+    );
+    if (!inside.has(occurrence.transfer.target)) unsafe.add(occurrence.transfer.target);
+    for (const loop of enclosing.get(occurrence.transfer.target) ?? [])
+      if (!inside.has(loop)) unsafe.add(loop);
     for (let index = scopes.length - 1; index >= 0; index--) {
       const scope = scopes[index]!;
       if (scope.kind !== 'loop' || scope.follow !== occurrence.transfer.target) continue;
@@ -867,8 +883,7 @@ export function planLoopExits(
       break;
     }
   });
-  for (const [transfer, route] of routes)
-    if (unsafeEntries.has(route.loop)) routes.delete(transfer);
+  for (const [transfer, route] of routes) if (unsafe.has(route.loop)) routes.delete(transfer);
   return routes;
 }
 
@@ -907,26 +922,20 @@ export interface LayoutPlan {
   readonly clones: ReadonlySet<BlockRegion>;
   /** Duplicated tail occurrences: the copied block and the edge it now ends. */
   readonly duplicated: readonly { readonly transfer: ParallelTransfer; readonly tail: string }[];
-  /** Regions ordered by CFG dependencies or placed with all their incoming edges. */
-  readonly ordered: readonly string[];
-  /** Terminal blocks moved to their only edge, or right after the only loop
-   * entering them (`at`: the edge target or the loop header). */
-  readonly relocated: readonly { readonly block: string; readonly at: string }[];
   /** Tails whose every incoming edge now ends in an owned copy. */
   readonly hidden: readonly string[];
-  /** Exit blocks moved onto their only loop edge so the loop's other exits
-   * share one successor (`at`: the edge target the block was entered from). */
-  readonly merged: readonly { readonly block: string; readonly at: string }[];
   /** Tails lexically between a goto and its target, copied onto every
    * incoming edge (fallthroughs included) so the goto falls through. */
   readonly forced: readonly string[];
 }
 
-/** Layout-only source-view rewrites. Every change keeps the original block and
- * transfer objects; the renderer re-derives lexical actions from the result
- * and the control validators check each emitted edge independently. `silent`
- * accepts expression-only tails; `small` optionally accepts bounded statement
- * tails. Every copied path runs the same statements once, then returns. */
+/** Source-view tail copies, after structuring (which already orders regions,
+ * places loop exits and labels edges into small function tails first). Every
+ * change keeps the original block and transfer objects; the renderer
+ * re-derives lexical actions from the result and the control validators check
+ * each emitted edge independently. `silent` accepts expression-only tails;
+ * `small` optionally accepts bounded statement tails. Every copied path runs
+ * the same statements once, then returns. */
 export function planLayout(
   body: Region,
   program: Reconstruction,
@@ -941,177 +950,7 @@ export function planLayout(
   let duplicated: { transfer: ParallelTransfer; tail: string }[] = [];
   // Optional searches charge a bounded share of the remaining work (see step 4).
   let active = context;
-  const relocated: { block: string; at: string }[] = [];
   const blocks = program.blocks;
-  const ordered: string[] = [];
-  const incomingEdges = new Map<string, { block: string; transfer: ParallelTransfer }[]>();
-  for (const block of blocks.values())
-    for (const transfer of controlTransfers(block.control)) {
-      const edges = incomingEdges.get(transfer.target) ?? [];
-      edges.push({ block: block.id, transfer });
-      incomingEdges.set(transfer.target, edges);
-    }
-  // Place a shared continuation in the smallest owned region containing all
-  // of its incoming edges. A loop's continuation goes after it, never inside.
-  const attach = (
-    region: Region,
-    transfers: readonly ParallelTransfer[],
-    target: Region,
-    depth = 0,
-  ): Region | null => {
-    context.checkpoint(1);
-    if (depth >= 32) return null;
-    const contained = new Set<ParallelTransfer>();
-    const collect = (child: Region): void => {
-      context.checkpoint(1);
-      if (child.kind === 'sequence') child.regions.forEach(collect);
-      else if (child.kind === 'loop') collect(child.body);
-      else {
-        for (const edge of controlTransfers(child.control)) contained.add(edge);
-        for (const arm of controlArms(child.control)) if (arm.body) collect(arm.body);
-      }
-    };
-    collect(region);
-    if (!transfers.every((transfer) => contained.has(transfer))) return null;
-    if (region.kind === 'loop') return sequence([region, target]);
-    if (region.kind === 'sequence') {
-      for (let index = 0; index < region.regions.length; index++) {
-        const changed = attach(region.regions[index]!, transfers, target, depth + 1);
-        if (changed)
-          return sequence(region.regions.map((child, i) => (i === index ? changed : child)));
-      }
-      return sequence([...region.regions, target]);
-    }
-    const transfer = transfers.length === 1 ? transfers[0] : undefined;
-    if (region.control.kind === 'jump' && region.control.transfer === transfer)
-      return sequence([region, target]);
-    let found = false;
-    const control = mapArms(region.control, (arm) => {
-      if (arm.transfer === transfer && !arm.body) {
-        found = true;
-        return { ...arm, body: target };
-      }
-      const changed = arm.body ? attach(arm.body, transfers, target, depth + 1) : null;
-      if (changed) {
-        found = true;
-        return { ...arm, body: changed };
-      }
-      return arm;
-    });
-    return found ? { ...region, control } : sequence([region, target]);
-  };
-  const shallow = (region: Region, depth = 0): boolean => {
-    context.checkpoint(1);
-    if (depth >= 16) return false;
-    if (region.kind === 'sequence')
-      return region.regions.every((child) => shallow(child, depth + 1));
-    if (region.kind === 'loop') return shallow(region.body, depth + 1);
-    return controlArms(region.control).every((arm) => !arm.body || shallow(arm.body, depth + 1));
-  };
-  // Structuring reduces successors first, which can leave shared continuations
-  // before their predecessors. Order whole owned regions, never instructions.
-  // Cyclic sibling dependencies are irreducible here and retain explicit edges.
-  const order = (region: Region, header: string | null = null): Region => {
-    context.checkpoint(1);
-    if (region.kind === 'loop') return { ...region, body: order(region.body, region.header) };
-    if (region.kind === 'block')
-      return {
-        ...region,
-        control: mapArms(region.control, (arm) =>
-          arm.body ? { ...arm, body: order(arm.body, header) } : arm,
-        ),
-      };
-    const children = region.regions.map((child) => order(child, header));
-    const owner = new Map<string, number>();
-    const targets: Set<string>[] = children.map(() => new Set());
-    const collect = (child: Region, index: number): void => {
-      context.checkpoint(1);
-      if (child.kind === 'sequence') child.regions.forEach((item) => collect(item, index));
-      else if (child.kind === 'loop') collect(child.body, index);
-      else {
-        owner.set(child.id, index);
-        for (const transfer of controlTransfers(child.control))
-          targets[index]!.add(transfer.target);
-        for (const arm of controlArms(child.control)) if (arm.body) collect(arm.body, index);
-      }
-    };
-    children.forEach(collect);
-    const outgoing = targets.map(
-      (ids, index) =>
-        new Set(
-          [...ids].flatMap((id) => {
-            // Header backedges are performed by the enclosing loop, not
-            // sibling dependencies. Other cycles remain irreducible.
-            const next = id === header ? undefined : owner.get(id);
-            return next === undefined || next === index ? [] : [next];
-          }),
-        ),
-    );
-    const incoming = children.map(() => 0);
-    for (const successors of outgoing) for (const next of successors) incoming[next]!++;
-    const ready = incoming.flatMap((count, index) => (count === 0 ? [index] : [])).reverse();
-    const indices: number[] = [];
-    // Prefer a newly ready continuation over an unrelated pending sibling.
-    // In particular, a loop's sole exit belongs immediately after that loop.
-    while (ready.length) {
-      const index = ready.pop()!;
-      indices.push(index);
-      for (const next of outgoing[index]!) {
-        context.checkpoint(1);
-        if (--incoming[next]! === 0) ready.push(next);
-      }
-    }
-    if (indices.length !== children.length || indices[0] !== 0) return sequence(children);
-    if (indices.some((index, position) => index !== position)) {
-      for (const child of children) {
-        const id = firstBlock(child);
-        if (id !== null) ordered.push(id);
-      }
-    }
-    const owned: (Region | null)[] = [...children];
-    // Work backwards, then revisit joins exposed by earlier ownership moves.
-    // Every successful round removes a sibling; cycles cannot be absorbed.
-    const candidates = [...indices].reverse();
-    let moved = true;
-    while (moved) {
-      moved = false;
-      for (const index of candidates) {
-        context.checkpoint(1);
-        const target = owned[index];
-        if (!target || index === 0 || !shallow(target)) continue;
-        const members = new Set(
-          [...owner].filter(([, value]) => value === index).map(([id]) => id),
-        );
-        const edges = [...members].flatMap((id) =>
-          (incomingEdges.get(id) ?? []).filter((edge) => !members.has(edge.block)),
-        );
-        if (!edges.length || edges.some((edge) => edge.transfer.target !== firstBlock(target)))
-          continue;
-        const edge = edges[0]!,
-          source = owner.get(edge.block);
-        if (
-          source === undefined ||
-          source === index ||
-          !owned[source] ||
-          edges.some((edge) => owner.get(edge.block) !== source)
-        )
-          continue;
-        const changed = attach(
-          owned[source]!,
-          edges.map((edge) => edge.transfer),
-          target,
-        );
-        if (!changed) continue;
-        owned[source] = changed;
-        owned[index] = null;
-        for (const id of members) owner.set(id, source);
-        ordered.push(edge.transfer.target);
-        moved = true;
-      }
-    }
-    return sequence(indices.flatMap((index) => (owned[index] ? [owned[index]!] : [])));
-  };
-  body = order(body);
   const tails = new Map<string, number>();
   const tailSize = (id: string, path = new Set<string>()): number => {
     const known = tails.get(id);
@@ -1150,322 +989,13 @@ export function planLayout(
       : copy;
   };
 
-  // 1. A terminal block entered only from one loop is placed right after it, so
-  // its edges become breaks, when every other exit of that loop is a tail.
-  const predecessors = new Map<string, Set<string>>();
-  for (const block of blocks.values())
-    for (const transfer of controlTransfers(block.control)) {
-      context.checkpoint(1);
-      const list = predecessors.get(transfer.target) ?? new Set<string>();
-      list.add(block.id);
-      predecessors.set(transfer.target, list);
-    }
-  const scan = (region: Region, owned: Set<string>, targets: Set<string>): void => {
-    context.checkpoint(1);
-    if (region.kind === 'sequence') for (const child of region.regions) scan(child, owned, targets);
-    else if (region.kind === 'loop') scan(region.body, owned, targets);
-    else {
-      owned.add(region.id);
-      for (const transfer of controlTransfers(region.control)) targets.add(transfer.target);
-      for (const arm of controlArms(region.control)) if (arm.body) scan(arm.body, owned, targets);
-    }
-  };
-  const terminal = (id: string): boolean => {
-    const kind = blocks.get(id)?.control.kind;
-    return kind === 'return' || kind === 'trap' || kind === 'unknown' || kind === 'indirect';
-  };
-  // A terminal block whose only CFG edge is labeled moves onto that edge.
   const edges = new Map<string, number>();
   for (const block of blocks.values())
     for (const transfer of controlTransfers(block.control))
       edges.set(transfer.target, (edges.get(transfer.target) ?? 0) + 1);
-  // 0. A loop's lexical successor is the exit most of its edges reach, so those
-  // edges become breaks instead of tail copies. Every other exit is either a
-  // tail (still copied) or a block entered by one loop edge only, which then
-  // moves onto that edge and ends in a break or a tail copy.
-  const merged: { block: string; at: string }[] = [];
-  const successors = (region: Region, owned: ReadonlySet<string>, counts: Map<string, number>) => {
-    context.checkpoint(1);
-    if (region.kind === 'sequence')
-      for (const child of region.regions) successors(child, owned, counts);
-    else if (region.kind === 'loop') successors(region.body, owned, counts);
-    else {
-      for (const transfer of controlTransfers(region.control))
-        if (!owned.has(transfer.target))
-          counts.set(transfer.target, (counts.get(transfer.target) ?? 0) + 1);
-      for (const arm of controlArms(region.control))
-        if (arm.body) successors(arm.body, owned, counts);
-    }
-  };
-  /** `home` placed where the only edge to `id` leaves the region. */
-  const embed = (region: Region, id: string, home: BlockRegion): Region | null => {
-    context.checkpoint(1);
-    if (region.kind === 'sequence') {
-      for (let index = 0; index < region.regions.length; index++) {
-        const changed = embed(region.regions[index]!, id, home);
-        if (changed)
-          return sequence(region.regions.map((child, i) => (i === index ? changed : child)));
-      }
-      return null;
-    }
-    if (region.kind === 'loop') {
-      const changed = embed(region.body, id, home);
-      return changed && { ...region, body: changed };
-    }
-    if (region.control.kind === 'jump')
-      return region.control.transfer.target === id ? sequence([region, home]) : null;
-    let found = false;
-    const control = mapArms(region.control, (arm) => {
-      if (found) return arm;
-      if (!arm.body && arm.transfer.target === id) {
-        found = true;
-        return { ...arm, body: home };
-      }
-      const changed = arm.body ? embed(arm.body, id, home) : null;
-      if (changed) {
-        found = true;
-        return { ...arm, body: changed };
-      }
-      return arm;
-    });
-    return found ? { ...region, control } : null;
-  };
-  const joinExits = (children: Region[], index: number, follow: Region | null): Region[] | null => {
-    const loop = children[index]!;
-    if (loop.kind !== 'loop') return null;
-    const owned = new Set<string>(),
-      counts = new Map<string, number>();
-    scan(loop.body, owned, new Set());
-    successors(loop.body, owned, counts);
-    const after = leaf(follow);
-    const continuation = after ? firstBlock(after) : null;
-    const siblingBlock = (id: string): number =>
-      children.findIndex((child, at) => at > index && child.kind === 'block' && child.id === id);
-    // The exit most edges reach follows the loop. Without one, a loop with an
-    // exit that is no duplicable tail tries each exit in turn: whichever lets
-    // the others move onto their edges.
-    const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
-    const [first, second] = sorted;
-    const candidates =
-      first && first[1] > 1 && (!second || second[1] < first[1])
-        ? [first[0]]
-        : sorted.some(([id]) => !isTail(id))
-          ? sorted.map(([id]) => id)
-          : [];
-    for (const shared of candidates) {
-      context.checkpoint(1);
-      if (siblingBlock(shared) < 0 && shared !== continuation) continue;
-      const sunk = new Map<number, BlockRegion>();
-      let inside: Region | null = loop;
-      for (const id of counts.keys()) {
-        if (id === shared) continue;
-        const at = siblingBlock(id),
-          sibling = at < 0 ? undefined : (children[at] as BlockRegion),
-          entries = incomingEdges.get(id) ?? [];
-        if (
-          sibling &&
-          id !== program.function.entry &&
-          entries.length === 1 &&
-          owned.has(entries[0]!.block) &&
-          (terminal(id) ||
-            (sibling.control.kind === 'jump' &&
-              (sibling.control.transfer.target === shared ||
-                isTail(sibling.control.transfer.target))))
-        ) {
-          inside = embed(inside, id, sibling);
-          if (!inside) break;
-          sunk.set(at, sibling);
-        } else if (!isTail(id)) {
-          inside = null;
-          break;
-        }
-      }
-      if (!inside || !sunk.size) continue;
-      const moved = inside;
-      const result = children.flatMap((child, at) =>
-        at === index ? [moved] : sunk.has(at) ? [] : [child],
-      );
-      // Only the shared exit may follow the loop, and every edge of the loop
-      // (including the moved blocks') that reaches it must print as a break.
-      const next = result.findIndex((child, at) => at > index && firstBlock(child) !== null);
-      if ((next < 0 ? continuation : firstBlock(result[next]!)) !== shared) continue;
-      let exact = true;
-      visitTransfers(
-        sequence(result),
-        language,
-        context,
-        (occurrence) => {
-          if (
-            occurrence.transfer.target === shared &&
-            (owned.has(occurrence.block) ||
-              [...sunk.values()].some((s) => s.id === occurrence.block)) &&
-            occurrenceAction(occurrence, language) !== 'break'
-          )
-            exact = false;
-        },
-        follow,
-      );
-      if (!exact) continue;
-      for (const block of sunk.values())
-        merged.push({
-          block: block.id,
-          at: incomingEdges.get(block.id)![0]!.transfer.target,
-        });
-      return result;
-    }
-    return null;
-  };
-  const consolidate = (region: Region, follow: Region | null): Region => {
-    context.checkpoint(1);
-    if (region.kind === 'loop') {
-      const inner = consolidate(region.body, region);
-      return inner === region.body ? region : { ...region, body: inner };
-    }
-    if (region.kind === 'block') {
-      let changed = false;
-      const control = mapArms(region.control, (arm) => {
-        if (!arm.body) return arm;
-        const inner = consolidate(arm.body, follow);
-        if (inner === arm.body) return arm;
-        changed = true;
-        return { ...arm, body: inner };
-      });
-      return changed ? { ...region, control } : region;
-    }
-    const children = region.regions.map((child, index) => {
-      let next = follow;
-      for (let j = index + 1; j < region.regions.length; j++)
-        if (firstBlock(region.regions[j]!) !== null) {
-          next = region.regions[j]!;
-          break;
-        }
-      return consolidate(child, next);
-    });
-    const changed = children.some((child, index) => child !== region.regions[index]);
-    // A loop and the exit that follows it may sit in different nested
-    // sequences; sequences carry no layout of their own, so join on the flat list.
-    let flat = children.flatMap(function flatten(child): Region[] {
-      return child.kind === 'sequence' ? child.regions.flatMap(flatten) : [child];
-    });
-    let joinedAny = false;
-    for (let index = 0; index < flat.length; index++) {
-      const joined = joinExits(flat, index, follow);
-      if (joined) {
-        flat = joined;
-        joinedAny = true;
-      }
-    }
-    return joinedAny ? sequence(flat) : changed ? sequence(children) : region;
-  };
-  body = consolidate(body, null);
-  const sinks = new Map<ParallelTransfer, string>();
-  visitTransfers(body, language, context, (occurrence) => {
-    const id = occurrence.transfer.target;
-    if (
-      edges.get(id) === 1 &&
-      terminal(id) &&
-      !isTail(id) &&
-      id !== program.function.entry &&
-      occurrenceAction(occurrence, language) === 'goto'
-    )
-      sinks.set(occurrence.transfer, id);
-  });
-  const moves = new Map<string, string>();
-  const placed = new Set<string>(sinks.values());
-  const findMoves = (region: Region, follow: string | null): void => {
-    context.checkpoint(1);
-    if (region.kind === 'sequence') {
-      region.regions.forEach((child, index) =>
-        findMoves(child, nextEntry(region.regions, index, follow)),
-      );
-      return;
-    }
-    if (region.kind === 'loop') {
-      const owned = new Set<string>(),
-        targets = new Set<string>();
-      scan(region.body, owned, targets);
-      const exits = [...targets].filter((id) => !owned.has(id));
-      const movable = exits.filter(
-        (id) =>
-          id !== follow &&
-          terminal(id) &&
-          (!isTail(id) || (predecessors.get(id)?.size ?? 0) > 1) &&
-          !placed.has(id) &&
-          [...(predecessors.get(id) ?? [])].every((previous) => owned.has(previous)),
-      );
-      if (movable.length === 1 && exits.every((id) => id === movable[0] || isTail(id))) {
-        moves.set(region.header, movable[0]!);
-        placed.add(movable[0]!);
-      }
-      findMoves(region.body, region.header);
-      return;
-    }
-    for (const arm of controlArms(region.control)) if (arm.body) findMoves(arm.body, follow);
-  };
-  findMoves(body, null);
   let presented = body;
-  if (placed.size) {
-    const homes = new Map<string, BlockRegion>();
-    // Only sequence elements move: an owned arm body has a unique predecessor.
-    const lift = (region: Region): Region => {
-      context.checkpoint(1);
-      if (region.kind === 'block')
-        return {
-          ...region,
-          control: mapArms(region.control, (item) =>
-            item.body ? { ...item, body: lift(item.body) } : item,
-          ),
-        };
-      if (region.kind === 'loop') return { ...region, body: lift(region.body) };
-      const children: Region[] = [];
-      for (const child of region.regions)
-        if (child.kind === 'block' && placed.has(child.id)) homes.set(child.id, child);
-        else children.push(lift(child));
-      return sequence(children);
-    };
-    const lifted = lift(body);
-    const home = (transfer: ParallelTransfer): BlockRegion | undefined => {
-      const id = sinks.get(transfer),
-        region = id === undefined ? undefined : homes.get(id);
-      if (region) relocated.push({ block: region.id, at: transfer.target });
-      return region;
-    };
-    const place = (region: Region): Region => {
-      context.checkpoint(1);
-      if (region.kind === 'block') {
-        const control = region.control;
-        if (control.kind === 'jump') {
-          const sunk = home(control.transfer);
-          return sunk ? sequence([region, sunk]) : region;
-        }
-        return {
-          ...region,
-          control: mapArms(control, (item) => {
-            if (item.body) return { ...item, body: place(item.body) };
-            const sunk = home(item.transfer);
-            return sunk ? { ...item, body: sunk } : item;
-          }),
-        };
-      }
-      if (region.kind === 'sequence') return sequence(region.regions.map(place));
-      const loop = { ...region, body: place(region.body) },
-        moved = moves.get(region.header),
-        after = moved === undefined ? undefined : homes.get(moved);
-      if (!after) return loop;
-      relocated.push({ block: after.id, at: region.header });
-      return sequence([loop, after]);
-    };
-    // Every lifted block must land again, or the layout is left unchanged.
-    if (homes.size === placed.size) {
-      presented = place(lifted);
-      if (relocated.length !== placed.size) {
-        presented = body;
-        relocated.length = 0;
-      }
-    }
-  }
 
-  // 2. Each labeled edge into a tail ends in an owned copy of the tail instead.
+  // 1. Each labeled edge into a tail ends in an owned copy of the tail instead.
   // A jump and the copied continuation it owns are removed together if the
   // jump's home becomes unreachable. Otherwise its orphan return would remain
   // after another terminal block, despite having no incoming edge. `forced`
@@ -1519,7 +1049,7 @@ export function planLayout(
       ),
     };
   };
-  // 3. A tail no longer reached lexically at home is printed only as its copies.
+  // 2. A tail no longer reached lexically at home is printed only as its copies.
   let hidden = new Set<string>();
   const expand = (base: Region): Region => {
     clones = new Set();
@@ -1577,9 +1107,9 @@ export function planLayout(
   const base = presented;
   presented = expand(base);
 
-  // 4. A goto whose lexical path to its target crosses only tail homes falls
+  // 3. A goto whose lexical path to its target crosses only tail homes falls
   // through once those tails are copied onto every incoming edge instead.
-  // This search is optional work: exhausting its share keeps step 3's layout.
+  // This search is optional work: exhausting its share keeps step 2's layout.
   const kept = { presented, clones, duplicated, expansions, hidden };
   const restore = (): void => {
     forced = new Set();
@@ -1635,9 +1165,6 @@ export function planLayout(
     body: presented,
     clones,
     duplicated,
-    relocated,
-    merged,
-    ordered,
     hidden: [...hidden],
     forced: [...forced],
   };
@@ -1793,6 +1320,13 @@ export function planLoopForms(
       enters[0]!.destination.header === loop.header
         ? enters[0]!.transfer
         : undefined;
+    // The sole entry edge being an `if` arm, the loop is first entered only
+    // when that condition took the arm's value, wherever the loop is laid out.
+    const gate = init && enters[0]!.control;
+    const entered: readonly Guard[] =
+      gate && gate.kind === 'if'
+        ? [...guards, { control: gate, value: gate.when_true.transfer === init }]
+        : guards;
     // The loop syntax performs exactly this edge as its lexical break. Its
     // copies (when `copies`) print right after the loop, so no other edge from
     // inside the loop may reach the continuation.
@@ -1905,7 +1439,7 @@ export function planLoopForms(
             init,
             step: repeats[0]!.transfer,
             inside,
-            guards,
+            guards: entered,
           })
         )
           return { kind: 'for', test: control.id, enter: stayTrue, bottom: false };
@@ -1961,7 +1495,7 @@ export function planLoopForms(
           init,
           step: again.transfer,
           inside,
-          guards,
+          guards: entered,
         })
       )
         return { kind: 'for', test: control.id, enter: repeat, bottom: true };
@@ -2213,7 +1747,8 @@ export function planSharedArms(
     context.checkpoint(1);
     if (region.kind === 'sequence')
       return sequence(region.regions.map((child) => mark(child, members, head, owned, form)));
-    if (region.kind === 'loop') return region;
+    // Tail copies are recognized by identity (clones, return constants).
+    if (region.kind === 'loop' || !controlArms(region.control).length) return region;
     return {
       ...region,
       control: mapArms(region.control, (arm) =>
@@ -2244,6 +1779,7 @@ export function planSharedArms(
     context.checkpoint(1);
     if (region.kind === 'loop')
       return { ...region, body: rewrite(region.body, region.once ? follow : region) };
+    if (region.kind === 'block' && !controlArms(region.control).length) return region;
     if (region.kind === 'block')
       return {
         ...region,
