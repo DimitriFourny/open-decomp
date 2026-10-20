@@ -346,7 +346,7 @@ class Parser {
       if (result) this.returnType = { kind: 'float', bits: result[1] === 'float' ? 32 : 64 };
       const indents = [0];
       const token =
-        /[ \t]+|#[^\n]*|ord\('(?:\\u[0-9a-f]{4}|\\[0-7]{1,3}|\\.|[^'\\])'\)|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+\.[0-9]*(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|\.\.\.|==|!=|<=|>=|<<|>>|[.()[\],:=?<>+*/%&|^~!-]/gy;
+        /[ \t]+|#[^\n]*|ord\('(?:\\u[0-9a-f]{4}|\\[0-7]{1,3}|\\.|[^'\\])'\)|"(?:\\.|[^"\\])*"|0x[0-9a-fA-F]+|[0-9]+\.[0-9]*(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+|[0-9]+|[A-Za-z_][A-Za-z_0-9]*|\.\.\.|==|!=|<=|>=|<<|>>|\/\/|[.()[\],:=?<>+*/%&|^~!-]/gy;
       for (const line of lines.slice(endHeader + 1)) {
         if (/^\s*(?:#|$)/.test(line)) continue;
         const indent = line.length - line.trimStart().length;
@@ -1067,6 +1067,7 @@ class Parser {
           '-': 6,
           '*': 7,
           '%': 7,
+          '//': 7,
         }
       : {
           '|': 1,
@@ -2188,6 +2189,11 @@ export function execute(
           return left / right;
         case '%':
           return left % right;
+        case '//': {
+          // Python floor division.
+          const quotient = left / right;
+          return quotient * right !== left && left < 0n !== right < 0n ? quotient - 1n : quotient;
+        }
       }
       throw new Error(`Unknown emitted operator ${op}`);
     }

@@ -805,6 +805,51 @@ semantics and the unsimplified printing; `test/emitters/c/source-simplify.test.t
 and `test/reconstruction/source-integer-identity.test.ts` pin the signed/width
 edge cases where a cast or an unknown operand must stay.
 
+All of these source-normalization rewrites form one ordered rule pool
+(`src/reconstruction/source-rules.ts`, `EXPRESSION_RULES`). Each rule names its
+presentation record (or none for exact wiring), its views and its proof class:
+`structural` (exact wiring; the BDD may veto while its allowance remains),
+`bitvector` (the original form stays once the allowance is exhausted) or `own`
+(side conditions are the proof and are pinned by counterexample tests).
+`normalizeSourceExpressions` applies the first matching rule per value and
+revisits it to a fixpoint, at most 32 rewrites per value. Source-only rules added
+with the pool: `magic_division` (floor(x*M/2^s) of a zero-extended x through
+multiply-high, shifts and high slices, or the add-back form t + ((x-t)>>1) of a
+2^w+M multiplier, is x / d when d = ceil(2^s/M) passes an exact closed-form bound
+over every residue; a shifted quotient folds into the divisor), `division_narrowing`
+(unsigned division/remainder of a zero extension by 0 < c < 2^N, and signed of a
+sign extension by c other than 0 and -1, is the extended narrow operation),
+`remainder_idiom` (x - (x/c)*c of one SSA value and one constant c is x % c),
+`compare_canonical` (constant to the right; comparisons of matching extensions,
+or of one extension with a representable constant, use the narrow operands) and
+`low_bits_narrowing` (the former BDD-checked low-slice narrowing, now its own
+lemma; the checked view keeps the BDD check). Signed magic division and 32-bit
+magic sequences over a 64-bit operand with an unproven high half are not
+recognized. Two value-level rules (`src/analysis/values/rules.ts`) run in
+`simplifySSA` for both views: `zext(trunc v)` is `v` when `v` is proven below the
+narrow width, and `x OP x` of one value is OP's reflexive truth value unless an
+indeterminate definition can reach `x` (through definitions or phi inputs, 128
+values bounded). x86's quotient-overflow guard after a division of a zero-extended
+dividend by a constant thus folds and its unreachable trap disappears. The printer
+prints division by a constant other than 0 (signed: other than -1) natively
+(`native_division`; Python-like keeps the helper for signed operands, whose floor
+division differs) and an integer insert as `(base & kept) | (value << offset)`
+(`mask_insert`). `test/reconstruction/source-division.test.ts` checks the magic
+divisor bound against exhaustive 8-bit and sampled 16-bit search, compiler
+constants and off-by-one multipliers, and the narrowing/remainder lemmas at
+INT_MIN, -1 and width edges.
+
+The bitvector checker first accepts the same operator over identity-equal
+operands (congruence) without BDD work, then compiles both sides with every
+subterm common to both cones as one leaf and only then the whole bounded cone; a
+proof that adds or drops a leaf is accepted only when no added/dropped cone can
+reach an indeterminate definition, and a counterexample is reported only over true
+inputs. Bits are ordered most-significant first (a ripple-carry adder is linear),
+results compare by canonical node identity, a verified shared-leaf formula is
+cached per session by its leaf-renamed shape, and parallel moves of whole
+variables are checked by identity. On the development matrix this lowered
+allowance exhaustion from 186 to 29 of 200 functions.
+
 Source-only unsigned range analysis combines edge guards, definedness and parallel phi transfers before removing proven singleton register-cell plumbing. It widens unresolved loops and preserves unsupported signed guards, underflow paths and unknown definitions. The emitted-output induction smoke covers 294 observations, including zero trips, maximal counts, early exits, wrong guards and additional phi inputs; this is not a proof for arbitrary loops.
 
 Source names use live dataflow roles and established field evidence, with deterministic neutral fallbacks. Explicit user displays and supplied prototype names outrank inferred roles; conflicting callable/data uses do not invent intent. Cross-dialect keywords, helper names and duplicate displays cannot shadow declarations, and the explicit `entry_sp` storage input remains protected. Trusted regressions compile and execute the declared integer/structured-memory subset as C11 and Python with real width and byte-memory helpers; incomplete indirect calls and general pseudocode are not claimed compilable.
