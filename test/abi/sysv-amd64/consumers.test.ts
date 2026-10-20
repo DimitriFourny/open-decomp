@@ -409,6 +409,9 @@ test('ELF debug capability is explicitly unavailable, not silently absent or Mac
   );
   const result = recoverDebugInfo(loaded, createOperationContext());
   assert.equal(result.status, 'partial');
+  // No `.debug_*` section: the missing capability hides no declaration, so
+  // local type inference stays usable (only embedded DWARF would be undecoded).
+  assert.equal(result.undecoded, false);
   assert.equal(result.data, null);
   assert.deepEqual(result.types, []);
   assert.deepEqual(result.functions, []);
@@ -429,6 +432,23 @@ test('ELF debug capability is explicitly unavailable, not silently absent or Mac
       error.code === 'unsupported_target' &&
       error.message.includes('ELF DWARF'),
   );
+  // Embedded DWARF that stays unread is undecoded: its declarations are unknown.
+  const dwarfBytes = readFileSync('fixtures/bin/elf-x86_64-symbols'),
+    dwarfSha = contentHash(dwarfBytes);
+  const withDwarf = recoverDebugInfo(
+    new ELFLoader().load(
+      {
+        image_id: imageIdentity(dwarfSha),
+        sha256: dwarfSha,
+        bytes: new ImmutableBytes(dwarfBytes),
+        slice_id: null,
+      },
+      createOperationContext(),
+    ),
+    createOperationContext(),
+  );
+  assert.equal(withDwarf.status, 'partial');
+  assert.equal(withDwarf.undecoded, true);
 });
 
 test('call-local signatures retain AL slice observations without creating target-global contracts', () => {

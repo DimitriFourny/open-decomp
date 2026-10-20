@@ -115,6 +115,7 @@ function parameterRegister(abi: AbiProfile) {
 function debugInput(types: SuppliedTypeRecord[], sig: Signature): DebugRecovery {
   return {
     status: 'complete',
+    undecoded: false,
     uuid: null,
     content_sha256: 'a'.repeat(64),
     data: null,

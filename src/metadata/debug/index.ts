@@ -47,6 +47,11 @@ export interface DebugFunctionRecord {
 }
 export interface DebugRecovery {
   readonly status: 'absent' | 'complete' | 'partial';
+  /** Debug data exists in the image or supplied artifact that this recovery did not
+   * decode. Its declarations are unknown, so local type inference cannot be checked
+   * against them. A partial status without undecoded data (an ELF image that has no
+   * DWARF sections) reports the missing capability without hiding any declaration. */
+  readonly undecoded: boolean;
   readonly uuid: string | null;
   readonly content_sha256: string;
   readonly data: DwarfData | null;
@@ -72,24 +77,6 @@ export function recoverDebugInfo(
 ): DebugRecovery {
   context.checkpoint(0);
   if (image.target.format === 'elf') {
-    // Without embedded DWARF sections there is no debug data to recover (as for
-    // a Mach-O image without __debug_info); only present DWARF stays unread.
-    if (
-      !external &&
-      !image.sections.some(
-        (section) => section.kind === 'section' && /^\.z?debug_/.test(section.name),
-      )
-    )
-      return {
-        status: 'absent',
-        uuid: null,
-        content_sha256: image.sha256,
-        data: null,
-        types: [],
-        functions: [],
-        evidence: [],
-        diagnostics: [],
-      };
     const diagnostic: Diagnostic = {
       code: 'unavailable_semantics',
       severity: 'warning',
@@ -101,6 +88,10 @@ export function recoverDebugInfo(
       throw new OperationError({ ...diagnostic, code: 'unsupported_target', severity: 'error' });
     return {
       status: 'partial',
+      // Only embedded DWARF sections hold declarations this recovery leaves unread.
+      undecoded: image.sections.some(
+        (section) => section.kind === 'section' && /^\.z?debug_/.test(section.name),
+      ),
       uuid: null,
       content_sha256: image.sha256,
       data: null,
@@ -120,6 +111,7 @@ export function recoverDebugInfo(
       });
     return {
       status: 'absent',
+      undecoded: false,
       uuid: null,
       content_sha256: image.sha256,
       data: null,
@@ -171,6 +163,7 @@ export function recoverDebugInfo(
   if (!header.sections.get('__debug_info')?.length) {
     return {
       status: diagnostics.length ? 'partial' : 'absent',
+      undecoded: diagnostics.length > 0,
       uuid: header.uuid || null,
       content_sha256: hash,
       data: null,
@@ -186,6 +179,7 @@ export function recoverDebugInfo(
   if (!data)
     return {
       status: parsed.status,
+      undecoded: parsed.status === 'partial',
       uuid: header.uuid || null,
       content_sha256: hash,
       data,
@@ -473,6 +467,7 @@ export function recoverDebugInfo(
     evidenceFor('line-tables', 'Half-open source address intervals recorded by DWARF');
   const result: DebugRecovery = {
     status: diagnostics.length ? 'partial' : 'complete',
+    undecoded: diagnostics.length > 0,
     uuid: header.uuid || null,
     content_sha256: hash,
     data,
