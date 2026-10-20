@@ -140,9 +140,10 @@
           <code>loadFunctionScope</code> in
           <a class="src" href="../../src/service/queries/scope.ts">src/service/queries/scope.ts</a>
           resolves the stored function ID, <code>loadFunctionGraph</code> materializes native
-          name/function arrays once per live <code>LoadedImage</code> and revision in a
-          <code>WeakMap</code>, and <code>loadFunctionIndex</code> reuses those arrays for
-          presentation and xref queries.
+          name/function arrays once per live <code>LoadedImage</code>, project and revision in a
+          <code>WeakMap</code>, and <code>loadFunctionIndex</code> reuses the cached function array
+          when present, lazily loading persisted reference records into the same entry for later
+          analysis passes such as call resolution and type recovery.
         </p>
 
         <figure class="diagram">
@@ -190,7 +191,8 @@
           <figcaption>
             <strong>Figure 1.</strong> Discovery is a pure analysis over immutable image facts. The
             preparation step builds indexes but decodes nothing; the traversal step is the only
-            place that touches executable bytes, and the result is what the project publishes.
+            place that touches executable bytes, and later stages publish records derived from the
+            result.
           </figcaption>
         </figure>
 
@@ -209,15 +211,15 @@
       <section id="seeds">
         <h2>Seeds, trust and indexed evidence</h2>
         <p>
-          <code>prepareDiscoveryIndex</code> collapses everything the loader knows into an
+          <code>prepareDiscoveryIndex</code> collapses the loader facts that can ground code into an
           <code>IndexedSeed</code> per virtual entry address. A seed carries a set of evidence IDs,
           optional native names, any boundary claims, and one boolean, <code>established</code>.
           Multiple loader facts for the same address are merged: the ELF fixture carries two
           function-symbol evidence records for each function, so 36 such records collapse to 18
-          seeds. On <code>macho-arm64-symbols</code>, 18 seeds carry 17 function-symbol, 17
-          export-candidate, 17 loader-function-start, 8 unwind, one entry and one import-callable
-          proof records. Evidence is additive; an <code>established</code> fact can never be
-          downgraded by a candidate fact.
+          seeds. On <code>macho-arm64-symbols</code>, the 18 seeds together carry 17
+          function-symbol, 17 export-candidate, 17 loader-function-start, 8 unwind, one entry and
+          one import-callable evidence records. Evidence is additive; an
+          <code>established</code> fact can never be downgraded by a candidate fact.
         </p>
         <pre><code>interface IndexedSeed {
   readonly entry: Address;
@@ -249,20 +251,20 @@
               <td><code>image.entry_points</code></td>
               <td>yes</td>
               <td>no name, no claim</td>
-              <td>executable backing required</td>
+              <td>no executable-backing check</td>
             </tr>
             <tr>
               <td><code>function symbol</code></td>
               <td><code>symbols</code> with kind <code>function</code></td>
               <td>yes</td>
-              <td>native name; symbol size becomes a claim</td>
+              <td>native name; positive symbol size becomes a claim</td>
               <td>executable backing required</td>
             </tr>
             <tr>
               <td><code>executable symbol candidate</code></td>
               <td><code>symbols</code> with kind <code>unknown</code></td>
               <td>no</td>
-              <td>native name; size becomes a claim</td>
+              <td>native name; positive size becomes a claim</td>
               <td>data regions and object-symbol addresses are excluded</td>
             </tr>
             <tr>
@@ -283,7 +285,7 @@
               <td><code>loader function start</code></td>
               <td><code>hints</code> of kind <code>function</code></td>
               <td>yes</td>
-              <td>hint size becomes a claim</td>
+              <td>positive hint size becomes a claim</td>
               <td>executable backing required</td>
             </tr>
             <tr>
@@ -311,14 +313,15 @@
         </table>
 
         <p>
-          Two loader constructs are deliberately <em>not</em> seeds. A data hint becomes a
-          <code>DataRegion</code> in the index; if its encoding is <code>jump_table</code> it also
-          becomes a <code>JumpTableCandidate</code> with a concrete range. An object symbol with a
-          size becomes a data region and its address is added to <code>objectAddresses</code>. The
-          <code>seed</code> gate then refuses to turn an export or an unknown-kind symbol into a
-          function when its address lies in such a region. The test suite calls this out directly:
-          constants in an executable Mach-O <code>__const</code> section are not functions, and a
-          zero-sized object symbol defeats an export-only code guess.
+          Two loader constructs are deliberately <em>not</em> seeds. A positive-size data hint
+          becomes a <code>DataRegion</code> in the index; if its encoding is
+          <code>jump_table</code> it also becomes a <code>JumpTableCandidate</code> with a concrete
+          range. Every addressed object symbol is added to <code>objectAddresses</code>, and a
+          positive size also becomes a data region. The <code>seed</code> gate then refuses to turn
+          an export or an unknown-kind symbol into a function when its address lies in such a
+          region. The test suite calls this out directly: constants in an executable Mach-O
+          <code>__const</code> section are not functions, and a zero-sized object symbol defeats an
+          export-only code guess.
         </p>
 
         <figure class="diagram">
@@ -348,10 +351,10 @@
             <text x="425" y="128" text-anchor="middle" class="title">seed() gate</text>
             <text x="425" y="150" text-anchor="middle" class="small">normalize to a VA</text>
             <text x="425" y="168" text-anchor="middle" class="small">
-              require executable backing
+              backing check, entry/assertion exempt
             </text>
             <text x="425" y="186" text-anchor="middle" class="small">
-              exclude data / object addresses
+              reject data/object for candidates
             </text>
             <text x="425" y="204" text-anchor="middle" class="small">
               derive evidence, merge by address
@@ -377,9 +380,9 @@
             </text>
           </svg>
           <figcaption>
-            <strong>Figure 2.</strong> Every loader fact passes through one gate. The gate is where
-            data-shaped facts are rejected as code, not a later cleanup pass; claims survive on the
-            seed and are checked again per graph.
+            <strong>Figure 2.</strong> Every loader root passes through one gate. The gate is where
+            data-shaped candidates are rejected as code, not a later cleanup pass; claims survive on
+            the seed and are checked again per graph.
           </figcaption>
         </figure>
 
@@ -416,8 +419,8 @@
         <dl class="terms">
           <dt>seeds</dt>
           <dd>
-            Mutable copies of the indexed seeds for this call, including roots discovered from
-            direct calls.
+            Mutable copies of the indexed seeds in a normal call, plus roots discovered from direct
+            calls; selected mode starts with an empty map and falls back to the index.
           </dd>
           <dt>queue / queued</dt>
           <dd>
@@ -450,9 +453,9 @@
           <code>evidenceDeriver</code> fingerprints the selected slice, the literal
           <code>discovery/1</code> version, a rule string, the address value and the sorted parent
           evidence IDs. The same proof reached by the same path therefore produces the same ID
-          across runs, and rule strings are the vocabulary you see in diagnostics:
-          <code>direct call target</code>, <code>loader function start</code>,
-          <code>decoded control flow</code>,
+          across runs, and rule strings are the vocabulary recorded on the resulting evidence's
+          <code>origin.rule</code> and claim: <code>direct call target</code>,
+          <code>loader function start</code>, <code>decoded control flow</code>,
           <code
             >indirect branch targets from immutable table entries under a dominating unsigned index
             bound</code
@@ -485,11 +488,11 @@
 
         <ol class="steps">
           <li>
-            <strong>Validate and prepare.</strong> Check decoder architecture, revision, previous
-            graphs and index identity. If no index was supplied, call
-            <code>prepareDiscoveryIndex</code>. In <code>selected_entry</code> mode, require that
-            the entry is a virtual address with an indexed seed, start with only that seed on the
-            queue, and do not copy the other seeds into the mutable seed map.
+            <strong>Validate and prepare.</strong> Check decoder architecture, revision and previous
+            graphs; if no index was supplied, call <code>prepareDiscoveryIndex</code>, otherwise
+            verify the index identity. In <code>selected_entry</code> mode, require that the entry
+            is a virtual address with an indexed seed, start with only that seed on the queue, and
+            do not copy the other seeds into the mutable seed map.
           </li>
           <li>
             <strong>Sort the initial roots.</strong> Queue entries are sorted by address; discovered
@@ -526,17 +529,19 @@
           <li>
             <strong>Seed direct calls.</strong> A valid direct call with a target calls
             <code>seed(target, 'direct call target', [flowEvidence], true)</code>, which adds
-            evidence and marks the target established even if it was not a loader root. In normal
-            mode it is also enqueued; in selected mode it is not decoded, because every known root
-            is a boundary.
+            evidence and marks the target established when the target has executable backing, even
+            if it was not a loader root. In normal mode it is also enqueued; in selected mode it is
+            not enqueued, so the callee is left to its own graph.
           </li>
           <li>
             <strong>Follow intraprocedural successors.</strong>
-            <code>instructionSuccessors</code> contributes the fallthrough of a call, both edges of
-            a conditional branch, the target of an unconditional branch, the fallthrough of an
-            indirect branch or trap, and nothing for returns. Every successor gets an entry in
-            <code>incoming</code> and is enqueued; in selected mode, a successor that is another
-            indexed root is refused by <code>enqueue</code> and remains a boundary.
+            <code>instructionSuccessors</code> contributes the fallthrough of a call (nothing for a
+            direct noreturn callee), both edges of a conditional branch, the target of an
+            unconditional branch, the fallthrough of an indirect branch or trap, the address after
+            an <code>unknown</code> instruction when <code>may_fallthrough</code>, and nothing for
+            returns. Every successor gets an entry in <code>incoming</code> and is enqueued; in
+            selected mode, a successor that is another indexed root is refused by
+            <code>enqueue</code> and remains a boundary.
           </li>
           <li>
             <strong>Attempt indirect-table proof.</strong> A non-conditional indirect branch is
@@ -544,13 +549,14 @@
             recorded as incoming edges from the branch, and the proof is stored provisionally in
             <code>tables</code>. Separately, architecture-shaped heuristics append
             <code>JumpTableCandidate</code> records (x86 indexed indirect operand with scale at
-            least 4; ARM64 indexed load immediately before a register branch); candidates never
-            create edges.
+            least 4; ARM64 indexed load into the branch register immediately before the branch);
+            candidates never create edges.
           </li>
         </ol>
 
         <pre><code>queue.sort((a, b) =&gt; (a.value &lt; b.value ? -1 : a.value &gt; b.value ? 1 : 0));
 for (let cursor = 0; cursor &lt; queue.length; cursor++) {
+  context.checkpoint(1);
   const address = queue[cursor]!;
   if (decoded.has(address.value) || gaps.has(address.value)) continue;
   // … data, executable-backing and instruction-budget gaps …
@@ -561,6 +567,7 @@ for (let cursor = 0; cursor &lt; queue.length; cursor++) {
   if (!instruction) { /* record a gap and continue */ }
   decoded.set(address.value, instruction);
   const flowEvidence = derive('decoded control flow', address, instruction.evidence_ids);
+  instructionEvidence.set(instruction.id, [flowEvidence]);
   if (instruction.validity !== 'valid') continue;
   if (instruction.flow.kind === 'call' &amp;&amp; instruction.flow.target) {
     seed(instruction.flow.target, 'direct call target', [flowEvidence], true);
@@ -698,13 +705,14 @@ for (let cursor = 0; cursor &lt; queue.length; cursor++) {
               <td><code>branch</code></td>
               <td>target, plus fallthrough when conditional</td>
               <td>
-                <code>branch</code> (conditional flag from the decoder), plus
+                <code>branch</code> (conditional flag from the decoder) or
+                <code>tail_call</code> for an unconditional branch to another entry, plus
                 <code>fallthrough</code> when conditional
               </td>
             </tr>
             <tr>
               <td><code>indirect_branch</code></td>
-              <td>fallthrough if present; proven table targets replace this</td>
+              <td>fallthrough if present, plus proven table targets when a proof succeeds</td>
               <td>
                 <code>unknown</code> or one <code>branch</code> per proven target, plus fallthrough
               </td>
@@ -716,7 +724,7 @@ for (let cursor = 0; cursor &lt; queue.length; cursor++) {
             </tr>
             <tr>
               <td><code>unknown</code></td>
-              <td>the next byte/instruction address only when <code>may_fallthrough</code></td>
+              <td>the address after the instruction only when <code>may_fallthrough</code></td>
               <td>
                 <code>unknown</code> plus a conditional <code>fallthrough</code> for each successor
               </td>
@@ -731,10 +739,11 @@ for (let cursor = 0; cursor &lt; queue.length; cursor++) {
 
         <p>
           A direct call to a root that is already known merges evidence rather than creating a
-          second root. A direct call to an address that is not known becomes a new established seed;
-          this is how local helper functions appear in stripped and symbol-bearing images. In
-          selected mode the call target is still seeded as evidence, but it is not enqueued, so the
-          selected graph stops at the call continuation and leaves the callee to its own graph.
+          second root. A direct call to an executably backed address that is not known becomes a new
+          established seed; this is how local helper functions appear in stripped and symbol-bearing
+          images. In selected mode an executably backed call target is still seeded as evidence, but
+          it is not enqueued, so the selected graph stops at the call continuation and leaves the
+          callee to its own graph.
         </p>
         <p>
           An unconditional branch whose target is another function entry is a tail call. It appears
@@ -815,8 +824,9 @@ for (let cursor = 0; cursor &lt; queue.length; cursor++) {
           Two reachability rules set the conflict flag. A reachable instruction landing in a known
           data region is a <code>data</code> gap and a conflict. A successor that reaches another
           function entry is a conflict unless the edge came from a proven jump table or is an
-          unconditional branch (a tail call). The diagnostics preserve both sides' evidence IDs, so
-          a consumer can inspect the disputed proof rather than trusting a boolean.
+          unconditional branch (a tail call). A successor-conflict diagnostic cites both functions'
+          seed evidence, so a consumer can inspect the disputed proof rather than trusting a
+          boolean.
         </p>
 
         <figure class="diagram">
@@ -842,7 +852,7 @@ for (let cursor = 0; cursor &lt; queue.length; cursor++) {
             <text x="450" y="153" text-anchor="middle" class="small">every boundary claim?</text>
             <rect class="box warn" x="620" y="114" width="240" height="50" rx="7" />
             <text x="740" y="136" text-anchor="middle" class="small">claim contains another</text>
-            <text x="740" y="153" text-anchor="middle" class="small">seed or claim?</text>
+            <text x="740" y="153" text-anchor="middle" class="small">seed entry?</text>
             <rect class="box warn" x="330" y="182" width="240" height="50" rx="7" />
             <text x="450" y="204" text-anchor="middle" class="small">reachable target lies in</text>
             <text x="450" y="221" text-anchor="middle" class="small">a known data region?</text>
@@ -943,15 +953,15 @@ for (let cursor = 0; cursor &lt; queue.length; cursor++) {
         <h3>The single-entry chain</h3>
         <p>
           Proof starts from the branch and walks backwards. The chain stops at a function entry, at
-          a branch with zero or more than one decoded predecessor, at an invalid instruction, or at
-          a predecessor that is not <code>fallthrough</code> or <code>branch</code>. It also stops
-          if the predecessor is already in the chain. The maximum is <code>MAX_CHAIN = 64</code>;
-          fewer than three instructions is an immediate rejection. Each instruction is replayed
-          forward through a symbolic interpreter over 64-bit values. Registers begin as opaque
-          symbols; constants, zero-extension, sign-extension, addition and shifting are hash-consed
-          so equal expressions compare by key. A conditional branch on the chain can establish a
-          fact about the compared left-hand side; the fact records the maximum and the guard
-          instruction that produces the out-of-range edge.
+          any instruction with zero or more than one decoded predecessor, at an invalid instruction,
+          or at a predecessor that is not <code>fallthrough</code> or <code>branch</code>. It also
+          stops if the predecessor is already in the chain. The maximum is
+          <code>MAX_CHAIN = 64</code>; fewer than three instructions is an immediate rejection. Each
+          instruction is replayed forward through a symbolic interpreter over 64-bit values.
+          Registers begin as opaque symbols; constants, zero-extension, sign-extension, addition and
+          shifting are hash-consed so equal expressions compare by key. A conditional branch on the
+          chain can establish a fact about the compared left-hand side; the fact records the maximum
+          and the guard instruction that produces the out-of-range edge.
         </p>
 
         <h3>What is modelled in each architecture</h3>
@@ -970,7 +980,7 @@ for (let cursor = 0; cursor &lt; queue.length; cursor++) {
                 <code>MOVZ</code>/<code>MOVN</code>, <code>ADR</code>/<code>ADRP</code> with a
                 relative target
               </td>
-              <td><code>mov</code> immediate, <code>lea</code>, RIP-relative memory constants</td>
+              <td><code>mov</code> immediate, <code>lea</code>, RIP-relative constant addresses</td>
             </tr>
             <tr>
               <td>Index extension</td>
@@ -1013,7 +1023,7 @@ for (let cursor = 0; cursor &lt; queue.length; cursor++) {
                 indexed address; signed load marks a signed entry
               </td>
               <td>
-                64-bit <code>mov</code>/<code>movzx</code>/<code>movsx</code> from an indexed memory
+                <code>mov</code>/<code>movzx</code>/<code>movsx</code> from an indexed memory
                 operand
               </td>
             </tr>
@@ -1037,25 +1047,27 @@ for (let cursor = 0; cursor &lt; queue.length; cursor++) {
           </tbody>
         </table>
         <p>
-          Both interpreters forward stack and register slots keyed by an affine base, offset and
-          size; a store to an overlapping key kills the forwarded value. On x86-64 the segment base
-          must not be <code>fs</code> or <code>gs</code> and the memory operand's address size must
-          be 64-bit; otherwise the address is opaque. Those restrictions prevent the proof from
-          treating a thread-local or window-relative address as a table base.
+          Both interpreters forward memory slots (stack and register-relative) keyed by an affine
+          base, offset and size; a store to an overlapping key kills the forwarded value. On x86-64
+          the segment base must not be <code>fs</code> or <code>gs</code> and the memory operand's
+          address size must be 64-bit; otherwise the address is opaque. Those restrictions prevent
+          the proof from treating a thread-local (<code>fs</code>/<code>gs</code>) or non-64-bit
+          address as a table base.
         </p>
 
         <h3>Deriving base, bound, entry width and targets</h3>
         <p>
           A load is recognized as a table entry only when its effective address is affine with
           exactly one non-constant term, that term is the same symbolic node as the index register,
-          and the shift matches, and the index node already has a guard fact. The affine constant is
-          the table base. The entry width is the access width in bytes; the stride is
+          the shift matches, and <code>bound(selector.node)</code> yields a guard. The affine
+          constant is the table base. The entry width is the access width in bytes; the stride is
           <code>2^shift</code> on ARM64 and the memory operand's scale on x86-64; signedness comes
-          from the signed-load form. The bound is the maximum established by the guard. The count is
-          <code>max + 1</code>, and the proof rejects if that maximum is at least
-          <code>max_entries</code>; discovery passes <code>MAX_JUMP_TABLE_ENTRIES = 256</code>.
-          <code>guard_exact</code> records whether the bound is the fact attached directly to the
-          index node itself, as opposed to a structural bound inherited from a wider expression.
+          from the signed-load form. The bound is <code>bound(entry.index)</code>: a guard fact or a
+          structural maximum, whichever is tighter. The count is <code>max + 1</code>, and the proof
+          rejects if that maximum is at least <code>max_entries</code>; discovery passes
+          <code>MAX_JUMP_TABLE_ENTRIES = 256</code>. <code>guard_exact</code> records whether the
+          bound is the fact attached directly to the index node itself, as opposed to a structural
+          bound inherited from a wider expression.
         </p>
         <pre><code>if (chain.length &lt; 3) return undefined;
 const limit = bound(entry.index);
@@ -1073,14 +1085,14 @@ if (!bytes) return undefined;</code></pre>
           (<code>proveJumpTable</code>).
         </p>
         <p>
-          Table bytes are read little-endian from <code>recoverDataBytes</code> in
+          The proof reads the exact bytes returned by <code>recoverDataBytes</code> in
           <a class="src" href="../../src/analysis/strings/source-data.ts"
             >src/analysis/strings/source-data.ts</a
-          >. That function is intentionally strict: the table range must lie in exactly one
-          containing section, the section must be readable and not writable, the range must fit both
-          the virtual and file extent, no overlapping mapping may be writable or unreadable, no
-          relocation may intersect the range, and the address must map to exactly one file-backed
-          span of exactly the requested length. Zero-fill and synthetic bytes are never accepted.
+          >. That function is strict: the table range must lie in exactly one containing section,
+          the section must be readable and not writable, the range must fit both the virtual and
+          file extent, no overlapping mapping may be writable or unreadable, no relocation may
+          intersect the range, and the address must map to exactly one file-backed span of exactly
+          the requested length. Zero-fill and synthetic bytes are never accepted.
         </p>
 
         <figure class="diagram">
@@ -1286,19 +1298,19 @@ for (const [address, count] of incoming) if (count !== 1) leaders.add(address);<
             <rect class="box" x="330" y="40" width="280" height="86" rx="8" />
             <text x="344" y="61" class="title">0x100000598 · 12 B</text>
             <text x="344" y="82" class="mono">mov x8, x0</text>
-            <text x="344" y="99" class="mono">movz w0, #0</text>
+            <text x="344" y="99" class="mono">movz w0, #0x0</text>
             <text x="344" y="116" class="mono">mov w9, w1</text>
 
             <rect class="box" x="690" y="40" width="190" height="68" rx="8" />
             <text x="704" y="61" class="title">0x1000005b8 · 8 B</text>
-            <text x="704" y="82" class="mono">movz w0, #0</text>
+            <text x="704" y="82" class="mono">movz w0, #0x0</text>
             <text x="704" y="99" class="mono">ret</text>
 
             <rect class="box accent" x="330" y="190" width="300" height="118" rx="8" />
             <text x="344" y="211" class="title">0x1000005a4 · 16 B</text>
-            <text x="344" y="232" class="mono">ldr w10, [x8], #4</text>
+            <text x="344" y="232" class="mono">ldr w10, [x8], #0x4</text>
             <text x="344" y="249" class="mono">add w0, w10, w0</text>
-            <text x="344" y="266" class="mono">subs x9, x9, #1</text>
+            <text x="344" y="266" class="mono">subs x9, x9, #0x1</text>
             <text x="344" y="283" class="mono">b.ne 0x1000005a4</text>
 
             <rect class="box" x="330" y="360" width="190" height="62" rx="8" />
@@ -1373,7 +1385,7 @@ for (const [address, count] of incoming) if (count !== 1) leaders.add(address);<
           each instruction it classifies calls, branches, tail calls and unknown transfers, and for
           a resolved table it emits one <code>branch</code> reference per distinct target with the
           table proof's evidence. Direct calls carry <code>target_role: 'code'</code> and resolve to
-          the callee function ID when that function is in the discovery result; a call to an import
+          the callee function ID when the target is a known function entry; a call to an import
           callable entry resolves later to the import record with
           <code>target_role: 'callable_stub'</code>. These references are intentionally
           conservative: unresolved indirect transfers are retained as
@@ -1500,15 +1512,16 @@ for (const [address, count] of incoming) if (count !== 1) leaders.add(address);<
           or mismatched cursor raises <code>invalid_cursor</code>.
         </p>
         <p>
-          On the Mach-O fixture, discovery produced 144 references from 18 graphs. The reference
-          index state was <code>partial</code>, with diagnostics including “Unresolved indirect
-          targets” and “Discovery coverage is incomplete”. A concrete resolved call is
-          <code>_main</code> at <code>0x100000aa8</code>, whose reference kind is <code>call</code>,
+          On the Mach-O fixture, the published reference index contains 144 references built from
+          the 18 discovery graphs, target recovery and loader relocations. The reference index state
+          was <code>partial</code>, with diagnostics including “Unresolved indirect targets” and
+          “Discovery coverage is incomplete”. A concrete resolved call is the call at
+          <code>0x100000aa8</code> in <code>_main</code>, whose reference kind is <code>call</code>,
           status <code>established</code>, target <code>0x100000abc</code>, target entity the
           <code>_puts</code> import, target role <code>callable_stub</code>. A concrete data
-          reference is <code>_fixture_string</code> at <code>0x10000070c</code>, kind
-          <code>address</code>, status <code>established</code>, target <code>0x100000ad0</code>,
-          which resolves to the fixture's one string record.
+          reference is the <code>address</code> reference at <code>0x10000070c</code> in
+          <code>_fixture_string</code>, kind <code>address</code>, status <code>established</code>,
+          target <code>0x100000ad0</code>, which resolves to the fixture's one string record.
         </p>
       </section>
 
@@ -1520,14 +1533,13 @@ for (const [address, count] of incoming) if (count !== 1) leaders.add(address);<
             >src/analysis/strings/index.ts</a
           >
           is independent of discovery and runs after it in <code>prepareQueryImport</code>. It scans
-          only sections that are ordinary sections with file backing and that are not executable:
-          Mach-O excludes sections whose flags contain <code>0x80000400</code> (pure/some
-          instructions), while PE and ELF require a non-executable permission set. Each virtual
-          range is translated to file spans; zero-fill and unmapped spans are skipped rather than
-          synthesized.
+          only ordinary file-backed sections that the format marks as non-code: Mach-O excludes
+          sections whose flags contain <code>0x80000400</code> (pure/some instructions), while PE
+          and ELF require a non-executable permission set. Each virtual range is translated to file
+          spans; zero-fill and unmapped spans are skipped rather than synthesized.
         </p>
         <p>
-          The scanner is conservative about encodings. It starts at a non-NUL byte, looks for a
+          The scanner is conservative about encodings. It skips NUL padding, looks for a
           NUL-delimited record, and requires at least four characters by default. At an even
           address, UTF-16LE is recognized only when the section name matches
           <code>/ustring|utf16/i</code>, a BOM is present, or two consecutive printable-ASCII/zero
@@ -1540,8 +1552,9 @@ for (const [address, count] of incoming) if (count !== 1) leaders.add(address);<
           Defaults are <code>max_bytes: 32 * 1024 * 1024</code>, <code>max_strings: 50_000</code>,
           <code>max_string_bytes: 16 * 1024</code>, and <code>min_characters: 4</code>. Hitting the
           byte or record budget stops the scan and adds a <code>resource_limit</code> diagnostic;
-          overlapping section aliases and unavailable mappings do too. <code>state</code> is
-          <code>partial</code> exactly when such a reason exists.
+          skipping an oversized candidate or an overlapping section alias adds one too, as does a
+          section whose start has no mapping. <code>state</code> is <code>partial</code> exactly
+          when any such reason exists.
         </p>
         <p>
           A record starts as <code>status: 'candidate'</code>. The reference index promotes it to
@@ -1558,7 +1571,8 @@ for (const [address, count] of incoming) if (count !== 1) leaders.add(address);<
             A complete string index means all eligible sections within the documented byte and
             record budgets were scanned. It does not mean every byte sequence that a human would
             call a string was found: arbitrary encoded, compressed or encrypted text, strings in
-            executable sections, and strings beyond the budgets are out of scope.
+            instruction sections (or in executable PE/ELF sections), and strings beyond the budgets
+            are out of scope.
           </p>
         </div>
       </section>
@@ -1575,8 +1589,8 @@ for (const [address, count] of incoming) if (count !== 1) leaders.add(address);<
           instructions before that branch. On ARM64 the forwarding branch is
           <code>BR_64_branch_reg</code> and inert means <code>ADRP</code>, <code>ADR</code>,
           <code>NOP</code>, a positive-offset 64-bit <code>LDR</code> or a 64-bit literal
-          <code>LDR</code>. On x86-64 the branch is <code>jmp</code> and inert means
-          <code>endbr64</code> or <code>nop</code>. This covers Mach-O
+          <code>LDR</code>. On x86-64 the forwarding branch is an indirect <code>jmp</code> and
+          inert means <code>endbr64</code> or <code>nop</code>. This covers Mach-O
           <code>__stubs</code> (<code>adrp</code>/<code>ldr</code>/<code>br</code>), ELF PLT entries
           and PE import thunks (<code>jmp [IAT]</code>).
         </p>
@@ -1655,8 +1669,8 @@ for (const [address, count] of incoming) if (count !== 1) leaders.add(address);<
           <code>_puts</code> graph are partial because of their indirect control transfer.
         </p>
         <p>
-          Real images therefore stay <code>partial</code>. The project publishes
-          <code>indexes.function = 'partial'</code> whenever
+          Images with unresolved indirect flow therefore stay <code>partial</code>. The project
+          publishes <code>indexes.function = 'partial'</code> whenever
           <code>discovery.coverage.state</code> is not <code>complete</code>. That is why the CLI's
           <code>functions</code> command prints a warning such as
           <code>functions: partial (incomplete_index)</code> on the fixture, and why query envelopes
@@ -1704,9 +1718,9 @@ for (const [address, count] of incoming) if (count !== 1) leaders.add(address);<
           <li>
             Selected-local rebuilding adds a synthetic
             <code>selected-local graph reconstruction</code> evidence record to every selected
-            graph, and an <code>unavailable_semantics</code>
-            diagnostic only when the observed graph differs from the published record. It does not
-            mutate historical ranges.
+            graph, and an <code>unavailable_semantics</code> diagnostic only when the published
+            record's analysis is not <code>complete</code> or its ranges differ from the observed
+            ranges. It does not mutate historical ranges.
           </li>
         </ul>
         <div class="callout invariant">

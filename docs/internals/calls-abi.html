@@ -112,9 +112,9 @@
         <ul>
           <li>
             <code>CallAnalysisResult</code> from <code>analyzeCalls</code>: per call node, its
-            resolved targets, contract observations with an <code>AbiCallLayout</code>, prepared
-            register candidates, explicit arguments, noreturn status, and per-exit function
-            observations. This is intraprocedural evidence about the call boundary.
+            resolved targets, contract observations with an <code>AbiCallLayout</code>, register
+            candidates, explicit arguments, noreturn status, and per-exit function observations.
+            This is intraprocedural evidence about the call boundary.
           </li>
           <li>
             <code>SourceEvidence</code> from <code>recoverSourceEvidence</code>: an
@@ -312,9 +312,10 @@
           <p>
             Once a parameter's type cannot be classified, every later parameter gets an empty
             location list and <code>stack_bytes</code> is only the rounded known-prefix lower bound.
-            Both the SysV and Darwin implementations say this in code comments, and
-            <code>argument_count</code> stays <code>null</code> for a known prefix. A partial layout
-            therefore cannot be mistaken for “the remaining arguments are on the stack”.
+            Both the SysV and Darwin implementations say this in code comments, and when the
+            supplied parameter list is only a known prefix, <code>argument_count</code> stays
+            <code>null</code>. A partial layout therefore cannot be mistaken for “the remaining
+            arguments are on the stack”.
           </p>
         </div>
 
@@ -410,7 +411,7 @@
                 in <code>x8</code> (no result register asserted)
               </td>
               <td>
-                <code>x19</code>–<code>x28</code>, <code>sp</code>, <code>d8</code>–<code>d15</code>
+                <code>x19</code>–<code>x29</code>, <code>sp</code>, <code>d8</code>–<code>d15</code>
               </td>
               <td>
                 Red zone 128 B; variadic actuals always on the stack; unprototyped calls
@@ -463,9 +464,9 @@
         </p>
         <p>
           <code>classifyType</code> is intentionally narrower than SysV: a plain aggregate of 1, 2,
-          4 or 8 bytes is passed as an integer of that width; every other aggregate is passed by
-          pointer (the caller's copy), and <code>__m128</code>-sized vectors are also indirect.
-          Other vector widths are unsupported because shape alone cannot distinguish the
+          4 or 8 bytes is passed as an integer of that width; every other supported aggregate is
+          passed by pointer (the caller's copy), and <code>__m128</code>-sized vectors are also
+          indirect. Other vector widths are unsupported because shape alone cannot distinguish the
           <code>__m64</code> integer ABI class from a compiler vector extension. For variadic float
           arguments, the value is placed in both the SIMD register and the corresponding integer
           register, mirroring the shadow-store requirement.
@@ -477,20 +478,21 @@
           <code>integer</code>, <code>simd</code> (with up to four homogeneous members), or
           <code>indirect</code>. An aggregate is <code>simd</code> only when every non-empty field
           is itself SIMD, fields are contiguous from offset zero, all members have the same width
-          and vector-ness, and the total member count is at most four; otherwise an aggregate larger
-          than 16 bytes is passed indirectly, and one of at most 16 bytes is treated as an integer
-          object. Nested HFA fields are flattened into members with absolute bit offsets, which is
-          why a <code>{float,float}</code> inside a larger homogeneous aggregate still lands in
-          consecutive <code>s</code> registers.
+          and vector-ness, and the total member count is at most four; otherwise a successfully
+          classified aggregate larger than 16 bytes is passed indirectly, and one of at most 16
+          bytes is treated as an integer object. Nested HFA fields are flattened into members with
+          absolute bit offsets, which is why a <code>{float,float}</code> inside a larger
+          homogeneous aggregate still lands in consecutive <code>s</code> registers.
         </p>
         <p>
           Allocation tracks <code>ngrn</code> and <code>nsrn</code> separately. A SIMD shape uses
           consecutive SIMD registers if all members fit; an integer shape needs
           <code>ceil(size/8)</code> integer registers. Crucially, Apple does not round NGRN to an
           even number for a 16-byte value, and an aggregate is never split between the last register
-          and the stack: if it does not fit, <code>ngrn</code> is set to 8 and the object moves
-          whole to the stack. All stack offsets are relative to callee-entry SP, where the first
-          anonymous argument is at <code>+0</code>.
+          and the stack: if it does not fit, the relevant cursor is exhausted (<code>ngrn</code> for
+          integer/indirect shapes, <code>nsrn</code> for SIMD shapes) and the object moves whole to
+          the stack. All stack offsets are relative to callee-entry SP, where the first anonymous
+          argument is at <code>+0</code>.
         </p>
         <p>
           For variadic actuals the profile departs from ordinary allocation: every anonymous
@@ -750,13 +752,13 @@ if (output) {
         <p>
           Result storage is tracked at three independent strengths.
           <code>analyzeCalls</code> records <code>return_candidates</code> per return terminator:
-          initialized general registers other than the stack pointer that are not themselves
-          incoming values. Those are candidates, not a result list.
-          <code>possibleAbiReturnStorage(abi)</code> then enumerates what the profile could ever
-          use: it classifies one pointer-sized integer, floats of 16/32/64/80/128 bits, 4/8/16-lane
-          <code>i32</code> vectors, <code>{word,word}</code>, <code>{f64,f64}</code> and
-          <code>{f32×4}</code> returns, unions the resulting register roots and widens overlapping
-          widths. The answer is cached per profile in a <code>WeakMap</code>.
+          general registers other than the stack pointer that are not themselves incoming values.
+          Those are candidates, not a result list. <code>possibleAbiReturnStorage(abi)</code> then
+          enumerates what the profile could ever use: it classifies one pointer-sized integer,
+          floats of 32/64/80/128 bits, 4/8/16-lane <code>i32</code> vectors,
+          <code>{word,word}</code>, <code>{f64,f64}</code> and <code>{f32×4}</code> returns, unions
+          the resulting register roots and widens overlapping widths. The answer is cached per
+          profile in a <code>WeakMap</code>.
         </p>
         <p>
           That capability set is not evidence. The function's comment is explicit that the synthetic
@@ -896,7 +898,7 @@ if (output) {
             <tr>
               <td>Observation (prepared prefix, result demand, callee summary)</td>
               <td>Physical, never a complete source prototype</td>
-              <td>Supplements locations; cannot close arity by itself</td>
+              <td>Supplements locations; a prepared prefix alone cannot close arity</td>
             </tr>
           </tbody>
         </table>
@@ -976,10 +978,10 @@ export interface NativeSummary {
           </li>
           <li>
             <strong>Load under a fair share.</strong> Each load or demand probe receives at most
-            <code>floor(remainingWork / 4)</code>; the loader's own capacities (instructions,
-            blocks, IR nodes) are also decremented. No new body starts once remaining work is below
-            half of the initial allowance, so finished interfaces keep a reserve for the fixed
-            point. Only a limit that matches this step's own reservation is recoverable;
+            <code>max(1, floor(remainingWork / 4))</code>; the loader's own capacities
+            (instructions, blocks, IR nodes) are also decremented. No new body starts once remaining
+            work is below half of the initial allowance, so finished interfaces keep a reserve for
+            the fixed point. Only a limit that matches this step's own reservation is recoverable;
             cancellation, deadlines, the global work limit and selected-body failures escape.
           </li>
           <li>
@@ -1025,8 +1027,9 @@ export interface NativeSummary {
             >
             — and an unfinished body keeps whatever it had established.
             <code>complete</code> requires zero reasons <em>and</em> a non-ambiguous parameter
-            state; <code>arity_complete</code> additionally requires an unambiguous closure and no
-            limit/refinement reason.
+            state; <code>arity_complete</code> additionally requires complete machine call/stack
+            semantics, an unambiguous parameter state, no budget truncation, no context fallback and
+            no refinement limit.
           </p>
         </div>
 
@@ -1069,7 +1072,7 @@ export interface NativeSummary {
             <rect class="box muted" x="320" y="96" width="260" height="46" rx="8" />
             <text x="450" y="115" text-anchor="middle" class="title">13 other direct callees</text>
             <text x="450" y="132" text-anchor="middle" class="small mono">
-              _fixture_variadic, _fixture_stack_args
+              e.g. _fixture_variadic, …
             </text>
 
             <rect class="box" x="320" y="190" width="260" height="46" rx="8" />
@@ -1107,10 +1110,11 @@ export interface NativeSummary {
             <strong>Figure 4.</strong> The real call graph reachable from <code>_main</code>: two
             local direct callees (<code>_fixture_string</code> is the other), with 13 of the 15
             direct callees of <code>_fixture_check</code> collapsed. The import stub
-            <code>_puts</code> is skipped by <code>nativeDependencies</code>. Every edge drawn is a
-            direct call with an exact address, so every target is prepared; the callback inside
-            <code>_fixture_indirect</code> is an unresolved indirect target and therefore never
-            becomes a unit. This fixture has no recursive SCC, so each component is observed once.
+            <code>_puts</code> is skipped by <code>nativeDependencies</code>. Every edge drawn to a
+            unit is a direct call with an exact address, so every such target is prepared; the
+            callback inside <code>_fixture_indirect</code> is an unresolved indirect target and
+            therefore never becomes a unit. This fixture has no recursive SCC, so each component is
+            observed once.
           </figcaption>
         </figure>
 
@@ -1141,17 +1145,17 @@ export interface NativeSummary {
         <p>
           <code>source_interface</code> is a second refinement used when context assumptions,
           library tails or a callee's own source interface change the observation. It never replaces
-          the checked interface; it is merged and kept beside it, and only its proven
-          <code>argument_list_closure</code> is exposed when the summary is arity-complete.
+          the checked interface; it is kept beside it in <code>SourceEvidence.source_callees</code>,
+          and the source view prefers it for the same call only when the summary is arity-complete.
         </p>
       </section>
 
       <section id="reuse">
         <h2>Two cache tiers and why they are invisible</h2>
         <p>
-          Preparing a callee is the dominant cold cost of a decompilation, and the useful unit is
-          the prepared body, not the final summary: the summary depends on demands and context,
-          while the IR, types, call analysis and dependency list do not. The cache therefore stores
+          Preparing a callee repeats the lifter/SSA/type pipeline, and the useful unit is the
+          prepared body, not the final summary: the summary depends on demands and context, while
+          the IR, types, call analysis and dependency list do not. The cache therefore stores
           <code>PreparedNativeUnit</code>s and re-observes them on demand.
         </p>
 
@@ -1228,12 +1232,12 @@ export interface NativeSummary {
             <text x="825" y="61" text-anchor="middle" class="title">verifyTracedReads</text>
             <text x="825" y="79" text-anchor="middle" class="small">digest · re-reads</text>
 
-            <path class="edge bad dashed" d="M825,96 L825,126" marker-end="url(#arrow)" />
-            <text x="895" y="114" text-anchor="middle" class="edge-label">miss</text>
+            <path class="edge bad dashed" d="M877,96 L877,126" marker-end="url(#arrow)" />
+            <text x="887" y="114" class="edge-label">miss</text>
 
-            <rect class="box" x="710" y="128" width="230" height="56" rx="8" />
-            <text x="825" y="149" text-anchor="middle" class="title">prepare again</text>
-            <text x="825" y="167" text-anchor="middle" class="small">a miss is never served</text>
+            <rect class="box" x="805" y="128" width="145" height="56" rx="8" />
+            <text x="877" y="149" text-anchor="middle" class="title">prepare again</text>
+            <text x="877" y="167" text-anchor="middle" class="small">a miss is never served</text>
 
             <path
               class="edge ok"
@@ -1255,11 +1259,11 @@ export interface NativeSummary {
             <text x="560" y="183" text-anchor="middle" class="title">observe</text>
             <text x="560" y="201" text-anchor="middle" class="small">per demand/context</text>
 
-            <path class="edge accent" d="M640,190 L668,190" marker-end="url(#arrow-accent)" />
+            <path class="edge accent" d="M640,190 L653,190" marker-end="url(#arrow-accent)" />
 
-            <rect class="box ok" x="670" y="162" width="180" height="56" rx="8" />
-            <text x="760" y="183" text-anchor="middle" class="title">NativeSummary</text>
-            <text x="760" y="201" text-anchor="middle" class="small">complete / partial</text>
+            <rect class="box ok" x="655" y="162" width="140" height="56" rx="8" />
+            <text x="725" y="183" text-anchor="middle" class="title">NativeSummary</text>
+            <text x="725" y="201" text-anchor="middle" class="small">complete / partial</text>
 
             <text x="115" y="235" class="small">
               Only complete preparations are stored; the summary itself never is.
@@ -1277,10 +1281,9 @@ export interface NativeSummary {
         <div class="callout caveat">
           <span class="title">Identity includes the revision</span>
           <p>
-            Prepared evidence embeds the revision in its IDs. The scope therefore names the
-            revision, and any annotation or other revision change invalidates every stored row; the
-            next write deletes superseded rows. This is deliberate: a row must never be offered for
-            a state in which preparing would produce a different unit.
+            The scope names the revision, so any annotation or other revision change invalidates
+            every stored row; the next write deletes superseded rows. This is deliberate: a row must
+            never be offered for a state in which preparing would produce a different unit.
           </p>
         </div>
       </section>
@@ -1319,10 +1322,10 @@ warning: unavailable_semantics: callee summaries partial: _fixture_check</code><
           There is no supplied prototype for <code>fixture_check</code>; it is a local function, so
           the caller's interface comes from the callee summary. That summary stays open because
           <code>_fixture_check</code> calls <code>_fixture_indirect</code>, whose body has an
-          unresolved indirect target. Its observed interface therefore has
-          <code>parameter_state: 'ambiguous'</code>, and <code>observeParameters</code>'s
-          <code>closedCallee</code> test rejects an ambiguous callee;
-          <code>_fixture_check</code> gets no <code>argument_list_closure</code>.
+          unresolved indirect target. The observed interface of
+          <code>_fixture_indirect</code> therefore has <code>parameter_state: 'ambiguous'</code>,
+          and <code>observeParameters</code>'s <code>closedCallee</code> test rejects an ambiguous
+          callee; <code>_fixture_check</code> gets no <code>argument_list_closure</code>.
           <code>_main</code> reaches <code>_fixture_check</code>, so the chain propagates and the
           caller prints <code>fixture_check(...)</code>. The same reason appears as
           <code>callee summaries partial: _fixture_check</code>: the diagnostic is attached to the
@@ -1333,14 +1336,24 @@ warning: unavailable_semantics: callee summaries partial: _fixture_check</code><
           its call site are both real:
         </p>
         <pre><code>uint64_t fixture_stack_args(
-  uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4,
-  uint64_t arg5, uint64_t arg6, uint64_t arg7, uint64_t arg8, uint64_t arg9
+  uint64_t arg0,
+  uint64_t arg1,
+  uint64_t arg2,
+  uint64_t arg3,
+  uint64_t arg4,
+  uint64_t arg5,
+  uint64_t arg6,
+  uint64_t arg7,
+  uint64_t arg8,
+  uint64_t arg9
 ) { … }
 
 /* caller, after preparing two outgoing slots */
 *(uint64_t *)(entry_sp - 192) = 9;
 *(uint64_t *)(entry_sp - 184) = 10;
-call_result_2 = fixture_stack_args(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...);</code></pre>
+if (fixture_stack_args(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...) != 0x181) {
+  return 9;
+}</code></pre>
         <p>
           Ten obvious physical arguments, eight in <code>x0</code>–<code>x7</code> and two in the
           outgoing stack slots — yet the list still carries an open marker. The reason is an
@@ -1402,11 +1415,11 @@ call_result_2 = fixture_stack_args(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...);</code></
           </li>
           <li>
             <strong>Type the keywords.</strong> The unique method type encoding for the selector is
-            parsed; its parameter count must be <code>arity + 2</code>. Without an encoding, every
-            keyword is a pointer-sized integer. The resulting <code>AbiSignature</code> is run
-            through <code>abi.classifyCall</code>, and a non-complete layout, a hidden result, or a
-            location that is not exactly one register of the declared width rejects the typed
-            interface.
+            parsed; its parameter count must be <code>arity + 2</code> for the encoding to be used.
+            Without an encoding, or when that count disagrees, every keyword is a pointer-sized
+            integer. The resulting <code>AbiSignature</code> is run through
+            <code>abi.classifyCall</code>, and a non-complete layout, a hidden result, or a location
+            that is not exactly one register of the declared width rejects the typed interface.
           </li>
           <li>
             <strong>Check caller preparation.</strong> If the caller prepares an FP/SIMD or integer
@@ -1420,8 +1433,8 @@ call_result_2 = fixture_stack_args(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...);</code></
             example an <code>NSString</code> format selector) closes only when the format argument
             is an exact string literal and the promoted actuals occupy Darwin's anonymous stack
             slots; otherwise it is marked <code>variadic_stack: true</code>. A constant
-            <code>stringWithFormat:@"%@=%ld"</code> therefore produces a closed two-argument
-            message, while an unknown format leaves the tail open.
+            <code>stringWithFormat:@"%@=%ld"</code> therefore produces a closed tail with exactly
+            the two promoted actuals, while an unknown format leaves the tail open.
           </li>
         </ol>
         <p>
@@ -1528,8 +1541,9 @@ call_result_2 = fixture_stack_args(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...);</code></
           </svg>
           <figcaption>
             <strong>Figure 6.</strong> Selector resolution never guesses: a dispatcher without a
-            proven selref load, an encoding whose parameter count disagrees with the colon count, or
-            an extra prepared argument register all fall back to the physical call.
+            proven selref load or an extra prepared argument register falls back to the physical
+            call, and an encoding whose parameter count disagrees with the colon count leaves its
+            keywords pointer-sized.
           </figcaption>
         </figure>
 
@@ -1701,9 +1715,9 @@ call_result_2 = fixture_stack_args(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...);</code></
               <td>Recursive groups</td>
               <td>
                 A recursive SCC closes only by the coinductive check; any ambiguous member, variadic
-                stack escape, stack parameter or refinement limit leaves the whole group open. There
-                is no fixture with a recursive SCC, so this path is exercised by tests, not by the
-                worked example.
+                stack escape, stack parameter or refinement limit leaves the whole group open. The
+                worked-example fixture has no recursive SCC, so this path is exercised by tests, not
+                by the worked example.
               </td>
               <td><code>dependencyComponents</code>, <code>closeRecursive</code></td>
             </tr>
@@ -1739,10 +1753,11 @@ call_result_2 = fixture_stack_args(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...);</code></
             <tr>
               <td>Objective-C</td>
               <td>
-                Resolution requires a dispatcher import or a <code>__objc_stubs</code> entry plus a
-                unique method encoding; direct <code>objc_msgSend</code> calls with runtime-computed
-                selectors remain physical, and the dispatcher stub bodies are themselves reported as
-                partial callee summaries.
+                Resolution requires a dispatcher import, a runtime message entry or a
+                <code>__objc_stubs</code> entry; a unique method encoding types the keywords but is
+                not required. Direct <code>objc_msgSend</code> calls with runtime-computed selectors
+                remain physical, and the dispatcher stub bodies are themselves reported as partial
+                callee summaries.
               </td>
               <td><code>objc-messages.ts</code>, <code>objc-signature.ts</code></td>
             </tr>
@@ -1797,7 +1812,7 @@ call_result_2 = fixture_stack_args(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...);</code></
             <code>parameterRegisters</code> and <code>possibleAbiReturnStorage</code>, which probe
             the profile with synthetic signatures, and with <code>nativeRegisterPrefix</code>, which
             consumes the resulting register bank; a profile that answers <code>unsupported</code> to
-            those probes will observe fewer parameters even when its real calls are fine.
+            those probes will observe fewer parameters or results even when its real calls are fine.
           </p>
         </div>
         <p>

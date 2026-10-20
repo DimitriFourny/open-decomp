@@ -303,9 +303,11 @@ export interface LoopRegion {
           </dd>
           <dt>Silent block</dt>
           <dd>
-            A block that prints nothing: no retained statements, no inlined result of its own, no
-            notes, no deferred stores, and no source definitions anchored at it. Many layout rules
-            require silence because they move or merge controls.
+            A block that prints nothing: no retained statement except a promoted flag access or a
+            statement whose result is inlined at its reader, and no source definitions anchored at
+            the block, its control or its statements. Rules that need a genuinely empty block also
+            reject notes and deferred stores. Many layout rules require silence because they move or
+            merge controls.
           </dd>
         </dl>
       </section>
@@ -495,8 +497,8 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
             <rect class="box accent" x="520" y="294" width="320" height="100" rx="8" />
             <text x="535" y="313" class="mono">loop header 0x1000005a4</text>
             <text x="535" y="331" class="small">body: block 0x1000005a4</text>
-            <text x="535" y="349" class="small">if (remaining == 1) break</text>
-            <text x="535" y="367" class="small">else continue 0x5a4</text>
+            <text x="535" y="349" class="small">if (remaining != 1) continue 0x5a4</text>
+            <text x="535" y="367" class="small">else break to 0x5b4</text>
 
             <rect class="box ok" x="520" y="406" width="260" height="44" rx="8" />
             <text x="535" y="424" class="mono">block 0x1000005b4</text>
@@ -556,8 +558,8 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
               <td><code>0x1000005b4</code></td>
               <td>Sibling block after the <code>if</code></td>
               <td>
-                Reached by the loop's break transfer; it is the lexical follow of the loop inside
-                the false arm.
+                Reached by the loop's break transfer; it follows the <code>if</code> at the outer
+                level, after the false-arm sequence.
               </td>
             </tr>
             <tr>
@@ -573,8 +575,8 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
         <h2>The renderer and its phases</h2>
         <p>
           <code
-            >new Renderer(input, options, context, language, version, inlineCalls = true, metadata =
-            'full')</code
+            >new Renderer(input, options, context, language, version, rejectedCalls = new Set(),
+            metadata = 'full')</code
           >
           is ordered in four groups.
         </p>
@@ -600,8 +602,9 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
             <strong>Plan the source view.</strong> Only when <code>sourceView</code> is true,
             <code>planSourceControl()</code> runs. It is the ordered pipeline described in the next
             section; its output is a new <code>body: Region</code> plus maps such as
-            <code>variables</code>, <code>loopTests</code>, <code>flagTests</code>,
-            <code>exitFlags</code> and <code>actions</code>.
+            <code>variables</code>, <code>flagTests</code>, <code>exitFlags</code> and
+            <code>loopExits</code>. <code>findLabels</code> later adds <code>loopTests</code> and
+            <code>actions</code>.
           </li>
           <li>
             <strong>Prepare printing.</strong> <code>findLabels</code> decides the lexical action of
@@ -645,7 +648,7 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
 
             <rect class="box accent" x="470" y="50" width="190" height="64" rx="8" />
             <text x="565" y="72" text-anchor="middle" class="title">planSourceControl()</text>
-            <text x="565" y="91" text-anchor="middle" class="small">14 ordered passes</text>
+            <text x="565" y="91" text-anchor="middle" class="small">15 ordered passes</text>
             <text x="565" y="106" text-anchor="middle" class="small mono">source view only</text>
 
             <path class="edge" d="M660,82 L698,82" marker-end="url(#arrow)" />
@@ -694,37 +697,55 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
         <h3>Call inlining and the retry</h3>
         <p>
           A call with exactly one live result that is read once by the next printed statement (or by
-          the return) is printed as an operand of that reader, at the call's original position. This
-          is not a syntax trick: <code>admitInlinedCall</code> also requires that the printed result
-          type is the result variable's type. The call is <em>held</em> when its block is reached;
-          the text is not emitted yet. When the reader is about to print,
-          <code>reader()</code> checks that no code line was printed in between:
+          the return, <code>if</code> or <code>switch</code> test) is printed as an operand of that
+          reader, at the call's original position. This is not a syntax trick:
+          <code>admitInlinedCall</code> also requires that the printed result type is the result
+          variable's type. The call is <em>held</em> when its block is reached; the text is not
+          emitted yet. When the reader is about to print, <code>reader()</code> checks that no code
+          line was printed in between:
         </p>
         <pre><code>private reader(print: () =&gt; void): void {
-  const start = this.writer.offset,
-    held = [...this.pendingCalls.keys()].map((id) =&gt; this.inlinedCalls.get(id)!);
-  if (held.length &amp;&amp; this.writer.codeLines !== this.heldLines) throw new CallInliningRetry();
+  if (this.openReader &amp;&amp; this.writer.watched === null) return print();
+  this.settleReader();
+  const held = [...this.pendingCalls.keys()].map((id) =&gt; this.inlinedCalls.get(id)!);
+  if (!held.length) return print();
+  if (this.writer.codeLines !== this.heldLines)
+    throw new CallInliningRetry([...this.pendingCalls.keys()]);
+  this.openReader = { start: this.writer.offset, held };
+  this.writer.watched = null;
   print();
-  …
+  this.settleReader();
 }</code></pre>
         <p>
-          If the assumption was wrong, the exception unwinds the whole render and
-          <code>renderSource</code> retries with call inlining disabled. The outer fallback handles
-          a different limit: if provenance metadata exceeds its bound,
+          If the assumption was wrong, <code>renderSource</code> adds the failed calls' results to a
+          rejected set and renders again; each retry prints the rejected calls as statements, and
+          after four retries every call is printed as a statement. The outer fallback handles a
+          different limit: if provenance metadata exceeds its bound,
           <code>MetadataLimitError</code> is thrown, the same text is rendered in
           <code>metadata: 'omitted'</code> mode, and the emission records the omission.
         </p>
 
         <pre><code>export function renderSource(
-  input: EmissionInput, options: ConstructorParameters&lt;typeof Renderer&gt;[1],
-  context: OperationContext, language: 'c-like' | 'python-like', version: string,
+  input: EmissionInput,
+  options: ConstructorParameters&lt;typeof Renderer&gt;[1],
+  context: OperationContext,
+  language: 'c-like' | 'python-like',
+  version: string,
 ): EmissionResult {
   const attempt = (metadata: 'full' | 'omitted'): EmissionResult =&gt; {
-    try {
-      return new Renderer(input, options, context, language, version, true, metadata).render();
-    } catch (error) {
-      if (!(error instanceof CallInliningRetry)) throw error;
-      return new Renderer(input, options, context, language, version, false, metadata).render();
+    const rejected = new Set&lt;string&gt;();
+    // Each retry prints the failed calls as statements.
+    for (let retry = 0; ; retry++) {
+      try {
+        return new Renderer(
+          input, options, context, language, version,
+          retry &lt; 4 ? rejected : null,
+          metadata,
+        ).render();
+      } catch (error) {
+        if (!(error instanceof CallInliningRetry) || retry &gt;= 4) throw error;
+        for (const id of error.results) rejected.add(id);
+      }
     }
   };
   try {
@@ -745,9 +766,9 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
             Before <code>render()</code> returns, <code>validateRenderedTransfers</code> re-derives
             every emitted edge from the printed body, and <code>validateEmittedControl</code> checks
             loop/switch scopes, break/continue targets and exit guards. Every structured coverage
-            entry must have been mapped; an unmapped block, control or statement throws
-            <code>invalid_input</code>. A control-validation record with status rejected is itself
-            rejected through <code>rejectTranslation</code>.
+            entry's block must exist in the reconstruction, and its control and every statement must
+            have been mapped; otherwise <code>invalid_input</code> is thrown. A control-validation
+            record with status rejected is itself rejected through <code>rejectTranslation</code>.
           </p>
         </div>
       </section>
@@ -828,6 +849,15 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
             </tr>
             <tr>
               <td>9</td>
+              <td><code>planReturnConstants</code></td>
+              <td>
+                Drops an edge copy that only supplies a return tail's carrier when every printed
+                path reads it through the return's conversions, recording the constant and the
+                forwarded copy.
+              </td>
+            </tr>
+            <tr>
+              <td>10</td>
               <td><code>planFlagTests</code></td>
               <td>
                 Reconstructs <code>&amp;&amp;</code>/<code>||</code> chains lowered through a
@@ -835,7 +865,7 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
               </td>
             </tr>
             <tr>
-              <td>10</td>
+              <td>11</td>
               <td><code>planLoopForms</code></td>
               <td>
                 Chooses <code>for</code>, <code>while</code> or <code>do-while</code> where side
@@ -843,14 +873,14 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
               </td>
             </tr>
             <tr>
-              <td>11</td>
+              <td>12</td>
               <td><code>planSharedArms</code></td>
               <td>
                 Prints a short-circuit test whose operands share one arm as <code>if/else</code>.
               </td>
             </tr>
             <tr>
-              <td>12</td>
+              <td>13</td>
               <td><code>planBreakableBlocks</code></td>
               <td>
                 Wraps a forward-goto range in a <code>do { } while (0)</code> block when it removes
@@ -858,7 +888,7 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
               </td>
             </tr>
             <tr>
-              <td>13</td>
+              <td>14</td>
               <td>loop-target normalisation</td>
               <td>
                 Re-derives break/continue by lexical scope instead of trusting structurer
@@ -866,7 +896,7 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
               </td>
             </tr>
             <tr>
-              <td>14</td>
+              <td>15</td>
               <td><code>planLoopExits</code></td>
               <td>Routes multi-level exits through one boolean per target loop.</td>
             </tr>
@@ -878,7 +908,9 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
             >src/emitters/source-control.ts</a
           >
           (<code>planLayout</code>, <code>planLoopForms</code>, <code>planLoopExits</code>,
-          <code>coalescePhiCopies</code>, <code>VariableLiveness</code>).
+          <code>coalescePhiCopies</code>, <code>VariableLiveness</code>) and the renderer
+          (<code>planSourceControl</code>, <code>planReturnConstants</code>,
+          <code>chooseLocalTypes</code>).
         </p>
 
         <h3>Lexical transfer actions</h3>
@@ -920,12 +952,14 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
             so a loop's sole exit lands immediately after it.
           </li>
           <li>
-            <strong>Exit merging.</strong> <code>joinExits</code> chooses the exit reached by most
-            edges of a loop as the loop's lexical successor, so those edges become breaks. Every
-            other exit must either be a duplicable tail or a terminal/jump block entered by one loop
-            edge; that block is embedded at the edge (moved onto the break path). The pass then
-            re-walks the result and requires every edge from the loop or moved blocks to the shared
-            exit to print as <code>break</code>; otherwise the candidate is rejected.
+            <strong>Exit merging.</strong> <code>joinExits</code> first tries the exit reached by
+            strictly most edges of a loop (when at least two reach it) as the loop's lexical
+            successor, so those edges become breaks; otherwise, when some exit is not a duplicable
+            tail, it tries each exit in turn. Every other exit must either be a duplicable tail or a
+            terminal/jump block entered by one edge from inside the loop; that block is embedded at
+            the edge (moved onto the break path). The pass then re-walks the result and requires
+            every edge from the loop or moved blocks to the shared exit to print as
+            <code>break</code>; otherwise the candidate is rejected.
           </li>
           <li>
             <strong>Tail duplication.</strong> A tail is at most four blocks, each at most four
@@ -937,8 +971,9 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
           </li>
           <li>
             <strong>Terminal placement.</strong> A terminal block whose only CFG edge is a labelled
-            edge moves onto that edge. A terminal block entered by one loop edge and no other
-            predecessor may move right after that loop when every other exit is a duplicable tail.
+            edge moves onto that edge. A terminal block entered only from inside one loop may move
+            right after that loop when it is the only movable exit and every other exit is a
+            duplicable tail.
           </li>
           <li>
             <strong>Forced tails.</strong> If the only code lexically between a goto and its target
@@ -1120,7 +1155,7 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
         </ol>
         <p>
           <code>compatible</code> in the renderer compares storage width and type identity, plus
-          source role names: machine storage type must match, type ids and printed spellings must
+          supplied names: machine storage type must match, type ids and printed spellings must
           match, and any supplied name must agree. Pointer formals can match if the spellings match
           after dropping a top-level <code>const</code>. If the classes merge, the renderer declares
           the representative once and prints every member under it. The result is real: the checked
@@ -1169,10 +1204,11 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
             <text x="449" y="232" text-anchor="middle" class="edge-label">merge</text>
           </svg>
           <figcaption>
-            <strong>Figure 5.</strong> Both columns are actual output. <code>element</code> is a
-            single-use pure load expanded at its reader; <code>accumulator_1</code> is a phi value
-            coalesced with <code>accumulator</code>, so the backedge copy disappears and the update
-            prints as an in-place assignment.
+            <strong>Figure 5.</strong> Both columns summarize the emitted output; the checked column
+            abbreviates the explicit casts and memory helpers. <code>element</code> is a single-use
+            pure load expanded at its reader; <code>accumulator_1</code> is a phi value coalesced
+            with <code>accumulator</code>, so the backedge copy disappears and the update prints as
+            an in-place assignment.
           </figcaption>
         </figure>
 
@@ -1457,9 +1493,10 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
         <p>
           The C scalar-support prelude is computed from the finished text rather than planned in
           advance. <code>cScalarSupport</code> scans code only (comments and literals are stripped),
-          then emits only the <code>#include</code>s, typedefs and helper macros the text actually
-          references, in a fixed order. The real <code>fixture_loop</code> output shows an indirect
-          consequence: the word <code>true</code> in <code>while (true)</code> causes
+          then emits only the <code>#include</code>s, wide-integer defines and helper
+          functions/macros the text actually references, in a fixed order. The real
+          <code>fixture_loop</code> output shows an indirect consequence: the word
+          <code>true</code> in <code>while (true)</code> causes
           <code>#include &lt;stdbool.h&gt;</code>.
         </p>
       </section>
@@ -1551,7 +1588,7 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
           <code>fixture_loop</code>: C prints <code>address = address + 1</code> because
           <code>address</code> is <code>const uint32_t*</code>; Python-like prints
           <code>address = uint64(address + 4)</code>, where the address is a byte-addressed value.
-          Python-like also spells the load as
+          Python-like also spells that update as
           <code>uint32(memory.u32[address] + accumulator)</code>. The analysis is identical; only
           the spelling differs.
         </p>
@@ -1586,8 +1623,8 @@ if (depth + 2 &lt; maxDepth &amp;&amp; cyclic &amp;&amp; entries.size === 1) {
           >), a 64-bit load from a compiler-emitted selector or class-reference slot prints as
           <code>@selector(name)</code> or <code>[Name class]</code> in C-like output; Python-like
           uses the <code>selector(...)</code> / <code>objc_class(...)</code> helpers or the bare
-          class name. A call whose projected arguments exactly match the selector's keyword count
-          prints as a message send:
+          class name. A call whose projected arguments match the selector's keyword count (with a
+          known variadic tail after them) prints as a message send:
         </p>
         <pre><code>/* C-like */
 [receiver doThing:first with:second]
@@ -1664,7 +1701,7 @@ uint32_t fixture_loop(const uint32_t* address, uint32_t count) {
               <td>
                 Signature from the reconstruction projection; <code>sourceIdentifier</code> uses the
                 C spelling of the linkage name; <code>const uint32_t*</code> comes from the proven
-                pointee of the first argument (<code>natural_scalar_pointee</code>), and the source
+                pointer lineage of the first argument (<code>formal_pointer</code>), and the source
                 projection supplies the parameter spellings <code>address</code>/<code>count</code>.
               </td>
             </tr>
@@ -1715,9 +1752,11 @@ uint32_t fixture_loop(const uint32_t* address, uint32_t count) {
             <tr>
               <td><code>if (remaining == 1) { break; }</code></td>
               <td>
-                The loop body's branch. The true arm jumps to the loop's follow 0x5b4, so
-                <code>transferAction</code> classifies it as <code>break</code>; the false arm stays
-                in the loop and prints nothing.
+                The loop body's branch, whose IR test is <code>remaining != 1</code>. The false arm
+                jumps to the loop's follow 0x5b4, so <code>transferAction</code> classifies it as
+                <code>break</code>; the true arm repeats the loop and prints nothing. Because that
+                arm is silent, <code>sourceIf</code> prints the exit positively, inverting the test
+                to <code>remaining == 1</code>.
               </td>
             </tr>
             <tr>
@@ -1747,9 +1786,9 @@ uint32_t fixture_loop(const uint32_t* address, uint32_t count) {
         </table>
         <p>
           The mapping for that last line is a concrete look at the provenance model. In the emitted
-          JSON, one mapping record for the span <code>[401, 423)</code> has text
-          <code>" return accumulator;\n"</code>, semantic subjects including the return/function
-          entities, one instruction ref, one range
+          JSON, one mapping record for the span <code>[401, 423)</code> covers the text
+          <code>return accumulator;\n</code> with its two-space indent, semantic subjects including
+          the return/function entities, one instruction ref, one range
           <code>{ space: "file", value: "0x5b4", size: "0x4" }</code>, and one evidence ref; a
           second contributor record shares the same span with its own semantic refs. The range is a
           file-space offset, not the virtual address <code>0x1000005b4</code>; the image id
@@ -1795,8 +1834,8 @@ uint32_t fixture_loop(const uint32_t* address, uint32_t count) {
 
             <rect class="box accent" x="20" y="36" width="260" height="70" rx="8" />
             <text x="36" y="58" class="title">Emission.text</text>
-            <text x="36" y="78" class="mono">" return accumulator;\n"</text>
-            <text x="36" y="96" class="small">UTF-16 span [401, 423)</text>
+            <text x="36" y="78" class="mono">"return accumulator;\n"</text>
+            <text x="36" y="96" class="small">span [401, 423), two-space indent</text>
 
             <path class="edge accent" d="M280,72 L318,72" marker-end="url(#arrow-accent)" />
 
@@ -1941,11 +1980,10 @@ uint32_t fixture_loop(const uint32_t* address, uint32_t count) {
           <p>
             If provenance exceeds the byte budget, <code>Writer.metadata</code> throws
             <code>MetadataLimitError</code>. <code>renderSource</code> then re-renders the same text
-            with metadata omitted and records <code>omitted</code> entries in the order
-            <code>EMISSION_METADATA_SHED_ORDER</code>: <code>inferences</code>, then
-            <code>mappings</code>, then <code>requirements</code>. The text is complete and
-            identical; <code>provenanceCoverage</code> reports the layer as partial. Text overflow,
-            by contrast, is a hard <code>resource_limit</code> failure.
+            with metadata omitted and records <code>omitted</code> entries for
+            <code>mappings</code>, <code>inferences</code> and <code>requirements</code>. The text
+            is complete and identical; <code>provenanceCoverage</code> reports the layer as partial.
+            Text overflow, by contrast, is a hard <code>resource_limit</code> failure.
           </p>
         </div>
 
@@ -1974,8 +2012,9 @@ uint32_t fixture_loop(const uint32_t* address, uint32_t count) {
           Later passes reduce the number of gotos without changing the structurer: bounded return
           tail duplication, terminal-block placement, loop-exit merging, goto-path tail duplication,
           <code>do { } while (0)</code> wraps for forward gotos, and boolean exit flags for
-          multi-level breaks. Each is optional work and each is kept only when it does not increase
-          the printed goto count or lose a <code>continue</code>/outer break. The roadmap in
+          multi-level breaks. Each rewrite is gated by a presentation record and re-checked by the
+          control validators; the optional searches (goto-path tails, breakable blocks, shared arms
+          and in-place coalescing) run under a bounded share of the remaining work. The roadmap in
           <a href="../../TODO.md">TODO.md</a> (R2, “Region-collapse structuring”) plans to replace
           the SCC/unique-entry structurer with an iterative collapse over the whole CFG: sequence,
           if-then, if-then-else, short-circuit <code>&amp;&amp;</code>/<code>||</code>,
@@ -1997,19 +2036,21 @@ uint32_t fixture_loop(const uint32_t* address, uint32_t count) {
           Switches are only those already established in the IR. The structurer does not build a
           switch from an if-chain, and guard folding requires the
           <code>jump_table.exact_guard_instruction</code> proof produced during discovery. The
-          layout pass groups copy-free case arms that share a body and omits a default that merely
-          reaches the same fallback, but it will not invent case ranges or a default target.
+          layout pass groups copy-free case arms that share a body and omits an empty default, but
+          it will not invent case ranges or a default target.
         </p>
 
         <h3>What the renderer refuses to simplify</h3>
         <p>
           Every source-view rewrite is gated by
           <code>LocalValidationSession.presentation</code>. If the record bound is exhausted, the
-          call returns false and the caller keeps the explicit form; the same applies to the
-          optional-work searches, which keep the rewrites found so far when they exhaust their
-          share. The renderer never edits emitted text with regexes and never special-cases
-          fixtures: the only repair is the call-inlining retry, which re-renders from scratch
-          without inlining.
+          call returns false and the caller keeps the explicit form. Optional-work searches also
+          stop at their share: <code>planBreakableBlocks</code> keeps the wraps found so far, while
+          the forced-tail, shared-arm and value-coalescing searches discard their partial result.
+          The renderer never edits emitted text with regexes and never special-cases fixtures. Its
+          repairs are retries: a <code>CallInliningRetry</code> re-renders with the failed calls
+          printed as statements (up to four attempts, then every call), and a
+          <code>MetadataLimitError</code> re-renders the same text with metadata omitted.
         </p>
         <p>
           Remaining readability costs are known and measurable: open arities (<code>...</code>),

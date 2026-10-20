@@ -223,7 +223,7 @@
         <p>
           A decoder is an architectural fact producer. It reports what the bytes mean for a chosen
           feature set and where control goes; it does not build IR, infer types, or name variables.
-          The whole contract is six declarations:
+          The whole contract is three declarations:
         </p>
         <pre><code>export interface DecodeRequest {
   readonly image: LoadedImage;
@@ -255,7 +255,7 @@ export interface Decoder extends ComponentIdentity {
   readonly address: Address;
   readonly bytes: AddressRange;
   readonly size: number;
-  readonly validity: 'valid' | 'invalid' | 'undefined' | 'reserved' | 'feature_disabled';
+  readonly validity: z.infer&lt;typeof instructionSchema&gt;['validity'];
   readonly payload: Arm64Payload | X86Payload | null;
   readonly flow: DecodedFlow;
   readonly diagnostics: readonly Diagnostic[];
@@ -268,12 +268,12 @@ export interface DecodeGap {
 }</code></pre>
         <p>
           Three invariants are enforced by the Zod schema itself, not by convention: a
-          <code>valid</code> instruction must carry a structured payload; an ARM64 instruction is
-          exactly four bytes; and the <code>bytes</code> reference must have the same size as
-          <code>size</code>. The payload is a discriminated union on <code>architecture</code>, so a
-          consumer cannot accidentally read ARM fields from an x86 instruction. The
-          <code>validity</code> enum reserves <code>reserved</code>, which the current two adapters
-          do not emit (upstream folds those words into <code>undefined</code>).
+          <code>valid</code> instruction must carry a structured payload; an instruction with an
+          ARM64 payload is exactly four bytes; and the <code>bytes</code> reference must have the
+          same size as <code>size</code>. The payload is a discriminated union on
+          <code>architecture</code>, so a consumer cannot accidentally read ARM fields from an x86
+          instruction. The <code>validity</code> enum reserves <code>reserved</code>, which the
+          current two adapters do not emit (upstream folds those words into <code>undefined</code>).
         </p>
         <p>
           <code>bytes</code> is the byte reference used for display and provenance. It is normally
@@ -289,10 +289,10 @@ export interface DecodeGap {
 
         <h3><code>DecodedFlow</code></h3>
         <p>
-          Flow is a small sum type with two cross-field rules: only a conditional transfer may have
-          a fallthrough (so <code>conditional === (fallthrough !== null)</code>), and an indirect
-          call must have a <code>null</code> target while a direct call must have a decoded target.
-          The kinds are:
+          Flow is a small sum type with two cross-field rules: for <code>branch</code>,
+          <code>indirect_branch</code> and <code>trap</code> flows,
+          <code>conditional === (fallthrough !== null)</code>; and an indirect call must have a
+          <code>null</code> target while a direct call must have a decoded target. The kinds are:
         </p>
         <table>
           <thead>
@@ -344,10 +344,11 @@ export interface DecodeGap {
           </tbody>
         </table>
         <p>
-          A trap is a fact about the instruction, not a catch-all. Invalid encodings, feature-gated
-          instructions and exception-generating system calls become <code>unknown</code> with an
-          explanation; this prevents a decoder bug or a missing CPU feature from masquerading as
-          proven unreachable code.
+          A trap is a fact about the instruction, not a catch-all. On ARM64, invalid encodings,
+          feature-gated instructions and exception-generating system calls become
+          <code>unknown</code> with an explanation, and x86-64 invalid encodings do the same; this
+          prevents a decoder bug or a missing CPU feature from masquerading as proven unreachable
+          code.
         </p>
 
         <h3>Register descriptors</h3>
@@ -375,9 +376,9 @@ export interface DecodeGap {
           Register <em>access</em> metadata (<code>read</code>, <code>write</code>,
           <code>read_write</code>, <code>conditional_read</code>, <code>conditional_write</code>,
           <code>read_conditional_write</code>, <code>none</code>, <code>unknown</code>) is
-          dependency information used by discovery and diagnostics. Lifters deliberately do not use
-          it to decide semantics: an instruction's architectural behaviour is written down
-          explicitly in the lifter.
+          dependency information used by discovery, target analysis and presentation. Lifters
+          deliberately do not use it to decide semantics: an instruction's architectural behaviour
+          is written down explicitly in the lifter.
         </p>
 
         <h3>Payloads</h3>
@@ -530,9 +531,8 @@ export interface DecodeGap {
         <div class="callout invariant">
           <span class="title">Invariant</span>
           <p>
-            <code>valid</code> implies a non-null architecture payload, and ARM64 implies
-            <code>size === 4</code>. The schema rejects violations before a lifter or discovery pass
-            can observe them.
+            <code>valid</code> implies a non-null architecture payload, and an ARM64 payload implies
+            <code>size === 4</code>. The schema encodes both rules.
           </p>
         </div>
         <div class="callout caveat">
@@ -564,9 +564,9 @@ export interface DecodeGap {
         <ol class="steps">
           <li>
             <strong>Normalize regions.</strong> Requests in file space are mapped through
-            <code>image.mappings</code> into VA ranges; holes and merged ranges become
-            <code>unmapped</code> gaps. RVA requests add <code>image_base</code>. Decoding regions
-            must belong to the image.
+            <code>image.mappings</code> into VA ranges; holes become <code>unmapped</code> gaps and
+            adjacent or overlapping ranges are merged. RVA requests add <code>image_base</code>.
+            Decoding regions must belong to the image.
           </li>
           <li>
             <strong>Prepare data boundaries once.</strong> Data hints are normalized once per
@@ -713,10 +713,10 @@ export interface DecodeGap {
         <div class="callout refusal">
           <span class="title">Refusal</span>
           <p>
-            Both decoders throw <code>TypeError</code>/<code>RangeError</code> when asked to decode
-            a mismatched architecture or mode, when a region belongs to another image, or after
-            <code>dispose()</code>. Budget exhaustion does not throw: it truncates at the
-            instruction limit and reports a <code>budget</code> gap.
+            Both decoders throw <code>TypeError</code>/<code>RangeError</code> for a mismatched
+            architecture or mode and for a region belonging to another image, and a plain
+            <code>Error</code> after <code>dispose()</code>. Budget exhaustion does not throw: it
+            truncates at the instruction limit and reports a <code>budget</code> gap.
           </p>
         </div>
       </section>
@@ -972,19 +972,21 @@ export type FunctionIR = RegisterIR | SSAForm;</code></pre>
           explicit, and the graph is stateful. <code>SSAForm</code> has no
           <code>read_register</code>/<code>write_register</code> at all; architectural state is
           represented by sparse <code>register_states</code> rows. At dominator-tree roots an entry
-          row binds every tracked cell to a distinct block parameter; elsewhere it lists only merged
-          or rebound cells. Exit rows bind every cell at function exits and only cells rebound in
-          other blocks. Unlisted cells inherit the immediate dominator's exit through
-          <code>registerStateAt</code>, so full per-block state is derived, never materialized. The
-          lifter is forbidden from doing any of this: construction is a separate pass
-          (<code>constructSSA</code>), linked on the next page.
+          row binds every tracked cell to a distinct block parameter; elsewhere it lists only the
+          cells whose definitions meet at that block. Exit rows bind every cell at function exits
+          and only cells rebound in other blocks. Unlisted cells inherit the immediate dominator's
+          exit through <code>registerStateAt</code>, so full per-block state is derived, never
+          materialized. The lifter is forbidden from doing any of this: construction is a separate
+          pass (<code>constructSSA</code>), linked on the next page.
         </p>
         <p>
-          <code>FunctionBody.returns</code> is the list of source-level return types, not
-          architectural return registers. Lifters pass an empty list: call/return ABI interpretation
-          belongs to later stages, and both worked examples below have
-          <code>ir.returns = []</code> while still reading <code>x0</code>/<code>d0</code> (ARM64)
-          or the return slot (x86-64) for their own reasons.
+          <code>FunctionBody.returns</code> is the list of IR value types expected by
+          <code>return</code> terminators, not architectural return registers. Lifters pass an empty
+          list: call/return ABI interpretation belongs to later stages, and both worked examples
+          below have <code>ir.returns = []</code> while still reading <code>x0</code>/<code
+            >d0</code
+          >
+          (ARM64) or the return slot (x86-64) for their own reasons.
         </p>
         <p class="sources">
           <a class="src" href="../../src/ir/model.ts">src/ir/model.ts</a>
@@ -1103,9 +1105,9 @@ export type FunctionIR = RegisterIR | SSAForm;</code></pre>
           <figcaption>
             <strong>Figure 3.</strong> The graph is a tree of ownership with explicit
             cross-references: blocks own instruction and terminator lists; terminators own edges;
-            instructions and terminators own provenance. Values and effects are referenced by ID,
-            never embedded, which is what makes SSA rewriting and dominance checking possible
-            without cloning code.
+            instructions and terminators own provenance. Values and effects are small handles with
+            stable IDs, not nested expression trees, which is what makes SSA rewriting and dominance
+            checking possible without cloning code.
           </figcaption>
         </figure>
 
@@ -1157,15 +1159,15 @@ assign(type: DataType, expression: Expression): Value {
           caller-owned birth key. <code>block(birth, parameters)</code> hashes
           <code>['ir.block', [function_id, birth]]</code>; a duplicate birth key throws. The lifters
           use <code>['discovered', block.id]</code> for discovered blocks, so an IR block is
-          traceable to its CFG block; guard blocks use instruction-derived births (<code
+          traceable to its CFG block; guard continue blocks use instruction-derived births (<code
             >[instruction.id, reason, 'continue']</code
           >).
         </p>
         <p>
           <code>source(provenance)</code> changes the origin attached to subsequent nodes. Lifters
           call it once per decoded instruction. <code>finish()</code> on the builder merges the
-          function provenance with every block's, freezes the block list, creates empty SSA state
-          rows only if the builder was created with form <code>'ssa'</code>, and calls
+          function provenance with every block's, materializes the block list, creates empty SSA
+          state rows only if the builder was created with form <code>'ssa'</code>, and calls
           <code>assertValidIR</code>. A block that was never terminated throws
           <code>TypeError('Block has no terminator')</code>.
         </p>
@@ -1236,9 +1238,10 @@ assign(type: DataType, expression: Expression): Value {
           </li>
           <li>
             <strong>Terminate.</strong> If the block was not terminated by an instruction, use its
-            single non-call CFG successor as a jump, or a proven noreturn call as a trap, or an
-            <code>unknown</code> boundary. Missing entries and unresolved continuations get
-            synthetic blocks rather than invented edges.
+            single non-call CFG successor (x86-64: its single fallthrough successor) as a jump, or a
+            proven noreturn call as a trap, or an <code>unknown</code> boundary. A missing entry
+            gets a synthetic block and an unresolved continuation an <code>unknown</code>
+            terminator, rather than invented edges.
           </li>
         </ol>
 
@@ -1311,8 +1314,9 @@ assign(type: DataType, expression: Expression): Value {
                 <code>dN</code> (64) are <code>zero_extend_root</code> slices
               </td>
               <td>
-                <code>x86_64:xmmN</code> (128-bit root); <code>zmmN</code> (512) in the unknown
-                clobber set; legacy scalar writes use a preserving low slice
+                <code>x86_64:zmmN</code> (512-bit root); <code>xmmN</code>/<code>ymmN</code> are
+                slices; <code>zmmN</code> is in the unknown clobber set; legacy scalar writes use a
+                preserving low slice
               </td>
             </tr>
             <tr>
@@ -1425,7 +1429,7 @@ assign(type: DataType, expression: Expression): Value {
             <rect class="box" x="490" y="420" width="420" height="60" rx="8" />
             <text x="700" y="444" text-anchor="middle" class="title">xmm0 / zmm0</text>
             <text x="700" y="462" text-anchor="middle" class="small mono">
-              128-bit root · legacy scalar writes keep upper bits
+              512-bit zmm root · legacy scalar writes keep upper bits
             </text>
           </svg>
           <figcaption>
@@ -1527,12 +1531,12 @@ assign(type: DataType, expression: Expression): Value {
           drivers turn that into an <code>unknown_effect</code> carrying
           <code>unknownClobbers</code> — for ARM64 all general, vector and control registers plus
           NZCV/FPSR and memory; for x86 all GPRs, 32 zmm roots, MXCSR, six flags and memory — plus
-          an <code>unavailable_semantics</code>
-          diagnostic at the instruction address and a coverage reason. Coverage becomes
-          <code>partial</code>; the graph is still valid. ARM then terminates the block with
-          <code>unknown</code> only when the instruction's decoded flow is not a fallthrough or
-          call; x86 terminates immediately. Nothing is silently dropped and nothing is turned into
-          an invented trap: an <code>unknown_effect</code> is a real node, not a no-op.
+          an <code>unavailable_semantics</code> diagnostic (with the instruction address on ARM64)
+          and a coverage reason. Coverage becomes <code>partial</code>; the graph is still valid.
+          ARM then terminates the block with <code>unknown</code> only when the instruction's
+          decoded flow is not a fallthrough or call; x86 terminates immediately. Nothing is silently
+          dropped and nothing is turned into an invented trap: an <code>unknown_effect</code> is a
+          real node, not a no-op.
         </p>
 
         <h3>Provenance and jump tables</h3>
@@ -1549,8 +1553,8 @@ assign(type: DataType, expression: Expression): Value {
           proven targets, the guard's out-of-range target as <code>otherwise</code>, and a
           <code>jump_table</code> origin. It requires the selector and branch to be in the same
           block and every target to be a discovered block; otherwise the branch remains
-          <code>indirect</code>. The <code>otherwise</code> edge is kept even when the guard is
-          exact, because the IR should still be well-formed if the proof is later invalidated.
+          <code>indirect</code>. The <code>otherwise</code> edge is present even when the guard is
+          exact.
         </p>
 
         <div class="callout invariant">
@@ -1558,8 +1562,9 @@ assign(type: DataType, expression: Expression): Value {
           <p>
             A lifter never invents an architectural trap from missing semantics, and never drops an
             instruction. Unsupported means <code>unknown_effect</code> + coverage reason; malformed
-            graph input means <code>unknown</code>/synthetic boundary; a proven trap is emitted only
-            for an instruction whose decoded flow is a trap.
+            graph input means <code>unknown</code>/synthetic boundary; a trap terminator is emitted
+            only for an instruction whose decoded flow is a trap, or for a call that discovery
+            proved noreturn.
           </p>
         </div>
       </section>
@@ -1685,21 +1690,21 @@ BLOCK entity_aef @0x100000588..0x100000594 params=[]
             <tr>
               <td class="num"><code>0x401880</code></td>
               <td><code>file:0x880+2</code></td>
-              <td><code>mov eax, esi</code></td>
+              <td><code>mov eax,esi</code></td>
               <td><code>Mov_rm32_r32</code>, 32-bit</td>
               <td><code>fallthrough</code> → <code>0x401882</code></td>
             </tr>
             <tr>
               <td class="num"><code>0x401882</code></td>
               <td><code>file:0x882+2</code></td>
-              <td><code>cmp edi, esi</code></td>
+              <td><code>cmp edi,esi</code></td>
               <td><code>Cmp_rm32_r32</code>, flags read 0, written <code>0x8d5</code></td>
               <td><code>fallthrough</code> → <code>0x401884</code></td>
             </tr>
             <tr>
               <td class="num"><code>0x401884</code></td>
               <td><code>file:0x884+3</code></td>
-              <td><code>cmovg eax, edi</code></td>
+              <td><code>cmovg eax,edi</code></td>
               <td><code>Cmovg_r32_rm32</code>, flags read <code>0x8c0</code></td>
               <td><code>fallthrough</code> → <code>0x401887</code></td>
             </tr>
@@ -1812,19 +1817,19 @@ BLOCK entity_330 @0x401880..0x401888 params=[]
             <text x="20" y="300" class="lane">x86-64 · ELF fixture_maximum</text>
             <rect class="box muted" x="20" y="320" width="200" height="100" rx="8" />
             <text x="120" y="342" text-anchor="middle" class="title">0x401880</text>
-            <text x="120" y="361" text-anchor="middle" class="mono">mov eax, esi</text>
+            <text x="120" y="361" text-anchor="middle" class="mono">mov eax,esi</text>
             <text x="120" y="380" text-anchor="middle" class="small">2 nodes</text>
             <text x="120" y="398" text-anchor="middle" class="small mono">read → write</text>
             <rect class="box muted" x="250" y="320" width="200" height="100" rx="8" />
             <text x="350" y="342" text-anchor="middle" class="title">0x401882</text>
-            <text x="350" y="361" text-anchor="middle" class="mono">cmp edi, esi</text>
+            <text x="350" y="361" text-anchor="middle" class="mono">cmp edi,esi</text>
             <text x="350" y="380" text-anchor="middle" class="small">22 nodes</text>
             <text x="350" y="398" text-anchor="middle" class="small mono">
               14 assigns · 6 flags
             </text>
             <rect class="box muted" x="480" y="320" width="200" height="100" rx="8" />
             <text x="580" y="342" text-anchor="middle" class="title">0x401884</text>
-            <text x="580" y="361" text-anchor="middle" class="mono">cmovg eax, edi</text>
+            <text x="580" y="361" text-anchor="middle" class="mono">cmovg eax,edi</text>
             <text x="580" y="380" text-anchor="middle" class="small">10 nodes</text>
             <text x="580" y="398" text-anchor="middle" class="small mono">5 reads · select</text>
             <rect class="box muted" x="710" y="320" width="200" height="100" rx="8" />
@@ -2098,20 +2103,20 @@ BLOCK entity_330 @0x401880..0x401888 params=[]
             </tr>
             <tr>
               <td>
-                SSA bindings use <code>preserve_other_bits</code>, are not zero-register writes,
-                bind equal-width integer values, and never overlap within a root.
+                SSA bindings use <code>preserve_other_bits</code>, are not zero-register writes, and
+                never overlap within a root.
               </td>
             </tr>
             <tr>
               <td>
-                Root entry rows and function-exit rows cover exactly the tracked cell layout; other
-                rows list only tracked cells.
+                Root entry rows and exit rows of blocks with no successors cover exactly the tracked
+                cell layout; other rows list only tracked cells.
               </td>
             </tr>
             <tr>
               <td>
-                At a root, entry bindings are distinct block parameters; elsewhere they are only
-                merged/rebound cells.
+                At a root, entry bindings are distinct block parameters; elsewhere entry rows are
+                sparse lists of distinct tracked cells.
               </td>
             </tr>
             <tr>
@@ -2130,7 +2135,9 @@ BLOCK entity_330 @0x401880..0x401888 params=[]
             </tr>
             <tr>
               <td rowspan="9"><code>type</code></td>
-              <td>Every definition has a valid <code>IRType</code>.</td>
+              <td>
+                Every definition and every declared return type has a valid <code>IRType</code>.
+              </td>
             </tr>
             <tr>
               <td>Every reference has the same type as its definition.</td>
@@ -2142,7 +2149,10 @@ BLOCK entity_330 @0x401880..0x401888 params=[]
               </td>
             </tr>
             <tr>
-              <td>Register access width equals the read/written value width.</td>
+              <td>
+                Register access width equals the read/written value width; SSA bindings bind
+                equal-width integer values.
+              </td>
             </tr>
             <tr>
               <td>
@@ -2160,7 +2170,7 @@ BLOCK entity_330 @0x401880..0x401888 params=[]
               </td>
             </tr>
             <tr>
-              <td>Switch selectors are integers; switch cases fit the selector width.</td>
+              <td>Switch selectors are integers.</td>
             </tr>
             <tr>
               <td>Return types match <code>FunctionBody.returns</code>.</td>
@@ -2348,8 +2358,8 @@ BLOCK entity_330 @0x401880..0x401888 params=[]
         <p>
           <code>evaluateExpression</code> is the shared constant folder. The values analysis uses it
           to collapse expressions when all inputs are constant; stack recovery uses it to evaluate
-          address arithmetic and stack slots; reconstruction uses it for constant folding (including
-          the flag-to-compare simplification that keeps <code>undefined</code> results explicit);
+          address arithmetic and stack slots; reconstruction uses it for constant folding and
+          separately rewrites flag comparisons, keeping <code>undefined</code> results explicit;
           source emission uses it for flag reconstruction, and variadic source inference uses it for
           argument observations.
         </p>
@@ -2378,9 +2388,9 @@ BLOCK entity_330 @0x401880..0x401888 params=[]
             it will not execute an unverified graph.
           </li>
           <li>
-            <strong>Initialize roots.</strong> Every register root mentioned by the IR must be
-            supplied (or is zero-initialized by the test helper). A supplied root that the IR never
-            uses is a <code>TypeError</code>, which catches typos. Each root holds
+            <strong>Initialize roots.</strong> Unsupplied register roots read as unknown (the test
+            helpers zero-initialize them). A supplied root that the IR never uses is a
+            <code>TypeError</code>, which catches typos. Each root holds
             <code>{bits, known, undefined, width}</code>, so partial knowledge and undefined slices
             are distinct from uninitialized ones.
           </li>
@@ -2396,9 +2406,9 @@ BLOCK entity_330 @0x401880..0x401888 params=[]
             clobbers; unknown effects stop.
           </li>
           <li>
-            <strong>Apply SSA state rows.</strong> <code>register_inputs</code> are written before a
-            boundary; <code>register_outputs</code> are read after it; exit rows write rebound cells
-            before the terminator.
+            <strong>Apply SSA state rows.</strong> <code>register_inputs</code> are written before
+            any instruction that carries them; <code>register_outputs</code> are read after a
+            boundary; exit rows write rebound cells before the terminator.
           </li>
           <li>
             <strong>Choose an edge.</strong> A branch observes the condition; a switch observes the
@@ -2440,8 +2450,7 @@ BLOCK entity_330 @0x401880..0x401888 params=[]
           Every layer charges the same cumulative work counter and checks cancellation and the
           deadline. On top of that, the IR has its own node and block capacity, because a small
           instruction can expand into dozens of nodes: the real <code>cmp</code> above expands to 22
-          register instructions before its flag writes. Defaults come from
-          <code>DEFAULT_BUDGET</code>:
+          IR nodes, six of them flag writes. Defaults come from <code>DEFAULT_BUDGET</code>:
         </p>
         <table>
           <thead>
@@ -2494,9 +2503,10 @@ BLOCK entity_330 @0x401880..0x401888 params=[]
   #nodes = 0;
   #blocks = 0;
   constructor(readonly limits: IRConstructionLimits = {}) {
-    for (const limit of [limits.max_ir_nodes, limits.max_blocks])
+    for (const limit of [limits.max_ir_nodes, limits.max_blocks]) {
       if (limit !== undefined &amp;&amp; (!Number.isSafeInteger(limit) || limit &lt; 0))
         throw new RangeError('IR construction limits must be nonnegative safe integers');
+    }
   }
   block(parameters: number): void {
     this.limits.checkpoint?.(0);

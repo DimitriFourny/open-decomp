@@ -117,10 +117,9 @@
           lifter” (<a class="src" href="../../src/ir/model.ts">src/ir/model.ts</a>,
           <code>SSAConstruction</code>). The service layer runs the same chain for a normal
           decompilation: <code>lifter.lift</code>, <code>abiObservableRegisterMasks</code>,
-          <code>constructSSA</code>, <code>simplifySSA</code>, each gated by
-          <code>requirePass</code> and measured by <code>boundIR</code> (<a
-            class="src"
-            href="../../src/service/analysis/index.ts"
+          <code>constructSSA</code> and <code>simplifySSA</code>. The two passes are gated by
+          <code>requirePass</code>, and <code>boundIR</code> runs after lifting, construction and
+          simplification (<a class="src" href="../../src/service/analysis/index.ts"
             >src/service/analysis/index.ts</a
           >, <code>passOptions</code>). Stack recovery is not called there directly; it is the first
           thing <code>analyzeCalls</code> does, and the remaining call-analysis work is charged
@@ -208,7 +207,7 @@
           <code>eax</code>/<code>rax</code> and with flags. <code>constructSSA</code> therefore
           partitions each root into disjoint “cells” at every access boundary and at
           ABI-observability boundaries, then versions the cells independently. The cell key is the
-          triple used everywhere in the implementation:
+          triple used throughout construction:
         </p>
         <pre><code>type Cell = RegisterDescriptor;
 const key = (cell: Cell): string =&gt; `${cell.root}:${cell.offset_bits}:${cell.width_bits}`;</code></pre>
@@ -218,10 +217,10 @@ const key = (cell: Cell): string =&gt; `${cell.root}:${cell.offset_bits}:${cell.
         </p>
         <p>
           The cut set for a root starts as <code>{0, root_width_bits}</code>. Then
-          <code>build</code> adds the low and high edge of every descriptor the body actually reads
-          or writes, a cut every 2048 bits for wide architectural roots, and — for roots the body
-          never touches directly but the ABI can observe — the run boundaries of the ABI mask (see
-          the next section). Adjacent cuts become frozen cells:
+          <code>build</code> adds the low and high edge of every descriptor the body reads or writes
+          or a call clobbers, a cut every 2048 bits for wide architectural roots, and — for roots
+          the body never touches directly but the ABI can observe — the run boundaries of the ABI
+          mask (see the next section). Adjacent cuts become frozen cells:
         </p>
         <pre><code>const cell: Cell = Object.freeze({
   ...descriptor,
@@ -256,17 +255,17 @@ const key = (cell: Cell): string =&gt; `${cell.root}:${cell.offset_bits}:${cell.
         <div class="callout invariant">
           <span class="title">Invariant</span>
           <p>
-            Cells of one root never overlap. For a root the body actually accesses they cover the
-            whole root; for a root known only from clobbers they cover the observable mask runs.
-            Every lowered
+            Cells of one root never overlap. For a non-zero root the body actually accesses they
+            cover the whole root; for a root known only from clobbers they cover the observable mask
+            runs. Every lowered
             <code>read_register</code> becomes an <code>assign</code> whose expression is a
-            <code>bitcast</code> of the current cell value (or a <code>concat</code> of them, or the
-            constant zero for the <code>zero</code> role); every
-            <code>write_register</code> disappears as an instruction and only changes the rename
-            state. <code>verifyIR</code> is run by the service after each pass, and the analysis
-            tests assert that no <code>read_register</code>/<code>write_register</code> survives (<a
-              class="src"
-              href="../../test/analysis/ssa/ssa.test.ts"
+            <code>bitcast</code> of the current cell value (or of a <code>concat</code> of them, or
+            of a fresh constant-zero assignment for the <code>zero</code> role); every
+            <code>write_register</code> disappears as an instruction, with non-<code>discard</code>
+            writes changing the rename state and <code>discard</code> writes contributing only
+            provenance. <code>boundIR</code> runs <code>assertValidIR</code> after each pass, and
+            the analysis tests assert that no <code>read_register</code>/<code>write_register</code>
+            survives (<a class="src" href="../../test/analysis/ssa/ssa.test.ts"
               >test/analysis/ssa/ssa.test.ts</a
             >).
           </p>
@@ -349,12 +348,12 @@ const key = (cell: Cell): string =&gt; `${cell.root}:${cell.offset_bits}:${cell.
           classify machine-boundary inputs that no source signature can describe.
         </p>
         <p>
-          The masks are properties of the ABI, not of the function. In the Darwin ARM64 profile
-          every observable slice happens to be full width, so <code>observableCuts</code> adds
-          nothing there; the 32/32 split of <code>x0</code> in Figure 2 comes from the function's
-          own <code>w0</code>
-          access. The Windows x64 profile is more interesting, and these values are real output for
-          <code>WindowsX64Abi</code>:
+          The masks are properties of the ABI, not of the function. In the Darwin ARM64 profile the
+          observable integer slices are full width and the preserved vector slices are the low 64
+          bits of 128-bit roots, so <code>observableCuts</code> adds only a cut at 64 for
+          <code>v8</code>–<code>v15</code>; the 32/32 split of <code>x0</code> in Figure 2 comes
+          from the function's own <code>w0</code> access. The Windows x64 profile is more
+          interesting, and these values are real output for <code>WindowsX64Abi</code>:
         </p>
         <table>
           <thead>
@@ -475,8 +474,8 @@ const key = (cell: Cell): string =&gt; `${cell.root}:${cell.offset_bits}:${cell.
             effects are rewritten as described below. At the terminator, each successor edge gets
             the target block's parameter cells appended in cell-slot order, using the values in
             scope at the end of the block. All predecessor edges pass their merged cells
-            simultaneously: the argument vector is a snapshot, so a backedge carries the previous
-            iteration's values.
+            simultaneously: the argument vector is a snapshot, so a backedge carries the values
+            computed at the end of the current iteration, which the header sees on its next visit.
           </li>
         </ol>
         <p class="sources">
@@ -548,7 +547,7 @@ const key = (cell: Cell): string =&gt; `${cell.root}:${cell.offset_bits}:${cell.
             </text>
 
             <path class="edge" d="M780,192 L816,192" marker-end="url(#arrow)" />
-            <text x="798" y="184" text-anchor="middle" class="edge-label">i == 1</text>
+            <text x="795" y="184" text-anchor="middle" class="edge-label">x9==1</text>
 
             <rect class="box muted" x="818" y="150" width="112" height="84" rx="8" />
             <text x="874" y="174" text-anchor="middle" class="title">b3</text>
@@ -574,7 +573,7 @@ const key = (cell: Cell): string =&gt; `${cell.root}:${cell.offset_bits}:${cell.
               6 append every target parameter to each edge, simultaneously
             </text>
             <text x="20" y="364" class="small">
-              Real addresses from the Mach-O symbol table; parameter counts from constructSSA
+              Real addresses from the decoded Mach-O fixture; parameter counts from constructSSA
               output.
             </text>
           </svg>
@@ -619,11 +618,12 @@ const key = (cell: Cell): string =&gt; `${cell.root}:${cell.offset_bits}:${cell.
           differs from the entry value, except at a function exit, where every cell is listed
           because the caller can observe the machine state. A consumer that needs the value of any
           cell at any block calls
-          <code>registerStateAt</code>, which walks the block's entry row, then the exit rows along
-          the dominator chain, and returns <code>null</code> if that chain never binds the exact
-          cell (<a class="src" href="../../src/ir/dominance.ts">src/ir/dominance.ts</a>,
-          <code>registerStateAt</code>). This is also why the simplifier treats entry and exit rows
-          as liveness roots: dropping a value just because no expression uses it would erase
+          <code>registerStateAt</code>, which checks the requested boundary's row at the block, then
+          alternates exit and entry rows up the dominator chain, and returns <code>null</code> if
+          that chain never binds the exact cell (<a class="src" href="../../src/ir/dominance.ts"
+            >src/ir/dominance.ts</a
+          >, <code>registerStateAt</code>). This is also why the simplifier treats entry and exit
+          rows as liveness roots: dropping a value just because no expression uses it would erase
           observable architectural state.
         </p>
         <p>
@@ -656,7 +656,7 @@ const key = (cell: Cell): string =&gt; `${cell.root}:${cell.offset_bits}:${cell.
         <h2>Budgets and partial results</h2>
         <p>
           Three independent limits apply. <code>AnalysisBudget</code> counts abstract work with a
-          default of <code>1_000_000</code> units (<code>options.max_work</code>); every loop over
+          default of <code>1_000_000</code> units (<code>options.max_work</code>); traversal of
           blocks, instructions, edges and cells charges it, and it also forwards the count to the
           operation's <code>checkpoint</code> for cancellation and deadline handling.
           <code>IRConstructionBudget</code> counts materialized nodes and blocks against
@@ -776,8 +776,8 @@ export interface ValueAnalysis {
           <code>change</code> is monotone: the first fact is stored; any later different fact
           replaces it with <code>varying</code>; once <code>varying</code>, nothing changes. That is
           the whole join rule, and it is why the code can promise a “monotone finite-height lattice,
-          including loop backedges”. A loop's first-iteration constant is therefore not published as
-          the loop value: the backedge delivers a different fact and the parameter becomes
+          including loop backedges”. A loop's first-iteration constant does not become the loop
+          value when the backedge delivers a different fact: the parameter then becomes
           <code>varying</code>.
         </p>
         <figure class="diagram">
@@ -831,10 +831,10 @@ export interface ValueAnalysis {
         </figure>
         <p>
           The analysis also records <code>reachable_blocks</code> and <code>executable_edges</code>;
-          <code>simplifySSA</code> consumes both to delete unreachable blocks and to thread branch
-          edges only along edges proven executable. Because the fact map is keyed by value identity,
-          the same analysis result is used for folding, branch pruning, switch selection and the
-          simplifier's edge-specific predicate reasoning.
+          <code>simplifySSA</code> consumes <code>reachable_blocks</code> to delete unreachable
+          blocks and the fact map to fold expressions and prune branches and switches. Because the
+          fact map is keyed by value identity, the same analysis result is used for folding, branch
+          pruning, switch selection and the simplifier's edge-specific predicate reasoning.
         </p>
       </section>
 
@@ -864,8 +864,8 @@ while (changed) {
           <code>eliminateTrivialParameters</code>).
         </p>
         <p>
-          <code>rewrite</code> rewrites in place functionally: it builds new instruction and block
-          arrays and preserves identities. For every assignment it first calls
+          <code>rewrite</code> is functional: it builds new instruction and block arrays and
+          preserves identities. For every assignment it first calls
           <code>recoverComparison</code>
           (next section), then applies one of the rules below. If the expression object changed, it
           merges the provenance of the old expression's defining assignments into the replacement's
@@ -974,11 +974,11 @@ while (changed) {
           Copy propagation is restricted to same-type <code>bitcast</code>s, i.e. genuine copies. It
           resolves whole copy chains, then removes every copy node and substitutes the final source
           at every reference, including register-state rows and edge arguments. Provenance is merged
-          into same-block consumers; when the source lives in another block, the copy's origin joins
-          its own block's provenance instead, and dominated consumers simply reference the value.
-          Eliminating trivial parameters is proved safe by the comment on the function: the first
-          entry along every path must carry <code>v</code> from a non-dominated predecessor, so
-          <code>v</code>'s definition dominates the block; the parameter and its edge slots can
+          into same-block consumers; when the copy was defined in another block, the copy's origin
+          joins its own block's provenance instead, and dominated consumers simply reference the
+          value. Eliminating trivial parameters is proved safe by the comment on the function: the
+          first entry along every path must carry <code>v</code> from a non-dominated predecessor,
+          so <code>v</code>'s definition dominates the block; the parameter and its edge slots can
           disappear, while architectural entry bindings are remapped to <code>v</code>.
         </p>
         <p>
@@ -1196,12 +1196,12 @@ while (changed) {
         </p>
         <p>
           Stack taint is sticky by design. <code>noteStackBindings</code> records every value bound
-          to a stack-pointer cell, both in the register-state rows and in instruction snapshots, and
-          <code>get</code> promotes any such value whose fact is no longer stack-derived to
-          <code>dynamic_stack</code>. That covers a join of two different offsets, a partial
-          overwrite of the pointer slice, and a replacement by an unknown value. This is why the
-          result can say “this is still stack-derived, but no longer a fixed offset” instead of
-          silently returning <code>unknown</code>.
+          to a stack-pointer cell, both in the register-state rows and in instruction register
+          inputs and outputs, and <code>get</code> promotes any such value whose fact is neither
+          stack-derived nor <code>undefined</code> to <code>dynamic_stack</code>. That covers a join
+          of two different offsets, a partial overwrite of the pointer slice, and a replacement by
+          an unknown value. This is why the result can say “this is still stack-derived, but no
+          longer a fixed offset” instead of silently returning <code>unknown</code>.
         </p>
         <p>
           The solver is a reverse-postorder priority worklist. A DFS over all components (entry
@@ -1221,6 +1221,7 @@ while (changed) {
             produces a <code>stack_fragment</code> with the added bit offset;
             <code>concat</code> reassembles a full pointer only when every original bit survives at
             the right offset; anything else falls back to <code>evaluateExpression</code>, then to
+            <code>undefined</code> if the evaluator reports undefined, to
             <code>dynamic_stack</code> if an operand is stack-derived, otherwise
             <code>unknown</code>.
           </li>
@@ -1277,8 +1278,9 @@ while (changed) {
           snapshot under the terminator's ID; it records a <code>StackAccess</code> for every
           load/store whose address is stack-derived; and it widens
           <code>frame.minimum_offset</code>/<code>maximum_offset</code> from stack facts and access
-          ranges. <code>frame.dynamic</code> becomes true when the stack pointer stops being a known
-          <code>stack</code> value or an access has no known offset; <code>escaped</code> and
+          ranges. <code>frame.dynamic</code> becomes true when a recorded fact widens to
+          <code>dynamic_stack</code> (including a stack pointer that is no longer a known
+          <code>stack</code> value) or an access has no known offset; <code>escaped</code> and
           <code>aliased</code> are latched from the states. The result also exposes
           <code>values</code> (the final fact of every published SSA value, used by call analysis
           for argument observation) and <code>entry</code>, the synthesized entry snapshot with an
@@ -1333,9 +1335,13 @@ while (changed) {
         <p>
           Region classification uses callee-entry SP coordinates, never the current allocated frame:
         </p>
-        <pre><code>export function classifyStackRegion(abi: AbiProfile, offset: bigint | null, size: bigint) {
+        <pre><code>export function classifyStackRegion(
+  abi: AbiProfile,
+  offset: bigint | null,
+  size: bigint,
+): StackAccess['region'] {
   if (offset === null) return 'dynamic';
-  const classify = (at: bigint) =&gt; at &lt; 0n ? 'local_candidate'
+  const classify = (at: bigint): StackAccess['region'] =&gt; at &lt; 0n ? 'local_candidate'
     : at &lt; abi.stack_return_address_bytes ? 'return_address'
     : abi.id === 'windows-x64' &amp;&amp; at &lt; 40n ? 'shadow_space'
     : 'incoming_candidate';
@@ -1746,12 +1752,13 @@ export function summarizeEffect(node: Instruction): EffectSummary | null</code><
         <div class="callout caveat">
           <span class="title">Why <code>_fixture_loop</code> looks different</span>
           <p>
-            The loop function's simplified form still contains eight parameters on its header and
-            explicit
-            <code>concat</code>s for the packed NZCV register. Loop-carried cells cannot become
-            trivial — at least two incoming values differ — and flag packing is ordinary integer
-            data flow, so it is not removed. The graph is still constant-folded and bitcast-free; it
-            is simply not a straight-line function. Page
+            The loop function's simplified form still contains eight parameters on its header,
+            explicit <code>concat</code>s reassembling 64-bit register cells from their 32-bit
+            halves, and <code>insert</code>s packing NZCV. In this loop the header's cells are not
+            trivial — the incoming edge from <code>b1</code> and the backedge carry different values
+            for every parameter — and flag packing is ordinary integer data flow, so it is not
+            removed. The graph is still constant-folded and bitcast-free; it is simply not a
+            straight-line function. Page
             <a href="reconstruction.html">Source reconstruction</a> consumes exactly this shape.
           </p>
         </div>
@@ -1772,10 +1779,10 @@ export function summarizeEffect(node: Instruction): EffectSummary | null</code><
         <p>
           Parameter placement uses the iterated dominance frontier and simultaneously transferred
           edge arguments, which handles loops and irreducible components without phi instructions,
-          but it is not a minimal SSA construction: the roots bind every cell, and the simplifier,
-          not the constructor, removes trivial parameters and unreachable blocks. If simplification
-          is interrupted before its first complete round, those blocks and parameters remain in the
-          returned last-complete graph. On a work-limit failure
+          but the constructor does not prune the result: the roots bind every cell, and the
+          simplifier, not the constructor, removes trivial parameters and unreachable blocks. If
+          simplification is interrupted before its first complete round, those blocks and parameters
+          remain in the returned last-complete graph. On a work-limit failure
           <code>constructSSA</code> returns the original register IR, so callers must check
           <code>state</code> before touching <code>form</code>.
         </p>
@@ -1784,7 +1791,7 @@ export function summarizeEffect(node: Instruction): EffectSummary | null</code><
           <code>classifyCall</code> probes. They describe which storage an ABI boundary can observe,
           not a signature: a mask does not claim that a register holds an argument, only that it
           could be observed. A backend that cannot supply <code>abi.preserved</code> is refused
-          rather than approximated. Conversely, a root the body actually touches is always
+          rather than approximated. Conversely, a non-zero root the body actually touches is always
           materialized, even when its mask is zero, so the machine view of the function itself is
           never lost.
         </p>

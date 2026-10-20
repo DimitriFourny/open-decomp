@@ -487,9 +487,9 @@
           <dt><code>symbols</code>, <code>imports</code>, <code>exports</code></dt>
           <dd>
             Native name facts. <code>original_name</code> is immutable linkage text;
-            <code>display_name</code> may later receive a demangled label. An import has a
+            <code>display_name</code> may later receive a demangled label. An import may carry a
             <code>slot</code> (storage address of the pointer) or a <code>callable_entry</code> (a
-            stub known to forward to the import), never an assertion that the slot contains a
+            stub known to forward to the import), and never asserts that the slot contains a
             resolved value.
           </dd>
           <dt><code>relocations</code></dt>
@@ -528,7 +528,10 @@
             <tr>
               <td><code>function</code></td>
               <td><code>address</code>, optional <code>size</code></td>
-              <td>Discovery seeds the address as established with that name and range.</td>
+              <td>
+                Discovery seeds the address as established, with the hint's size as an exact range
+                when present.
+              </td>
             </tr>
             <tr>
               <td><code>unwind</code></td>
@@ -569,9 +572,9 @@
           <p>
             Entity IDs are derived from <code>[sliceId, kind, birth]</code>, where
             <code>birth</code> is a table index, file offset or name. Splits and merges mint new IDs
-            and record lineage; they never rename an existing ID. Every loader-created evidence
-            record is deduplicated by fingerprint of <code>[sliceId, offset, size, claim]</code>, so
-            repeated reads of one table share a proof instead of inflating the store.
+            and record lineage; they never rename an existing ID. Evidence IDs are a fingerprint of
+            <code>[sliceId, offset, size, claim]</code>; Mach-O and ELF reuse an existing record for
+            the same range and claim, so repeated reads of one table do not mint new proofs.
             <a class="src" href="../../src/core/identity.ts">src/core/identity.ts</a>
             (<code>entityIdentity</code>),
             <a class="src" href="../../src/loaders/macho/state.ts">src/loaders/macho/state.ts</a>
@@ -620,8 +623,8 @@ export type Translation =
           <code>checkedEnd(start, size)</code> additionally rejects a range whose exclusive end
           would exceed 2^64, so a half-open range may end exactly at 2^64 but neither its start nor
           its size may exceed unsigned 64-bit representation. <code>checkedIndex</code>
-          converts a bigint index to a safe JS number only after proving it lies within a bounded
-          buffer.
+          converts a bigint index to a safe JS number only after checking it against a bounded
+          buffer length.
           <a class="src" href="../../src/core/addresses.ts">src/core/addresses.ts</a>
           (<code>checkedU64</code>, <code>checkedEnd</code>, <code>checkedIndex</code>).
         </p>
@@ -713,7 +716,7 @@ export type Translation =
             </title>
 
             <rect class="box muted" x="10" y="40" width="180" height="46" rx="8" />
-            <text x="100" y="61" text-anchor="middle" class="title">fat header</text>
+            <text x="100" y="61" text-anchor="middle" class="title">fat header + pad</text>
             <text x="100" y="78" text-anchor="middle" class="small mono">file 0x0 – 0x1000</text>
 
             <rect class="box bad" x="200" y="40" width="210" height="46" rx="8" />
@@ -1034,9 +1037,9 @@ export type Translation =
             above 65,536, and walks 8-byte-aligned commands. Duplicate occurrences of the structural
             commands (symtab, dysymtab, dyld info, main, function starts, data-in-code, exports
             trie, chained fixups) are malformed. Every command is retained as a
-            <code>load_command</code> header record: up to 3,800 bytes of fields are decoded as
-            32-bit words; larger payloads are retained as a file range. Unknown commands produce an
-            <code>unsupported_target</code> warning, not a guess.
+            <code>load_command</code> header record: a command of at most 3,800 bytes has its fields
+            decoded as 32-bit words; a larger command's payload is retained as a file range. Unknown
+            commands produce an <code>unsupported_target</code> warning, not a guess.
           </li>
           <li>
             <strong>Segments, sections and mappings.</strong> <code>LC_SEGMENT_64</code> must have
@@ -1071,9 +1074,9 @@ file_size: backing,</code></pre>
             <strong><code>LC_SYMTAB</code> and <code>LC_DYSYMTAB</code>.</strong> Each
             <code>nlist_64</code> carries a string index, type, section ordinal, description and
             value. STAB entries (<code>type &amp; 0xe0</code>) are excluded from the symbol list. A
-            definition's kind is only inherited from its section when the value lies inside that
-            section; otherwise it is <code>unknown</code>, because linkers also associate header
-            symbols with instruction sections. Weak binding comes from
+            definition's kind is inherited from its section only when the value lies inside that
+            section; a section-associated definition outside it is <code>unknown</code>, because
+            linkers also associate header symbols with instruction sections. Weak binding comes from
             <code>n_desc &amp; 0xc0</code>; external versus local from <code>type &amp; 1</code>.
             The indirect symbol table is interpreted through sections of type 6, 7, 8 and 0x14:
             pointer sections yield an import <code>slot</code>, stub sections yield a
@@ -1197,17 +1200,17 @@ file_size: backing,</code></pre>
             <strong>Base relocations.</strong> Blocks are walked with a 4 KiB-aligned page RVA and a
             block size that is a multiple of four. Only <code>IMAGE_REL_BASED_DIR64</code> (type 10)
             is recorded as a rebase fact whose target is the 64-bit value currently stored at the
-            site; other types are retained as raw references and marked unsupported, with HIGHADJ
-            consuming its extra slot. The loader does not add a delta to targets; it records what
-            the file says.
+            site; other types are diagnosed as unsupported from the retained directory bytes, with
+            HIGHADJ consuming its extra slot. The loader does not add a delta to targets; it records
+            what the file says.
           </li>
           <li>
             <strong>Exceptions and unwind.</strong> The <code>.pdata</code> directory is a table of
             12-byte runtime-function entries. Ranges must be nonempty, sorted and non-overlapping;
             each becomes a function hint with an exact size. Each <code>UNWIND_INFO</code> chain is
             followed up to 64 records, validates version 1, code slots and prolog ordering, records
-            the optional language handler, and stops at a chained entry. Unsupported versions or
-            opcodes degrade to a capability rather than inventing unwind semantics.
+            the optional language handler, and continues through chained records. Unsupported
+            versions or opcodes degrade to a capability rather than inventing unwind semantics.
           </li>
           <li>
             <strong>TLS, debug and COFF symbols.</strong> The TLS directory contributes its template
@@ -1252,9 +1255,9 @@ file_size: backing,</code></pre>
           <li>
             <strong>Symbol tables.</strong> <code>SHT_SYMTAB</code> and
             <code>SHT_DYNSYM</code> entries are 24 bytes and linked to a string table. The first
-            entry must be null. A defined symbol with a section index must fit inside that section's
-            VA range; <code>SHN_ABS</code> is absolute; <code>SHN_XINDEX</code>, TLS symbols and
-            IFUNC resolvers are explicitly unsupported. Dynamic exports come only from
+            entry must be null. A defined non-TLS symbol in an allocated section must fit inside
+            that section's VA range; <code>SHN_ABS</code> is absolute; <code>SHN_XINDEX</code>, TLS
+            symbols and IFUNC resolvers are explicitly unsupported. Dynamic exports come only from
             <code>SHT_DYNSYM</code>, with global/weak/GNU-unique binding and default or protected
             visibility.
           </li>
@@ -1267,7 +1270,7 @@ file_size: backing,</code></pre>
             <code>DT_SYMTAB</code>, <code>DT_RELA</code>, <code>DT_REL</code> and the PLT relocation
             table are each matched to exactly one section with the declared size and entry stride.
             GNU version-need and version-symbol sections are validated record by record, and a
-            version index must have a provider.
+            symbol version index above 1 must have a provider.
           </li>
           <li>
             <strong>Relocations to imports.</strong> <code>SHT_RELA</code> and
@@ -1287,8 +1290,8 @@ file_size: backing,</code></pre>
             <strong>Entry point and capabilities.</strong> <code>e_entry</code> must be backed
             executable memory. The format capability is <code>supported</code>; specialized
             omissions (PLT callable entries, TLS execution, RELR, Android packed relocations, COPY
-            ownership, IRELATIVE, IFUNC, compressed tables) are reported as separate unsupported
-            capabilities and diagnostics.
+            ownership, IRELATIVE and IFUNC) are reported as separate unsupported capabilities and
+            diagnostics.
           </li>
         </ol>
 
@@ -1503,11 +1506,12 @@ file_size: backing,</code></pre>
 
         <h3>What downstream actually consumes</h3>
         <p>
-          Discovery's seed loop turns image entry points, function/unknown symbols, non-forwarder
-          exports and import <code>callable_entry</code> values into established entries. It turns
-          function hints into established seeds with optional exact ranges, unwind hints into
-          candidate starts, and data hints into protected data ranges (jump-table hints additionally
-          become candidate tables). Symbol objects with an address also contribute data ranges.
+          Discovery's seed loop turns image entry points, function symbols and import
+          <code>callable_entry</code> values into established seeds; unknown-kind symbols and
+          non-forwarder exports become executable candidates. It turns function hints into
+          established seeds with optional exact ranges, unwind hints into candidate starts, and data
+          hints into protected data ranges (jump-table hints additionally become candidate tables).
+          Object symbols with an address and a positive size also contribute data ranges.
           <a class="src" href="../../src/analysis/discovery/index.ts"
             >src/analysis/discovery/index.ts</a
           >
@@ -1809,9 +1813,10 @@ const language = candidate.startsWith('_Z')
             machine, PE32, managed CLR, system driver or unsupported subsystem;
             <code>malformed_image</code> for alignment, table, directory or unwind contradictions.
             ELF: <code>unsupported_target</code> for the wrong class/endianness/machine/type,
-            extended indexes, sectionless images, compressed native tables, RELR or Android packed
-            relocations; <code>malformed_image</code> for segment/section/dynamic/version/relocation
-            contradictions.
+            extended indexes, sectionless images or compressed native tables;
+            <code>malformed_image</code> for segment/section/dynamic/version/relocation
+            contradictions. RELR and Android packed relocations do not fail the load; they are
+            reported as unsupported capabilities.
           </p>
         </div>
 
@@ -1858,7 +1863,7 @@ const language = candidate.startsWith('_Z')
             </tr>
             <tr>
               <td><code>fat-slice-overrun.bin</code></td>
-              <td>FAT entry claims size <code>0xfffff000</code></td>
+              <td>FAT entry claims offset <code>0xfffff000</code></td>
               <td><code>malformed_image</code></td>
               <td><code>malformed_image: Invalid universal slice range/alignment</code></td>
             </tr>
@@ -2089,7 +2094,7 @@ writeImageMetadata(this.#db, metadata, revision);</code></pre>
             <strong>ELF.</strong> Sectionless images, extended counts/indexes, <code>ET_REL</code>,
             compressed native tables, <code>SHN_XINDEX</code>, TLS symbol resolution, IFUNC, RELR,
             Android packed relocations and nonallocated relocation semantics are outside the subset.
-            Non-executable PLT stubs remain code, not import entries.
+            PLT stubs remain code, not import entries.
           </li>
           <li>
             <strong>Provenance.</strong> A loader fact proves what the file says at a file range,

@@ -60,9 +60,10 @@
         <p class="lede">
           Open Decomp is a static native-binary decompiler: binary formats become an immutable
           image, the image becomes a CFG, the CFG becomes typed SSA, and the SSA becomes C-like or
-          Python-like pseudocode with evidence attached to every derived fact. This page maps the
-          module graph, the process boundaries, the per-target component set, the cache identity and
-          the seven progress stages of one decompile request.
+          Python-like pseudocode with evidence records and presentation status that distinguish
+          proven facts from hypotheses. This page maps the module graph, the process boundaries, the
+          per-target component set, the cache identity and the seven progress stages of one
+          decompile request.
         </p>
         <p class="sources">
           Sources:
@@ -77,6 +78,18 @@
           >
           <a class="src" href="../../src/workers/index.ts">src/workers/index.ts</a>
         </p>
+        <div class="callout caveat">
+          <span class="title">Code version</span>
+          <p>
+            These pages describe the code at commit
+            <code>3c30ecbaa6ce9dec9483c927e04018918383037a</code> (<code>3c30ecb</code>,
+            2026-10-20). Every real example on these pages was produced by a build of that commit.
+            To update the pages later, list what changed since then with
+            <code>git diff --stat 3c30ecb..HEAD -- src</code>, revise the pages that cover those
+            directories (see the <a href="#modules">module map</a>), and move this commit hash
+            forward.
+          </p>
+        </div>
       </header>
 
       <nav class="toc" aria-label="On this page">
@@ -99,7 +112,7 @@
       <section id="position">
         <h2>Where this sits in the pipeline</h2>
         <p>
-          The decompiler is a single TypeScript code base (96,896 lines under <code>src/</code>)
+          The decompiler is a single TypeScript code base (97,050 lines under <code>src/</code>)
           with three targets: Mach-O on AArch64 with the Darwin ABI, PE on x86-64 with the Microsoft
           x64 ABI, and ELF on x86-64 with the System V AMD64 ABI. Those triples are the only values
           <code>targetSchema</code> accepts; it also pins little-endian, 64-bit addressing and a
@@ -159,8 +172,8 @@
             <strong>Refuse or mark <code>partial</code> rather than guess.</strong> Component
             dispatch throws <code>unsupported_target</code>; an ambiguous function name is an error,
             not a first match; a pass that cannot produce a complete representation throws
-            <code>unavailable_semantics</code>; unresolved call interfaces stay as <code>...</code>
-            and carry a diagnostic.
+            <code>unavailable_semantics</code>; in the source view, unresolved call interfaces stay
+            as <code>...</code> and carry a diagnostic (the checked view keeps a named helper).
           </li>
           <li>
             <strong>Evidence-bearing output.</strong> Diagnostics and presentation records cite
@@ -225,7 +238,8 @@
               <td>
                 <code>open-decomp functions|decompile|export|types</code> →
                 <a class="src" href="../../src/cli/entry.ts">src/cli/entry.ts</a>
-                (<code>runAnalysisCli</code>)
+                (<code>main</code> → <code>runAnalysisCli</code> in
+                <a class="src" href="../../src/cli/commands.ts">src/cli/commands.ts</a>)
               </td>
               <td>
                 Pseudocode on stdout, progress/diagnostics on stderr; exit 0 complete/empty, 2
@@ -286,7 +300,7 @@
         <p>
           The pool keeps one persistent child per canonical project.
           <code>ProjectWorkerPool</code> bounds <code>max_workers</code> to 2 by default (range
-          1–32) and <code>max_queued</code> to 16 (range 0–1024); the CLI's
+          1–32) and <code>max_queued</code> to 16 (range 0–1024);
           <code>BinarySession</code> deliberately creates the service with
           <code>max_workers: 1</code>. IPC is length-prefixed JSON frames with
           <code>MAX_FRAME_BYTES = 2 * 1024 * 1024</code> and at most 256 images per project
@@ -305,8 +319,8 @@
           result is served from a transient in-memory artifact and nothing derived is indexed.
           <a class="src" href="../../src/project/cache/index.ts">src/project/cache/index.ts</a>
           (<code>runCachedDecompilation</code>). The emitters are the last layer: they consume the
-          structured presentation and produce the wire <code>Emission</code>, which is the only
-          artifact the transports ever render.
+          structured presentation and produce the wire <code>Emission</code>, the pseudocode
+          artifact the transports render.
         </p>
 
         <figure class="diagram">
@@ -429,10 +443,11 @@
         <h3>What validation actually checks</h3>
         <p>
           <code>validateToolRequest</code> parses the operation's Zod schema, then enforces
-          cross-field preconditions that a structural schema cannot express: a supplied
-          <code>revision</code> or <code>expected_revision</code> must equal the current revision
-          (otherwise <code>RevisionConflict</code>, code <code>stale_revision</code>), and an
-          address or range must belong to the named image.
+          cross-field preconditions that a structural schema cannot express: an address or range
+          must belong to the named image, and a supplied <code>revision</code> or
+          <code>expected_revision</code> must equal the current revision when the caller passes that
+          current revision (otherwise <code>RevisionConflict</code>, code
+          <code>stale_revision</code>).
           <a class="src" href="../../src/core/validation.ts">src/core/validation.ts</a>.
           <code>validateToolResponse</code> goes further on the way out: the result must parse
           against the output schema, belong to the same project and revision, mutations must advance
@@ -457,10 +472,10 @@
         <h2>Module dependency map</h2>
         <p>
           The map below was computed by resolving every relative
-          <code>import … from '../&lt;dir&gt;/…'</code> in <code>src/</code> to its top-level
-          directory, then splitting value imports from type-only imports. There are 18 top-level
-          directories plus <code>src/index.ts</code> (94 lines), which is a pure re-export barrel
-          for the public API. Line counts are physical lines of <code>.ts</code>.
+          <code>import … from '../&lt;dir&gt;/…'</code> (or re-export) in <code>src/</code> to its
+          top-level directory, then splitting value imports from type-only imports. There are 18
+          top-level directories plus <code>src/index.ts</code> (94 lines), which is a pure re-export
+          barrel for the public API. Line counts are physical lines of <code>.ts</code>.
         </p>
 
         <table>
@@ -555,7 +570,7 @@
             </tr>
             <tr>
               <td><code>emitters</code></td>
-              <td class="num">15,787</td>
+              <td class="num">15,941</td>
               <td>C-like and Python-like renderers; emission tables, mappings, inferences.</td>
               <td>core, ir, metadata, reconstruction</td>
               <td><a href="structuring-emission.html">09 Structuring &amp; emission</a></td>
@@ -593,7 +608,7 @@
                 <code>BinarySession</code>: content-addressed project open, selection, decompile,
                 close.
               </td>
-              <td>core, service</td>
+              <td>core, service, settings</td>
               <td><a href="index.html#layers">this page</a></td>
             </tr>
             <tr>
@@ -748,7 +763,8 @@
           <code>darwin_arm64</code>, <code>windows_x64</code> and <code>sysv_amd64</code>.
           <code>targetPipeline</code> first requires little-endian 64-bit addressing and then
           matches the complete <em>format + architecture + ABI</em> triple; anything else throws
-          <code>unsupported_target</code> with “No complete lifter/ABI pipeline is registered”.
+          <code>unsupported_target</code> with “No complete lifter/ABI pipeline is registered for
+          the target”.
           <a class="src" href="../../src/service/analysis/versions.ts"
             >src/service/analysis/versions.ts</a
           >
@@ -758,9 +774,9 @@
           <span class="title">Two different interfaces</span>
           <p>
             <code>contracts.ts</code> also declares <code>ComponentRegistry</code> and
-            <code>ServiceContext.AnalysisService</code>, but no implementation of
-            <code>ComponentRegistry</code> exists in <code>src/</code>; the frozen object above is
-            the actual composition root. Do not go looking for a runtime registry.
+            <code>AnalysisService</code> (paired with <code>ServiceContext</code>), but no
+            implementation of <code>ComponentRegistry</code> exists in <code>src/</code>; the frozen
+            object above is the actual composition root. Do not go looking for a runtime registry.
           </p>
         </div>
 
@@ -791,8 +807,8 @@
               </td>
               <td><code>DarwinArm64Abi</code><br /><span class="mono">darwin-arm64/1.3.0</span></td>
               <td>
-                <span class="mono">reconstructed-c-53</span><br /><span class="mono"
-                  >reconstructed-python-like-53</span
+                <span class="mono">reconstructed-c-54</span><br /><span class="mono"
+                  >reconstructed-python-like-54</span
                 >
               </td>
             </tr>
@@ -809,8 +825,8 @@
               </td>
               <td><code>WindowsX64Abi</code><br /><span class="mono">windows-x64/2</span></td>
               <td>
-                <span class="mono">reconstructed-c-53</span><br /><span class="mono"
-                  >reconstructed-python-like-53</span
+                <span class="mono">reconstructed-c-54</span><br /><span class="mono"
+                  >reconstructed-python-like-54</span
                 >
               </td>
             </tr>
@@ -827,8 +843,8 @@
               </td>
               <td><code>SysVAMD64Abi</code><br /><span class="mono">sysv-amd64/1</span></td>
               <td>
-                <span class="mono">reconstructed-c-53</span><br /><span class="mono"
-                  >reconstructed-python-like-53</span
+                <span class="mono">reconstructed-c-54</span><br /><span class="mono"
+                  >reconstructed-python-like-54</span
                 >
               </td>
             </tr>
@@ -856,7 +872,7 @@
           joined composition string:
         </p>
         <pre><code>const analysis =
-  'pipeline/25;discovery/5;targets/2;ssa/5;values-effects/4;stack-calls/9;debug/1;library/8;types/8;annotations/1;structure/3;reconstruction/49';</code></pre>
+  'pipeline/25;discovery/5;targets/2;ssa/5;values-effects/4;stack-calls/9;debug/1;library/8;types/8;annotations/1;structure/3;reconstruction/50';</code></pre>
         <p>
           Each of those numbers is the composition contract for a stage group whose semantics
           changed; bumping one changes every cache key that includes it. The
@@ -961,11 +977,12 @@
           </li>
           <li>
             <strong>Project open.</strong> <code>BinarySession.open</code> canonicalizes the path,
-            hashes the whole file with <code>hashInput</code> (refusing a symlink, a file over 512
-            MiB, or a file that changes while hashing), derives the project directory as
+            hashes the whole file with <code>hashInput</code> (refusing a non-regular file, a file
+            over 512 MiB, or a file that changes while hashing), derives the project directory as
             <code>&lt;sha256&gt;.&lt;slice|default&gt;</code>, creates a
             <code>QueryService</code> with one worker, and sends <code>project_open</code> with
-            <code>{ kind: 'import', wait: true }</code>.
+            <code>wait: true</code>, importing on first use and resuming an existing project
+            directory.
             <a class="src" href="../../src/api/index.ts">src/api/index.ts</a>
             (<code>BinarySession.open</code>),
             <a class="src" href="../../src/service/queries/input-identity.ts"
@@ -981,8 +998,8 @@
             then runs <code>prepareQueryImport</code>: <code>recoverRuntimeMetadata</code>,
             <code>decorateImageNames</code>, <code>discoverFunctions</code>,
             <code>buildStringIndex</code>, <code>buildReferenceIndex</code>,
-            <code>classifyImportStubs</code>. Image, indexes and the completed job commit in one
-            transaction.
+            <code>classifyImportStubs</code>. The prepared image record, indexes and the completed
+            job commit in one transaction.
             <a class="src" href="../../src/workers/runtime.ts">src/workers/runtime.ts</a>
             (<code>execute</code>, import branch),
             <a class="src" href="../../src/service/queries/prepare.ts"
@@ -1087,9 +1104,7 @@
 
             <rect class="box" x="120" y="394" width="520" height="56" rx="8" />
             <text x="132" y="415" class="title">types — progress 4/7</text>
-            <text x="132" y="434" class="small mono">
-              recoverTypes · annotations · refineMemoryShapes
-            </text>
+            <text x="132" y="434" class="small mono">recoverTypes · annotations</text>
 
             <path class="edge" d="M380,450 L380,470" marker-end="url(#arrow)" />
             <text x="660" y="465" class="small mono">TypeRecoveryResult</text>
@@ -1130,9 +1145,9 @@
           </svg>
           <figcaption>
             <strong>Figure 4.</strong> The seven <code>progress</code> labels are coarse: the
-            <code>types</code> label covers the whole annotation/type/source-evidence block, and
-            <code>recoverSourceEvidence</code> runs inside it. Each arrow is a real value passed to
-            the next stage, not a log message.
+            <code>types</code> label covers annotation and type recovery, and
+            <code>recoverSourceEvidence</code> runs after structuring, before emission. Each arrow
+            is a real value passed to the next stage, not a log message.
           </figcaption>
         </figure>
 
@@ -1185,8 +1200,8 @@
               <td><code>types</code></td>
               <td>SSA, calls, debug/library/user types, annotation catalog</td>
               <td>
-                Baseline and refined <code>TypeRecoveryResult</code>, source evidence, memory
-                shapes, image-wide types.
+                Baseline and refined <code>TypeRecoveryResult</code>, memory shapes, image-wide
+                types.
               </td>
               <td><a href="types-metadata.html">07</a> · <a href="reconstruction.html">08</a></td>
             </tr>
@@ -1194,8 +1209,8 @@
               <td><code>structure</code></td>
               <td>SSA CFG</td>
               <td>
-                <code>StructuredFunction</code>; a missing presentation is
-                <code>internal_error</code>.
+                <code>StructuredFunction</code> (source evidence is recovered after structuring); a
+                missing presentation is <code>internal_error</code>.
               </td>
               <td><a href="structuring-emission.html">09</a></td>
             </tr>
@@ -1204,7 +1219,7 @@
               <td>structured function, types, names, annotations, source evidence, options</td>
               <td>
                 <code>Emission</code> with interned ids/evidence/ranges, mappings, inferences,
-                requirements, helper list and coverage counters.
+                requirements and helper list, plus coverage counters alongside it.
               </td>
               <td><a href="structuring-emission.html">09</a></td>
             </tr>
@@ -1250,7 +1265,7 @@
             <rect class="box" x="660" y="8" width="120" height="34" rx="8" />
             <text x="720" y="24" text-anchor="middle" class="title">ProjectStore</text>
             <text x="720" y="37" text-anchor="middle" class="small mono">SQLite</text>
-            <rect class="box accent" x="810" y="8" width="140" height="34" rx="8" />
+            <rect class="box accent" x="805" y="8" width="152" height="34" rx="8" />
             <text x="880" y="24" text-anchor="middle" class="title">pipeline</text>
             <text x="880" y="37" text-anchor="middle" class="small mono">executeDecompilation</text>
 
@@ -1334,8 +1349,8 @@
           </svg>
           <figcaption>
             <strong>Figure 5.</strong> The CLI owns cancellation and exit codes; the child owns the
-            store and all CPU work. A decompile that outlives its transport stays a durable job and
-            is resumed by a second <code>wait:true</code> call, which hits the published artifact.
+            store and the analysis work. A decompile that outlives its transport stays a durable
+            job, and a later <code>wait:true</code> call hits the published artifact.
           </figcaption>
         </figure>
       </section>
@@ -1351,7 +1366,7 @@
           The function record is
           <code>entity_835a96c5…f1817f</code> at <code>va:0x100000588</code>. Asking the project for
           the disassembly returns exactly three valid instructions, each with its own entity ID,
-          byte range and decoder payload:
+          byte range and decoder payload; the compact detail view renders the mnemonics shown here:
         </p>
         <table>
           <thead>
@@ -1365,19 +1380,19 @@
           <tbody>
             <tr>
               <td><code>0x100000588</code></td>
-              <td><code>SUBS w31, w0, w1</code></td>
+              <td><code>subs wzr, w0, w1</code></td>
               <td><code>SUBS_32_addsub_shift</code></td>
               <td>fallthrough</td>
             </tr>
             <tr>
               <td><code>0x10000058c</code></td>
-              <td><code>CSEL w0, w0, w1, gt</code></td>
+              <td><code>csel w0, w0, w1, gt</code></td>
               <td><code>CSEL_32_condsel</code></td>
               <td>fallthrough</td>
             </tr>
             <tr>
               <td><code>0x100000590</code></td>
-              <td><code>RET</code></td>
+              <td><code>ret</code></td>
               <td><code>RET_64R_branch_reg</code></td>
               <td>return</td>
             </tr>
@@ -1403,12 +1418,12 @@ uint64_t fn__fixture_maximum(uint64_t arg0, uint64_t arg1) {
         <p>
           The structured envelope reports <code>state: "complete"</code>,
           <code>cache: "hit"</code> (this was the second run), five coverage layers all
-          <code>complete</code> (decode 11/11, lift 11/11, abi 1/1, analysis 1/1, reconstruction
-          40/40), and the emission carries 23 source mappings and two evidence records for a
-          105-character text. The call’s versions identify exactly the components from Table 3:
+          <code>complete</code> (decode 3/3, lift 3/3, abi 1/1, analysis 1/1, reconstruction 19/19),
+          and the emission carries 23 source mappings and two evidence records for a 105-character
+          text. The call’s versions identify exactly the components from Table 3:
           <code>open-decomp-macho/1.0.4</code>, <code>aa0e547…+adapter.2</code>,
           <code>ARM64 typed semantic lifter/1.0.6</code>, <code>darwin-arm64/1.3.0</code>,
-          <code>reconstructed-c-53</code>.
+          <code>reconstructed-c-54</code>.
         </p>
 
         <figure class="diagram">
@@ -1419,11 +1434,11 @@ uint64_t fn__fixture_maximum(uint64_t arg0, uint64_t arg1) {
 
             <text x="20" y="32" class="small">function_get, view: disassembly</text>
             <rect class="box" x="20" y="50" width="360" height="34" rx="6" />
-            <text x="32" y="72" class="small mono">0x100000588 SUBS w31, w0, w1</text>
+            <text x="32" y="72" class="small mono">0x100000588 subs wzr, w0, w1</text>
             <rect class="box" x="20" y="100" width="360" height="34" rx="6" />
-            <text x="32" y="122" class="small mono">0x10000058c CSEL w0, w0, w1, gt</text>
+            <text x="32" y="122" class="small mono">0x10000058c csel w0, w0, w1, gt</text>
             <rect class="box" x="20" y="150" width="360" height="34" rx="6" />
-            <text x="32" y="172" class="small mono">0x100000590 RET</text>
+            <text x="32" y="172" class="small mono">0x100000590 ret</text>
 
             <path class="edge" d="M380,67 L400,67 L400,167" />
             <path class="edge" d="M380,117 L400,117" />
@@ -1518,13 +1533,13 @@ uint64_t fn__fixture_maximum(uint64_t arg0, uint64_t arg1) {
 }</code></pre>
         <p>
           One context per operation: counters and the monotonic deadline are never reset by a pass.
-          <code>createOperationContext</code> freezes the parsed budget and samples the clock only
-          every 32 charges (<code>clockCountdown = 31</code>), latching expiry so later charges fail
-          identically; this is explicitly to keep the clock read off the hot path of analyses that
-          “charge millions of times per request”. A charge that is not a nonnegative safe integer
-          throws <code>RangeError</code>; an aborted signal throws <code>cancelled</code>; an
-          expired deadline or exhausted work counter throws <code>resource_limit</code> with
-          <code>details.kind: 'limit'</code> and the resource name.
+          <code>createOperationContext</code> freezes the parsed budget and samples the clock at
+          most once every 32 charges (<code>clockCountdown = 31</code>), latching expiry so later
+          charges fail identically; this is explicitly to keep the clock read off the hot path of
+          analyses that “charge millions of times per request”. A charge that is not a nonnegative
+          safe integer throws <code>RangeError</code>; an aborted signal throws
+          <code>cancelled</code>; an expired deadline or exhausted work counter throws
+          <code>resource_limit</code> with <code>details.kind: 'limit'</code> and the resource name.
           <a class="src" href="../../src/core/operation.ts">src/core/operation.ts</a>.
         </p>
         <table>
@@ -1615,7 +1630,8 @@ uint64_t fn__fixture_maximum(uint64_t arg0, uint64_t arg1) {
               <td><code>invalid_address</code></td>
               <td>discovery, debug metadata</td>
               <td>
-                Address belongs to another image, is not a 64-bit value, or is not an indexed root.
+                Address belongs to another image, overflows the address space, or is not an indexed
+                root.
               </td>
             </tr>
             <tr>
@@ -1691,7 +1707,7 @@ uint64_t fn__fixture_maximum(uint64_t arg0, uint64_t arg1) {
             <tr>
               <td><code>unsupported_version</code></td>
               <td>project store</td>
-              <td>Project schema is newer than this build; no mutation is attempted.</td>
+              <td>Project schema is below 1 or newer than this build; no mutation is attempted.</td>
             </tr>
             <tr>
               <td><code>internal_error</code></td>
@@ -1841,10 +1857,10 @@ uint64_t fn__fixture_maximum(uint64_t arg0, uint64_t arg1) {
         </p>
         <p>
           Navigation results cite evidence IDs; <code>evidence_get</code> resolves them, and
-          <code>derivation: 'closure'</code> walks ancestors. Inside one emission, every proof is
-          interned once in <code>emission.evidence</code> and cited by index, which is why an
-          emission's mappings are compact even when many spans share a proof. The presentation
-          status vocabulary — <code>established</code>, <code>inferred</code>,
+          <code>derivation: 'closure'</code> walks the derivation/conflict closure. Inside one
+          emission, every proof is interned once in <code>emission.evidence</code> and cited by
+          index, which is why an emission's mappings are compact even when many spans share a proof.
+          The presentation status vocabulary — <code>established</code>, <code>inferred</code>,
           <code>asserted</code>, <code>hypothesis</code>, <code>conflicting</code>,
           <code>assumption</code>, <code>unresolved</code> — is separate from semantic coverage; the
           comment in <code>inference.ts</code> warns that “presentation confidence is not semantic
@@ -1960,8 +1976,9 @@ uint64_t fn__fixture_maximum(uint64_t arg0, uint64_t arg1) {
           </dd>
           <dt>Slice</dt>
           <dd>
-            A selectable architecture region of a universal/fat container; the selected slice is
-            part of image identity and of every cache key.
+            A selectable architecture region of a container (for example one architecture of a
+            universal/fat Mach-O); the selected slice is part of the project directory name and of
+            every analysis cache key.
           </dd>
           <dt>Project</dt>
           <dd>
@@ -1987,8 +2004,8 @@ uint64_t fn__fixture_maximum(uint64_t arg0, uint64_t arg1) {
           <dt>Coverage</dt>
           <dd>
             Per-layer completeness (<code>decode</code>, <code>lift</code>, <code>abi</code>,
-            <code>analysis</code>, <code>reconstruction</code>) with completed/total units and
-            reasons.
+            <code>analysis</code>, <code>reconstruction</code>, plus <code>provenance</code> when
+            metadata is shed) with completed/total units and reasons.
           </dd>
           <dt>Evidence</dt>
           <dd>
@@ -2030,20 +2047,21 @@ uint64_t fn__fixture_maximum(uint64_t arg0, uint64_t arg1) {
             <code>FunctionRecord.boundary</code> can be <code>candidate</code> or
             <code>conflicting</code>, and <code>analysis</code> can be <code>not_analyzed</code>. On
             the fixture used above, <code>functions</code> reports
-            <code>partial (incomplete_index)</code> even though every listed function is established
-            — the index describes its documented seeded subset, not all code. See
-            <a href="discovery.html">03</a>.
+            <code>partial (incomplete_index)</code> even though every listed function’s boundary is
+            established (its analysis may still be partial) — the index describes its documented
+            seeded subset, not all code. See <a href="discovery.html">03</a>.
           </li>
           <li>
-            <strong>Open call interfaces stay open.</strong> Unresolved calls retain
-            <code>...</code> and conservative effects; <code>AbiCallLayout.state</code> can be
-            <code>partial</code> or <code>unsupported</code>. The tool does not guess arity. See
+            <strong>Open call interfaces stay open.</strong> In the source view, unresolved calls
+            retain <code>...</code> (the checked view keeps a named helper) and conservative
+            effects; <code>AbiCallLayout.state</code> can be <code>partial</code> or
+            <code>unsupported</code>. The tool does not guess arity. See
             <a href="calls-abi.html">06</a>.
           </li>
           <li>
             <strong>Deep provenance can be shed.</strong> An artifact larger than 16 MiB first loses
             its incremental-reuse readset, then whole provenance classes in
-            <code>EMISSION_METADATA_SHED_ORDER</code>; each omission is named in
+            <code>EMISSION_METADATA_SHED_ORDER</code>; each shed provenance class is named in
             <code>emission.omitted</code> and produces a partial <code>provenance</code>
             coverage entry. Pseudocode, signature and the annotation catalog are never shed.
             <a class="src" href="../../src/project/cache/index.ts">src/project/cache/index.ts</a>.
@@ -2117,8 +2135,8 @@ uint64_t fn__fixture_maximum(uint64_t arg0, uint64_t arg1) {
             Until every component exists, the correct behaviour is to throw
             <code>unsupported_target</code> from <code>pipelineComponents</code> rather than
             assemble a partial pipeline. The same rule applies per operation: a loader that cannot
-            establish a slice returns <code>ambiguous_slice</code> diagnostics with the candidate
-            list, and a discovery seed that is not an indexed virtual root is
+            establish a slice throws <code>ambiguous_slice</code> with the candidate list in its
+            diagnostic, and a discovery seed that is not an indexed virtual root is
             <code>invalid_address</code>.
           </p>
         </div>

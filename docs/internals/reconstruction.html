@@ -419,10 +419,11 @@ export interface ExitScratchSlice {
           <p>
             Reconstruction throws <code>OperationError</code> with code
             <code>invalid_input</code> when the structured tree owns a block twice, and with
-            <code>resource_limit</code> when <code>context.budget.blocks</code>,
-            <code>context.budget.ir_nodes</code> or the statement budget is exceeded. It never
-            silently truncates a function. Publication failures later use
-            <code>unavailable_semantics</code> (see
+            <code>resource_limit</code> when the block, statement or value budget is exceeded (<code
+              >context.budget.blocks</code
+            >
+            / <code>context.budget.ir_nodes</code>). It never silently truncates a function.
+            Publication failures later use <code>unavailable_semantics</code> (see
             <a href="#requirements">Requirements and validation</a>).
           </p>
         </div>
@@ -637,23 +638,26 @@ export interface ExitScratchSlice {
           parameters, the function signature, the parameter-name map and the requirement list. It
           also supplies three closures used by later passes: <code>make</code> (create a
           deterministic synthesized value and register it), <code>alias</code> (replace a value's
-          expression with a bitcast and force it inline) and <code>materialize</code> (turn a
-          forced-inline arithmetic definition back into a statement when the renderer cannot expand
-          it).
+          expression with a bitcast and force it inline) and <code>materialize</code> (give every
+          live anchored integer forced-inline definition an ordered statement next to its anchor).
         </p>
         <p>Call interfaces are resolved in this order of strength:</p>
         <ol class="steps">
+          <li>
+            <strong>Variadic library rule.</strong> With <code>view === 'source'</code>, a
+            <code>call_argument_signatures</code> entry can supply the actual types for the call.
+          </li>
+          <li>
+            <strong>Observed contracts.</strong> A single established call contract is used in
+            either view; in the source view several established contracts are accepted when they are
+            identical (<code>repeatedContract</code>). Both paths are admitted through
+            <code>arity_closure</code>.
+          </li>
           <li>
             <strong>Established declaration.</strong> <code>signatureFor(subject)</code> accepts
             exactly one established or asserted signature for the call and the function, whose ABI
             id matches the evidence ABI and whose types resolve to ABI types. Conflicts and missing
             pieces yield <code>null</code>.
-          </li>
-          <li>
-            <strong>Observed contracts.</strong> With <code>view === 'source'</code>, all
-            established call contracts may be used if they are identical
-            (<code>repeatedContract</code>). A variadic library rule
-            (<code>call_argument_signatures</code>) can supply stronger actual types.
           </li>
           <li>
             <strong>Inferred callee.</strong> Otherwise an <code>InferredCallee</code> from
@@ -691,14 +695,15 @@ export interface ExitScratchSlice {
           scalar-width floating-bank argument is presented as the IEEE value of its lane (<code
             >{ kind: 'float', bits: 32 | 64 }</code
           >), because every supported C ABI passes such an argument as
-          <code>float</code>/<code>double</code>. A hidden-result pointer register outside the
-          argument registers (AAPCS64 <code>x8</code>) becomes the incoming indirect result location
-          under the <code>indirect_result</code> rule.
+          <code>float</code>/<code>double</code>. In the source view, a hidden-result pointer
+          register outside the argument registers (AAPCS64 <code>x8</code>) becomes the incoming
+          indirect result location under the <code>indirect_result</code> rule.
         </p>
         <p>
-          If an established, completely classifiable, non-variadic function signature exists, every
-          parameter and every return location must bind; only then are the synthetic formals
-          discarded in favour of the declared ones, and the declared parameter names are copied into
+          If an established, completely classifiable, non-variadic function signature without a
+          hidden result exists, every parameter and every return location must bind; only then are
+          the synthetic formals discarded in favour of the declared ones, and the declared parameter
+          names are copied into
           <code>parameter_names</code>. The <code>functionSignature</code> also suppresses inferred
           result rules: a declaration is stronger evidence than any observation.
         </p>
@@ -777,13 +782,13 @@ export interface ExitScratchSlice {
           <code>physical_inputs</code> is deliberately empty: <code>planSource</code>'s call and
           return projections carry the interface explicitly. A projected return stores only its
           uncertain outputs. The checked view's visible difference here is that those uncertain
-          return outputs stay results, while the source view may move ABI-scratch slices to
-          <code>exit_scratch</code>.
+          return outputs stay outputs (an uncertain physical overlay), while the source view may
+          move ABI-scratch slices to <code>exit_scratch</code>.
         </p>
         <p>
           The source view then converts possible-return slices into <code>exit_scratch</code>. This
           is the careful part of the return model. For each inferred return, an output slice that
-          overlaps positive result evidence stays a result. Otherwise
+          overlaps positive result evidence stays an output. Otherwise
           <code>scratch(root, start)</code> walks backward through lossless transport (identity
           bitcasts, extracts, concats, phis) and classifies the slice as:
         </p>
@@ -840,14 +845,15 @@ export interface ExitScratchSlice {
           control, or the consuming call for variadic stores).
         </p>
         <p>
-          The final signature is <code>sourcePlan.signature</code>, but it is dropped when a
-          physical parameter was not represented by the projection, or when the entry stack base is
-          live (in which case the function is presented with an explicit <code>entry_sp</code>).
-          Memory views come from type-recovery shapes and are removed when the same node is claimed
-          by two fields (<code>ambiguous</code>), when the field is conflicting, or when the field
-          width does not equal the access width. Diagnostics are emitted for live unknown
-          expressions, unknown effects, physical or incomplete call interfaces, incomplete return
-          storage, and unresolved control boundaries — always as
+          When a source plan exists the final signature is <code>sourcePlan.signature</code>;
+          otherwise it is the boundary projector's function signature, dropped when a physical
+          parameter was not represented by the projection. In either case it is dropped when the
+          entry stack base is live (the function is then presented with an explicit
+          <code>entry_sp</code>). Memory views come from type-recovery shapes and are removed when
+          the same node is claimed by two fields (<code>ambiguous</code>), when the field is
+          conflicting, or when the field width does not equal the access width. Diagnostics are
+          emitted for live unknown expressions, unknown effects, physical or incomplete call
+          interfaces, incomplete return storage, and unresolved control boundaries — always as
           <code>unavailable_semantics</code> warnings with the origin's evidence ids.
         </p>
         <p>
@@ -866,12 +872,11 @@ export interface ExitScratchSlice {
           <span class="title">Ordering matters</span>
           <p>
             Stack planning must follow call planning (closures decide what may be private); cell
-            recombination must follow stack planning (it consumes the address facts) and precede
-            expression normalization (which may then see whole values); the identity lattice must
-            follow STACK and call aliasing (aliases are inputs to identities); and
-            floating/signature projections must come last (they inspect final formals and promoted
-            slots). Changing this order changes output, so the code keeps the passes in one visible
-            sequence rather than hiding them behind hooks.
+            recombination must follow stack planning and precede expression normalization (which may
+            then see whole values); the identity lattice must follow stack and call aliasing
+            (aliases are inputs to identities); and floating/signature projections must come last
+            (they inspect final formals and promoted slots). Changing this order changes output, so
+            the code keeps the passes in one visible sequence rather than hiding them behind hooks.
           </p>
         </div>
       </section>
@@ -879,11 +884,12 @@ export interface ExitScratchSlice {
       <section id="views">
         <h2>Source vs checked view</h2>
         <p>
-          Both views run the whole reconstruction pipeline. The difference is a small, explicit set
-          of <code>view === 'source'</code> gates. The checked view is not “raw assembly”: it still
-          folds pure identities, recomputes ranges, projects boundaries from types and records
-          diagnostics. It simply refuses every rewrite whose justification is a presentation
-          argument rather than a semantic identity.
+          Both views run the reconstruction pipeline. The difference is a small, explicit set of
+          <code>view === 'source'</code> gates, plus the three source-only passes (constant
+          projection, cell recombination and variadic stack arguments). The checked view is not “raw
+          assembly”: it still folds pure identities, recomputes ranges, projects boundaries from
+          types and records diagnostics. It simply refuses every rewrite whose justification is a
+          presentation argument rather than a semantic identity.
         </p>
         <table>
           <thead>
@@ -993,9 +999,27 @@ export interface ExitScratchSlice {
           <a class="src" href="../../src/reconstruction/source-stack.ts"
             >src/reconstruction/source-stack.ts</a
           >
-          and
           <a class="src" href="../../src/reconstruction/source-expressions.ts"
             >src/reconstruction/source-expressions.ts</a
+          >,
+          <a class="src" href="../../src/reconstruction/source-cells.ts"
+            >src/reconstruction/source-cells.ts</a
+          >,
+          <a class="src" href="../../src/reconstruction/source-data.ts"
+            >src/reconstruction/source-data.ts</a
+          >,
+          <a class="src" href="../../src/reconstruction/source-variadic.ts"
+            >src/reconstruction/source-variadic.ts</a
+          >,
+          <a class="src" href="../../src/reconstruction/source-fp.ts"
+            >src/reconstruction/source-fp.ts</a
+          >,
+          <a class="src" href="../../src/reconstruction/source-signature.ts"
+            >src/reconstruction/source-signature.ts</a
+          >
+          and
+          <a class="src" href="../../src/reconstruction/source-results.ts"
+            >src/reconstruction/source-results.ts</a
           >.
         </p>
 
@@ -1028,9 +1052,9 @@ export interface ExitScratchSlice {
               &#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;uint64_t
               count) {
             </text>
-            <text x="24" y="110" class="mono">&#160;&#160;uint32_t remaining;</text>
-            <text x="24" y="126" class="mono">&#160;&#160;uint32_t element;</text>
-            <text x="24" y="142" class="mono">&#160;&#160;uint32_t accumulator_1;</text>
+            <text x="24" y="110" class="mono">&#160;&#160;uint32_t accumulator;</text>
+            <text x="24" y="126" class="mono">&#160;&#160;type_4* address_1;</text>
+            <text x="24" y="142" class="mono">&#160;&#160;uint32_t remaining;</text>
             <text x="24" y="158" class="mono">&#160;&#160;…</text>
             <text x="24" y="186" class="mono">
               &#160;&#160;&#160;&#160;&#160;&#160;element = (*(unaligned_uint32_t *)
@@ -1092,20 +1116,22 @@ export interface ExitScratchSlice {
           </svg>
           <figcaption>
             <strong>Figure 4.</strong> Real output for the same function. The checked view exposes
-            every machine cell and cast; the source view has eliminated register-cell recombination,
-            recovered a <code>const uint32_t *</code> formal, named the loop variables by role
-            (<code>remaining</code> is a decreasing count) and narrowed the result to the observed
-            32-bit width. Both are generated from the same <code>Reconstruction</code> pipeline.
+            every machine cell and cast; the source view has recombined the register cells into
+            whole values, recovered a <code>const uint32_t *</code> formal, named the loop variables
+            by role (<code>remaining</code> is a decreasing count) and narrowed the result to the
+            observed 32-bit width. Both are generated from the same
+            <code>Reconstruction</code> pipeline.
           </figcaption>
         </figure>
 
         <p>
           The difference is not text post-processing. In <code>_fixture_loop</code> the source view
           records a pointer interpretation for <code>address</code> and a narrow width for the count
-          and result, and the loop identity lattice coalesces the loop-carried copies; the renderer
-          then prints declarations for those <code>Reconstruction</code> values. The checked view
-          keeps the <code>field_view</code> and <code>unaligned_uint32_t</code> lvalue because it
-          never ran the source-only formal and cell projections.
+          and result; the renderer then coalesces the loop-carried phi copies into shared variables
+          (<code>phi_copy_coalescing</code>) and prints declarations for those
+          <code>Reconstruction</code> values. The checked view keeps the <code>field_view</code> and
+          <code>unaligned_uint32_t</code> lvalue because it never ran the source-only formal
+          projection or the <code>typed_dereference</code> rule.
         </p>
 
         <h3>A frame-save example: <code>_main</code></h3>
@@ -1167,9 +1193,9 @@ export interface ExitScratchSlice {
             >
             (<code>registerTypeSlices</code>, <code>registerTypes</code>,
             <code>unchangedStorage</code>), which tracks storage per register root rather than
-            assuming one interpretation. If all return paths agree on one integer width, the width
-            is unified with a zero extension; if every path returns the same tuple of types, it is
-            published as <code>return_types</code>.
+            assuming one interpretation. If every return path yields one integer result, the widest
+            width is used and narrower results are zero-extended to it; if every path returns the
+            same tuple of types, it is published as <code>return_types</code>.
           </li>
           <li>
             <strong>Tail interface.</strong> A tail call may determine the result type only when
@@ -1179,10 +1205,10 @@ export interface ExitScratchSlice {
         </ol>
         <p>
           Pointer results are not inferred from width. <code>sourceDataValues</code> resolves a
-          returned address against immutable address facts; if every return yields the same string,
-          the presentation records <code>return_pointer: 'char'</code>, and if every return yields
-          an object (but not all strings) it records <code>'byte'</code>. Otherwise the result stays
-          an integer <code>uintptr_t</code>-like value.
+          returned address against immutable address facts; if every return yields a string, the
+          presentation records <code>return_pointer: 'char'</code>, and if every return yields an
+          object (but not all strings) it records <code>'byte'</code>. Otherwise the result stays an
+          integer <code>uintptr_t</code>-like value.
         </p>
         <p>
           <code>projectSourceSignature</code>
@@ -1360,9 +1386,10 @@ export interface ExitScratchSlice {
           The distinction the task asks about is real: debug/prototype parameter names are not
           “supplied” entity names. They arrive through <code>source.parameter_names</code>, which
           <code>planSource</code> fills from a declared signature (or from
-          <code>argN</code> positionally). The renderer only accepts the positional
-          <code>argN</code> fallback when the function is not <code>inferred</code>; otherwise it
-          lets the role/library machinery name the value. Generic names are a small fixed set
+          <code>argN</code> positionally). <code>planSourceNames</code> ignores a positional
+          <code>argN</code> parameter name when the function is <code>inferred</code>, so a role or
+          library name takes precedence; the renderer's formal naming falls back to the positional
+          <code>argN</code> when no such name applies. Generic names are a small fixed set
           (<code>condition</code>, <code>call_result</code>, <code>element</code>,
           <code>result</code>), not <code>valueN</code>: the <code>valueN</code> spelling is the
           renderer's last-resort identifier for a value (a promoted local falls back to
@@ -1471,7 +1498,7 @@ export interface ExitScratchSlice {
             <path class="edge" d="M200,218 L230,218 L230,161 L248,161" marker-end="url(#arrow)" />
             <text x="234" y="195" class="edge-label">private</text>
             <path class="edge" d="M200,231 L248,261" marker-end="url(#arrow)" />
-            <text x="222" y="255" class="edge-label">incoming</text>
+            <text x="198" y="274" class="edge-label">incoming</text>
             <path class="edge" d="M200,244 L242,244 L242,361 L248,361" marker-end="url(#arrow)" />
             <text x="246" y="300" class="edge-label">RA</text>
             <path class="edge" d="M110,250 L110,328" marker-end="url(#arrow)" />
@@ -1498,20 +1525,22 @@ export interface ExitScratchSlice {
           The planner first computes a taint set: every value derived from a stack address, through
           expressions, phis and memory dependencies. It then walks calls, unknown effects, loads,
           stores and returns. Any tainted value in possible argument or result storage exposes the
-          frame. In the source view, only an address whose offset is unknown exposes the whole
-          frame; an escaped address of known offset designates its own object, never a
-          compiler-owned save slot elsewhere. This distinction is what allows a single promoted
-          local to survive a call that receives its address.
+          frame. For frame saves, an address of unknown origin exposes the whole frame
+          (<code>frameExposed</code>), while an escaped address of known offset only excludes the
+          save group it overlaps: it designates its own object, never a compiler-owned save slot
+          elsewhere. Private-slot promotion itself stays frame-wide: in the source view any escape
+          sets <code>saveEscaped</code> and skips every slot, and the checked view likewise requires
+          <code>!escaped</code>.
         </p>
         <p>
           Promotion itself has a frame-wide prerequisite. In the checked view it requires
           <code>!escaped &amp;&amp; !unknownCallStorage &amp;&amp; !aliased</code>. In the source
-          view it requires <code>!saveEscaped</code>, adds the disjoint-store premise
-          (<code>frame_private_to_activation</code>), and additionally refuses accesses in blocks
-          that reach an open-arity call, or before one in the same block (the call may read that
-          area), slots overlapping established outgoing argument storage, volatile accesses, and any
-          group that is not a negative, exact, non-overlapping interval. Each promoted group is
-          independently checked by
+          view it requires <code>!saveEscaped</code>, applies the disjoint-store premise
+          (<code>frame_private_to_activation</code>, recorded when external stores or calls exist),
+          and additionally refuses accesses in blocks that reach an open-arity call, or before one
+          in the same block (the call may read that area), slots overlapping established outgoing
+          argument storage, volatile accesses, and any group that is not a negative, exact,
+          non-overlapping interval. Each promoted group is independently checked by
           <code>validateStackPromotion</code>
           (<a class="src" href="../../src/reconstruction/local-storage-validation.ts"
             >src/reconstruction/local-storage-validation.ts</a
@@ -1729,10 +1758,12 @@ export interface Requirement {
           <dt>fp_environment</dt>
           <dd>
             One function-level assumption for all FP arithmetic, conversions and environment guards.
-            Each site's <code>state_epoch</code> is the value id of the FPCR/MXCSR state at that
-            operation (entry state, a call clobber, or an unchanged transport of one). A computed or
-            loaded control state does not qualify, so the guard stays explicit. Sites also carry
-            <code>predicate_value_id</code> and <code>supported_predicate_value</code>
+            A guard site's <code>state_epoch</code> is the value id of the FPCR/MXCSR state it
+            assumes (entry state, a call clobber, or an unchanged transport of one); unguarded
+            arithmetic uses an <code>unmodeled:</code> marker and a call site uses the call's effect
+            input id. A computed or loaded control state does not qualify, so the guard stays
+            explicit. Sites also carry <code>predicate_value_id</code> and
+            <code>supported_predicate_value</code>
             for the recognized lifter guard.
           </dd>
           <dt>abi_conformance</dt>
@@ -1751,18 +1782,19 @@ export interface Requirement {
           </dd>
         </dl>
         <p>
-          Record ids are fingerprints: <code>requirement_&lt;hash&gt;</code> and
-          <code>site_&lt;hash&gt;</code> over the function, kind and the identifying rule, site or
-          explanation. That makes them stable across runs of the same revision and prevents two
-          different explanations from sharing an id. Budgets are explicit: 1000 sites per record, 10
-          000 subject ids, 1000 evidence ids, 10 000 instruction ids. The FP site list and the
-          reference sets throw <code>resource_limit</code> when exceeded; the ABI-conformance
-          builder stops admitting further sites at its bound.
+          Record ids are fingerprints. <code>requirement_&lt;hash&gt;</code> hashes the function,
+          kind and the identifying site, rule/explanation or a fixed FP tag;
+          <code>site_&lt;hash&gt;</code> hashes the function with the origin/state (FP) or the rule,
+          explanation and anchors (ABI conformance). That makes them stable across runs of the same
+          revision and prevents two different subjects or rules from sharing an id. Budgets are
+          explicit: 1000 sites per record, 10 000 subject ids, 1000 evidence ids, 10 000 instruction
+          ids. The FP site list and the reference sets throw <code>resource_limit</code> when
+          exceeded; the ABI-conformance builder stops admitting further sites at its bound.
         </p>
         <p>
           In text, the checked view prints one comment per <code>fp_environment</code> requirement,
           in the form <code>/* Requirement requirement_&lt;id&gt; (assumption): … */</code>, before
-          the signature. For <code>_main</code> the real first line is:
+          the signature. For <code>_main</code> the real comment is:
         </p>
         <pre><code>/* Requirement requirement_985231b20718e258c752fe590aa2ee7e6eaec534d6038514b9f4a8001411a67f (assumption): FP arithmetic requires nearest-even rounding, gradual underflow and disabled exception traps; … */</code></pre>
         <p>
@@ -1797,11 +1829,11 @@ export interface Requirement {
           Anything outside that fragment returns <code>unverified</code>, never a false proof.
         </p>
         <p>
-          The session also has global record bounds. <code>records.length</code> is capped at 256;
-          when the 257th candidate arrives, one summary record with subject <code>*</code> is
-          written and later candidates are not attempted. Verified records with identical
-          kind/rule/scope/reason are grouped, with subject ids chunked in groups of 64. ABI
-          conformance sites are grouped the same way. These are metadata bounds only: they never
+          The session also has global record bounds. At most 256 checking actions can store a
+          record; when a further candidate arrives, one terminal summary record with subject
+          <code>*</code> is written and later candidates are not attempted. Verified records with
+          identical kind/rule/scope/reason are grouped, with subject ids chunked in groups of 64.
+          ABI conformance sites are grouped the same way. These are metadata bounds only: they never
           change the text except through the presentation gate below.
         </p>
         <pre><code>presentation(rule, subject, scope, subjectIds?, reason?): boolean {
@@ -1816,10 +1848,11 @@ export interface Requirement {
 }</code></pre>
         <p>
           That boolean is the admission control for source-view rewrites. A rule whose record cannot
-          be stored returns <code>false</code>, and the caller must keep the checked form. Pure
-          semantic folds do not call it: they have no presentation record, only their bitvector
-          check. <code>requireAbi(rule, anchors, explanation)</code> is separate: it records the
-          assumption attached to an <em>applied</em> rewrite and never refuses it.
+          stored returns <code>false</code>, and the caller must keep the checked form. Pure
+          semantic folds do not call it: <code>foldExpressions</code> keeps no record, and the base
+          path of <code>normalizeSourceExpressions</code> uses only its bitvector check.
+          <code>requireAbi(rule, anchors, explanation)</code> is separate: it records the assumption
+          attached to an <em>applied</em> rewrite and never refuses it.
         </p>
 
         <figure class="diagram">
@@ -2073,7 +2106,7 @@ export interface Requirement {
             function and is capped at 8000 units (and 12 000 operations per BDD). When it is
             exhausted, later bitvector candidates are recorded as <code>unverified</code> and
             skipped (<code>skipExhaustedBitvector</code>), and the more explicit form remains.
-            Verified records are grouped, and the record count is capped at 256.
+            Verified records are grouped, and at most 256 checking actions can store a record.
           </li>
           <li>
             <strong>Pointer and type recovery is per function (roadmap R4).</strong>

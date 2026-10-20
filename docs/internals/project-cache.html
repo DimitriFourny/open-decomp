@@ -291,7 +291,7 @@
             <text x="15" y="269" class="small mono">82680f1e…c9adf.default/</text>
 
             <text x="15" y="310" class="lane">
-              project_open(import) — two revisions, no readable in-between state
+              project_open(import) — two revisions; the first is unfinished
             </text>
 
             <rect class="box" x="10" y="325" width="140" height="70" rx="8" />
@@ -337,7 +337,7 @@
           <figcaption>
             <strong>Figure 2.</strong> The directory name is a pure function of content and slice.
             Import commits twice — once for the immutable image, once for decoded metadata and
-            indexes — so a fresh project's first readable snapshot is revision 2, as observed.
+            indexes — so a fresh project's first complete snapshot is revision 2, as observed.
           </figcaption>
         </figure>
 
@@ -371,8 +371,8 @@
           <li>
             <strong>Prepare derived native facts.</strong> <code>prepareQueryImport</code> runs
             runtime metadata, name decoration, <code>discoverFunctions</code>, the string index, the
-            reference index and import-stub classification — all outside SQLite so a failed
-            preparation publishes nothing.
+            reference index and import-stub classification — all outside SQLite, so a failed
+            preparation commits no derived records.
           </li>
           <li>
             <strong>Publish atomically.</strong> One store transaction writes the loaded image,
@@ -418,11 +418,11 @@
           >
           <code>DatabaseSync</code>) and exposes a domain interface: snapshots, images, records,
           indexes, evidence/types/signatures/lineage, annotations, jobs, artifacts, native summaries
-          and transactions. It takes the lock with <code>PRAGMA locking_mode=EXCLUSIVE</code> and
-          <code>BEGIN EXCLUSIVE</code>, enables foreign keys, then switches to WAL. The OS releases
-          the lock if the worker crashes; the next resume reconciles jobs rather than leaving a
-          half-owned database. Prepared statements are compiled per SQL text and cached up to 256
-          entries because statement compilation costs more than most indexed reads.
+          and transactions. It sets <code>PRAGMA locking_mode=EXCLUSIVE</code>, enables foreign
+          keys, takes <code>BEGIN EXCLUSIVE</code>, then switches to WAL. The OS releases the lock
+          if the worker crashes; the next resume reconciles jobs rather than leaving a half-owned
+          database. Prepared statements are compiled per SQL text and cached up to 256 entries
+          because statement compilation costs more than most indexed reads.
         </p>
 
         <h3>Schema version and migration chain</h3>
@@ -498,9 +498,10 @@
         <h3>Tables and columns</h3>
         <p>
           All tables are <code>STRICT</code>. Payload columns contain the tagged encoding described
-          below, not JSON text; entity identifiers are opaque strings with a fixed prefix and 32
-          random bytes, or content-derived for images. The ER diagram groups tables by the question
-          they answer.
+          below, not the domain object as free-form JSON; identifier strings are a fixed prefix
+          followed by 64 lowercase hex digits, content-derived for images, entity records and
+          derived evidence, random for projects, jobs and artifacts. The ER diagram groups tables by
+          the question they answer.
         </p>
         <table>
           <thead>
@@ -582,8 +583,8 @@
               <td><code>lineage</code></td>
               <td><strong>id</strong>, revision, payload</td>
               <td>
-                Split/merge history. IDs are minted at birth and never renamed; lineage records
-                previous/next identities.
+                Split/merge history. Entity IDs are minted at birth and never renamed; lineage
+                records previous/next identities.
               </td>
             </tr>
             <tr>
@@ -778,7 +779,7 @@
   revisionSchema.parse(current);
   return revisionSchema.parse(current + 1);
 }</code></pre>
-        <p>The store repeats that precondition atomically before opening its transaction:</p>
+        <p>The store repeats that precondition before opening its transaction:</p>
         <pre><code>const current = this.#current();
 if (current !== expectedRevision)
   return { state: 'conflict', expected_revision: expectedRevision, current_revision: current };
@@ -844,12 +845,12 @@ if (this.#transaction) fail('invalid_input', 'Nested transactions are forbidden'
         <h2>Revisions, snapshots &amp; annotations</h2>
         <p>
           The project revision is a single integer. It is not a per-table version: it names one
-          complete, immutable view of every fact. Reads take a revision explicitly; a query for
-          revision 2 must return the same answers forever, regardless of revisions committed later.
-          The store implements that with "latest row at or before the requested revision" for
-          images, records, types, signatures, evidence, annotations and loaded images. A record
-          inserted at revision 3 is invisible to a revision-2 query; a deletion at revision 3 is
-          represented by a tombstone, so revision 2 still sees the earlier payload.
+          complete, immutable view of every fact. Reads take a revision explicitly; a store read for
+          revision 2 must return the same rows forever, regardless of revisions committed later. The
+          store implements that with "latest row at or before the requested revision" for images,
+          records, types, signatures, evidence, annotations and loaded images. A record inserted at
+          revision 3 is invisible to a revision-2 query; an annotation removal at revision 3 is a
+          <code>NULL</code>-payload tombstone, so revision 2 still sees the earlier payload.
         </p>
 
         <figure class="diagram">
@@ -899,7 +900,7 @@ if (this.#transaction) fail('invalid_input', 'Nested transactions are forbidden'
             </text>
           </svg>
           <figcaption>
-            <strong>Figure 4.</strong> Revision 2 is the first readable snapshot after an import. A
+            <strong>Figure 4.</strong> Revision 2 is the first complete snapshot after an import. A
             later annotation commit invalidates exact cache authority without destroying the old
             artifact: the old payload can still be reused if its dependency readset fingerprints
             still match.
@@ -911,8 +912,9 @@ if (this.#transaction) fail('invalid_input', 'Nested transactions are forbidden'
           <code>revision</code>; mutations carry <code>expected_revision</code>. The host's
           <code>validateToolRequest</code> can assert either against the current revision before
           work begins, and throws <code>RevisionConflict</code> (code <code>stale_revision</code>)
-          with both numbers. The store repeats the check atomically because time passes between
-          admission and commit. Annotation batches are the richest example:
+          with both numbers. The store repeats the check because time passes between admission and
+          commit, and its single exclusive connection means no other writer can intervene.
+          Annotation batches are the richest example:
         </p>
         <ol class="steps">
           <li>
@@ -938,11 +940,11 @@ if (this.#transaction) fail('invalid_input', 'Nested transactions are forbidden'
           </li>
           <li>
             <strong>Return the new revision.</strong> The result reports
-            <code>previous_revision</code>, <code>revision</code>, applied/removed IDs and
-            <code>invalidation.derived_before_revision</code>. If the precondition fails at commit
-            time, no edits are committed; the tool result is <code>failed</code> with
-            <code>stale_revision</code>, <code>current_revision</code> set, and the job saved as
-            <code>stale</code>.
+            <code>previous_revision</code>, <code>revision</code>, the applied annotations and
+            removed IDs, and <code>invalidation.derived_before_revision</code>. If the precondition
+            fails at commit time, no edits are committed; the tool result is
+            <code>failed</code> with <code>stale_revision</code>, <code>current_revision</code> set,
+            and the job saved as <code>stale</code>.
           </li>
         </ol>
         <div class="callout refusal">
@@ -967,8 +969,8 @@ if (this.#transaction) fail('invalid_input', 'Nested transactions are forbidden'
           <code>ANALYSIS_ARTIFACT_VERSION = 2</code>; the artifact bound is
           <code>MAX_ANALYSIS_ARTIFACT_BYTES = 16 MiB</code>
           (<a class="src" href="../../src/project/cache/model.ts">src/project/cache/model.ts</a>).
-          The exported <code>readAnalysisArtifact</code> is that exact reader for trusted consumers
-          (investigation and catalog assembly), not a second cache path.
+          The exported <code>readAnalysisArtifact</code> is that exact reader for trusted
+          investigation consumers, not a second cache path.
         </p>
 
         <h3>Identity: what makes a result reusable</h3>
@@ -1007,7 +1009,7 @@ if (this.#transaction) fail('invalid_input', 'Nested transactions are forbidden'
           <code>pipelineVersions</code> composes a version record from the loader, decoder, lifter,
           ABI, emitter and one explicit analysis string:
           <code
-            >pipeline/25;discovery/5;targets/2;ssa/5;values-effects/4;stack-calls/9;debug/1;library/8;types/8;annotations/1;structure/3;reconstruction/49</code
+            >pipeline/25;discovery/5;targets/2;ssa/5;values-effects/4;stack-calls/9;debug/1;library/8;types/8;annotations/1;structure/3;reconstruction/50</code
           >. Those numbers are a contract, not a package version: changing any stage's semantics
           requires bumping its entry, which invalidates old artifacts instead of silently serving
           them. <code>acceptsAnalysisIdentity</code> checks the stored components against the
@@ -1214,8 +1216,8 @@ if (existing) {
         <p class="sources">
           <a class="src" href="../../src/project/cache/index.ts">src/project/cache/index.ts</a>
           (<code>runCachedDecompilation</code>). The early return is legitimate because the payload
-          was parsed, size-bounded and validated by <code>loadPayload</code>; no later stage repeats
-          the parse.
+          was parsed, size-bounded and validated by <code>loadPayload</code>; the handler and query
+          service do not parse it again.
         </p>
 
         <div class="callout invariant">
@@ -1236,7 +1238,7 @@ if (existing) {
         <p>
           Reuse across revisions is only safe if the computation that produced the result depended
           on nothing that changed. <code>AnalysisDependencyCollector</code> is a
-          <code>ProjectStore</code> proxy. Every store read it sees at the preparing revision is
+          <code>ProjectStore</code> proxy. Every tracked store read at the preparing revision is
           converted into a typed selector and a canonical fingerprint; reads at other revisions are
           not captured. The selector union is closed: <code>signature</code>, <code>type</code>,
           <code>proof</code>, <code>annotations</code>, <code>type_annotations</code>,
@@ -1244,7 +1246,7 @@ if (existing) {
           <code>function_address</code>.
         </p>
         <pre><code>case 'queryRecords':
-  return (query) =&gt; {
+  return &lt;K extends keyof StoredRecordKinds&gt;(query: RecordQuery&lt;K&gt;) =&gt; {
     const result = target.queryRecords(query);
     if (query.revision === revision) {
       if (query.kind === 'function' &amp;&amp; query.ids !== undefined)
@@ -1279,8 +1281,8 @@ if (existing) {
           (<code>dependency-validation</code>) and bounds the ledger at
           <code>MAX_READS = 100000</code>. If a candidate has no readset, it is not reusable across
           revisions at all. <code>replay</code> and <code>verifyTracedReads</code> do the same for
-          persisted callee units, with a per-store/revision memo so shared closures are checked
-          once.
+          persisted callee units; <code>verifyTracedReads</code> memoizes confirmed reads per store
+          and revision, so shared closures are checked once.
         </p>
 
         <table>
@@ -1363,9 +1365,9 @@ if (existing) {
           <code>publishTransientArtifact</code> — memory only, newest within 64 MiB, readable like a
           published handle for this session but never indexed or written. Native unit persistence
           returns <code>undefined</code>, and the in-process prepared-unit cache returns an empty
-          identity, so nothing is read or left behind. The dependency collector still runs, which
-          keeps work charges and therefore results identical. Imports, indexes, annotations and jobs
-          still persist.
+          identity, so nothing is read or left behind. The dependency collector still runs, so the
+          same computation is performed with the same dependency tracking; only reuse and
+          persistence are skipped. Imports, indexes, annotations and jobs still persist.
         </p>
 
         <h3>The persisted callee-summary tier</h3>
@@ -1392,8 +1394,9 @@ if (existing) {
           a few milliseconds. A single compressed row above
           <code>MAX_NATIVE_SUMMARY_ROW_BYTES = 16 MiB</code> is rejected; the per-project cap is
           <code>DEFAULT_NATIVE_SUMMARY_BYTES = 64 MiB</code>. Queued writes flush at the next
-          publication, when they exceed <code>MAX_PENDING_SUMMARY_BYTES = 8 MiB</code>, or at store
-          close. Eviction is deterministic: superseded revisions are dropped first, then the oldest
+          publication, when a worker request finishes, when they exceed
+          <code>MAX_PENDING_SUMMARY_BYTES = 8 MiB</code>, or at store close. Eviction is
+          deterministic: superseded revisions are dropped first, then the oldest
           <code>(revision, seq)</code> rows until the cap is met.
         </p>
         <div class="callout caveat">
@@ -1525,15 +1528,16 @@ if (existing) {
 
         <h3>Job lifecycle, progress and cancellation</h3>
         <p>
-          <code>submit</code> reserves a queue slot, authorizes the source path, validates the
-          request schema and sends <code>admit</code>. The child writes the queued job and replies;
+          <code>submit</code> reserves a queue slot, validates the request schema, authorizes the
+          source path and sends <code>admit</code>. The child writes the queued job and replies;
           only then does <code>ticket.accepted</code> resolve. The host keeps one running job per
           project and calls <code>run</code> when it is ready; <code>status</code> reads durable
           state. <code>JobTicket.result</code> resolves with the terminal job and, when still in
           memory, its result. A completed recovered job may omit the transient result; callers must
           inspect artifacts or repeat a read-only query. Annotation and decompilation results are
           parsed against their tool output schema at the child boundary, and decompilation results
-          may be marked schema-validated so the host does not parse them again.
+          may be marked schema-validated so the child handler and runtime do not parse them a second
+          time before framing.
         </p>
         <p>
           Progress is written through <code>OperationContext.progress</code>. The runtime throttles
@@ -1616,7 +1620,7 @@ if (existing) {
             <text x="544" y="234" text-anchor="middle" class="edge-label">publishArtifact</text>
             <path class="edge ok" d="M440,264 L62,264" marker-end="url(#arrow)" />
             <text x="320" y="258" text-anchor="middle" class="edge-label">cache: computed</text>
-            <text x="650" y="282" class="small">cold median 0.635 s over five fresh runs</text>
+            <text x="650" y="282" class="small">cold median 0.669 s over five fresh runs</text>
 
             <text x="12" y="318" class="lane">
               (b) warm hit — same project, same artifact identity
@@ -1648,7 +1652,7 @@ if (existing) {
             <text x="544" y="510" text-anchor="middle" class="edge-label">saveJob(completed)</text>
             <path class="edge ok" d="M440,540 L62,540" marker-end="url(#arrow)" />
             <text x="320" y="534" text-anchor="middle" class="edge-label">cache: hit</text>
-            <text x="650" y="566" class="small">warm median 0.403 s over five runs</text>
+            <text x="650" y="566" class="small">warm median 0.499 s over five runs</text>
           </svg>
           <figcaption>
             <strong>Figure 8.</strong> Both paths pay host startup, project open, selector
@@ -1672,15 +1676,15 @@ if (existing) {
             <tr>
               <td>Cold</td>
               <td>fresh <code>--cache</code> directory; import + analysis + publication</td>
-              <td>0.649, 0.635, 0.641, 0.617, 0.610</td>
-              <td>0.635</td>
+              <td>0.654, 0.652, 0.693, 0.669, 0.694</td>
+              <td>0.669</td>
               <td><code>computed</code></td>
             </tr>
             <tr>
               <td>Warm</td>
               <td>same directory; exact artifact at revision 2</td>
-              <td>0.444, 0.403, 0.437, 0.400, 0.397</td>
-              <td>0.403</td>
+              <td>0.504, 0.499, 0.459, 0.501, 0.458</td>
+              <td>0.499</td>
               <td><code>hit</code></td>
             </tr>
           </tbody>
@@ -1689,20 +1693,20 @@ if (existing) {
           Measured with
           <code
             >node dist/src/cli/entry.js decompile fixtures/bin/macho-arm64-symbols --function
-            _fixture_loop --cache /tmp/od-cache</code
+            _fixture_loop --cache /tmp/od-cache --json</code
           >, five independent cold directories and five warm runs, wall time from process spawn. The
-          difference is <strong>0.232 s (36.5%)</strong> on this tiny fixture. The warm run still
-          takes about 0.4 s, almost all of it fixed host/child/startup cost — consistent with the
+          difference is <strong>0.170 s (25.4%)</strong> on this tiny fixture. The warm run still
+          takes about 0.5 s, almost all of it fixed host/child/startup cost — consistent with the
           roadmap note that the CLI cold path pays a fixed per-process cost regardless of cache
           hits. The cold run's real JSON reported <code>cache: "computed"</code>, revision
           <code>2</code>; the warm run reported <code>cache: "hit"</code> with the identical
-          artifact <code>artifact_ed2f7548…f905</code> (656,172 bytes, media type
+          artifact <code>artifact_b25bb973…e9019f</code> (656,172 bytes, media type
           <code>application/vnd.open-decomp.function+json</code>). The project was
-          <code>82680f1e…c9adf.default</code>, project ID <code>project_24254788…c3b42</code>; it
+          <code>82680f1e…c9adf.default</code>, project ID <code>project_41509f28…7c73</code>; it
           held 18 function records, 144 references, 22 symbols, 21 exports, 3 imports and one
           string. Eleven jobs were durably recorded for the two decompilations, but only one
           artifact was published: the hit reused the existing artifact instead of writing a second
-          one. One persisted summary row held <code>381,471</code> compressed bytes for the prepared
+          one. One persisted summary row held <code>381,468</code> compressed bytes for the prepared
           unit of <code>entity_8d3179…eec5e</code>.
         </p>
 
@@ -1749,7 +1753,7 @@ if (existing) {
             <path class="edge" d="M230,153 L192,153" marker-end="url(#arrow)" />
             <rect class="box c3" x="20" y="126" width="170" height="54" rx="8" />
             <text x="105" y="148" text-anchor="middle" class="title">batched flush</text>
-            <text x="105" y="166" text-anchor="middle" class="small">publish / 8 MiB / close</text>
+            <text x="105" y="166" text-anchor="middle" class="small">request / 8 MiB / close</text>
 
             <text x="20" y="222" class="small">
               Per-project cap 64 MiB; eviction by revision, then seq. Encoding is graph-tagged and
@@ -1830,8 +1834,8 @@ if (existing) {
               <td><code>dispatch</code> case</td>
               <td>
                 Image summary/headers/sections/mappings/entry
-                points/relocations/hints/capabilities/types; one-image ambiguity is
-                <code>ambiguous_slice</code>.
+                points/relocations/hints/capabilities/types; an unspecified image in a multi-image
+                snapshot is <code>ambiguous_slice</code>.
               </td>
             </tr>
             <tr>
@@ -1913,13 +1917,13 @@ if (existing) {
           </tbody>
         </table>
         <p>
-          Every worker result passes the same envelope validation. The handler parses against
-          <code>toolSchemas[operation].output</code>, enforces the frame limit, and returns a marked
-          result; the host re-checks the operation/project/revision relationship with
-          <code>validateToolResponse</code>, including the one-revision mutation rule and the output
-          byte budget. A decompilation hit may skip the second parse because
-          <code>runCachedDecompilation</code> already validated the stored payload and sized the
-          response.
+          Every worker result is parsed against the operation's output schema: the handler parses,
+          size-checks and marks its result, and <code>QueryService</code> parses any result that is
+          not already marked and enforces the output-byte limit. MCP additionally re-checks the
+          operation/project/revision relationship with <code>validateToolResponse</code>, including
+          the one-revision mutation rule and the output byte budget. A decompilation hit may skip
+          those parses because <code>runCachedDecompilation</code> already validated the stored
+          payload and sized the response.
         </p>
 
         <h3>MCP mapping and function handles</h3>
@@ -1952,11 +1956,12 @@ if (existing) {
         <p>
           Settings are optional defaults, never a second source of truth. The library does not read
           the file implicitly; entry points call <code>loadSettings</code>, which validates a strict
-          versioned JSON object and reports the source of every effective value. Precedence is
-          built-in default &lt; settings file &lt; explicit CLI flag / API option / MCP request
-          argument. An explicit settings path that is missing is an error; the default path being
-          missing is not. Invalid JSON, an unknown key, a wrong type or an unsupported version is a
-          <code>SettingsError</code> naming the path and key, never a silent fallback.
+          versioned JSON object through <code>inspectSettings</code>, which also reports the source
+          of every effective value. Precedence is built-in default &lt; settings file &lt; explicit
+          CLI flag / API option / MCP request argument. An explicit settings path that is missing is
+          an error; the default path being missing is not. Invalid JSON, an unknown key, a wrong
+          type or an unsupported version is a <code>SettingsError</code> naming the path and key,
+          never a silent fallback.
         </p>
         <table>
           <thead>
@@ -2051,9 +2056,8 @@ if (existing) {
         <h2>Limitations &amp; extension points</h2>
         <p>
           The design intentionally trades flexibility for reproducible snapshots. Some consequences
-          are permanent; others are roadmap items from <code>CONTINUE.md</code>. The code is the
-          authority where the two disagree; in particular, the store is at schema 6 even though some
-          prose still says schema 5.
+          are permanent; others are roadmap items from <code>CONTINUE.md</code>. The table separates
+          what the code does today from work it leaves open.
         </p>
         <table>
           <thead>
@@ -2118,12 +2122,12 @@ if (existing) {
               <td>C1 control escaping in emitted strings remains on the reliability list.</td>
             </tr>
             <tr>
-              <td>Stale prose</td>
+              <td>Persistence version</td>
               <td>
                 <code>STORE_SCHEMA_VERSION = 6</code>; migration 5→6 creates
-                <code>native_summaries</code>.
+                <code>native_summaries</code>, and prepared callee units are persisted in it.
               </td>
-              <td>Docs that say schema 5 or “summaries are not yet persisted” are stale.</td>
+              <td>—</td>
             </tr>
           </tbody>
         </table>
@@ -2146,9 +2150,10 @@ if (existing) {
             <strong>Declare the name and schemas.</strong> Add the name to
             <code>toolNameSchema</code> in
             <a class="src" href="../../src/core/tools.ts">src/core/tools.ts</a> and add its input
-            and output schemas to <code>toolSchemas</code>. Strict objects are the convention; every
-            request carries <code>project_id</code>, <code>revision</code> (or
-            <code>expected_revision</code>) and a budget.
+            and output schemas to <code>toolSchemas</code>. Strict objects are the convention;
+            analysis and navigation requests carry <code>project_id</code> and
+            <code>revision</code> (or <code>expected_revision</code>), and every request carries a
+            budget.
           </li>
           <li>
             <strong>Choose the execution path.</strong> Analysis/navigation tools automatically

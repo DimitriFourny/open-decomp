@@ -60,9 +60,9 @@
         <p class="lede">
           This stage turns typed SSA plus external metadata into non-rewriting source-type
           constraints: associations with exact source and machine bit ranges, observed memory
-          shapes, source signatures, and one image-wide identity for each recovered structure. It
-          never changes the machine type of an IR value; later reconstruction and emitters decide
-          what can be printed.
+          shapes, source signatures, and a single image-wide identity for structure types connected
+          by exact pointer flows. It never changes the machine type of an IR value; later
+          reconstruction and emitters decide what can be printed.
         </p>
         <p class="sources">
           Sources:
@@ -110,8 +110,8 @@
         <p>
           The service pipeline advances through seven named phases in
           <a class="src" href="../../src/service/analysis/index.ts">src/service/analysis/index.ts</a
-          >: <code>lift</code>, <code>ssa</code>, <code>metadata</code>, <code>types</code>,
-          <code>structure</code>, <code>emit</code>, and the surrounding work. At
+          >: <code>decode</code>, <code>lift</code>, <code>ssa</code>, <code>metadata</code>,
+          <code>types</code>, <code>structure</code>, and <code>emit</code>. At
           <code>context.progress('types', 4, 7)</code> the pipeline has a simplified
           <code>SSAForm</code>, a decoded image, resolved call references, and the two metadata
           recoveries it passes in: <code>recoverDebugInfo(image, context)</code> and
@@ -146,11 +146,12 @@
           pipeline calls <code>refineMemoryShapes</code> with callee memory-shape transfers, then
           <code>recoverImageTypes</code> to merge compatible local views across exact pointer flows.
           The final <code>types</code> value is handed to the emitter and to
-          <code>semanticCatalog</code>; the same records feed durable signatures and the
-          <code>function_decompile</code> output. How the projected types become declarations,
-          locals and casts is covered in <a href="reconstruction.html">Source reconstruction</a>;
-          how they are printed is covered in
-          <a href="structuring-emission.html">Structuring &amp; emission</a>.
+          <code>semanticCatalog</code>; a durable signature read from the project feeds recovery as
+          an established input, the selected signature is returned with the
+          <code>function_decompile</code> output, and the catalog feeds annotation validation. How
+          the projected types become declarations, locals and casts is covered in
+          <a href="reconstruction.html">Source reconstruction</a>; how they are printed is covered
+          in <a href="structuring-emission.html">Structuring &amp; emission</a>.
         </p>
 
         <figure class="diagram">
@@ -188,7 +189,7 @@
 
             <text x="280" y="130" text-anchor="middle" class="small">baseline / asserted</text>
             <text x="470" y="130" text-anchor="middle" class="small">callee transfers</text>
-            <text x="660" y="130" text-anchor="middle" class="small">classes + types.h</text>
+            <text x="660" y="130" text-anchor="middle" class="small">merged classes</text>
           </svg>
           <figcaption>
             <strong>Figure 1.</strong> The order is not incidental: physical call/stack facts are
@@ -202,7 +203,7 @@
       <section id="evidence">
         <h2>Evidence, status and bit ranges</h2>
         <p>
-          Every supplied type is a <code>SuppliedTypeRecord</code> carrying an ID, a structural
+          Every supplied type is a <code>SuppliedTypeRecord</code> carrying an ID, a canonical
           <code>RecoveredType</code> definition, a <code>source</code>, a <code>status</code>, and
           evidence IDs. The semantic type model is deliberately small (<a
             class="src"
@@ -210,8 +211,8 @@
             >src/core/model.ts</a
           >): <code>void</code>, <code>unknown</code>, <code>integer</code>, <code>float</code>,
           <code>pointer</code>, <code>array</code>, <code>vector</code>, and <code>structure</code>.
-          Arrays and structures may have <code>null</code> counts, sizes and alignments; those nulls
-          mean “not established”, never “zero”.
+          Array counts and structure sizes and alignments may be <code>null</code>; those nulls mean
+          “not established”, never “zero”.
         </p>
         <p>
           The source set is closed and enumerated by provenance, not by an arbitrary score (<a
@@ -486,17 +487,17 @@ associate(
             partial result with the call diagnostics and publishes no source conclusions.
           </li>
           <li>
-            <strong>Bind physical locations.</strong> For each contract observation, parameter and
-            return locations are matched to pre-effect register/stack snapshots. Register fragments
-            produce associations with the intersection arithmetic above; stack storage becomes a
-            <code>stackTypeSubject</code> keyed by entry-SP-relative offset. Hidden results are
-            modeled as a pointer to the declared return type.
+            <strong>Bind physical locations.</strong> For each contract observation, parameter
+            locations are matched to pre-effect entry snapshots and return locations to post-effect
+            snapshots. Register fragments produce associations with the intersection arithmetic
+            above; stack storage becomes a <code>stackTypeSubject</code> keyed by entry-SP-relative
+            offset. Hidden results are modeled as a pointer to the declared return type.
           </li>
           <li>
             <strong>Group observed accesses.</strong> The affine resolver (next section) normalizes
             every load/store address and every indirect-call target. Accesses group by stack or by
-            affine base; each group records fields, widths, access kinds, strides, dynamic flags,
-            evidence, and whether the base escaped or aliased.
+            affine base; each group records fields, widths, access kinds, strides, dynamic flags and
+            evidence, while escape and alias facts are attached when the shape is built.
           </li>
           <li>
             <strong>Build shapes and candidate types.</strong> <code>buildMemoryShape</code> sorts
@@ -510,7 +511,8 @@ associate(
             <strong>Derive signedness from use.</strong> Float/vector operations associate their
             machine type. Signed division/remainder/arithmetic shift mark their operands signed;
             unsigned division/remainder/logical shift mark them unsigned; ordering comparisons mark
-            operands signed. These are operation-use candidates, not rewrites of the value.
+            operands signed or unsigned according to the predicate. These are operation-use
+            candidates, not rewrites of the value.
           </li>
           <li>
             <strong>Propagate.</strong> A worklist forwards each association along transfer edges
@@ -551,8 +553,8 @@ associate(
             <tr>
               <td><code>incompatible_types</code></td>
               <td>
-                Two declared alternatives at the same subject/offset/width have different canonical
-                definitions, or one type ID has different definitions
+                Two declared alternatives at the same subject/source offset/width/machine offset
+                have different canonical definitions, or one type ID has different definitions
               </td>
               <td>
                 Associations become <code>conflicting</code>; the diagnostic names every evidence ID
@@ -630,6 +632,7 @@ associate(
           <code>observed_extent</code> is explicitly “constant-displacement accesses only”.
         </p>
         <pre><code>export interface MemoryShape {
+  readonly id: string;
   readonly base: { readonly kind: 'value'; readonly value_id: string } | { readonly kind: 'stack' };
   readonly type_id: string;
   /** Relative origin of the incomplete structure view; not a complete object boundary. */
@@ -653,9 +656,9 @@ associate(
         </p>
         <ul>
           <li>
-            Constants and <code>add</code>/<code>sub</code> with one constant addend accumulate into
-            <code>offset</code>, wrapped with <code>BigInt.asIntN(64, …)</code>. The test suite
-            checks that repeated offsets wrap at machine width.
+            <code>add</code>/<code>sub</code> with one constant addend accumulate that addend into
+            <code>offset</code>, wrapped with <code>BigInt.asIntN(64, …)</code>; a bare constant
+            remains its own base. The test suite checks that repeated offsets wrap at machine width.
           </li>
           <li>
             <code>or</code>/<code>xor</code> with zero and <code>and</code> with
@@ -797,8 +800,9 @@ associate(
         <p>
           Refinement is transactional. It copies the existing result, adds evidence records and
           diagnostics, and on any budget/cancellation failure returns the original result plus a
-          partial state and a <code>resource_limit</code> diagnostic. It never reruns ABI, SSA or
-          stack analysis, and no foreign callee value becomes a caller SSA declaration.
+          partial state and a <code>resource_limit</code> or <code>cancelled</code> diagnostic. It
+          never reruns ABI, SSA or stack analysis, and no foreign callee value becomes a caller SSA
+          declaration.
         </p>
 
         <h3>Worked example: two field accesses become a struct</h3>
@@ -816,16 +820,16 @@ associate(
         <p>
           The repository fixtures contain no multi-field pointer struct, so for the struct case I
           compiled a small local C fixture (outside the repository) with
-          <code>clang -O1 -g0 -dynamiclib</code>:
+          <code>clang -O1 -g0 -dynamiclib -o point.dylib point.c</code>:
         </p>
         <pre><code>struct point { unsigned x; unsigned y; };
 struct point *make_point(struct point *p, unsigned x, unsigned y) { p-&gt;x = x; p-&gt;y = y; return p; }
 unsigned sum_point(struct point *p) { return p-&gt;x + p-&gt;y; }
 unsigned use_point(struct point *p) { return sum_point(p) + make_point(p, 1, 2)-&gt;x; }</code></pre>
         <p>
-          The built binary reports <code>_make_point</code> at <code>va:0x2f0</code>,
-          <code>_sum_point</code> at <code>va:0x2f8</code>, and <code>_use_point</code> at
-          <code>va:0x304</code>. Decompiling <code>_use_point</code> produces:
+          The built binary reports <code>_make_point</code> at <code>va:0x2d0</code>,
+          <code>_sum_point</code> at <code>va:0x2d8</code>, and <code>_use_point</code> at
+          <code>va:0x2e4</code>. Decompiling <code>_use_point</code> produces:
         </p>
         <pre><code>typedef struct use_point_arg0 use_point_arg0;
 uint32_t use_point(use_point_arg0* address) {
@@ -856,7 +860,7 @@ struct use_point_arg0 { uint32_t field_0x0; uint32_t field_0x4; };</code></pre>
             </title>
 
             <rect class="box muted" x="10" y="10" width="300" height="54" rx="8" />
-            <text x="160" y="32" text-anchor="middle" class="title">use_point @ va:0x304</text>
+            <text x="160" y="32" text-anchor="middle" class="title">use_point @ va:0x2e4</text>
             <text x="160" y="50" text-anchor="middle" class="small">clang -O1 local fixture</text>
 
             <path class="edge" d="M160,64 L160,86 L95,86 L95,108" marker-end="url(#arrow)" />
@@ -919,9 +923,9 @@ struct use_point_arg0 { uint32_t field_0x0; uint32_t field_0x4; };</code></pre>
         <h2>Image-scoped struct identity</h2>
         <p>
           A function-local shape cannot answer whether two functions observed the same structure.
-          <code>src/analysis/types/image-types.ts</code> supplies that identity: every function
-          contributes <em>objects</em> (views at displacement zero plus pointer values at exact
-          flows), and one unification merges the views connected by those flows. The key is
+          <code>src/analysis/types/image-types.ts</code> supplies that identity: each analyzed
+          function contributes <em>objects</em> (views at displacement zero plus pointer values at
+          exact flows), and one unification merges the views connected by those flows. The key is
           explicit: an image-level anchor is the value a function receives in an integer argument
           register, returns in its result register, or the address of one entry-SP-relative stack
           object.
@@ -962,8 +966,8 @@ struct use_point_arg0 { uint32_t field_0x0; uint32_t field_0x4; };</code></pre>
         </p>
         <p>
           Names are deterministic and evidence-ranked. An argument anchor outranks a return anchor,
-          which outranks a caller stack slot. Names are <code>fn_argN</code>, <code>fn_ret</code>,
-          or <code>fn_local_hex</code>; pointee classes without their own flow identity are named
+          which outranks a stack address. Names are <code>fn_argN</code>, <code>fn_ret</code>, or
+          <code>fn_local_hex</code>; pointee classes without their own flow identity are named
           <code>owner_foffset[e]</code> in four deterministic rounds; anything left is
           <code>fn_objN</code>. A bounded class appends a four-hex-digit digest of the merged
           layout, so one name never denotes two layouts; refused-union name collisions get a numeric
@@ -1032,18 +1036,20 @@ struct use_point_arg0 { uint32_t field_0x0; uint32_t field_0x4; };</code></pre>
 
         <h3>The <code>types</code> command and <code>types.h</code></h3>
         <p>
-          <code>executeImageTypes</code> in
-          <a class="src" href="../../src/service/analysis/index.ts"
-            >src/service/analysis/index.ts</a
+          The <code>types</code> query in
+          <a class="src" href="../../src/service/queries/handler.ts"
+            >src/service/queries/handler.ts</a
           >
-          recovers metadata, loads the function index, and calls <code>imageTypeDump</code> with a
-          byte bound taken from the output budget, the optional result limit, and the response frame
-          limit. <code>imageTypeDump</code> gives the pass <code>floor(remaining*3/4)</code> work,
-          analyzes every function body in entry order as far as the budget allows, then solves once.
-          It filters to non-local classes with at least one observed member, renders C declarations,
-          and halves the number of shown classes until the text fits <code>max_bytes</code>. The
-          result is <code>complete</code> only when every function was analyzed and every class was
-          shown; otherwise it is <code>partial</code>.
+          computes a byte bound from the output budget, the optional result limit, and the response
+          frame limit, then calls <code>executeImageTypes</code> in
+          <a class="src" href="../../src/service/analysis/index.ts">src/service/analysis/index.ts</a
+          >, which recovers metadata, loads the function index, and passes the bound to
+          <code>imageTypeDump</code>. <code>imageTypeDump</code> gives the pass
+          <code>floor(remaining*3/4)</code> work, analyzes every function body in entry order as far
+          as the budget allows, then solves once. It filters to non-local classes with at least one
+          observed member, renders C declarations, and halves the number of shown classes until the
+          text fits <code>max_bytes</code>. The result is <code>complete</code> only when every
+          function was analyzed and every class was shown; otherwise it is <code>partial</code>.
         </p>
         <p>
           <a class="src" href="../../src/emitters/image-types.ts">src/emitters/image-types.ts</a>
@@ -1067,8 +1073,8 @@ struct use_point_arg0 { uint32_t field_0x0; uint32_t field_0x4; };</code></pre>
       <section id="debug">
         <h2>Debug formats: DWARF and CodeView</h2>
         <p>
-          Debug information is the strongest structural evidence available, but it is treated as
-          supplied bytes with an exact identity, never as a filesystem lookup.
+          Debug information supplies structural evidence, but it is treated as supplied bytes with
+          an exact identity, never as a filesystem lookup.
           <code>recoverDebugInfo(image, context, external?)</code>
           (<a class="src" href="../../src/metadata/debug/index.ts">src/metadata/debug/index.ts</a>)
           accepts only an optional host-owned <code>ExternalDebugInput</code> with
@@ -1110,8 +1116,9 @@ struct use_point_arg0 { uint32_t field_0x0; uint32_t field_0x4; };</code></pre>
           >
           matches the image UUID <code>7d08d21e-2af8-3aa2-9bdc-0ea4464b5088</code> and yields 60
           types, 17 functions with 17 signatures, 60 variables, and 161 line rows; it reports
-          <code>partial</code> because some location expressions use unsupported opcodes. The
-          recovered <code>fixture_memory</code> signature at <code>va:0x1000005c0</code> is
+          <code>partial</code> because location expressions use unsupported opcodes or compound
+          forms, and two subroutine types are unsupported. The recovered
+          <code>fixture_memory</code> signature at <code>va:0x1000005c0</code> is
           <code>u64 (u64 *, u64)</code> with parameter names <code>p</code> and <code>delta</code>.
         </p>
 
@@ -1122,12 +1129,13 @@ struct use_point_arg0 { uint32_t field_0x0; uint32_t field_0x4; };</code></pre>
           parses the target's Mach-O load commands to obtain CPU type, subtype and
           <code>LC_UUID</code>. For external bytes it accepts a thin Mach-O or a universal
           container, requires the target to have an <code>LC_UUID</code>, and keeps exactly one
-          slice whose CPU, subtype and UUID all match. Zero matches, multiple matches, or a
-          universal table that disagrees with its slice are <code>conflicting_evidence</code>. Other
-          checks are equally strict: external content SHA-256, at most 128 MiB, no
-          <code>__zdebug</code> or compressed <code>ZLIB</code> sections, no unresolved relocations,
-          no zero-fill DWARF sections, no overlapping sections. Any of those either rejects the
-          input or turns it into an explicit partial diagnosis.
+          slice whose CPU, subtype and UUID all match. Zero or multiple matches are
+          <code>conflicting_evidence</code>; a universal table that disagrees with its slice is a
+          <code>malformed_image</code> error. Other checks are equally strict: external content
+          SHA-256, at most 128 MiB, no <code>__zdebug</code> or compressed
+          <code>ZLIB</code> sections, no unresolved relocations, no zero-fill DWARF sections, no
+          overlapping sections. Any of those either rejects the input or turns it into an explicit
+          partial diagnosis.
         </p>
 
         <h3>DWARF sections and DIE parsing</h3>
@@ -1161,8 +1169,8 @@ struct use_point_arg0 { uint32_t field_0x0; uint32_t field_0x4; };</code></pre>
           <code>DW_AT_upper_bound</code>/<code>DW_AT_count</code> and subrange children, base-type
           encoding, pointer size, and <code>DW_AT_alignment</code> when present. A structure is
           accepted only if every member has a known type, a byte offset, no bitfield bits, a bounded
-          name, and fits the declared size; otherwise it becomes <code>unknown</code> with an
-          <code>unavailable_semantics</code> diagnostic. Pointers are accepted only at 8 bytes.
+          name, and starts within the declared size; otherwise it becomes <code>unknown</code> with
+          an <code>unavailable_semantics</code> diagnostic. Pointers are accepted only at 8 bytes.
           Arrays become nested <code>array</code> types whose count may be <code>null</code>.
         </p>
         <p>
@@ -1255,10 +1263,10 @@ struct use_point_arg0 { uint32_t field_0x0; uint32_t field_0x4; };</code></pre>
             <text x="770" y="224" text-anchor="middle" class="title">DebugRecovery</text>
             <text x="770" y="246" text-anchor="middle" class="small">types · signatures</text>
             <text x="770" y="266" text-anchor="middle" class="small">
-              lines · variables · evidence
+              data: lines · variables · evidence
             </text>
             <text x="770" y="286" text-anchor="middle" class="small">
-              state: absent | partial | complete
+              status: absent | partial | complete
             </text>
 
             <rect class="box muted" x="620" y="40" width="300" height="90" rx="8" />
@@ -1292,11 +1300,11 @@ struct use_point_arg0 { uint32_t field_0x0; uint32_t field_0x4; };</code></pre>
             class="src"
             href="../../src/metadata/library-contracts/index.ts"
             >src/metadata/library-contracts/index.ts</a
-          >) matches imports by exact original name and nominal library identity. Weak imports and
-          imports bound through a nonzero relocation addend are excluded and reported as
-          <code>unavailable_semantics</code>; their nominal identity does not establish the callable
-          contract. Local symbols, demangled text, ordinals, and imported pointer storage never
-          create contracts.
+          >) matches imports by the normalized C spelling of the exact import name and nominal
+          library identity. Weak imports and imports bound through a nonzero relocation addend are
+          excluded and reported as <code>unavailable_semantics</code>; their nominal identity does
+          not establish the callable contract. Local symbols, demangled text, ordinals, and imported
+          pointer storage never create contracts.
         </p>
         <p>
           There are two declaration tables. The curated
@@ -1835,7 +1843,7 @@ puts((const char*)fixture_string());</code></pre>
           <li>
             Add tests for the positive match, a wrong-library negative, and a weak/adjusted import
             refusal. The generated decoder validates every type code and handle, so a malformed code
-            fails at load rather than producing a partial layout.
+            fails when decoded rather than producing a partial layout.
           </li>
         </ol>
 
@@ -1870,8 +1878,7 @@ puts((const char*)fixture_string());</code></pre>
             is consistent on the main points (non-rewriting associations, exact bit ranges, image
             identity, bounded exploration). The code additionally shows that no shipped surface
             passes external debug input, that a sibling dSYM is never discovered, and that CodeView
-            is identity-only; the secondary text is easy to read as if debug types were always
-            available. Treat the code paths above as authoritative.
+            is identity-only. Treat the code paths above as authoritative.
           </p>
         </div>
       </section>
