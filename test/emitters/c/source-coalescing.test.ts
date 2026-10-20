@@ -202,6 +202,62 @@ for (const language of ['c-like', 'python-like'] as const)
       // Three iterations swap (5, 2) twice; the exit edge swaps once more: 2 - 5.
       assert.equal(BigInt.asUintN(32, actual.values[0]!), 0xfffffffdn);
     });
+
+    test('a narrow value zero-extended into a wider phi shares its storage only when it is int-wide and the extensions are its only reads; high bits stay zero', () => {
+      for (const [bits, withSource, read] of [
+        [16, false, false],
+        [32, false, false],
+        [16, true, false],
+        [32, true, false],
+        [32, true, true],
+      ] as const) {
+        // v = ~(uintN)word; odd words store v (`read`) or the word; both edges pass
+        // zext64(v); return it. The extra narrow read would need a conversion, and a
+        // 16-bit `~` promotes to signed int in C, so its wide definition would too.
+        const b = program(`coalesce-widen-${bits}-${withSource}-${read}`),
+          entry = b.block('entry'),
+          odd = b.block('odd'),
+          even = b.block('even'),
+          join = b.block('join', [i64]);
+        const word = entry.load(i32, entry.constant(i64, 0x1000n));
+        const narrow = bits === 32 ? word : entry.cast('truncate', integer(16), word);
+        const v = entry.unary('not', narrow);
+        entry.branch(
+          entry.compare(
+            'ne',
+            entry.int('and', word, entry.constant(i32, 1n)),
+            entry.constant(i32, 0n),
+          ),
+          entry.edge(odd),
+          entry.edge(even),
+        );
+        odd.store(odd.constant(i64, 0x2000n), read ? v : word);
+        odd.jump(join, [odd.cast('zero_extend', i64, v)]);
+        even.jump(join, [even.cast('zero_extend', i64, v)]);
+        const [merged] = join.parameters as [Value];
+        join.return([merged]);
+        const input = b.finish(entry, [i64]);
+        const source = emit(input, language, 'source', withSource),
+          checked = emit(input, language, 'checked', withSource);
+        if (read || bits === 16)
+          assert.notEqual(name(source, v), name(source, merged), source.emission.text);
+        else {
+          assert.ok(rules(source).includes('phi_copy_coalescing'), source.emission.text);
+          assert.equal(name(source, v), name(source, merged), source.emission.text);
+          // The even edge only carried the dropped copy: no empty `else` arm prints.
+          assert.doesNotMatch(source.emission.text, /\belse\b/, source.emission.text);
+        }
+        for (const word of [0, 1, 0x7f, 0xfe]) {
+          const bytes = memory([word]);
+          const expected = execute(checked.emission, new Map(), bytes),
+            actual = execute(source.emission, new Map(), bytes);
+          assert.deepEqual(actual.values, expected.values, `${bits} ${word}`);
+          assert.deepEqual([...actual.memory], [...expected.memory]);
+          const mask = (1n << BigInt(bits)) - 1n;
+          assert.deepEqual(actual.values, [~BigInt(word) & mask], `${bits} ${word}`);
+        }
+      }
+    });
   });
 
 const rdi = register('rdi', 64, 0, 'replace_root', 'x86_64:rdi');
