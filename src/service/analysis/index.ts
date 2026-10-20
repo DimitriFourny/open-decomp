@@ -23,6 +23,7 @@ import { constructSSA } from '../../analysis/ssa/index.js';
 import { abiObservableRegisterMasks } from '../../analysis/ssa/observable-masks.js';
 import { simplifySSA } from '../../analysis/values/index.js';
 import {
+  recoverPointerEvidence,
   recoverTypes,
   refineMemoryShapes,
   type SuppliedSignature,
@@ -535,7 +536,14 @@ export async function executeDecompilation(
       );
       if (refinementFailure) throw new OperationError(refinementFailure);
       const imageTypes = recoverImageTypes(sourceInput, localTypes, types);
-      types = imageTypes.types;
+      // Pointer-ness reaches every value derived from, joined with or compared
+      // to an address only once local, callee-summary and image views are in.
+      types = recoverPointerEvidence(ir, imageTypes.types, fullContext, {
+        slice_id: image.selected_slice_id,
+        revision: args.revision,
+        layout: components.abi.layout,
+        max_work: context.budget.work,
+      });
       context.progress('emit', 6, 7);
       const emit = args.options.emitter === 'python-like' ? emitPythonLike : emitC;
       const emitted = emit(

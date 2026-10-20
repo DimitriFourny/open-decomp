@@ -187,7 +187,13 @@ export function functionTypeObjects(
       pointees: { offset: bigint; stride: bigint | null; object: string }[] = [];
     for (const field of shape.fields) {
       budget.charge(1 + field.value_ids.length);
-      if (field.dynamic || field.offset < 0n) continue;
+      // An access that lost an overlap is not a layout member of this view.
+      if (
+        field.dynamic ||
+        field.offset < 0n ||
+        (definition?.kind === 'structure' && !declared.has(field.id))
+      )
+        continue;
       const type_id = declared.get(field.id);
       fields.push({
         offset: field.offset,
@@ -243,6 +249,45 @@ export function functionTypeObjects(
   };
   for (const [index, value] of nativeArgumentValues(ir, types.calls, ir.id, observed, context))
     anchor(value, { kind: 'argument', function_id: fn.id, index }, true);
+  // A hidden-result pointer register outside the argument registers (AAPCS64
+  // x8) read at entry and stored through is the incoming result location: its
+  // object is this function's result, named by that role.
+  const hidden = abi.classifyCall({
+    returns: {
+      kind: 'aggregate',
+      size: 32n,
+      alignment: 8,
+      fields: [0n, 8n, 16n, 24n].map((offset) => ({
+        offset,
+        type: { kind: 'integer' as const, bits: 64, signed: false },
+      })),
+    },
+    parameters: [],
+    variadic: false,
+    fixed_parameter_count: 0,
+  }).hidden_result;
+  if (
+    hidden?.kind === 'indirect' &&
+    'root' in hidden.pointer &&
+    !registers.some((register) => 'root' in hidden.pointer && register.root === hidden.pointer.root)
+  ) {
+    const entry = ir.register_states.find((row) => row.block === ir.entry)?.entry ?? [];
+    const value = registerValue(
+      entry,
+      { ...hidden.pointer, offset_bits: 0, width_bits: 64 },
+      concatenations,
+    );
+    if (
+      value &&
+      types.shapes.some(
+        (shape) =>
+          shape.base.kind === 'value' &&
+          shape.base.value_id === value.id &&
+          shape.fields.some((field) => field.access.includes('write')),
+      )
+    )
+      anchor(value, { kind: 'return', function_id: fn.id }, true);
+  }
   const location = abi.classifyCall({
     returns: { kind: 'pointer' },
     parameters: [],

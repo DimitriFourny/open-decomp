@@ -47,10 +47,13 @@ Root causes found in the code, in the order we plan to address them:
 
 ## R4: Pointer and type inference
 
-- [ ] Propagate pointer-ness through the image: a value is a pointer when it is dereferenced, passed where a known prototype expects a pointer, returned from an allocator, compared with a pointer, or derived by add/sub from a pointer. Run this on the callee-summary and image-type paths (`src/service/analysis/image-types.ts`), not only per function.
-- [ ] Resolve conflicts by evidence weight instead of dropping the type: when one candidate has dereference evidence and the other only an integer use, keep the pointer type and leave a visible cast at the integer use.
+- [x] Propagate pointer-ness through the image: a value is a pointer when it is dereferenced, passed where a known prototype expects a pointer, returned from an allocator, compared with a pointer, or derived by add/sub from a pointer. Run this on the callee-summary and image-type paths (`src/service/analysis/image-types.ts`), not only per function.
+  - `recoverPointerEvidence` (`src/analysis/types/pointers.ts`) runs after local, callee-summary (`refineMemoryShapes`) and image types, seeded by every pointer association they produced. Open: an image flow whose callee dereferences a parameter does not yet bind the caller's argument value unless a callee summary transfer did (`applyImageTypes` adds no value associations).
+- [x] Resolve conflicts by evidence weight instead of dropping the type: when one candidate has dereference evidence and the other only an integer use, keep the pointer type and leave a visible cast at the integer use.
 - [ ] Name recovered structures from their strongest evidence: prototype parameter type, allocator size plus use site, or the field-access pattern shared across functions. Fall back to `type_N` only without any of these.
-- [ ] Render pointer arithmetic as indexing or field access when stride and base are established.
+  - Done: argument/result roles and shared views already named classes; the AAPCS64 hidden-result object now gets the `<function>_ret` role name. Open: allocator size plus use site needs an allocator attribute in the library catalog (none exists; a name list would special-case functions).
+- [x] Render pointer arithmetic as indexing or field access when stride and base are established.
+  - Element pointers derived by whole-element steps index (`p[k]`), record strides filled by one scalar present as scalar arrays, overlapping views keep the heavier layout so its members render as fields. Open: a member typed integer but accessed as `double` (`matrix_aggregate` +16) still prints a cast.
   - Acceptance: on the dev loop, integer-typed locals that are dereferenced become pointers. Struct field access replaces `*(T *)(p + off)` where a layout is recovered. No source type contradicts library prototypes or debug data.
 
 ## R5: Inference mode (opt-in guessing)
