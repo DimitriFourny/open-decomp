@@ -718,6 +718,22 @@ export function planSourceStack(
   if (view === 'source' && unknownCallStorage) {
     // Bounded search; an exhausted allowance leaves the remaining areas open.
     let allowance = 4096;
+    // Private slots in ascending offset order with the stores covering them.
+    // A covering store contains the slot's first byte.
+    const storeAccesses = new Map<string, (typeof accesses)[number]>();
+    for (const access of accesses)
+      if (access.node.kind === 'store') storeAccesses.set(access.node.id, access);
+    const slotsByOffset = [...groups.values()]
+      .map((group) => group[0]!)
+      .filter((slot) => slot.end <= 0n)
+      .sort((left, right) => (left.offset < right.offset ? -1 : 1))
+      .map((slot) => ({
+        slot,
+        covering: (storesByByte.get(slot.offset) ?? []).flatMap((node) => {
+          const access = storeAccesses.get(node.id);
+          return access && access.end >= slot.end ? [access] : [];
+        }),
+      }));
     for (const block of blocks.values())
       for (let position = 0; position < block.statements.length; position++) {
         const call = block.statements[position]!;
@@ -744,22 +760,11 @@ export function planSourceStack(
         let bound: bigint | null = null;
         if (entrySp !== undefined) {
           const area = entrySp + abi.stack_return_address_bytes;
-          const candidates = [...groups.values()]
-            .map((group) => group[0]!)
-            .filter(
-              (first) =>
-                first.offset >= area &&
-                first.end <= 0n &&
-                accesses.some(
-                  (access) =>
-                    access.node.kind === 'store' &&
-                    access.offset <= first.offset &&
-                    access.end >= first.end &&
-                    precedes(access),
-                ),
-            )
-            .sort((left, right) => (left.offset < right.offset ? -1 : 1));
-          for (const slot of candidates) {
+          const candidates = slotsByOffset.filter(
+            ({ slot, covering }) => slot.offset >= area && covering.some(precedes),
+          );
+          for (const { slot } of candidates) {
+            if (allowance-- <= 0) break;
             // Does a load of exactly this slot read its contents at the call?
             const scan = (id: string, start: number): 'read' | 'written' | 'open' => {
               const statements = blocks.get(id)!.statements;
@@ -802,7 +807,6 @@ export function planSourceStack(
               bound = slot.offset;
               break;
             }
-            if (allowance <= 0) break;
           }
         }
         openCalls.push({ block: block.id, position, reachers, bound });

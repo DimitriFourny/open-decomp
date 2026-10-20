@@ -320,17 +320,50 @@ like any plain test; the dead flag storage is not declared.
 
 Source-only `private_stack_promotion` gives exact, initialized, nonvolatile
 negative entry-SP slots stable location names (`local_38` means offset -0x38),
-unless a proven role supplies a better name. Mixed-width overlaps, outgoing
-argument slots, unknown effects and escaping frame addresses stay explicit.
+unless a proven role supplies a better name. Promotion is decided per slot, not
+per frame (`src/reconstruction/source-stack.ts`). Each frame address that
+escapes (a call argument or open argument register, a store to memory outside
+the private frame, a result, an indirect exit, an access at unknown offset)
+contributes the lowest entry-SP offset it can take: exact offsets, constant
+steps, nonnegative (zero-extended, masked or shifted) index addends, cell halves,
+phis and exact spill/reload copies keep that bound; signed or other arithmetic,
+and cycles that keep lowering it, lose it. The stack grows downward, so an object
+designated by an escaped pointer extends toward the entry SP and the caller
+frame: bytes at or above the lowest escaped offset stay explicit frame memory
+(`entry_sp - N`), slots wholly below it promote under the recorded
+`frame_object_base` requirement (code reached through an escaped address never
+steps below it; `container_of` or negative indexing from an interior pointer is
+outside this premise). A frame address stored into bytes an escaped address
+reaches escapes too. No current fact bounds an escaped object's extent
+(library contracts carry no size relation), so every escape covers everything
+above its base: when the lowest-addressed object escapes, as in optimized frames
+that place aggregates below scalars (SQLite `renameColumnFunc`, brotli `main`),
+all slots above it stay explicit; a 21-function SQLite/brotli sample of the LLM task set
+showed no change. Unknown effects and unbounded escapes keep the whole frame
+explicit. Mixed-width overlaps, outgoing argument slots and volatile accesses
+stay explicit. Same-width accesses of differing types (an O0 integer/IEEE pun
+through memory) promote only when every load forwards a bitcast of its reaching
+stored value. Narrower integer loads inside a whole-slot integer slot
+(`wide_slot_parts`) follow the same per-slot gate.
 External-pointer stores are disjoint from an activation's nonescaping private
 frame only under the recorded `frame_private_to_activation` / `abi_conformance`
 requirement; the original alias facts remain in checked output. Open-arity
-calls do not block fresh slots accessed only after those calls, but any slot
-access from which an open call is reachable remains possible argument storage.
-Loop-invariant entry stores may forward through loops. Initialized private-local
-reads may inline across unrelated effects, never across a write to the same
-local. Byte-path validation remains independent, including its explicit
-loop/path bounds; exhausted presentation capacity retains the explicit form.
+calls do not block fresh slots accessed only after those calls. Any slot access
+from which an open call is reachable remains possible argument storage, except
+above the call's bounded argument area (`open_call_argument_area`): a call's
+stack arguments form one contiguous callee-owned area from its callee-entry SP
+(above a pushed return address) that the callee may overwrite, so a slot written
+before the call and read back after it, with no write, call or unknown effect
+between, lies above that area, and so does every slot at or above it. A
+possible argument slot keeps its stores in memory, but `argument_slot_reload`
+forwards each reload that reads the one store reaching it on every path with no
+call, unknown effect or other write between; an O0 argument spill reloaded
+before an open call reads as the argument. A spill rewritten in between keeps
+its local or memory form. Loop-invariant entry stores may forward through loops.
+Initialized private-local reads may inline across unrelated effects, never
+across a write to the same local. Byte-path validation remains independent,
+including its explicit loop/path bounds; exhausted presentation capacity retains
+the explicit form. The checked view keeps the frame-wide conservative gate.
 
 Source-view `call_effects` records a visible call's unchanged memory, register
 and flag clobber contract rather than printing a redundant `boundary(...)`
