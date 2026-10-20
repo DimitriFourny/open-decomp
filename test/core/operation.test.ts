@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createOperationContext, OperationError } from '../../src/core/index.js';
+import { createOperationContext, OperationError, uncharged } from '../../src/core/index.js';
 
 test('work accounting survives phase changes and rejects work beyond the shared limit', () => {
   const context = createOperationContext({ budget: { work: 3 } });
@@ -42,4 +42,14 @@ test('remaining work observes the cumulative counter through context wrappers', 
   assert.equal(wrapped.remainingWork?.(), 6);
   wrapped.checkpoint(5);
   assert.equal(original.remainingWork?.(), 1);
+});
+
+test('an uncharged view consumes no work but still honors cancellation and deadlines', () => {
+  const controller = new AbortController();
+  const original = createOperationContext({ signal: controller.signal, budget: { work: 5 } });
+  const quiet = uncharged(original);
+  quiet.checkpoint(1_000_000);
+  assert.equal(original.remainingWork?.(), 5);
+  controller.abort();
+  assert.throws(() => quiet.checkpoint(1_000_000), { code: 'cancelled' });
 });

@@ -1,6 +1,7 @@
 import {
   entityIdentity,
   fingerprint,
+  uncharged,
   type Annotation,
   type Address,
   type DataLayout,
@@ -63,10 +64,12 @@ export function nativeCallIndex(
 ): NativeCallIndex {
   const cached = nativeIndexes.get(image);
   if (cached?.functions === functions && cached.references === references) return cached;
+  // Built once per image for every later request: see `uncharged`.
+  const quiet = uncharged(context);
   const functionsById = new Map<string, FunctionRecord>();
   const functionsByAddress = new Map<string, FunctionRecord[]>();
   for (const fn of functions) {
-    context.checkpoint(1);
+    quiet.checkpoint(1);
     functionsById.set(fn.id, fn);
     const key = nativeAddressKey(fn.entry),
       list = functionsByAddress.get(key) ?? [];
@@ -75,7 +78,7 @@ export function nativeCallIndex(
   }
   const exportsByAddress = new Map<string, LoadedImage['exports'][number][]>();
   for (const item of image.exports) {
-    context.checkpoint(1);
+    quiet.checkpoint(1);
     if (!item.address) continue;
     const key = nativeAddressKey(item.address),
       list = exportsByAddress.get(key) ?? [];
@@ -85,7 +88,7 @@ export function nativeCallIndex(
   const importsByAddress = new Map<string, LoadedImage['imports'][number][]>();
   const importsById = new Map<string, LoadedImage['imports'][number]>();
   for (const item of image.imports) {
-    context.checkpoint(1);
+    quiet.checkpoint(1);
     importsById.set(item.id, item);
     if (!item.callable_entry) continue;
     const key = nativeAddressKey(item.callable_entry),
@@ -96,7 +99,7 @@ export function nativeCallIndex(
   const referencesByFunction = new Map<string, Map<string, ReferenceRecord[]>>();
   const callersByTarget = new Map<string, ReferenceRecord[]>();
   for (const reference of references) {
-    context.checkpoint(1);
+    quiet.checkpoint(1);
     if (reference.kind === 'call' || reference.kind === 'tail_call') {
       if (reference.to) {
         const key = nativeAddressKey(reference.to),

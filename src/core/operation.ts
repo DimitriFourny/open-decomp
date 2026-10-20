@@ -13,6 +13,15 @@ export class OperationError extends Error {
   }
 }
 
+/** `context` with every work charge dropped: still cancellable and deadline-bound
+ * (a zero charge checks both), but nothing is consumed. Image-scoped indexes are built
+ * once per process and reused by every later request, so charging the request that
+ * happened to build one would make its work, and every budget-dependent decision
+ * after it, depend on which requests ran earlier. */
+export function uncharged(context: OperationContext): OperationContext {
+  return { ...context, checkpoint: () => context.checkpoint(0) };
+}
+
 /** One context per operation; counters and monotonic deadline are never reset by a pass. */
 export function createOperationContext(
   options: {

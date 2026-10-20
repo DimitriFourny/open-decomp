@@ -1,3 +1,4 @@
+import { uncharged } from '../../core/index.js';
 import type {
   FunctionRecord,
   LoadedImage,
@@ -97,16 +98,18 @@ export function loadFunctionGraph(
   const image = loaded.image;
   let indexed = navigation.get(image);
   if (!indexed || indexed.project_id !== scope.store.project_id || indexed.revision !== revision) {
+    // Materialized once per image for every later request: see `uncharged`.
+    const quiet = { store: scope.store, context: uncharged(scope.context) };
     indexed = {
       project_id: scope.store.project_id,
       revision,
       image: {
         ...image,
-        symbols: records(scope, revision, image.id, 'symbol').items,
-        imports: records(scope, revision, image.id, 'import').items,
-        exports: records(scope, revision, image.id, 'export').items,
+        symbols: records(quiet, revision, image.id, 'symbol').items,
+        imports: records(quiet, revision, image.id, 'import').items,
+        exports: records(quiet, revision, image.id, 'export').items,
       },
-      functions: records(scope, revision, image.id, 'function').items,
+      functions: records(quiet, revision, image.id, 'function').items,
     };
     navigation.set(image, indexed);
   }
@@ -133,12 +136,14 @@ export function loadFunctionIndex(
   readonly functions: readonly FunctionRecord[];
   readonly references: readonly ReferenceRecord[];
 } {
+  // Whether materialized earlier or here, the arrays cost the request nothing.
+  const quiet = { store: scope.store, context: uncharged(scope.context) };
   const indexed = navigation.get(image);
   if (!indexed || indexed.project_id !== scope.store.project_id || indexed.revision !== revision)
     return {
-      functions: records(scope, revision, image.id, 'function').items,
-      references: records(scope, revision, image.id, 'reference').items,
+      functions: records(quiet, revision, image.id, 'function').items,
+      references: records(quiet, revision, image.id, 'reference').items,
     };
-  indexed.references ??= records(scope, revision, image.id, 'reference').items;
+  indexed.references ??= records(quiet, revision, image.id, 'reference').items;
   return { functions: indexed.functions, references: indexed.references };
 }

@@ -1,3 +1,4 @@
+import { uncharged } from '../../core/index.js';
 import type { Evidence, LoadedImage, OperationContext } from '../../core/index.js';
 import { recoverRuntimeMetadata } from './index.js';
 import type { RuntimeRecord } from './model.js';
@@ -49,7 +50,9 @@ export function objcImageIndex(
 ): ObjCImageIndex | null {
   const cached = indexes.get(image);
   if (cached?.revision === revision) return cached.index;
-  const metadata = recoverRuntimeMetadata({ image, revision }, context);
+  // Built once per image for every later request: see `uncharged`.
+  const quiet = uncharged(context);
+  const metadata = recoverRuntimeMetadata({ image, revision }, quiet);
   const evidence = new Map(metadata.evidence.map((item) => [item.id, item]));
   const proof = (record: RuntimeRecord): Evidence[] =>
     record.evidence_ids.flatMap((id) => {
@@ -72,7 +75,7 @@ export function objcImageIndex(
     ivars = new Map<string, ObjCIvarFact[]>(),
     superclasses = new Map<string, string>();
   for (const record of metadata.records) {
-    context.checkpoint(1);
+    quiet.checkpoint(1);
     const at = record.address.value,
       fact = { name: record.name, evidence: proof(record) };
     if (record.kind === 'objc_selector') selector_refs.set(at, fact);
@@ -117,7 +120,7 @@ export function objcImageIndex(
   const imageEvidence = new Map(image.evidence.map((item) => [item.id, item]));
   const slots = new Map<bigint, ObjCFact | null>();
   for (const imported of image.imports) {
-    context.checkpoint(1);
+    quiet.checkpoint(1);
     const name = imported.original_name;
     if (!imported.slot || !name?.startsWith('_OBJC_CLASS_$_')) continue;
     const location = image.address_map.translate(imported.slot, 'va');
