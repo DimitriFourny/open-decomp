@@ -8,7 +8,7 @@ Primary consumer is now an LLM reversing an app; the headline metric is **LLM ta
 
 Landed this round (each a merged `wt/*` branch): text-first MCP `function_decompile` (tools/list 350 KB → 34 KB; `_CheckAlias` 211 KB → 2 KB), short handles, compact caveat header; metadata limits never discard pseudocode; selected-mode proof closure fix; 6.9k generated library prototypes + typed imported data (`bun run prototypes`); named GOT/IAT/bind globals and import stubs; string/char literals by evidence; names from prototype parameters/result roles; Darwin variadic stack arguments; SCC-ordered callee summaries; void-result inference; callee-saved save/restore elision; image-scoped struct identity, array-of-struct access, `types` command/view; `open-decomp export` (per-function files + index/strings/imports/exports/`types.h`); cross-request callee reuse (~1.6× one-process p50); ObjC metadata, `-[C sel]` names, message syntax, ivar-named `self`; typed locals and cast minimization; `...` for open arity; noreturn import calls end flow; constant tables/folded read-only loads/function-name constants; `field_0x…` members.
 
-TODO.md P3.6/P3.7 stay open: P3.7's "fewer irrelevant bytes than Ghidra" is still false on Ghidra's 16 questions (6,983 vs 2,518 est. tokens); P3.6 unchanged.
+TODO.md is now the readability roadmap (R1–R5: per-slot stack promotion, region-collapse structuring, expression rule pool, pointer inference, opt-in `likely` inference mode). The token gap remains: 6,983 vs 2,518 est. tokens on Ghidra's 16 questions.
 
 ## Raw evidence (local, not versioned; ignored in .gitignore)
 

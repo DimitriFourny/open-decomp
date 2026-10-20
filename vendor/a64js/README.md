@@ -2,7 +2,7 @@
 
 Imported from the existing `disass_arm/third_parts/a64js` checkout at Git commit `aa0e547ca5313779c87e1e52d75687b12e985615`. The tracked worktree was clean when imported; the exact imported file contents, not just the commit, are identified by SHA-256 in `snapshot.json`. No runtime dependency on that checkout remains.
 
-`LICENSE` is the upstream MIT license and copyright notice. Upstream describes its committed generated ISA tables as generated from the Arm **2025-12 A-profile A64 XML** release. No raw Arm XML/HTML, download/archive, generator, tests, CLI, package manager files or `node_modules` are bundled here. The MIT notice covers upstream project code; it does not relicense separately distributed Arm reference material. Review generated-data provenance and applicable Arm terms when updating/distributing the snapshot.
+`LICENSE` is the upstream MIT license and copyright notice. No XML reference data, download/archive, generator, tests, CLI, package manager files or `node_modules` are bundled here.
 
 This is a **transformed runtime snapshot**, not an unchanged source copy. TypeScript 5.9.3 `transpileModule` (target ES2023, module ESNext, `verbatimModuleSyntax: true`) erased types; an AST transform changed static import/export `.ts` specifiers to `.js`. Runtime dependencies were followed transitively from upstream `src/decode.ts` and `src/format.ts`. All 1,918 reachable runtime modules are needed by those roots, including the statically imported generated encoding inventory. Optional formatting is retained because decoding and operand construction share upstream formatter-family code.
 

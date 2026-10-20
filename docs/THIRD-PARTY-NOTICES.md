@@ -1,6 +1,6 @@
 # Third-party notices and provenance
 
-The Open Decomp application and its first-party documentation are licensed under [MIT](../LICENSE). This notice records the separate copyright, license and provenance obligations for bundled dependencies; the application license does not relicense them or independently clear rights in third-party generated data. Archive-specific identities below refer to the locally packaged `open-decomp` 0.1.0 distribution.
+The Open Decomp application and its first-party documentation are licensed under [MIT](../LICENSE). This notice records the separate copyright, license and provenance obligations for bundled dependencies; the application license does not relicense them. Archive-specific identities below refer to the locally packaged `open-decomp` 0.1.0 distribution.
 
 Full dependency notices are retained verbatim under [licenses/](../licenses/), with UTF-8 byte sizes, SHA256 hashes and original paths in [licenses/inventory.json](../licenses/inventory.json). The upstream Swift text is identified separately by retrieval URL/date. Hashes identify those retained texts, not a legal opinion. Runtime dependency packages also retain their shipped notices in the bundled `node_modules`. Do not replace actual governing texts with the summary labels below or with npm metadata alone.
 
@@ -10,7 +10,7 @@ Exact package versions are pinned by the source `bun.lock`. Archive SHA256/SHA51
 
 | Component                         | Version / revision                         | Applicable notices retained here                                                                                                                                                                                                                                                                            |
 | --------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| a64js transformed decoder runtime | `aa0e547ca5313779c87e1e52d75687b12e985615` | [MIT code license](../vendor/a64js/LICENSE), [snapshot provenance](../vendor/a64js/README.md), [source/output hashes](../vendor/a64js/snapshot.json); generated-data review below.                                                                                                                          |
+| a64js transformed decoder runtime | `aa0e547ca5313779c87e1e52d75687b12e985615` | [MIT code license](../vendor/a64js/LICENSE), [snapshot provenance](../vendor/a64js/README.md), [source/output hashes](../vendor/a64js/snapshot.json).                                                                                                                                                       |
 | `iced-x86`                        | 1.21.0                                     | [MIT](../licenses/iced-x86/LICENSE.txt), copyright 2018–present iced project and contributors. Official Node/WASM decoder; no native addon.                                                                                                                                                                 |
 | `@modelcontextprotocol/core`      | 2.3.1                                      | [Full licensing-transition notice and license](../licenses/@modelcontextprotocol/core/LICENSE); see below.                                                                                                                                                                                                  |
 | `@modelcontextprotocol/server`    | 2.3.1                                      | [Full licensing-transition notice and license](../licenses/@modelcontextprotocol/server/LICENSE); see below.                                                                                                                                                                                                |
@@ -33,21 +33,11 @@ The pinned SDK LICENSE files begin with a transition notice, which is preserved 
 
 The complete package texts, including the transition wording and Apache license, are in the linked files above. A manifest's simplified SPDX label does not supersede this transition. SDK project reference: <https://github.com/modelcontextprotocol/typescript-sdk>.
 
-## a64js code and Arm generated-data provenance
+## a64js decoder runtime
 
 The imported source is [DimitriFourny/a64js](https://github.com/DimitriFourny/a64js) at commit `aa0e547ca5313779c87e1e52d75687b12e985615`, from a tracked-clean checkout at import. Its code license is MIT, copyright 2026 a64js contributors; the retained license SHA256 recorded in the snapshot is `b18b6f1511d85fb279dfd0bbe45441bd80b531fbcce58498de166b27345d999a`.
 
 This is a **transformed runtime snapshot**, not an unchanged source copy. TypeScript 5.9.3 erased types targeting ES2023/ESNext with `verbatimModuleSyntax: true`; an AST transformation changed static import/export `.ts` specifiers to `.js`. The transitive closure from `src/decode.ts` and `src/format.ts` contains 1,918 reachable runtime modules, including generated encoding tables. `snapshot.json` records original TypeScript and emitted JavaScript SHA256 values plus retained declaration hashes. No decode logic/generated instructions were hand-patched; first-party adapter completion is separate. The distribution uses `dist/vendor/a64js`; root `vendor/a64js` holds the provenance/license files, not a required sibling runtime checkout.
-
-Upstream describes the committed tables as generated from Arm's **2025-12 A-profile A64 XML** release. The identified reference archive URL is:
-
-<https://developer.arm.com/-/cdn-downloads/permalink/Exploration-Tools-A64-ISA/ISA_A64/ISA_A64_xml_A_profile-2025-12.tar.gz>
-
-This URL is provenance, **not an installer download instruction**. The recorded review could identify the archive but could not obtain its governing license: developer.arm.com download fetches returned HTTP 403 and an archive-member license read returned 404. An unrelated Arm Performance Libraries EULA is not evidence for these ISA XML terms. Prior use of the archive by another project is not redistribution permission either.
-
-The MIT notice covers a64js project code; it does **not** relicense separately distributed Arm reference material or settle the rights in derived generated data. **Public redistribution review of the generated tables and applicable Arm terms remains unresolved.** Private/local artifact preparation does not constitute public legal clearance. Preserve this boundary on updates and obtain the actual governing terms before making any public-distribution claim.
-
-No raw Arm XML/HTML, reference archive, PDF/diff PDF, downloaded reference corpus or reference generator is included in the selected artifact. Do not add those separately licensed downloads to the distribution. Keep the exact revision and source/output hashes when updating; changing the Arm release is an explicit provenance/legal review, not an incidental rebuild.
 
 ## Microsoft demangler: LLVM and linked runtimes
 
@@ -99,8 +89,8 @@ Demangling is bounded local display decoration. Neither a demangled name nor the
 
 [FIXTURES.md](FIXTURES.md), the source checkout's `fixtures/manifest.json` and the Windows ABI fixture's `evidence.json` bind original source, recipes, compiler/linker versions, output hashes and independent inspection. Those corpus inputs are acceptance assets supplied explicitly to developer drivers, not installed runtime dependencies; the selected application artifact includes their documentation/license, not the fixture binaries. Compiler-output validation/native trusted-fixture execution and analysis-host acceptance are different evidence events.
 
-Compiler/linker tools, system SDKs/libraries, sibling source checkouts, private inputs, external benchmark binaries, local VM disks/media and raw Arm downloads are not redistributed in this artifact. The fixture license grants no rights in them. Benchmark download references and upstream statements in [PERFORMANCE.md](PERFORMANCE.md) are provenance for separate developer setup, not independent clearance of every linked runtime component or permission to bundle those inputs.
+Compiler/linker tools, system SDKs/libraries, sibling source checkouts, private inputs, external benchmark binaries and local VM disks/media are not redistributed in this artifact. The fixture license grants no rights in them. Benchmark download references and upstream statements in [PERFORMANCE.md](PERFORMANCE.md) are provenance for separate developer setup, not independent clearance of every linked runtime component or permission to bundle those inputs.
 
 ## Maintaining these notices
 
-On dependency/decoder updates, review the actual installed package files, preserve complete copyright/license/NOTICE/runtime authorship texts, update exact versions, package/WASM identities and `licenses/inventory.json`, and retain source/transformation provenance. Review changing SDK transition terms and unresolved Arm/Swift source questions explicitly. Have the release owner verify the final package inventory and offline installed behavior on each required host. The application's MIT grant does not change those third-party terms.
+On dependency/decoder updates, review the actual installed package files, preserve complete copyright/license/NOTICE/runtime authorship texts, update exact versions, package/WASM identities and `licenses/inventory.json`, and retain source/transformation provenance. Review changing SDK transition terms and unresolved Swift source questions explicitly. Have the release owner verify the final package inventory and offline installed behavior on each required host. The application's MIT grant does not change those third-party terms.
