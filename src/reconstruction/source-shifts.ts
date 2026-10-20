@@ -59,6 +59,28 @@ export function foldShiftIdiom(
       { kind: 'constant', bits: BigInt(amount) },
       [value],
     );
+  /** The value and bit position a bit is wired from, through slices and
+   * extensions (a sign extension's upper bits are its operand's sign bit). */
+  const bitOrigin = (operand: Value, offset: number): string => {
+    let current = resolve(operand),
+      at = offset;
+    for (let depth = 0; depth < 8; depth++) {
+      const definition = observe(current.id);
+      if (definition?.kind === 'extract') at += definition.offset;
+      else if (
+        definition?.kind === 'cast' &&
+        (definition.op === 'truncate' ||
+          (definition.op === 'zero_extend' && at < bitWidth(definition.value.type)) ||
+          definition.op === 'sign_extend')
+      )
+        // Truncation keeps the operand's low bits; extensions keep them too
+        // and a sign extension repeats the operand's sign bit above it.
+        at = Math.min(at, bitWidth(definition.value.type) - 1);
+      else break;
+      current = resolve(definition.value);
+    }
+    return `${current.id}:${at}`;
+  };
   /** Right-rotation amount 1..w-1 and the rotated operand of a constant rotate. */
   const rotation = (operand: Value): { source: Value; right: number } | null => {
     const definition = define(operand),
@@ -180,9 +202,8 @@ export function foldShiftIdiom(
     if (yes === null || no === null || (yes & mask) !== vacated || (no & mask) !== 0n) continue;
     const sign =
       (test?.kind === 'extract' &&
-        test.offset === width - 1 &&
-        bitWidth(test.value.type) === width &&
-        resolve(test.value).id === source.id) ||
+        bitWidth(pick.condition.type) === 1 &&
+        bitOrigin(test.value, test.offset) === bitOrigin(source, width - 1)) ||
       (test?.kind === 'compare' &&
         test.op === 'slt' &&
         bitWidth(test.left.type) === width &&

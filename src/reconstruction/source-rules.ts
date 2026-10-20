@@ -352,6 +352,29 @@ const sliceWiring: ExpressionRule = {
   },
 };
 
+/** select(sign bit, K1, K2), optionally masked by a constant: the vacated-bit
+ * fill of an arithmetic shift lowered as a logical shift. */
+function signFill(site: RuleSite, operand: Value): boolean {
+  let definition = site.observe(site.resolve(operand).id);
+  if (definition?.kind === 'integer' && definition.op === 'and') {
+    const masked =
+      site.constant(definition.right) !== null
+        ? definition.left
+        : site.constant(definition.left) !== null
+          ? definition.right
+          : null;
+    definition = masked ? site.observe(site.resolve(masked).id) : undefined;
+  }
+  if (
+    definition?.kind !== 'select' ||
+    site.constant(definition.when_true) === null ||
+    site.constant(definition.when_false) === null
+  )
+    return false;
+  const test = site.observe(site.resolve(definition.condition).id);
+  return test?.kind === 'extract' && test.offset === bitWidth(test.value.type) - 1;
+}
+
 /** The low bits of add/sub/mul/and/or/xor (and of a shift left by a count below
  * the narrow width) depend only on the low bits of the operands: carries and
  * partial products only propagate upward. */
@@ -361,6 +384,14 @@ function narrowLowBits(site: RuleSite): Expression | null {
   const source = site.packedSources.get(expression.value.id) ?? site.observe(expression.value.id),
     width = bitWidth(value.type);
   if (source?.kind !== 'integer') return null;
+  // A sign-filled logical shift is an arithmetic shift at its own width (the
+  // shift idiom folds it there); narrowing it first would split the idiom.
+  if (
+    site.view === 'source' &&
+    source.op === 'or' &&
+    (signFill(site, source.left) || signFill(site, source.right))
+  )
+    return null;
   const narrowable =
     ['add', 'sub', 'mul', 'and', 'or', 'xor'].includes(source.op) ||
     (site.view === 'source' &&

@@ -501,6 +501,8 @@ const simplifications = {
     'equality of two values of at least the width of int is unchanged by reinterpreting either as signed or unsigned of the same width: C converts a mixed pair to the unsigned type of the same bit pattern',
   signed_conversion_context:
     'a context that converts to a signed integer type of the same width (prototyped argument, assignment, return) receives the signed variable that a same-width unsigned reinterpretation merely re-read: the conversion restores its exact bits',
+  signed_wide_product:
+    'a 128-bit product of two sign-extended 64-bit operands (or constants in the signed 64-bit range) is the signed __int128 product of the narrow signed operands: it is exact (|a*b| <= 2^126) and its two-complement bits are the bit-vector product modulo 2^128',
 } as const;
 
 /** Source-view syntax shared by expression and memory printing. */
@@ -1061,6 +1063,44 @@ export function expressionText(
       }
       if (expression.op === 'add' || expression.op === 'sub' || expression.op === 'mul') {
         let op = expression.op === 'add' ? '+' : expression.op === 'sub' ? '-' : '*';
+        // A 128-bit product of sign-extended 64-bit operands is the exact signed
+        // __int128 product: (int128_t)(int64_t)a * (int64_t)b.
+        if (!python && expression.op === 'mul' && width === 128) {
+          const narrow = (value: Value): Printed | null => {
+            const constant = options.constant?.(value);
+            if (constant !== undefined) {
+              const signed = BigInt.asIntN(width, constant);
+              if (signed < -(1n << 63n) || signed >= 1n << 63n) return null;
+              return signed >= -(1n << 31n) && signed < 1n << 31n
+                ? { ...printer.signedLiteral(signed), ctype: { bits: 64, signed: true } }
+                : printer.cast(64, true, printer.literal(BigInt.asUintN(64, signed), 64));
+            }
+            const printed = operand(value),
+              from = printed.from?.operand;
+            return printed.ctype?.bits === width &&
+              !printed.ctype.signed &&
+              from?.ctype?.signed &&
+              from.ctype.bits === 64
+              ? from
+              : null;
+          };
+          const left = narrow(expression.left),
+            right = narrow(expression.right);
+          if (
+            left &&
+            right &&
+            (options.constant?.(expression.left) === undefined ||
+              options.constant?.(expression.right) === undefined) &&
+            printer.simplify('signed_wide_product', [expression.left.id, expression.right.id])
+          ) {
+            const [first, second] =
+              options.constant?.(expression.left) === undefined ? [left, right] : [right, left];
+            return printer.binary('*', printer.cast(width, true, first), second, {
+              bits: width,
+              signed: true,
+            });
+          }
+        }
         let leftValue = expression.left,
           subtrahend: bigint | undefined;
         // x + c with c in the upper half of the width is x - (2^width - c): the same

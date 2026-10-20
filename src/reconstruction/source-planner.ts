@@ -246,9 +246,11 @@ export function planSource(
             reason: 'bits outside source ABI result',
           });
           valueOrigins.set(base.id, [binding.value.id]);
+          // The inserted part is integer bits (the whole IEEE result's integer
+          // view in the source view), so the insert prints as a mask-and-or.
           const part =
             offset === 0 && high - low === bitWidth(type)
-              ? whole
+              ? sliced()
               : make(`${key}:result-part:${binding.value.id}`, integer(high - low), block, {
                   kind: 'extract',
                   value: sliced(),
