@@ -149,18 +149,6 @@ export function checkStrnicmp(
     block.provenance.ranges.some((range) => range.start.value === 0x48n),
   );
   assert.ok(zero);
-  const loopExits = [...program.blocks.values()]
-    .flatMap((block) => {
-      const control = block.control;
-      return control.kind === 'if'
-        ? [control.when_true.transfer, control.when_false.transfer]
-        : control.kind === 'jump'
-          ? [control.transfer]
-          : [];
-    })
-    .filter((transfer) => transfer.mode === 'break');
-  assert.ok(loopExits.some((transfer) => transfer.target === mismatch.id));
-  assert.ok(loopExits.some((transfer) => transfer.target === zero.id));
   const entry = ir.blocks.find((block) => block.id === ir.entry)!;
   const bindings = ir.register_states.find((state) => state.block === ir.entry)!.entry;
   for (const language of ['c-like', 'python-like'] as const) {

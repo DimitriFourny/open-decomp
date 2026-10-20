@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createOperationContext } from '../../src/core/index.js';
-import { assertValidIR, evaluateIR } from '../../src/ir/index.js';
+import { assertValidIR, evaluateIR, successors } from '../../src/ir/index.js';
 import type {
   BasicBlock,
   Edge,
@@ -185,6 +185,14 @@ export function equivalent(
     );
     assert.equal(actual.terminator.id, block.terminator.id);
     assert.deepEqual(actual.terminator.provenance, block.terminator.provenance);
+    // Every CFG edge is represented exactly once, in order, with its own copies and effect.
+    const shape = (terminator: Terminator) =>
+      successors(terminator).map((edge) => [
+        edge.target,
+        edge.arguments.map((value) => value.id),
+        edge.effect.id,
+      ]);
+    assert.deepEqual(shape(actual.terminator), shape(block.terminator));
   }
   return result.value;
 }

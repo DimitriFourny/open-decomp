@@ -3,9 +3,13 @@ import test from 'node:test';
 import { createOperationContext, entityIdentity } from '../../src/core/index.js';
 import { constructSSA } from '../../src/analysis/ssa/index.js';
 import { IRBuilder, evaluateIR, integer } from '../../src/ir/index.js';
-import type { SSAForm, TrustedCall } from '../../src/ir/index.js';
+import type { BlockBuilder, SSAForm, TrustedCall, Value } from '../../src/ir/index.js';
 import { structureControlFlow } from '../../src/presentation/index.js';
-import type { BlockRegion, StructuredFunction } from '../../src/presentation/index.js';
+import type {
+  BlockRegion,
+  ParallelTransfer,
+  StructuredFunction,
+} from '../../src/presentation/index.js';
 import { builder, image, provenance, register, returned, slice } from '../ir/support.js';
 import { equivalent, lower, regions } from './support.js';
 
@@ -17,6 +21,15 @@ const ssa = (name: string): IRBuilder<'ssa'> =>
   new IRBuilder(slice, entityIdentity(slice, 'function', name), provenance, 'ssa');
 const blocks = (program: StructuredFunction): BlockRegion[] =>
   regions(program.body).filter((region): region is BlockRegion => region.kind === 'block');
+const transfers = (program: StructuredFunction): ParallelTransfer[] =>
+  blocks(program).flatMap((block) => {
+    const control = block.control;
+    if (control.kind === 'jump') return [control.transfer];
+    if (control.kind === 'if') return [control.when_true.transfer, control.when_false.transfer];
+    if (control.kind === 'switch')
+      return [...control.cases.map((item) => item.arm.transfer), control.otherwise.transfer];
+    return [];
+  });
 
 test('diamond owns if/else effects and sequences without duplicating a shared join', () => {
   const b = ssa('structured-diamond');
@@ -154,7 +167,7 @@ test('nested single-entry loops preserve inner and outer continue destinations',
   assert.deepEqual(returned(evaluateIR(lower(result), { memory })), [6n]);
 });
 
-test('irreducible multi-entry cycles remain real labeled paths, including bounded infinite paths', () => {
+test('irreducible multi-entry cycles keep one loop and a real labeled entry, including bounded infinite paths', () => {
   const b = ssa('irreducible');
   const entry = b.block('entry', [i1, i32]),
     left = b.block('left', [i32]),
@@ -186,13 +199,21 @@ test('irreducible multi-entry cycles remain real labeled paths, including bounde
       [0n, 1n, 4n, 7n].map((n) => ({ arguments: [side, n], memory, max_steps: 80 })),
     ),
   );
-  assert.equal(regions(result.body).filter((region) => region.kind === 'loop').length, 0);
-  const leftControl = blocks(result).find((block) => block.id === left.id)!.control;
-  assert.equal(leftControl.kind, 'if');
-  if (leftControl.kind === 'if') {
-    assert.equal(leftControl.when_false.transfer.mode, 'goto');
-    assert.equal(leftControl.when_false.transfer.target, right.id);
+  // The cycle loops at the entry first in reverse postorder; the other entry
+  // is a labeled transfer into the loop body.
+  const loops = regions(result.body).filter((region) => region.kind === 'loop');
+  assert.deepEqual(
+    loops.map((region) => region.kind === 'loop' && region.header),
+    [left.id],
+  );
+  const entryControl = blocks(result).find((block) => block.id === entry.id)!.control;
+  assert.equal(entryControl.kind, 'if');
+  if (entryControl.kind === 'if') {
+    assert.equal(entryControl.when_false.transfer.mode, 'goto');
+    assert.equal(entryControl.when_false.transfer.target, right.id);
   }
+  const rightControl = blocks(result).find((block) => block.id === right.id)!.control;
+  assert.ok(rightControl.kind === 'if' && rightControl.when_false.transfer.mode === 'continue');
 });
 
 test('established switch retains duplicate destinations, per-edge copies and explicit fallback', () => {
@@ -362,4 +383,322 @@ test('instruction ranges, evidence and coverage stay attached to semantic identi
     blocks(result).find((block) => block.id === exit.id)!.control.provenance,
     origin,
   );
+});
+
+test('short-circuit operands nest in their arm and share the join without labels', () => {
+  // if (a && b) { store } return
+  const b = ssa('short-circuit'),
+    entry = b.block('entry', [i1, i1]),
+    second = b.block('second'),
+    body = b.block('body'),
+    join = b.block('join');
+  const [a, c] = entry.parameters as [Value, Value];
+  entry.branch(a, entry.edge(second), entry.edge(join));
+  second.branch(c, second.edge(body), second.edge(join));
+  body.store(body.constant(i64, 0x1000n), body.constant(i32, 7n));
+  body.jump(join);
+  join.return([join.load(i32, join.constant(i64, 0x1000n))]);
+  const result = equivalent(
+    b.finish(entry, [i32]),
+    [0n, 1n].flatMap((x) => [0n, 1n].map((y) => ({ arguments: [x, y], memory }))),
+  );
+  assert.ok(transfers(result).every((transfer) => transfer.mode !== 'goto'));
+  const head = blocks(result).find((block) => block.id === entry.id)!.control;
+  assert.ok(head.kind === 'if' && head.when_true.body && !head.when_false.body);
+  const operand = blocks(result).find((block) => block.id === second.id)!.control;
+  assert.ok(operand.kind === 'if' && operand.when_true.body && !operand.when_false.body);
+  assert.equal(operand.when_false.transfer.target, join.id);
+});
+
+test('continue and break leave a loop at its header and its single follow', () => {
+  // while (n--) { if (*p) continue; *q += 1; if (*q == 3) break; } return *q
+  const b = ssa('loop-continue'),
+    entry = b.block('entry', [i32]),
+    head = b.block('head', [i32]),
+    body = b.block('body', [i32]),
+    rest = b.block('rest', [i32]),
+    done = b.block('done');
+  entry.jump(head, [entry.parameters[0]!]);
+  const n = head.parameters[0]!;
+  head.branch(
+    head.compare('eq', n, head.constant(i32, 0n)),
+    head.edge(done),
+    head.edge(body, [head.int('sub', n, head.constant(i32, 1n))]),
+  );
+  const skip = body.load(i32, body.constant(i64, 0x1004n));
+  body.branch(
+    body.compare('ne', skip, body.constant(i32, 0n)),
+    body.edge(head, [body.parameters[0]!]),
+    body.edge(rest, [body.parameters[0]!]),
+  );
+  const address = rest.constant(i64, 0x1000n),
+    count = rest.int('add', rest.load(i32, address), rest.constant(i32, 1n));
+  rest.store(address, count);
+  rest.branch(
+    rest.compare('eq', count, rest.constant(i32, 3n)),
+    rest.edge(done),
+    rest.edge(head, [rest.parameters[0]!]),
+  );
+  done.return([done.load(i32, done.constant(i64, 0x1000n))]);
+  const result = equivalent(
+    b.finish(entry, [i32]),
+    [0n, 2n, 9n].flatMap((value) => [
+      { arguments: [value], memory },
+      {
+        arguments: [value],
+        memory: [
+          { base: 0x1000n, bytes: new Uint8Array([0, 0, 0, 0, 1, 0, 0, 0]), writable: true },
+        ],
+      },
+    ]),
+  );
+  const modes = transfers(result).map((transfer) => transfer.mode);
+  assert.ok(!modes.includes('goto'));
+  assert.equal(modes.filter((mode) => mode === 'continue').length, 2);
+  assert.equal(modes.filter((mode) => mode === 'break').length, 2);
+  const loops = regions(result.body).filter((region) => region.kind === 'loop');
+  assert.equal(loops.length, 1);
+});
+
+test('a multi-level exit breaks every loop it leaves and keeps its exact continuation', () => {
+  // for (i) for (j) if (*p == i + j) goto out; out: return
+  const b = ssa('multi-level-exit'),
+    entry = b.block('entry'),
+    outer = b.block('outer', [i32]),
+    inner = b.block('inner', [i32, i32]),
+    step = b.block('step', [i32, i32]),
+    latch = b.block('latch', [i32]),
+    out = b.block('out', [i32]);
+  entry.jump(outer, [entry.constant(i32, 0n)]);
+  const i = outer.parameters[0]!;
+  outer.branch(
+    outer.compare('eq', i, outer.constant(i32, 3n)),
+    outer.edge(out, [outer.constant(i32, 99n)]),
+    outer.edge(inner, [i, outer.constant(i32, 0n)]),
+  );
+  const [ii, j] = inner.parameters as [Value, Value];
+  const sum = inner.int('add', ii, j);
+  inner.branch(
+    inner.compare('eq', inner.load(i32, inner.constant(i64, 0x1000n)), sum),
+    inner.edge(out, [sum]),
+    inner.edge(step, [ii, j]),
+  );
+  const [si, sj] = step.parameters as [Value, Value];
+  const next = step.int('add', sj, step.constant(i32, 1n));
+  step.branch(
+    step.compare('eq', next, step.constant(i32, 3n)),
+    step.edge(latch, [si]),
+    step.edge(inner, [si, next]),
+  );
+  latch.jump(outer, [latch.int('add', latch.parameters[0]!, latch.constant(i32, 1n))]);
+  out.return(out.parameters);
+  const result = equivalent(
+    b.finish(entry, [i32]),
+    [0, 2, 4, 9].map((value) => ({
+      memory: [{ base: 0x1000n, bytes: new Uint8Array([value, 0, 0, 0]), writable: true }],
+    })),
+  );
+  const leave = blocks(result).find((block) => block.id === inner.id)!.control;
+  assert.ok(leave.kind === 'if');
+  if (leave.kind !== 'if') return;
+  // Both loops are exited: the transfer names the outermost one it leaves.
+  assert.equal(leave.when_true.transfer.mode, 'break');
+  assert.equal(leave.when_true.transfer.loop, outer.id);
+  assert.equal(leave.when_true.transfer.target, out.id);
+  assert.equal(regions(result.body).filter((region) => region.kind === 'loop').length, 2);
+});
+
+test('a switch case falling into another case keeps every case edge and its copies', () => {
+  // switch (x) { case 1: *p = 1; /* fallthrough */ case 2: *p += 2; break; default: *p = 9; }
+  const b = ssa('switch-fallthrough'),
+    entry = b.block('entry', [i32]),
+    one = b.block('one'),
+    two = b.block('two', [i32]),
+    other = b.block('other'),
+    join = b.block('join');
+  const address = (block: BlockBuilder) => block.constant(i64, 0x1000n);
+  entry.terminate({
+    kind: 'switch',
+    value: entry.parameters[0]!,
+    cases: [
+      { bits: 1n, edge: entry.edge(one) },
+      { bits: 2n, edge: entry.edge(two, [entry.constant(i32, 0n)]) },
+    ],
+    otherwise: entry.edge(other),
+  });
+  one.store(address(one), one.constant(i32, 1n));
+  one.jump(two, [one.constant(i32, 1n)]);
+  two.store(address(two), two.int('add', two.parameters[0]!, two.constant(i32, 2n)));
+  two.jump(join);
+  other.store(address(other), other.constant(i32, 9n));
+  other.jump(join);
+  join.return([join.load(i32, address(join))]);
+  const result = equivalent(
+    b.finish(entry, [i32]),
+    [0n, 1n, 2n, 3n].map((value) => ({ arguments: [value], memory })),
+  );
+  // The fallthrough edge is the only transfer that is not structured.
+  assert.ok(transfers(result).filter((transfer) => transfer.mode === 'goto').length <= 1);
+  assert.deepEqual(
+    [0n, 1n, 2n, 3n].map(
+      (value) => returned(evaluateIR(lower(result), { arguments: [value], memory }))[0],
+    ),
+    [9n, 3n, 2n, 9n],
+  );
+});
+
+type Statement =
+  | { readonly kind: 'store' | 'break' | 'continue' | 'return' }
+  | { readonly kind: 'if'; readonly then: Statement[]; readonly otherwise: Statement[] }
+  | { readonly kind: 'while' | 'do'; readonly body: Statement[] };
+
+/** A random structured program: nested if/else, top- and bottom-tested loops,
+ * innermost break/continue and early returns. */
+function program(next: (bound: number) => number, depth: number, loop: boolean): Statement[] {
+  const list: Statement[] = [];
+  for (let count = 1 + next(3); count > 0; count--) {
+    const roll = next(10);
+    if (depth < 3 && roll < 3)
+      list.push({
+        kind: 'if',
+        then: program(next, depth + 1, loop),
+        otherwise: next(2) ? program(next, depth + 1, loop) : [],
+      });
+    else if (depth < 3 && roll < 5)
+      list.push({ kind: next(2) ? 'while' : 'do', body: program(next, depth + 1, true) });
+    else if (loop && roll === 5) {
+      list.push({ kind: next(2) ? 'break' : 'continue' });
+      break;
+    } else if (roll === 6) {
+      list.push({ kind: 'return' });
+      break;
+    } else list.push({ kind: 'store' });
+  }
+  return list;
+}
+
+/** Lowers a structured program to SSA blocks; loops count through private cells. */
+function lowerProgram(name: string, statements: Statement[]): SSAForm {
+  const b = ssa(name);
+  let blocks = 0,
+    cells = 0,
+    stores = 0;
+  const fresh = (): BlockBuilder => b.block(`b${blocks++}`);
+  const test = (block: BlockBuilder, cell: number): Value => {
+    const address = block.constant(i64, 0x1010n + 4n * BigInt(cell)),
+      value = block.load(i32, address);
+    block.store(address, block.int('add', value, block.constant(i32, 1n)));
+    return block.compare('ult', value, block.constant(i32, 2n));
+  };
+  type Exits = { readonly repeat: () => BlockBuilder; readonly leave: () => BlockBuilder };
+  const emit = (list: Statement[], at: BlockBuilder, exits?: Exits): BlockBuilder | null => {
+    let current: BlockBuilder | null = at;
+    for (const statement of list) {
+      if (!current) break;
+      const block: BlockBuilder = current;
+      switch (statement.kind) {
+        case 'store': {
+          const slot = stores++;
+          block.store(
+            block.constant(i64, 0x1080n + 4n * BigInt(slot % 16)),
+            block.constant(i32, BigInt(slot)),
+          );
+          break;
+        }
+        case 'break':
+          block.jump(exits!.leave());
+          current = null;
+          break;
+        case 'continue':
+          block.jump(exits!.repeat());
+          current = null;
+          break;
+        case 'return':
+          block.return([]);
+          current = null;
+          break;
+        case 'if': {
+          const yes = fresh(),
+            no = fresh(),
+            cell = (stores + blocks) % 4;
+          block.branch(
+            block.compare(
+              'ne',
+              block.load(i32, block.constant(i64, 0x1000n + 4n * BigInt(cell))),
+              block.constant(i32, 0n),
+            ),
+            block.edge(yes),
+            block.edge(no),
+          );
+          const ends = [emit(statement.then, yes, exits), emit(statement.otherwise, no, exits)];
+          current = null;
+          for (const end of ends)
+            if (end) {
+              current ??= fresh();
+              end.jump(current);
+            }
+          break;
+        }
+        case 'while': {
+          const head = fresh(),
+            body = fresh(),
+            exit = fresh(),
+            cell = cells++;
+          block.jump(head);
+          head.branch(test(head, cell), head.edge(body), head.edge(exit));
+          const end = emit(statement.body, body, { repeat: () => head, leave: () => exit });
+          end?.jump(head);
+          current = exit;
+          break;
+        }
+        case 'do': {
+          const body = fresh(),
+            cell = cells++;
+          let latch: BlockBuilder | undefined, exit: BlockBuilder | undefined;
+          const leave = (): BlockBuilder => (exit ??= fresh());
+          const repeat = (): BlockBuilder => (latch ??= fresh());
+          block.jump(body);
+          const end = emit(statement.body, body, { repeat, leave });
+          if (end) end.jump(repeat());
+          if (latch) latch.branch(test(latch, cell), latch.edge(body), latch.edge(leave()));
+          current = exit ?? null;
+          break;
+        }
+      }
+    }
+    return current;
+  };
+  const entry = fresh();
+  emit(statements, entry)?.return([]);
+  return b.finish(entry, []);
+}
+
+test('reducible programs without multi-level exits structure without labeled transfers', () => {
+  let seed = 0x2545f491;
+  const next = (bound: number): number => {
+    seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+    return (seed >>> 8) % bound;
+  };
+  const bytes = (values: readonly number[]): Uint8Array => {
+    const result = new Uint8Array(0x100);
+    values.forEach((value, index) => (result[index * 4] = value));
+    return result;
+  };
+  for (let index = 0; index < 300; index++) {
+    const input = lowerProgram(`random-${index}`, program(next, 0, false));
+    const result = equivalent(
+      input,
+      [
+        [0, 0, 0, 0],
+        [1, 0, 1, 0],
+        [1, 1, 1, 1],
+        [0, 1, 0, 1],
+      ].map((cells) => ({
+        memory: [{ base: 0x1000n, bytes: bytes(cells), writable: true }],
+        max_steps: 2_000,
+      })),
+    );
+    const labeled = transfers(result).filter((transfer) => transfer.mode === 'goto');
+    assert.deepEqual(labeled, [], `program ${index}`);
+  }
 });

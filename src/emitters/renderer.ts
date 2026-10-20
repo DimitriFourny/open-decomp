@@ -6064,13 +6064,6 @@ export class Renderer {
     );
     let body = this.body;
     if (
-      (!layout.ordered.length ||
-        this.localValidation.presentation(
-          'loop_exit_layout',
-          subject,
-          'acyclic sibling regions follow exact CFG dependencies, excluding natural header backedges; successors whose external incoming edges all belong to one owned region move to the smallest such region, after any containing loop; fixed-point placement preserves every statement, edge copy and dynamic effect order, while cyclic dependencies retain labels',
-          layout.ordered,
-        )) &&
       (!layout.duplicated.length ||
         this.localValidation.presentation(
           'return_tail_duplication',
@@ -6084,20 +6077,6 @@ export class Renderer {
           subject,
           'a bounded tail lexically between a goto and its target is copied onto every incoming edge, fallthroughs included, so its home is no longer printed and the goto falls through; each path still runs the same effects once in the same order before the same exit',
           layout.forced,
-        )) &&
-      (!layout.relocated.length ||
-        this.localValidation.presentation(
-          'terminal_block_placement',
-          subject,
-          'a terminal block is printed at its only edge, or right after the only loop entering it when every other exit of that loop is a duplicated tail',
-          layout.relocated.map((item) => item.block),
-        )) &&
-      (!layout.merged.length ||
-        this.localValidation.presentation(
-          'loop_exit_merge',
-          subject,
-          'the exit reached by most loop edges follows the loop, so those edges print as breaks; an exit entered by one loop edge only moves onto that edge and still runs the same statements once on the same path before its own jump, so no exit edge, edge copy or effect changes',
-          layout.merged.map((item) => item.block),
         ))
     ) {
       body = layout.body;
