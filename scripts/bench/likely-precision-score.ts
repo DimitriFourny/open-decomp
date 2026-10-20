@@ -168,7 +168,7 @@ export const HEURISTIC_DIMENSION: Readonly<
   opaque_word_formal: 'parameter_type',
   carried_word_formal: 'parameter_type',
 };
-/** Gate of TODO.md R5: a heuristic prints in `likely` mode only at this precision or better. */
+/** Gate of roadmap R5 (`7301f55:TODO.md`): a heuristic prints in `likely` mode only at this precision or better. */
 export const PRECISION_GATE = LIKELY_PRECISION_GATE;
 
 /** An `argument_list` `guess` record joined with its call site. */

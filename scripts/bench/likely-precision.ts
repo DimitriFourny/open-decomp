@@ -1,5 +1,5 @@
 /**
- * Precision harness for the `likely` inference mode (TODO.md R5).
+ * Precision harness for the `likely` inference mode (roadmap R5, archived at `7301f55:TODO.md`).
  *
  * Each heuristic that closes an open argument list records a `guess` inference. This script
  * decompiles functions of binaries whose sources we hold, in `likely` mode, joins every `guess`

@@ -231,7 +231,7 @@ def command_run(args):
 # --------------------------------------------------------------------------- metrics
 
 # Cheap static text counts over a run's texts. Not a quality verdict: use them to see whether a change moved the
-# defect classes the readability roadmap targets (TODO.md R1-R5), then confirm with review packets.
+# defect classes the readability roadmaps target (TODO.md; R1-R5 archived at 7301f55:TODO.md), then confirm with review packets.
 METRIC_PATTERNS = {
     'goto': re.compile(r'\bgoto\b'),
     'label': re.compile(r'^\s*(?!default:)[A-Za-z_]\w*:\s*;?\s*$', re.M),
@@ -520,7 +520,7 @@ def main():
     run.add_argument('--jobs', type=int, default=4, help='Cells decompiled in parallel (functions of a cell are serial)')
     run.add_argument('--timeout', type=int, default=300, help='Seconds per function')
     run.add_argument('--node', default='node')
-    run.add_argument('--inference', choices=('proven', 'likely'), default='proven', help='Inference mode of every decompile (TODO.md R5)')
+    run.add_argument('--inference', choices=('proven', 'likely'), default='proven', help='Inference mode of every decompile (docs/CORE.md, inference mode)')
     packets = commands.add_parser('packets', help='Seeded stratified blind X/Y packets')
     packets.add_argument('--label', required=True)
     packets.add_argument('--sample', type=int, required=True)
