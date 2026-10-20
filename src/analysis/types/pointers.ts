@@ -425,6 +425,49 @@ export function recoverPointerEvidence(
       queue.push(id);
     }
   }
+  // An exact copy, phi or select all of whose sources hold one object pointer
+  // type (or are the null constant) holds that type too: a declared or observed
+  // `T *` survives register moves and control-flow joins instead of decaying to
+  // `void *`. Comparisons and arithmetic never carry a pointee type here.
+  const objectTypes = new Map<string, { key: string; type_id: string }>();
+  for (const [id, list] of seeds) {
+    budget.charge(list.length);
+    const objects = new Map<string, string>();
+    for (const type_id of list) {
+      const type = layouts.definition(type_id);
+      if (type?.kind === 'pointer' && layouts.definition(type.to)?.kind !== 'void')
+        objects.set(typeKey(type), type_id);
+    }
+    if (objects.size === 1) {
+      const [key, type_id] = [...objects][0]!;
+      objectTypes.set(id, { key, type_id });
+    }
+  }
+  const joinSources = new Map<string, string[]>();
+  for (const [from, targets] of joins)
+    for (const to of targets) {
+      budget.charge();
+      const list = joinSources.get(to) ?? [];
+      list.push(from);
+      joinSources.set(to, list);
+    }
+  const objectQueue = [...objectTypes.keys()].sort();
+  for (let index = 0; index < objectQueue.length; index++)
+    for (const to of joins.get(objectQueue[index]!) ?? []) {
+      budget.charge();
+      if (seeds.has(to) || objectTypes.has(to) || !proofs.has(to)) continue;
+      let found: { key: string; type_id: string } | undefined;
+      let exact = true;
+      for (const from of joinSources.get(to) ?? []) {
+        budget.charge();
+        const source = objectTypes.get(from);
+        if (source && (!found || found.key === source.key)) found = source;
+        else if (source || constant(from) !== 0n) exact = false;
+      }
+      if (!exact || !found) continue;
+      objectTypes.set(to, found);
+      objectQueue.push(to);
+    }
   const voidId = entityIdentity(options.slice_id, 'pointer-evidence-type', [input.id, 'void']);
   const pointerId = entityIdentity(options.slice_id, 'pointer-evidence-type', [
     input.id,
@@ -477,6 +520,8 @@ export function recoverPointerEvidence(
   for (const [subject_id, proof] of [...proofs].sort(([a], [b]) => a.localeCompare(b))) {
     budget.charge();
     associate(subject_id, pointerId, proof, 'address');
+    const object = seeds.has(subject_id) ? undefined : objectTypes.get(subject_id);
+    if (object) associate(subject_id, object.type_id, proof, 'joined object');
     const element = seeds.has(subject_id) ? null : elements.get(subject_id);
     if (!element) continue;
     let type_id = elementPointers.get(element.key);

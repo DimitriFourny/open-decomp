@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Regenerates src/metadata/library-contracts/generated/data/*.ts: function interfaces
-// (names, parameter names, types, variadic, noreturn) extracted from real C headers with
-// `clang -Xclang -ast-dump=json -fsyntax-only`:
+// (names, parameter names, types, variadic, noreturn, `alloc_size` parameters) extracted
+// from real C headers with `clang -Xclang -ast-dump=json -fsyntax-only`:
 //   - macOS SDK (`xcrun --show-sdk-path`) for ISO C, POSIX, Darwin libSystem and CoreFoundation;
 //   - mingw-w64 headers (Homebrew `mingw-w64`) plus its import libraries (`llvm-nm`) for the
 //     Windows CRT and kernel32/user32/advapi32/ws2_32/shell32;
@@ -38,6 +38,9 @@ interface Decl {
   readonly variadic: boolean;
   readonly noreturn: boolean;
   readonly formatted: boolean;
+  /** Declared `alloc_size`: the result is a fresh object whose size these
+   * 0-based parameters give (their product). Filled from the text AST dump. */
+  readonly allocSize: readonly number[] | null;
   readonly isStatic: boolean;
   readonly file: string;
 }
@@ -184,6 +187,8 @@ function collect(unit: Unit, text: string): Collected {
           noreturn:
             /\bnoreturn\b/.test(type) || attributes.some((item: Ast) => /NoReturn/.test(item.kind)),
           formatted: attributes.some((item: Ast) => item.kind === 'FormatAttr' && !item.implicit),
+          // The JSON dump omits the attribute's arguments; `allocSizes` reads them.
+          allocSize: attributes.some((item: Ast) => item.kind === 'AllocSizeAttr') ? [] : null,
           isStatic: node.storageClass === 'static',
           file,
         };
@@ -197,6 +202,7 @@ function collect(unit: Unit, text: string): Collected {
               : decl),
             noreturn: prior.noreturn || decl.noreturn,
             formatted: prior.formatted || decl.formatted,
+            allocSize: prior.allocSize ?? decl.allocSize,
             isStatic: prior.isStatic && decl.isStatic,
           });
         break;
@@ -720,6 +726,44 @@ function dump(unit: Unit): string {
   }
 }
 
+/** `alloc_size` parameter indices of the declarations whose JSON dump shows the
+ * attribute. clang's JSON dump omits attribute arguments, so one filtered text dump
+ * per name reads them (`AllocSizeAttr 0x... <range> [Implicit] 1 2`, 1-based); every
+ * redeclaration must agree. */
+function resolveAllocSizes(unit: Unit, data: Collected): void {
+  const names = [...data.decls.values()].filter((decl) => decl.allocSize).map((decl) => decl.name);
+  if (!names.length) return;
+  const source = join(OUT, '..', `.${unit.id}.alloc.c`);
+  mkdirSync(dirname(source), { recursive: true });
+  writeFileSync(source, unit.source);
+  try {
+    for (const name of names) {
+      const result = spawnSync(
+        unit.compiler,
+        [...unit.args, '-Xclang', '-ast-dump', '-Xclang', `-ast-dump-filter=${name}`, source],
+        { encoding: 'utf8', maxBuffer: 1 << 30 },
+      );
+      const found = new Set<string>();
+      for (const section of result.stdout.split(/^Dumping /m)) {
+        if (!section.startsWith(`${name}:\n`)) continue;
+        for (const match of section.matchAll(/AllocSizeAttr 0x[0-9a-f]+ .*? (\d+)(?: (\d+))?$/gm))
+          found.add(
+            [match[1]!, ...(match[2] ? [match[2]] : [])]
+              .map((index) => Number(index) - 1)
+              .join(','),
+          );
+      }
+      const decl = data.decls.get(name)!;
+      const indices = found.size === 1 ? [...found][0]!.split(',').map(Number) : [];
+      if (!indices.length || indices.some((index) => index < 0 || index >= decl.parameters.length))
+        throw new Error(`${unit.id}: ${name}: alloc_size arguments ${[...found].join(' | ')}`);
+      data.decls.set(name, { ...decl, allocSize: indices });
+    }
+  } finally {
+    rmSync(source, { force: true });
+  }
+}
+
 /* Windows import libraries: which DLL exports a name. */
 function importNames(archive: string): Set<string> {
   if (!existsSync(`${MINGW}/lib/${archive}`)) return new Set();
@@ -865,7 +909,8 @@ function addUnit(
       });
       const rule = formatRule(decl, resolver);
       const open = OPEN_FLAGS[decl.name];
-      const flags = `${decl.noreturn ? 'n' : ''}${decl.variadic ? 'v' : ''}${rule ? `${rule.kind}${rule.index}` : ''}${open !== undefined && decl.variadic ? `o${open}` : ''}`;
+      const allocates = decl.allocSize?.map((index) => `a${index}`).join('') ?? '';
+      const flags = `${decl.noreturn ? 'n' : ''}${decl.variadic ? 'v' : ''}${rule ? `${rule.kind}${rule.index}` : ''}${open !== undefined && decl.variadic ? `o${open}` : ''}${allocates}`;
       const row: Row = {
         name: decl.name,
         returns: encode(returns),
@@ -899,6 +944,7 @@ function addUnit(
         variadic: false,
         noreturn: false,
         formatted: false,
+        allocSize: null,
         isStatic: false,
         file: variable.file,
       },
@@ -937,6 +983,7 @@ function runUnit(
 ): void {
   console.log(`clang ${unit.id}`);
   const data = precollected ?? collect(unit, dump(unit));
+  resolveAllocSizes(unit, data);
   const resolver = new Resolver(data, windows);
   resolvers.push(resolver);
   addUnit(

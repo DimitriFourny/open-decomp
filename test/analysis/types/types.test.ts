@@ -647,6 +647,7 @@ for (const abi of targets)
             arguments: null,
             captures: null,
             returns_argument: null,
+            allocates: null,
           },
           variadic_rule: null,
           source: 'fixture declaration',

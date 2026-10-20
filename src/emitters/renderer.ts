@@ -497,8 +497,18 @@ export class Renderer {
       if (!projection.signature) continue;
       const declaration = projection.signature.signature;
       if (projection.results.length === 1) {
-        this.sourceValueTypes.set(projection.results[0]!.id, declaration.return_type);
-        this.callResults.set(projection.results[0]!.id, projection);
+        const result = projection.results[0]!;
+        // A declared `void *` result (malloc) is refined by the object pointer
+        // projection proved from its uses; C converts it implicitly.
+        const declared = this.typeRecords.get(declaration.return_type)?.definition;
+        const projected = this.program.source?.value_types?.get(result.id)?.type_id;
+        const refined =
+          declared?.kind === 'pointer' &&
+          this.typeRecords.get(declared.to)?.definition.kind === 'void' &&
+          projected !== undefined &&
+          this.typeRecords.get(projected)?.definition.kind === 'pointer';
+        if (!refined) this.sourceValueTypes.set(result.id, declaration.return_type);
+        this.callResults.set(result.id, projection);
       }
     }
     if (this.sourceView) {

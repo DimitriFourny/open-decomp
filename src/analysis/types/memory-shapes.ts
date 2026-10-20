@@ -11,6 +11,7 @@ import { AnalysisBudget } from '../ssa/budget.js';
 import { typeKey } from './layout.js';
 import type {
   MemoryShape,
+  ObjectAllocation,
   ObservedField,
   SuppliedTypeRecord,
   TypeAssociation,
@@ -595,6 +596,8 @@ export interface MemoryShapeBuildOptions {
   readonly dynamic: boolean;
   readonly field_type: (field: ObservedField) => string;
   readonly array_type: (element: string, field: ObservedField) => string;
+  /** The base is a fresh allocation of this size (see `MemoryShape.allocation`). */
+  readonly allocation?: ObjectAllocation;
 }
 export interface BuiltMemoryShape {
   readonly shape: MemoryShape;
@@ -707,6 +710,13 @@ export function buildMemoryShape(
     }
   const evidence_ids = [...new Set(fields.flatMap((field) => field.evidence_ids))].sort();
   if (evidence_ids.length > 1000) budget.charge(budget.limit + 1);
+  // A fresh allocation sizes the object only if every displaced access lies in it.
+  const allocation =
+    options.allocation &&
+    base_offset === 0n &&
+    fields.every((field) => field.dynamic || end(field) <= options.allocation!.size)
+      ? options.allocation
+      : undefined;
   return {
     shape: {
       id: options.id,
@@ -719,8 +729,14 @@ export function buildMemoryShape(
       escape: options.escape,
       dynamic: options.dynamic || fields.some((field) => field.stride !== null || field.dynamic),
       evidence_ids,
+      ...(allocation ? { allocation } : {}),
     },
-    definition: { kind: 'structure', size: null, alignment: null, fields: coreFields },
+    definition: {
+      kind: 'structure',
+      size: allocation?.size ?? null,
+      alignment: null,
+      fields: coreFields,
+    },
     conflicts,
   };
 }
@@ -881,6 +897,9 @@ export function refineMemoryShapes(
         dynamic: shape.dynamic,
       });
     }
+    const allocations = new Map(
+      (existing.allocations ?? []).map((allocation) => [allocation.value_id, allocation]),
+    );
     const changed = new Set<string>();
     for (const transfer of options.transfers) {
       budget.charge();
@@ -1125,6 +1144,9 @@ export function refineMemoryShapes(
           field_type: fieldType,
           array_type: (element, field) =>
             generated({ kind: 'array', element, count: null }, field.evidence_ids),
+          ...(group.base.kind === 'value' && allocations.has(group.base.value_id)
+            ? { allocation: allocations.get(group.base.value_id)! }
+            : {}),
         },
         budget,
       );
