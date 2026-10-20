@@ -32,10 +32,14 @@ Root causes found in the code, in the order we plan to address them:
 
 ## R2: Region-collapse structuring
 
-- [ ] Replace the SCC/unique-entry structurer with an iterative collapse over the whole CFG: sequence, if-then, if-then-else, short-circuit `&&`/`||`, while/do-while/infinite loops with break/continue, and switch. When no rule applies, pick the goto edge that unblocks the most collapses (not the first unmatched edge), then continue.
+- [x] Replace the SCC/unique-entry structurer with an iterative collapse over the whole CFG: sequence, if-then, if-then-else, short-circuit `&&`/`||`, while/do-while/infinite loops with break/continue, and switch. When no rule applies, pick the goto edge that unblocks the most collapses (not the first unmatched edge), then continue.
+  - Done in `src/presentation/index.ts` (`structure/4`, see docs/CORE.md). Edge groups into small function tails are labeled first (return splitting); other candidates are simulated (top eight by a one-step lookahead) within a bounded allowance. Short-circuit `||` chains whose then-target is entered by several operand arms still need the source-view `shared_condition_arm` rewrite.
 - [ ] Recover loop forms from the collapsed regions: `for` from induction variable plus bound plus step when the update is the last statement on the back edge; `do-while` versus `while` from the test position.
+  - Loop forms are still chosen by `planLoopForms` on the collapsed layout (header/latch placement now comes from the collapse; a loop entered from an `if` arm uses that arm as its `for` guard). Tested loops rose 79 to 96 on the 215-function sample, but its three `for` loops now print as `while`/`do` forms; not investigated further in this round.
 - [ ] Keep irreducible graphs correct with explicit labels. Delete the repair passes the new structurer makes redundant (tail duplication, forced tail copies, `do{}while(0)` wraps, `loop_exit_layout`) instead of stacking them on top.
+  - Irreducible components loop at their first entry; other entries stay labeled (exit flags refused for such loops). Deleted `loop_exit_layout`, `loop_exit_merge` and `terminal_block_placement`. Tail duplication, forced tail copies and `do{}while(0)` wraps are not redundant: on an intermediate version, removing breakable blocks raised the sample from 458 to 595 gotos and also removing tail copies to 846, so they stay.
   - Acceptance: fewer gotos per function on the dev loop than the current structurer; zero gotos on reducible CFGs without multi-level exits; every reachable edge/effect still represented (existing control-flow invariants); both dialects render the same structure.
+  - Result: dev loop 0 → 0 gotos; 215-function sample 409 → 353; property test: 300 random reducible programs with innermost break/continue structure with no labeled transfer; every edge represented exactly once (`test/presentation/support.ts`).
 
 ## R3: Expression rule pool
 
