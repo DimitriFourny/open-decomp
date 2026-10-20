@@ -875,11 +875,11 @@ First and only measurement of the sealed third suite, `proven` inference (defaul
 
 **Availability (192 function cells per tool).**
 
-| Tool        | Text returned | Not delivered                                                                                                      |
-| ----------- | ------------: | ------------------------------------------------------------------------------------------------------------------ |
-| Open Decomp |           126 | 64 `function_not_discovered` (every stripped PE and ELF cell), 2 `tool_error` (see open defects)                    |
-| Ghidra      |           113 | 79 `tool_error`: all 64 PE cells and 15 ELF cells ("address not contained in function"; same pattern as round 8)   |
-| angr        |           192 | 0                                                                                                                  |
+| Tool        | Text returned | Not delivered                                                                                                    |
+| ----------- | ------------: | ---------------------------------------------------------------------------------------------------------------- |
+| Open Decomp |           126 | 64 `function_not_discovered` (every stripped PE and ELF cell), 2 `tool_error` (see open defects)                 |
+| Ghidra      |           113 | 79 `tool_error`: all 64 PE cells and 15 ELF cells ("address not contained in function"; same pattern as round 8) |
+| angr        |           192 | 0                                                                                                                |
 
 Open Decomp states on the 126 texts: 52 complete, 74 partial. Reviewable pairs (both sides have text): 94 for Open Decomp vs Ghidra, 126 for Open Decomp vs angr. The other pairs are unscored.
 
@@ -902,43 +902,43 @@ Open Decomp passes by function: `h3_walk` 16, `h3_pack` 12, `h3_pairsum` 12, `h3
 
 **Blind readability (LLM reviewers, not a human study).** Both reviewers were Claude Haiku, fresh agents chunked 16 cases per agent, the same instructions per reviewer id (A and B), reading only `review/reviewer` or `review-angr/reviewer` (no tool names; X/Y assignment varies). Reviewer instructions: `.local/quality-rounds/heldout3-2026-10-20/review-instructions{,-angr}/reviewer-instructions.md`. The aggregator validated all submissions (94 and 126 cases each, ids matching). Counts below are reviewer ratings (two per pair).
 
-| Pair set (reviewed pairs)         | Overall preference (2 ratings per pair)       | Reviewer split | Per reviewer (A / B)                                |
-| --------------------------------- | --------------------------------------------- | -------------- | --------------------------------------------------- |
-| Open Decomp vs Ghidra (94 of 192) | OD 108, Ghidra 78, tie 2                      | 11 of 94 pairs | A: OD 57, Ghidra 36, tie 1; B: OD 51, Ghidra 42, tie 1 |
-| Open Decomp vs angr (126 of 192)  | OD 135, angr 111, tie 6                       | 11 of 126 pairs | A: OD 68, angr 57, tie 1; B: OD 67, angr 54, tie 5 |
+| Pair set (reviewed pairs)         | Overall preference (2 ratings per pair) | Reviewer split  | Per reviewer (A / B)                                   |
+| --------------------------------- | --------------------------------------- | --------------- | ------------------------------------------------------ |
+| Open Decomp vs Ghidra (94 of 192) | OD 108, Ghidra 78, tie 2                | 11 of 94 pairs  | A: OD 57, Ghidra 36, tie 1; B: OD 51, Ghidra 42, tie 1 |
+| Open Decomp vs angr (126 of 192)  | OD 135, angr 111, tie 6                 | 11 of 126 pairs | A: OD 68, angr 57, tie 1; B: OD 67, angr 54, tie 5     |
 
 Round 8, second suite, for comparison (different functions and reviewers, so a trend and not a delta): OD 44 / Ghidra 138 / tie 10 and OD 84 / angr 153 / tie 13 / neither 6.
 
 Dimension means (0–4, higher is more readable; round 8 second suite in brackets):
 
-| Dimension                         | OD vs Ghidra: OD | Ghidra | OD vs angr: OD | angr |
-| --------------------------------- | ---------------: | -----: | -------------: | ---: |
-| algorithm comprehension           |      2.49 [2.81] |   2.64 |           2.66 | 2.59 |
-| control flow                      |      2.90 [2.75] |   3.10 |           2.94 | 2.87 |
-| irrelevant machine-state clutter  |      2.16 [1.95] |   2.26 |           2.17 | 2.13 |
-| style                             |      2.18 [2.01] |   1.99 |           2.25 | 2.24 |
-| types and interfaces              |      2.28 [2.30] |   1.89 |           2.22 | 2.20 |
-| unresolved semantics              |      2.20 [3.04] |   2.19 |           2.32 | 2.06 |
+| Dimension                        | OD vs Ghidra: OD | Ghidra | OD vs angr: OD | angr |
+| -------------------------------- | ---------------: | -----: | -------------: | ---: |
+| algorithm comprehension          |      2.49 [2.81] |   2.64 |           2.66 | 2.59 |
+| control flow                     |      2.90 [2.75] |   3.10 |           2.94 | 2.87 |
+| irrelevant machine-state clutter |      2.16 [1.95] |   2.26 |           2.17 | 2.13 |
+| style                            |      2.18 [2.01] |   1.99 |           2.25 | 2.24 |
+| types and interfaces             |      2.28 [2.30] |   1.89 |           2.22 | 2.20 |
+| unresolved semantics             |      2.20 [3.04] |   2.19 |           2.32 | 2.06 |
 
 Open Decomp is ahead of Ghidra on style and types/interfaces and behind on algorithm comprehension, control flow and clutter (means differ by 0.1–0.2 on three of six, so those are small). Its unresolved-semantics mean fell from 3.04 on the second suite to 2.20 (Ghidra: 3.36 there, 2.19 here); this set was not matched to that one.
 
 Where Open Decomp wins and loses (reviewer ratings, OD vs Ghidra / OD vs angr):
 
-| Slice                      | OD vs Ghidra (OD / Ghidra / tie)                               | OD vs angr (OD / angr / tie)                                                                    |
-| -------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `h3_pairsum`               | 24 / 0 / 0                                                     | 25 / 7 / 0                                                                                      |
-| `h3_walk`                  | 24 / 0 / 0                                                     | 20 / 8 / 4                                                                                      |
-| `h3_clock`                 | 23 / 0 / 1                                                     | 18 / 14 / 0                                                                                     |
-| `h3_unescape`              | 15 / 5 / 0                                                     | 24 / 2 / 2                                                                                      |
-| `h3_pack`                  | 10 / 14 / 0                                                    | 8 / 24 / 0                                                                                      |
-| `h3_dispatch`              | 8 / 16 / 0                                                     | 15 / 17 / 0                                                                                     |
-| `h3_label`                 | 3 / 20 / 1                                                     | 16 / 16 / 0                                                                                     |
-| `h3_rescale`               | 1 / 23 / 0                                                     | 9 / 23 / 0                                                                                      |
-| Mach-O `-O2`               | 43 / 17 / 0                                                    | 56 / 3 / 1                                                                                      |
-| Mach-O `-O0`               | 30 / 34 / 0                                                    | 29 / 34 / 1                                                                                     |
-| ELF (`-O0` / `-O2`)        | 19 / 13 / 0 and 16 / 14 / 2                                    | 8 / 22 / 2 and 23 / 9 / 0                                                                       |
-| PE (`-O0` / `-O2`)         | no pairs (Ghidra has no PE text)                               | 2 / 28 / 2 and 17 / 15 / 0                                                                      |
-| symbol-bearing / stripped  | 70 / 54 / 2 and 38 / 24 / 0                                    | 90 / 95 / 5 and 45 / 16 / 1                                                                     |
+| Slice                     | OD vs Ghidra (OD / Ghidra / tie) | OD vs angr (OD / angr / tie) |
+| ------------------------- | -------------------------------- | ---------------------------- |
+| `h3_pairsum`              | 24 / 0 / 0                       | 25 / 7 / 0                   |
+| `h3_walk`                 | 24 / 0 / 0                       | 20 / 8 / 4                   |
+| `h3_clock`                | 23 / 0 / 1                       | 18 / 14 / 0                  |
+| `h3_unescape`             | 15 / 5 / 0                       | 24 / 2 / 2                   |
+| `h3_pack`                 | 10 / 14 / 0                      | 8 / 24 / 0                   |
+| `h3_dispatch`             | 8 / 16 / 0                       | 15 / 17 / 0                  |
+| `h3_label`                | 3 / 20 / 1                       | 16 / 16 / 0                  |
+| `h3_rescale`              | 1 / 23 / 0                       | 9 / 23 / 0                   |
+| Mach-O `-O2`              | 43 / 17 / 0                      | 56 / 3 / 1                   |
+| Mach-O `-O0`              | 30 / 34 / 0                      | 29 / 34 / 1                  |
+| ELF (`-O0` / `-O2`)       | 19 / 13 / 0 and 16 / 14 / 2      | 8 / 22 / 2 and 23 / 9 / 0    |
+| PE (`-O0` / `-O2`)        | no pairs (Ghidra has no PE text) | 2 / 28 / 2 and 17 / 15 / 0   |
+| symbol-bearing / stripped | 70 / 54 / 2 and 38 / 24 / 0      | 90 / 95 / 5 and 45 / 16 / 1  |
 
 The losses are concentrated in three kinds of function and in `-O0`. Recurring reviewer reasons for preferring the other tool:
 
@@ -955,24 +955,24 @@ Reasons reviewers gave for preferring Open Decomp: explicit byte offsets on a re
 
 **LLM task benchmark (`scripts/bench/llm-tasks/`, 42 questions, configs `mcp-default` and `export-file`, answerers Claude Haiku agents, 14 questions per agent, single run per set).** Packets `.local/llm-tasks/r20-{proven,likely}` built from checkout `3ba2255` (dist of `dda46a2`) with the binaries copied to `.local/llm-tasks/inputs/` (the MCP root check rejects the Homebrew symlink path); `likely` packets were built through a throwaway `HOME` whose `settings.json` sets `decompile.inference` to `likely`. Answers `.local/llm-tasks/answers-{proven,likely}`, scores `<packets>/score/score.{json,md}`. Only the `likely` packets contain `likely_arity(`/`likely_type(` markers (3 of 42 files per config; none in `proven`). Previous run (2026-10-19, `c8dceed`) in the same table:
 
-| Run and config                      | Correct / unknown / wrong | Material tokens | Tokens / correct |
-| ----------------------------------- | ------------------------: | --------------: | ---------------: |
-| run 2 `mcp-default` (`c8dceed`)     |                41 / 0 / 1 |          ~103.9k |            2,534 |
-| run 2 `export-file`                 |                42 / 0 / 0 |          ~104.9k |            2,497 |
-| round 1 `proven` `mcp-default`      |                39 / 3 / 0 |          57,628 |            1,478 |
-| round 1 `proven` `export-file`      |                41 / 1 / 0 |         100,909 |            2,461 |
-| round 1 `likely` `mcp-default`      |                39 / 3 / 0 |          57,711 |            1,480 |
-| round 1 `likely` `export-file`      |                40 / 1 / 1 |         100,989 |            2,525 |
+| Run and config                  | Correct / unknown / wrong | Material tokens | Tokens / correct |
+| ------------------------------- | ------------------------: | --------------: | ---------------: |
+| run 2 `mcp-default` (`c8dceed`) |                41 / 0 / 1 |         ~103.9k |            2,534 |
+| run 2 `export-file`             |                42 / 0 / 0 |         ~104.9k |            2,497 |
+| round 1 `proven` `mcp-default`  |                39 / 3 / 0 |          57,628 |            1,478 |
+| round 1 `proven` `export-file`  |                41 / 1 / 0 |         100,909 |            2,461 |
+| round 1 `likely` `mcp-default`  |                39 / 3 / 0 |          57,711 |            1,480 |
+| round 1 `likely` `export-file`  |                40 / 1 / 1 |         100,989 |            2,525 |
 
 On Ghidra's 16 questions (its archived output, 2,518 tokens, 13 correct, 194 tokens/correct; the 2,518 reproduces from the archived files):
 
-| Config (round 1)               | Correct | Material tokens | Tokens / correct | Round 2 (previous run) |
-| ------------------------------ | ------: | --------------: | ---------------: | ---------------------: |
-| `mcp-default`, `proven`        |   16/16 |           6,895 |              431 |        16, 6,983, 436  |
-| `export-file`, `proven`        |   16/16 |           7,323 |              458 |        16, 7,407, 463  |
-| `mcp-default`, `likely`        |   16/16 |           6,931 |              433 |                      — |
-| `export-file`, `likely`        |   16/16 |           7,359 |              460 |                      — |
-| Ghidra (archived)              |   13/16 |           2,518 |              194 |        13, 2,518, 194  |
+| Config (round 1)        | Correct | Material tokens | Tokens / correct | Round 2 (previous run) |
+| ----------------------- | ------: | --------------: | ---------------: | ---------------------: |
+| `mcp-default`, `proven` |   16/16 |           6,895 |              431 |         16, 6,983, 436 |
+| `export-file`, `proven` |   16/16 |           7,323 |              458 |         16, 7,407, 463 |
+| `mcp-default`, `likely` |   16/16 |           6,931 |              433 |                      — |
+| `export-file`, `likely` |   16/16 |           7,359 |              460 |                      — |
+| Ghidra (archived)       |   13/16 |           2,518 |              194 |         13, 2,518, 194 |
 
 Ghidra is still about 2.2× cheaper per correct answer on its 16 questions; Open Decomp answers all 16.
 
@@ -981,7 +981,6 @@ What the totals hide. The all-question token totals dropped by about 45% for `mc
 `likely` mode did not help: `mcp-default` is identical (39/3/0, 1,480 vs 1,478 tokens/correct), and `export-file` lost one answer and gained one confident wrong answer, `bro-filesize-failure` (`0xffffffffffffffff` where the gold is `-1`; the scorer compares the number, the value is the same 64-bit pattern, but it is scored wrong): 40/1/1, 2,525 vs 2,461 tokens/correct. Single runs with Haiku answerers; one-question differences are within noise. The held-out readability round ran in `proven` mode only, so no held-out readability evidence exists for `likely`.
 
 **Who saw what (the suite is now seen; the next measurement needs a new suite).** Development workers did not read it before this round. In this round: the measurement agent (`Heldout3Round`) ran the oracle and all tools, read the correctness records and per-function pass counts, the blind reviewers' rationales and aggregated results, and the reviewer packets' structure; it did not read the private C source or models. The coordinator (`Main`) saw the aggregated results. Reviewers (Haiku, per-reviewer-id chunks) saw only the reviewer packet trees (X/Y decompiler text, question, rubric) and no source, gold or mapping. The private mappings were sealed under `sealed/` until both submissions existed, then restored for aggregation. The decompiler output texts for all 24 cells are now in `.local/quality-rounds/heldout3-2026-10-20/` and have been seen by reviewers; do not use this suite for tuning, and do not paste its source, vectors or output into tracked files.
-
 
 ## Per-function latency and cross-request callee reuse (2026-10-19)
 
