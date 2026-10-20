@@ -46,6 +46,10 @@ export interface OperationContext {
   /** Actual shared work remaining; methods survive context wrappers/spreads.
    * Optional custom contexts cannot safely grant optional dependency work. */
   remainingWork?(): number;
+  /** The operation's own context: `createOperationContext` sets it and every wrapper or
+   * spread keeps it. Charges that belong to the whole request (per-process index builds,
+   * see `buildOnce`) are made on it, so sub-budgets and measured reuse never see them. */
+  readonly root?: OperationContext;
   progress(phase: string, completed: number, total: number | null): void;
 }
 export interface ComponentIdentity {

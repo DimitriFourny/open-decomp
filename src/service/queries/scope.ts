@@ -1,3 +1,4 @@
+import { buildOnce, useBuilt } from '../../core/index.js';
 import type {
   FunctionRecord,
   LoadedImage,
@@ -96,18 +97,24 @@ export function loadFunctionGraph(
 ): QueryFunctionGraph {
   const image = loaded.image;
   let indexed = navigation.get(image);
-  if (!indexed || indexed.project_id !== scope.store.project_id || indexed.revision !== revision) {
-    indexed = {
-      project_id: scope.store.project_id,
-      revision,
-      image: {
-        ...image,
-        symbols: records(scope, revision, image.id, 'symbol').items,
-        imports: records(scope, revision, image.id, 'import').items,
-        exports: records(scope, revision, image.id, 'export').items,
-      },
-      functions: records(scope, revision, image.id, 'function').items,
-    };
+  if (indexed?.project_id === scope.store.project_id && indexed.revision === revision)
+    useBuilt(scope.context, indexed);
+  else {
+    // Materialized once per image; every operation pays its recorded cost once.
+    indexed = buildOnce(scope.context, (quiet) => {
+      const read = { store: scope.store, context: quiet };
+      return {
+        project_id: scope.store.project_id,
+        revision,
+        image: {
+          ...image,
+          symbols: records(read, revision, image.id, 'symbol').items,
+          imports: records(read, revision, image.id, 'import').items,
+          exports: records(read, revision, image.id, 'export').items,
+        },
+        functions: records(read, revision, image.id, 'function').items,
+      };
+    });
     navigation.set(image, indexed);
   }
   return reconstructFunctionGraph(
@@ -139,6 +146,13 @@ export function loadFunctionIndex(
       functions: records(scope, revision, image.id, 'function').items,
       references: records(scope, revision, image.id, 'reference').items,
     };
-  indexed.references ??= records(scope, revision, image.id, 'reference').items;
+  useBuilt(scope.context, indexed);
+  indexed.references = indexed.references
+    ? useBuilt(scope.context, indexed.references)
+    : buildOnce(
+        scope.context,
+        (quiet) =>
+          records({ store: scope.store, context: quiet }, revision, image.id, 'reference').items,
+      );
   return { functions: indexed.functions, references: indexed.references };
 }

@@ -1,4 +1,4 @@
-import { fingerprint } from '../../core/index.js';
+import { buildOnce, fingerprint, useBuilt } from '../../core/index.js';
 import type {
   FunctionGraph,
   FunctionRecord,
@@ -29,7 +29,13 @@ export interface QueryFunctionGraph extends FunctionGraph {
 }
 const cache = new Map<
   string,
-  { readonly graph: QueryFunctionGraph; readonly units: number; readonly characters: number }
+  {
+    readonly graph: QueryFunctionGraph;
+    readonly units: number;
+    readonly characters: number;
+    /** Work reconstructing it charged: a reuse charges the same. */
+    readonly work: number;
+  }
 >();
 let cachedUnits = 0;
 let cachedCharacters = 0;
@@ -55,25 +61,36 @@ export function reconstructFunctionGraph(
   const { image, revision } = input,
     fn = input.function;
   const key = `${input.project_id}:${revision}:${image.selected_slice_id}:${fn.id}:${context.budget.instructions}:${context.budget.blocks}:${input.formatting ? 'formatted' : 'structured'}`;
+  // The discovery index is per image: every operation pays its recorded build cost once,
+  // before and apart from the graph's own work, whether or not the graph is cached.
+  let prepared = indexes.get(image);
+  if (prepared && prepared.revision === revision && prepared.functions === input.functions)
+    useBuilt(context, prepared);
+  else {
+    prepared = buildOnce(context, (quiet) => ({
+      revision,
+      functions: input.functions,
+      index: prepareDiscoveryIndex({ image, revision, functions: input.functions }, quiet),
+      noreturn_calls: libraryNoreturnCalls(image, quiet),
+    }));
+    indexes.set(image, prepared);
+  }
   const cached = cache.get(key);
   if (cached) {
-    context.checkpoint(cached.units);
+    context.checkpoint(cached.work);
     // Refresh the bounded graph LRU without retaining its image bytes.
     cache.delete(key);
     cache.set(key, cached);
     return cached.graph;
   }
-  let prepared = indexes.get(image);
-  if (!prepared || prepared.revision !== revision || prepared.functions !== input.functions) {
-    const index = prepareDiscoveryIndex({ image, revision, functions: input.functions }, context);
-    prepared = {
-      revision,
-      functions: input.functions,
-      index,
-      noreturn_calls: libraryNoreturnCalls(image, context),
-    };
-    indexes.set(image, prepared);
-  }
+  let work = 0;
+  const measured: OperationContext = {
+    ...context,
+    checkpoint(amount) {
+      context.checkpoint(amount);
+      work += amount;
+    },
+  };
   const decoder =
     image.target.architecture === 'arm64'
       ? new Arm64Decoder()
@@ -93,15 +110,15 @@ export function reconstructFunctionGraph(
         selected_entry: fn.entry,
         noreturn_calls: prepared.noreturn_calls,
       },
-      context,
+      measured,
     );
     if (presentations) {
       for (const instruction of discovery.graphs[0]?.instructions ?? []) {
-        context.checkpoint(1);
+        measured.checkpoint(1);
         if (instruction.payload === null) continue;
         const presentation = decoder.format(instruction);
         presentationCharacters += presentation.mnemonic.length + presentation.operands.length;
-        context.checkpoint(presentation.mnemonic.length + presentation.operands.length);
+        measured.checkpoint(presentation.mnemonic.length + presentation.operands.length);
         presentations.set(instruction.id, presentation);
       }
     }
@@ -196,7 +213,7 @@ export function reconstructFunctionGraph(
       cachedUnits -= removed.units;
       cachedCharacters -= removed.characters;
     }
-    cache.set(key, { graph, units, characters });
+    cache.set(key, { graph, units, characters, work });
     cachedUnits += units;
     cachedCharacters += characters;
   }

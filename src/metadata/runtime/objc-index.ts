@@ -1,3 +1,4 @@
+import { buildOnce, useBuilt } from '../../core/index.js';
 import type { Evidence, LoadedImage, OperationContext } from '../../core/index.js';
 import { recoverRuntimeMetadata } from './index.js';
 import type { RuntimeRecord } from './model.js';
@@ -48,7 +49,20 @@ export function objcImageIndex(
   context: OperationContext,
 ): ObjCImageIndex | null {
   const cached = indexes.get(image);
-  if (cached?.revision === revision) return cached.index;
+  if (cached?.revision === revision) return useBuilt(context, cached).index;
+  const built = buildOnce(context, (quiet) => ({
+    revision,
+    index: buildObjCImageIndex(image, revision, quiet),
+  }));
+  indexes.set(image, built);
+  return built.index;
+}
+
+function buildObjCImageIndex(
+  image: LoadedImage,
+  revision: number,
+  context: OperationContext,
+): ObjCImageIndex | null {
   const metadata = recoverRuntimeMetadata({ image, revision }, context);
   const evidence = new Map(metadata.evidence.map((item) => [item.id, item]));
   const proof = (record: RuntimeRecord): Evidence[] =>
@@ -131,19 +145,16 @@ export function objcImageIndex(
     slots.set(at, prior === undefined || prior?.name === fact.name ? fact : null);
   }
   for (const [at, fact] of slots) if (fact && !class_refs.has(at)) class_refs.set(at, fact);
-  const index =
-    metadata.state === 'absent'
-      ? null
-      : {
-          selector_refs,
-          class_refs,
-          stubs,
-          strings,
-          methods,
-          selector_types,
-          ivars,
-          superclasses,
-        };
-  indexes.set(image, { revision, index });
-  return index;
+  return metadata.state === 'absent'
+    ? null
+    : {
+        selector_refs,
+        class_refs,
+        stubs,
+        strings,
+        methods,
+        selector_types,
+        ivars,
+        superclasses,
+      };
 }

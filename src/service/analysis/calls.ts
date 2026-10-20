@@ -1,6 +1,8 @@
 import {
   entityIdentity,
   fingerprint,
+  buildOnce,
+  useBuilt,
   type Annotation,
   type Address,
   type DataLayout,
@@ -53,7 +55,8 @@ const nativeIndexes = new WeakMap<LoadedImage, NativeCallIndex>();
 const nativeAddressKey = (address: Address): string =>
   `${address.image_id}:${address.space}:${address.value}`;
 
-/** Index immutable native facts once; callers/callee summaries only visit their
+/** Index immutable native facts once (every operation using the index pays its build cost once,
+ * see `buildOnce`); callers/callee summaries only visit their
  * own call nodes and reference lists. Array identities bind the exact snapshot. */
 export function nativeCallIndex(
   image: LoadedImage,
@@ -62,7 +65,21 @@ export function nativeCallIndex(
   context: OperationContext,
 ): NativeCallIndex {
   const cached = nativeIndexes.get(image);
-  if (cached?.functions === functions && cached.references === references) return cached;
+  if (cached?.functions === functions && cached.references === references)
+    return useBuilt(context, cached);
+  const indexed = buildOnce(context, (quiet) =>
+    buildNativeCallIndex(image, functions, references, quiet),
+  );
+  nativeIndexes.set(image, indexed);
+  return indexed;
+}
+
+function buildNativeCallIndex(
+  image: LoadedImage,
+  functions: readonly FunctionRecord[],
+  references: readonly ReferenceRecord[],
+  context: OperationContext,
+): NativeCallIndex {
   const functionsById = new Map<string, FunctionRecord>();
   const functionsByAddress = new Map<string, FunctionRecord[]>();
   for (const fn of functions) {
@@ -129,7 +146,6 @@ export function nativeCallIndex(
     references_by_function: referencesByFunction,
     callers_by_target: callersByTarget,
   };
-  nativeIndexes.set(image, indexed);
   return indexed;
 }
 

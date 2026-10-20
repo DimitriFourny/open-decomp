@@ -1,3 +1,4 @@
+import { buildOnce, useBuilt } from '../../core/index.js';
 import type { Address, LoadedImage, OperationContext, SymbolRecord } from '../../core/index.js';
 import { findVariable } from '../../metadata/library-contracts/catalog.js';
 import { cSourceName, libraryLookupName } from '../../metadata/symbols/c-names.js';
@@ -150,7 +151,15 @@ const symbolIndexes = new WeakMap<readonly SymbolRecord[], SymbolIndex>();
 const imageIndexes = new WeakMap<LoadedImage, ImageDataIndex>();
 function symbolIndex(symbols: readonly SymbolRecord[], context: OperationContext): SymbolIndex {
   const cached = symbolIndexes.get(symbols);
-  if (cached) return cached;
+  if (cached) return useBuilt(context, cached);
+  const indexed = buildOnce(context, (quiet) => buildSymbolIndex(symbols, quiet));
+  symbolIndexes.set(symbols, indexed);
+  return indexed;
+}
+function buildSymbolIndex(
+  symbols: readonly SymbolRecord[],
+  context: OperationContext,
+): SymbolIndex {
   const objects = new Map<string, Interval<SymbolRecord>[]>(),
     pages = new Map<string, { start: bigint }[]>();
   symbols.forEach((symbol, order) => {
@@ -173,13 +182,15 @@ function symbolIndex(symbols: readonly SymbolRecord[], context: OperationContext
     if (group) group.push(item);
     else objects.set(key, [item]);
   });
-  const indexed: SymbolIndex = { objects: treesByCoordinate(objects, context), pages };
-  symbolIndexes.set(symbols, indexed);
-  return indexed;
+  return { objects: treesByCoordinate(objects, context), pages };
 }
 function imageDataIndex(image: LoadedImage, context: OperationContext): ImageDataIndex {
   const cached = imageIndexes.get(image);
-  if (cached) return cached;
+  if (cached) return useBuilt(context, cached);
+  const indexed = buildOnce(context, (quiet) => buildImageDataIndex(image, quiet));
+  return indexed;
+}
+function buildImageDataIndex(image: LoadedImage, context: OperationContext): ImageDataIndex {
   const data = image.hints.filter((hint): hint is DataHint => {
     context.checkpoint(1);
     return hint.kind === 'data';
