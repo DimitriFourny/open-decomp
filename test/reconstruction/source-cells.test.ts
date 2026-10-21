@@ -287,3 +287,125 @@ for (const scenario of ['same-reason', 'different-reason', 'undefined-state', 'm
     assert.deepEqual(definitions.get(high.id), { kind: 'extract', value: whole, offset: 32 });
     assert.ok(validation.records.some((record) => record.rule === 'register_cell_recombination'));
   });
+
+// A pointer assembled per arm from two 32-bit cells: `lo = A; hi = 1` on one
+// edge and `lo = B; hi = 1` on the other. Range analysis folds the upper cell
+// to its one constant (`folded`) before cell recombination runs.
+for (const scenario of [
+  'varying-constants',
+  'folded-high',
+  'folded-high-nonconstant-edge',
+  'nonconstant-edge',
+] as const)
+  test(`register cell recombination of constant cells: ${scenario}`, () => {
+    const value = (id: string, bits = 32): Value => ({ id, type: integer(bits) });
+    const low = value('low'),
+      high = value('high'),
+      narrow = value('narrow'),
+      aLow = value('a-low'),
+      aHigh = value('a-high'),
+      bLow = value('b-low'),
+      bHigh = value('b-high');
+    const effect = { id: 'effect', type: effectType };
+    const block: BlockRegion = {
+      id: 'join',
+      kind: 'block',
+      provenance,
+      parameters: [low, high],
+      effect_parameter: effect,
+      dominator: null,
+      register_exit: [],
+      statements: [],
+      register_entry: [
+        { register: register('lo', 32), value: low },
+        { register: register('hi', 32, 32), value: high },
+      ],
+      control: { id: 'return', kind: 'return', provenance, values: [], effect },
+    };
+    const transfer = (lo: Value, hi: Value): ParallelTransfer => ({
+      kind: 'transfer',
+      target: block.id,
+      mode: 'next',
+      effect: { source: effect, destination: effect },
+      copies: [
+        { destination: low, source: lo },
+        { destination: high, source: hi },
+      ],
+    });
+    const first = transfer(aLow, aHigh),
+      second = transfer(bLow, bHigh);
+    const folded = scenario === 'folded-high' || scenario === 'folded-high-nonconstant-edge';
+    const definitions = new Map<string, Expression>([
+      [aLow.id, { kind: 'constant', bits: 0x60ce8n }],
+      [aHigh.id, { kind: 'constant', bits: scenario === 'varying-constants' ? 2n : 1n }],
+      [bLow.id, { kind: 'constant', bits: 0x60ae0n }],
+      [bHigh.id, { kind: 'constant', bits: 1n }],
+    ]);
+    // The second edge's low cell is computed, not constant.
+    if (scenario === 'nonconstant-edge' || scenario === 'folded-high-nonconstant-edge')
+      definitions.set(bLow.id, { kind: 'cast', op: 'bitcast', value: narrow });
+    if (folded) definitions.set(high.id, { kind: 'constant', bits: 1n });
+    definitions.set('read', { kind: 'concat', values: [low, high] });
+    const incoming = new Map([
+      [low.id, [aLow, bLow]],
+      [high.id, [aHigh, bHigh]],
+    ]);
+    const blocks = new Map([[block.id, block]]),
+      context = createOperationContext();
+    const validation = new LocalValidationSession(context);
+    const result = recombineSourceCells(
+      blocks,
+      [
+        { transfer: first, block },
+        { transfer: second, block },
+      ],
+      definitions,
+      incoming,
+      {
+        make: (key, type, _block, expression) => {
+          if (expression) definitions.set(key, expression);
+          return { id: key, type };
+        },
+        alias: (target, expression) => {
+          definitions.set(target.id, expression);
+        },
+      },
+      validation,
+      context,
+    );
+    if (scenario !== 'varying-constants' && scenario !== 'folded-high') {
+      // Any edge whose cells are not constants keeps every cell separate.
+      assert.equal(result.size, 0);
+      assert.deepEqual(blocks.get(block.id)!.parameters, [low, high]);
+      assert.deepEqual(incoming.get(low.id), [aLow, bLow]);
+      return;
+    }
+    const whole = result.get(first)![0]!.destination;
+    const wholeFirst = result.get(first)![0]!.source,
+      wholeSecond = result.get(second)![0]!.source;
+    // One whole-width parameter, one whole constant per edge: low | high << 32.
+    assert.deepEqual(definitions.get(wholeFirst.id), {
+      kind: 'constant',
+      bits: scenario === 'varying-constants' ? 0x2_00060ce8n : 0x1_00060ce8n,
+    });
+    assert.deepEqual(definitions.get(wholeSecond.id), { kind: 'constant', bits: 0x1_00060ae0n });
+    assert.equal(whole.type.kind === 'integer' && whole.type.bits, 64);
+    assert.deepEqual(incoming.get(whole.id), [wholeFirst, wholeSecond]);
+    assert.equal(incoming.has(low.id) || incoming.has(high.id), false);
+    assert.deepEqual(definitions.get(low.id), { kind: 'extract', value: whole, offset: 0 });
+    assert.deepEqual(definitions.get(high.id), { kind: 'extract', value: whole, offset: 32 });
+    assert.ok(blocks.get(block.id)!.parameters.includes(whole));
+    // Every recombined constant was proved on its own edge.
+    const proofs = validation.records.filter((record) => record.kind === 'bitvector');
+    assert.equal(proofs.length, 2);
+    assert.ok(proofs.every((record) => record.status === 'verified'));
+    assert.deepEqual(
+      proofs.map((record) => record.subject_ids),
+      [
+        [aLow.id, aHigh.id],
+        [bLow.id, bHigh.id],
+      ],
+    );
+    assert.ok(validation.records.some((record) => record.rule === 'register_cell_recombination'));
+    assert.equal(first.copies.length, 2, 'original machine transfer remains immutable');
+  });

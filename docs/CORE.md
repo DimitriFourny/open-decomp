@@ -738,7 +738,15 @@ literal-zero upper cells, i.e. a 32-bit or narrower write that zero-extends; all
 literal constants; cells that are each an unknown (unavailable) value of the same
 reason (for example non-argument entry registers), which jointly form one unknown
 value of the full width; or the unchanged cells of another recombined phi, which is
-resolved as a fixpoint. Other register banks keep the complete-root rule with
+resolved as a fixpoint. A cell that range analysis already folded to a constant
+(`value7 = 1` on every edge) still counts as a cell of the group, but then every
+edge must write one constant per cell: the group becomes one whole-width
+parameter with one whole constant per edge (`0x100060ce8`, not `value6 | value7 << 32`),
+and source-fact discovery also offers each such whole constant as a candidate address,
+so function-pointer and global naming applies to it. Each constant is proved on its
+own edge by exact interpreter evaluation (a `bitvector` record: the cells'
+concatenation equals the constant; no BDD allowance is spent); a non-constant cell
+on any edge keeps every cell separate. Other register banks keep the complete-root rule with
 identical whole values. Original SSA cells and transfers remain immutable;
 source aliases extract slices from the new whole phi, preserving parallel copies
 and full-width arithmetic carries. Independently written cells (for example a
