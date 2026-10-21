@@ -181,7 +181,7 @@ test('SysV red-zone bytes with definite initialization remain private storage', 
   const { ir, extra } = source(b.finish(block, [u64]), sysvAMD64Abi);
   for (const language of ['c-like', 'python-like'] as const) {
     const output = emit(ir, extra, language);
-    assert.match(output.emission.text, /\bstack_frame\b/);
+    assert.match(output.emission.text, /\bframe\.local_80\b/);
     assert.doesNotMatch(output.emission.text, /\bentry_sp\b/);
     const observation = execute(output.emission);
     assert.deepEqual(observation.values, [0x89abcdef01234567n]);

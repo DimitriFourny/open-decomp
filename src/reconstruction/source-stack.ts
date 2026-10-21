@@ -14,13 +14,103 @@ import {
 } from '../ir/index.js';
 import type { BlockRegion, ParallelTransfer } from '../presentation/index.js';
 import type { BoundaryProjection } from './model.js';
-import type { FrameSaves, SourceLocal, SourceStackStorage } from './source-model.js';
+import type { FrameMember, FrameSaves, SourceLocal, SourceStackStorage } from './source-model.js';
 import type { Requirement } from '../core/inference.js';
 import { LocalValidationSession } from './local-validation.js';
 import { type ForwardedByte, validateStackPromotion } from './local-storage-validation.js';
 import { sourceRequirementPredicates } from './source-requirements.js';
 
 type MemoryNode = Extract<Instruction, { kind: 'load' | 'store' }>;
+const FRAME_OBJECT_SCOPE =
+  'frame bytes kept as memory print as one local frame object at their entry-SP offsets: one scalar member per exact (offset, width) access set, byte arrays where accesses overlap or a frame address is indexed or points inside, padding between; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
+const SCALAR_BYTES = new Set([1n, 2n, 4n, 8n, 16n]);
+
+/** Member layout of a source-view frame object that ends at the entry SP.
+ * One scalar member per exact (offset, width) access set; overlapping
+ * accesses, an address strictly inside a member and an indexed base (with the
+ * accesses that continue it without a gap) form one byte array; a taken
+ * address in a gap starts a byte array that runs to the next member. The
+ * bottom is lowered so the object starts at a stack-aligned address. Offsets
+ * at or above the entry SP are not frame bytes and are ignored. */
+export function frameLayout(
+  accesses: readonly { readonly offset: bigint; readonly end: bigint; readonly id: string }[],
+  taken: readonly bigint[],
+  indexed: ReadonlySet<bigint>,
+  alignment: number,
+  returnAddressBytes: bigint,
+): { minimum_offset: bigint; size: bigint; members: FrameMember[] } {
+  const order = (left: bigint, right: bigint): number => (left < right ? -1 : left > right ? 1 : 0);
+  const clusters: { offset: bigint; end: bigint; scalar: boolean; access_ids: string[] }[] = [];
+  for (const access of [...accesses].sort(
+    (left, right) => order(left.offset, right.offset) || order(left.end, right.end),
+  )) {
+    const last = clusters.at(-1);
+    if (last && access.offset < last.end) {
+      if (access.offset !== last.offset || access.end !== last.end) last.scalar = false;
+      if (access.end > last.end) last.end = access.end;
+      last.access_ids.push(access.id);
+    } else
+      clusters.push({
+        offset: access.offset,
+        end: access.end,
+        scalar: SCALAR_BYTES.has(access.end - access.offset),
+        access_ids: [access.id],
+      });
+  }
+  // Index of the cluster holding byte `offset`, or -1.
+  const containing = (offset: bigint): number => {
+    for (let low = 0, high = clusters.length - 1; low <= high;) {
+      const middle = (low + high) >> 1,
+        cluster = clusters[middle]!;
+      if (offset < cluster.offset) high = middle - 1;
+      else if (offset >= cluster.end) low = middle + 1;
+      else return middle;
+    }
+    return -1;
+  };
+  const gaps = new Set<bigint>();
+  for (const offset of taken) {
+    if (offset >= 0n) continue;
+    const index = containing(offset);
+    if (index < 0) gaps.add(offset);
+    else if (clusters[index]!.offset !== offset) clusters[index]!.scalar = false;
+  }
+  for (const offset of indexed) {
+    if (offset >= 0n) continue;
+    const index = containing(offset);
+    if (index < 0) {
+      gaps.add(offset);
+      continue;
+    }
+    const cluster = clusters[index]!;
+    cluster.scalar = false;
+    while (clusters[index + 1]?.offset === cluster.end) {
+      cluster.end = clusters[index + 1]!.end;
+      cluster.access_ids.push(...clusters[index + 1]!.access_ids);
+      clusters.splice(index + 1, 1);
+    }
+  }
+  const members: FrameMember[] = clusters.map((cluster) => ({
+    offset: cluster.offset,
+    size: cluster.end - cluster.offset,
+    scalar: cluster.scalar,
+    access_ids: cluster.access_ids,
+  }));
+  const starts = [...gaps].sort(order);
+  for (let index = 0, next = 0; index < starts.length; index++) {
+    const start = starts[index]!;
+    while (next < clusters.length && clusters[next]!.offset <= start) next++;
+    let end = starts[index + 1] ?? 0n;
+    if (next < clusters.length && clusters[next]!.offset < end) end = clusters[next]!.offset;
+    members.push({ offset: start, size: end - start, scalar: false, access_ids: [] });
+  }
+  members.sort((left, right) => order(left.offset, right.offset));
+  const lowest = (members[0]?.offset ?? 0n) + returnAddressBytes,
+    unit = BigInt(alignment),
+    minimum = lowest - (((lowest % unit) + unit) % unit) - returnAddressBytes;
+  return { minimum_offset: minimum, size: -minimum, members };
+}
+
 /** Exact private slots only. Escapes and overlapping access intervals retain one
  * shared frame; promoting a slot never changes an observable memory operation. */
 export function planSourceStack(
@@ -407,20 +497,24 @@ export function planSourceStack(
       }
     }
   }
-  const expose = (value: Value): void => {
-    if (!tainted.has(value.id)) return;
+  /** Records an escape of `value`; returns its known frame base offsets. */
+  const expose = (value: Value): readonly bigint[] | null => {
+    if (!tainted.has(value.id)) return [];
     const bases = baseOffsets(value);
     if (bases) for (const offset of bases) exposedOffsets.add(offset);
     else frameExposed = true;
     if (view !== 'source' || !floors.has(value.id)) {
       const expression = expressions.get(value.id);
       if (expression?.kind !== 'compare' && expression?.kind !== 'float_compare') reachAll = true;
-      return;
+      return bases;
     }
     const floor = floors.get(value.id)!;
     if (floor === null) reachAll = true;
     else if (reachFloor === undefined || floor < reachFloor) reachFloor = floor;
+    return bases;
   };
+  // Source view: frame offsets that dynamically indexed accesses derive from.
+  const indexedBases = new Set<bigint>();
   const abi = input.source!.abi;
   const preservedRoot = (root: string): boolean =>
     abi.preserved.some((register) => register.root === root);
@@ -536,7 +630,8 @@ export function planSourceStack(
       }
       if (offset === undefined && tainted.has(node.address.id)) {
         escaped = true;
-        expose(node.address);
+        const bases = expose(node.address);
+        if (view === 'source') for (const base of bases ?? []) indexedBases.add(base);
       }
       if (offset === undefined || width % 8) continue;
       const end = offset + BigInt(width / 8);
@@ -1622,8 +1717,18 @@ export function planSourceStack(
       )
       .map((access) => access.node.address.id),
   );
+  // Source view: the frame bytes kept as memory print as one local frame
+  // object ending at the entry SP instead of `entry_sp` arithmetic. Only an
+  // address at or above the entry SP (incoming stack arguments, the return
+  // address, the caller's frame) still needs the entry SP as an input; such an
+  // address, when live, keeps the whole frame in entry-SP form.
+  const frameObject =
+    view === 'source' &&
+    sharedEntry &&
+    validation.presentation('frame_object', input.function.id, FRAME_OBJECT_SCOPE);
   const entryStorage = sharedEntry || entryAddresses.size ? entryStack() : null;
-  const requiresEntry = (id: string): boolean => sharedEntry || entryAddresses.has(id);
+  const requiresEntry = (id: string): boolean =>
+    entryAddresses.has(id) || (frameObject ? addresses.get(id)! >= 0n : sharedEntry);
   if (entryStorage)
     for (const binding of entry.register_entry)
       if (
@@ -1665,16 +1770,47 @@ export function planSourceStack(
         if (offset < minimum) minimum = offset;
         if (offset >= maximum) maximum = offset + 1n;
       }
-    return remaining.length || addressLive
-      ? {
-          ...(entryStorage && live.has(entryStorage.id)
-            ? { kind: 'entry' as const, base: entryStorage, dynamic: dynamicStorage }
-            : { kind: 'private' as const }),
-          minimum_offset: minimum,
-          size: maximum - minimum,
-          alignment: input.source!.abi.layout.stack_alignment,
-        }
-      : null;
+    if (!remaining.length && !addressLive) return null;
+    const alignment = input.source!.abi.layout.stack_alignment;
+    if (entryStorage && live.has(entryStorage.id))
+      return {
+        kind: 'entry',
+        base: entryStorage,
+        dynamic: dynamicStorage,
+        minimum_offset: minimum,
+        size: maximum - minimum,
+        alignment,
+      };
+    if (
+      view !== 'source' ||
+      maximum > 0n ||
+      (sharedEntry
+        ? !frameObject
+        : !validation.presentation('frame_object', input.function.id, FRAME_OBJECT_SCOPE))
+    )
+      return { kind: 'private', minimum_offset: minimum, size: maximum - minimum, alignment };
+    const taken: bigint[] = [];
+    for (const [id, offset] of addresses) if (live.has(id)) taken.push(offset);
+    context.checkpoint(remaining.length + taken.length);
+    const layout = frameLayout(
+      remaining.map((access) => ({ offset: access.offset, end: access.end, id: access.node.id })),
+      taken,
+      indexedBases,
+      alignment,
+      input.source!.abi.stack_return_address_bytes,
+    );
+    if (sharedEntry)
+      validation.requireAbi(
+        'frame_object',
+        [input.function.id, ...remaining.slice(0, 63).map((access) => access.node.id)],
+        "The frame object is this activation's stack frame: its bytes end at the entry SP, and its start is stack-aligned. Under ABI conformance a frame address handed to a callee, stored or indexed designates bytes inside it (never the caller's frame, incoming stack arguments or the return address), and no caller-supplied, global, loaded or returned pointer designates its bytes. Every load and store keeps its address, width, order and aliasing; the checked view and the original mappings keep the entry-SP form.",
+      );
+    return {
+      kind: 'object',
+      id: `entity_${fingerprint(['source-frame', input.function.id])}`,
+      alignment,
+      ...layout,
+    };
   };
   return {
     hidden,

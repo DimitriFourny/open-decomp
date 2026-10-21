@@ -294,6 +294,16 @@ class Parser {
   private readonly tables = new Map<string, { readonly address: bigint; readonly bits: number }>();
   /** Declared scalar globals (`extern T name;`): the name is the object, not a pointer. */
   private readonly scalars = new Set<string>();
+  /** Local frame objects (`struct { ... } frame;`, Python `frame = stack_frame(...)`):
+   * the name designates the object, `&frame` its address. */
+  private readonly objects = new Set<string>();
+  /** Python-like frame objects: their size and annotated members (`frame.local_38: T`);
+   * a member's type is null for a byte array. */
+  private readonly frameSizes = new Map<string, bigint>();
+  private readonly frameMembers = new Map<
+    string,
+    { readonly offset: bigint; readonly type: Extract<CType, { kind: 'int' | 'float' }> | null }
+  >();
   /** Declared result types of `extern R name(...);` functions. */
   private readonly prototypes = new Map<string, CType>();
   returnType: CType = MATH;
@@ -465,14 +475,23 @@ class Parser {
       return;
     }
     this.take('struct');
-    const name = this.take(),
-      fields = new Map<string, { offset: bigint; type: CType; array: boolean }>();
+    const name = this.take();
     if (this.peek() === name) {
       this.take(name);
       this.take(';');
       this.structNames.add(name);
       return;
     }
+    const layout = this.structBody();
+    if (this.peek() === name) this.take(name);
+    this.take(';');
+    this.structs.set(name, layout);
+  }
+
+  /** `{ T field; uint8_t gap[N]; ... } [__attribute__((packed))]` laid out by C
+   * rules (each scalar at its natural alignment unless packed). */
+  private structBody(): StructLayout {
+    const fields = new Map<string, { offset: bigint; type: CType; array: boolean }>();
     let offset = 0n,
       alignment = 1n;
     this.take('{');
@@ -536,9 +555,7 @@ class Parser {
     this.take('}');
     if (packed)
       for (const token of ['__attribute__', '(', '(', 'packed', ')', ')']) this.take(token);
-    if (this.peek() === name) this.take(name);
-    this.take(';');
-    this.structs.set(name, { size: ((offset + alignment - 1n) / alignment) * alignment, fields });
+    return { size: ((offset + alignment - 1n) / alignment) * alignment, fields };
   }
 
   /** Return and formal types of `R name(T a, U b) {`; unknown spellings stay mathematical. */
@@ -651,6 +668,28 @@ class Parser {
     if (token === 'memory' && this.peek() === '.') {
       this.position--;
       this.memoryStatement('\n');
+      return;
+    }
+    if (this.objects.has(token) && this.peek() === '.') {
+      if (this.tokens[this.position + 2] !== ':') {
+        this.position--;
+        this.memoryStatement('\n');
+        return;
+      }
+      // `frame.local_N: T` declares the member at entry-SP offset -N.
+      this.take('.');
+      const field = this.take(),
+        match = /^local_([\da-f]+)$/.exec(field);
+      this.take(':');
+      const type = this.bodyType(true);
+      assert.ok(match && type, 'Unsupported frame member declaration');
+      const scalar = type.scalar === 'array' ? null : this.cType(type);
+      assert.ok(scalar === null || scalar.kind === 'int' || scalar.kind === 'float');
+      this.frameMembers.set(`${token}.${field}`, {
+        offset: this.frameSizes.get(token)! - BigInt(`0x${match[1]}`),
+        type: scalar?.kind === 'int' || scalar?.kind === 'float' ? scalar : null,
+      });
+      this.take('\n');
       return;
     }
     if (token === 'label') {
@@ -806,6 +845,12 @@ class Parser {
     }
     const expression = this.peek() === '=' ? (this.take('='), this.expression()) : null;
     this.take('\n');
+    if (expression?.kind === 'call' && expression.name === 'stack_frame') {
+      const size = expression.args[0];
+      assert.ok(size?.kind === 'literal' && typeof size.value === 'bigint');
+      this.objects.add(names[0]!);
+      this.frameSizes.set(names[0]!, size.value);
+    }
     this.ops.push({ kind: 'assign', names, expression, tuple });
   }
 
@@ -815,11 +860,23 @@ class Parser {
       this.take('(');
       const alignment = this.expression();
       this.take(')');
-      this.take('uint8_t');
-      const name = this.take();
-      this.take('[');
-      const size = this.expression();
-      this.take(']');
+      let name: string, size: Expr;
+      if (this.peek() === 'struct') {
+        // A local frame object: its storage, laid out like any declared structure.
+        this.take('struct');
+        const layout = this.structBody();
+        name = this.take();
+        this.structs.set(`$${name}`, layout);
+        this.symbols.set(name, { kind: 'pointer', to: { kind: 'struct', name: `$${name}` } });
+        this.objects.add(name);
+        size = { kind: 'literal', value: layout.size };
+      } else {
+        this.take('uint8_t');
+        name = this.take();
+        this.take('[');
+        size = this.expression();
+        this.take(']');
+      }
       this.take(';');
       this.ops.push({
         kind: 'assign',
@@ -832,7 +889,10 @@ class Parser {
     if (
       (token === '(' && this.peek() === '*') ||
       token === '*' ||
-      (/^[A-Za-z_]\w*$/.test(token) && (this.peek() === '[' || this.peek() === '->'))
+      (/^[A-Za-z_]\w*$/.test(token) &&
+        (this.peek() === '[' ||
+          this.peek() === '->' ||
+          (this.peek() === '.' && this.objects.has(token))))
     ) {
       this.position--;
       this.memoryStatement(';');
@@ -1234,8 +1294,34 @@ class Parser {
             : member.array
               ? { kind: 'cast', type: { kind: 'pointer', to: memberType }, value: address }
               : this.read(address, memberType);
+      } else if (
+        this.python &&
+        this.peek() === '.' &&
+        expression.kind === 'ref' &&
+        this.objects.has(expression.name)
+      ) {
+        this.take('.');
+        const field = this.take(),
+          member = this.frameMembers.get(`${expression.name}.${field}`);
+        assert.ok(member, `Undeclared frame member ${field}`);
+        const address: Expr = {
+          kind: 'binary',
+          op: '+',
+          left: expression,
+          right: { kind: 'literal', value: member.offset },
+        };
+        expression = member.type ? this.read(address, member.type) : address;
       } else return expression;
     }
+  }
+
+  /** `&lvalue` (Python `address_of(lvalue)`) of a frame object, member or element:
+   * the address read or written there; an object or byte array already is one. */
+  private addressOf(lvalue: Expr): Expr {
+    if (lvalue.kind !== 'call' || lvalue.name !== 'read_memory') return lvalue;
+    const type = lvalue.ctype;
+    assert.ok(type?.kind === 'int' || type?.kind === 'float', 'Address of a non-scalar lvalue');
+    return { kind: 'cast', type: { kind: 'pointer', to: type }, value: lvalue.args[0]! };
   }
 
   /** Plain C dereference of a typed scalar pointer; alignment follows the
@@ -1335,6 +1421,7 @@ class Parser {
     if (token === '...') return { kind: 'call', name: 'unknown_argument_remainder', args: [] };
     if (token === '&' && this.scalars.has(this.peek()) && this.tokens[this.position + 1] !== '[')
       return { kind: 'ref', name: this.take() };
+    if (token === '&' && this.objects.has(this.peek())) return this.addressOf(this.atom());
     if (token === '&') {
       const name = this.take();
       this.take('[');
@@ -1531,6 +1618,7 @@ class Parser {
       }
       this.payload = payload;
       this.take(')');
+      if (token === 'address_of' && args.length === 1) return this.addressOf(args[0]!);
       return { kind: 'call', name: token, args };
     }
     if (this.scalars.has(token)) return this.dereference({ kind: 'ref', name: token });
@@ -1809,7 +1897,7 @@ export function execute(
       assert.equal(typeof entry, 'bigint', `Oracle has no address for function ${args[0]}`);
       return entry as bigint;
     }
-    if (name === 'stack_storage') {
+    if (name === 'stack_storage' || name === 'stack_frame') {
       const size = number(args[0]),
         alignment = number(args[1]);
       assert.ok(size >= 0n && size <= 1048576n && alignment > 0n);

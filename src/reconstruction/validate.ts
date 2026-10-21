@@ -57,6 +57,7 @@ export function validateReconstruction(program: Reconstruction, context: Operati
     if (!known || bitWidth(known.type) !== bitWidth(value.type))
       invalid(program.function, 'a projected use has no compatible value definition');
   };
+  const storage = program.source?.stack;
   for (const id of reachable) {
     const block = program.blocks.get(id)!;
     const row = coverage.get(id);
@@ -74,6 +75,28 @@ export function validateReconstruction(program: Reconstruction, context: Operati
     for (const parameter of block.parameters) definitions.add(parameter.id);
     for (const node of block.statements) {
       context.checkpoint(1);
+      if (
+        (storage?.kind === 'private' || storage?.kind === 'object') &&
+        program.retained.has(node.id) &&
+        (node.kind === 'load' || node.kind === 'store')
+      ) {
+        const offset = program.source!.stack_addresses.get(node.address.id);
+        const bytes = BigInt(
+          Math.ceil(bitWidth(node.kind === 'load' ? node.result.type : node.value.type) / 8),
+        );
+        if (offset !== undefined && offset + bytes > 0n)
+          invalid(
+            node,
+            'callee-entry incoming bytes were projected as newly allocated private storage',
+          );
+        if (
+          storage.kind === 'object' &&
+          offset !== undefined &&
+          offset < storage.minimum_offset &&
+          !program.source!.locals.has(node.id)
+        )
+          invalid(node, 'a frame access lies below its frame object');
+      }
       if (program.retained.has(node.id)) {
         if ('result' in node) definitions.add(node.result.id);
         if (node.kind === 'call') {
@@ -140,31 +163,25 @@ export function validateReconstruction(program: Reconstruction, context: Operati
       invalid(program.function, 'a synthesized local is used without an emitted definition');
     if (expression) for (const operand of expressionOperands(expression)) checkValue(operand);
   }
-  const storage = program.source?.stack;
   if (
     storage?.kind === 'entry' &&
     (!program.parameters.some((value) => value.id === storage.base.id) ||
       !program.live.has(storage.base.id))
   )
     invalid(program.function, 'entry-backed storage has no live explicit incoming base');
-  if (storage?.kind === 'private')
-    for (const id of reachable) {
-      const block = program.blocks.get(id)!;
-      for (const node of block.statements) {
-        context.checkpoint(1);
-        if (!program.retained.has(node.id) || (node.kind !== 'load' && node.kind !== 'store'))
-          continue;
-        const offset = program.source!.stack_addresses.get(node.address.id);
-        const bytes = BigInt(
-          Math.ceil(bitWidth(node.kind === 'load' ? node.result.type : node.value.type) / 8),
-        );
-        if (offset !== undefined && offset + bytes > 0n)
-          invalid(
-            node,
-            'callee-entry incoming bytes were projected as newly allocated private storage',
-          );
-      }
+  if (storage?.kind === 'object') {
+    let end = storage.minimum_offset;
+    for (const member of storage.members) {
+      context.checkpoint(1);
+      if (member.size <= 0n || member.offset < end)
+        invalid(program.function, 'frame object members overlap or are out of order');
+      end = member.offset + member.size;
     }
+    if (end > 0n || storage.minimum_offset + storage.size !== 0n)
+      invalid(program.function, 'a frame object does not end at the entry SP');
+  }
+  // Retained frame accesses of private and object storage are checked in the
+  // statement scan above.
   const locals = program.source?.locals;
   if (locals?.size) {
     const predecessors = new Map<string, string[]>();

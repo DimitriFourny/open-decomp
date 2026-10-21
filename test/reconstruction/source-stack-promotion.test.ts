@@ -215,11 +215,32 @@ for (const abi of targets) {
     assert.ok(rules(source).includes('arity_closure'));
     assert.deepEqual([...promoted(source)], ['-40:-32']);
     assert.ok(requirements(source).includes('frame_object_base'));
+    assert.ok(requirements(source).includes('frame_object'));
     assert.deepEqual([...promoted(fixture.view('checked'))], []);
     for (const language of ['c-like', 'python-like'] as const) {
-      const text = emit(fixture.ir, fixture.extra, language).emission.text;
-      assert.match(text, /entry_sp/);
-      assert.match(text, /sub_2000\(/);
+      const output = emit(fixture.ir, fixture.extra, language).emission;
+      // The escaped slot and the slot above it stay memory: members of the
+      // frame object, the escaped one passed by address.
+      assert.doesNotMatch(output.text, /entry_sp/);
+      assert.match(
+        output.text,
+        language === 'c-like'
+          ? /sub_2000\(&frame\.local_20\)/
+          : /sub_2000\(address_of\(frame\.local_20\)\)/,
+      );
+      let calls = 0;
+      const observation = execute(
+        output,
+        new Map(),
+        new Map(),
+        0n,
+        new Map(),
+        new Map(),
+        new Map([['sub_2000', () => (calls++, [])]]),
+      );
+      // 5 + 6 + 7: the callee leaves the escaped slot unchanged.
+      assert.deepEqual(observation.values, [18n]);
+      assert.equal(calls, 1);
     }
   });
 
@@ -745,7 +766,9 @@ for (const abi of [sysvAMD64Abi, windowsX64Abi])
       assert.ok(!rules(fixture.view('checked')).includes('call_return_address'));
       for (const language of ['c-like', 'python-like'] as const) {
         const output = emit(fixture.ir, fixture.extra, language).emission;
-        assert.equal(/entry_sp/.test(output.text), gate !== 'push');
+        // A retained push slot is a frame object member, never entry-SP arithmetic.
+        assert.doesNotMatch(output.text, /entry_sp/);
+        assert.equal(/\bframe\.local_8\b/.test(output.text), gate !== 'push');
         assert.match(output.text, /sub_2000\(/);
       }
     }
