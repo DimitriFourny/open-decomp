@@ -5330,7 +5330,9 @@ export class Renderer {
             : `while ${test(form.enter)}:`,
       );
       this.loopExit(exit.transfer, depth, control);
-      this.arm(enter, depth, control);
+      // The loop prints `pass` itself when its whole body prints nothing.
+      this.transfer(enter.transfer, depth, control);
+      if (enter.body) this.region(enter.body, depth);
       return;
     }
     if (form?.kind === 'for') {
