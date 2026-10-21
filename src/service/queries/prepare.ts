@@ -154,11 +154,10 @@ export async function prepareQueryImport(
       for (const kind of ['symbol', 'export'] as const)
         tx.setIndexState(image.id, kind, nativeNamesPartial ? 'partial' : 'complete');
       tx.setIndexState(image.id, 'import', metadataPartial ? 'partial' : 'complete');
-      tx.setIndexState(
-        image.id,
-        'function',
-        discovery.coverage.state === 'complete' ? 'complete' : 'partial',
-      );
+      // Complete function enumeration, not complete per-function analysis: unresolved flow
+      // inside a function leaves its graph partial but cannot hide another function.
+      tx.setIndexState(image.id, 'function', discovery.enumeration);
+      tx.setDiscoveryFrontier(image.id, discovery.frontier);
       tx.setIndexState(image.id, 'string', references.strings?.state ?? strings.state);
       tx.setIndexState(image.id, 'reference', references.state);
     },
