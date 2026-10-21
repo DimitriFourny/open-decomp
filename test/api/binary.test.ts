@@ -162,7 +162,7 @@ test(
 );
 
 test(
-  'function selection retains uncertainty under incomplete discovery and closed sessions cannot keep querying',
+  'function selection proves absence once whole-image enumeration completes and closed sessions cannot keep querying',
   { timeout: 60000 },
   async (t) => {
     const { input, sessions } = await setup(t);
@@ -174,7 +174,7 @@ test(
       session.decompile({ name: 'no_such_function_in_this_fixture' }),
       (error) =>
         error instanceof FunctionSelectionError &&
-        error.reason === 'incomplete' &&
+        error.reason === 'not_found' &&
         error.candidates.length === 0,
     );
     await session.close();
@@ -183,7 +183,7 @@ test(
 );
 
 test(
-  'C names resolve through the authoritative symbol table under a partial function index, and ambiguity stays honest',
+  'C names resolve through the authoritative symbol table under a partial function index, ambiguity stays honest, absence drives discovery to completion',
   { timeout: 120000 },
   async (t) => {
     const { root, sessions } = await setup(t);
@@ -211,13 +211,19 @@ test(
         error.reason === 'ambiguous' &&
         error.candidates.length === 2,
     );
+    // The tables cannot settle an absent name under the partial index, so the session runs
+    // whole-image discovery to completion (default request budget) and then proves absence.
+    const before = partial.revision;
     await assert.rejects(
       partial.decompile({ name: 'task_absent' }),
       (error) =>
         error instanceof FunctionSelectionError &&
-        error.reason === 'incomplete' &&
+        error.reason === 'not_found' &&
         error.candidates.length === 0,
     );
+    assert.ok(partial.revision > before);
+    const completed = await partial.findFunctions({ page: { limit: 1 } });
+    assert.ok('data' in completed && completed.data.page.index_state === 'complete');
     const complete = await openBinary(binary, { cachePath: join(root, 'complete') });
     sessions.push(complete);
     assert.equal(

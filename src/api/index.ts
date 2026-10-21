@@ -1,13 +1,13 @@
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
-import { OperationError, sliceIdSchema } from '../core/index.js';
+import { OperationError, decodeDiagnostic, sliceIdSchema } from '../core/index.js';
 import type { ToolInput, ToolResult, WireJob } from '../core/index.js';
 import { QueryService } from '../service/queries/index.js';
 import { hashInput, projectDirectoryName } from '../service/queries/input-identity.js';
 import type { QueryCallOptions } from '../service/queries/index.js';
 import { materializeDecompilation } from '../service/queries/materialize.js';
-import { selectFunction } from '../service/queries/selector.js';
+import { FunctionSelectionError, selectFunction } from '../service/queries/selector.js';
 export { FunctionSelectionError } from '../service/queries/selector.js';
 /** The settings file is never read implicitly: call `loadSettings()` and pass the values you want
  * (`cache_root` as `cachePath`, `analysis_cache` as `analysisCache`, `decompile.*` as decompile
@@ -121,7 +121,8 @@ const selectorSchema = z.union([
 export class BinarySession {
   readonly image: BinaryImage;
   readonly projectId: string;
-  readonly revision: number;
+  /** Advances only when this session commits a whole-image discovery step. */
+  revision: number;
   #closing: Promise<void> | undefined;
   private constructor(
     readonly inputPath: string,
@@ -307,13 +308,61 @@ export class BinarySession {
       ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
     };
     options.signal?.throwIfAborted();
-    const selected = await selectFunction(
-      this.service,
-      { project_id: this.projectId, revision: this.revision, image_id: this.image.id },
-      selector,
-      call,
-    );
+    const select = () =>
+      selectFunction(
+        this.service,
+        { project_id: this.projectId, revision: this.revision, image_id: this.image.id },
+        selector,
+        call,
+      );
+    let selected;
+    try {
+      selected = await select();
+    } catch (error) {
+      if (!(error instanceof FunctionSelectionError) || error.reason !== 'incomplete') throw error;
+      // An unsettled selection runs whole-image discovery to its end (each step under this
+      // request's budget), so the answer comes from the final enumeration whatever ran before.
+      if (!(await this.completeDiscovery(options.budget, call))) throw error;
+      selected = await select();
+    }
     return this.decompileFunction(selected.id, options);
+  }
+
+  /** Continue whole-image function discovery step by step, each under `budget` (default
+   * budget when omitted), until a step makes no progress. Each progressing step commits one
+   * revision. Returns whether any step progressed. */
+  async completeDiscovery(
+    budget?: ToolInput<'functions_discover'>['budget'],
+    call: QueryCallOptions = {},
+  ): Promise<boolean> {
+    this.#requireOpen();
+    let progressed = false;
+    for (;;) {
+      const step = await this.service.execute(
+        'functions_discover',
+        {
+          project_id: this.projectId,
+          revision: this.revision,
+          image_id: this.image.id,
+          ...(budget === undefined ? {} : { budget }),
+        },
+        call,
+      );
+      if (!('data' in step))
+        throw new OperationError(
+          'error' in step
+            ? decodeDiagnostic(step.error)
+            : {
+                code: 'internal_error',
+                severity: 'error',
+                message: 'Discovery step returned no result',
+                evidence_ids: [],
+              },
+        );
+      if (!step.data.progressed) return progressed;
+      progressed = true;
+      this.revision = step.data.revision;
+    }
   }
 
   /** Decompile an already identified function (entity ID from findFunctions). */

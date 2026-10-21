@@ -84,6 +84,8 @@ const descriptions: Record<ToolName, string> = {
     'Read bounded immutable mapped bytes or typed machine bits. Zero-fill, unmapped holes and continuations stay distinct; target bytes never execute.',
   annotations_apply:
     'Atomically apply revision-checked name, note, type or signature assertions, retractions and removals. Assertions are not binary facts; a successful edit advances one revision and invalidates derived analysis.',
+  functions_discover:
+    'Continue a budget-limited whole-image function discovery by one step at the current revision (a selection reported "incomplete"). A step that progresses publishes the functions it found and advances one revision; progressed false means complete or unable to finish a root within the instruction limit.',
   analysis_status:
     'Inspect a durable project-owned job. known_revision is the last acknowledged project revision; artifact published_revision is a separate snapshot identity.',
   analysis_cancel:
@@ -478,6 +480,7 @@ export function createMcpServer(service: QueryService, policy: McpServerPolicy =
             'project_close',
             'function_decompile',
             'annotations_apply',
+            'functions_discover',
             'analysis_cancel',
           ].includes(name),
           openWorldHint: false,

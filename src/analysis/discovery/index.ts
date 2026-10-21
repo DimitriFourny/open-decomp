@@ -27,6 +27,8 @@ export type { DiscoveryLineage } from './lineage.js';
 
 /** Same entry cap as indirect-table target recovery; larger tables stay unresolved. */
 const MAX_JUMP_TABLE_ENTRIES = 256;
+/** Linker-synthesized import trampoline sections (ELF PLT variants, Mach-O stub sections). */
+const STUB_SECTION = /(^|[.,])(plt|plt\.sec|plt\.got|iplt)$|__(auth_|objc_)?stubs$|__stub_helper$/;
 
 /** Assertions remain labeled evidence, never binary facts. Ranges are boundary claims, not
  * permission to decode unreachable bytes. Retracted assertions do not seed discovery. */
@@ -161,8 +163,9 @@ function evidenceDeriver(image: LoadedImage, revision: number, evidence: Map<str
   };
 }
 
-/** Discovery is recursive traversal from evidence, never a prologue scan or linear sweep.
- * Complete means the seeded traversal finished, not that every function in the image is known.
+/** Discovery is recursive traversal from evidence, never a prologue scan. Image-wide mode then
+ * sweeps unexplained executable bytes into candidate roots; `enumeration` is complete only when
+ * every executable byte is explained.
  * Unknown indirect flow remains partial. Instruction limits return partial reachable graphs;
  * work, block, deadline and cancellation limits throw OperationError and publish no result.
  * Decoder byte references are opaque (including split-backed VA ranges), not file offsets.
@@ -669,7 +672,29 @@ export function discoverFunctions(
       context,
     );
     const align = (value: bigint): bigint => (value + unit - 1n) & -unit;
-    for (const range of index.executable) {
+    // Executable sections when the loader names them (else the executable mappings), minus
+    // linker-synthesized import trampolines (PLT, Mach-O stubs): their callable entries are
+    // import roots and the remaining bytes (PLT0, lazy-binding tails) are no function.
+    const sections = image.sections.filter(
+      (section) =>
+        section.kind === 'section' &&
+        section.permissions.includes('execute') &&
+        section.virtual_range.size > 0n,
+    );
+    const sweepable = sections.length
+      ? coalesce(
+          sections
+            .filter((section) => !STUB_SECTION.test(section.name))
+            .map((section) => {
+              const start = section.virtual_range.start.value;
+              const end = start + section.virtual_range.size;
+              const backed = executableEnd(start);
+              return { start, end: backed < end ? backed : end };
+            }),
+          context,
+        )
+      : index.executable;
+    for (const range of sweepable) {
       let address = align(range.start > sweepCursor ? range.start : sweepCursor);
       while (address < range.end) {
         context.checkpoint(1);

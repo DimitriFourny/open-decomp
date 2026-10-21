@@ -145,6 +145,7 @@ const inputs: Record<ToolName, object> = {
       },
     ],
   },
+  functions_discover: { ...request, image_id: image },
   analysis_status: { ...request, job_id: jobId },
   analysis_cancel: { ...request, job_id: jobId },
 };
@@ -221,6 +222,16 @@ const success: Record<ToolName, object> = {
       ],
       removed: [],
       invalidation: { scope: 'project', derived_before_revision: 4 },
+    },
+  },
+  functions_discover: {
+    state: 'complete',
+    data: {
+      previous_revision: 2,
+      revision: 3,
+      published: 2,
+      index_state: 'complete',
+      progressed: true,
     },
   },
   analysis_status: { state: 'complete', data: { job, known_revision: 3 } },

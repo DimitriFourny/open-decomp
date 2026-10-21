@@ -69,6 +69,7 @@ export const toolNameSchema = z.enum([
   'evidence_get',
   'memory_read',
   'annotations_apply',
+  'functions_discover',
   'analysis_status',
   'analysis_cancel',
 ]);
@@ -507,6 +508,11 @@ export const annotationsApplyArgsSchema = z
   });
 export const analysisStatusArgsSchema = z.strictObject({ ...requestContext, job_id: jobIdSchema });
 export const analysisCancelArgsSchema = z.strictObject({ ...requestContext, job_id: jobIdSchema });
+/** Continue a budget-limited whole-image function discovery by one step at the current revision. */
+export const functionsDiscoverArgsSchema = z.strictObject({
+  ...requestContext,
+  image_id: imageIdSchema,
+});
 
 const resultContext = {
   schema_version: z.literal(SCHEMA_VERSION),
@@ -1196,6 +1202,27 @@ export const annotationsApplyResultSchema = resultSchema(
         });
     }),
 );
+export const functionsDiscoverResultSchema = resultSchema(
+  z
+    .strictObject({
+      previous_revision: revisionSchema,
+      /** The committed revision, or previous_revision when the step changed nothing. */
+      revision: revisionSchema,
+      /** Function records this step published (finished, newly found or still cut). */
+      published: z.number().int().min(0),
+      index_state: z.enum(['complete', 'partial']),
+      /** False when the enumeration is complete already or the step cannot finish any root
+       * within the instruction limit; another step at the same budget changes nothing. */
+      progressed: z.boolean(),
+    })
+    .superRefine((data, context) => {
+      if (data.revision !== data.previous_revision + (data.progressed ? 1 : 0))
+        context.addIssue({
+          code: 'custom',
+          message: 'A discovery step commits exactly when it progresses',
+        });
+    }),
+);
 export const analysisStatusResultSchema = resultSchema(
   z.strictObject({ job: jobSchema, known_revision: revisionSchema }),
 );
@@ -1244,6 +1271,10 @@ export interface ToolSchemaRegistry {
     input: typeof annotationsApplyArgsSchema;
     output: typeof annotationsApplyResultSchema;
   };
+  functions_discover: {
+    input: typeof functionsDiscoverArgsSchema;
+    output: typeof functionsDiscoverResultSchema;
+  };
   analysis_status: {
     input: typeof analysisStatusArgsSchema;
     output: typeof analysisStatusResultSchema;
@@ -1266,6 +1297,7 @@ export const toolSchemas: ToolSchemaRegistry = {
   evidence_get: { input: evidenceGetArgsSchema, output: evidenceGetResultSchema },
   memory_read: { input: memoryReadArgsSchema, output: memoryReadResultSchema },
   annotations_apply: { input: annotationsApplyArgsSchema, output: annotationsApplyResultSchema },
+  functions_discover: { input: functionsDiscoverArgsSchema, output: functionsDiscoverResultSchema },
   analysis_status: { input: analysisStatusArgsSchema, output: analysisStatusResultSchema },
   analysis_cancel: { input: analysisCancelArgsSchema, output: analysisCancelResultSchema },
 } as const;
