@@ -11,6 +11,7 @@ licenses/
 /test/**/fixtures/
 
 # Frozen, hash-referenced benchmark evidence and inputs (byte identity matters).
+/scripts/bench/odbench/corpus.json
 /scripts/bench/*.json
 /scripts/bench/quality-evidence/
 

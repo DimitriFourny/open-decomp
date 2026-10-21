@@ -4,6 +4,7 @@ coverage/
 *.tsbuildinfo
 .DS_Store
 .local/
+.odbench/
 *.log
 *.open-decomp/
 __pycache__/

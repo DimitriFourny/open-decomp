@@ -1,0 +1,3849 @@
+{
+  "schema": "odbench-corpus/1",
+  "frozen": "2026-10-21",
+  "method": "Selected once on 2026-10-21 by scripts/bench/odbench/select.ts (`bun run bench select`; `--check` rebuilds and compares); the committed file is frozen. Candidates (sqlite3-arm64, brotli): functions of the Open Decomp function index of the binary, minus import stubs (kind import_stub), unnamed and compiler-derived names (outlined .cold pieces and other names with a dot), names that occur more than once in the binary, names without exactly one top-level definition in the binary's source (sources.ts extractDefinitions: prototypes do not count; names defined on several conditional-compilation branches are ambiguous), and code_bytes outside [16, 32768] (larger functions dominate every total). code_bytes = sum of the instruction sizes of the function's compact disassembly (getFunction view disassembly), the value of index.tsv code_bytes in the CLI export; size buckets: small < 128 <= medium < 1024 <= large < 8192 <= huge. Exclusion counts: sqlite3-arm64: 2511 candidates after excluding 16 ambiguous_definition_in_source, 1 code_bytes_above_32768, 140 code_bytes_below_16, 1 compiler_derived_name, 130 compiler_outlined_cold, 30 import_stub, 702 no_definition_in_source, 352 unnamed; brotli: 15 candidates after excluding 1 compiler_outlined_cold, 48 import_stub. sqlite3-arm64: full = 100 drawn from the candidates other than QA functions, stratified small 25, medium 40, large 25, huge 10 (a bucket that runs out hands its remainder to medium), plus every function used by a question of scripts/bench/llm-tasks/questions.json (mapped by address, forced in regardless of size); quick = those QA functions + 20 drawn from the full draw (small 5, medium 8, large 5, huge 2). brotli: full = every candidate plus the QA functions; quick = the QA functions + 3 others. matrix: full = the 12 build-manifest functions of the 6 apple-clang21 symbol-bearing cells (macho-arm64, pe-x86_64, elf-x86_64 x O0, O2) and of the 3 llvm-clang23 -O2 stripped cells (stripped functions: name null, source from the symbol-bearing twin by address); quick = the 12 functions of elf-x86_64-apple-clang21-O2 symbols and of pe-x86_64-llvm-clang23-O2 stripped. crc32_z is defined on both branches of #ifdef ARMCRC32 in zlib crc32.c; the #else definition is active in every build (source.alternative 1; clang -E of each target defines neither W nor ARMCRC32). PRNG: mulberry32 seeded 20261021; pools sorted by va before drawing (partial Fisher-Yates per bucket in order small, medium, large, huge); one fresh generator per draw. Counts: quick: 68 functions (sqlite 34, brotli 10, matrix 24); by size small 29, medium 28, large 9, huge 2; per binary sqlite3-arm64 34, brotli 10, m-elf-x86_64-apple-clang21-O2-sym 12, m-pe-x86_64-llvm-clang23-O2-strip 12. full: 237 functions (sqlite 114, brotli 15, matrix 108); by size small 104, medium 96, large 33, huge 4; per binary sqlite3-arm64 114, brotli 15, m-macho-arm64-apple-clang21-O0-sym 12, m-pe-x86_64-apple-clang21-O0-sym 12, m-elf-x86_64-apple-clang21-O0-sym 12, m-macho-arm64-apple-clang21-O2-sym 12, m-pe-x86_64-apple-clang21-O2-sym 12, m-elf-x86_64-apple-clang21-O2-sym 12, m-macho-arm64-llvm-clang23-O2-strip 12, m-pe-x86_64-llvm-clang23-O2-strip 12, m-elf-x86_64-llvm-clang23-O2-strip 12.",
+  "binaries": [
+    {
+      "id": "sqlite3-arm64",
+      "path": "sqlite3-arm64",
+      "sha256": "4e01e37ea6fc2cfb008521558f999ac06cdbb4504e3eeb422c1a84b5ead57e56",
+      "format": "macho",
+      "arch": "arm64",
+      "opt": "release",
+      "stripped": false,
+      "group": "sqlite",
+      "origin": "SQLite 3.54.0 shell, macOS arm64; the binary of the archived baseline-2026-10-17 Ghidra run (llm-tasks/questions.json)",
+      "sources": [
+        "sqlite3.c"
+      ]
+    },
+    {
+      "id": "brotli",
+      "path": "brotli",
+      "sha256": "9a3bf1017b44e9733ac7655b0b8ce6c564db789caac10a070fb979a06e0123c7",
+      "format": "macho",
+      "arch": "arm64",
+      "opt": "release",
+      "stripped": false,
+      "group": "brotli",
+      "origin": "brotli 1.2.0 command-line tool, Homebrew macOS arm64 (llm-tasks/questions.json)",
+      "sources": [
+        "brotli.c"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O0-sym",
+      "path": "matrix/macho-arm64-apple-clang21-O0/symbols",
+      "sha256": "d976a41d0312c359278d516b9fa9a5edad0df4c06194eb3bd75f1538d2df99fe",
+      "format": "macho",
+      "arch": "arm64",
+      "opt": "O0",
+      "stripped": false,
+      "group": "matrix",
+      "origin": "Open Decomp quality-matrix build macho-arm64-apple-clang21-O0-symbol-bearing (apple-clang21, symbols); build-manifest.json cell macho-arm64-apple-clang21-O0-symbol-bearing",
+      "sources": [
+        "matrix/quality-matrix-corpus.c",
+        "matrix/adler32.c",
+        "matrix/crc32.c"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O0-sym",
+      "path": "matrix/pe-x86_64-apple-clang21-O0/symbols.exe",
+      "sha256": "fa10a341dd58c9c7d18a09bbb7cb6ffc0e0c86ef39a549fb8141f3ea4ed22144",
+      "format": "pe",
+      "arch": "x86_64",
+      "opt": "O0",
+      "stripped": false,
+      "group": "matrix",
+      "origin": "Open Decomp quality-matrix build pe-x86_64-apple-clang21-O0-symbol-bearing (apple-clang21, symbols); build-manifest.json cell pe-x86_64-apple-clang21-O0-symbol-bearing",
+      "sources": [
+        "matrix/quality-matrix-corpus.c",
+        "matrix/adler32.c",
+        "matrix/crc32.c"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O0-sym",
+      "path": "matrix/elf-x86_64-apple-clang21-O0/symbols",
+      "sha256": "551e16d0b8f936942cc43a4aaabf2a575a3608e24596f6cf3af1358c1ca45eba",
+      "format": "elf",
+      "arch": "x86_64",
+      "opt": "O0",
+      "stripped": false,
+      "group": "matrix",
+      "origin": "Open Decomp quality-matrix build elf-x86_64-apple-clang21-O0-symbol-bearing (apple-clang21, symbols); build-manifest.json cell elf-x86_64-apple-clang21-O0-symbol-bearing",
+      "sources": [
+        "matrix/quality-matrix-corpus.c",
+        "matrix/adler32.c",
+        "matrix/crc32.c"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O2-sym",
+      "path": "matrix/macho-arm64-apple-clang21-O2/symbols",
+      "sha256": "5d6d1d74cc2eedaec86bb3299e22639951ff438622ccb4c6cd29945b33439460",
+      "format": "macho",
+      "arch": "arm64",
+      "opt": "O2",
+      "stripped": false,
+      "group": "matrix",
+      "origin": "Open Decomp quality-matrix build macho-arm64-apple-clang21-O2-symbol-bearing (apple-clang21, symbols); build-manifest.json cell macho-arm64-apple-clang21-O2-symbol-bearing",
+      "sources": [
+        "matrix/quality-matrix-corpus.c",
+        "matrix/adler32.c",
+        "matrix/crc32.c"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O2-sym",
+      "path": "matrix/pe-x86_64-apple-clang21-O2/symbols.exe",
+      "sha256": "47bdb9f4b713cea42697cbfa6795bc8e2c2877e4552b9153974d2933f86d1e54",
+      "format": "pe",
+      "arch": "x86_64",
+      "opt": "O2",
+      "stripped": false,
+      "group": "matrix",
+      "origin": "Open Decomp quality-matrix build pe-x86_64-apple-clang21-O2-symbol-bearing (apple-clang21, symbols); build-manifest.json cell pe-x86_64-apple-clang21-O2-symbol-bearing",
+      "sources": [
+        "matrix/quality-matrix-corpus.c",
+        "matrix/adler32.c",
+        "matrix/crc32.c"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O2-sym",
+      "path": "matrix/elf-x86_64-apple-clang21-O2/symbols",
+      "sha256": "45d747cf5d886901c837419fcc33fe121181dd8f682253fbb37afa430f295c42",
+      "format": "elf",
+      "arch": "x86_64",
+      "opt": "O2",
+      "stripped": false,
+      "group": "matrix",
+      "origin": "Open Decomp quality-matrix build elf-x86_64-apple-clang21-O2-symbol-bearing (apple-clang21, symbols); build-manifest.json cell elf-x86_64-apple-clang21-O2-symbol-bearing",
+      "sources": [
+        "matrix/quality-matrix-corpus.c",
+        "matrix/adler32.c",
+        "matrix/crc32.c"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-llvm-clang23-O2-strip",
+      "path": "matrix/macho-arm64-llvm-clang23-O2/stripped",
+      "sha256": "a040703c3a1b0c8c5e98e45f7cd4b5a7456fc9d84966205ca2874f1f89d94b48",
+      "format": "macho",
+      "arch": "arm64",
+      "opt": "O2",
+      "stripped": true,
+      "group": "matrix",
+      "origin": "Open Decomp quality-matrix build macho-arm64-llvm-clang23-O2-stripped (llvm-clang23, stripped); build-manifest.json cell macho-arm64-llvm-clang23-O2-stripped",
+      "sources": [
+        "matrix/quality-matrix-corpus.c",
+        "matrix/adler32.c",
+        "matrix/crc32.c"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-llvm-clang23-O2-strip",
+      "path": "matrix/pe-x86_64-llvm-clang23-O2/stripped.exe",
+      "sha256": "05ea33bb3eb84c893474f9078756fe1600567b024f8ce11ff0bcd30fd8f7047b",
+      "format": "pe",
+      "arch": "x86_64",
+      "opt": "O2",
+      "stripped": true,
+      "group": "matrix",
+      "origin": "Open Decomp quality-matrix build pe-x86_64-llvm-clang23-O2-stripped (llvm-clang23, stripped); build-manifest.json cell pe-x86_64-llvm-clang23-O2-stripped",
+      "sources": [
+        "matrix/quality-matrix-corpus.c",
+        "matrix/adler32.c",
+        "matrix/crc32.c"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-llvm-clang23-O2-strip",
+      "path": "matrix/elf-x86_64-llvm-clang23-O2/stripped",
+      "sha256": "28e40fd68d14a5226aeab7de48440f9d1411ef2972ccedd9aa5f43903820fa74",
+      "format": "elf",
+      "arch": "x86_64",
+      "opt": "O2",
+      "stripped": true,
+      "group": "matrix",
+      "origin": "Open Decomp quality-matrix build elf-x86_64-llvm-clang23-O2-stripped (llvm-clang23, stripped); build-manifest.json cell elf-x86_64-llvm-clang23-O2-stripped",
+      "sources": [
+        "matrix/quality-matrix-corpus.c",
+        "matrix/adler32.c",
+        "matrix/crc32.c"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "id": "sqlite3.c",
+      "path": "sqlite3.c",
+      "origin": "SQLite 3.54.0 amalgamation (sqlite-autoconf-3540000.tar.gz, archive sha256 134ec0802dda5795816e25d25872d20b312cb3973438c49b30bc40b7705ea9ed)",
+      "url": "https://sqlite.org/2026/sqlite-autoconf-3540000.tar.gz",
+      "sha256": "2da161e310ef0aba3465f22a4d12b8a43723236f0942fa76e8aac523c3317243"
+    },
+    {
+      "id": "brotli.c",
+      "path": "brotli.c",
+      "origin": "brotli v1.2.0 command-line tool source (c/tools/brotli.c)",
+      "url": "https://raw.githubusercontent.com/google/brotli/v1.2.0/c/tools/brotli.c",
+      "sha256": "cb6c8ca6668d324d50cd085fc3ddb3f202afe34fb562b5b583c0d7b0cceccd0c"
+    },
+    {
+      "id": "matrix/quality-matrix-corpus.c",
+      "path": "matrix/quality-matrix-corpus.c",
+      "origin": "Open Decomp quality-matrix corpus (MIT), .odbench/sources/matrix/build-manifest.json",
+      "sha256": "bd645e96379d016e8bf1c2cae3673ca80b8a8414a6d51b75d1f8ba86c6efa41d"
+    },
+    {
+      "id": "matrix/adler32.c",
+      "path": "matrix/adler32.c",
+      "origin": "zlib 1.3.1 adler32.c, unmodified (Z_SOLO), sha256 of archive 9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
+      "url": "https://zlib.net/fossils/zlib-1.3.1.tar.gz",
+      "sha256": "9cd1443a24ff2a3053961695bd432035c58347386a420d3388232376ebabe211"
+    },
+    {
+      "id": "matrix/crc32.c",
+      "path": "matrix/crc32.c",
+      "origin": "zlib 1.3.1 crc32.c, unmodified (Z_SOLO), sha256 of archive 9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
+      "url": "https://zlib.net/fossils/zlib-1.3.1.tar.gz",
+      "sha256": "8fd16f0a7714d51c89c2eb37eb98ec15e8a4dc57ba343e7b7398b19144039fda"
+    }
+  ],
+  "functions": [
+    {
+      "id": "sqlite3-arm64/sqlite3_initialize@0x10003927c",
+      "binary": "sqlite3-arm64",
+      "va": "0x10003927c",
+      "name": "sqlite3_initialize",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_initialize"
+      },
+      "code_bytes": 28,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_str_vappendf@0x100039ff0",
+      "binary": "sqlite3-arm64",
+      "va": "0x100039ff0",
+      "name": "sqlite3_str_vappendf",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_str_vappendf"
+      },
+      "code_bytes": 8396,
+      "size": "huge",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_stricmp@0x10003d250",
+      "binary": "sqlite3-arm64",
+      "va": "0x10003d250",
+      "name": "sqlite3_stricmp",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_stricmp"
+      },
+      "code_bytes": 92,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_strnicmp@0x10003d2ac",
+      "binary": "sqlite3-arm64",
+      "va": "0x10003d2ac",
+      "name": "sqlite3_strnicmp",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_strnicmp"
+      },
+      "code_bytes": 116,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_finalize@0x10003f1bc",
+      "binary": "sqlite3-arm64",
+      "va": "0x10003f1bc",
+      "name": "sqlite3_finalize",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_finalize"
+      },
+      "code_bytes": 240,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_backup_pagecount@0x100041268",
+      "binary": "sqlite3-arm64",
+      "va": "0x100041268",
+      "name": "sqlite3_backup_pagecount",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_backup_pagecount"
+      },
+      "code_bytes": 88,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_result_double@0x100041bd4",
+      "binary": "sqlite3-arm64",
+      "va": "0x100041bd4",
+      "name": "sqlite3_result_double",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_result_double"
+      },
+      "code_bytes": 100,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_result_pointer@0x100042080",
+      "binary": "sqlite3-arm64",
+      "va": "0x100042080",
+      "name": "sqlite3_result_pointer",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_result_pointer"
+      },
+      "code_bytes": 208,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_result_error_code@0x100042678",
+      "binary": "sqlite3-arm64",
+      "va": "0x100042678",
+      "name": "sqlite3_result_error_code",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_result_error_code"
+      },
+      "code_bytes": 168,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_enable_load_extension@0x100047618",
+      "binary": "sqlite3-arm64",
+      "va": "0x100047618",
+      "name": "sqlite3_enable_load_extension",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_enable_load_extension"
+      },
+      "code_bytes": 180,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3GetToken@0x1000488a8",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000488a8",
+      "name": "sqlite3GetToken",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3GetToken"
+      },
+      "code_bytes": 1704,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_incomplete@0x100049964",
+      "binary": "sqlite3-arm64",
+      "va": "0x100049964",
+      "name": "sqlite3_incomplete",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_incomplete"
+      },
+      "code_bytes": 1196,
+      "size": "large",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_complete@0x100049e10",
+      "binary": "sqlite3-arm64",
+      "va": "0x100049e10",
+      "name": "sqlite3_complete",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_complete"
+      },
+      "code_bytes": 28,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_libversion_number@0x100049ef0",
+      "binary": "sqlite3-arm64",
+      "va": "0x100049ef0",
+      "name": "sqlite3_libversion_number",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_libversion_number"
+      },
+      "code_bytes": 12,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_threadsafe@0x100049efc",
+      "binary": "sqlite3-arm64",
+      "va": "0x100049efc",
+      "name": "sqlite3_threadsafe",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_threadsafe"
+      },
+      "code_bytes": 8,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3Initialize@0x100049f04",
+      "binary": "sqlite3-arm64",
+      "va": "0x100049f04",
+      "name": "sqlite3Initialize",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3Initialize"
+      },
+      "code_bytes": 1164,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_changes64@0x10004b174",
+      "binary": "sqlite3-arm64",
+      "va": "0x10004b174",
+      "name": "sqlite3_changes64",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_changes64"
+      },
+      "code_bytes": 156,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_total_changes64@0x10004b224",
+      "binary": "sqlite3-arm64",
+      "va": "0x10004b224",
+      "name": "sqlite3_total_changes64",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_total_changes64"
+      },
+      "code_bytes": 156,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/createFunctionApi@0x10004ba34",
+      "binary": "sqlite3-arm64",
+      "va": "0x10004ba34",
+      "name": "createFunctionApi",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "createFunctionApi"
+      },
+      "code_bytes": 424,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_errcode@0x10004d284",
+      "binary": "sqlite3-arm64",
+      "va": "0x10004d284",
+      "name": "sqlite3_errcode",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_errcode"
+      },
+      "code_bytes": 184,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_limit@0x10004d4c0",
+      "binary": "sqlite3-arm64",
+      "va": "0x10004d4c0",
+      "name": "sqlite3_limit",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_limit"
+      },
+      "code_bytes": 224,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/openDatabase@0x10004d5ac",
+      "binary": "sqlite3-arm64",
+      "va": "0x10004d5ac",
+      "name": "openDatabase",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "openDatabase"
+      },
+      "code_bytes": 1476,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_collation_needed16@0x10004e194",
+      "binary": "sqlite3-arm64",
+      "va": "0x10004e194",
+      "name": "sqlite3_collation_needed16",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_collation_needed16"
+      },
+      "code_bytes": 188,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3_rtree_query_callback@0x100050d10",
+      "binary": "sqlite3-arm64",
+      "va": "0x100050d10",
+      "name": "sqlite3_rtree_query_callback",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3_rtree_query_callback"
+      },
+      "code_bytes": 164,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3session_delete@0x100051eb8",
+      "binary": "sqlite3-arm64",
+      "va": "0x100051eb8",
+      "name": "sqlite3session_delete",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3session_delete"
+      },
+      "code_bytes": 208,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sessionOneChangeToHash@0x10005655c",
+      "binary": "sqlite3-arm64",
+      "va": "0x10005655c",
+      "name": "sessionOneChangeToHash",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sessionOneChangeToHash"
+      },
+      "code_bytes": 2272,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/pthreadMutexFree@0x100056f8c",
+      "binary": "sqlite3-arm64",
+      "va": "0x100056f8c",
+      "name": "pthreadMutexFree",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "pthreadMutexFree"
+      },
+      "code_bytes": 116,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3DbMallocRawNN@0x1000571d4",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000571d4",
+      "name": "sqlite3DbMallocRawNN",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3DbMallocRawNN"
+      },
+      "code_bytes": 172,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3Fp10Convert2@0x1000573f8",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000573f8",
+      "name": "sqlite3Fp10Convert2",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3Fp10Convert2"
+      },
+      "code_bytes": 356,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/unixSync@0x100057b40",
+      "binary": "sqlite3-arm64",
+      "va": "0x100057b40",
+      "name": "unixSync",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "unixSync"
+      },
+      "code_bytes": 264,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/verifyDbFile@0x10005913c",
+      "binary": "sqlite3-arm64",
+      "va": "0x10005913c",
+      "name": "verifyDbFile",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "verifyDbFile"
+      },
+      "code_bytes": 220,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/pcache1RemoveFromHash@0x10005cfe0",
+      "binary": "sqlite3-arm64",
+      "va": "0x10005cfe0",
+      "name": "pcache1RemoveFromHash",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "pcache1RemoveFromHash"
+      },
+      "code_bytes": 80,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/btreeLeaveAll@0x10005d388",
+      "binary": "sqlite3-arm64",
+      "va": "0x10005d388",
+      "name": "btreeLeaveAll",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "btreeLeaveAll"
+      },
+      "code_bytes": 116,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/pagerUnlockAndRollback@0x1000614e4",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000614e4",
+      "name": "pagerUnlockAndRollback",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "pagerUnlockAndRollback"
+      },
+      "code_bytes": 200,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3PagerSavepoint@0x1000616c4",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000616c4",
+      "name": "sqlite3PagerSavepoint",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3PagerSavepoint"
+      },
+      "code_bytes": 1248,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/freeP4@0x100067da8",
+      "binary": "sqlite3-arm64",
+      "va": "0x100067da8",
+      "name": "freeP4",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "freeP4"
+      },
+      "code_bytes": 356,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/vdbePmaReaderClear@0x1000696f0",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000696f0",
+      "name": "vdbePmaReaderClear",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "vdbePmaReaderClear"
+      },
+      "code_bytes": 96,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/vdbeMemAddTerminator@0x10006b77c",
+      "binary": "sqlite3-arm64",
+      "va": "0x10006b77c",
+      "name": "vdbeMemAddTerminator",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "vdbeMemAddTerminator"
+      },
+      "code_bytes": 112,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3Atoi64@0x10006bab4",
+      "binary": "sqlite3-arm64",
+      "va": "0x10006bab4",
+      "name": "sqlite3Atoi64",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3Atoi64"
+      },
+      "code_bytes": 624,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3VdbeDisplayComment@0x100075208",
+      "binary": "sqlite3-arm64",
+      "va": "0x100075208",
+      "name": "sqlite3VdbeDisplayComment",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3VdbeDisplayComment"
+      },
+      "code_bytes": 1156,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3BtreeOpen@0x1000769c0",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000769c0",
+      "name": "sqlite3BtreeOpen",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3BtreeOpen"
+      },
+      "code_bytes": 3460,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/filterHash@0x10007c130",
+      "binary": "sqlite3-arm64",
+      "va": "0x10007c130",
+      "name": "filterHash",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "filterHash"
+      },
+      "code_bytes": 316,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/btreeOverwriteContent@0x100080df4",
+      "binary": "sqlite3-arm64",
+      "va": "0x100080df4",
+      "name": "btreeOverwriteContent",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "btreeOverwriteContent"
+      },
+      "code_bytes": 244,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/vdbeSorterExtendFile@0x10008311c",
+      "binary": "sqlite3-arm64",
+      "va": "0x10008311c",
+      "name": "vdbeSorterExtendFile",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "vdbeSorterExtendFile"
+      },
+      "code_bytes": 180,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3FindCollSeq@0x1000842ec",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000842ec",
+      "name": "sqlite3FindCollSeq",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3FindCollSeq"
+      },
+      "code_bytes": 256,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3Prepare@0x1000848e0",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000848e0",
+      "name": "sqlite3Prepare",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3Prepare"
+      },
+      "code_bytes": 1216,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3FreeIndex@0x1000856a8",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000856a8",
+      "name": "sqlite3FreeIndex",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3FreeIndex"
+      },
+      "code_bytes": 124,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/stat4ValueFromExpr@0x100088368",
+      "binary": "sqlite3-arm64",
+      "va": "0x100088368",
+      "name": "stat4ValueFromExpr",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "stat4ValueFromExpr"
+      },
+      "code_bytes": 360,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/jsonConvertTextToBlob@0x100089f80",
+      "binary": "sqlite3-arm64",
+      "va": "0x100089f80",
+      "name": "jsonConvertTextToBlob",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "jsonConvertTextToBlob"
+      },
+      "code_bytes": 228,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/jsonAppendRaw@0x10008a960",
+      "binary": "sqlite3-arm64",
+      "va": "0x10008a960",
+      "name": "jsonAppendRaw",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "jsonAppendRaw"
+      },
+      "code_bytes": 96,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/jsonIs4Hex@0x10008af98",
+      "binary": "sqlite3-arm64",
+      "va": "0x10008af98",
+      "name": "jsonIs4Hex",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "jsonIs4Hex"
+      },
+      "code_bytes": 68,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/jsonTranslateTextToBlob@0x10008b404",
+      "binary": "sqlite3-arm64",
+      "va": "0x10008b404",
+      "name": "jsonTranslateTextToBlob",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "jsonTranslateTextToBlob"
+      },
+      "code_bytes": 1860,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/jsonBlobMakeEditable@0x10008c678",
+      "binary": "sqlite3-arm64",
+      "va": "0x10008c678",
+      "name": "jsonBlobMakeEditable",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "jsonBlobMakeEditable"
+      },
+      "code_bytes": 112,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/jsonAfterEditSizeAdjust@0x10008c8fc",
+      "binary": "sqlite3-arm64",
+      "va": "0x10008c8fc",
+      "name": "jsonAfterEditSizeAdjust",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "jsonAfterEditSizeAdjust"
+      },
+      "code_bytes": 104,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/jsonLabelCompareEscaped@0x10008cc5c",
+      "binary": "sqlite3-arm64",
+      "va": "0x10008cc5c",
+      "name": "jsonLabelCompareEscaped",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "jsonLabelCompareEscaped"
+      },
+      "code_bytes": 304,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3AddDefaultValue@0x100093700",
+      "binary": "sqlite3-arm64",
+      "va": "0x100093700",
+      "name": "sqlite3AddDefaultValue",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3AddDefaultValue"
+      },
+      "code_bytes": 436,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3CreateForeignKey@0x100094ef8",
+      "binary": "sqlite3-arm64",
+      "va": "0x100094ef8",
+      "name": "sqlite3CreateForeignKey",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3CreateForeignKey"
+      },
+      "code_bytes": 1136,
+      "size": "large",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3Select@0x100095c90",
+      "binary": "sqlite3-arm64",
+      "va": "0x100095c90",
+      "name": "sqlite3Select",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3Select"
+      },
+      "code_bytes": 13652,
+      "size": "huge",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/parserDoubleLinkSelect@0x100099224",
+      "binary": "sqlite3-arm64",
+      "va": "0x100099224",
+      "name": "parserDoubleLinkSelect",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "parserDoubleLinkSelect"
+      },
+      "code_bytes": 280,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3ExprListSetSpan@0x100099af8",
+      "binary": "sqlite3-arm64",
+      "va": "0x100099af8",
+      "name": "sqlite3ExprListSetSpan",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3ExprListSetSpan"
+      },
+      "code_bytes": 92,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3Pragma@0x10009f360",
+      "binary": "sqlite3-arm64",
+      "va": "0x10009f360",
+      "name": "sqlite3Pragma",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3Pragma"
+      },
+      "code_bytes": 15500,
+      "size": "huge",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3DropTrigger@0x1000a3ce4",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000a3ce4",
+      "name": "sqlite3DropTrigger",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3DropTrigger"
+      },
+      "code_bytes": 280,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3GetVdbe@0x1000a6364",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000a6364",
+      "name": "sqlite3GetVdbe",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3GetVdbe"
+      },
+      "code_bytes": 44,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3ExprCheckIN@0x1000ac9a8",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000ac9a8",
+      "name": "sqlite3ExprCheckIN",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3ExprCheckIN"
+      },
+      "code_bytes": 188,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3SelectPrep@0x1000b371c",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000b371c",
+      "name": "sqlite3SelectPrep",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3SelectPrep"
+      },
+      "code_bytes": 244,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3MarkAllShadowTablesOf@0x1000b6214",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000b6214",
+      "name": "sqlite3MarkAllShadowTablesOf",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3MarkAllShadowTablesOf"
+      },
+      "code_bytes": 248,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/renameWalkWith@0x1000b72d8",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000b72d8",
+      "name": "renameWalkWith",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "renameWalkWith"
+      },
+      "code_bytes": 280,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/selectInnerLoop@0x1000bc1e4",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000bc1e4",
+      "name": "selectInnerLoop",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "selectInnerLoop"
+      },
+      "code_bytes": 1012,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/generateSortTail@0x1000be78c",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000be78c",
+      "name": "generateSortTail",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "generateSortTail"
+      },
+      "code_bytes": 1656,
+      "size": "large",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/codeOffset@0x1000c0ba0",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000c0ba0",
+      "name": "codeOffset",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "codeOffset"
+      },
+      "code_bytes": 72,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/exprSelectWalkTableConstant@0x1000c17d8",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000c17d8",
+      "name": "exprSelectWalkTableConstant",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "exprSelectWalkTableConstant"
+      },
+      "code_bytes": 28,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3WhereCodeOneLoopStart@0x1000c400c",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000c400c",
+      "name": "sqlite3WhereCodeOneLoopStart",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3WhereCodeOneLoopStart"
+      },
+      "code_bytes": 9000,
+      "size": "huge",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3ExprIsLikeOperator@0x1000c8dd4",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000c8dd4",
+      "name": "sqlite3ExprIsLikeOperator",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3ExprIsLikeOperator"
+      },
+      "code_bytes": 116,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/whereScanNext@0x1000c90b4",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000c90b4",
+      "name": "whereScanNext",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "whereScanNext"
+      },
+      "code_bytes": 800,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/whereLoopAddVirtual@0x1000c9578",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000c9578",
+      "name": "whereLoopAddVirtual",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "whereLoopAddVirtual"
+      },
+      "code_bytes": 2120,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/whereIsCoveringIndex@0x1000cba88",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000cba88",
+      "name": "whereIsCoveringIndex",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "whereIsCoveringIndex"
+      },
+      "code_bytes": 172,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3WhereExplainBloomFilter@0x1000ce204",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000ce204",
+      "name": "sqlite3WhereExplainBloomFilter",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3WhereExplainBloomFilter"
+      },
+      "code_bytes": 616,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3CodeRowTrigger@0x1000d41a8",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000d41a8",
+      "name": "sqlite3CodeRowTrigger",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3CodeRowTrigger"
+      },
+      "code_bytes": 1240,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3RowidConstraint@0x1000d92f8",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000d92f8",
+      "name": "sqlite3RowidConstraint",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3RowidConstraint"
+      },
+      "code_bytes": 136,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3ParseUri@0x1000dc2b8",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000dc2b8",
+      "name": "sqlite3ParseUri",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3ParseUri"
+      },
+      "code_bytes": 1392,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/analyzeDatabase@0x1000dca04",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000dca04",
+      "name": "analyzeDatabase",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "analyzeDatabase"
+      },
+      "code_bytes": 228,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/openStatTable@0x1000dcbbc",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000dcbbc",
+      "name": "openStatTable",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "openStatTable"
+      },
+      "code_bytes": 600,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/renameColumnFunc@0x1000e2b70",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000e2b70",
+      "name": "renameColumnFunc",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "renameColumnFunc"
+      },
+      "code_bytes": 1872,
+      "size": "large",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/renameTableFunc@0x1000e32c0",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000e32c0",
+      "name": "renameTableFunc",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "renameTableFunc"
+      },
+      "code_bytes": 1560,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/getConstraintToken@0x1000e5638",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000e5638",
+      "name": "getConstraintToken",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "getConstraintToken"
+      },
+      "code_bytes": 188,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/cume_distValueFunc@0x1000e5e24",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000e5e24",
+      "name": "cume_distValueFunc",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "cume_distValueFunc"
+      },
+      "code_bytes": 96,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/isDate@0x1000e7638",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000e7638",
+      "name": "isDate",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "isDate"
+      },
+      "code_bytes": 4900,
+      "size": "large",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/pcache1Shrink@0x1000ecae0",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000ecae0",
+      "name": "pcache1Shrink",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "pcache1Shrink"
+      },
+      "code_bytes": 108,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3Fts3HashInsert@0x1000edd84",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000edd84",
+      "name": "sqlite3Fts3HashInsert",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3Fts3HashInsert"
+      },
+      "code_bytes": 524,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/unicodeNext@0x1000ee370",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000ee370",
+      "name": "unicodeNext",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "unicodeNext"
+      },
+      "code_bytes": 1172,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3FtsUnicodeIsalnum@0x1000eead0",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000eead0",
+      "name": "sqlite3FtsUnicodeIsalnum",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3FtsUnicodeIsalnum"
+      },
+      "code_bytes": 144,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/fts3auxDisconnectMethod@0x1000eef88",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000eef88",
+      "name": "fts3auxDisconnectMethod",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "fts3auxDisconnectMethod"
+      },
+      "code_bytes": 84,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/simpleDestroy@0x1000f1c68",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000f1c68",
+      "name": "simpleDestroy",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "simpleDestroy"
+      },
+      "code_bytes": 24,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/fts3DestroyMethod@0x1000f3668",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000f3668",
+      "name": "fts3DestroyMethod",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "fts3DestroyMethod"
+      },
+      "code_bytes": 136,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/fts3UpdateMethod@0x1000f3eec",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000f3eec",
+      "name": "fts3UpdateMethod",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "fts3UpdateMethod"
+      },
+      "code_bytes": 2760,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/fts3EvalAllocateReaders@0x1000f7ac0",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000f7ac0",
+      "name": "fts3EvalAllocateReaders",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "fts3EvalAllocateReaders"
+      },
+      "code_bytes": 620,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/fts3EvalNextRow@0x1000f9930",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000f9930",
+      "name": "fts3EvalNextRow",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "fts3EvalNextRow"
+      },
+      "code_bytes": 1880,
+      "size": "large",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/incrPhraseTokenNext@0x1000fa604",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000fa604",
+      "name": "incrPhraseTokenNext",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "incrPhraseTokenNext"
+      },
+      "code_bytes": 160,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/fts3EvalTestExpr@0x1000fa76c",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000fa76c",
+      "name": "fts3EvalTestExpr",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "fts3EvalTestExpr"
+      },
+      "code_bytes": 1476,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sqlite3Fts3Incrmerge@0x1000fd924",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000fd924",
+      "name": "sqlite3Fts3Incrmerge",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sqlite3Fts3Incrmerge"
+      },
+      "code_bytes": 5436,
+      "size": "large",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/nodeReaderInit@0x1000ff538",
+      "binary": "sqlite3-arm64",
+      "va": "0x1000ff538",
+      "name": "nodeReaderInit",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "nodeReaderInit"
+      },
+      "code_bytes": 120,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/fts3MatchinfoLcsCb@0x100102920",
+      "binary": "sqlite3-arm64",
+      "va": "0x100102920",
+      "name": "fts3MatchinfoLcsCb",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "fts3MatchinfoLcsCb"
+      },
+      "code_bytes": 16,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/fts5CreateTokenizer@0x10010592c",
+      "binary": "sqlite3-arm64",
+      "va": "0x10010592c",
+      "name": "fts5CreateTokenizer",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "fts5CreateTokenizer"
+      },
+      "code_bytes": 108,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/fts5StructureWrite@0x10010810c",
+      "binary": "sqlite3-arm64",
+      "va": "0x10010810c",
+      "name": "fts5StructureWrite",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "fts5StructureWrite"
+      },
+      "code_bytes": 520,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/fts5MultiIterAdvanceRowid@0x10010bc18",
+      "binary": "sqlite3-arm64",
+      "va": "0x10010bc18",
+      "name": "fts5MultiIterAdvanceRowid",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "fts5MultiIterAdvanceRowid"
+      },
+      "code_bytes": 240,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/fts5ParseSetColset@0x10010e1c4",
+      "binary": "sqlite3-arm64",
+      "va": "0x10010e1c4",
+      "name": "fts5ParseSetColset",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "fts5ParseSetColset"
+      },
+      "code_bytes": 372,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/fts5FlushSecureDelete@0x100111488",
+      "binary": "sqlite3-arm64",
+      "va": "0x100111488",
+      "name": "fts5FlushSecureDelete",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "fts5FlushSecureDelete"
+      },
+      "code_bytes": 3056,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/fts5CursorRowid@0x100117dbc",
+      "binary": "sqlite3-arm64",
+      "va": "0x100117dbc",
+      "name": "fts5CursorRowid",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "fts5CursorRowid"
+      },
+      "code_bytes": 104,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/fts5SentenceFinderAdd@0x10011c584",
+      "binary": "sqlite3-arm64",
+      "va": "0x10011c584",
+      "name": "fts5SentenceFinderAdd",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "fts5SentenceFinderAdd"
+      },
+      "code_bytes": 132,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/fts5UnicodeCreate@0x10011c61c",
+      "binary": "sqlite3-arm64",
+      "va": "0x10011c61c",
+      "name": "fts5UnicodeCreate",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "fts5UnicodeCreate"
+      },
+      "code_bytes": 1708,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/rtreeInsertCell@0x100124318",
+      "binary": "sqlite3-arm64",
+      "va": "0x100124318",
+      "name": "rtreeInsertCell",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "rtreeInsertCell"
+      },
+      "code_bytes": 2392,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/stmtClose@0x10012994c",
+      "binary": "sqlite3-arm64",
+      "va": "0x10012994c",
+      "name": "stmtClose",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "stmtClose"
+      },
+      "code_bytes": 68,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sessionAppendIdent@0x10012c298",
+      "binary": "sqlite3-arm64",
+      "va": "0x10012c298",
+      "name": "sessionAppendIdent",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sessionAppendIdent"
+      },
+      "code_bytes": 176,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "sqlite3-arm64/sessionRetryConstraints@0x10012cc70",
+      "binary": "sqlite3-arm64",
+      "va": "0x10012cc70",
+      "name": "sessionRetryConstraints",
+      "source": {
+        "file": "sqlite3.c",
+        "name": "sessionRetryConstraints"
+      },
+      "code_bytes": 2380,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "brotli/main@0x100001588",
+      "binary": "brotli",
+      "va": "0x100001588",
+      "name": "main",
+      "source": {
+        "file": "brotli.c",
+        "name": "main"
+      },
+      "code_bytes": 6532,
+      "size": "large",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "brotli/CheckAlias@0x100002f0c",
+      "binary": "brotli",
+      "va": "0x100002f0c",
+      "name": "CheckAlias",
+      "source": {
+        "file": "brotli.c",
+        "name": "CheckAlias"
+      },
+      "code_bytes": 136,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "brotli/ParseInt@0x100002f94",
+      "binary": "brotli",
+      "va": "0x100002f94",
+      "name": "ParseInt",
+      "source": {
+        "file": "brotli.c",
+        "name": "ParseInt"
+      },
+      "code_bytes": 136,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "brotli/ParseBase64@0x10000301c",
+      "binary": "brotli",
+      "va": "0x10000301c",
+      "name": "ParseBase64",
+      "source": {
+        "file": "brotli.c",
+        "name": "ParseBase64"
+      },
+      "code_bytes": 336,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "brotli/FileSize@0x10000316c",
+      "binary": "brotli",
+      "va": "0x10000316c",
+      "name": "FileSize",
+      "source": {
+        "file": "brotli.c",
+        "name": "FileSize"
+      },
+      "code_bytes": 104,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "brotli/NextFile@0x1000031d4",
+      "binary": "brotli",
+      "va": "0x1000031d4",
+      "name": "NextFile",
+      "source": {
+        "file": "brotli.c",
+        "name": "NextFile"
+      },
+      "code_bytes": 472,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "brotli/OpenFiles@0x1000033ac",
+      "binary": "brotli",
+      "va": "0x1000033ac",
+      "name": "OpenFiles",
+      "source": {
+        "file": "brotli.c",
+        "name": "OpenFiles"
+      },
+      "code_bytes": 292,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "brotli/CloseFiles@0x1000034d0",
+      "binary": "brotli",
+      "va": "0x1000034d0",
+      "name": "CloseFiles",
+      "source": {
+        "file": "brotli.c",
+        "name": "CloseFiles"
+      },
+      "code_bytes": 564,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "brotli/ProvideInput@0x100003704",
+      "binary": "brotli",
+      "va": "0x100003704",
+      "name": "ProvideInput",
+      "source": {
+        "file": "brotli.c",
+        "name": "ProvideInput"
+      },
+      "code_bytes": 164,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "brotli/PrintFileProcessingProgress@0x1000037a8",
+      "binary": "brotli",
+      "va": "0x1000037a8",
+      "name": "PrintFileProcessingProgress",
+      "source": {
+        "file": "brotli.c",
+        "name": "PrintFileProcessingProgress"
+      },
+      "code_bytes": 168,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "brotli/WriteOutput@0x100003850",
+      "binary": "brotli",
+      "va": "0x100003850",
+      "name": "WriteOutput",
+      "source": {
+        "file": "brotli.c",
+        "name": "WriteOutput"
+      },
+      "code_bytes": 180,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "brotli/PrintBytes@0x100003904",
+      "binary": "brotli",
+      "va": "0x100003904",
+      "name": "PrintBytes",
+      "source": {
+        "file": "brotli.c",
+        "name": "PrintBytes"
+      },
+      "code_bytes": 184,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "brotli/InitDecoder@0x1000039bc",
+      "binary": "brotli",
+      "va": "0x1000039bc",
+      "name": "InitDecoder",
+      "source": {
+        "file": "brotli.c",
+        "name": "InitDecoder"
+      },
+      "code_bytes": 136,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "brotli/OnMetadataStart@0x100003a44",
+      "binary": "brotli",
+      "va": "0x100003a44",
+      "name": "OnMetadataStart",
+      "source": {
+        "file": "brotli.c",
+        "name": "OnMetadataStart"
+      },
+      "code_bytes": 48,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "brotli/OnMetadataChunk@0x100003a74",
+      "binary": "brotli",
+      "va": "0x100003a74",
+      "name": "OnMetadataChunk",
+      "source": {
+        "file": "brotli.c",
+        "name": "OnMetadataChunk"
+      },
+      "code_bytes": 112,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O0-sym/matrix_multi_exit@0x100000310",
+      "binary": "m-macho-arm64-apple-clang21-O0-sym",
+      "va": "0x100000310",
+      "name": "matrix_multi_exit",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_multi_exit"
+      },
+      "code_bytes": 204,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O0-sym/matrix_switch@0x1000003dc",
+      "binary": "m-macho-arm64-apple-clang21-O0-sym",
+      "va": "0x1000003dc",
+      "name": "matrix_switch",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_switch"
+      },
+      "code_bytes": 352,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O0-sym/matrix_alias@0x100000564",
+      "binary": "m-macho-arm64-apple-clang21-O0-sym",
+      "va": "0x100000564",
+      "name": "matrix_alias",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_alias"
+      },
+      "code_bytes": 88,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O0-sym/matrix_aggregate@0x1000005bc",
+      "binary": "m-macho-arm64-apple-clang21-O0-sym",
+      "va": "0x1000005bc",
+      "name": "matrix_aggregate",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_aggregate"
+      },
+      "code_bytes": 92,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O0-sym/matrix_callback@0x100000618",
+      "binary": "m-macho-arm64-apple-clang21-O0-sym",
+      "va": "0x100000618",
+      "name": "matrix_callback",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_callback"
+      },
+      "code_bytes": 156,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O0-sym/matrix_variadic@0x1000006b4",
+      "binary": "m-macho-arm64-apple-clang21-O0-sym",
+      "va": "0x1000006b4",
+      "name": "matrix_variadic",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic"
+      },
+      "code_bytes": 124,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O0-sym/matrix_mixed@0x100000730",
+      "binary": "m-macho-arm64-apple-clang21-O0-sym",
+      "va": "0x100000730",
+      "name": "matrix_mixed",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_mixed"
+      },
+      "code_bytes": 116,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O0-sym/matrix_variadic_call@0x1000007a4",
+      "binary": "m-macho-arm64-apple-clang21-O0-sym",
+      "va": "0x1000007a4",
+      "name": "matrix_variadic_call",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic_call"
+      },
+      "code_bytes": 104,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O0-sym/matrix_checksum@0x10000080c",
+      "binary": "m-macho-arm64-apple-clang21-O0-sym",
+      "va": "0x10000080c",
+      "name": "matrix_checksum",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_checksum"
+      },
+      "code_bytes": 84,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O0-sym/adler32_z@0x100000880",
+      "binary": "m-macho-arm64-apple-clang21-O0-sym",
+      "va": "0x100000880",
+      "name": "adler32_z",
+      "source": {
+        "file": "matrix/adler32.c",
+        "name": "adler32_z"
+      },
+      "code_bytes": 2028,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O0-sym/crc32_z@0x10000129c",
+      "binary": "m-macho-arm64-apple-clang21-O0-sym",
+      "va": "0x10000129c",
+      "name": "crc32_z",
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_z",
+        "alternative": 1
+      },
+      "code_bytes": 564,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O0-sym/crc32_combine@0x100001688",
+      "binary": "m-macho-arm64-apple-clang21-O0-sym",
+      "va": "0x100001688",
+      "name": "crc32_combine",
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_combine"
+      },
+      "code_bytes": 52,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O0-sym/matrix_multi_exit@0x140001000",
+      "binary": "m-pe-x86_64-apple-clang21-O0-sym",
+      "va": "0x140001000",
+      "name": "matrix_multi_exit",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_multi_exit"
+      },
+      "code_bytes": 157,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O0-sym/matrix_switch@0x1400010a0",
+      "binary": "m-pe-x86_64-apple-clang21-O0-sym",
+      "va": "0x1400010a0",
+      "name": "matrix_switch",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_switch"
+      },
+      "code_bytes": 311,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O0-sym/matrix_alias@0x1400011e0",
+      "binary": "m-pe-x86_64-apple-clang21-O0-sym",
+      "va": "0x1400011e0",
+      "name": "matrix_alias",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_alias"
+      },
+      "code_bytes": 71,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O0-sym/matrix_aggregate@0x140001230",
+      "binary": "m-pe-x86_64-apple-clang21-O0-sym",
+      "va": "0x140001230",
+      "name": "matrix_aggregate",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_aggregate"
+      },
+      "code_bytes": 93,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O0-sym/matrix_callback@0x140001290",
+      "binary": "m-pe-x86_64-apple-clang21-O0-sym",
+      "va": "0x140001290",
+      "name": "matrix_callback",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_callback"
+      },
+      "code_bytes": 132,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O0-sym/matrix_variadic@0x140001320",
+      "binary": "m-pe-x86_64-apple-clang21-O0-sym",
+      "va": "0x140001320",
+      "name": "matrix_variadic",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic"
+      },
+      "code_bytes": 117,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O0-sym/matrix_mixed@0x1400013a0",
+      "binary": "m-pe-x86_64-apple-clang21-O0-sym",
+      "va": "0x1400013a0",
+      "name": "matrix_mixed",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_mixed"
+      },
+      "code_bytes": 112,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O0-sym/matrix_variadic_call@0x140001410",
+      "binary": "m-pe-x86_64-apple-clang21-O0-sym",
+      "va": "0x140001410",
+      "name": "matrix_variadic_call",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic_call"
+      },
+      "code_bytes": 97,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O0-sym/matrix_checksum@0x140001480",
+      "binary": "m-pe-x86_64-apple-clang21-O0-sym",
+      "va": "0x140001480",
+      "name": "matrix_checksum",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_checksum"
+      },
+      "code_bytes": 82,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O0-sym/adler32_z@0x140001500",
+      "binary": "m-pe-x86_64-apple-clang21-O0-sym",
+      "va": "0x140001500",
+      "name": "adler32_z",
+      "source": {
+        "file": "matrix/adler32.c",
+        "name": "adler32_z"
+      },
+      "code_bytes": 1539,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O0-sym/crc32_z@0x140001ce0",
+      "binary": "m-pe-x86_64-apple-clang21-O0-sym",
+      "va": "0x140001ce0",
+      "name": "crc32_z",
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_z",
+        "alternative": 1
+      },
+      "code_bytes": 643,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O0-sym/crc32_combine@0x140002100",
+      "binary": "m-pe-x86_64-apple-clang21-O0-sym",
+      "va": "0x140002100",
+      "name": "crc32_combine",
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_combine"
+      },
+      "code_bytes": 40,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O0-sym/matrix_multi_exit@0x401a60",
+      "binary": "m-elf-x86_64-apple-clang21-O0-sym",
+      "va": "0x401a60",
+      "name": "matrix_multi_exit",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_multi_exit"
+      },
+      "code_bytes": 132,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O0-sym/matrix_switch@0x401af0",
+      "binary": "m-elf-x86_64-apple-clang21-O0-sym",
+      "va": "0x401af0",
+      "name": "matrix_switch",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_switch"
+      },
+      "code_bytes": 267,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O0-sym/matrix_alias@0x401c00",
+      "binary": "m-elf-x86_64-apple-clang21-O0-sym",
+      "va": "0x401c00",
+      "name": "matrix_alias",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_alias"
+      },
+      "code_bytes": 63,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O0-sym/matrix_aggregate@0x401c40",
+      "binary": "m-elf-x86_64-apple-clang21-O0-sym",
+      "va": "0x401c40",
+      "name": "matrix_aggregate",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_aggregate"
+      },
+      "code_bytes": 78,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O0-sym/matrix_callback@0x401c90",
+      "binary": "m-elf-x86_64-apple-clang21-O0-sym",
+      "va": "0x401c90",
+      "name": "matrix_callback",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_callback"
+      },
+      "code_bytes": 115,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O0-sym/matrix_variadic@0x401d10",
+      "binary": "m-elf-x86_64-apple-clang21-O0-sym",
+      "va": "0x401d10",
+      "name": "matrix_variadic",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic"
+      },
+      "code_bytes": 314,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O0-sym/matrix_mixed@0x401e50",
+      "binary": "m-elf-x86_64-apple-clang21-O0-sym",
+      "va": "0x401e50",
+      "name": "matrix_mixed",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_mixed"
+      },
+      "code_bytes": 99,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O0-sym/matrix_variadic_call@0x401ec0",
+      "binary": "m-elf-x86_64-apple-clang21-O0-sym",
+      "va": "0x401ec0",
+      "name": "matrix_variadic_call",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic_call"
+      },
+      "code_bytes": 81,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O0-sym/matrix_checksum@0x401f20",
+      "binary": "m-elf-x86_64-apple-clang21-O0-sym",
+      "va": "0x401f20",
+      "name": "matrix_checksum",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_checksum"
+      },
+      "code_bytes": 76,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O0-sym/adler32_z@0x401f90",
+      "binary": "m-elf-x86_64-apple-clang21-O0-sym",
+      "va": "0x401f90",
+      "name": "adler32_z",
+      "source": {
+        "file": "matrix/adler32.c",
+        "name": "adler32_z"
+      },
+      "code_bytes": 1493,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O0-sym/crc32_z@0x402750",
+      "binary": "m-elf-x86_64-apple-clang21-O0-sym",
+      "va": "0x402750",
+      "name": "crc32_z",
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_z",
+        "alternative": 1
+      },
+      "code_bytes": 631,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O0-sym/crc32_combine@0x402b60",
+      "binary": "m-elf-x86_64-apple-clang21-O0-sym",
+      "va": "0x402b60",
+      "name": "crc32_combine",
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_combine"
+      },
+      "code_bytes": 43,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O2-sym/matrix_multi_exit@0x100000310",
+      "binary": "m-macho-arm64-apple-clang21-O2-sym",
+      "va": "0x100000310",
+      "name": "matrix_multi_exit",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_multi_exit"
+      },
+      "code_bytes": 80,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O2-sym/matrix_switch@0x100000360",
+      "binary": "m-macho-arm64-apple-clang21-O2-sym",
+      "va": "0x100000360",
+      "name": "matrix_switch",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_switch"
+      },
+      "code_bytes": 152,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O2-sym/matrix_alias@0x1000003f8",
+      "binary": "m-macho-arm64-apple-clang21-O2-sym",
+      "va": "0x1000003f8",
+      "name": "matrix_alias",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_alias"
+      },
+      "code_bytes": 36,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O2-sym/matrix_aggregate@0x10000041c",
+      "binary": "m-macho-arm64-apple-clang21-O2-sym",
+      "va": "0x10000041c",
+      "name": "matrix_aggregate",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_aggregate"
+      },
+      "code_bytes": 56,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O2-sym/matrix_callback@0x100000454",
+      "binary": "m-macho-arm64-apple-clang21-O2-sym",
+      "va": "0x100000454",
+      "name": "matrix_callback",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_callback"
+      },
+      "code_bytes": 112,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O2-sym/matrix_variadic@0x1000004c4",
+      "binary": "m-macho-arm64-apple-clang21-O2-sym",
+      "va": "0x1000004c4",
+      "name": "matrix_variadic",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic"
+      },
+      "code_bytes": 56,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O2-sym/matrix_mixed@0x1000004fc",
+      "binary": "m-macho-arm64-apple-clang21-O2-sym",
+      "va": "0x1000004fc",
+      "name": "matrix_mixed",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_mixed"
+      },
+      "code_bytes": 48,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O2-sym/matrix_variadic_call@0x10000052c",
+      "binary": "m-macho-arm64-apple-clang21-O2-sym",
+      "va": "0x10000052c",
+      "name": "matrix_variadic_call",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic_call"
+      },
+      "code_bytes": 44,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O2-sym/matrix_checksum@0x100000558",
+      "binary": "m-macho-arm64-apple-clang21-O2-sym",
+      "va": "0x100000558",
+      "name": "matrix_checksum",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_checksum"
+      },
+      "code_bytes": 80,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O2-sym/adler32_z@0x1000005b8",
+      "binary": "m-macho-arm64-apple-clang21-O2-sym",
+      "va": "0x1000005b8",
+      "name": "adler32_z",
+      "source": {
+        "file": "matrix/adler32.c",
+        "name": "adler32_z"
+      },
+      "code_bytes": 816,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O2-sym/crc32_z@0x100000a84",
+      "binary": "m-macho-arm64-apple-clang21-O2-sym",
+      "va": "0x100000a84",
+      "name": "crc32_z",
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_z",
+        "alternative": 1
+      },
+      "code_bytes": 264,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-apple-clang21-O2-sym/crc32_combine@0x100000c5c",
+      "binary": "m-macho-arm64-apple-clang21-O2-sym",
+      "va": "0x100000c5c",
+      "name": "crc32_combine",
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_combine"
+      },
+      "code_bytes": 200,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O2-sym/matrix_multi_exit@0x140001000",
+      "binary": "m-pe-x86_64-apple-clang21-O2-sym",
+      "va": "0x140001000",
+      "name": "matrix_multi_exit",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_multi_exit"
+      },
+      "code_bytes": 53,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O2-sym/matrix_switch@0x140001040",
+      "binary": "m-pe-x86_64-apple-clang21-O2-sym",
+      "va": "0x140001040",
+      "name": "matrix_switch",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_switch"
+      },
+      "code_bytes": 105,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O2-sym/matrix_alias@0x1400010b0",
+      "binary": "m-pe-x86_64-apple-clang21-O2-sym",
+      "va": "0x1400010b0",
+      "name": "matrix_alias",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_alias"
+      },
+      "code_bytes": 19,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O2-sym/matrix_aggregate@0x1400010d0",
+      "binary": "m-pe-x86_64-apple-clang21-O2-sym",
+      "va": "0x1400010d0",
+      "name": "matrix_aggregate",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_aggregate"
+      },
+      "code_bytes": 34,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O2-sym/matrix_callback@0x140001100",
+      "binary": "m-pe-x86_64-apple-clang21-O2-sym",
+      "va": "0x140001100",
+      "name": "matrix_callback",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_callback"
+      },
+      "code_bytes": 97,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O2-sym/matrix_variadic@0x140001170",
+      "binary": "m-pe-x86_64-apple-clang21-O2-sym",
+      "va": "0x140001170",
+      "name": "matrix_variadic",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic"
+      },
+      "code_bytes": 163,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O2-sym/matrix_mixed@0x140001220",
+      "binary": "m-pe-x86_64-apple-clang21-O2-sym",
+      "va": "0x140001220",
+      "name": "matrix_mixed",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_mixed"
+      },
+      "code_bytes": 56,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O2-sym/matrix_variadic_call@0x140001260",
+      "binary": "m-pe-x86_64-apple-clang21-O2-sym",
+      "va": "0x140001260",
+      "name": "matrix_variadic_call",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic_call"
+      },
+      "code_bytes": 45,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O2-sym/matrix_checksum@0x140001290",
+      "binary": "m-pe-x86_64-apple-clang21-O2-sym",
+      "va": "0x140001290",
+      "name": "matrix_checksum",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_checksum"
+      },
+      "code_bytes": 60,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O2-sym/adler32_z@0x1400012f0",
+      "binary": "m-pe-x86_64-apple-clang21-O2-sym",
+      "va": "0x1400012f0",
+      "name": "adler32_z",
+      "source": {
+        "file": "matrix/adler32.c",
+        "name": "adler32_z"
+      },
+      "code_bytes": 1018,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O2-sym/crc32_z@0x1400018b0",
+      "binary": "m-pe-x86_64-apple-clang21-O2-sym",
+      "va": "0x1400018b0",
+      "name": "crc32_z",
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_z",
+        "alternative": 1
+      },
+      "code_bytes": 400,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-apple-clang21-O2-sym/crc32_combine@0x140001b30",
+      "binary": "m-pe-x86_64-apple-clang21-O2-sym",
+      "va": "0x140001b30",
+      "name": "crc32_combine",
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_combine"
+      },
+      "code_bytes": 200,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O2-sym/matrix_multi_exit@0x401a60",
+      "binary": "m-elf-x86_64-apple-clang21-O2-sym",
+      "va": "0x401a60",
+      "name": "matrix_multi_exit",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_multi_exit"
+      },
+      "code_bytes": 52,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O2-sym/matrix_switch@0x401aa0",
+      "binary": "m-elf-x86_64-apple-clang21-O2-sym",
+      "va": "0x401aa0",
+      "name": "matrix_switch",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_switch"
+      },
+      "code_bytes": 103,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O2-sym/matrix_alias@0x401b10",
+      "binary": "m-elf-x86_64-apple-clang21-O2-sym",
+      "va": "0x401b10",
+      "name": "matrix_alias",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_alias"
+      },
+      "code_bytes": 19,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O2-sym/matrix_aggregate@0x401b30",
+      "binary": "m-elf-x86_64-apple-clang21-O2-sym",
+      "va": "0x401b30",
+      "name": "matrix_aggregate",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_aggregate"
+      },
+      "code_bytes": 42,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O2-sym/matrix_callback@0x401b60",
+      "binary": "m-elf-x86_64-apple-clang21-O2-sym",
+      "va": "0x401b60",
+      "name": "matrix_callback",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_callback"
+      },
+      "code_bytes": 98,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O2-sym/matrix_variadic@0x401bd0",
+      "binary": "m-elf-x86_64-apple-clang21-O2-sym",
+      "va": "0x401bd0",
+      "name": "matrix_variadic",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic"
+      },
+      "code_bytes": 298,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O2-sym/matrix_mixed@0x401d20",
+      "binary": "m-elf-x86_64-apple-clang21-O2-sym",
+      "va": "0x401d20",
+      "name": "matrix_mixed",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_mixed"
+      },
+      "code_bytes": 54,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O2-sym/matrix_variadic_call@0x401d60",
+      "binary": "m-elf-x86_64-apple-clang21-O2-sym",
+      "va": "0x401d60",
+      "name": "matrix_variadic_call",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic_call"
+      },
+      "code_bytes": 25,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O2-sym/matrix_checksum@0x401d80",
+      "binary": "m-elf-x86_64-apple-clang21-O2-sym",
+      "va": "0x401d80",
+      "name": "matrix_checksum",
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_checksum"
+      },
+      "code_bytes": 56,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O2-sym/adler32_z@0x401de0",
+      "binary": "m-elf-x86_64-apple-clang21-O2-sym",
+      "va": "0x401de0",
+      "name": "adler32_z",
+      "source": {
+        "file": "matrix/adler32.c",
+        "name": "adler32_z"
+      },
+      "code_bytes": 1067,
+      "size": "large",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O2-sym/crc32_z@0x402410",
+      "binary": "m-elf-x86_64-apple-clang21-O2-sym",
+      "va": "0x402410",
+      "name": "crc32_z",
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_z",
+        "alternative": 1
+      },
+      "code_bytes": 354,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-apple-clang21-O2-sym/crc32_combine@0x402690",
+      "binary": "m-elf-x86_64-apple-clang21-O2-sym",
+      "va": "0x402690",
+      "name": "crc32_combine",
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_combine"
+      },
+      "code_bytes": 216,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-llvm-clang23-O2-strip/sub@0x100000310",
+      "binary": "m-macho-arm64-llvm-clang23-O2-strip",
+      "va": "0x100000310",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_multi_exit"
+      },
+      "code_bytes": 80,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-llvm-clang23-O2-strip/sub@0x100000360",
+      "binary": "m-macho-arm64-llvm-clang23-O2-strip",
+      "va": "0x100000360",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_switch"
+      },
+      "code_bytes": 152,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-llvm-clang23-O2-strip/sub@0x1000003f8",
+      "binary": "m-macho-arm64-llvm-clang23-O2-strip",
+      "va": "0x1000003f8",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_alias"
+      },
+      "code_bytes": 36,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-llvm-clang23-O2-strip/sub@0x10000041c",
+      "binary": "m-macho-arm64-llvm-clang23-O2-strip",
+      "va": "0x10000041c",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_aggregate"
+      },
+      "code_bytes": 52,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-llvm-clang23-O2-strip/sub@0x100000450",
+      "binary": "m-macho-arm64-llvm-clang23-O2-strip",
+      "va": "0x100000450",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_callback"
+      },
+      "code_bytes": 116,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-llvm-clang23-O2-strip/sub@0x1000004c4",
+      "binary": "m-macho-arm64-llvm-clang23-O2-strip",
+      "va": "0x1000004c4",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic"
+      },
+      "code_bytes": 56,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-llvm-clang23-O2-strip/sub@0x1000004fc",
+      "binary": "m-macho-arm64-llvm-clang23-O2-strip",
+      "va": "0x1000004fc",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_mixed"
+      },
+      "code_bytes": 48,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-llvm-clang23-O2-strip/sub@0x10000052c",
+      "binary": "m-macho-arm64-llvm-clang23-O2-strip",
+      "va": "0x10000052c",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic_call"
+      },
+      "code_bytes": 44,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-llvm-clang23-O2-strip/sub@0x100000558",
+      "binary": "m-macho-arm64-llvm-clang23-O2-strip",
+      "va": "0x100000558",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_checksum"
+      },
+      "code_bytes": 80,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-llvm-clang23-O2-strip/sub@0x1000005b8",
+      "binary": "m-macho-arm64-llvm-clang23-O2-strip",
+      "va": "0x1000005b8",
+      "name": null,
+      "source": {
+        "file": "matrix/adler32.c",
+        "name": "adler32_z"
+      },
+      "code_bytes": 924,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-llvm-clang23-O2-strip/sub@0x100000af0",
+      "binary": "m-macho-arm64-llvm-clang23-O2-strip",
+      "va": "0x100000af0",
+      "name": null,
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_z",
+        "alternative": 1
+      },
+      "code_bytes": 264,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-macho-arm64-llvm-clang23-O2-strip/sub@0x100000cc4",
+      "binary": "m-macho-arm64-llvm-clang23-O2-strip",
+      "va": "0x100000cc4",
+      "name": null,
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_combine"
+      },
+      "code_bytes": 196,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-llvm-clang23-O2-strip/sub@0x140001000",
+      "binary": "m-pe-x86_64-llvm-clang23-O2-strip",
+      "va": "0x140001000",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_multi_exit"
+      },
+      "code_bytes": 53,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-llvm-clang23-O2-strip/sub@0x140001040",
+      "binary": "m-pe-x86_64-llvm-clang23-O2-strip",
+      "va": "0x140001040",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_switch"
+      },
+      "code_bytes": 105,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-llvm-clang23-O2-strip/sub@0x1400010b0",
+      "binary": "m-pe-x86_64-llvm-clang23-O2-strip",
+      "va": "0x1400010b0",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_alias"
+      },
+      "code_bytes": 19,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-llvm-clang23-O2-strip/sub@0x1400010d0",
+      "binary": "m-pe-x86_64-llvm-clang23-O2-strip",
+      "va": "0x1400010d0",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_aggregate"
+      },
+      "code_bytes": 31,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-llvm-clang23-O2-strip/sub@0x1400010f0",
+      "binary": "m-pe-x86_64-llvm-clang23-O2-strip",
+      "va": "0x1400010f0",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_callback"
+      },
+      "code_bytes": 97,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-llvm-clang23-O2-strip/sub@0x140001160",
+      "binary": "m-pe-x86_64-llvm-clang23-O2-strip",
+      "va": "0x140001160",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic"
+      },
+      "code_bytes": 168,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-llvm-clang23-O2-strip/sub@0x140001210",
+      "binary": "m-pe-x86_64-llvm-clang23-O2-strip",
+      "va": "0x140001210",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_mixed"
+      },
+      "code_bytes": 56,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-llvm-clang23-O2-strip/sub@0x140001250",
+      "binary": "m-pe-x86_64-llvm-clang23-O2-strip",
+      "va": "0x140001250",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic_call"
+      },
+      "code_bytes": 45,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-llvm-clang23-O2-strip/sub@0x140001280",
+      "binary": "m-pe-x86_64-llvm-clang23-O2-strip",
+      "va": "0x140001280",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_checksum"
+      },
+      "code_bytes": 60,
+      "size": "small",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-llvm-clang23-O2-strip/sub@0x1400012e0",
+      "binary": "m-pe-x86_64-llvm-clang23-O2-strip",
+      "va": "0x1400012e0",
+      "name": null,
+      "source": {
+        "file": "matrix/adler32.c",
+        "name": "adler32_z"
+      },
+      "code_bytes": 986,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-llvm-clang23-O2-strip/sub@0x140001870",
+      "binary": "m-pe-x86_64-llvm-clang23-O2-strip",
+      "va": "0x140001870",
+      "name": null,
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_z",
+        "alternative": 1
+      },
+      "code_bytes": 400,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-pe-x86_64-llvm-clang23-O2-strip/sub@0x140001ae0",
+      "binary": "m-pe-x86_64-llvm-clang23-O2-strip",
+      "va": "0x140001ae0",
+      "name": null,
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_combine"
+      },
+      "code_bytes": 183,
+      "size": "medium",
+      "tiers": [
+        "quick",
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-llvm-clang23-O2-strip/sub@0x401a60",
+      "binary": "m-elf-x86_64-llvm-clang23-O2-strip",
+      "va": "0x401a60",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_multi_exit"
+      },
+      "code_bytes": 52,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-llvm-clang23-O2-strip/sub@0x401aa0",
+      "binary": "m-elf-x86_64-llvm-clang23-O2-strip",
+      "va": "0x401aa0",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_switch"
+      },
+      "code_bytes": 103,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-llvm-clang23-O2-strip/sub@0x401b10",
+      "binary": "m-elf-x86_64-llvm-clang23-O2-strip",
+      "va": "0x401b10",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_alias"
+      },
+      "code_bytes": 19,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-llvm-clang23-O2-strip/sub@0x401b30",
+      "binary": "m-elf-x86_64-llvm-clang23-O2-strip",
+      "va": "0x401b30",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_aggregate"
+      },
+      "code_bytes": 38,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-llvm-clang23-O2-strip/sub@0x401b60",
+      "binary": "m-elf-x86_64-llvm-clang23-O2-strip",
+      "va": "0x401b60",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_callback"
+      },
+      "code_bytes": 98,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-llvm-clang23-O2-strip/sub@0x401bd0",
+      "binary": "m-elf-x86_64-llvm-clang23-O2-strip",
+      "va": "0x401bd0",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic"
+      },
+      "code_bytes": 291,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-llvm-clang23-O2-strip/sub@0x401d10",
+      "binary": "m-elf-x86_64-llvm-clang23-O2-strip",
+      "va": "0x401d10",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_mixed"
+      },
+      "code_bytes": 54,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-llvm-clang23-O2-strip/sub@0x401d50",
+      "binary": "m-elf-x86_64-llvm-clang23-O2-strip",
+      "va": "0x401d50",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_variadic_call"
+      },
+      "code_bytes": 25,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-llvm-clang23-O2-strip/sub@0x401d70",
+      "binary": "m-elf-x86_64-llvm-clang23-O2-strip",
+      "va": "0x401d70",
+      "name": null,
+      "source": {
+        "file": "matrix/quality-matrix-corpus.c",
+        "name": "matrix_checksum"
+      },
+      "code_bytes": 56,
+      "size": "small",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-llvm-clang23-O2-strip/sub@0x401dd0",
+      "binary": "m-elf-x86_64-llvm-clang23-O2-strip",
+      "va": "0x401dd0",
+      "name": null,
+      "source": {
+        "file": "matrix/adler32.c",
+        "name": "adler32_z"
+      },
+      "code_bytes": 1068,
+      "size": "large",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-llvm-clang23-O2-strip/sub@0x4023e0",
+      "binary": "m-elf-x86_64-llvm-clang23-O2-strip",
+      "va": "0x4023e0",
+      "name": null,
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_z",
+        "alternative": 1
+      },
+      "code_bytes": 354,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    },
+    {
+      "id": "m-elf-x86_64-llvm-clang23-O2-strip/sub@0x402640",
+      "binary": "m-elf-x86_64-llvm-clang23-O2-strip",
+      "va": "0x402640",
+      "name": null,
+      "source": {
+        "file": "matrix/crc32.c",
+        "name": "crc32_combine"
+      },
+      "code_bytes": 201,
+      "size": "medium",
+      "tiers": [
+        "full"
+      ]
+    }
+  ]
+}

@@ -1,6 +1,68 @@
 # Performance and resource evidence
 
-Roots recorded under `~/Documents/` before round 6 no longer exist; archived evidence is in `.local/evidence/` per `scripts/bench/evidence-assets.json`. Historical sections below keep their recorded paths.
+Roots recorded under `~/Documents/` before round 6 no longer exist, and the `.local/` store (evidence archives, frozen-suite rounds, dev-loop and structure-sample outputs, the angr venv) was deleted on 2026-10-21; only odbench's pinned inputs were kept, in `.odbench/`. Historical sections below keep their recorded paths.
+
+## odbench: the benchmark (2026-10-21)
+
+One command measures an Open Decomp build against Ghidra 12.1.4 on a frozen corpus, so every change is judged the same way. It replaces the development comparison loop and the structure sample. Code: `scripts/bench/odbench/` (`cli.ts` is the entry point). The corpus is a **development set**: its sources are known and its outputs will be read while tuning, so claims of generalisation still need a sealed suite.
+
+```sh
+bun run build                                         # the measured checkout needs a built dist/
+bun run bench inputs                                  # verify the pinned binaries and sources in .odbench/
+/Users/df0/Documents/projects/od-wt/heavy.sh bun run bench all --label head --tier quick
+# another build: any checkout with a built dist/, e.g. a worktree of an earlier commit
+/Users/df0/Documents/projects/od-wt/heavy.sh bun run bench run od --label base --repo /path/to/checkout --tier quick
+bun run bench all --label head --base od-base --tier quick    # judges head and base against Ghidra and head against base
+bun run bench report --lanes od-head,od-base,source --tier quick   # re-render from the caches, no model call
+```
+
+**Data store.** `.odbench/` in the main checkout (gitignored; `$OPEN_DECOMP_BENCH_DIR` overrides; every worktree shares it). `inputs/` and `sources/` hold the pinned binaries and sources (13 MB, sha256 in `corpus.json`; `bench inputs` verifies them and names each origin). The brotli Homebrew binary and the 24 matrix binaries cannot be downloaded again byte-identically: back up `inputs/` and `sources/`. `lanes/<lane>/` holds each lane's texts and `lane.json`; `judge/cache/` one file per model call; `reports/` the rendered reports.
+
+**Corpus** (`scripts/bench/odbench/corpus.json`, frozen by `select.ts`, seed 20261021, `bench select --check` rebuilds it byte-identically). Functions whose name has a definition in the source, excluding import stubs, `.cold` pieces and code outside 16–32,768 bytes, stratified by code size; every function of the 42 llm-tasks questions is included.
+
+| tier  | functions | SQLite 3.54.0 shell (Mach-O arm64) | brotli 1.2.0 CLI (Mach-O arm64) | matrix (zlib + corpus C)                                                                             |
+| ----- | --------: | ---------------------------------: | ------------------------------: | ---------------------------------------------------------------------------------------------------- |
+| quick |        68 |                                 34 |                              10 | 24: ELF x86-64 `-O2` symbols, PE x86-64 `-O2` stripped                                               |
+| full  |       237 |                                114 |                              15 | 108: 6 apple-clang21 symbol cells (Mach-O/ELF/PE × `-O0`/`-O2`), 3 llvm-clang23 `-O2` stripped cells |
+
+**Lanes.** `od-<label>`: one child process per binary imports the checkout's `dist/src/api/index.js`, opens the binary in a fresh cache and decompiles each function by address (C-like source view, `proven`, default budget), timing import and every call; `--repeat N` re-runs and checks determinism. `ghidra`: `analyzeHeadless` with default auto-analysis, then a post-script decompiles each function (located by name, address, or ELF rebase; where analysis found no function at the entry it is created there, as Open Decomp is also given the address), timing import, analysis and each decompile; cached per binary. `source`: the source definition with comments removed: the calibration anchor and the comprehension ceiling. The lane records `dist/` build time and warns when `dist/` is older than the last `src/` commit.
+
+**Measures.**
+
+- Coverage: functions with pseudocode, partial, failed, not found.
+- Size: lexical C tokens (comments excluded), Claude tokens (the judge model's tokenizer: input usage minus a one-token baseline), bytes, lines. Ratios are per-function geometric means against Ghidra with bootstrap 95% CIs. Code costs about 2 bytes per Claude token, not the 3.6 the llm-tasks estimate assumed.
+- Structure counters: the structure sample's counters (verified identical on 60 SQLite chunks) plus nesting, decision points, casts, declarations, placeholder names and both tools' artifacts (`entry_sp`, `unknown_*`, `physical_*` …; `CONCAT44`, `undefined8`, `extraout_` …). Regression signals, not verdicts.
+- Human readability: Haiku compares two listings blind, in both presentation orders, on control flow, data, expressions, noise and overall; a lane scores 1 / 0.5 / 0 per order for win / tie / loss, averaged over orders (a judge that always prefers the first listing scores 0.5). Strict wins need both orders. Identical texts are ties without a call.
+- LLM comprehension: Haiku explains the function from the lane text alone; a second call grades the explanation against the original source (with comments) without seeing the lane text: claims correct / wrong / unverifiable and coverage 0–4. Offsets, addresses and macro values count as correct when the behavior matches.
+- QA: the 42 frozen llm-tasks questions (exact prompt wording and scoring rules), 3 samples each, on decompiler lanes only (they ask compiled facts such as field offsets that source text does not show). Reported with Claude tokens per correct answer.
+- Speed: per binary cold time (process + open/import + analysis + every decompile) and per-function decompile time. Open Decomp analyzes per function; Ghidra analyzes the whole program first, so compare cold totals; per-function times are not like for like.
+
+**Judge.** `anthropic/claude-haiku-5-5` through `omp -p --mode json` (no tools, no session), or the Anthropic API when `ANTHROPIC_API_KEY` is set; `--model` and `--backend cmd --command CMD` change it. Every call is cached by task, model, exact prompt text and sample, so unchanged texts (the Ghidra and source lanes, unchanged functions) are never judged twice and `report` never calls a model. Replies are parsed leniently (C escapes, doubled closing brackets) and validated; three attempts per call, and `bench judge` re-asks only what is missing. Cost: the first quick-tier run with three lanes made 1,215 calls (4.1 M input tokens, $0.81, 8 min); a further build on the quick tier about 600 calls ($0.50, 4 min); extending the three lanes to the full tier 1,885 more calls ($1.31, 12.5 min).
+
+**Reading a report.** Section 2 is the scorecard; section 3 gives per-dimension scores and position consistency per pair, and the anchor check (the source must beat Ghidra with score ≥ 0.7, otherwise the readability rows are not trusted); section 4 breaks results down by group, format, optimization, stripping and size; section 7 lists the worst functions with the judge's reasons and the grader's wrong claims, which is where work items come from. A build-to-build pair (`--base`) judges only functions whose text changed.
+
+First measurement, quick tier, 2026-10-21: `head` = `0eaab0f` (readability roadmap 2 merged), `base` = `18575c1` (roadmap 2 start), Ghidra 12.1.4; 53 functions where every lane has text (`base` finds no function for 11 stripped PE entries and fails 4). Cold times are from quick-tier runs.
+
+| measure                                    |                   head |                    base | source (anchor)      | Ghidra |
+| ------------------------------------------ | ---------------------: | ----------------------: | -------------------- | -----: |
+| functions with text (of 68)                |                     66 |                      53 | 68                   |     68 |
+| lexical tokens vs Ghidra (geomean, 95% CI) |   1.360 [1.188, 1.540] |    1.521 [1.318, 1.737] | 0.590 [0.497, 0.702] |      1 |
+| Claude tokens vs Ghidra                    |   1.449 [1.238, 1.669] |    1.608 [1.358, 1.882] | 0.546 [0.460, 0.656] |      1 |
+| readability vs Ghidra (overall)            |   0.675 [0.566, 0.778] |    0.557 [0.443, 0.670] | 0.991 [0.972, 1.000] |      — |
+| strict wins / ties / losses vs Ghidra      |           30 / 11 / 12 |            22 / 15 / 16 | 52 / 1 / 0           |      — |
+| comprehension coverage (0–4)               |                  2.642 |                   2.585 | 3.717                |  2.811 |
+| comprehension coverage − Ghidra (paired)   | −0.170 [−0.453, 0.075] | −0.226 [−0.453, −0.038] | 0.906 [0.679, 1.151] |      — |
+| wrong claims per function                  |                   2.93 |                    2.85 | 0.40                 |   2.23 |
+| QA correct rate (126 samples)              |                    75% |                     73% | —                    |    67% |
+| QA Claude tokens per correct answer        |                  5,051 |                   5,568 | —                    |  3,528 |
+| cold time, 4 binaries                      |                 56.3 s |                  45.0 s | —                    | 48.1 s |
+
+Full tier, same day, `head` against Ghidra (231 of 237 functions; `head` fails 6): lexical tokens 1.374 [1.293, 1.458] and Claude tokens 1.515 [1.414, 1.616] of Ghidra's; readability 0.659 [0.604, 0.710] (124 / 55 / 52, p < 0.001; control flow 0.538, data 0.747, expressions 0.618, noise 0.352); comprehension coverage 2.570 vs 2.723, paired −0.152 [−0.274, −0.030], wrong claims 2.87 vs 2.26 per function; source anchor 0.987 (225 / 6 / 0). Cold time over the 11 binaries 2 min 35 s vs 1 min 27 s; SQLite alone 130 s (114 decompiles) vs 38.7 s (31.9 s of it auto-analysis).
+
+- Head against base directly (quick): 0.689 [0.594, 0.774], strict 25 wins / 23 ties / 5 losses (9 identical texts), sign test p < 0.001. The benchmark sees roadmap 2.
+- Judge reliability: the anchor scores 0.991 (quick) and 0.987 (full) with 98% and 97% position consistency. Both presentation orders name the same winner on `overall` in 76–79% (head vs Ghidra), 72% (base vs Ghidra) and 68% (head vs base) of the functions, and in 48–86% on single dimensions, so per-dimension scores are noisier than `overall`.
+- Readability and comprehension disagree: Haiku prefers Open Decomp's listings overall (data 0.747) but not on noise (0.352), while explanations written from them are slightly less accurate than from Ghidra's (full tier −0.15). The top wrong claims in section 7 come from machine-level text (`physical_return` tails, `entry_sp` frame slots standing for a by-value struct, `indirect_exit` stubs for jump-table switches) and from offset-level descriptions; some are grader mistakes on inlined code (`btreeLeaveAll` inlines `sqlite3BtreeLeave`, `crc32_combine` inlines `crc32_combine64`).
+- Speed is one run per lane on a shared host (load average about 2.5): on the quick tier SQLite's cold time rose 37.1 s → 46.3 s from base to head.
 
 ## Evidence archive setup
 
@@ -631,28 +693,9 @@ One reviewer flagged a conditionally incremented change counter named `index` in
 
 Round 8 audited every parameter printed with a role name on the same 12 cells (C view, 280 decompiled functions): 62 `address` (pointer formals), 6 `callback` and 2 `count` (a `u32 count` formal), all correct against the source, 0 `index`/`remaining`/`limit`/`accumulator`. The audit found the hole that remained, reproduced on constructed IR: a parameter that is itself the loop variable (the loop begins at function entry) printed as `index` for any up-step and as `count` for any unit countdown, whatever the loop tested. A parameter now takes a loop role only as a unit countdown ending at zero (`count`), a loop bound is `count` only for a unit step from 0 that stops strictly below it (else `limit`), the initial-value exception of a coalesced variable never covers a parameter, and a parameter used as a bit position in `1 << n` is not a `shift_count`. Matrix output is byte-identical; a wider sample (148 sqlite3 and corpus functions) found one wrong name, `sqlite3_config`'s opcode printed as `shift_count`, now neutral.
 
-## Development comparison loop
+## Development comparison loop (retired 2026-10-21)
 
-`scripts/bench/quality-dev-loop.py` compares the Open Decomp source view with the archived Ghidra 12.1.4 texts on the 24-cell, 12-function broader matrix (`.local/performance/quality-matrix-reviewed/`, up to 288 pairs) so a change can be measured in minutes instead of once per frozen-suite round. **This matrix is a development set, not held-out:** its source (`source/`, zlib 1.3.1 plus `quality-matrix-corpus.c`) is known and it has been inspected while tuning. Use it to steer work; claim nothing from it as independent evidence. The frozen suite above remains the reporting benchmark. No analyzed binary is executed.
-
-```sh
-# 1. Ghidra texts from the archived recording (hash-checks the archive and all 24 binaries; refuses on mismatch; no Ghidra re-run)
-python3 scripts/bench/quality-dev-loop.py ghidra --output .local/quality-dev/ghidra
-# 2. Open Decomp texts, C source view, default budget; any checkout's dist works (baseline: git archive HEAD | tar -x -C /tmp/snap, link node_modules, bun run build)
-python3 scripts/bench/quality-dev-loop.py run --entry dist/src/cli/entry.js --label r8 [--jobs 4]
-# 3. Blind packets: same --seed gives the same pairs across labels, stratified by function x O0/O2
-python3 scripts/bench/quality-dev-loop.py packets --label r8 --sample 60 --seed 8 --output .local/quality-dev/review-r8
-mv .local/quality-dev/review-r8/private .local/quality-dev/sealed-review-r8 && chmod 700 .local/quality-dev/sealed-review-r8
-# 4. After the reviewers write submissions (schema in review-r8/instructions.md):
-python3 scripts/bench/quality-dev-loop.py aggregate --packets .local/quality-dev/review-r8 \
-  --mapping .local/quality-dev/sealed-review-r8 --review submissions/review-A.json [--review submissions/review-B.json]
-# Cheap per-change check, no reviewers: static text counts side by side (only pairs with text in every run)
-python3 scripts/bench/quality-dev-loop.py metrics --label base --label r9 [--json]
-```
-
-`run` writes `.local/quality-dev/runs/<label>/<cell>/<function>.c` and `summary.json` (status `complete`/`partial`/`failed`, exit code, seconds, failure diagnostics); each cell uses one throwaway cache under `/tmp`, deleted afterwards. `packets` reuses the frozen six-dimension 0–4 rubric and instruction wording, writes `case-NNN/{X.c,Y.c,question.json}` with a seeded random X/Y assignment, and keeps the mapping in `private/` for sealing; add `--require-label OTHER` to restrict a round to pairs that also have text in an earlier run. `aggregate` decodes preferences and dimension means per tool, function, O0/O2, target and symbol state into `aggregate.json` and `aggregate.md`.
-
-`metrics` counts defect classes from the readability roadmap in each run's texts: `goto`, labels, `entry_sp` frame references, open `...` arities, casts to scalar/pointer types, helper preamble lines (`#define`/`static inline`), helper calls (`__od_*`, `bv_*`, `insert_bits`), `type_N` names and local declarations, plus lines and bytes/4 as an estimated token count, grouped by all/O0/O2/target. The counts are regex-based and only show whether a change moved a defect class; they are not a readability verdict.
+`scripts/bench/quality-dev-loop.py` compared the Open Decomp source view with archived Ghidra 12.1.4 texts on the 24-cell, 12-function broader matrix (up to 288 pairs), with blind reviewer packets and regex `metrics` (gotos, labels, `entry_sp`, open arities, casts, helper preamble lines and calls, `type_N` names, declarations, bytes/4 as estimated tokens). The matrix is a development set, not held-out. The script and its archived Ghidra recording were retired with the `.local/` store; odbench (see "odbench: the benchmark") replaces it: the matrix binaries and sources are part of its corpus, Ghidra runs live, and its static counters include every counter above. The historical script: `git show 0eaab0f:scripts/bench/quality-dev-loop.py`. Numbers below labeled "dev loop" were measured with it.
 
 ## Source view round 8 (2026-10-19, commits `50c361b`, `41b9dee`)
 
@@ -739,6 +782,8 @@ Losses. The total did drop against pre-R2 (214 → 200) but not per function, an
 Related per-item evidence recorded elsewhere in this document: likely-mode precision and the R5 type heuristics ("Likely-inference precision", including the dev-loop `r5-likely-c` comparison and byte-identical `proven` output), cache and latency work ("Persistent analysis cache" and "Per-function latency and cross-request callee reuse"), and the LLM task protocol ("LLM task success per token").
 
 ## Readability roadmap 2 baseline: Ghidra lane in the structure sample (2026-10-21, roadmap item M1)
+
+The structure sample script and its Ghidra script were retired on 2026-10-21 (odbench replaces them; its counters are a verified port): `git show 0eaab0f:scripts/bench/structure-gotos.py`, `git show 0eaab0f:scripts/bench/ghidra-decompile-list.java`. The commands below and in the following sections are historical.
 
 The structure sample (`scripts/bench/structure-gotos.py`) now has a Ghidra lane and a paired metrics table. `ghidra` runs `analyzeHeadless` (Ghidra 12.1.4, default decompiler options after auto-analysis) on the sample binaries and decompiles the functions listed in an Open Decomp export's `index.tsv` (or `SAMPLE.list` files) by symbol name, because Ghidra rebases the ELF image; the SQLite filters share one analysis. Ghidra only loads the binaries; nothing is executed. The Java script is `scripts/bench/ghidra-decompile-list.java` (the class `DecompileList` is copied under that name into a temporary script path at run time). Both lanes write `OUT/LABEL/SAMPLE/functions/NAME@ADDR.c`; `metrics --label NAME=DIR` reads any existing directory, also the flat layout `DIR/SAMPLE/*.c`.
 

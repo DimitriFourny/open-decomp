@@ -37,6 +37,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "bench": "node --import tsx scripts/bench/odbench/cli.ts",
     "format": "node --import tsx scripts/format.ts",
     "format:check": "node --import tsx scripts/format.ts --check",
     "typecheck": "tsc --noEmit",
