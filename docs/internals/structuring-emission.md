@@ -131,5 +131,5 @@ Attempts share one reconstruction, validated once; each forks the validation ses
   - The sample has only 3 `for` loops.
   - Python-like has no `do-while` or `for`.
   - Irreducible regions get no node splitting.
-- **Cost.** Each inlining retry re-runs all source planning, for up to 5 attempts, doubled when metadata is omitted. brotli `main` and SQLite `whereLoopAddBtreeIndex` finish within ~0.4M of the 10M work limit. `renderer.ts` is one ~7.9k-line class.
+- **Cost.** Each inlining retry re-runs the attempt-dependent source planning (inlining plan, liveness, coalescing), for up to 5 attempts, doubled when metadata is omitted; source-name, character and indexed-data plans are shared, and a retried attempt publishes no mappings. brotli `main` and SQLite `whereLoopAddBtreeIndex` finish ~0.55M / ~0.95M under the 10M work limit. `renderer.ts` is one ~7.9k-line class.
 - **Measurement gap.** The dev loop prints 0 gotos, so structuring is measured only on the sample.

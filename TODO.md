@@ -8,7 +8,7 @@ Make source-view output as short and as structured as Ghidra's on the same funct
 - Copy Ghidra's exact transforms, not its guesses. Its stack alias boundary (`varmap.cc:754-757`), parameter fill-in (`fspec.cc:1100-1140`), return-value detection (`coreaction.cc:1991-2037`), constants-as-pointers (`coreaction.cc:1093-1176`) and "most specific type wins" lattice (`type.cc:229-235`) are heuristics: they belong in `inference: "likely"` behind the R5 precision gate, or nowhere.
 - Fix the owning shared layer (SSA, reconstruction, structuring, renderer); never repair emitted text with regexes or special-case fixtures or functions. Both dialects consume the same result.
 - Reuse the local validator (`src/reconstruction/local-validation.ts`), evidence/provenance and cache-version contracts. Bump component versions when output identity changes.
-- Never raise budgets. brotli `main` and SQLite `whereLoopAddBtreeIndex` finish only ~0.4M / ~0.3M work under the 10M limit; an item that adds work pays for it in the same change.
+- Never raise budgets. brotli `main` and SQLite `whereLoopAddBtreeIndex` finish ~0.55M / ~0.95M work under the 10M limit (after G9's lifts and their payback); an item that adds work pays for it in the same change.
 - Tune on the structure sample and the development loop; claims come from a new sealed suite (see Measurement).
 
 Ghidra citations are relative to `../ghidra/Ghidra/Features/Decompiler/src/decompile/cpp/`.
