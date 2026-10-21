@@ -267,6 +267,16 @@ export class Renderer {
   private readonly fallthrough = new Set<ParallelTransfer>();
   private readonly loopTests = new Map<string, LoopForm>();
   private clones: ReadonlySet<BlockRegion> = new Set();
+  private cloneIds: ReadonlySet<string> = new Set();
+  /** Source view: a block that prints nothing but its jump (see planSourceControl). */
+  private quietJump: (block: BlockRegion) => boolean = () => false;
+  /** Blocks printing nothing whose jump prints nothing either, by the block it
+   * falls to: an edge reaching one of them arrives where it falls. Filled by
+   * findLabels, later blocks first. */
+  private readonly silentNext = new Map<string, string>();
+  private readonly loopHeaders = new Set<string>();
+  /** The silent blocks each fallthrough or break edge crosses before its target. */
+  private readonly crossed = new Map<ParallelTransfer, readonly string[]>();
   private loopExits: ReadonlyMap<ParallelTransfer, LoopExitRoute> = new Map();
   private normalizeLoopTargets = false;
   private readonly exitFlags = new Map<string, string>();
@@ -633,7 +643,30 @@ export class Renderer {
     if (!this.program.blocks.has(input.function.entry))
       this.invalid('Structured function has no entry block');
     if (this.sourceView) this.planSourceControl(plans);
+    this.cloneIds = new Set([...this.clones].map((block) => block.id));
     this.findLabels(this.body, [], 0);
+    const crossed = new Set([...this.crossed.values()].flat());
+    if (
+      crossed.size &&
+      !this.localValidation.presentation(
+        'silent_block_crossing',
+        this.input.function.id,
+        'an edge whose lexical destination is a chain of blocks printing nothing (no statement, definition, note or edge copy; each jumps silently to the next, none heads a loop or is repeated by a tail copy) reaches the block after the chain: a goto to it prints nothing, and a goto from a loop to it, which is the loop continuation but for that chain, is a break; labels stay where they were and the blocks crossed are listed',
+        [...crossed],
+      )
+    ) {
+      // Keep the exact lexical rules.
+      this.labels.clear();
+      this.gotos.clear();
+      this.actions.clear();
+      this.consumed.clear();
+      this.fallthrough.clear();
+      this.loopTests.clear();
+      this.silentNext.clear();
+      this.crossed.clear();
+      this.quietJump = () => false;
+      this.findLabels(this.body, [], 0);
+    }
     if (validate) validateReconstruction(this.program, context);
   }
 
@@ -4881,6 +4914,20 @@ export class Renderer {
     return null;
   }
 
+  /** The silent blocks control crosses entering `from` before reaching `target`
+   * (none when `from` is the target), or null when it arrives elsewhere. */
+  private crossing(from: string | null, target: string): readonly string[] | null {
+    const through: string[] = [];
+    for (let at = from; at !== null;) {
+      if (at === target) return through;
+      const next = this.silentNext.get(at);
+      if (next === undefined || through.length >= this.silentNext.size) return null;
+      through.push(at);
+      at = next;
+    }
+    return null;
+  }
+
   private findLabels(
     region: Region,
     nesting: readonly Nest[],
@@ -4899,6 +4946,7 @@ export class Renderer {
       return;
     }
     if (region.kind === 'loop') {
+      this.loopHeaders.add(region.header);
       if (region.form) {
         this.loopTests.set(region.form.test, region.form);
         if (region.form.kind === 'while')
@@ -4930,7 +4978,19 @@ export class Renderer {
           this.sourceView,
           !!this.program.source,
           this.normalizeLoopTargets,
+          (from, target) => this.crossing(from, target) !== null,
         );
+      if (
+        !performed &&
+        !this.loopExits.has(item) &&
+        (action === 'fallthrough' || action === 'break')
+      ) {
+        const through = this.crossing(
+          action === 'break' ? (nested.at(-1)?.follow ?? null) : destination,
+          item.target,
+        );
+        if (through?.length) this.crossed.set(item, through);
+      }
       // A duplicated tail prints its transfers again; each copy must agree.
       const previous = this.actions.get(item);
       if (previous !== undefined && previous !== action)
@@ -4954,7 +5014,17 @@ export class Renderer {
       );
       if (item.body) this.findLabels(item.body, nested, depth + 1, follow);
     };
-    if (control.kind === 'jump') decide(control.transfer, nesting, follow);
+    if (control.kind === 'jump') {
+      decide(control.transfer, nesting, follow);
+      if (
+        this.actions.get(control.transfer) === 'fallthrough' &&
+        !this.consumed.has(control.transfer) &&
+        !this.loopHeaders.has(region.id) &&
+        !this.cloneIds.has(region.id) &&
+        this.quietJump(region)
+      )
+        this.silentNext.set(region.id, control.transfer.target);
+    }
     if (control.kind === 'if') {
       arm(control.when_true, nesting);
       arm(control.when_false, nesting);
@@ -5192,9 +5262,14 @@ export class Renderer {
       this.emittedEdges.set(transfer, { kind: 'loop-exit', ...route });
       return;
     }
+    const through = this.crossed.get(transfer);
     this.emittedEdges.set(
       transfer,
-      action === 'goto' ? { kind: 'goto', target: transfer.target } : { kind: action },
+      action === 'goto'
+        ? { kind: 'goto', target: transfer.target }
+        : through && (action === 'fallthrough' || action === 'break')
+          ? { kind: action, through }
+          : { kind: action },
     );
     // A joined exit leaves by the jump statement its merged test printed.
     if (this.joinedExits.delete(transfer)) return;
@@ -6641,6 +6716,19 @@ export class Renderer {
   private elseArm(arm: ControlArm, depth: number, origin: Control): void {
     const c = this.language === 'c-like',
       inner = this.soleControl(arm);
+    // An arm printing nothing prints no `else`.
+    if (
+      this.emptyArm(arm) &&
+      this.localValidation.presentation(
+        'branch_layout',
+        this.input.function.id,
+        'an empty arm is dropped (inverting the exact integer test) and an arm that cannot fall through ends its if; the other arm follows unchanged',
+      )
+    ) {
+      if (c) this.writer.line(depth, '}');
+      this.silentArm(arm, depth, origin);
+      return;
+    }
     if (
       inner &&
       this.printsOneIf(inner) &&
@@ -7711,14 +7799,15 @@ export class Renderer {
         'break and continue select the nearest enclosing loop by exact lexical successor/header identity, not the structurer annotation; a C switch never captures a loop break',
         [...new Set(normalized)],
       );
+    this.quietJump = (block) =>
+      block.control.kind === 'jump' &&
+      silent(block) &&
+      !this.notes.has(block.id) &&
+      !anchored(block.control.id) &&
+      block.statements.every((node) => !anchored(node.id)) &&
+      !this.printedCopies(block.control.transfer).length;
     const routes = planLoopExits(this.body, this.language, this.context, {
-      quiet: (block) =>
-        block.control.kind === 'jump' &&
-        silent(block) &&
-        !this.notes.has(block.id) &&
-        !anchored(block.control.id) &&
-        block.statements.every((node) => !anchored(node.id)) &&
-        !this.printedCopies(block.control.transfer).length,
+      quiet: this.quietJump,
       exitCopies: exitCopyLoops,
     });
     if (

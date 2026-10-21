@@ -10,7 +10,13 @@ import {
   validateParallelMoves,
 } from '../../src/reconstruction/local-validation.js';
 import { validateStorageTrace } from '../../src/reconstruction/local-storage-validation.js';
-import { structureControlFlow, type ParallelTransfer } from '../../src/presentation/index.js';
+import {
+  structureControlFlow,
+  type BlockRegion,
+  type ControlArm,
+  type ParallelTransfer,
+  type Region,
+} from '../../src/presentation/index.js';
 import { reconstruct } from '../../src/reconstruction/index.js';
 import {
   validateEmittedControl,
@@ -256,6 +262,101 @@ export function localValidationCounterexamples(): void {
         record.counterexample?.actual === 'wrong-rendered-exit',
     ),
   );
+  // An edge may cross blocks printing nothing only when each is a jump block
+  // recorded as falling through to the next, in order, from the follow.
+  const crossing = new IRBuilder(
+    slice,
+    entityIdentity(slice, 'function', 'translation-silent-crossing'),
+    provenance,
+    'ssa',
+  );
+  const head = crossing.block('head', [integer(8)]),
+    work = crossing.block('work'),
+    skip = crossing.block('skip'),
+    join = crossing.block('join');
+  head.branch(
+    head.compare('eq', head.parameters[0]!, head.constant(integer(8), 0n)),
+    head.edge(work),
+    head.edge(skip),
+  );
+  work.store(work.constant(integer(64), 0x1000n), work.constant(integer(8), 1n));
+  work.jump(join);
+  skip.jump(join);
+  join.return([join.constant(integer(8), 2n)]);
+  const crossed = structureControlFlow(
+    crossing.finish(head, [integer(8)]),
+    createOperationContext(),
+  );
+  assert.ok(crossed.value);
+  const found = new Map<string, BlockRegion>();
+  const collect = (region: Region): void => {
+    if (region.kind === 'sequence') region.regions.forEach(collect);
+    else if (region.kind === 'loop') collect(region.body);
+    else {
+      const control = region.control;
+      found.set(region.id, region);
+      if (control.kind === 'if')
+        for (const arm of [control.when_true, control.when_false]) if (arm.body) collect(arm.body);
+    }
+  };
+  collect(crossed.value.body);
+  const bare = (arm: ControlArm): ControlArm => ({ transfer: arm.transfer });
+  const flatBlock = (block: BlockRegion): BlockRegion =>
+    block.control.kind === 'if'
+      ? {
+          ...block,
+          control: {
+            ...block.control,
+            when_true: bare(block.control.when_true),
+            when_false: bare(block.control.when_false),
+          },
+        }
+      : block;
+  const layout = [head, work, skip, join].map((block) => flatBlock(found.get(block.id)!));
+  const laid = reconstruct(
+    { function: { ...crossed.value, body: { kind: 'sequence', regions: layout } } },
+    createOperationContext(),
+  );
+  const [branch, lead, quiet, tail] = layout as [
+    BlockRegion,
+    BlockRegion,
+    BlockRegion,
+    BlockRegion,
+  ];
+  assert.equal(branch.control.kind, 'if');
+  assert.equal(lead.control.kind, 'jump');
+  assert.equal(quiet.control.kind, 'jump');
+  const edges = (through: readonly string[], silentKind: EmittedEdge['kind']) => {
+    const emitted = new Map<ParallelTransfer, EmittedEdge>();
+    emitted.set((branch.control as { when_true: ControlArm }).when_true.transfer, {
+      kind: 'fallthrough',
+    });
+    emitted.set((branch.control as { when_false: ControlArm }).when_false.transfer, {
+      kind: 'goto',
+      target: quiet.id,
+    });
+    emitted.set((lead.control as { transfer: ParallelTransfer }).transfer, {
+      kind: 'fallthrough',
+      through,
+    });
+    emitted.set(
+      (quiet.control as { transfer: ParallelTransfer }).transfer,
+      silentKind === 'goto' ? { kind: 'goto', target: tail.id } : { kind: 'fallthrough' },
+    );
+    return emitted;
+  };
+  const rejected = (emitted: Map<ParallelTransfer, EmittedEdge>): boolean => {
+    const session = new LocalValidationSession(createOperationContext());
+    validateEmittedControl(laid.function, emitted, 'c-like', session);
+    return session.records.some(
+      (record) => record.kind === 'control' && record.status === 'rejected',
+    );
+  };
+  assert.ok(!rejected(edges([quiet.id], 'fallthrough')));
+  // The crossed block must be the follow, not a block elsewhere, and must fall through.
+  assert.ok(rejected(edges([], 'fallthrough')));
+  assert.ok(rejected(edges([tail.id], 'fallthrough')));
+  assert.ok(rejected(edges([quiet.id], 'goto')));
   const unknown = value('unknown', 8);
   for (const state of ['unknown', 'undefined'] as const) {
     const unknownDefinitions = new Map<string, Expression>([

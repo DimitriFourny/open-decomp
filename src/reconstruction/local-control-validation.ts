@@ -11,11 +11,64 @@ export type EmittedEdge =
   | { readonly kind: 'loop-exit'; readonly loop: string; readonly through: readonly string[] }
   /** A short-circuit operand edge entering the shared arm body of its head. */
   | { readonly kind: 'shared-arm' }
-  | { readonly kind: 'fallthrough' | 'break' | 'continue' };
+  /** `through`: the blocks the edge crosses, in order, after reaching its lexical
+   * destination (the follow of the statement, or of the loop for `break`):
+   * each prints nothing and falls through to the next, the last to the target. */
+  | { readonly kind: 'fallthrough' | 'break'; readonly through?: readonly string[] }
+  | { readonly kind: 'continue' };
 export interface EmittedLoopExits {
   readonly initialized: ReadonlySet<string>;
   readonly guards: ReadonlyMap<string, ReadonlySet<string>>;
 }
+/** Blocks ending in a jump that occur once in a layout and head no loop: the
+ * only blocks an edge may cross silently (a duplicated tail repeats its
+ * blocks, and falling into a loop header enters the loop). */
+export function jumpBlocks(body: Region): ReadonlyMap<string, ParallelTransfer> {
+  const found = new Map<string, ParallelTransfer>();
+  const excluded = new Set<string>();
+  const visit = (region: Region): void => {
+    if (region.kind === 'sequence') region.regions.forEach(visit);
+    else if (region.kind === 'loop') {
+      excluded.add(region.header);
+      visit(region.body);
+    } else {
+      const control = region.control;
+      if (control.kind === 'jump') {
+        if (found.has(region.id)) excluded.add(region.id);
+        found.set(region.id, control.transfer);
+      } else {
+        const arms =
+          control.kind === 'if'
+            ? [control.when_true, control.when_false]
+            : control.kind === 'switch'
+              ? [...control.cases.map((item) => item.arm), control.otherwise]
+              : [];
+        for (const arm of arms) if (arm.body) visit(arm.body);
+      }
+    }
+  };
+  visit(body);
+  for (const id of excluded) found.delete(id);
+  return found;
+}
+
+/** The block reached from `start` once `through` is crossed, or null when a
+ * crossed block is not a jump block recorded as falling through to the next. */
+export function crossSilently(
+  start: string | null,
+  through: readonly string[] | undefined,
+  jumps: ReadonlyMap<string, ParallelTransfer>,
+  emitted: ReadonlyMap<ParallelTransfer, EmittedEdge>,
+): string | null {
+  let at = start;
+  for (const id of through ?? []) {
+    const transfer = jumps.get(id);
+    if (at !== id || !transfer || emitted.get(transfer)?.kind !== 'fallthrough') return null;
+    at = transfer.target;
+  }
+  return at;
+}
+
 /** Consume recorded emitted actions, not the structurer's suggested transfer
  * modes. Derive lexical destinations from the rendered region layout. */
 export function validateEmittedControl(
@@ -33,6 +86,7 @@ export function validateEmittedControl(
     id: string;
   };
   let work = 0;
+  const jumps = jumpBlocks(fn.body);
   const entry = (region: Region, fallback: string | null): string | null => {
     while (region.kind === 'sequence') {
       validation.allowance.charge();
@@ -64,7 +118,10 @@ export function validateEmittedControl(
       let actual = follow;
       if (action.kind === 'goto') actual = action.target;
       if (action.kind === 'shared-arm') actual = shared;
-      if (action.kind === 'break') actual = scopes.at(-1)?.after ?? null;
+      if (action.kind === 'fallthrough')
+        actual = crossSilently(follow, action.through, jumps, emitted);
+      if (action.kind === 'break')
+        actual = crossSilently(scopes.at(-1)?.after ?? null, action.through, jumps, emitted);
       if (action.kind === 'continue') {
         const scope = [...scopes].reverse().find((item) => item.loop !== null);
         actual = scope && (scope.test === undefined || scope.test === subject) ? scope.loop : null;

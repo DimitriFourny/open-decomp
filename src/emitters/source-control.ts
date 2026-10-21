@@ -70,7 +70,11 @@ export function firstBlock(region: Region): string | null {
  * goes when nothing is printed. In the source view any transfer that already
  * reaches its target lexically prints nothing (including a trailing continue
  * and a goto/break into an owned tail copy). The checked view keeps exactly the
- * original rules, where only source programs elide a goto to the follow. */
+ * original rules, where only source programs elide a goto to the follow.
+ * `reaches(from, target)` tells whether control entering block `from` arrives
+ * at `target` without printing anything (`from === target`, or `from` is a
+ * block printing nothing that falls through to it); it decides every
+ * comparison with a lexical follow. */
 export function transferAction(
   transfer: ParallelTransfer,
   nesting: readonly Nest[],
@@ -79,22 +83,24 @@ export function transferAction(
   sourceView: boolean,
   sourceProgram = sourceView,
   normalizeLoopTargets = sourceView,
+  reaches: (from: string | null, target: string) => boolean = exactly,
 ): TransferAction {
-  if (sourceView && transfer.target === destination) return 'fallthrough';
+  if (sourceView && reaches(destination, transfer.target)) return 'fallthrough';
   if (sourceView && normalizeLoopTargets) {
     const loop = [...nesting].reverse().find((item) => item.kind === 'loop');
     if (loop?.kind === 'loop') {
       if (transfer.target === loop.header) return 'continue';
       if (
-        transfer.target === loop.follow &&
+        reaches(loop.follow, transfer.target) &&
         (language === 'python-like' || nesting.at(-1)?.kind === 'loop')
       )
         return 'break';
     }
   }
-  if (transfer.mode === 'next') return transfer.target === destination ? 'fallthrough' : 'goto';
+  if (transfer.mode === 'next')
+    return reaches(destination, transfer.target) ? 'fallthrough' : 'goto';
   if (transfer.mode === 'goto')
-    return sourceProgram && transfer.target === destination ? 'fallthrough' : 'goto';
+    return sourceProgram && reaches(destination, transfer.target) ? 'fallthrough' : 'goto';
   for (let i = nesting.length - 1; i >= 0; i--) {
     const item = nesting[i]!;
     if (item.kind !== 'loop') continue;
@@ -102,12 +108,16 @@ export function transferAction(
     // A loop may have several exits. Only its actual lexical successor can
     // use break; other destinations must keep their explicit labeled edge.
     if (transfer.mode === 'continue') return transfer.target === item.header ? 'continue' : 'goto';
-    return transfer.target === item.follow &&
+    return reaches(item.follow, transfer.target) &&
       (language === 'python-like' || nesting[nesting.length - 1]?.kind === 'loop')
       ? 'break'
       : 'goto';
   }
   return 'goto';
+}
+
+function exactly(from: string | null, target: string): boolean {
+  return from === target;
 }
 
 /** The arm of a loop-form test that the loop syntax itself performs. */

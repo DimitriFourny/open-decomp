@@ -8,7 +8,12 @@ import type {
 } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
 import { validateEmittedUses } from './validate-uses.js';
-import type { EmittedEdge, EmittedLoopExits } from './local-control-validation.js';
+import {
+  crossSilently,
+  jumpBlocks,
+  type EmittedEdge,
+  type EmittedLoopExits,
+} from './local-control-validation.js';
 
 function invalid(origin: Origin, message: string): never {
   throw new OperationError({
@@ -291,6 +296,7 @@ export function validateRenderedTransfers(
   emitted?: ReadonlyMap<ParallelTransfer, EmittedEdge>,
   exits?: EmittedLoopExits,
 ): void {
+  const jumps = emitted ? jumpBlocks(fn.body) : new Map<string, ParallelTransfer>();
   const entry = (region: Region, fallback: string | null): string | null => {
     for (;;) {
       context.checkpoint(1);
@@ -316,6 +322,8 @@ export function validateRenderedTransfers(
     let actual = follow;
     if (action?.kind === 'goto' || (!action && gotos.has(transfer)))
       actual = action?.kind === 'goto' ? action.target : transfer.target;
+    else if (action?.kind === 'fallthrough')
+      actual = crossSilently(follow, action.through, jumps, emitted!);
     else if (mode === 'fallthrough' || (!action && fallthrough.has(transfer))) actual = follow;
     else if (mode === 'shared-arm') actual = shared;
     else if (mode === 'continue') {
@@ -327,7 +335,9 @@ export function validateRenderedTransfers(
           break;
         }
       }
-    } else if (mode === 'break') actual = nesting.at(-1)?.follow ?? null;
+    } else if (action?.kind === 'break')
+      actual = crossSilently(nesting.at(-1)?.follow ?? null, action.through, jumps, emitted!);
+    else if (mode === 'break') actual = nesting.at(-1)?.follow ?? null;
     else if (action?.kind === 'loop-exit') {
       const outer = nesting.findIndex(
         (scope) => scope.kind === 'loop' && scope.header === action.loop,

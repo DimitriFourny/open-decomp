@@ -1968,4 +1968,161 @@ for (const language of ['c-like', 'python-like'] as const)
         Array.from({ length: 20 }, (_, value) => new Map([[x.id, BigInt(value)]])),
       );
     });
+
+    /** The same blocks and edges laid out as one flat sequence. */
+    const flat = (fn: StructuredFunction, order: readonly string[]): StructuredFunction => {
+      const blocks = blockRegions(fn);
+      return { ...fn, body: { kind: 'sequence', regions: order.map((id) => blocks.get(id)!) } };
+    };
+    const jumps = (text: string): number => text.match(/\bgoto\b/g)?.length ?? 0;
+
+    test('a goto over blocks that print nothing to the block after them prints nothing', () => {
+      const b = program('source-silent-fallthrough'),
+        entry = b.block('entry', [i32]),
+        work = b.block('work'),
+        skip = b.block('skip'),
+        join = b.block('join');
+      const flag = entry.parameters[0]!;
+      entry.branch(
+        entry.compare('eq', flag, entry.constant(i32, 0n)),
+        entry.edge(work),
+        entry.edge(skip),
+      );
+      work.store(work.constant(i64, 0x1000n), flag);
+      work.jump(join);
+      skip.jump(join);
+      for (let index = 0; index < 6; index++)
+        join.store(join.constant(i64, 0x1010n + BigInt(index * 4)), flag);
+      join.return([join.constant(i32, 3n)]);
+      const fn = structure(b.finish(entry, [i32])),
+        // `work` is followed by `skip`, which prints nothing and falls into `join`.
+        laid = flat(
+          fn,
+          [entry, work, skip, join].map((block) => block.id),
+        ),
+        source = emitStructured(laid, language),
+        checked = emitStructured(laid, language, 'checked');
+      assert.equal(jumps(source.emission.text), 1, source.emission.text);
+      assert.ok(jumps(checked.emission.text) > 1);
+      assert.ok(rules(source).includes('silent_block_crossing'));
+      for (const start of [0n, 1n, 6n]) {
+        const args = new Map([[flag.id, start]]);
+        const actual = execute(source.emission, args, memory());
+        const expected = execute(checked.emission, args, memory());
+        assert.deepEqual(actual.values, expected.values);
+        assert.deepEqual(actual.events, expected.events);
+        assert.deepEqual(actual.memory, expected.memory);
+      }
+    });
+
+    test('a goto that leaves a loop for the block after a silent one is a break', () => {
+      const b = program('source-silent-break'),
+        entry = b.block('entry', [i32]),
+        head = b.block('head'),
+        step = b.block('step'),
+        leave = b.block('leave'),
+        done = b.block('done');
+      const flag = entry.parameters[0]!;
+      entry.branch(
+        entry.compare('eq', flag, entry.constant(i32, 0n)),
+        entry.edge(head),
+        entry.edge(leave),
+      );
+      const count = head.load(i32, head.constant(i64, 0x1000n));
+      head.store(head.constant(i64, 0x1000n), head.int('add', count, head.constant(i32, 1n)));
+      head.branch(
+        head.compare('eq', count, head.constant(i32, 3n)),
+        head.edge(done),
+        head.edge(step),
+      );
+      step.store(step.constant(i64, 0x1004n), count);
+      step.jump(head);
+      leave.jump(done);
+      for (let index = 0; index < 6; index++)
+        done.store(done.constant(i64, 0x1010n + BigInt(index * 4)), flag);
+      done.return([done.constant(i32, 3n)]);
+      const fn = structure(b.finish(entry, [i32])),
+        order = [entry, head, step, leave, done].map((block) => block.id),
+        // `leave` follows the loop, prints nothing and falls into `done`.
+        laid = relayout(fn, order, order.slice(1, 3)),
+        source = emitStructured(laid, language),
+        checked = emitStructured(laid, language, 'checked');
+      assert.match(source.emission.text, /\bbreak\b/);
+      assert.equal(jumps(source.emission.text), 1, source.emission.text);
+      assert.ok(jumps(checked.emission.text) > 1);
+      assert.ok(rules(source).includes('silent_block_crossing'));
+      for (const start of [0, 1, 3])
+        for (const enter of [0n, 1n]) {
+          const args = new Map([[flag.id, enter]]);
+          const actual = execute(source.emission, args, memory([start]));
+          const expected = execute(checked.emission, args, memory([start]));
+          assert.deepEqual(actual.values, expected.values);
+          assert.deepEqual(actual.events, expected.events);
+          assert.deepEqual(actual.memory, expected.memory);
+        }
+    });
+
+    test('a block that prints something is never crossed', () => {
+      const b = program('source-silent-crossing-printed'),
+        entry = b.block('entry', [i32]),
+        work = b.block('work'),
+        skip = b.block('skip'),
+        join = b.block('join');
+      const flag = entry.parameters[0]!;
+      entry.branch(
+        entry.compare('eq', flag, entry.constant(i32, 0n)),
+        entry.edge(work),
+        entry.edge(skip),
+      );
+      work.store(work.constant(i64, 0x1000n), flag);
+      work.jump(join);
+      skip.store(skip.constant(i64, 0x1004n), flag);
+      skip.jump(join);
+      for (let index = 0; index < 6; index++)
+        join.store(join.constant(i64, 0x1010n + BigInt(index * 4)), flag);
+      join.return([join.constant(i32, 3n)]);
+      const fn = structure(b.finish(entry, [i32])),
+        laid = flat(
+          fn,
+          [entry, work, skip, join].map((block) => block.id),
+        ),
+        source = emitStructured(laid, language);
+      assert.equal(jumps(source.emission.text), 2, source.emission.text);
+      assert.ok(!rules(source).includes('silent_block_crossing'));
+    });
+
+    test('an else arm that prints nothing prints no else', () => {
+      // `if (a || b) { X }` followed by the rest: the other arm is silent.
+      for (const exits of [false, true]) {
+        const b = program(`source-empty-else-${exits}`),
+          entry = b.block('entry', [i32, i32]),
+          second = b.block('second'),
+          taken = b.block('taken'),
+          stay = b.block('stay'),
+          join = b.block('join');
+        const [x, y] = entry.parameters as [Value, Value];
+        entry.branch(
+          entry.compare('eq', x, entry.constant(i32, 0n)),
+          entry.edge(taken),
+          entry.edge(second),
+        );
+        second.branch(
+          second.compare('eq', y, second.constant(i32, 0n)),
+          second.edge(taken),
+          second.edge(stay),
+        );
+        taken.store(taken.constant(i64, 0x1000n), x);
+        if (exits) taken.return([taken.constant(i32, 1n)]);
+        else taken.jump(join);
+        stay.jump(join);
+        for (let index = 0; index < 6; index++)
+          join.store(join.constant(i64, 0x1010n + BigInt(index * 4)), x);
+        join.return([join.constant(i32, 3n)]);
+        const input = b.finish(entry, [i32]),
+          source = emit(input, language, 'source', true),
+          checked = emit(input, language, 'checked');
+        assert.doesNotMatch(source.emission.text, /\belse\b/, source.emission.text);
+        agree(source, checked, grid([x, y], choices));
+      }
+    });
   });
