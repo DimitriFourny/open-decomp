@@ -183,9 +183,52 @@ test(
   'a call-inlining retry reuses the reconstruction and still prints exact C',
   { skip: nativeOracleSkip(), timeout: 120_000 },
   async (t) => {
-    // The `verbose` comparison is held for its `if`, but a run-once block opens
-    // between them, so the render is retried with that call as a statement.
-    // Every attempt continues the same reconstruction and validation state.
+    // The `strchr` result is read only by the do-while test, which prints after
+    // the repeat copies (`s++`, the counter), so the render is retried with that
+    // call as a statement. Every attempt continues the same reconstruction and
+    // validation state.
+    const source = `#include <stdint.h>
+#include <string.h>
+__attribute__((noinline, used)) int skip(const char *s, int *out) {
+  int n = 0;
+  do {
+    out[n & 3] = n;
+    s++;
+    n += 5;
+  } while (strchr(s, ';') == 0);
+  return n;
+}
+`;
+    await checkEmittedC(
+      'open-decomp-inlining-retry-',
+      source,
+      [
+        {
+          name: 'skip',
+          formals: 2,
+          text: [/^\s+\w+ = strchr\(/m, /\} while \(\w+ == 0\);/],
+          driver: `  const char *cases[] = {"a;", "ab;", "abcdefghij;", "xy;zw", "...........;;"};
+  for (unsigned c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+    int expected[4] = {7, 7, 7, 7}, observed[4] = {7, 7, 7, 7};
+    int want = source_skip(cases[c], expected);
+    int got = (int)skip((uint64_t)(uintptr_t)cases[c], (void *)observed);
+    if (want != got) fail("skip case %u: %d vs %d", c, want, got);
+    for (unsigned k = 0; k < 4; k++)
+      if (expected[k] != observed[k]) fail("skip case %u: out[%u] %d vs %d", c, k, expected[k], observed[k]);
+  }`,
+        },
+      ],
+      t,
+    );
+  },
+);
+
+test(
+  'forward gotos into shared tails print as labels (no run-once block) and run exactly like their source',
+  { skip: nativeOracleSkip(), timeout: 120_000 },
+  async (t) => {
+    // Several `goto fail` / `goto done` edges into shared tails: each prints as a
+    // `goto` to its forward label, and the emitted C runs identically to the source.
     const source = `#include <stdint.h>
 #include <string.h>
 __attribute__((noinline, used)) int params(int argc, const char **argv, int *flags) {
@@ -233,7 +276,7 @@ fail:
         {
           name: 'params',
           formals: 3,
-          text: [/^\s+\w+ = strcmp\("verbose"/m, /if \(strcmp\("version"/],
+          text: [/\bgoto label_\w+;/, /^\s*label_\w+:;$/m],
           driver: `  const char *cases[][4] = {
     {"p"}, {"p", "verbose"}, {"p", "verbose", "verbose"}, {"p", "version", "x"},
     {"p", "quality=3"}, {"p", "quality=3", "quality=4"}, {"p", "quality=x"},

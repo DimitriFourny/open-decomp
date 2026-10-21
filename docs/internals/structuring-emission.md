@@ -9,7 +9,7 @@ Turns a function's validated SSA control-flow graph (CFG) into a region tree, th
 - **`StructuredFunction`** holds a `Region` tree plus coverage: every block, statement and terminator, including unreachable ones. A region is one of three kinds.
   - **block**: one SSA block; its id is also its label. It holds the block's statements, its dominator, its register rows, and a single control (jump, if, switch, or terminal). Each if/switch arm is a transfer, optionally with a body region the arm owns.
   - **sequence**: lexical order only. Each block's transfers still decide where execution goes.
-  - **loop**: a header and a body, which mean `while (true)` with explicit transfers. The emitter, never the structurer, may attach a `LoopForm` (`while`, `do_while`, `for`). It may also mark a loop `once`, meaning a block that runs exactly once and can be broken out of.
+  - **loop**: a header and a body, which mean `while (true)` with explicit transfers. The emitter, never the structurer, may attach a `LoopForm` (`while`, `do_while`, `for`).
 - **`ParallelTransfer`**: exactly one per CFG edge. It holds the target, a mode (`next`, `goto`, or `break`/`continue` plus a loop id), the simultaneous block-argument copies, and an effect token.
 
 ## Algorithm
@@ -70,15 +70,14 @@ flowchart LR
 
 Source-view planning starts after [variable recovery](reconstruction.md#variable-recovery). The steps below run in order, and each records a presentation rule:
 
-| step                  | effect                                                                                                                                                       |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `foldSwitchGuards`    | a proven jump-table range guard and its switch print as one switch                                                                                           |
-| `planLayout`          | a labeled edge into a small tail gets its own copy of the tail (at most 128 copied blocks). A copy is refused if its transfer would print two different ways |
-| `planFlagTests`       | an O0 flag-local chain prints as `&&`/`\|\|`                                                                                                                 |
-| `planLoopForms`       | `while (c)` when the header prints only its test; C only: `do-while` with one repeat edge and a re-proved test; `for` with induction init/step copies        |
-| `planSharedArms`      | `if (a && b) {F} else {X}`                                                                                                                                   |
-| `planBreakableBlocks` | a forward goto to a later sibling becomes `break` out of `do {} while (0)`, kept only if the goto count drops                                                |
-| `planLoopExits`       | a multi-level exit sets a flag that is re-tested after each scope                                                                                            |
+| step               | effect                                                                                                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `foldSwitchGuards` | a proven jump-table range guard and its switch print as one switch                                                                                           |
+| `planLayout`       | a labeled edge into a small tail gets its own copy of the tail (at most 128 copied blocks). A copy is refused if its transfer would print two different ways |
+| `planFlagTests`    | an O0 flag-local chain prints as `&&`/`\|\|`                                                                                                                 |
+| `planLoopForms`    | `while (c)` when the header prints only its test; C only: `do-while` with one repeat edge and a re-proved test; `for` with induction init/step copies        |
+| `planSharedArms`   | `if (a && b) {F} else {X}`                                                                                                                                   |
+| `planLoopExits`    | a multi-level exit sets a flag that is re-tested after each scope                                                                                            |
 
 Printing:
 
@@ -88,12 +87,11 @@ Printing:
 - **Copies.** Dependency-ordered; a temporary breaks cycles.
 - **Checks.** After printing, validators re-derive every emitted edge, scope and exit flag. Every coverage entry must be mapped.
 
-|          | C-like                                                              | Python-like                      |
-| -------- | ------------------------------------------------------------------- | -------------------------------- |
-| loops    | `while (true)`, `while`, `do-while`, `for`                          | `while True:`, `while c:`        |
-| switch   | `switch` (captures `break`: an in-case loop exit becomes goto/flag) | `match`/`case a \| b:`           |
-| labels   | `goto L;` / `L:;`                                                   | pseudocode `goto L` / `label L:` |
-| run-once | `do {} while (0);`                                                  | `while True:` … `break`          |
+|        | C-like                                                              | Python-like                      |
+| ------ | ------------------------------------------------------------------- | -------------------------------- |
+| loops  | `while (true)`, `while`, `do-while`, `for`                          | `while True:`, `while c:`        |
+| switch | `switch` (captures `break`: an in-case loop exit becomes goto/flag) | `match`/`case a \| b:`           |
+| labels | `goto L;` / `L:;`                                                   | pseudocode `goto L` / `label L:` |
 
 ### 3. Retry and fallback under limits
 

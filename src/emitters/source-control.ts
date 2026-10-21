@@ -7,7 +7,6 @@ import type {
   LoopForm,
   ParallelTransfer,
   Region,
-  SequenceRegion,
 } from '../presentation/index.js';
 import type { Reconstruction } from '../reconstruction/model.js';
 import type { InlineSite } from './source-inlining.js';
@@ -20,8 +19,6 @@ type Nest =
       readonly kind: 'loop';
       readonly header: string;
       readonly follow: string | null;
-      /** A breakable block run once: `break` leaves it, nothing continues it. */
-      readonly once?: true;
     }
   | { readonly kind: 'switch'; readonly id: string };
 
@@ -87,7 +84,7 @@ export function transferAction(
   if (sourceView && normalizeLoopTargets) {
     const loop = [...nesting].reverse().find((item) => item.kind === 'loop');
     if (loop?.kind === 'loop') {
-      if (transfer.target === loop.header && !loop.once) return 'continue';
+      if (transfer.target === loop.header) return 'continue';
       if (
         transfer.target === loop.follow &&
         (language === 'python-like' || nesting.at(-1)?.kind === 'loop')
@@ -104,8 +101,7 @@ export function transferAction(
     if (transfer.loop !== item.header) return 'goto';
     // A loop may have several exits. Only its actual lexical successor can
     // use break; other destinations must keep their explicit labeled edge.
-    if (transfer.mode === 'continue')
-      return transfer.target === item.header && !item.once ? 'continue' : 'goto';
+    if (transfer.mode === 'continue') return transfer.target === item.header ? 'continue' : 'goto';
     return transfer.target === item.follow &&
       (language === 'python-like' || nesting[nesting.length - 1]?.kind === 'loop')
       ? 'break'
@@ -721,13 +717,12 @@ export function visitTransfers(
     }
     if (region.kind === 'loop') {
       const after = leaf(follow);
-      walk(region.body, region.once ? follow : region, [
+      walk(region.body, region, [
         ...nesting,
         {
           kind: 'loop',
           header: region.header,
           follow: after ? firstBlock(after) : null,
-          ...(region.once ? { once: true as const } : {}),
         },
       ]);
       return;
@@ -809,9 +804,9 @@ export interface LoopExitRoute {
 
 /** A boolean is needed only when a real edge bypasses two or more breakable
  * scopes to an enclosing loop's exact continuation. No arbitrary target, loop
- * entry, or irreducible edge is rewritten: a loop or block run once entered by
- * a goto (at its header or into its body) keeps its labeled exits, since the
- * flag, declared where it starts, would not be initialized on that entry. */
+ * entry, or irreducible edge is rewritten: a loop entered by a goto (at its
+ * header or into its body) keeps its labeled exits, since the flag, declared
+ * where it starts, would not be initialized on that entry. */
 export function planLoopExits(
   body: Region,
   language: 'c-like' | 'python-like',
@@ -1441,7 +1436,6 @@ export function planLoopForms(
         ),
       };
     if (region.kind === 'loop') {
-      if (region.once) return { ...region, body: rebuild(region.body, follow, guards) };
       const inner = rebuild(region.body, region.header, guards);
       const form = choose(region, follow, guards);
       return form ? { ...region, body: inner, form } : { ...region, body: inner };
@@ -1472,132 +1466,7 @@ export function planLoopForms(
   return rebuild(body, null, []);
 }
 
-/** Source view, after loop forms: a forward goto to a later element of an
- * enclosing sequence becomes `break` out of a block run once (`do { } while
- * (0)`) holding the elements from the goto's own up to its target. Every
- * statement, edge copy and effect stays in place and order; the block starts
- * at a plain block that no edge inside it re-enters. A wrap is kept only when
- * it lowers the number of printed gotos (an edge that would newly cross it to
- * an outer loop counts as one), so continues and outer breaks are never lost.
- * Returns the new layout and the header of every block introduced. The
- * search is optional work; exhausting its share keeps the wraps found so far. */
-export function planBreakableBlocks(
-  body: Region,
-  language: 'c-like' | 'python-like',
-  shared: OperationContext,
-): { readonly body: Region; readonly blocks: readonly string[] } {
-  type Step = { readonly region: Region; readonly index: number };
-  const blocks: string[] = [];
-  const refused = new Set<string>();
-  const context = optionalWork(shared, 16);
-  try {
-    search(context);
-  } catch (error) {
-    if (!(error instanceof OptionalWorkExhausted)) throw error;
-  }
-  return { body, blocks };
-
-  function search(context: OperationContext): void {
-    let gotos = gotoOccurrences(body, language, context);
-    for (let attempts = 0; gotos.length && attempts < 32;) {
-      const chains = new Map<BlockRegion, readonly Step[]>();
-      const headers = new Set<string>();
-      const walk = (region: Region, chain: readonly Step[]): void => {
-        context.checkpoint(1);
-        if (region.kind === 'sequence')
-          region.regions.forEach((child, index) => walk(child, [...chain, { region, index }]));
-        else if (region.kind === 'loop') {
-          headers.add(region.header);
-          walk(region.body, [...chain, { region, index: 0 }]);
-        } else {
-          chains.set(region, chain);
-          controlArms(region.control).forEach((arm, index) => {
-            if (arm.body) walk(arm.body, [...chain, { region, index }]);
-          });
-        }
-      };
-      walk(body, []);
-      // The innermost enclosing sequence holding the target after the goto.
-      const candidates: { sequence: SequenceRegion; from: number; to: number }[] = [];
-      for (const occurrence of gotos) {
-        const chain = chains.get(occurrence.owner) ?? [];
-        for (let at = chain.length - 1; at >= 0; at--) {
-          const { region, index } = chain[at]!;
-          if (region.kind !== 'sequence') continue;
-          const to = region.regions.findIndex(
-            (child, position) =>
-              position > index && firstBlock(child) === occurrence.transfer.target,
-          );
-          if (to < 0) continue;
-          const known = candidates.find((item) => item.sequence === region && item.to === to);
-          if (known) known.from = Math.min(known.from, index);
-          else candidates.push({ sequence: region, from: index, to });
-          break;
-        }
-      }
-      let accepted = false;
-      for (const { sequence: parent, from, to } of candidates) {
-        const head = leaf(parent.regions[from]!);
-        // Scope identities (exit flags, guards) are headers: never share one.
-        if (head?.kind !== 'block' || headers.has(head.id)) continue;
-        const key = `${head.id}:${firstBlock(parent.regions[to]!)}`;
-        if (refused.has(key) || attempts >= 32) continue;
-        attempts++;
-        const inner = sequence(parent.regions.slice(from, to));
-        let reentered = false;
-        visitTransfers(inner, language, context, (occurrence) => {
-          if (occurrence.transfer.target === head.id) reentered = true;
-        });
-        if (reentered) {
-          refused.add(key);
-          continue;
-        }
-        const once: Region = { kind: 'loop', header: head.id, body: inner, once: true };
-        const replaced = sequence([
-          ...parent.regions.slice(0, from),
-          once,
-          ...parent.regions.slice(to),
-        ]);
-        const replace = (region: Region): Region => {
-          context.checkpoint(1);
-          if (region === parent) return replaced;
-          if (region.kind === 'sequence') {
-            const children = region.regions.map(replace);
-            return children.some((child, index) => child !== region.regions[index])
-              ? sequence(children)
-              : region;
-          }
-          if (region.kind === 'loop') {
-            const inner = replace(region.body);
-            return inner === region.body ? region : { ...region, body: inner };
-          }
-          let changed = false;
-          const control = mapArms(region.control, (arm) => {
-            if (!arm.body) return arm;
-            const inner = replace(arm.body);
-            if (inner === arm.body) return arm;
-            changed = true;
-            return { ...arm, body: inner };
-          });
-          return changed ? { ...region, control } : region;
-        };
-        const next = replace(body);
-        const remaining = gotoOccurrences(next, language, context);
-        if (remaining.length < gotos.length) {
-          body = next;
-          gotos = remaining;
-          blocks.push(head.id);
-          accepted = true;
-          break;
-        }
-        refused.add(key);
-      }
-      if (!accepted) break;
-    }
-  }
-}
-
-/** Source view, after loop forms and before breakable blocks: a short-circuit
+/** Source view, after loop forms: a short-circuit
  * test `if (a && b) { F } X` whose operands all leave for the next statement X,
  * X entered by those edges only, while F leaves for the statement after X,
  * prints as `if (a && b) { F } else { X }` (or `if (a || b) { X } else { F }`
@@ -1606,7 +1475,8 @@ export function planBreakableBlocks(
  * copy-free tests the condition prints (`operand`, with only copy-free silent
  * jumps between them); no statement, edge copy or effect moves, and a rewrite
  * is kept only when an edge leaving F now falls through. Returns the new layout
- * and the head control ids. Optional work, like planBreakableBlocks. */
+ * and the head control ids. Optional work: exhausting its share keeps the
+ * rewrites found so far. */
 export function planSharedArms(
   body: Region,
   program: Reconstruction,
@@ -1705,8 +1575,7 @@ export function planSharedArms(
   };
   const rewrite = (region: Region, follow: Region | null): Region => {
     context.checkpoint(1);
-    if (region.kind === 'loop')
-      return { ...region, body: rewrite(region.body, region.once ? follow : region) };
+    if (region.kind === 'loop') return { ...region, body: rewrite(region.body, region) };
     if (region.kind === 'block' && !controlArms(region.control).length) return region;
     if (region.kind === 'block')
       return {

@@ -123,7 +123,6 @@ import {
   formArm,
   foldSwitchGuards,
   planLayout,
-  planBreakableBlocks,
   planSharedArms,
   planLoopForms,
   planLoopExits,
@@ -164,7 +163,6 @@ type Nest =
       readonly kind: 'loop';
       readonly header: string;
       readonly follow: string | null;
-      readonly once?: true;
     }
   | { readonly kind: 'switch'; readonly id: string };
 /** One test of a merged `if` chain: its printed form and the value it tests. */
@@ -4580,17 +4578,9 @@ export class Renderer {
       }
       this.findLabels(
         region.body,
-        [
-          ...nesting,
-          {
-            kind: 'loop',
-            header: region.header,
-            follow,
-            ...(region.once ? { once: true as const } : {}),
-          },
-        ],
+        [...nesting, { kind: 'loop', header: region.header, follow }],
         depth + 1,
-        region.once ? follow : region.header,
+        region.header,
       );
       return;
     }
@@ -6538,7 +6528,7 @@ export class Renderer {
       this.hoisted.clear();
       this.forLoops.clear();
     }
-    // Short-circuit tests sharing one arm print as if/else (before breakable blocks).
+    // Short-circuit tests sharing one arm print as if/else.
     const loopTests = new Set(this.body === body ? [] : tests);
     const sharedArms = planSharedArms(
       this.body,
@@ -6575,17 +6565,6 @@ export class Renderer {
       )
     )
       this.body = sharedArms.body;
-    const breakable = planBreakableBlocks(this.body, this.language, this.context);
-    if (
-      breakable.blocks.length &&
-      this.localValidation.presentation(
-        'breakable_block',
-        subject,
-        'a forward goto to a later element of an enclosing statement list becomes break out of a do { } while (0) block (Python-like: while True: ending in break) holding the elements from the goto up to its target; nothing continues the block, no edge re-enters its first block, every statement, edge copy and effect keeps its place and order, and the block is kept only when fewer gotos remain',
-        breakable.blocks,
-      )
-    )
-      this.body = breakable.body;
     const normalized: string[] = [];
     visitTransfers(this.body, this.language, this.context, (occurrence) => {
       const target = occurrence.destination ? firstBlock(occurrence.destination) : null;
@@ -7202,16 +7181,6 @@ export class Renderer {
       if (flag) {
         this.writer.statement(depth, this.writer.declaration('uint8_t', flag, ' = 0'));
         this.initializedExitFlags.add(region.header);
-      }
-      // A block run once is `do { } while (0)`, or `while True:` ending in a
-      // break wherever its body can fall off the end.
-      if (region.once) {
-        this.writer.line(depth, c ? 'do {' : 'while True:');
-        this.region(region.body, depth + 1);
-        if (c) this.writer.line(depth, '} while (0);');
-        else if (!this.regionTerminates(region.body)) this.writer.statement(depth + 1, 'break');
-        this.propagateLoopExit(region.header, depth);
-        return;
       }
       // A while/for test prints its own header line from inside the body (its
       // block's control); a do-while test prints the closing `} while (...)` line.

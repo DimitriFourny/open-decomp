@@ -1217,7 +1217,6 @@ for (const language of ['c-like', 'python-like'] as const)
       assert.doesNotMatch(text, /\bgoto\b|\blabel\b|while \(0\)|while True/);
       assert.match(checked.emission.text, /\bgoto\b/);
       assert.ok(rules(source).includes('shared_condition_arm'), text);
-      assert.ok(!rules(source).includes('breakable_block'));
       assert.ok(!rules(checked).includes('shared_condition_arm'));
       assert.match(
         text,
@@ -1392,8 +1391,8 @@ for (const language of ['c-like', 'python-like'] as const)
       agree(source, checked, grid([a, d], choices));
     });
 
-    test('a goto past code an operand prints breaks out of a block run once', () => {
-      const b = program('source-breakable-block'),
+    test('a goto past code an operand prints as a goto to its label, never a run-once block', () => {
+      const b = program('source-forward-goto'),
         entry = b.block('entry', [i32, i32]),
         second = b.block('second'),
         other = b.block('other'),
@@ -1418,13 +1417,10 @@ for (const language of ['c-like', 'python-like'] as const)
         source = emit(input, language),
         checked = emit(input, language, 'checked'),
         text = source.emission.text;
-      assert.doesNotMatch(text, /\bgoto\b|\blabel\b/);
-      assert.match(checked.emission.text, /\bgoto\b/);
-      assert.ok(rules(source).includes('breakable_block'), text);
+      assert.match(text, /\bgoto\b/, text);
+      assert.match(text, c ? /^\s*\w+:;$/m : /^\s*label \w+:$/m, text);
+      assert.doesNotMatch(text, /while \(0\)|while True/);
       assert.ok(!rules(source).includes('shared_condition_arm'));
-      assert.ok(!rules(checked).includes('breakable_block'));
-      if (c) assert.match(text, /do \{\n[^]*\bbreak;\n[^]*\} while \(0\);/);
-      else assert.match(text, /while True:\n[^]*\bbreak\n/);
       agree(source, checked, grid([a, d], choices));
     });
 

@@ -116,11 +116,6 @@ export interface LoopRegion {
   /** Generic single-entry loop: condition evaluation and effects stay in body. */
   readonly body: Region;
   readonly form?: LoopForm;
-  /** Source view only: a breakable block run exactly once (`do { } while (0)`),
-   * not a loop. Its body falls through to its follow, `break` leaves it, and
-   * no edge continues it. It holds no header backedge; `header` is its first
-   * block. */
-  readonly once?: true;
 }
 export type Region = BlockRegion | SequenceRegion | LoopRegion;
 export interface StructuredFunction extends Origin {

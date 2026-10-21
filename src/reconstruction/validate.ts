@@ -258,8 +258,6 @@ type Nest =
       readonly follow: string | null;
       /** do-while: only its test may `continue` (elsewhere it reaches the test). */
       readonly test?: string;
-      /** A block run once: `break` leaves it, `continue` never targets it. */
-      readonly once?: true;
     }
   | { readonly kind: 'switch'; readonly id: string; readonly follow: string | null };
 
@@ -308,8 +306,7 @@ export function validateRenderedTransfers(
       for (let i = nesting.length - 1; i >= 0; i--) {
         const scope = nesting[i]!;
         if (scope.kind === 'loop') {
-          if (!scope.once && (scope.test === undefined || scope.test === origin.id))
-            actual = scope.header;
+          if (scope.test === undefined || scope.test === origin.id) actual = scope.header;
           break;
         }
       }
@@ -381,17 +378,15 @@ export function validateRenderedTransfers(
       return;
     }
     if (region.kind === 'loop') {
-      // A block run once falls through to its follow; falling off a do-while
-      // body reaches its test, never the header directly.
+      // Falling off a do-while body reaches its test, never the header directly.
       const test = region.form?.kind === 'do_while' ? region.form.test : undefined;
-      walk(region.body, region.once ? follow : test === undefined ? region.header : null, [
+      walk(region.body, test === undefined ? region.header : null, [
         ...nesting,
         {
           kind: 'loop',
           header: region.header,
           follow,
           ...(test === undefined ? {} : { test }),
-          ...(region.once ? { once: true as const } : {}),
         },
       ]);
       return;
