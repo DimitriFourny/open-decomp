@@ -123,7 +123,7 @@ Attempts share one reconstruction, validated once; each forks the validation ses
   - The rest are non-follow loop exits, edges inside C switches, and 2 backward gotos to loop headers.
   - Lever: reaching-condition guarded regions; the unmerged `wt/r2d` prototype only reached 195.
 - **Per-function regressions.** Forward labels made some functions worse: `whereLoopAddBtree` went from 14 to 26 gotos. Selection is greedy with an 8-candidate lookahead; a wider search is a possible lever [inference].
-- **Content blindness.** Which blocks end up silent, and which copies survive, is known only after structuring. Leftover copies can block loop forms [inference]. Lever: feed "prints nothing" facts into collapse.
+- **Content blindness.** Which blocks end up silent is known only after structuring. Which edge copies print is now a fact of the variable partition (`edgeCopies`), computed before source planning, but the region structurer still runs before reconstruction and does not read it. Lever: feed "prints nothing" facts and edge copy counts into collapse (G2).
 - **Narrow recognition.**
   - Switches come only from jump tables.
   - The sample has only 3 `for` loops.

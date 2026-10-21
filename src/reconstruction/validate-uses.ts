@@ -3,8 +3,8 @@ import { expressionOperands, type Origin, type Value } from '../ir/index.js';
 import type { ParallelTransfer } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
 
-/** SSA values may be used in any dominated block, and source rewrites (phi-copy
- * coalescing, tail duplication, shared locals) move or share emission sites.
+/** SSA values may be used in any dominated block, and source rewrites (the
+ * variable partition, tail duplication, shared locals) move or share emission sites.
  * Check each value's actual emission sites, not just membership in the SSA value map. */
 export function validateEmittedUses(
   program: Reconstruction,

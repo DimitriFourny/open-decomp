@@ -1,5 +1,5 @@
 import type { OperationContext } from '../core/index.js';
-import { expressionOperands, type Value } from '../ir/index.js';
+import { bitWidth, expressionOperands, type Value } from '../ir/index.js';
 import type {
   BlockRegion,
   Control,
@@ -384,167 +384,79 @@ export class VariableLiveness {
   }
 }
 
-/** Coalesce edge copies and value-preserving assignments using SSA live-range
- * interference. `compatible` must establish interchangeable storage, including
- * any original-width read/definition conversions supplied by the renderer.
- * Assignment pairs hold equal values at their definition and may overlap there.
- * Returns value id -> representative for accepted classes. */
-export function coalescePhiCopies(
+/** What the variable partition needs to know about one printed value. */
+export interface VariableMember {
+  /** Presented spelling of the value on its own. */
+  readonly spelling: string;
+  /** Storage identity (machine storage type and FP presentation): members of
+   * one variable share it. */
+  readonly storage: string;
+  /** Its definition prints converted exactly into any scalar variable spelling
+   * (an edge copy, a pure assignment, a plain load). Any other member (a
+   * formal, a call result) is rigid: its spelling is the variable's. */
+  readonly flexible: boolean;
+  /** An integer value spelled as a pointer or an integer type of its own
+   * width: same-width conversions between such spellings keep every bit. */
+  readonly scalar: boolean;
+  /** Plain unsigned integer spelling: a variable holding several widths holds
+   * only these (each narrower member is read through one conversion). */
+  readonly plain: boolean;
+  /** Carries a supplied name (preferred as the representative). */
+  readonly named: boolean;
+  /** Reads of the value: the variable takes its members' most-read spelling. */
+  readonly reads: number;
+  readonly formal: boolean;
+}
+
+interface ValuePair {
+  readonly destination: Value;
+  readonly source: Value;
+}
+
+export interface PartitionPairs {
+  /** A block parameter and the variable an incoming argument reads (directly,
+   * through a same-width alias or as a zero extension into plain storage):
+   * they share a variable unless they interfere (Ghidra `mergeMarker`); an
+   * interfering pair keeps its explicit edge copy. */
+  readonly edges: readonly ValuePair[];
+  /** Statement definitions whose value equals their source at that point (a
+   * same-width alias, a zero extension into plain unsigned storage): the
+   * source being live there is no conflict. Merged like edges. */
+  readonly equal: readonly ValuePair[];
+  /** A definition and a variable its expression reads (in-place update `x = x
+   * + 1`): merged only when both have the same presented spelling (Ghidra
+   * `mergeAdjacent`). */
+  readonly adjacent: readonly ValuePair[];
+  /** Values one machine register holds, in program order: a value joins an
+   * earlier one of the same presented spelling when they do not interfere
+   * (register reuse; Ghidra `mergeByDatatype`). */
+  readonly reuse: readonly (readonly Value[])[];
+}
+
+/** One variable partition over the printed SSA values (block parameters, edge
+ * arguments, definitions), from exact SSA live-range interference: two values
+ * conflict when one is live where the other is defined (simultaneous block
+ * parameters and loop-carried liveness included), except a source at a
+ * definition equal to it. Classes join only without a conflict between any two
+ * members, with one storage identity, at most one rigid spelling, scalar
+ * members whenever spellings differ and plain members whenever widths differ.
+ * Since no member is ever live where another is written, sharing storage
+ * changes names only. Formals stay representatives; otherwise the widest
+ * member of the rigid or most-read spelling represents the class and gives the
+ * variable its declared type. Returns value id -> representative for classes
+ * of two or more members; empty when the interference matrix is out of bounds
+ * (its work is optional, at most 1/8 of the remaining budget). */
+export function partitionVariables(
   program: Reconstruction,
   liveness: VariableLiveness,
-  compatible: (a: Value, b: Value) => boolean,
+  member: (value: Value) => VariableMember,
+  pairs: PartitionPairs,
   context: OperationContext,
-  assignments: readonly { readonly destination: Value; readonly source: Value }[] = [],
 ): Map<string, Value> {
   const result = new Map<string, Value>();
   if (!liveness.complete) return result;
-  const candidates = new Set<number>();
-  const pairs: { destination: number; source: number }[] = [];
-  for (const copies of [...program.transfers.values(), assignments])
-    for (const copy of copies) {
-      context.checkpoint(1);
-      const destination = liveness.index.get(copy.destination.id),
-        source = liveness.index.get(copy.source.id);
-      if (
-        destination === undefined ||
-        source === undefined ||
-        program.inline.has(copy.source.id) ||
-        !compatible(copy.destination, copy.source)
-      )
-        continue;
-      candidates.add(destination);
-      candidates.add(source);
-      pairs.push({ destination, source });
-    }
-  if (!pairs.length) return result;
-  const interference = new Map<number, Set<number>>();
-  for (const id of candidates) interference.set(id, new Set());
-  const conflict = (a: number, b: number): void => {
-    if (a === b || !candidates.has(a) || !candidates.has(b)) return;
-    interference.get(a)!.add(b);
-    interference.get(b)!.add(a);
-  };
-  const members = [...candidates];
-  const equalDefinitions = new Map<number, number>();
-  for (const copy of assignments) {
-    const destination = liveness.index.get(copy.destination.id),
-      source = liveness.index.get(copy.source.id);
-    if (destination !== undefined && source !== undefined)
-      equalDefinitions.set(destination, source);
-  }
-  for (const block of program.blocks.values()) {
-    context.checkpoint(1);
-    const live = liveness.exit(block);
-    const events = liveness.events(block);
-    for (let i = events.length - 1; i >= 0; i--) {
-      const event = events[i]!;
-      if (!event.def) {
-        for (const id of event.ids) live[id >>> 5]! |= 1 << (id & 31);
-        continue;
-      }
-      for (const id of event.ids) live[id >>> 5]! &= ~(1 << (id & 31));
-      for (const id of event.ids) {
-        if (!candidates.has(id)) continue;
-        for (const other of event.ids) conflict(id, other);
-        for (const other of members) {
-          context.checkpoint(1);
-          // At this copy definition the source and destination hold the same
-          // value, even when a later read still uses the narrow source.
-          if (liveness.has(live, other) && equalDefinitions.get(id) !== other) conflict(id, other);
-        }
-      }
-    }
-    // Parameters (and formals) are bound simultaneously at entry, on every edge.
-    const entry = liveness.live(block.id)!,
-      bound = liveness.bound(block);
-    for (const id of bound) {
-      if (!candidates.has(id)) continue;
-      for (const other of bound) conflict(id, other);
-      for (const other of members) {
-        context.checkpoint(1);
-        if (liveness.has(entry, other)) conflict(id, other);
-      }
-    }
-  }
-  const parent = new Map<number, number>(),
-    classes = new Map<number, number[]>();
-  for (const id of candidates) {
-    parent.set(id, id);
-    classes.set(id, [id]);
-  }
-  const find = (id: number): number => {
-    let root = id;
-    while (parent.get(root) !== root) root = parent.get(root)!;
-    return root;
-  };
-  for (const pair of pairs) {
-    const a = find(pair.destination),
-      b = find(pair.source);
-    if (a === b) continue;
-    const left = classes.get(a)!,
-      right = classes.get(b)!;
-    let free = true;
-    for (const x of left) {
-      for (const y of right) {
-        context.checkpoint(1);
-        if (interference.get(x)!.has(y) || !compatible(liveness.values[x]!, liveness.values[y]!)) {
-          free = false;
-          break;
-        }
-      }
-      if (!free) break;
-    }
-    if (!free) continue;
-    parent.set(b, a);
-    left.push(...right);
-    classes.delete(b);
-  }
-  const formals = new Set(program.parameters.map((value) => value.id));
-  for (const list of classes.values()) {
-    if (list.length < 2) continue;
-    const values = [...list].sort((a, b) => a - b).map((id) => liveness.values[id]!);
-    const representative = classRepresentative(values, formals);
-    for (const value of values) result.set(value.id, representative);
-  }
-  return result;
-}
-
-/** Formals keep their name; otherwise the earliest widest declaration. */
-function classRepresentative(values: readonly Value[], formals: ReadonlySet<string>): Value {
-  return (
-    values.find((value) => formals.has(value.id)) ??
-    values.reduce((best, value) =>
-      best.type.kind === 'integer' &&
-      value.type.kind === 'integer' &&
-      value.type.bits > best.type.bits
-        ? value
-        : best,
-    )
-  );
-}
-
-/** In-place update coalescing: a value defined from a printed variable that
- * dies at that very definition (`y = f(x)`, no later read of `x`) shares its
- * storage, so the statement prints as `x = f(x)`; candidates are `pairs`
- * (destination, an operand leaf of its definition). Unrelated values never
- * share. Two classes join only when no member of one is live where a member of
- * the other is defined (including simultaneous block parameters and
- * loop-carried liveness) and every member pair is `compatible`. `existing`
- * classes (phi-copy coalescing) only grow. Returns the full value id ->
- * representative map, or undefined when nothing merged or the interference
- * graph is out of bounds. */
-export function coalesceValues(
-  program: Reconstruction,
-  liveness: VariableLiveness,
-  compatible: (a: Value, b: Value) => boolean,
-  context: OperationContext,
-  existing: ReadonlyMap<string, Value>,
-  pairs: readonly { readonly destination: Value; readonly source: Value }[],
-): Map<string, Value> | undefined {
-  if (!liveness.complete) return undefined;
   const count = liveness.values.length,
     words = (count + 31) >>> 5;
-  // The interference matrix is optional work: never starve the rest of the run.
   const allowance = Math.floor((context.remainingWork?.() ?? 0) / 8);
   let spent = 0;
   const charge = (work: number): boolean => {
@@ -552,6 +464,14 @@ export function coalesceValues(
     context.checkpoint(work);
     return spent <= allowance;
   };
+  const indexOf = (value: Value): number | undefined =>
+    program.inline.has(value.id) ? undefined : liveness.index.get(value.id);
+  const equal = new Map<number, number>();
+  for (const pair of pairs.equal) {
+    const destination = indexOf(pair.destination),
+      source = indexOf(pair.source);
+    if (destination !== undefined && source !== undefined) equal.set(destination, source);
+  }
   // Row `i`: every value live where `i` is defined (or defined together with it).
   const rows = new Uint32Array(count * words);
   const mark = (a: number, b: number): void => {
@@ -562,107 +482,212 @@ export function coalesceValues(
     const events = liveness.events(block);
     for (let i = events.length - 1; i >= 0; i--) {
       const event = events[i]!;
-      if (!charge(1 + (event.def ? event.ids.length * words : event.ids.length))) return undefined;
+      if (!charge(1 + (event.def ? event.ids.length * words : event.ids.length))) return result;
       if (!event.def) {
         for (const id of event.ids) live[id >>> 5]! |= 1 << (id & 31);
         continue;
       }
       for (const id of event.ids) live[id >>> 5]! &= ~(1 << (id & 31));
       for (const id of event.ids) {
-        for (let w = 0; w < words; w++) rows[id * words + w]! |= live[w]!;
+        const row = id * words;
+        for (let w = 0; w < words; w++) rows[row + w]! |= live[w]!;
+        // At an equal definition the source holds the same value.
+        const source = equal.get(id);
+        if (source !== undefined) rows[row + (source >>> 5)]! &= ~(1 << (source & 31));
         for (const other of event.ids) if (other !== id) mark(id, other);
       }
     }
     // Parameters (and formals) are bound simultaneously at entry, on every edge.
     const entry = liveness.live(block.id)!,
       here = liveness.bound(block);
-    if (!charge(1 + here.length * words)) return undefined;
+    if (!charge(1 + here.length * words)) return result;
     for (const id of here) {
       for (let w = 0; w < words; w++) rows[id * words + w]! |= entry[w]!;
       for (const other of here) if (other !== id) mark(id, other);
     }
   }
-  const parent = Array.from({ length: count }, (_, index) => index),
-    members = new Map<number, number[]>(),
-    bits = new Map<number, Uint32Array>(),
-    conflicts = new Map<number, Uint32Array>();
-  for (let id = 0; id < count; id++) {
-    members.set(id, [id]);
-    const own = new Uint32Array(words);
-    own[id >>> 5]! |= 1 << (id & 31);
-    bits.set(id, own);
-    conflicts.set(id, rows.slice(id * words, (id + 1) * words));
+  interface Class {
+    readonly members: number[];
+    readonly bits: Uint32Array;
+    readonly conflicts: Uint32Array;
+    readonly storage: string;
+    rigid: string | null;
+    readonly spellings: Set<string>;
+    readonly widths: Set<number>;
+    scalar: boolean;
+    plain: boolean;
   }
+  const parent = new Map<number, number>(),
+    classes = new Map<number, Class>(),
+    facts = new Map<number, VariableMember>();
+  const fact = (id: number): VariableMember => {
+    let known = facts.get(id);
+    if (!known) facts.set(id, (known = member(liveness.values[id]!)));
+    return known;
+  };
   const find = (id: number): number => {
-    while (parent[id] !== id) id = parent[id] = parent[parent[id]!]!;
-    return id;
-  };
-  const join = (a: number, b: number): void => {
-    parent[b] = a;
-    members.get(a)!.push(...members.get(b)!);
-    members.delete(b);
-    const bitsA = bits.get(a)!,
-      bitsB = bits.get(b)!,
-      rowA = conflicts.get(a)!,
-      rowB = conflicts.get(b)!;
-    for (let w = 0; w < words; w++) {
-      bitsA[w]! |= bitsB[w]!;
-      rowA[w]! |= rowB[w]!;
+    if (!parent.has(id)) {
+      const own = fact(id),
+        bits = new Uint32Array(words);
+      bits[id >>> 5]! |= 1 << (id & 31);
+      parent.set(id, id);
+      classes.set(id, {
+        members: [id],
+        bits,
+        conflicts: rows.slice(id * words, (id + 1) * words),
+        storage: own.storage,
+        rigid: own.flexible ? null : own.spelling,
+        spellings: new Set([own.spelling]),
+        widths: new Set([bitWidth(liveness.values[id]!.type)]),
+        scalar: own.scalar,
+        plain: own.plain,
+      });
+      return id;
     }
-    bits.delete(b);
-    conflicts.delete(b);
+    let root = id;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    for (let next = id; next !== root;) {
+      const up = parent.get(next)!;
+      parent.set(next, root);
+      next = up;
+    }
+    return root;
   };
-  for (const [id, representative] of existing) {
-    const a = liveness.index.get(id),
-      b = liveness.index.get(representative.id);
-    if (a === undefined || b === undefined || find(a) === find(b)) continue;
-    join(find(b), find(a));
-  }
-  const before = members.size;
   let exhausted = false;
-  /** Join two classes when they never interfere and every member pair is compatible. */
+  /** Join two classes when no member of one conflicts with a member of the other
+   * and the union still has one storage, one presented spelling and exact
+   * conversions for every other member; true when they now share a variable. */
   const attempt = (a: number, b: number): boolean => {
-    const bitsA = bits.get(a)!,
-      bitsB = bits.get(b)!,
-      rowA = conflicts.get(a)!,
-      rowB = conflicts.get(b)!;
+    if (a === b) return true;
+    const left = classes.get(a)!,
+      right = classes.get(b)!;
+    if (left.storage !== right.storage) return false;
+    const plain = left.plain && right.plain;
+    if (left.rigid !== null && right.rigid !== null && left.rigid !== right.rigid && !plain)
+      return false;
+    if (!plain && [...right.widths].some((width) => !left.widths.has(width))) return false;
+    if (
+      !plain &&
+      !(left.scalar && right.scalar) &&
+      [...right.spellings].some((spelling) => !left.spellings.has(spelling))
+    )
+      return false;
     if (!charge(words)) {
       exhausted = true;
       return false;
     }
     for (let w = 0; w < words; w++)
-      if (((rowA[w]! & bitsB[w]!) | (rowB[w]! & bitsA[w]!)) !== 0) return false;
-    const left = members.get(a)!,
-      right = members.get(b)!;
-    if (!charge(left.length * right.length)) {
-      exhausted = true;
-      return false;
+      if (((left.conflicts[w]! & right.bits[w]!) | (right.conflicts[w]! & left.bits[w]!)) !== 0)
+        return false;
+    parent.set(b, a);
+    left.members.push(...right.members);
+    for (let w = 0; w < words; w++) {
+      left.bits[w]! |= right.bits[w]!;
+      left.conflicts[w]! |= right.conflicts[w]!;
     }
-    for (const x of left)
-      for (const y of right)
-        if (!compatible(liveness.values[x]!, liveness.values[y]!)) return false;
-    join(a, b);
+    left.rigid ??= right.rigid;
+    for (const spelling of right.spellings) left.spellings.add(spelling);
+    for (const width of right.widths) left.widths.add(width);
+    left.scalar &&= right.scalar;
+    left.plain = plain;
+    classes.delete(b);
     return true;
   };
-  for (const pair of pairs) {
-    if (exhausted) break;
-    const d = liveness.index.get(pair.destination.id),
-      s = liveness.index.get(pair.source.id);
-    if (d === undefined || s === undefined) continue;
-    const a = find(d),
-      b = find(s);
-    if (a !== b) attempt(a, b);
+  const join = (pair: ValuePair, sameSpelling: boolean): void => {
+    if (exhausted) return;
+    const destination = indexOf(pair.destination),
+      source = indexOf(pair.source);
+    if (destination === undefined || source === undefined) return;
+    if (sameSpelling && fact(destination).spelling !== fact(source).spelling) return;
+    context.checkpoint(1);
+    attempt(find(destination), find(source));
+  };
+  for (const pair of pairs.edges) join(pair, false);
+  for (const pair of pairs.equal) join(pair, false);
+  for (const pair of pairs.adjacent) join(pair, true);
+  // Register reuse (Ghidra `mergeByDatatype`, kept to one machine register):
+  // each value joins the first earlier class of its register and spelling it
+  // can share storage with.
+  for (const group of pairs.reuse) {
+    const stacks = new Map<string, number[]>();
+    for (const value of group) {
+      if (exhausted) break;
+      const id = indexOf(value);
+      if (id === undefined) continue;
+      const spelling = fact(id).spelling;
+      const stack = stacks.get(spelling) ?? [];
+      stacks.set(spelling, stack);
+      const root = find(id);
+      if (!stack.some((other) => (context.checkpoint(1), attempt(find(other), find(root)))))
+        stack.push(root);
+    }
   }
-  const formals = new Set(program.parameters.map((value) => value.id));
-  if (members.size === before) return undefined;
-  const result = new Map<string, Value>();
-  for (const list of members.values()) {
-    if (list.length < 2) continue;
-    const values = [...list].sort((a, b) => a - b).map((id) => liveness.values[id]!);
-    const representative = classRepresentative(values, formals);
-    for (const value of values) result.set(value.id, representative);
+  for (const { members } of classes.values()) {
+    if (members.length < 2) continue;
+    context.checkpoint(members.length);
+    members.sort((a, b) => a - b);
+    const representative = classRepresentative(members, liveness.values, fact);
+    for (const id of members) result.set(liveness.values[id]!.id, liveness.values[representative]!);
   }
   return result;
+}
+
+/** A formal; otherwise among the widest members a rigid one, else one of the
+ * most-read spelling (a named member first, then the earliest). */
+function classRepresentative(
+  members: readonly number[],
+  values: readonly Value[],
+  fact: (id: number) => VariableMember,
+): number {
+  const formal = members.find((id) => fact(id).formal);
+  if (formal !== undefined) return formal;
+  const widest = Math.max(...members.map((id) => bitWidth(values[id]!.type)));
+  const candidates = members.filter((id) => bitWidth(values[id]!.type) === widest);
+  const rigid = candidates.find((id) => !fact(id).flexible);
+  if (rigid !== undefined) return rigid;
+  const reads = new Map<string, number>();
+  for (const id of members)
+    reads.set(fact(id).spelling, (reads.get(fact(id).spelling) ?? 0) + fact(id).reads);
+  let spelling = fact(candidates[0]!).spelling;
+  for (const id of candidates)
+    if (reads.get(fact(id).spelling)! > reads.get(spelling)!) spelling = fact(id).spelling;
+  const chosen = candidates.filter((id) => fact(id).spelling === spelling);
+  return chosen.find((id) => fact(id).named) ?? chosen[0]!;
+}
+
+/** Edge copies `copies` (one transfer's) still print under the partition
+ * `variables`: a copy between members of one variable is no move, whether the
+ * source is the member itself, a same-width alias of it, or the zero extension
+ * of a narrower member (the variable's plain unsigned storage holds exactly
+ * that extension; the parallel-copy validation states the assumption).
+ * Structuring and source planning read every edge's copy count from here. */
+export function edgeCopies<T extends ValuePair>(
+  program: Reconstruction,
+  variables: ReadonlyMap<string, Value>,
+  inline: ReadonlySet<string>,
+  copies: readonly T[],
+): readonly T[] {
+  if (!variables.size) return copies;
+  const uncast = (value: Value, ops: readonly string[]): Value => {
+    for (let depth = 0; depth < 16 && inline.has(value.id); depth++) {
+      const expression = program.expressions.get(value.id);
+      if (expression?.kind !== 'cast' || !ops.includes(expression.op)) break;
+      value = expression.value;
+    }
+    return value;
+  };
+  return copies.filter((copy) => {
+    const destination = variables.get(copy.destination.id);
+    if (!destination) return true;
+    const source = uncast(copy.source, ['bitcast']);
+    const narrow = uncast(source, ['bitcast', 'zero_extend']);
+    return !(
+      (!inline.has(source.id) && variables.get(source.id) === destination) ||
+      (!inline.has(narrow.id) &&
+        variables.get(narrow.id) === destination &&
+        bitWidth(narrow.type) < bitWidth(destination.type))
+    );
+  });
 }
 
 export interface Occurrence {
@@ -903,7 +928,7 @@ export function planLayout(
   program: Reconstruction,
   language: 'c-like' | 'python-like',
   silent: (block: BlockRegion) => boolean,
-  /** Number of edge copies the transfer prints (after phi-copy coalescing). */
+  /** Number of edge copies the transfer prints under the variable partition (`edgeCopies`). */
   copies: (transfer: ParallelTransfer) => number,
   context: OperationContext,
   small: (block: BlockRegion) => boolean = silent,

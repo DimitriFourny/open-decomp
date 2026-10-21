@@ -119,8 +119,9 @@ import type { EmissionInput, EmissionResult } from './model.js';
 import { collectInferences } from './inference.js';
 import {
   VariableLiveness,
-  coalesceValues,
-  coalescePhiCopies,
+  edgeCopies,
+  partitionVariables,
+  type VariableMember,
   controlArms,
   formArm,
   foldSwitchGuards,
@@ -719,10 +720,11 @@ export class Renderer {
           const variable = members.every((id, index) => {
             const name = own[index];
             if (name === role) return true;
-            if ((name && !sourceGenericStems.has(name)) || this.sourceCarried.has(id)) return false;
-            // The initial value of a loop variable shares its role, except that of
-            // a parameter (or a conversion of one): what a caller passes is not
-            // an index or accumulator because the body then steps or folds it.
+            if (this.sourceCarried.has(id)) return false;
+            // The initial value of a loop variable shares its role, whatever its
+            // own name, except that of a parameter (or a conversion of one): what
+            // a caller passes is not an index or accumulator because the body then
+            // steps or folds it.
             const head = this.sourceInitial.get(id);
             if (
               head !== undefined &&
@@ -731,11 +733,20 @@ export class Renderer {
               !fromParameter(this.program.values.get(id)!)
             )
               return true;
+            if (name && !sourceGenericStems.has(name)) return false;
             const sources = merged.get(id),
-              operand = converted(this.program.values.get(id)!);
-            return sources
-              ? sources.every((source) => same(source, representative))
-              : operand !== undefined && same(operand, representative);
+              value = this.program.values.get(id)!,
+              operand = converted(value);
+            if (sources) return sources.every((source) => same(source, representative));
+            if (operand !== undefined) return same(operand, representative);
+            // An in-place update of the variable (it reads a member) is that variable.
+            const expression = this.program.expressions.get(id);
+            return (
+              expression !== undefined &&
+              expressionOperands(expression).some(
+                (input) => this.variables.get(input.id)?.id === representative,
+              )
+            );
           });
           names.set(representative, variable ? role : null);
         } else {
@@ -1002,6 +1013,38 @@ export class Renderer {
       return this.printer.primary(this.checkedInterpretation(value, printed.text, id));
     if (this.program.source.float_values?.has(value.id)) return printed;
     const given = id;
+    const holder = given === undefined ? this.variables.get(value.id) : undefined;
+    if (
+      holder &&
+      holder.id !== value.id &&
+      value.type.kind === 'integer' &&
+      bitWidth(holder.type) === value.type.bits
+    ) {
+      // A partition member presented differently from its variable defines it
+      // through one exact conversion to the variable's declared type (the same
+      // integer or address bits).
+      const declared = this.declaredSpelling(value);
+      if (declared !== this.valueType(value)) {
+        if (this.language === 'python-like' && declared.startsWith('pointer['))
+          return printed.ctype && !printed.ctype.signed && printed.ctype.bits <= value.type.bits
+            ? printed
+            : this.printer.reduce(value.type.bits, printed);
+        if (this.language === 'c-like' && declared.endsWith('*')) {
+          const step =
+            assigned &&
+            this.pointerStep(declared, this.declaredPointer(value), assigned, value.type.bits);
+          if (step) return step;
+          const text = this.pointerValue(printed, declared);
+          return {
+            text,
+            precedence: text === printed.pointer?.text ? PRIMARY : UNARY,
+            ctype: null,
+          };
+        }
+        const integer = this.declaredInteger(holder, declared);
+        return integer?.signed ? this.printer.cast(integer.bits, true, printed) : printed;
+      }
+    }
     id ??=
       this.sourceValueTypes.get(value.id) ??
       this.program.source.value_types?.get(value.id)?.type_id;
@@ -1034,7 +1077,9 @@ export class Renderer {
         return printed.ctype && !printed.ctype.signed && printed.ctype.bits <= type.bits
           ? printed
           : this.printer.reduce(type.bits, printed);
-      const step = assigned && this.pointerStep(id!, assigned, type.bits);
+      const step =
+        assigned &&
+        this.pointerStep(this.sourceType(id!), this.scalarPointee(id!), assigned, type.bits);
       if (step) return step;
       // Integer-to-pointer conversion of the exact address bits (a declared
       // pointer of the receiving type converts implicitly; a narrower integer goes
@@ -1092,9 +1137,7 @@ export class Renderer {
     const member = this.memberTypes.get(storage);
     if (member) return member;
     if (storage.includes('->')) return null;
-    const id =
-      this.sourceValueTypes.get(load.address.id) ??
-      this.program.source?.value_types?.get(load.address.id)?.type_id;
+    const id = this.variableTypeId(load.address);
     const pointee = id && !this.inline.has(load.address.id) ? this.scalarPointee(id) : null;
     return pointee ?? { bits: bitWidth(load.result.type), signed: false };
   }
@@ -1111,12 +1154,17 @@ export class Renderer {
       : null;
   }
 
-  /** `p = p + index * size + k` on the same declared scalar pointer type prints
-   * as C pointer arithmetic `p + index + k/size` when the index is scaled by
-   * exactly the element size and the byte displacement k is a multiple of it;
-   * C scales by exactly that size, so the address bits agree. */
-  private pointerStep(id: string, expression: Expression, bits: number): Printed | null {
-    const element = this.scalarPointee(id);
+  /** `p = p + index * size + k` on variables declared with the same scalar
+   * pointer `spelling` (element `element`) prints as C pointer arithmetic `p +
+   * index + k/size` when the index is scaled by exactly the element size and
+   * the byte displacement k is a multiple of it; C scales by exactly that size,
+   * so the address bits agree. */
+  private pointerStep(
+    spelling: string,
+    element: IntegerCType | null,
+    expression: Expression,
+    bits: number,
+  ): Printed | null {
     if (
       expression.kind !== 'integer' ||
       (expression.op !== 'add' && expression.op !== 'sub') ||
@@ -1124,16 +1172,12 @@ export class Renderer {
     )
       return null;
     const size = BigInt(element.bits / 8);
-    const sum = this.addressSum(expression, bits, size, (value) => {
-      const baseType =
-        this.sourceValueTypes.get(value.id) ??
-        this.program.source?.value_types?.get(value.id)?.type_id;
-      return (
-        !this.inline.has(value.id) &&
-        !!baseType &&
-        this.sourceType(baseType) === this.sourceType(id)
-      );
-    });
+    const sum = this.addressSum(
+      expression,
+      bits,
+      size,
+      (value) => !this.inline.has(value.id) && this.declaredSpelling(value) === spelling,
+    );
     if (
       !sum ||
       sum.displacement % size !== 0n ||
@@ -1284,11 +1328,20 @@ export class Renderer {
     });
   }
 
-  /** Declared spelling of the variable a value prints as (its phi class
-   * representative when coalesced). */
+  /** Declared spelling of the variable a value prints as (its partition
+   * representative's). */
   private declaredSpelling(value: Value): string {
+    const holder = this.variables.get(value.id) ?? value;
+    return this.declaredTypes.get(holder.id) ?? this.valueType(holder);
+  }
+
+  /** Type record id of the variable a value prints as (its partition
+   * representative's): reads through the variable see that type. */
+  private variableTypeId(value: Value): string | undefined {
+    const holder = this.variables.get(value.id) ?? value;
     return (
-      this.declaredTypes.get((this.variables.get(value.id) ?? value).id) ?? this.valueType(value)
+      this.sourceValueTypes.get(holder.id) ??
+      this.program.source?.value_types?.get(holder.id)?.type_id
     );
   }
 
@@ -2390,9 +2443,7 @@ export class Renderer {
         ? [value, alias.value]
         : [value]) {
         if (!this.program.source || this.inline.has(candidate.id)) continue;
-        const id =
-          this.sourceValueTypes.get(candidate.id) ??
-          this.program.source.value_types?.get(candidate.id)?.type_id;
+        const id = this.variableTypeId(candidate);
         const type = id && this.typeRecords.get(id)?.definition;
         // Callable context retains the declared pointer local; value() converts
         // pointers to integer bits for machine arithmetic, not invocation.
@@ -2969,9 +3020,7 @@ export class Renderer {
       if (!id) return null;
     } else {
       if (base.type.kind !== 'integer') return null;
-      id =
-        this.sourceValueTypes.get(base.id) ??
-        this.program.source?.value_types?.get(base.id)?.type_id;
+      id = this.variableTypeId(base);
       if (!id || this.declaredSpelling(base) !== this.sourceType(id)) return null;
       baseText = this.local(base);
     }
@@ -4377,13 +4426,7 @@ export class Renderer {
   ): string {
     if (node.kind === 'assign') {
       const expression = this.program.expressions.get(node.result.id) ?? node.expression;
-      if (
-        this.sourceView &&
-        expression.kind === 'cast' &&
-        expression.op === 'zero_extend' &&
-        this.variableKey(node.result) === this.variableKey(expression.value)
-      )
-        return '';
+      if (this.noMove(node)) return '';
       const literal =
         expression.kind === 'constant' || expression.kind === 'address'
           ? this.valueLiteral(node.result, this.declaredSpelling(node.result), false)
@@ -5127,7 +5170,12 @@ export class Renderer {
       induction.add(variable);
     }
     const initialized = inits.filter((copy) => induction.has(key(copy.destination)));
-    if (initialized.length !== induction.size) return false;
+    // An induction variable the entry edge writes without a printed copy (its
+    // entry value already shares the variable) needs no init clause.
+    const entering = new Set(
+      (this.program.transfers.get(loop.init) ?? []).map((copy) => key(copy.destination)),
+    );
+    if ([...induction].some((variable) => !entering.has(variable))) return false;
     const restated = this.rebased.get(loop.test.id);
     const reads = loop.bottom
       ? restated
@@ -5152,7 +5200,8 @@ export class Renderer {
         )
           return false;
     }
-    if (loop.bottom && !this.entryHolds(loop, inits)) return false;
+    if (loop.bottom && !this.entryHolds(loop, this.program.transfers.get(loop.init) ?? []))
+      return false;
     this.hoisted.set(loop.init, new Set(initialized.map((copy) => key(copy.destination))));
     this.hoisted.set(loop.step, induction);
     this.forLoops.set(loop.test.id, { init: loop.init, step: loop.step });
@@ -5328,29 +5377,19 @@ export class Renderer {
     }
   }
 
-  /** Edge copies actually printed: a coalesced class's self-copy is no move. A
-   * zero extension of a narrower member of the destination's class is one too:
-   * that class shares widened unsigned storage, which holds the zero-extended
-   * value (the parallel-copy validation states this assumption). */
+  /** Edge copies actually printed: the variable partition's `edgeCopies`, less
+   * copies forwarded into returned constants. */
   private printedCopies(
     transfer: ParallelTransfer,
   ): readonly { readonly destination: Value; readonly source: Value }[] {
     const all = this.program.transfers.get(transfer) ?? [];
     const forwarded = this.forwardedCopies.get(transfer);
-    const copies = forwarded ? all.filter((copy) => !forwarded.has(copy.destination.id)) : all;
-    if (!this.variables.size) return copies;
-    return copies.filter((copy) => {
-      const destination = this.variables.get(copy.destination.id);
-      const source = this.uncast(copy.source, ['bitcast']);
-      const narrow = this.uncast(source, ['bitcast', 'zero_extend']);
-      return !(
-        destination &&
-        ((!this.inline.has(source.id) && this.variables.get(source.id) === destination) ||
-          (!this.inline.has(narrow.id) &&
-            this.variables.get(narrow.id) === destination &&
-            bitWidth(narrow.type) < bitWidth(destination.type)))
-      );
-    });
+    return edgeCopies(
+      this.program,
+      this.variables,
+      this.inline,
+      forwarded ? all.filter((copy) => !forwarded.has(copy.destination.id)) : all,
+    );
   }
 
   private arm(arm: ControlArm, depth: number, origin: Control): void {
@@ -5863,8 +5902,21 @@ export class Renderer {
           printed(node.id) ||
           (this.program.retained.has(node.id) &&
             !this.flagAccesses.has(node.id) &&
-            !('result' in node && this.inlined.has(node.result.id))),
+            !('result' in node && this.inlined.has(node.result.id)) &&
+            !this.noMove(node)),
       )
+    );
+  }
+
+  /** Source view: a retained zero extension or same-width alias of a member of
+   * its own variable is no move and prints nothing. */
+  private noMove(node: Instruction): boolean {
+    if (!this.sourceView || node.kind !== 'assign') return false;
+    const expression = this.program.expressions.get(node.result.id) ?? node.expression;
+    return (
+      expression.kind === 'cast' &&
+      (expression.op === 'zero_extend' || expression.op === 'bitcast') &&
+      this.variableKey(node.result) === this.variableKey(expression.value)
     );
   }
 
@@ -6479,52 +6531,74 @@ export class Renderer {
       for (const destinations of copies.values())
         for (const destination of destinations) widen(narrow, destination);
     }
-    for (const block of program.blocks.values())
+    // A retained same-width alias `d = (T)s` holds exactly `s`.
+    const aliases: { destination: Value; source: Value }[] = [];
+    // Definitions printed through an exact conversion into the variable's type:
+    // edge copies (block parameters), pure assignments and plain source loads.
+    const flexible = new Set<string>();
+    for (const block of program.blocks.values()) {
+      this.context.checkpoint(1);
+      for (const parameter of block.parameters) flexible.add(parameter.id);
       for (const node of block.statements) {
-        if (node.kind !== 'assign' || !program.retained.has(node.id)) continue;
+        if (!program.retained.has(node.id)) continue;
+        if (
+          node.kind === 'load' &&
+          program.source &&
+          !this.globals.import_loads.has(node.id) &&
+          !this.punnedLocal(node)
+        )
+          flexible.add(node.result.id);
+        if (node.kind !== 'assign') continue;
+        flexible.add(node.result.id);
         const expression = program.expressions.get(node.result.id) ?? node.expression;
         if (expression.kind === 'cast' && expression.op === 'zero_extend')
           widen(expression.value, node.result);
+        else if (expression.kind === 'cast' && expression.op === 'bitcast')
+          aliases.push({ destination: node.result, source: expression.value });
       }
+    }
     const storageType = (value: Value): string =>
       machineType((widening.get(value.id) ?? value).type);
-    const compatible = (a: Value, b: Value): boolean => {
-      if (!program.source && (formals.has(a.id) || formals.has(b.id))) return false;
-      const left = widening.get(a.id) ?? a,
-        right = widening.get(b.id) ?? b;
-      const pointerFormal = [left, right].find(
-        (value) => program.source?.formal_types?.get(value.id)?.kind === 'pointer',
-      );
-      const pointerCompatible =
-        pointerFormal &&
-        this.valueType(left).replace(/^const /, '') ===
-          this.valueType(right).replace(/^const /, '');
-      return (
-        storageType(a) === storageType(b) &&
-        (pointerCompatible ||
-          (typeId(left) === typeId(right) && this.valueType(left) === this.valueType(right))) &&
-        (this.names.get(a.id) ?? null) === (this.names.get(b.id) ?? null)
-      );
+    const pointerSpelling = (spelling: string): boolean =>
+      this.language === 'c-like' ? spelling.endsWith('*') : spelling.startsWith('pointer[');
+    const member = (value: Value): VariableMember => {
+      const spelling = this.valueType(value),
+        formal = formals.has(value.id),
+        floating = program.source?.float_values?.get(value.id);
+      const integer = /^(?:const )?u?int(\d+)_t$/.exec(spelling);
+      const scalar =
+        value.type.kind === 'integer' &&
+        floating === undefined &&
+        (pointerSpelling(spelling) ||
+          Number(integer?.[1]) === value.type.bits ||
+          (spelling === 'bool' && value.type.bits === 1));
+      return {
+        spelling,
+        // Without source evidence a formal keeps its own storage.
+        storage:
+          formal && !program.source
+            ? `formal ${value.id}`
+            : `${storageType(value)} ${floating ?? ''}`,
+        flexible: flexible.has(value.id) && !formal,
+        scalar,
+        plain:
+          value.type.kind === 'integer' &&
+          !formal &&
+          floating === undefined &&
+          spelling === this.dataType(value.type),
+        named: this.names.has(value.id),
+        reads: program.use_counts.get(value.id) ?? 0,
+        formal,
+      };
     };
-    const variables = coalescePhiCopies(program, liveness, compatible, this.context, assignments);
-    if (
-      variables.size &&
-      this.localValidation.presentation(
-        'phi_copy_coalescing',
-        subject,
-        'noninterfering edge copies (including formals after their last use) and unsigned widening assignments share storage; formals retain their declaration, otherwise a widening class uses its widest unsigned declaration and preserves original definition and read conversions',
-        [...variables.keys()],
-      )
-    )
-      this.variables = variables;
-    // In-place updates: a definition that is the last reader of one of its
-    // operand variables shares that variable (`y = f(x)` prints `x = f(x)`).
-    const chains: { destination: Value; source: Value }[] = [];
+    // In-place updates: a definition and each variable its expression reads
+    // (`y = f(x)` prints `x = f(x)` when `x` dies there).
+    const adjacent: { destination: Value; source: Value }[] = [];
     const chain = (destination: Value, operands: readonly Value[]): void => {
       if (!liveness.index.has(destination.id)) return;
       for (const operand of operands)
         for (const leaf of liveness.leaves(operand))
-          chains.push({ destination, source: liveness.values[leaf]! });
+          adjacent.push({ destination, source: liveness.values[leaf]! });
     };
     const chainDefinitions = (anchor: string): void => {
       for (const definition of program.source?.definitions?.get(anchor) ?? [])
@@ -6547,40 +6621,38 @@ export class Renderer {
       }
       chainDefinitions(block.control.id);
     }
-    // Plain integer temporaries print identically whatever their recovered type
-    // identity; everything else needs the phi-coalescing agreement.
-    const sharedStorage = (a: Value, b: Value): boolean =>
-      this.sourceRoleNames.get(a.id) === this.sourceRoleNames.get(b.id) &&
-      (compatible(a, b) ||
-        (!!program.source &&
-          a.type.kind === 'integer' &&
-          b.type.kind === 'integer' &&
-          !formals.has(a.id) &&
-          !formals.has(b.id) &&
-          !widening.has(a.id) &&
-          !widening.has(b.id) &&
-          this.valueType(a) === this.valueType(b) &&
-          this.valueType(a) === this.dataType(a.type) &&
-          storageType(a) === storageType(b) &&
-          (this.names.get(a.id) ?? null) === (this.names.get(b.id) ?? null)));
-    const chained = coalesceValues(
+    const edges: { destination: Value; source: Value }[] = [...assignments];
+    for (const copies of program.transfers.values()) edges.push(...copies);
+    // Values each machine register holds at a block boundary, in value order.
+    const registers = new Map<string, Set<Value>>();
+    for (const block of program.blocks.values())
+      for (const binding of [...block.register_entry, ...block.register_exit]) {
+        this.context.checkpoint(1);
+        if (!liveness.index.has(binding.value.id)) continue;
+        const held = registers.get(binding.register.id) ?? new Set<Value>();
+        held.add(binding.value);
+        registers.set(binding.register.id, held);
+      }
+    const reuse = [...registers.values()].map((held) =>
+      [...held].sort((a, b) => liveness.index.get(a.id)! - liveness.index.get(b.id)!),
+    );
+    const variables = partitionVariables(
       program,
       liveness,
-      sharedStorage,
+      member,
+      { edges, equal: [...assignments, ...aliases], adjacent, reuse },
       this.context,
-      this.variables,
-      chains,
     );
     if (
-      chained &&
+      variables.size &&
       this.localValidation.presentation(
-        'copy_coalescing',
+        'variable_partition',
         subject,
-        'a value defined from a printed variable that dies there (in-place update: y = f(x) with no later read of x) shares its storage with that variable when no member of either class is live where a member of the other is defined (including simultaneous block parameters and loop-carried liveness), every member has the same presented type, machine width, source name and role, and no read observes a different value; unrelated values never share storage, formals retain their declaration, and a role name survives only when every member carries it',
-        [...chained.keys()].filter((id) => this.variables.get(id) !== chained.get(id)),
+        'printed SSA values share one variable exactly when no member is live where another is defined (SSA liveness including simultaneous block parameters and loop-carried values; a source at a definition equal to it does not conflict): each block parameter with the variables its incoming edge arguments read, then each same-width alias or plain unsigned zero extension with its source, then each definition with an operand variable of the same presented type (in-place update); an edge copy within one variable prints nothing, an interfering pair keeps its copy. Members share one machine storage type and FP presentation; a formal or other rigid definition fixes the declared type, otherwise the widest member of the most-read type declares it; a member presented differently is converted exactly at its definition (same-width integer or pointer bits) and at each read; members of several widths are plain unsigned, narrower ones defined by zero extension and read through truncation. Names are chosen per variable',
+        [...variables.keys()],
       )
     )
-      this.variables = chained;
+      this.variables = variables;
     const key = (value: Value): string => (this.variables.get(value.id) ?? value).id;
     const definitions = program.source?.definitions;
     const hasDefinitions = (anchor: string): boolean =>
@@ -6593,7 +6665,8 @@ export class Renderer {
         (node) =>
           (!program.retained.has(node.id) ||
             this.flagAccesses.has(node.id) ||
-            ('result' in node && this.inlined.has(node.result.id))) &&
+            ('result' in node && this.inlined.has(node.result.id)) ||
+            this.noMove(node)) &&
           !hasDefinitions(node.id),
       );
     // A proven jump table's exact range guard and its switch print as one switch.
@@ -6676,7 +6749,8 @@ export class Renderer {
         prints: (node) =>
           (program.retained.has(node.id) &&
             !this.deferredStores.has(node.id) &&
-            !('result' in node && this.inlined.has(node.result.id))) ||
+            !('result' in node && this.inlined.has(node.result.id)) &&
+            !this.noMove(node)) ||
           anchored(node.id),
         anchored,
         copies: (transfer) => this.printedCopies(transfer).length,

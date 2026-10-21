@@ -334,13 +334,15 @@ function steppedPointer(bytes: bigint, indexed: boolean) {
   return emit(ssa, { types, source }, 'c-like');
 }
 
+// The stepped pointer shares the formal's variable (no copy into a second
+// local); the step prints as a statement or in a `for` header.
 for (const [bytes, indexed, text] of [
-  [8n, true, /address_1 = address_1 \+ \w+ \+ 2;/],
-  [-8n, true, /address_1 = address_1 \+ \w+ - 2;/],
-  [12n, false, /address_1 = address_1 \+ 3;/],
-  [-12n, false, /address_1 = address_1 - 3;/],
-  [6n, true, /address_1 = \(uint32_t\*\)\(\(uintptr_t\)address_1 \+ \(\w+ << 2\) \+ 6\);/],
-  [6n, false, /address_1 = \(uint32_t\*\)\(\(uintptr_t\)address_1 \+ 6\);/],
+  [8n, true, /address = address \+ \w+ \+ 2[;)]/],
+  [-8n, true, /address = address \+ \w+ - 2[;)]/],
+  [12n, false, /address = address \+ 3[;)]/],
+  [-12n, false, /address = address - 3[;)]/],
+  [6n, true, /address = \(uint32_t\*\)\(\(uintptr_t\)address \+ \(\w+ << 2\) \+ 6\)[;)]/],
+  [6n, false, /address = \(uint32_t\*\)\(\(uintptr_t\)address \+ 6\)[;)]/],
 ] as const)
   test(`typed index: pointer update by ${bytes} bytes${indexed ? ' plus a scaled index' : ''} executes as pointer arithmetic or stays explicit`, () => {
     const output = steppedPointer(bytes, indexed);

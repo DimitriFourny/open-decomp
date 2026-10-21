@@ -238,22 +238,44 @@ that the phi lacks. A dropped widening edge copy is validated under the stated
 invariant that the class storage holds exactly the zero extension of its live
 narrow member: that member's definition stores its narrow value with the narrow
 conversion (`(uint16_t)~(uint16_t)x`, never a promoted negative `int`), and no
-other member is defined while it is live. Signed extensions, truncations,
-incompatible declarations and live-range interference keep separate storage. The
-`phi_copy_coalescing` presentation record names the affected values; simultaneous
-edge copies still pass the existing move validator. An `if` or `switch` arm whose
-edge and blocks then print nothing is dropped like an arm without a body
-(`branch_layout`), in both dialects.
+other member is defined while it is live. Signed extensions and truncations keep
+separate storage. An `if` or `switch` arm whose edge and blocks then print nothing
+is dropped like an arm without a body (`branch_layout`), in both dialects.
 
-`copy_coalescing` then shares storage for in-place updates: a value defined from
-a printed variable that is not read after that definition (`y = f(x)`, the next
-version of `x`) prints as `x = f(x)`. Unrelated values never share storage.
-Interference is the SSA live-range check including loop-carried liveness, values
-defined together and block parameters bound simultaneously on an edge. Every
-member must have the same presented type and width, source name and role name,
-so a coalesced variable keeps a role name only when every member carries it. The
-pass is bounded work and gives up (keeping separate variables) when its graph
-exceeds its allowance.
+These widening pairs are part of one variable partition (`partitionVariables`,
+`src/emitters/source-control.ts`; readability roadmap 2, G1), computed before
+source control planning from exact SSA live-range interference: two values
+conflict when one is live where the other is defined (values defined together,
+block parameters bound simultaneously on an edge and loop-carried liveness
+included; a source at a definition equal to it, a same-width alias or a plain
+zero extension, does not). In order it joins each block parameter with the
+variables its incoming edge arguments read (Ghidra `mergeMarker`), each retained
+same-width alias or widening assignment with its source, each definition with an
+operand variable of the same presented type (in-place update `y = f(x)` prints
+`x = f(x)`; Ghidra `mergeAdjacent`), and values one machine register holds at
+block boundaries with the same presented type (register reuse; Ghidra
+`mergeByDatatype` kept to one register). An interfering pair keeps its explicit
+edge copy; an edge copy or alias statement inside one variable prints nothing.
+Members share one machine storage type and FP presentation. Names are chosen per
+variable and never decide a merge. Presented types may differ when every member
+is an integer spelled as a pointer or an integer of its own width: a formal or
+other rigid definition (call result, register output) fixes the declared type,
+otherwise the widest member of the most-read spelling declares it, and a member
+presented differently is converted exactly at its definition
+(`address = (uint32_t*)*(uint64_t *)0x3000;`) and read through the variable's
+type. The `variable_partition` presentation record names the members;
+simultaneous edge copies still pass the move validator, and `planLayout`,
+loop-form and flag planning read every edge's copy count from the partition
+(`edgeCopies`). A `for` header whose induction variable shares the entry value's
+variable prints an empty init clause. The interference matrix is optional work
+(at most 1/8 of the remaining budget); past it no values share a variable.
+Evidence (2026-10-21, 25-function subset of the structure sample: 12 SQLite, 10
+brotli, 3 ELF fixtures): C local declarations 429 -> 342 and plain `x = y;` /
+`x = (T)y;` copies 120 -> 61 (Python-like 435 -> 347 and 104 -> 43), gotos and
+loop forms unchanged; `whereLoopAddBtree` no longer prints its six `address_32 =
+(uint8_t*)address_22; goto label_169;` arms (674 -> 605 lines). Counted work of a
+fresh `decompile`: brotli `main` 8,013,804 -> 7,967,605, SQLite
+`whereLoopAddBtreeIndex` 9,638,349 -> 9,564,098.
 
 Library names (`library-names.ts`): a value passed to a library-declared parameter takes
 that header parameter name (leading underscores removed; `a1`, `arg`, `p`, `ptr`, ...
