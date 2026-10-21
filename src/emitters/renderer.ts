@@ -44,10 +44,12 @@ import { validateReconstruction, validateRenderedTransfers } from '../reconstruc
 import { foldSourceCondition } from '../reconstruction/source-conditions.js';
 import { constantRotationOperands } from '../reconstruction/source-shifts.js';
 import type {
+  FrameMember,
   ObjCMessage,
   SourceAddress,
   SourceFormalType,
   SourceLocal,
+  SourceStackStorage,
 } from '../reconstruction/source-model.js';
 import { selectorArity } from '../metadata/runtime/objc-types.js';
 import { objcMessageText, objcStringLiteral } from './objc.js';
@@ -1488,6 +1490,7 @@ export class Renderer {
     const stack = this.program.source?.stack,
       offset = this.program.source?.stack_addresses.get(value.id);
     if (stack && offset !== undefined) {
+      if (stack.kind === 'object') return this.frameAddress(stack, offset);
       if (stack.kind === 'entry') {
         if (source) {
           const base = this.printed(stack.base);
@@ -3679,6 +3682,142 @@ export class Renderer {
     };
   }
 
+  /** Element spelling of a plain (little-endian, nonvolatile, alignment 1)
+   * memory access, shared by cast dereferences and frame members. */
+  private plainAccessSpelling(node: Extract<Instruction, { kind: 'load' | 'store' }>): string {
+    const type = this.accessType(node);
+    if (this.program.source?.float_accesses?.has(node.id))
+      return type.kind === 'float' && type.bits === 32 ? 'float' : 'double';
+    return type.kind === 'integer' ? `uint${type.bits}_t` : machineType(type);
+  }
+
+  /** The frame member holding entry-SP byte `offset` and the offset within it. */
+  private frameMemberAt(
+    stack: Extract<SourceStackStorage, { kind: 'object' }>,
+    offset: bigint,
+  ): { member: FrameMember; delta: bigint } | undefined {
+    const members = stack.members;
+    // One charge per lookup: the binary search takes at most log2(members) steps.
+    this.context.checkpoint(1);
+    for (let low = 0, high = members.length - 1; low <= high;) {
+      const middle = (low + high) >> 1,
+        member = members[middle]!;
+      if (offset < member.offset) high = middle - 1;
+      else if (offset >= member.offset + member.size) low = middle + 1;
+      else return { member, delta: offset - member.offset };
+    }
+    return undefined;
+  }
+
+  private readonly frameTypes = new Map<FrameMember, string>();
+  /** Declared type of a frame member: a byte array, or the one spelling every
+   * plain access of a scalar member uses (else the unsigned integer of its width). */
+  private frameMemberType(member: FrameMember): string {
+    if (!member.scalar) return 'uint8_t';
+    let type = this.frameTypes.get(member);
+    if (type !== undefined) return type;
+    let common: string | null | undefined;
+    for (const id of member.access_ids) {
+      this.context.checkpoint(1);
+      const node = this.statements.get(id);
+      if (
+        (node?.kind !== 'load' && node?.kind !== 'store') ||
+        node.access.endian !== 'little' ||
+        node.access.volatile ||
+        node.access.alignment !== 1
+      )
+        continue;
+      const spelled = this.plainAccessSpelling(node);
+      common = common === undefined || common === spelled ? spelled : null;
+    }
+    type = common ?? `uint${member.size * 8n}_t`;
+    this.frameTypes.set(member, type);
+    return type;
+  }
+
+  /** Address of entry-SP `offset` in the frame object: `&frame.local_38`, an
+   * element of a byte-array member, else a byte offset from the object. */
+  private frameAddress(
+    stack: Extract<SourceStackStorage, { kind: 'object' }>,
+    offset: bigint,
+  ): Printed {
+    const name = this.sourceIdentifier(stack.id, 'frame'),
+      found = this.frameMemberAt(stack, offset),
+      address = { bits: 64, signed: false } as const;
+    const member =
+      found && (found.delta === 0n || !found.member.scalar)
+        ? `${name}.local_${(-found.member.offset).toString(16)}`
+        : undefined;
+    if (this.language === 'python-like') {
+      const base = this.printer.primary(`address_of(${member ?? name})`, address),
+        delta = member ? found!.delta : offset - stack.minimum_offset;
+      return delta === 0n
+        ? base
+        : this.printer.binary('+', base, this.printer.literal(delta, 64), address);
+    }
+    if (member) {
+      const pointer =
+        found!.delta === 0n
+          ? { text: `&${member}`, type: `${this.frameMemberType(found!.member)}*` }
+          : {
+              text: `&${member}[${this.printer.literal(found!.delta, 64).text}]`,
+              type: 'uint8_t*',
+            };
+      return { text: `(uintptr_t)${pointer.text}`, precedence: UNARY, ctype: address, pointer };
+    }
+    const base: Printed = { text: `(uintptr_t)&${name}`, precedence: UNARY, ctype: address };
+    const delta = offset - stack.minimum_offset;
+    return delta === 0n
+      ? base
+      : this.printer.binary('+', base, this.printer.literal(delta, 64), address);
+  }
+
+  /** A plain access at a known frame offset: the member itself when it is
+   * exactly that member with its declared type, otherwise one cast
+   * dereference of the member or object bytes. Undefined keeps the general
+   * memory spelling (volatile, big-endian, aligned or non-byte accesses). */
+  private frameStorage(node: Extract<Instruction, { kind: 'load' | 'store' }>): string | undefined {
+    const stack = this.program.source?.stack,
+      offset = this.program.source?.stack_addresses.get(node.address.id),
+      bits = BigInt(bitWidth(this.accessType(node)));
+    if (
+      stack?.kind !== 'object' ||
+      offset === undefined ||
+      bits % 8n ||
+      node.access.endian !== 'little' ||
+      node.access.volatile ||
+      node.access.alignment !== 1
+    )
+      return undefined;
+    const name = this.sourceIdentifier(stack.id, 'frame'),
+      found = this.frameMemberAt(stack, offset),
+      spelled = this.plainAccessSpelling(node);
+    const member = found && `${name}.local_${(-found.member.offset).toString(16)}`;
+    let text: string | undefined;
+    if (
+      found?.member.scalar &&
+      found.delta === 0n &&
+      found.member.size * 8n === bits &&
+      this.frameMemberType(found.member) === spelled
+    )
+      text = member;
+    else if (this.language === 'python-like') return undefined;
+    else if (found?.member.scalar && found.delta === 0n) text = `*(${spelled} *)&${member}`;
+    else if (found && !found.member.scalar)
+      text =
+        found.delta === 0n
+          ? `*(${spelled} *)${member}`
+          : `*(${spelled} *)&${member}[${this.printer.literal(found.delta, 64).text}]`;
+    else {
+      const delta = offset - stack.minimum_offset;
+      text =
+        delta === 0n
+          ? `*(${spelled} *)&${name}`
+          : `*(${spelled} *)((uint8_t *)&${name} + ${this.printer.literal(delta, 64).text})`;
+    }
+    return this.permitUnaligned(node) ? text : undefined;
+  }
+
   /** Source-view memory access: `*p` through a declared scalar pointer of the
    * accessed width, otherwise one cast dereference of the actual address. The
    * memory-view annotation stays in mappings and inferences, not in the text. */
@@ -3704,6 +3843,8 @@ export class Renderer {
         });
       return `${table.name}[${index!.text}]`;
     }
+    const frame = this.frameStorage(node);
+    if (frame !== undefined) return frame;
     const type = this.accessType(node),
       access = node.access,
       scalar = access.endian === 'little' && !access.volatile && access.alignment === 1,
@@ -3789,12 +3930,12 @@ export class Renderer {
         precedence: UNARY,
         ctype: { bits: 64, signed: false },
       };
-    let name: string;
-    if (this.program.source?.float_accesses?.has(node.id))
-      name = type.kind === 'float' && type.bits === 32 ? 'float' : 'double';
-    else if (type.kind !== 'integer') name = machineType(type);
-    else if (access.alignment === 1 && this.permitUnaligned(node)) name = `uint${type.bits}_t`;
-    else {
+    let name = this.plainAccessSpelling(node);
+    if (
+      type.kind === 'integer' &&
+      !this.program.source?.float_accesses?.has(node.id) &&
+      !(access.alignment === 1 && this.permitUnaligned(node))
+    ) {
       name = `aligned${access.alignment}_uint${type.bits}_t`;
       this.writer.helper(
         name,
@@ -7687,6 +7828,43 @@ export class Renderer {
           ? `_Alignas(${stack.alignment}) uint8_t stack_frame[${stack.size}]`
           : `stack_frame = ${this.call('stack_storage', 'Private byte-addressable stack storage with original initialization unknown; overlapping accesses share bytes.', [String(stack.size), String(stack.alignment)])}`,
       );
+    }
+    if (stack?.kind === 'object') {
+      const name = this.sourceIdentifier(stack.id, 'frame');
+      if (this.language === 'c-like') {
+        // Members sit at their packed frame offsets; padding fills the gaps.
+        let end = stack.minimum_offset,
+          packed = false;
+        w.line(1, `_Alignas(${stack.alignment}) struct {`);
+        for (const member of stack.members) {
+          this.context.checkpoint(1);
+          const field = `local_${(-member.offset).toString(16)}`;
+          if (member.offset > end)
+            w.statement(2, `uint8_t pad_${(-end).toString(16)}[${member.offset - end}]`);
+          w.statement(
+            2,
+            member.scalar
+              ? `${this.frameMemberType(member)} ${field}`
+              : `uint8_t ${field}[${member.size}]`,
+          );
+          packed ||= member.scalar && (member.offset - stack.minimum_offset) % member.size !== 0n;
+          end = member.offset + member.size;
+        }
+        if (end < 0n) w.statement(2, `uint8_t pad_${(-end).toString(16)}[${-end}]`);
+        w.statement(1, `}${packed ? ' __attribute__((packed))' : ''} ${name}`);
+      } else {
+        w.statement(
+          1,
+          `${name} = ${this.call('stack_frame', "This activation's stack frame kept as memory: SIZE bytes ending at the entry stack pointer, starting at an ALIGNMENT-aligned address, original contents unknown. Each annotated member local_N names the bytes at entry-SP offset -N with its type; members and all other frame bytes are ordinary aliasable memory.", [String(stack.size), String(stack.alignment)])}`,
+        );
+        for (const member of stack.members) {
+          this.context.checkpoint(1);
+          w.statement(
+            1,
+            `${name}.local_${(-member.offset).toString(16)}: ${member.scalar ? this.frameMemberType(member) : `array<uint8_t, ${member.size}>`}`,
+          );
+        }
+      }
     }
     const declaredLocals = new Set<string>();
     for (const [node, local] of this.program.source?.locals ?? []) {

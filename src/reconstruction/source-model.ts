@@ -219,7 +219,10 @@ export interface SourceLocal {
   readonly stack_offset?: bigint;
 }
 /** An entry-backed view shares original stack bytes across every region. Its
- * bounds describe observed affine accesses, not a proven dynamic allocation. */
+ * bounds describe observed affine accesses, not a proven dynamic allocation.
+ * Source view: `object` is this activation's frame kept as memory, printed as
+ * one local object of `size` bytes ending at the entry SP; `minimum_offset` is
+ * its entry-SP offset. */
 export type SourceStackStorage = {
   readonly minimum_offset: bigint;
   readonly size: bigint;
@@ -227,7 +230,19 @@ export type SourceStackStorage = {
 } & (
   | { readonly kind: 'private' }
   | { readonly kind: 'entry'; readonly base: Value; readonly dynamic: boolean }
+  | { readonly kind: 'object'; readonly id: string; readonly members: readonly FrameMember[] }
 );
+/** One named member of a frame object, in entry-SP coordinates. Bytes between
+ * members are padding; every byte stays ordinary, aliasable memory. */
+export interface FrameMember {
+  readonly offset: bigint;
+  readonly size: bigint;
+  /** Every access to these bytes reads or writes exactly them: a scalar member.
+   * Otherwise (overlapping accesses, an interior or indexed address) a byte array. */
+  readonly scalar: boolean;
+  /** The known-offset frame accesses inside these bytes. */
+  readonly access_ids: readonly string[];
+}
 /** Complete source interpretation of an unchanged machine-width value. */
 export interface SourceTypeView {
   readonly type_id: string;
