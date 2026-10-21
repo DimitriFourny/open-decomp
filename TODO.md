@@ -1,197 +1,527 @@
-# Readability roadmap 2: close the remaining gap with Ghidra
+# Roadmap 3: remove machine-state artifacts (`physical_return`, `entry_sp`, `indirect_exit`)
 
 ## Goal and rules
 
-Make source-view output as short and as structured as Ghidra's on the same functions without giving up correctness or explicit uncertainty. These are planned items, not current capabilities. The previous roadmap (R1–R5) has landed; its text, per-item evidence and rejected variants are at `git show 7301f55:TODO.md`.
+odbench (docs/PERFORMANCE.md "odbench: the benchmark") shows that Haiku prefers Open Decomp's listings to Ghidra's overall (full tier 0.659), but that an LLM understands Ghidra's slightly better (comprehension −0.15). The losses concentrate in functions that print three machine-level artifacts. This roadmap removes them at their root. Readability roadmap 2 (G1–G9) is done; its text is at `git show f61e1a1:TODO.md`.
 
-- Correctness before readability. Every rewrite keeps fixed-width arithmetic, signedness, memory/call ordering, aliasing and explicit unknowns. A shorter wrong program is a regression.
-- Copy Ghidra's exact transforms, not its guesses. Its stack alias boundary (`varmap.cc:754-757`), parameter fill-in (`fspec.cc:1100-1140`), return-value detection (`coreaction.cc:1991-2037`), constants-as-pointers (`coreaction.cc:1093-1176`) and "most specific type wins" lattice (`type.cc:229-235`) are heuristics: they belong in `inference: "likely"` behind the R5 precision gate, or nowhere.
-- Fix the owning shared layer (SSA, reconstruction, structuring, renderer); never repair emitted text with regexes or special-case fixtures or functions. Both dialects consume the same result.
-- Reuse the local validator (`src/reconstruction/local-validation.ts`), evidence/provenance and cache-version contracts. Bump component versions when output identity changes.
-- Never raise budgets. brotli `main` and SQLite `whereLoopAddBtreeIndex` finish ~0.55M / ~0.95M work under the 10M limit (after G9's lifts and their payback); an item that adds work pays for it in the same change.
-- Tune on the structure sample and the development loop; claims come from a new sealed suite (see Measurement).
+Each item below is sized for one agent. The root causes were found by reading the code and confirmed with checked views, instrumented copies of `dist/` and prototype hacks outside the repository (2026-10-21). The prototypes measured the effect but wrote no validation records, so each item still has to be implemented properly. Line references are at `f61e1a1`.
 
-Ghidra citations are relative to `../ghidra/Ghidra/Features/Decompiler/src/decompile/cpp/`.
+- **Correctness first.** Every rewrite keeps fixed-width arithmetic, signedness, memory and call ordering, aliasing and explicit unknowns. A shorter wrong program is a regression.
+- **Proven vs likely.** The default `proven` mode prints only what is proven or rests on an ABI premise recorded with `validation.requireAbi(...)`, like G7's `frame_object` or the existing `exit_scratch` / `incidental_result` rules. Heuristics go behind `inference: "likely"` and its precision gate (`src/reconstruction/source-likely.ts`, `scripts/bench/likely-precision.ts`).
+- **Fix the owning shared layer.** That is the lifter, discovery, SSA, native summaries, reconstruction or the renderer. Never patch emitted text with regexes, and never special-case functions or fixtures. Both dialects consume the same result.
+- **Validator records.** Every new presentation rule writes a `validation.presentation(...)` record (`src/reconstruction/local-validation.ts`). The checked view (`--view checked`) stays byte-identical unless the item says otherwise.
+- **Never raise budgets.** brotli `main` and SQLite `whereLoopAddBtreeIndex` run close to the 10M work limit. An item that adds work pays for it in the same change, and the cost is measured with M1.
+- **Version bumps happen at merge time.** Take the next free number on `main`; do not pre-assign. Components:
+  - `discovery`, `stack-calls`, `reconstruction` and `pipeline` in `src/service/analysis/versions.ts:62`;
+  - `C_EMITTER_VERSION` in `src/emitters/c/index.ts:5` and `PYTHON_LIKE_EMITTER_VERSION` in `src/emitters/python-like/index.ts:5`;
+  - `NATIVE_SUMMARY_FORMAT` in `src/service/analysis/native-summaries.ts:17`.
 
-## Baseline (2026-10-20)
+## Baseline (odbench full tier, head `0eaab0f` = `f61e1a1` for `src/`, 231 functions with text)
 
-Same 214 functions of the structure sample (`scripts/bench/structure-gotos.py`: brotli 1.2.0 CLI, SQLite 3.54.0 `btree`/`vdbemem`/`exprcode` name filters, Mach-O and ELF fixture libraries). Open Decomp at `c07c94f` (`open-decomp export`, C source view, `proven`, default budget); Ghidra 12.1.4 headless, default decompiler options after auto-analysis. Counts are regex matches on printed text, not a readability verdict. Raw outputs of both tools, the Ghidra script, the function lists and the per-construct classification are in `.local/ghidra-gap-2026-10-20/` (local, gitignored).
+| artifact in the C source view                             | functions | occurrences | readability vs Ghidra on them | comprehension OD / Ghidra | tokens × Ghidra |
+| --------------------------------------------------------- | --------: | ----------- | ----------------------------: | ------------------------: | --------------: |
+| `physical_return(explicit_values(…), physical_inputs(…))` |        18 | 34 calls    |                         0.167 |               2.44 / 2.50 |            2.22 |
+| `entry_sp` formal and `*(T *)(entry_sp ± k)`              |        13 | 163 lines   |                         0.462 |               2.00 / 1.46 |            2.14 |
+| `indirect_exit(target, reason, physical_inputs())`        |         6 | 6           |                         0.417 |               1.67 / 3.17 |            0.48 |
+| none of these (nor `__unknown_effect`)                    |       192 | —           |                         0.733 |               2.64 / 2.80 |            1.31 |
 
-| metric                                            |          Open Decomp | Ghidra |
-| ------------------------------------------------- | -------------------: | -----: |
-| `goto`                                            |                  372 |    405 |
-| functions with a `goto`                           |                   31 |     48 |
-| `do { } while (0)`                                |                   95 |      0 |
-| `break`                                           |                  284 |     23 |
-| `while (true)`                                    |                   47 |      8 |
-| `continue` / exit-flag variables                  |              12 / 12 |  0 / 0 |
-| `for`                                             |                    3 |     12 |
-| `else if`                                         |                    0 |     37 |
-| conditions holding a statement (`(x = f(), ...)`) |                    0 |     33 |
-| non-blank lines                                   |               16,614 | 11,377 |
-| bytes                                             |               749 KB | 380 KB |
-| local declarations                                |                2,463 |  1,163 |
-| lines with `entry_sp`                             | 1,370 (38 functions) |      0 |
-| call lines ending in `, ...)`                     |                  774 |      0 |
-| 64-bit values reassembled from two 32-bit cells   |     11 (6 functions) |      0 |
+Report: `.odbench/reports/2026-10-21-173924-od-head-full/report.md` (local). Section 7 lists the grader's wrong claims about these functions. Typical examples are "returns via `physical_return`", "updates a caller-supplied frame region at `entry_sp`" and "the function is a stub that exits to an indirect branch".
 
-The SQLite source of the 114 SQLite functions has 51 gotos (we print 215, Ghidra 288; inlining inflates both). The goto count is not the gap. The gap is the goto substitutes (breakable blocks, `while (true)` with breaks, exit flags), the missing C idioms (`else if`, comma conditions, `for`, un-rotated loops) and everything printed around the statements:
+| class                                                            | functions                                                               | items  |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------- | ------ |
+| return join split into register cells                            | `matrix_switch` ELF/PE `-O2`                                            | R1     |
+| self-recursive call counted as result demand                     | `btreeOverwriteContent`, `fts3EvalAllocateReaders`, `fts3EvalNextRow`   | R2     |
+| context-specialized callee summary switches result register      | `matrix_variadic_call` `-O2` (ELF, PE, both stripped)                   | R3     |
+| `-O0` callee summary misses a slot-typed double                  | `matrix_variadic_call` `-O0` (ELF, PE, Mach-O)                          | R4     |
+| vector copy/zero-fill temporary taken for an FP result           | `vdbePmaReaderClear`, `matrix_aggregate` ×4 (sret)                      | R5     |
+| integer-built double in an FP register                           | `sqlite3Fp10Convert2`                                                   | R6     |
+| incoming stack arguments not bound as formals                    | `createFunctionApi` (AAPCS64 args 9–11)                                 | S1     |
+| frame object switched off while any entry-SP address is live     | multiplier: 104 of the 163 lines                                        | S2     |
+| reloaded stack addresses printed as constants (undeclared names) | the SysV and PE variadics                                               | S3     |
+| written by-value aggregate in the incoming area                  | `matrix_aggregate` ×3 (SysV MEMORY class)                               | S4, S5 |
+| callee-side variadic areas                                       | `matrix_variadic` Win64 ×3 and Darwin ×3 (S6); SysV ×3 (S7)             | S6, S7 |
+| jump table proved on a stale chain                               | `selectInnerLoop` (+ `jsonTranslateTextToBlob`, `sqlite3_str_vappendf`) | J1     |
+| table base or index fact set before a merge or call              | `jsonTranslateTextToBlob` (+ 5 more SQLite tables)                      | J2     |
+| tail-jumped callee absorbed into its caller (stripped)           | `matrix_switch` stripped llvm-clang23 ELF/PE                            | J3     |
+| indirect tail call through a register                            | `sqlite3_result_pointer`, `pcache1Shrink` (about 282 `br` in SQLite)    | J4     |
 
-| share of our 749 KB                                          |      |
-| ------------------------------------------------------------ | ---: |
-| statements and control flow (about Ghidra's whole output)    | 53 % |
-| per-function `typedef` / `struct` / `extern` preamble        | 18 % |
-| lines using `entry_sp` (frame kept as raw memory)            | 11 % |
-| local declarations                                           | 10 % |
-| comments                                                     |  6 % |
-| `unknown_*` / `requirement_predicate` / `physical_*` helpers |  2 % |
+## Lanes and order
 
-Each of our 180 jump constructs (108 `goto`, 43 `do { } while (0)`, 29 `while (true)`) in 40 functions was classified against Ghidra's output and the disassembly (`goto-classify-{small,large}.md`):
+The work splits into four lanes. Lanes are independent; inside a lane, follow the arrows. Items in different lanes that touch the same file are named, so that the second to merge rebases.
 
-| cause                                                                        | constructs | item   |
-| ---------------------------------------------------------------------------- | ---------: | ------ |
-| Ghidra prints a goto at the same place                                       |         85 | —      |
-| a test plus one statement joins `&&` / `\|\|` as a comma condition           |         26 | G2     |
-| two tests of the same value merged (incl. loop un-rotation)                  |         16 | G3     |
-| loop exit choice (`while (true)` where Ghidra prints `do { } while (c)`)     |         16 | G4     |
-| phi copies in arms keep them apart                                           |         14 | G1     |
-| other: goto edge choice, label placement, if/else printed as breakable block |         23 | G4, G6 |
-| return-block duplication, jump threading                                     |          0 | —      |
+- **Lane J (discovery):** J1 → J2, J1 → J3.
+- **Lane T (tails):** J4. It extracts the frame-save helper in `src/reconstruction/source-stack.ts`, so land it before S2 or rebase S2 onto it.
+- **Lane R (results):**
+  - R1, R2 and R5 → R6 are in reconstruction and analysis (`source-planner.ts`, `result-demands.ts`/`source-facts.ts`, `source-results.ts`).
+  - R3 → R4 are in native summaries. Land them one after the other.
+- **Lane S (stack):**
+  - S1 → (S2, S3) → S4;
+  - S2 → S6 → S7;
+  - S5, S8 and S9 are optional.
+  - All of them are in `source-stack.ts`, `source-planner.ts` and the renderer. Land them one after the other.
+- **M1** is a prerequisite for every item's work check. It is small; do it first.
 
-Our small return-tail copies already beat Ghidra's (on the 34 smaller functions Ghidra prints 73 gotos, we print 41, mostly because of them); keep them.
+## M1: Counted work per function in odbench
 
-**Order.** M1 → G6 (drop breakable blocks first, so later items are measured against the honest baseline) → G5 → G1 → G2 → G3 → G4 → rest of G6. G2 needs G1's variable partition to know which edge copies print. G7, G8 and G9 do not touch control flow and can run in parallel worktrees.
+Every item has to show that brotli `main` and SQLite `whereLoopAddBtreeIndex` (and every corpus function) still finish within the 10M work limit, and what it costs. Today nothing reports work consumed: `decompile --json` shows only the budget, and earlier rounds used throwaway instrumentation. The counter is `consumed` in `createOperationContext` (`src/core/operation.ts:64-140`, `remainingWork()`).
 
-## M1: Ghidra lane in the structure sample
+- [ ] Expose the work an operation consumed in the decompile result. Use a field that does not take part in cache identity or output fingerprints, for example operation metadata next to `budget`.
+  - Have the odbench OD lane record it per function (`FunctionResult.work`, `scripts/bench/odbench/od-worker.ts`, `lane-od.ts`).
+  - Have `report.ts` print, in section 8, per-function work, the largest functions, and the functions above 80% of the limit.
+  - Acceptance: `bun run bench run od --label m1 --tier full` records `work` for every function. brotli `main` and `whereLoopAddBtreeIndex` appear in section 8 with their counts. Outputs are byte-identical to `od-head`.
 
-- [x] Check in the headless script (`.local/ghidra-gap-2026-10-20/ghidra-scripts/DecompileList.java`) as `scripts/bench/ghidra-decompile-list.java` and add a `ghidra` subcommand to `structure-gotos.py` that runs `analyzeHeadless` (`GHIDRA_INSTALL_DIR`, `JAVA_HOME`) on the sample binaries with the same function lists (matched by symbol name: Ghidra rebases the ELF image) into the same per-function layout. Ghidra only loads the binaries; nothing is executed.
-- [x] Extend `metrics` with every counter of the baseline tables: jump statements (`goto` + `break` + `continue` + exit flags + run-once blocks), `while (true)`, `for`, `else if`, comma conditions, non-blank lines, bytes by part (preamble, `entry_sp` lines, local declarations, comments, uncertainty helpers, other), call lines with `, ...)`, cell reassemblies. Print a paired Open Decomp / Ghidra table and per-function deltas.
-  - Evidence (2026-10-21): `ghidra` smoke on 3 ELF, 3 brotli and 2 + 2 SQLite functions gave the 2026-10-20 outputs (headers aside); `metrics` on the saved outputs reproduces the goto, break, continue, exit-flag, `while (true)`, `for` and cell-reassembly rows exactly and the line, byte, declaration and open-call rows when file totals are recounted; `else if` 36 vs 37, Ghidra declarations 1,237 vs 1,163 and comma conditions 120 vs 33 differ by counter definition (docs/PERFORMANCE.md, "Readability roadmap 2 baseline").
-  - Acceptance: reproduces the baseline tables from `.local/ghidra-gap-2026-10-20/`; recorded in docs/PERFORMANCE.md as this roadmap's baseline.
+## R: `physical_return`
 
-## G1: Merge phi copies into variables before structuring
+The renderer prints `physical_return` at `src/emitters/renderer.ts:8130-8199` whenever the return projection is `physical`, or `outputs` remain after `exit_scratch`. Every cause is upstream of that point, so no item changes the renderer. With all six prototypes on, the lane went from 34 to 0 calls. In the full tier, only the 18 functions and two more SQLite functions changed, both toward their source types.
 
-Edge copies print inside arms and keep equal arms apart (14 classified constructs). `whereLoopAddBtree` prints six arms `address_32 = (uint8_t*)address_22; goto label_169;` where Ghidra prints one 8-term condition; local declarations are 2,463 vs 1,163. Today `phi_copy_coalescing` runs in the renderer after structuring and unions a pair only when storage type, presented type and name agree (docs/internals/reconstruction.md, variable recovery).
+### R1: Rebind narrow join exits at the function's integer result width
 
-Ghidra forces every MULTIEQUAL's inputs and output into one variable (`mergeMarker`, `merge.cc:889-901`), inserts a COPY only where two live ranges overlap (`trimOpInput` at the end of the predecessor, `merge.cc:692-711`), hides copies inside one variable (`markInternalCopies`, `merge.cc:1444-1469`), then merges non-interfering same-type values (`mergeAdjacent`, `merge.cc:983-1013`; `mergeByDatatype`, `merge.cc:359-400`).
+- [ ] **Problem.** In `matrix_switch` (ELF `-O2` `0x401aa0`, PE `-O2` `0x140001040`), `default: return a` and `case 9: return a == b ? 42 : 99` share one `ret`. Case 9 writes `eax`, which zero-extends, so rax is two SSA cells. OD prints `return physical_return(explicit_values((uint64_t)result), physical_inputs("x86_64:rax:32:32", value0));`. Ghidra prints `return param_2;`.
+  - **Root cause:** `source-planner.ts:1115-1127` sets `wide` only when a high cell has a defining expression. A phi has none (`source-cells.ts:111-117`). The join exit therefore binds the 32-bit low cell. Harmonization (`:1227-1252`) then zero-extends it to the function width and keeps the high cell as an overlay. G8 recombination (`source-cells.ts:144-201`) does not fire, because an exit snapshot is not a joint read.
+  - **Change:** in harmonization, for an exit narrower than the function width W, check whether its uncertain outputs cover exactly bits [narrow, W) of the integer return root. If they do, bind the whole location at W (`concat` of the cells) and drop those outputs. Otherwise keep `zero_extend`. `recombineSourceCells` then merges the phi web and records `register_cell_recombination`.
+  - **Soundness:** bit-exact, because concat(cells) is the register value, and needs no ABI premise. Do not widen exits one by one: a prototype that followed phi sources made `btreeOverwriteContent` 64-bit. Decide W from all exits first, then rebind.
+  - **Tests:** an IR fixture for SysV and AAPCS64 (`test/reconstruction/source-results.test.ts` or `source-loop-cells.test.ts`). Nine arms return 64-bit values; one arm joins the default through a 32-bit write plus a 64-bit cmov. Execute the emitted C and Python against an oracle with `a = 0x123456789abcdef0`. Assert:
+    - no `physical_return`;
+    - a recombination record;
+    - an unchanged checked view;
+    - a negative case where every exit is narrow keeps the narrow type.
+  - **Acceptance:** both `matrix_switch` texts end `case 9: arg1 = arg1 == arg2 ? 42 : 99; break; } return arg1;`. No other full-tier text changes.
 
-- [x] One variable partition over SSA values (block parameters, edge arguments, definitions) computed from SSA live-range interference before structuring: a block parameter and its incoming arguments share a variable unless they interfere; an interfering pair keeps one explicit copy on that edge. Members may differ in storage width or presented type: the variable takes one presented type and a differing member prints one exact conversion at its definition, not a copy. Formals stay representatives; names are chosen per variable and are never a merge condition.
-  - Evidence (2026-10-21): `partitionVariables` (`src/emitters/source-control.ts`), record `variable_partition`; computed before source control planning (the region structurer itself still runs before reconstruction, see G2). Tests: interfering pair keeps one edge copy, integer member of a `uint32_t *` formal's variable converts once at its definition (executed, both dialects), native emitted C for swaps / pointer walk / early exit.
-- [x] Merge non-interfering same-type values (in-place updates `x = x + 1`, register reuse) in the same partition and delete the renderer coalescing it supersedes (`phi_copy_coalescing`, `copy_coalescing`).
-  - Evidence (2026-10-21): in-place pairs and same-type values one register holds at block boundaries join in the same partition; `coalescePhiCopies` / `coalesceValues` and both records deleted.
-- [x] Structuring and source planning read "this edge prints k copies" from the partition (today `copies(transfer)` in `planLayout` is only known after coalescing).
-  - Evidence (2026-10-21): `edgeCopies` (partition-owned) feeds `planLayout`, `foldSwitchGuards`, flag, loop-form and shared-arm planning and printing; a `for` whose init copy merged prints `for (; c; step)`.
-  - Proof: interference is exact SSA liveness; merging non-interfering values changes names only. The control validators re-derive every edge's copies.
-  - Acceptance: the six `whereLoopAddBtree` arms print no copy; sample local declarations and plain `x = y;` copies fall; no new validator rejection; both dialects.
-  - Result (2026-10-21, 25-function subset): the six arms print `goto` only; C declarations 429 -> 342, plain copies 120 -> 61 (Python-like 435 -> 347, 104 -> 43); gotos and loop forms unchanged; `whereLoopAddBtree` validation records identical in status (no rejection); counted work brotli `main` 8.01M -> 7.97M, `whereLoopAddBtreeIndex` 9.64M -> 9.56M (docs/CORE.md).
+### R2: Forwarded result demand from a self-recursive call is not demand
 
-## G2: Structure with block contents; comma conditions
+- [ ] **Problem.** `btreeOverwriteContent` (`static int`) prints 6 × `physical_return(explicit_values((uint32_t)comparison), physical_inputs("arm64:x0:32:32", value2))`. `fts3EvalAllocateReaders` and `fts3EvalNextRow` (both `static void`) print the same overlay. All three are self-recursive.
+  - **Root cause:** `src/analysis/calls/result-demands.ts:94-105` pushes every changed exit cell of the primary result root as a full-width demand on the call that defines it. A callee's high half that only flows to this function's own exit therefore demands `x0[0:64]`. `source-facts.ts:2021-2036` folds dependencies of the function's own unit into `function_return_demands`, so the self-call demands the function's own result. That blocks `exit_scratch` (`reconstruction/index.ts:556-559, 686-689`) and `incidental_result` (`source-results.ts:695-698, 781-791`).
+  - **Change:**
+    - Tag demand roots from the return-exit snapshot as _forwarded_. Every other root is _semantic_: loads, stores, call arguments, branches, switch, indirect targets, explicit return values. A value reached from both is semantic.
+    - `NativeDependency` (`native-prepare.ts:83-86, 141`) keeps `return_demand` and gains `return_demand_semantic`.
+    - In the `source-facts.ts` aggregation, a dependency from the function's own unit contributes only its semantic demand.
+  - **Soundness:** the self-demand is circular. Under the existing `exit_scratch` / `incidental_result` premise ("callers read only the established return storage" / "read no result"), the self-call is one of those callers. No new rule is applied; the existing ones fire with their existing records.
+  - **Tests:**
+    - `test/analysis/calls/result-demands.test.ts`: forwarded vs semantic tagging.
+    - A recursive AAPCS64 fixture with exits `mov w0,#0`, the self-call result and a library `int` call. Without external demand it prints a 32-bit result with an `exit_scratch` record. With `function_return_demands: [x0 64]` from an external caller the overlay stays.
+    - A void-like recursive fixture becomes `void`.
+    - Execute the low 32 bits against an oracle.
+  - **Acceptance:**
+    - `btreeOverwriteContent` prints `uint32_t btreeOverwriteContent(` with plain `return 0;` / `return (uint32_t)comparison;`.
+    - `fts3EvalNextRow` prints `void`.
+    - `fts3EvalAllocateReaders` has no `physical_return`. Its leftover `uint32_t` result is a known residual: a stored constant 7 left in `w0` looks deliberate.
+    - Expected side changes, both toward the source: `fts3EvalTestExpr` → `uint32_t`, `fts5ParseSetColset` → `void`. Nothing else changes.
+  - **Not in this item:** using forwarded demand for non-self callers only when the caller's own exit is semantically demanded. It changes many callee summaries; measure it as a separate item if wanted.
 
-The structurer runs before reconstruction and ignores block contents (docs/internals/structuring-emission.md, design decisions). The renderer merges `if (a) if (b)` into `a && b` only when nothing prints between the two tests (`renderer.ts:5461`). A test separated from the previous one by a single call therefore costs a goto or a breakable block: 26 classified constructs (`sqlite3BtreeTripAllCursors`: 3 gotos, Ghidra 1 with `(uVar2 = _saveCursorPosition(pbVar3), (int)uVar2 != 0)`).
+### R3: A context-specialized callee summary keeps the callee's result root
 
-Ghidra structures inside its data-flow loop and again after merging (`coreaction.cc:6021`, `6100`). A block may join a condition when it prints at most its branch plus one statement (`BlockBasic::isComplex`, `block.cc:2417-2472`; `ruleBlockOr`, `blockaction.cc:1321-1371`), and that operand prints comma-separated (`printc.cc:2979-3017`).
+- [ ] **Problem.** `matrix_variadic_call` `-O2` (ELF `0x401d60`, PE `0x140001260`, stripped ELF `sub@0x401d50` and PE `sub@0x140001250`) is two tail calls to the variadic `matrix_variadic` (returns `double`). OD prints a `void` function whose two exits return different registers through `physical_return`, under the header `/* ABI scratch at return, not results: … */`.
+  - **Root cause:**
+    - `native-context-prepare.ts:28-67` specializes the callee to the call's constants. For `matrix_variadic(0)` only the `xorpd %xmm0,%xmm0; ret` exit survives.
+    - A literal zero has no IEEE type, so `native-transfer.ts:428-453` skips xmm0 (`if (floating && !type) continue;`) and claims `rax[0:64]`, which the `va_list` setup writes.
+    - The other call site still projects xmm0, so the two exits disagree.
+    - The context-free result is already computed (`native-context-prepare.ts:39-49`) but used only for entry registers.
+  - **Change:**
+    - Store the generic result on the context unit.
+    - In `observeNativeUnit` (`source-facts.ts:1383-1509`), use the generic `returns`/`return_types`/`written_result` only when both results are non-empty and their root sets differ, for `observed` and for `source_interface`.
+    - Keep context widths on the same root, and never add a result to an empty context.
+    - Persist the field if prepared units are serialized (`native-summaries.ts`).
+  - **Soundness:** the specialized exits are a subset of the callee's exits, so the generic per-exit proofs hold on each of them. Only the storage classification is inherited; values stay context-precise.
+  - **Tests:** `test/service/analysis/native-context.test.ts` / `native-interface.test.ts`.
+    - A SysV callee with `count == 0 → xorpd xmm0` and a loop exit that `addsd`s into xmm0: the generic and the `count = 0` summaries both give xmm0 f64.
+    - A caller with call sites for count 0 and 2 becomes a `double` function; execute it with a stub callee.
+    - Negative: empty generic and empty context stay empty.
+  - **Acceptance:**
+    - The four functions print `double …` with `return matrix_variadic(0);` / `return matrix_variadic(2…);` and no "ABI scratch" comment.
+    - `fts3UpdateMethod` and `analyzeDatabase` stay byte-identical. A broader override, applied whenever the results differed, changed them and was rejected.
+    - Nothing else changes.
+  - **Separate problem:** the ELF `-O2` text still drops the double parameters `a`, `b`. They pass through to the variadic callee, so this is open arity; see S8.
 
-- [x] Content facts per block: printed statements, labels/notes and edge copies (G1), computed from reconstruction and source inlining. First map every read of the region tree under `src/reconstruction` (ownership walk `index.ts:83`, FP guard rewrite `source-fp.ts:235`, loop roles `source-names.ts:367`, `validate.ts`, `local-control-validation.ts`) and make the facts independent of the first region tree.
-  - Evidence (2026-10-21): the ownership walk and validators index blocks/transfers only, loop roles read loop membership; the FP guard check became a CFG fact (`source-fp.ts`, terminal failure block entered only by its guard). Facts: `commaOperands` / carriers, `printedCopies`, `returnsConstants` (renderer, after the variable partition), passed as `StructuringConditions`.
-- [x] Structure again with those facts (Ghidra's post-merge pass), or move structuring after reconstruction if the map shows no real dependency [inference: the move is the cleaner design]. Decide by measured work; the result must fit the work-limit margins (see rules). Dropping `planBreakableBlocks` (G6) frees its search allowance.
-  - Evidence (2026-10-21): structure again (`restructure`, record `short_circuit_structure`); the service's source-view layout skips the goto search (`provisional`). Decision and numbers in docs/internals/structuring-emission.md. Work brotli `main` 8.90M → 9.20M, `whereLoopAddBtreeIndex` 9.00M → 9.40M (second structuring 1.04M / 0.38M, provisional first saves 0.75M / 0.35M, partly re-spent by callee summaries that take half the remaining work); both complete under 10M with main's diagnostics.
-- [x] Short-circuit operand rule: an operand block that prints exactly one statement before its test joins `&&` / `||`. C prints `(x = f(), x != 0)`, or `(x = f()) != 0` when the test reads `x` once directly; Python-like prints `(x := f()) != 0`. Eligible first: an assignment whose value the test reads (both dialects can print it). Measure how many of the 26 constructs that leaves before extending to other single statements.
-  - Proof: the comma operator is a sequence point; the statement runs exactly when the test runs, in the same order. Nothing is hoisted. The control validator checks the chain like any merged condition.
-  - Acceptance: `sqlite3BtreeTripAllCursors` prints at most one goto; the sample's jump statements fall by about the measured comma-condition share; comma/walrus conditions appear in both dialects.
-  - Result (2026-10-21, 26-function subset, docs/PERFORMANCE.md "G2"): `sqlite3BtreeTripAllCursors` 3 → 1 goto; C jump statements 237 → 211 (Ghidra 184), gotos 209 → 182, no per-function increase; Python-like 254 → 232 with 25 walrus lines. Includes joined exits (`if (a || (x = f()) == 0) goto L;`, record `joined_exit_condition`) and record `comma_condition`. Left: void-call operands `(f(x), test)` (C only; `sqlite3BtreeClose` #39, `sqlite3ExprCodeExprList` #83), operands whose call is inlined into the test, loop-condition comma tests. Executed tests: `test/emitters/c/source-comma-condition.test.ts` (both dialects).
+### R4: The native return interface types `-O0` slot reloads like the source planner
 
-## G3: Merge duplicated tests; un-rotate loops
+- [ ] **Problem.** `matrix_variadic_call` `-O0` (ELF `0x401ec0`, PE `0x140001410`, Mach-O `0x1000007a4`) prints `physical_return` with `unknown_value(…, "call clobbers zmm0_low64")`. The callee `matrix_variadic` is `double` in its own source view, but its summary says `rax`/`x0`.
+  - **Root cause:**
+    - `nativeReturnInterface` (`native-transfer.ts:242-250, 428-453`) types registers only from expressions and contracts.
+    - At `-O0` the result is a reload of a frame slot (`movsd -0x28(%rbp),%xmm0` / `ldr d0,[sp,#8]`), so the FP root is skipped.
+    - The source planner types the same reload (`source-results.ts:178-253`: `slotStores`, `reloaded`, `slotType`). Two implementations of "which register is the result" disagree.
+  - **Change:** move the slot-typing helper into a shared module and use it in `nativeReturnInterface` at the `floating && !type` branch. The type applies when every exit cell is a load from an exact private slot whose direct stores are all one of: FP of the same width, literals, or typed reloads. The existing typed-result precedence (`:488-497`) then replaces the integer root. The output of `source-results.ts` must stay byte-identical.
+  - **Tests:** `native-interface.test.ts`, O0-style callees:
+    - SysV (slot stored with an `fadd` result and a literal 0.0, xmm0 reloads it, eax a loop counter) → xmm0 f64;
+    - AAPCS64 (`ldr d0` from an sp slot, x0 not written) → v0 f64;
+    - Negative: an integer store into the slot keeps today's behavior;
+    - A caller fixture executes `double r = callee(...); return r;` through a frame slot.
+  - **Acceptance:**
+    - The three functions print `double matrix_variadic_call(uint32_t arg0, double arg1, double arg2)` with `return result;` / `return frame.local_30;`.
+    - No `unknown_value(… "call clobbers zmm0_low64")`.
+    - The PE signature must stay `(uint32_t, double, double)`. A forced-summary prototype showed an extra `uint64_t` rdx formal; if it appears, report it to S8 instead of patching it.
+    - Nothing else changes.
+  - **Depends on:** R3 (same files; land them one after the other).
 
-Compilers copy one test into several predecessors and we print a goto per copy: 16 classified constructs, 11 in `allocateBtreePage` (`cbz`/`cbnz x21` at 0x100066780, 0x1000669ec, 0x100066afc; `cbnz x26` at 0x100066cb0, 0x100066d38). A rotated loop prints as `if (p != 0) { do { … } while (p != 0); }` (`sqlite3BtreeTripAllCursors`; Ghidra: `for (pbVar3 = …; pbVar3 != 0; pbVar3 = *(byte **)(pbVar3 + 0x28))`), so the sample has 3 `for` loops against 12. SSA threading bypasses only empty blocks whose branch is constant or tests the same SSA value (`src/analysis/values/index.ts:627-652`).
+### R5: A vector copy or fill temporary in the FP register is not a result
 
-Ghidra's `ConditionalJoin` (`blockaction.cc:1920-2115`, match `2073-2099`) and `ActionNodeJoin` (`2335-2373`) replace two CBRANCH blocks with the same exits and functionally equal conditions by one joined block whose differing operands become MULTIEQUALs (`nodeJoinCreateBlock`, `funcdata_block.cc:798-834`); `BlockWhileDo::finalTransform` then builds `for` loops (`block.cc:3284-3366`, `3477-3546`).
+- [ ] **Problem:**
+  - `vdbePmaReaderClear` (`static void`, ends with `memset` of the reader) prints `physical_return(… "arm64:x0:0:64", address_4, "arm64:v0:0:64", 0, …)`. Here x0 is a leftover `vdbeIncrFree` result and v0 is the `movi v0.2d,#0` used by `stp q0,q0`.
+  - `matrix_aggregate` (ELF/PE `-O2`, both stripped) returns its struct through the hidden pointer. OD prints `rax` = the sret pointer echo plus the `zmm0` halves of a 16-byte `movups` copy. Ghidra prints `long *matrix_aggregate(...)` with `return param_2;`.
+  - **Root cause:**
+    - `selectSourcePrimaryResult` (`source-results.ts:748-778`) returns `explicit` when the untyped FP register is written after the integer register on every exit.
+    - `observedElsewhere` (`:409-458`) deliberately ignores stores, so the copy datum looks like a result.
+    - In the zero-fill case, constant folding breaks value identity. The link survives in instruction provenance: the `movi` id is shared by the exit cells and by every store datum.
+  - **Change:**
+    - Build two sets: SSA values that are, through transport, the datum of a ≥128-bit store; and the instruction ids in those data's provenance.
+    - The FP carrier is incidental when every exit leaf is one of: such a datum, a constant sharing such an instruction, or an unprojected or non-final call output.
+    - Then skip the `explicit` return and treat the FP state as `undefined` for the `incidental_result` gate.
+    - The integer register then decides. For the aggregate, rax equals entry rdi (Win64: rcx), which is an exact pointer result. Otherwise `incidental_result` gives `void`.
+  - **Soundness:** this is the `incidental_result` family: a presentation record plus the `abi_conformance` premise that callers read no FP result. The ≥128-bit restriction keeps scalar FP results that are also stored explicit.
+  - **Risk to measure:** an untyped vector-returning function that also stores the same vector. No corpus function has one.
+  - **Tests:** `source-results.test.ts`, executed against a memory oracle:
+    - AAPCS64 zero-fill → `void`;
+    - SysV sret echo with a 128-bit copy → `return p`;
+    - Win64 variant;
+    - Negatives: a 64-bit untyped d0 that is stored and returned stays explicit; a vector-typed carrier stays unchanged;
+    - The checked view is unchanged.
+  - **Acceptance:**
+    - `vdbePmaReaderClear` prints `void` with no `physical_return`.
+    - The four `matrix_aggregate` texts print `<T>* …(<T>* address, …)` ending `return address;`.
+    - Nothing else changes. The by-value struct parameter is S4's job.
 
-- [x] SSA CFG rewrite in simplification: two branch blocks with the same two targets (same or complemented polarity) whose condition cones are equal up to leaves that differ per block become a new join block with one parameter per differing leaf and one branch; both blocks jump to it and the target edge arguments are carried per predecessor. The joined cone must be pure (no load, call or unknown effect); the provenance of both terminators joins.
-- [x] Rotated loops: the guard `if (c)` and the bottom test `c` over the loop-carried value join into one header test, so `planLoopForms` prints `while (c)` or `for (init; c; step)`.
-  - Done (`values-effects/6`, emitters 71): `joinDuplicateTests` (`src/analysis/values/join.ts`) at each simplification fixpoint, incl. effect-free forwarding preheaders and a per-edge term check before applying; Python-like `while` headers no longer print a `pass` before the body. 21-function subset (fresh `decompile`, `/tmp`): gotos 182 → 169 (`allocateBtreePage` 28 → 21: exactly the 3 + 3 `cbz/cbnz x21` and 1 `cbnz x26` gotos; `CloseFiles` 5 → 1; `btreeBeginTrans` 52 → 50; no function rose), `while (true)` 22 → 21, tested loops 30 → 31, `for` 2 → 2 (pointer-chasing steps are not `for` inductions); 8 rotated `if (p) do … while (p)` loops print `while (p)` (`sqlite3BtreeTripAllCursors`, `btreeEndTransaction` ×2, `btreeLockCarefully`, `sqlite3BtreeClearTable`, `sqlite3BtreeCreateTable`, `sqlite3BtreeCommitPhaseOne`, `whereLoopAddBtree`). Counted work: `whereLoopAddBtreeIndex` 9,638,238 → 9,681,310, brotli `main` 8,014,703 → 8,043,696. Not joined: re-tests of packed NZCV flags (`extract(insert(…), 30)` against a recovered compare), guards with another shape or exit (`count == 0` vs a 64-bit down-counter), and preheaders that compute a non-constant value (`orr x8, xzr, x2` is `0 | x2`, not folded: identities see only the right operand; folding the left one changed `native_report`'s variadic stack-argument recovery and was dropped).
-  - `for` steps (emitters 72): `planLoopForms`/`acceptStatementFor` take a top-tested loop's last body statement assigning the tested variable (incl. a load `p = p->next`) as the `for` step when the sole repeat edge prints nothing and nothing else in the loop writes the variable; the init is the statement ending the entry block or the entry edge's copy (Ghidra's `BlockWhileDo::finalTransform`). Same subset: `for` 2 → 4 (`sqlite3BtreeTripAllCursors`: `for (address_1 = …; address_1 != 0; address_1 = …->field_0x28)`, `btreeLockCarefully`), gotos/loops otherwise unchanged; Python-like keeps `while`. Executed against source: `bump` (pointer-chasing `for`, incl. an empty list).
-  - Proof: structural equality of the two condition cones modulo the parameterized leaves; local validation checks that the joined test equals each original test on its incoming edge.
-  - Acceptance: `sqlite3BtreeTripAllCursors` prints one loop test; `allocateBtreePage` loses the 7 gotos the classification attributes directly to duplicated tests; sample `for` and tested loops rise.
+### R6: An integer-built double in the FP register is a `double` result
 
-## G4: Choose loop exits like Ghidra
+- [ ] **Problem.** `sqlite3Fp10Convert2` (`static double`) builds the double's bits in integer registers (`fmov d0, x8`; `movi v0.2d,#0` on early exits). There is no IEEE evidence, so OD prints `void` and 3 × `physical_return(… "arm64:v0:0:64", …)`.
+  - **Change:** in the branch that would return `explicit` (after R5's incidental check), choose `float` when all of the following hold:
+    1. On every exit, the FP cell walks to leaves that are not call outputs, loads, observed elsewhere or vector data; literals are neutral.
+    2. On every exit with a non-literal leaf, the upper FP cells are literal 0, i.e. a scalar `fmov`/`movq` write.
+    3. The non-literal exits agree on width: 64 gives `double`, 32 gives `float`.
+    4. At least one exit has a non-literal leaf.
 
-Bottom-tested loops become `while (true)` with breaks, and the code after the loop is absorbed into the body: 47 `while (true)` vs 8, 284 `break` vs 23, 16 classified constructs. `ParseInt`: Ghidra prints `do { … } while (uVar2 != 5);` followed by the post-loop test; we print `while (true)` with `continue`, three `break`s and a goto. Our follow key ranks fewest other non-tail exits first, then a header exit, then a latch exit (`src/presentation/index.ts:480-490`).
+    Record `primary_result` with the reason "…written before an untyped scalar FP value consumed only by exits on every exit path", plus an `abi_conformance` requirement: "a scalar FP-bank result is IEEE; callers read no integer result". This mirrors the accepted rule that scalar FP-bank formals are IEEE (docs/CORE.md).
 
-Ghidra's `LoopBody::findExit` takes exit candidates from the tails first, then the head, then middle nodes (`blockaction.cc:182-239`); `orderTails` puts the exiting tail first (`245-263`); body extension never adds the exit block (`150-176`).
+  - **Mode decision:** proven if the precision check is clean, otherwise `likely`. Check that no full-tier function whose source returns a non-FP type gains `double`/`float`, and run the same comparison over the SQLite/brotli samples of `likely-precision`. Any false positive moves the rule behind `inference: "likely"` and `LIKELY_GATE`.
+  - **Tests:**
+    - An AAPCS64 fixture with `movi #0` and `fmov d0, x8` exits → `double`. Executed results are bit-exact for NaN payloads, −0.0 and infinities.
+    - Negatives: the value is also stored or passed to a call; all exits are literals; the upper lane is non-zero; x0 is demanded.
+    - A 32-bit `fmov s0, w8` variant → `float`.
+  - **Acceptance:** `sqlite3Fp10Convert2` prints `double sqlite3Fp10Convert2(…)` with no `physical_return`; nothing else changes in the full tier.
+  - **Depends on:** R5.
 
-- [x] Rank a latch (bottom-test) exit first when the loop has one repeat edge, then the header exit, then the current key. Compare body extension with Ghidra's `extend` and stop absorbing code that runs only after the loop has finished.
-- [x] The 6 classified edge-choice cases in large functions: Ghidra labels a side exit (error or return path) so the enclosing if/else still collapses; we keep it as a `break` and pay a goto where the arms merge. Also the outer `while (true)` in `sqlite3BtreeIndexMoveto` (line 241 in the baseline) whose only back edge is `goto label_103`.
-  - Acceptance: `ParseInt` prints a do-while with the post-loop code after it; sample `while (true)` and `break` counts fall; every per-function goto increase is listed in docs/PERFORMANCE.md with its cause (totals hid `whereLoopAddBtree` 14 → 26 in the forward-label round).
-  - Evidence (structure/7, emitters 72; docs/PERFORMANCE.md "Readability roadmap 2, G4 loop exits"): 28-function subset gotos 506 → 486, `break` 73 → 69, `continue` 13 → 8, `while (true)` 47 → 43, no per-function goto increase; `ParseInt` prints `do { … } while (index != 5);` then the post-loop test; `sqlite3BtreeIndexMoveto` outer loop is a do-while (no `goto label_104`) and its comparator fallback is the else arm (`branch_order`, 12 → 8 gotos). Latch-first as Ghidra orders it was rejected (+28 gotos); the bottom test ranks after labeled-exit cost. `whereLoopAddBtree` rows 78/80/93 unchanged. Tests: source-control (do/while with post-loop code, shared side exit, arm order; both dialects, executed) and emitted-c-source native oracles (ParseInt, else-arm label).
+## S: `entry_sp`
 
-## G5: `else if`
+163 lines in 13 functions. Each fix is a proven-mode rewrite under an ABI premise recorded like G7's `frame_object`. None needs `likely`.
 
-The renderer never prints `else if` (0 in the sample, Ghidra 37); 39 `} else { if (…) … }` sites have an else body that is exactly one if statement. Ghidra prints an else block that is itself an if with a pending brace, giving `else if` (`printc.cc:3036-3041`, `3071-3078`).
+A prototype of S1–S3 (unsound, measurement only) gave these results:
 
-- [x] In the renderer's if printing (`renderer.ts`, around `5380-5490`): when an else arm prints exactly one `if` (no statement, definition, label, note or edge copy before or after it), print `} else if (…) {` (Python-like `elif`) at the outer depth. Mappings keep their spans.
-  - Done (emitters 70): `sourceIf` prints the `else` arm through `elseArm` (`soleControl`/`printsOneIf` decide from what the arm prints; `else_if` presentation record). Checked on 9 functions in both dialects (before/after exports at HEAD, `/tmp`): normalized token streams (braces and `else:` + `if` vs `elif` ignored) identical in all 18 files; the 19 sole-if `} else { if … }` sites in them (baseline sites by the same counter: 39 of 79 `else { if`) all print `else if` / `elif` (fixture_check 10, sqlite3VdbeMemTranslate 6, btreeBeginTrans 2, ParseBase64 1); the rest have a statement or sibling after the if and stay nested.
-  - Acceptance: sample `else if` at least 39; the layout, validators and every other printed token unchanged; both dialects.
+- `createFunctionApi`: 18 → 0 lines;
+- SysV `matrix_variadic` `-O2`: 31 → 2 lines;
+- SysV `matrix_variadic` `-O0`: 38 → 2 lines.
 
-## G6: Drop `do { } while (0)`; fix emitter repair artifacts
+### S1: Incoming scalar stack arguments become formals by per-slot reach
 
-Decision (2026-10-20): breakable blocks were a cheap goto reduction. Reviewers cited them (`h3_pack`, docs/PERFORMANCE.md, third suite round 1), Ghidra never prints them, and they are dropped. Removing them raised gotos 200 → 333 on `structure/6` (docs/PERFORMANCE.md, structuring sample); G1–G4 are measured against the baseline without them.
+- [ ] **Problem.** `createFunctionApi` has 11 source parameters; on AAPCS64, arguments 9–11 are on the caller's stack. OD reads `*(uint64_t *)((uintptr_t)entry_sp + 0/8/16)`. Ghidra prints `param_9..param_11`.
+  - **Root cause:** `src/reconstruction/source-stack.ts:1394-1433` binds incoming loads to formals (via `incomingStack`, `source-planner.ts:1356-1377`) only when all of these hold:
+    - `!escaped`. But any unresolved call sets it (`:609-614`), and every callee summary here was cut by budget.
+    - No store through a non-stack pointer anywhere in the function (`:1409`).
+    - The per-load stack snapshot flags `aliased`/`escaped` are clear (`:1418-1419`).
 
-- [x] Delete `planBreakableBlocks` (`src/emitters/source-control.ts:1484`), its renderer call and `breakable_block` presentation record (`renderer.ts:6578-6588`), the `once` loop mark (`src/presentation/model.ts:119-123`) and its handling in the renderer (`renderer.ts:4589`, `7206`) and the validators (`src/reconstruction/validate.ts:261`, `311`, `387`; `src/reconstruction/local-control-validation.ts:29-34`, `73`, `144`), the Python-like run-once `while True: … break` form, their tests and docs (docs/internals/structuring-emission.md, docs/CORE.md). Bump the version. Land first and record the new sample baseline with M1.
-  - Done (emitters 69): `planBreakableBlocks`, the `breakable_block` rule, the `once` loop mark and the run-once printing in both dialects are gone; their edges print as `goto` to forward labels. Checked on 6 functions (C / Python-like exports, `/tmp` before-after): `do { } while (0)` 2/2/2/8/6/5 → 0 and no run-once `while True:` in `CloseFiles`, `sqlite3BtreeSetPageSize`, `sqlite3VdbeMemGrow`, `btreeBeginTrans`, `sqlite3BtreeOpen`, `sqlite3ExprCodeIN`; gotos 2→5, 1→4, 3→6, 32→52, 31→46, 5→14 respectively (full-sample baseline recorded by the coordinator).
-- [x] `if (loop_exit_0) { break; } break;` in `allocateBtreePage`: `planLoopExits` emits a flag test followed by an unconditional transfer to the same place. Emit neither the test nor the flag when both outcomes leave the same way.
-  - Done (emitters 75): `planLoopExits` drops a route whose guard is followed by a silent `break` leaving the same scope (`LoopExitPrinting.quiet`/`exitCopies`); the edge prints as a `goto` to the continuation's label. Checked by a hand-laid-out region (`test/emitters/c/source-control.test.ts`, both dialects, executed against the checked view): `switch { case 1 → done; case 2: continue; default → silent tail }` prints `case 1: goto label; … } break;` with no flag, and keeps the flag when the tail prints a store. The structurer's own layouts no longer contain the shape (no `do { } while (0)`): the 6 baseline functions and macho/elf/brotli/SQLite-`btree` exports (179 functions, C) are byte-identical before/after this change.
-- [x] Exit flags that are set on every path reaching their test (`whereLoopAddBtree` `loop_exit_*`): introduce a flag only when some path reaches the re-test with it clear; otherwise print the transfer directly. Baseline: 12 flags in 6 functions; Ghidra prints a goto for a multi-level exit. After G1–G4, measure flags against plain gotos the same way as breakable blocks.
-  - Done (emitters 75): a route is kept only if every guard it passes is reached with its flag clear (a printed edge to the scope's successor, or a kept flagged exit to that loop's own successor) and is not redundant; otherwise it prints as a `goto` (nested scopes only, so no cycle). Flags in the 6 baseline functions: 12 → 2 on main before this change (G4/G6 removed the rest: `allocateBtreePage`, `whereLoopAddBtree`, `btreeBeginTrans`, `sqlite3BtreeOpen` print 0; `whereLoopAddBtreeIndex` and brotli `main` print 1 each, tested after an inner loop that also exits normally, so both are kept and unchanged). A hand-laid-out `switch` whose lexical successor none of its edges reaches (every other edge leaves through a flag) loses its flag and prints gotos; execution equals the checked view in both dialects.
-- [x] Emitter repair artifacts left by G2/G4 (no-op `goto`, `goto` that is a `break`, empty `else {}`).
-  - Done (emitters 77, `wt/g6d`): a block that prints nothing and jumps silently to the next is transparent to the lexical follow (`quietJump`, `silentNext`, `transferAction(..., reaches)`), so a goto over such a chain prints nothing and a goto out of the innermost loop to the block after a silent block following it is a `break` (`silent_block_crossing`; the edge records the blocks it crosses and both validators re-derive them). An `else` arm that prints nothing prints no `else` (`elseArm`, `branch_layout`; the shared-arm `||` form with a silent stay arm was the source). Counter over the 214-function structure sample (`rm2-6ecd517` → this build; throwaway line counter over the exported files, not committed): goto directly (through closing braces) before its label 3 → 0, goto to the label right after its loop 5 → 0, `else {` + `}` 12 → 0; gotos 453 → 443, no function prints more (`allocateBtreePage` 21 → 16 with 5 `break`, `sqlite3BtreeInsert` 15 → 13, `main` 160 → 159, `sqlite3BtreeRollback` 2 → 1, `sqlite3BtreeSavepoint` 1 → 0); only those 10 of 214 texts change. Python-like (`allocateBtreePage` 21 → 16 gotos, 4 → 9 `break`; empty `else:` in 3 of 5 checked functions → 0). Tests: `test/emitters/c/source-control.test.ts` (four shapes × both dialects, executed against the checked view), `test/reconstruction/local-validation-cases.ts` (forged `through` claims rejected).
-  - Acceptance: no `do { } while (0)` or run-once `while True:` in either dialect; both artifacts gone from their functions; validators re-derive every edge.
+    These whole-function gates fail. The live entry SP then also disables the frame object (S2), so the 14 negative slots print as `entry_sp − k`.
 
-## G7: Shrink what surrounds the code
+  - **Change** (source view only):
+    - `expose()` (`:501-515`) also records `incomingFloor`: the lowest floor of exposures with a base ≥ 0. Mixed-sign values and indexed or dynamic accesses with a base ≥ 0 count too.
+    - Bind an exact, nonvolatile, loads-only, non-overlapping incoming group when `!reachAll`, `group.end <= incomingFloor` (or there is no floor), and the facts are complete.
+    - Drop the `escaped`, unknown-store and snapshot-flag gates in the source view; keep them in the checked view.
+    - Optionally also accept float/double and narrower integers where `abi.classifyCall` places such a scalar. Reuse the IEEE retyping in `source-signature.ts:120-156`.
+  - **Soundness:** callees, caller-supplied, global, loaded and returned pointers cannot designate this activation's incoming argument storage. Only addresses derived from it can, and the floor excludes those. Record:
+    - `requireAbi('incoming_arguments_private', …)`;
+    - `presentation('incoming_formal', 'stack:<key>', …)`.
+  - **Tests** (`test/reconstruction/incoming-stack.test.ts`, IR builder, AAPCS64 and SysV):
+    - 9 (AAPCS64) or 7 (SysV) used parameters, an open call before the incoming loads and a store through argument 1. Assert no `entry_sp`, the formal count, and `execute()` equal to the oracle for 0, 2^64−1 and 2^63. The event trace shows the store and the call but no incoming loads.
+    - Negative: the incoming address is passed to the call, so the slot is not bound and a call oracle writing through it is observed.
+  - **Acceptance:**
+    - `createFunctionApi` has 0 `entry_sp` and 11 formals (`…, arg8, arg9, <ptr> arg10`); its negative slots print as `frame.*` members.
+    - No other text gains `entry_sp`.
+    - The checked view is byte-identical.
 
-47 % of our bytes are outside statements and control flow, and Ghidra prints none of it. On the LLM task benchmark we pay about 2.2× Ghidra's tokens per correct answer.
+### S2: The frame object coexists with live entry-SP addresses ≥ 0
 
-- [x] Per-function preamble (18 % of bytes): every function prints its `typedef` / `struct` bodies and `extern` lines. Print struct bodies once per image (`export` already writes `types.h`; MCP has the `types` view) and reference them by name; print an `extern` only when it carries a declared or library prototype, not an inferred `(T*, ...)` that repeats the call site.
-  - Acceptance: preamble bytes per function fall; the LLM task benchmark (`scripts/bench/llm-tasks/`) gains no wrong or unknown answer.
-  - Evidence (2026-10-21, docs/PERFORMANCE.md "Readability roadmap 2, G7"): inferred `extern`s gone (open arity moves to one comment line); `export` writes struct typedefs/bodies once to `types.h` (`options.structures: "external"`); `decompile` and MCP keep them inline because the merged `types` pass omits most structures a function names (SQLite `btree`: 442 bytes of `types.h` vs 230 structures). Preamble 9,426 → 5,485 bytes over 14 export functions (−42 %), file bytes −8.0 %. **The LLM task benchmark is not re-run here: the coordinator must check it for new wrong/unknown answers** (struct bodies now live in `types.h` for `export-file`; MCP unchanged except the open-arity spelling).
-- [x] Escaped frame memory (11 % of bytes, 1,370 `entry_sp` lines in 38 functions). Ghidra puts constant-offset stack slots in SSA and names them (`local_28`, `&local_28`) under an alias-boundary guess (`varmap.cc:708-799`). Exact alternative without promotion: print the frame region kept as memory as one local frame object, a struct whose members sit at their frame offsets (one member per consistent (offset, width) access set, byte arrays for overlapping or dynamically indexed parts), and spell accesses `frame.local_ec`, `&frame.local_ec`, `(uint8_t *)&frame + i`. Memory semantics, ordering and aliasing are unchanged: nothing is forwarded. Owner: stack plan (`src/reconstruction/source-stack.ts`) and renderer.
-  - Acceptance: no `entry_sp` in functions whose frame accesses are all at known offsets; the 52 third-suite interface mismatches caused by an extra `entry_sp` input disappear if no access needs `entry_sp` once the frame object exists [check].
-  - Evidence (2026-10-21, docs/PERFORMANCE.md "Readability roadmap 2, G7 frame object"): sample `entry_sp` lines 1,470 → 26 over the 38 baseline functions plus `renameColumnFunc` (left: two `fixture_variadic` reading the caller's variadic area); `main` / `whereLoopAddBtreeIndex` work 9.61M → 9.53M / 9.718M → 9.721M; third-suite mismatch functions print `entry_sp` in 8 of 72 decompilations (was 46), all Win64 incoming stack arguments; evaluator re-score pending.
-- [x] Open arity at call sites (774 call lines end in `, ...)`, 375 such externs): the source view prints `...` at every open call (`renderer.ts:1677-1681`). Print only the proven arguments at the call and state the open arity once in the callee's declaration. Proven mode stays proven: no argument is added to or dropped from the IR, and `likely` closures still print `likely_arity(...)`.
-  - Acceptance: the checked view is unchanged; LLM benchmark questions about arguments keep their answers.
-  - Evidence (2026-10-21): 176 → 0 call lines ending `, ...)` in the source view of 10 functions × 2 dialects (checked view byte-identical on all 20 texts); open callees named once on `open arity (calls show proven args only): …`, indirect calls state it in their function-pointer type; an interface with no proven argument, a callee with an established prototype and a callee with a closed or guessed call keep the inline `...` (36 `f(...)` sites remain). **LLM benchmark argument questions: the coordinator must verify** (not run here).
+- [ ] **Problem.** `frame()` (`source-stack.ts:1720-1731, 1775-1783`) returns the entry-SP form for the _whole_ frame whenever any address at or above the entry SP is live. The `frame_object` validation record is then `verified` but unused. This accounts for 104 of the 163 lines (createFunctionApi, SysV variadics).
+  - **Change:**
+    - Extend the object variant of `SourceStackStorage` (`source-model.ts:226-234`) with `entry: Value | null`.
+    - When the frame object is verified and the entry SP is live, lay out the object from accesses with `end <= 0` (minus the return address) and taken negative addresses.
+    - Renderer (`printed` `:1650-1679`, `frameStorage` `:3992-4032`): offsets ≥ 0 keep `entry_sp + k`; negative offsets go through `frame.*`.
+    - `validate.ts:83-103` accepts retained accesses ≥ 0 only when `storage.entry` is set.
+    - Never emit an object with no members and no taken address; the prototype printed `struct { } frame;` for Darwin.
+    - Update `inference.ts:498-501` and `source-names.ts:958`.
+  - **Soundness:** G7's existing premise (`requireAbi('frame_object', …)`, `:1802-1807`). Frame addresses stay inside the frame object, which never reaches incoming bytes. Nothing is forwarded.
+  - **Tests** (`test/reconstruction/frame-object.test.ts`), per ABI:
+    - an escaped negative slot;
+    - an indexed negative base;
+    - entry SP+8 (AAPCS64: +0) stored into a negative slot and dereferenced later.
 
-## G8: Recombine split register cells
+    Negative offsets print as `frame.*`, and `entry_sp` appears only in ≥ 0 expressions. `execute()` gives the same values and the same event order as the checked view. Add a case with no negative accesses: no frame object.
 
-A 64-bit value assembled per arm from two 32-bit cells prints as `value6 | ((uint64_t)value7 << 32)`. `sqlite3BtreeCommitPhaseTwo` builds the `getPageNormal` / `getPageMMap` function pointers this way (low cells `0x60ce8` / `0x60ae0`, high cell `1`, i.e. `0x100060ce8`); Ghidra prints `pcVar4 = _getPageNormal`. Baseline: 11 reassemblies in 6 functions. Ghidra's varnodes are whole registers, so this cannot arise there.
+  - **Acceptance:**
+    - The SysV `matrix_variadic` texts (`-O0` `0x401d10`, `-O2` `0x401bd0`, stripped `sub@0x401bd0`) print every negative access as `frame.*`, with ≤ 4 `entry_sp` lines each.
+    - No `struct { } frame;` anywhere.
+    - The checked view is unchanged.
+  - **Depends on:** S1. Rebase onto J4 if J4 has landed: both touch `source-stack.ts`.
 
-- [x] Cell recombination (source view, docs/internals/reconstruction.md, step 6) also merges a phi group whose cells are constants (or recombinable values) on every incoming edge into one whole-width parameter with one constant per edge; pointer and global naming then applies to each constant.
-  - Acceptance: `sqlite3BtreeCommitPhaseTwo` prints both symbols; the sample reassembly count falls; local validation proves each recombined constant.
-  - Evidence (types/15, reconstruction/62): `sqlite3BtreeCommitPhaseTwo` prints `value8 = (uintptr_t)getPageNormal;` / `getPageMMap` (python-like `function_address("getPageNormal")`) instead of `value6 | ((uint64_t)value7 << 32)`; the range-folded constant high cell no longer keeps the low cell split, and source facts offer the whole per-edge constants as candidate addresses. Each constant is proved by `validateConstantCells` (exact evaluation, no BDD allowance). Reassembly regex over the 6 baseline functions at the same base: 11 → 9 (`sqlite3BtreeCommitPhaseTwo` 1 → 0, `sqlite3BtreeOpen` 1 → 0); the 9 left are cells defined by call clobbers, `__unknown_effect` outputs (G9) or a group with an unknown-effect edge, not constant phi groups. Tests: `test/reconstruction/source-cells.test.ts` (constant cells), `test/reconstruction/sqlite-cell-constants.test.ts`.
+### S3: Stack addresses read back from memory print through their load
 
-## G9: Coverage
+- [ ] **Problem.** In the SysV and PE variadic texts, values are assigned to undeclared names (`value4 = …`, `address_5 = …`, `address_2 = address;`); the graders flagged these. Also, `entry_sp + 8` appears where the binary _reloads_ `va.overflow_arg_area`.
+  - **Root cause:**
+    - The stack plan seeds its address map from every value with a stack fact, including load results (`source-stack.ts:133-137`).
+    - The renderer prints such values as address constants (`renderer.ts:1650-1653`) and skips their declarations (`:8933`).
+    - But a retained load still prints as `name = …` (`:4610-4617`).
+  - **Change:**
+    - Split the analysis address map from the presentation map in `planSourceStack`'s result. The analysis map keeps taint, escape and floors; the presentation map feeds `source.stack_addresses` and liveness (`reconstruction/index.ts:863, 942, 1219`).
+    - A retained load whose result is at offset ≥ 0 prints through its declared variable.
+    - A retained load at a negative offset is either hidden with `presentation('frame_reload_spelled_as_address', …)` or declared.
+    - General invariant: `assignmentText` never assigns to a name the declaration pass skipped.
+  - **Soundness:** a spelling choice between two expressions proven equal.
+  - **Tests:** an IR builder case stores SP+8 into a frame slot, reloads it and dereferences it in a loop. Assert:
+    - every assignment target is declared (`new Parser(text).symbols` from `test/emitters/c/support.ts`);
+    - no `entry_sp + 8` inside the loop;
+    - `execute()` is equal.
 
-We print no text where Ghidra does. Third suite: stripped ELF 0 of 32 functions for us, 17 of 32 for Ghidra (stripped PE: neither harness produced text). Dev loop: all 88 failures are the stripped ELF/PE cells (`No function matches the selector` at `-O0`, `Function search is incomplete; uniqueness or absence cannot be established` at `-O2`). One unsupported instruction turns a function into whole-state `unknown_effect` plumbing: `sqlite3VdbeMemNumerify` prints 146 lines around `FCVTZS_64D_float2int`, Ghidra 37. The x86-64 lifter also ends the block there (ARM64 continues).
+    Repeat with a negative frame address.
 
-- [x] Stripped ELF/PE discovery and selection: resumable whole-image discovery so a selector can resolve a function, or prove its absence, on stripped images.
-  - Evidence (`wt/g9strip`): image-wide sweep roots unexplained code as `candidate`s (PLT/stub sections excluded), function index `complete` only when every executable byte is explained; `functions_discover` continues a persisted frontier one revision per step and API/CLI selection runs it to completion; all 96 addresses of the 8 stripped matrix cells return text; `test/api/discovery-resume.test.ts` (resume, cold-project identity, padding `not_found`) and discovery unit tests.
-- [x] The x86-64 lifter continues past an unsupported instruction, like ARM64.
-  - Evidence (wt/g9lift): `X86Lifter` emits the whole-state `unknown_effect` and continues when the flow is fallthrough/call (other flows still end the block); tests in `test/lifters/x86_64/semantics.test.ts` (same block keeps the following `mov`, conditional successors stay reachable, invalid encoding still terminates).
-- [x] Lift the encodings seen: ARM64 `FCVTZS_64D_float2int`, `UCVTF_D64_float2fix`, `DUP_asimdins_DR_r`, `CMEQ_asimdsame_only`, `AND_asimdsame_only` (structure sample); x86-64 `bts`, `punpcklbw` (third suite). Each gets semantic tests against the trusted evaluator.
-  - Acceptance: stripped ELF/PE dev-loop and third-suite cells return text; the listed encodings leave no `__unknown_effect` in their functions.
-  - Evidence (wt/g9lift; the stripped-ELF/PE half belongs to the first checkbox): `sqlite3VdbeMemNumerify` 150 -> 71 non-blank lines, no `Unsupported ARM64 encoding`; brotli `PrintBytes` 54 -> 26 lines, no unknown effect; brotli `main` has none of DUP/CMEQ/AND left but its counted work rises 9.60M -> 11.15M, so at the default 10M limit it fails with `resource_limit` until that work is paid for (measure: `.local/g9-work/measure-main-work.sh`). Semantic tests: `test/lifters/arm64/conversions.test.ts` (FCVTZS/FCVTZU saturation/NaN/RZ for all four S/D x W/X pairs, SCVTF/UCVTF fixed-point incl. single rounding, DUP/CMEQ/AND lanes) and `test/lifters/x86_64/semantics.test.ts` (BTS register/immediate/memory incl. signed bit-string offsets against a byte-level model, PUNPCKLBW).
+  - **Acceptance:** no assignment to an undeclared name in the 13 functions. With S2, the SysV `-O2` texts lose `entry_sp + 8` in their loop pre-headers.
+  - **Depends on:** S1 (land after it; pairs with S2).
+
+### S4: An incoming by-value aggregate becomes a struct formal
+
+- [ ] **Problem.** `matrix_aggregate(aggregate input, u64 delta, double scale)` passes a 24-byte struct, which is SysV MEMORY class: it sits at entry SP+8..+32 and is modified in place. OD prints `*(uint64_t *)(entry_sp + 8) = …` (ELF `-O0` `0x401c40`, `-O2` `0x401b30`, stripped `sub@0x401b30`). Ghidra prints `in_stack_*` locals.
+  - **Root cause:**
+    - Formal binding accepts only loads of pointer-width integers without overlaps (`source-stack.ts:1404-1407`, `source-planner.ts:1360`).
+    - Slot promotion and the frame object are negative-only (`source-stack.ts:956-957`; `frameLayout` `:73, 79`).
+    - `validate.ts:83-96` rejects any retained non-negative access.
+  - **Change:**
+    - When retained accesses lie in the incoming area (`incoming_candidate`, plus the Win64 `shadow_space`), S1 did not bind them, and no exposure has a base ≥ 0, lay them out with `frameLayout` generalized by origin and direction. Members sit at their entry offsets.
+    - Create one source-only formal `stack_args` of struct type, appended last in `finalize` and recorded in `formal_stack_offsets`.
+    - Spelling: `stack_args.arg_8`, `&stack_args.arg_8`, `*(uint64_t *)&stack_args.arg_10`, with a preamble struct. Python-like: `stack_args: struct{…}`.
+    - `reconstruction/index.ts:1102` must not drop the signature for it.
+  - **Soundness:** nothing is forwarded. Record:
+    - `requireAbi('incoming_object', …)`: the sret pointer, globals, loaded pointers and unknown stores never designate the incoming area;
+    - `presentation('incoming_object', …)`.
+  - **Tests:** a SysV IR fixture with sret in `rdi`, `rsi`, `xmm0`, an add/increment/multiply at +8/+16/+24, and a 16-byte plus an 8-byte copy to `[rdi]`. `execute()` reproduces `{total+delta, count+1, weight*scale}` byte-exactly for wrapping `total`, `count = 0xffffffff` and NaN/−0.0 `weight`. Add an O0-style `lea`-based variant and a negative variant where the address escapes.
+  - **Acceptance:** the three texts have 0 `entry_sp` and one `struct stack_args_… stack_args` formal. The checked view is unchanged.
+  - **Depends on:** S2. The interpreter in `test/emitters/c/support.ts` needs by-value struct formals.
+
+### S5 (optional): `frameLayout` keeps scalar members under spanning accesses
+
+- [ ] A wide access that exactly covers whole narrower clusters plus padding merges them into a byte array today (`uint8_t local_d8[8]`, `arg_10[8]`). Keep the narrower members and spell the wide access as a cast at the first member (`source-stack.ts:35-112`).
+  - Acceptance: the SysV `-O2` `matrix_variadic` and the `matrix_aggregate` texts get `uint32_t` members. `frame-object.test.ts` layout expectations are updated.
+  - Depends on: S4.
+
+### S6: Darwin and Win64 variadic functions print `...` and `va_start`
+
+- [ ] **Problem.**
+  - Win64 `matrix_variadic` (`-O0` `0x140001320`, `-O2` `0x140001170`, stripped `sub@0x140001160`) spills `rdx`/`r8`/`r9` into the home area (`*(uint64_t *)(entry_sp + 16) = arg1; …`) and walks it from +16. Its signature shows the spilled registers as formals.
+  - Darwin (`-O0` `0x1000006b4`, `-O2` `0x1000004c4`, stripped `sub@0x1000004c4`) prints `double* entry_sp` as a formal and walks it.
+  - **Root cause:**
+    - `source-variadic.ts` handles only the caller side.
+    - Nothing recognizes the callee's `va_start` code.
+    - The planner makes every argument register a formal (`source-planner.ts:684-710`) and refuses declared variadic signatures (`:839`).
+    - The Win64 home area is classified `shadow_space` (`src/analysis/stack/index.ts:86-101`).
+  - **Change:**
+    - **Detection.** Let `a` be the lowest exposed incoming offset (S1's floor): Darwin 0 (or the end of the named stack formals), Win64 `8 + 8n` with 1 ≤ n ≤ 4. A value based at `a` must be dereferenced at non-constant offsets or escape, and no known-offset incoming access may lie below `a` except bound named formals. Win64 additionally needs, for each i in [n, 4), exactly one unconditional entry-region store of the entry value of the i-th integer argument register to home slot `8 + 8i`, before any other access to that area or any call, with no other use of those registers.
+    - **Rewrite:**
+      - the named formals only, followed by `...`;
+      - a source-only `va` value replacing the entry-SP base (`(uintptr_t)va + k`);
+      - the Win64 home stores hidden;
+      - a `va_list va; va_start(va, <last named>);` prologue (Python-like: `va = va_start(arg0)`);
+      - `va_list` is `char *` on both ABIs.
+  - **Soundness:** exact by the ABI definition of `va_start`. Record `requireAbi('variadic_convention', …)` and `presentation('va_start', …)`. If the base is only read at constant offsets, the function is not variadic: use S4 instead.
+  - **Tests:**
+    - `fixtures/bin/macho-arm64-symbols` `fixture_variadic` (2 `entry_sp` lines today): assert `...`, no `entry_sp`, and `execute()` equal to the C oracle for counts 0..9 with doubles placed at entry SP.
+    - A Win64 IR fixture: the home stores are hidden and `execute()` returns the sum over registers and stack slots.
+    - Negative: a missing home store or a direct use of `rdx` means no rewrite.
+    - Add `va_list`/`va_start` to the test interpreter.
+  - **Acceptance:** the six texts have 0 `entry_sp` and signatures `(uint32_t arg0, ...)` / `(uint32_t count, ...)`; the PE `arg1..arg3` formals are gone.
+  - **Depends on:** S1, S2.
+
+### S7: SysV variadic functions print `...` and `va_start`
+
+- [ ] **Problem.** SysV `matrix_variadic` (`-O0` `0x401d10`, `-O2` `0x401bd0`, stripped `sub@0x401bd0`) prints 15 formals: `arg1..arg5`, `double arg6` and 7 × `uint128_t` (the register save area spills). It also prints `al` as `unknown_value("bits8_t", "non-argument entry register")` and the `va_list` initialization through `entry_sp`. Ghidra prints `double matrix_variadic(uint param_1)`.
+  - **Change:** match the exact footprint; if anything differs, do not rewrite.
+    - **Register save area** at frame offset R, 16-aligned. For i in [g, 6), one u64 store of the entry GPR i at R+8i (unconditional). For j in [f, 8), one 128-bit store of the entry xmm_j at R+48+16j, all inside one region guarded by `al != 0`.
+    - **`va_list`** at frame offset v: `gp_offset = 8g`, `fp_offset = 48+16f` (two u32 stores or one u64), `overflow_arg_area` = entry SP + 8 + s, `reg_save_area` = R.
+    - Every footprint store happens on every path before any other access to these areas, any call or any escape. The saved registers and `al` have no other use.
+  - **Rewrite:**
+    - the named formals followed by `...`;
+    - the footprint stores hidden and the empty guard dropped (check that structuring removes an `if` with an empty arm and a pure condition);
+    - `va_start(va, <last named>)` at the last footprint store;
+    - `va` as a `va_list` frame member, with fields spelled `va[0].gp_offset` / `fp_offset` / `overflow_arg_area` / `reg_save_area`;
+    - reloads of the overflow pointer print through S3.
+  - **Soundness:** SysV `va_start` lowering _is_ these stores. The `al` guard only matters if a caller violates the ABI. Record `requireAbi('variadic_convention', …)` and `presentation('va_start', …)` listing the absorbed stores.
+  - **Tests:** `fixtures/bin/elf-x86_64-symbols` `fixture_variadic` (24 `entry_sp` lines today):
+    - assert one named formal, `...`, and no `uint128_t` formals or `unknown_value("bits8_t"…)`;
+    - `execute()` against the oracle for counts 0..12, which forces the overflow path;
+    - Negatives: a missing xmm store, an extra use of `rsi`, a call between footprint stores. Each gives no rewrite and output identical to today's.
+  - **Acceptance:** the three texts have 0 `entry_sp` and the signature `(uint32_t arg0, ...)`.
+  - **Not done here:** `va_arg` recognition; Ghidra does not do it either.
+  - **Depends on:** S2, S3, S6 (shared `...`/`va` plumbing).
+
+### S8 (optional): Callers see a callee's variadic interface
+
+- [ ] Publish the S6/S7 footprint as a `NativeInterface` field: `variadic: {named_integer, named_vector, named_stack_bytes}` (`src/service/analysis/source-facts.ts:541-616`, native summaries). Bump `stack-calls` and `NATIVE_SUMMARY_FORMAT`.
+  - Effect: call sites print the variadic arguments (`matrix_variadic(2, a, b)`), and `matrix_variadic_call` `-O2` keeps its double parameters `a`, `b`, which R3 does not restore.
+  - Depends on: S6, S7, R3.
+
+### S9 (optional): Declared signatures with stack, variadic or hidden-result parameters
+
+- [ ] `source-planner.ts:835-840` refuses variadic and `hidden_result` declarations, and `bind` refuses stack locations (`:142`). With S1, S4, S6 and S7, a declared stack parameter can bind to an incoming formal or object member, and a declared `...` can drive S6/S7. No corpus function needs it. Without it, a DWARF signature with stack parameters re-creates `entry_sp`, and `reconstruction/index.ts:1102` drops the signature.
+
+## J: `indirect_exit`
+
+The relative x86 jump-table shape (`lea; movslq; add; jmp *reg`) and the compressed ARM64 shape (`adr; ldr[bh]; add …, lsl #2; br`) are already proved; `sqlite3GetToken` prints a `switch`. CONTINUE.md's "relative jump table unproven" is wrong. Every failure comes from where the proof chain starts, or from which functions discovery knows, not from the table encoding.
+
+A whole-image instrumented run on sqlite3-arm64 found 21 tables proved and 291 distinct unresolved `br`: 9 compressed tables and about 282 indirect tail calls.
+
+### J1: Re-prove jump tables on settled chains
+
+- [ ] **Problem.** `selectInnerLoop` (`0x1000bc1e4`) prints `if (value7 <= 12) return indirect_exit(0x1000bc594 + ((uint64_t)data_100132d3e[value7] << 2), …)`. Its graph holds 253 of the function's 639 instructions, so the case bodies are lost. Ghidra prints the `switch`.
+  - **Root cause:**
+    - `proveJumpTable` (`src/analysis/discovery/jump-tables.ts:205-702`) runs once, when the branch is first decoded, on the predecessor map decoded so far (`discovery/index.ts:542-566`).
+    - Per-graph validation (`:788-883`) only re-checks the recorded chain. When a chain member later gains predecessors, the table is rejected for good (`:877-880`).
+    - A fresh proof on the final chain succeeds: 13 targets, table `0x100132d3e`.
+  - **Change:**
+    - After every `drain()`, including the drains the sweep triggers, re-prove in VA order every unconditional indirect branch whose chain context changed: a member gained a predecessor or became a seed, or the root gained instructions. Replace or drop the table entry, enqueue new targets, and drain until stable.
+    - In per-graph validation, when the recorded chain fails, re-prove with the graph's predecessors and `is_entry`. Accept the result only if the chain is single-entry, every target is inside the function, and the targets are a subset of the current ones. The subset rule keeps validation removal-only, so it terminates.
+  - **Tests:** `test/analysis/jump-tables.test.ts`, synthetic ARM64. Entry `b L1`; at `L1`: `sub w8,w0,#1; cmp w8,#2; b.hi out; adr; ldrb; add …, lsl #2; br`, with one case branching back to `L1`. The table resolves (3 targets, guard exact) and the case bodies are members. Negative: with the guard before `L1`, the table stays unresolved and the graph `partial`.
+  - **Acceptance:**
+    - `selectInnerLoop` has the table at `0x1000bc590` (13 targets), prints a `switch`, has no `indirect_exit`, and holds ≥ 600 instructions.
+    - SQLite: proved tables go from 21 to ≥ 22, and none is lost.
+    - Matrix and brotli texts are byte-identical except where a table newly resolves.
+    - Fix CONTINUE.md's note and `docs/internals/discovery.md` (proofs are re-run on the final predecessors).
+
+### J2: Register facts at the chain start
+
+- [ ] **Problem.** In `jsonTranslateTextToBlob` (`0x10008b404`), the table base `x24` is set before the parser loop and survives `bl` calls (callee-saved). The straight-line prover sees it as an opaque symbol. The same holds for `sqlite3ExprCodeTarget`, `sqlite3ExprDataType`, `strftimeFunc`, `re_sql_func` (whose case blocks become 14 spurious functions) and `sqlite3_str_vappendf`. `sqlite3Fts5ExprNew` needs a "known zero-extended" fact for an index guarded on `w8` and loaded through `x8`.
+  - **Change:**
+    - Add an optional `entry_state` to the proof input, mapping a register to a constant or to "zero-extended from k bits". `read()` (`jump-tables.ts:233-242`) seeds roots from it.
+    - When the straight-line proof fails, compute facts only for the roots it needs: a forward must-dataflow over the root's decoded members, including proved-table edges.
+      - Lattice: ⊥ / const / zext k / ⊤.
+      - Transfer: reuse the prover's exact evaluators, factored into a stepper. A 32-bit write gives `zext 32`.
+      - Kills: x86 from the exact `payload.registers`. ARM64 from any register operand plus writeback, with an explicit kill-all list (PAC/AUT hints, SVC, anything without a payload). Calls kill every register not in the new `DiscoveryInput.preserved_registers`, filled from the image's `AbiProfile.preserved` (`service/queries/graphs.ts:104-112`, `prepare.ts:77-83, 214-222`). Without that input, calls kill everything (today's behavior).
+    - Re-derive the facts on the final graph, and keep the table only if the targets are the same or a subset.
+    - Record the defining instruction and every crossed call in the table's evidence (rule text names the ABI); optionally add `entry_facts` to `ResolvedJumpTable` (`core/contracts.ts:100`).
+  - **Soundness:** call preservation is the ABI contract SSA already applies in proven mode (docs/internals/ssa-values.md). The facts hold on every decoded path, including the table's own edges.
+  - **Tests:**
+    - (a) a base in a callee-saved register, set before a loop that contains a `bl`, resolves with `preserved_registers`;
+    - (b) the base redefined on one back edge does not resolve;
+    - (c) (a) without `preserved_registers` does not resolve;
+    - (d) a `w`-guarded index loaded via `x` resolves when its only definition is a 32-bit write, but not after a 64-bit `ldr`;
+    - (e) the x86 `lea r14,[rip+T]` hoisted variant resolves;
+    - (f) `paciasp` or `svc` in the loop kills the facts.
+  - **Acceptance:**
+    - `jsonTranslateTextToBlob` resolves (table `0x100132882`, 59 entries), prints a `switch` on the byte, and holds ≥ 800 instructions.
+    - SQLite: the six tables above resolve (≥ 28 proved), and `re_sql_func`'s case blocks are no longer functions.
+    - Only `yy_reduce` (348 entries > `MAX_JUMP_TABLE_ENTRIES = 256`) stays unresolved; see Decisions.
+  - **Depends on:** J1. The two share one `discovery` bump if they land together.
+
+### J3: Candidate functions at tail-jump targets
+
+- [ ] **Problem.** In the stripped llvm-clang23 `-O2` cells, `matrix_switch` (ELF `0x401aa0`, PE `0x140001040`) is reached only by the entry point's tail `jmp` with the index fixed at 2.
+  - Discovery absorbs it into the entry function: there is no symbol, no `.eh_frame`, and a leaf has no `.pdata`.
+  - In the entry function the index is a constant, so the table does not prove, and the sweep turns the 10 case blocks into candidate functions.
+  - `decompile --address va:0x401aa0` returns the _entry_ function, which is why OD prints `void fn_function() { return indirect_exit(0x401ada, …); }`.
+  - The symbol-bearing cells have identical bytes and print a `switch`.
+  - **Change:** after the seeded drain and before the sweep (`discovery/index.ts:736-741`), and in image-wide or continuation mode only, seed a `candidate` function at the target T of an unconditional direct jump J in root R when all of these hold:
+    1. T is not a seed or an object address.
+    2. T lies before R's entry, or at or after the next seed above it.
+    3. The SP at J equals R's entry SP, by an SP-delta must-dataflow (new `stack-delta.ts`, x86 and ARM64).
+    4. Every decoded edge into T is such a jump.
+
+    Evidence: `derive('unconditional jump at entry stack depth to code outside the root body', …)`. Then J1 proves T's table, and R's jump becomes a direct `tail_call`.
+
+  - **Soundness:** a function boundary is a presentation choice; the `tail_call` edge models the transfer exactly. This reverses the documented non-goal "no promotion of branch targets to seeds", so update `docs/internals/discovery.md` with these guards.
+  - **Tests** (`test/analysis/discovery.test.ts`, synthetic):
+    - (a) `mov edi,2; jmp T` with T before the entry → T becomes a candidate with a complete graph, and the entry has a `tail_call`;
+    - (b) a backward jump inside the root's own range → no seed;
+    - (c) `push rbp; jmp T` → no seed;
+    - (d) T also reached by a `jcc` → no seed and no conflict;
+    - (e) ARM64 `ldp x29,x30,[sp],#16; b T` → seed.
+  - **Acceptance:**
+    - In both stripped cells, `functions` lists `0x401aa0` / `0x140001040` and none of the case-block addresses.
+    - `decompile` at those addresses prints `(uint32_t, uint64_t, uint64_t)` and a 10-case `switch` plus default, like the symbol-bearing cells.
+    - The entry functions print a direct tail call.
+    - Mach-O and all symbol-bearing cells are unchanged.
+  - **Depends on:** J1.
+
+### J4: Indirect tail calls in the source view
+
+- [ ] **Problem.**
+  - `sqlite3_result_pointer` (`0x100042080`, the inlined `invokeValueDestructor`) prints `return indirect_exit(arg3, "Indirect branch target is unresolved", …)` for `br x3` after a full epilogue. Ghidra prints `(*UNRECOVERED_JUMPTABLE)(param_2); return;`.
+  - `pcache1Shrink` (`0x1000ecae0`) does the same with `br x1`, where `x1` is loaded from the global `xMutexLeave` slot `data_100168d80`.
+  - About 282 of SQLite's unresolved `br` instructions are such tail calls, including frameless leaves like `memtraceRoundup`.
+  - **Root cause:**
+    - Neither lifter marks an indirect branch as a tail call (`arm64/index.ts:286-293`, `x86_64/index.ts:316-320`).
+    - `tails` are built only for direct targets with a callee summary (`source-planner.ts:616-653`).
+  - **Change** (reconstruction and renderer, source view only; the checked view keeps `indirect_exit`):
+    - New `src/reconstruction/source-tails.ts` `classifyIndirectTails`. A candidate is an `indirect` exit without a table where the exit stack snapshot has SP = entry SP (`analysis/stack/index.ts:891-893`).
+    - Exclude targets whose expression cone (≤ 128 nodes, loads are leaves) contains a constant in an executable range. These are switch-like and keep `indirect_exit`.
+    - Return-location proof:
+      - ARM64: `x30` at the exit is either the entry `x30`, or a reload of a slot that qualifies as a frame save with this exit included. For that, extract the frame-save qualification at `source-stack.ts:1004-1222` into a helper that takes an explicit exit list, and use it from both places.
+      - x86-64: no store overlaps [entry SP, entry SP+8), the frame does not escape, and there is no unknown-address store.
+    - The frame-save route records the existing `abi_conformance` requirement.
+    - Accepted exits get `presentation('indirect_tail_call', …)` and a `TailProjection` with `target: null` plus the target value (`source-model.ts`).
+    - Arguments: bind the ABI argument-register prefix from `block.register_exit`, as for indirect calls, with the list open. The producer of the indirect-call prefix was not located; start from `src/service/analysis/source-facts.ts`.
+    - `planSourceStack` treats these exits like tail calls.
+    - Renderer (`renderer.ts:8268-8310`): use the indirect-call `functionPointer` spelling (`:4385-4396, 4509-4535`). Print `call; return;` when the function's return projection is void, otherwise `return call`.
+  - **Soundness:** with SP = entry SP and the return location proved to hold the entry return address, the branch is observationally a call of the target by our caller. The interface stays open and the target's effects unknown.
+  - **Tests:** IR-built like `test/reconstruction/frame-saves.test.ts`, executed with a stub target:
+    - (a) an ARM64 frame + call + restore + `br x3` becomes a value-target tail that forwards the result and passes x0;
+    - (b) x30 overwritten → no tail;
+    - (c) SP not restored → no tail;
+    - (d) target = `adr` + table entry → no tail;
+    - (e) a frame address passed to the inner call → no tail;
+    - (f) x86 `add rsp,8; jmp rax` → tail, and a store to [entry SP] → no tail;
+    - (g) checked view unchanged.
+  - **Acceptance:**
+    - `sqlite3_result_pointer` prints `((void (*)(uint64_t, ...))arg3)(arg1); return;` (or the `return` form) with no `indirect_exit`.
+    - `pcache1Shrink` prints a function-pointer tail call through `data_100168d80` and records `abi_conformance`.
+    - Both checked views are unchanged.
+    - `selectInnerLoop` / `jsonTranslateTextToBlob` before J1/J2 keep `indirect_exit` (SP ≠ entry SP, code-address cone).
+  - **Independent** of J1–J3. Rebase with S2: both touch `source-stack.ts`.
+
+## Expected end state (prototype-backed where noted)
+
+| artifact          | full tier now           | after the items                                                                                                                                                                                    |
+| ----------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `physical_return` | 34 calls, 18 functions  | 0. Prototype of R1–R6: only the 18 targets plus `fts3EvalTestExpr` and `fts5ParseSetColset` changed, both toward their source types. `fts3EvalAllocateReaders` keeps a spurious `uint32_t` result. |
+| `entry_sp`        | 163 lines, 13 functions | 0 expected. Prototype of S1–S3: `createFunctionApi` 18 → 0, SysV variadic 38/31 → 2. S4, S6 and S7 not prototyped.                                                                                 |
+| `indirect_exit`   | 6 functions             | 0 expected in the corpus. Probes: tables proved for J1/J2; J3 seed by analysis; J4 not prototyped. Image-wide, `yy_reduce` remains.                                                                |
+
+## Decisions recorded with this roadmap
+
+- **R6 (untyped scalar FP result):** proven mode only if the precision check is clean, otherwise `likely`. The item decides from its own measurement.
+- **J3:** reversing discovery's "no promotion of branch targets to seeds" is accepted with the four guards above. A boundary is presentation; the transfer stays exact.
+- **Not in scope:**
+  - `yy_reduce`'s 348-entry table. It needs `MAX_JUMP_TABLE_ENTRIES` above 256 (`discovery/index.ts:29`, mirrored in target recovery). That is a structural cap, not the work budget; raise it only by an explicit decision.
+  - Hiding outgoing-argument stores to budget-cut callees (`createFunctionApi`'s `frame.local_88/80/90`). This needs closed callee interfaces or `likely` arity.
+  - `va_arg` recognition.
+  - The `__unknown_effect` functions (unlifted encodings such as `INS_asimdins_IR_r` and `USHL_asimdsame_only`), a G9-style follow-up.
 
 ## Measurement
 
-- After each item: `structure-gotos.py` with the Ghidra lane (M1) and `scripts/bench/quality-dev-loop.py`; record paired totals and per-function regressions.
-- After G1–G4: re-run the per-construct classification on the same 40 functions (protocol and categories in `.local/ghidra-gap-2026-10-20/goto-classify-*.md`).
-- The structure sample, the dev loop and the third suite are all seen. Claims need a new sealed suite built and measured under the sealing rule in docs/PERFORMANCE.md.
-- Round result (2026-10-21, main `6ecd517`; docs/PERFORMANCE.md "Readability roadmap 2: round result"): structure sample jump statements 775 → 519 (Ghidra 428), every per-function goto increase traced to the G6 run-once removal; dev loop 288/288 texts; LLM task benchmark 41/1/0 in both configs, no new wrong answer, tokens per correct 2,461 → 2,323 (`export-file`). Per-construct re-classification: `.local/ghidra-gap-2026-10-20/goto-classify-rm2.md`.
-- [ ] Gate: on the new sealed suite, blind preference is at least even with Ghidra on control flow, machine-state clutter and algorithm comprehension (the dimensions where Ghidra led in round 1); the executable-correctness subset does not regress; the LLM task benchmark's tokens per correct answer fall with no new wrong answer. Report counterexamples and losses next to wins.
+Every item is measured with odbench on the full tier, from a worktree with a built `dist/`:
+
+```sh
+bun run build
+/Users/df0/Documents/projects/od-wt/heavy.sh bun run bench run od --label <item> --repo <worktree> --tier full
+bun run bench all --label <item> --base od-head --tier full        # judged against Ghidra and against head
+grep -c 'physical_return\|entry_sp\|indirect_exit' .odbench/lanes/od-<item>/texts/<acceptance file>.c
+```
+
+Report per item:
+
+- the artifact count before and after for the acceptance functions;
+- the set of texts that differ from `od-head` (it must equal the expected set);
+- readability against head and against Ghidra on the changed functions;
+- comprehension and its paired delta;
+- the work of brotli `main`, `whereLoopAddBtreeIndex` and the changed functions (M1).
+
+A per-item judge run on the full tier costs on the order of $0.10–0.50 (only changed texts are judged).
+
+The corpus is a development set. Claims of generalisation need a new sealed suite (docs/PERFORMANCE.md "sealing rule").
 
 ## Definition of done for each item
 
-- Define the consumer-visible acceptance criterion or reduce the observed defect to a deterministic behavioral case before implementing.
-- Fix the owning shared layer and exercise both dialects through CLI/API/MCP. Delete obsolete passes the change supersedes.
-- Run the changed scenario end to end and observe the output. Use semantic regressions for boundaries and effects, not text snapshots.
-- Preserve source mappings and provenance; bump cache component versions when output identity changes.
-- Update docs (CORE.md, PERFORMANCE.md, docs/internals) only with exercised evidence, including unsupported cases and losses.
+- The listed acceptance functions change as stated, every other full-tier text stays byte-identical (or each other change is explained and goes toward the source), and the checked view is unchanged unless the item says otherwise.
+- Semantic tests in the named files: behavior through the IR builder and `execute()` of emitted C and Python against oracles, not text snapshots. Run `bun run typecheck`, `bun run test:unit` and `bun run test:integration`.
+- Validation records and ABI requirements as named; component versions bumped at merge time.
+- Docs updated with exercised evidence only: docs/CORE.md (result rules, stack presentation, helper vocabulary), the relevant docs/internals pages, and a docs/PERFORMANCE.md entry with the odbench numbers. Tick the box here with a one-line evidence note.
