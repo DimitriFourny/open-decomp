@@ -879,28 +879,28 @@ python3 scripts/bench/structure-gotos.py metrics --label pre=/tmp/structure-goto
   --ghidra ghidra=.local/ghidra-gap-2026-10-20/ghidra
 ```
 
-| 213 common functions                 |     pre |     g6a |     rm2 |  Ghidra |
-| ------------------------------------ | ------: | ------: | ------: | ------: |
-| `goto`                               |     372 |     565 |     428 |     405 |
-| functions with a `goto`              |      31 |      36 |      34 |      48 |
-| `do { } while (0)`                   |      95 |       0 |       0 |       0 |
-| `break`                              |     284 |      78 |      79 |      23 |
-| `continue` / exit flags              | 12 / 12 |  13 / 2 |  10 / 2 |   0 / 0 |
-| jump statements                      |     775 |     658 |     519 |     428 |
-| `while (true)`                       |      47 |      47 |      42 |       8 |
-| `for`                                |       3 |       3 |       6 |      12 |
-| loops with a test                    |      56 |      56 |      61 |      89 |
-| `else if`                            |       0 |       0 |      30 |      36 |
-| comma conditions (regex)             |       0 |       0 |      12 |     120 |
-| non-blank lines, no comments         |  16,546 |  16,369 |  14,110 |  11,316 |
-| bytes                                | 745,628 | 724,889 | 574,915 | 377,473 |
-| bytes: preamble                      | 151,560 | 151,560 |  25,336 |       0 |
-| bytes: `entry_sp` lines              |  86,202 |  83,110 |   1,346 |       0 |
-| bytes: comments                      |  37,903 |  37,903 |  44,738 |  24,603 |
-| local declarations                   |   2,456 |   2,452 |   2,436 |   1,237 |
-| lines with `entry_sp` (functions)    | 1,309 (37) | 1,309 (37) | 26 (2) |       0 |
-| call lines ending `, ...)`           |     725 |     725 |      68 |       0 |
-| 64-bit cell reassemblies (functions) |  11 (6) |  11 (6) |   6 (3) |       0 |
+| 213 common functions                 |        pre |        g6a |     rm2 |  Ghidra |
+| ------------------------------------ | ---------: | ---------: | ------: | ------: |
+| `goto`                               |        372 |        565 |     428 |     405 |
+| functions with a `goto`              |         31 |         36 |      34 |      48 |
+| `do { } while (0)`                   |         95 |          0 |       0 |       0 |
+| `break`                              |        284 |         78 |      79 |      23 |
+| `continue` / exit flags              |    12 / 12 |     13 / 2 |  10 / 2 |   0 / 0 |
+| jump statements                      |        775 |        658 |     519 |     428 |
+| `while (true)`                       |         47 |         47 |      42 |       8 |
+| `for`                                |          3 |          3 |       6 |      12 |
+| loops with a test                    |         56 |         56 |      61 |      89 |
+| `else if`                            |          0 |          0 |      30 |      36 |
+| comma conditions (regex)             |          0 |          0 |      12 |     120 |
+| non-blank lines, no comments         |     16,546 |     16,369 |  14,110 |  11,316 |
+| bytes                                |    745,628 |    724,889 | 574,915 | 377,473 |
+| bytes: preamble                      |    151,560 |    151,560 |  25,336 |       0 |
+| bytes: `entry_sp` lines              |     86,202 |     83,110 |   1,346 |       0 |
+| bytes: comments                      |     37,903 |     37,903 |  44,738 |  24,603 |
+| local declarations                   |      2,456 |      2,452 |   2,436 |   1,237 |
+| lines with `entry_sp` (functions)    | 1,309 (37) | 1,309 (37) |  26 (2) |       0 |
+| call lines ending `, ...)`           |        725 |        725 |      68 |       0 |
+| 64-bit cell reassemblies (functions) |     11 (6) |     11 (6) |   6 (3) |       0 |
 
 - **Against Ghidra, summed per function:** jump statements +347 → +91 (larger in 37 → 25 functions, smaller in 17 → 24), non-blank lines +5,230 → +2,794, bytes +368,155 → +197,442. Remaining largest jump excesses: brotli `main` 179 vs 115, `btreeBeginTrans` 49 vs 37, `whereLoopAddBtreeIndex` 52 vs 42, `whereLoopAddBtree` 32 vs 24.
 - **Every per-function goto increase `pre` → `rm2` comes from dropping run-once blocks (G6, decided 2026-10-20):** 22 functions print more gotos than at `pre` (largest `btreeBeginTrans` 32 → 47, `sqlite3ExprCodeTarget` 13 → 25, brotli `main` 151 → 160, `sqlite3BtreeCreateTable` 6 → 15, `sqlite3ExprCodeIN` 5 → 14, `sqlite3BtreeOpen` 31 → 36); in each, `rm2` ≤ `g6a`. From `g6a` to `rm2` (G1–G5, G6 flags, G7–G9) no function gains a goto; 24 lose some (`whereLoopAddBtreeIndex` 70 → 37, brotli `main` 188 → 160, `whereLoopAddBtree` 35 → 24, `sqlite3BtreeOpen` 46 → 36, `sqlite3BtreeInsert` 25 → 15, `allocateBtreePage` 28 → 21).
