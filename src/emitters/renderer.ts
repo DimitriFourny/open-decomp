@@ -81,6 +81,7 @@ import {
   sourceGenericStems,
   sourceIdentifierStem,
   sourceRoleStems,
+  type SourceNamePlan,
 } from '../reconstruction/source-names.js';
 import {
   abiConformanceRequirements,
@@ -114,7 +115,7 @@ import {
   type Printed,
   type SimplificationRecorder,
 } from './expressions.js';
-import { MetadataLimitError, Writer } from './writer.js';
+import { MetadataLimitError, Writer, type EvidenceSource } from './writer.js';
 import type { EmissionInput, EmissionResult } from './model.js';
 import { collectInferences } from './inference.js';
 import {
@@ -205,6 +206,15 @@ export class CallInliningRetry extends Error {
   constructor(readonly results: readonly string[]) {
     super('call inlining retry');
   }
+}
+
+/** Plans of one reconstruction that no attempt's state (rejected calls, metadata
+ * mode, validation session) can change: the first attempt computes them and
+ * every retry reuses them. */
+interface AttemptPlans {
+  names?: SourceNamePlan;
+  characters?: ReadonlySet<string>;
+  indexedData?: ReadonlyMap<string, IndexedDataAccess>;
 }
 
 /** Only syntax lives here: both dialects consume the same reconstructed program. */
@@ -332,6 +342,8 @@ export class Renderer {
   private readonly sourceNames = new Map<string, string>();
   private readonly usedSourceNames = new Set<string>();
   private readonly sourceAddresses = new Map<string, SourceAddress | null>();
+  /** First source address of each `va` value, in source order. */
+  private readonly vaAddresses = new Map<bigint, Address>();
   /** Source view: values holding one character code (see source-characters.ts). */
   private characters: ReadonlySet<string> = new Set();
   private readonly sourceDataValue: (value: Value) => SourceAddress | undefined;
@@ -373,6 +385,7 @@ export class Renderer {
     /** Call results never printed as their reader's operand; null: no call is. */
     private readonly rejectedCalls: ReadonlySet<string> | null = new Set(),
     private readonly metadata: 'full' | 'omitted' = 'full',
+    plans: AttemptPlans = {},
   ) {
     this.writer = new Writer(context, options.indent, options.include_evidence, language, metadata);
     // Rendering records presentation rewrites in the validation session; each
@@ -456,7 +469,13 @@ export class Renderer {
         else if (spelling !== name.source_name) this.linkageNames.set(name.entity_id, null);
       }
     }
-    const plan = planSourceNames(this.program, this.names, input.types, context, this.sourceView);
+    const plan = (plans.names ??= planSourceNames(
+      this.program,
+      this.names,
+      input.types,
+      context,
+      this.sourceView,
+    ));
     this.sourceRoleNames = plan.names;
     this.sourceCarried = plan.carried;
     this.sourceInitial = plan.initial;
@@ -504,6 +523,8 @@ export class Renderer {
       if (previous === undefined) this.sourceAddresses.set(key, item);
       else if (previous && (previous.name !== item.name || previous.string !== item.string))
         this.sourceAddresses.set(key, null);
+      if (item.address.space === 'va' && !this.vaAddresses.has(item.address.value))
+        this.vaAddresses.set(item.address.value, item.address);
     }
     this.globals = planGlobals(this.program, context, {
       data: this.sourceDataValue,
@@ -533,7 +554,7 @@ export class Renderer {
     }
     if (this.sourceView) {
       this.stridedPointerTypes();
-      this.characters = characterEvidence(this.program, context, {
+      this.characters = plans.characters ??= characterEvidence(this.program, context, {
         bytePointer: (id) => this.bytePointerType(id),
       }).values;
     }
@@ -559,7 +580,7 @@ export class Renderer {
     }
     if (!this.program.blocks.has(input.function.entry))
       this.invalid('Structured function has no entry block');
-    if (this.sourceView) this.planSourceControl();
+    if (this.sourceView) this.planSourceControl(plans);
     this.findLabels(this.body, [], 0);
     if (validate) validateReconstruction(this.program, context);
   }
@@ -1870,7 +1891,7 @@ export class Renderer {
         `note ${note.status}/${note.origin} id=${this.writer.quote(note.id)} subject=${this.writer.quote(id)} author=${this.writer.quote(note.author)}: ${this.writer.quote(note.value.value)}`,
       );
       this.inferenceSites.set(id, { start, end: this.writer.offset });
-      this.mapped(this.dataOrigin(id), start, [id], note.evidence_ids);
+      this.mapped(this.dataOrigin(id), start, [id], [note.evidence_ids]);
     }
   }
 
@@ -1897,22 +1918,50 @@ export class Renderer {
     return ids;
   }
 
+  /** Mappings of this attempt, published in order once its body can no longer be
+   * retried: a retried attempt's text and metadata are discarded, so it interns and
+   * unions nothing. Null once published; later mappings publish immediately. */
+  private pendingMappings: (() => void)[] | null = [];
+
+  /** Map `[start, end)` to `origin`; `ids` may be computed when the mapping is published. */
   private mapped(
     origin: Origin,
     start: number,
-    ids: readonly string[] = [],
-    evidence: readonly string[] = [],
+    ids: readonly string[] | (() => readonly string[]) = [],
+    evidence: readonly EvidenceSource[] = [],
     end = this.writer.offset,
   ): void {
     // Empty spans publish nothing; never intern identities for them.
     if (start === end) return;
+    const publish = (): void =>
+      this.publishMapping(origin, start, typeof ids === 'function' ? ids() : ids, evidence, end);
+    if (!this.pendingMappings) return publish();
+    this.context.checkpoint(1);
+    this.pendingMappings.push(publish);
+  }
+
+  private publishMappings(): void {
+    const pending = this.pendingMappings ?? [];
+    this.pendingMappings = null;
+    for (const publish of pending) publish();
+  }
+
+  private publishMapping(
+    origin: Origin,
+    start: number,
+    ids: readonly string[],
+    evidence: readonly EvidenceSource[],
+    end: number,
+  ): void {
     const contributors = this.program.source?.value_origins;
     const references = this.writer.references();
     for (const id of [origin.id, ...ids])
       for (const subject of contributors?.get(id) ?? [id]) references.add(subject);
     if (references.ids.length === 0) references.add(origin.id);
     const subjects = references.ids;
-    const dataEvidence = new Set(evidence);
+    // Evidence lists are passed by identity: the writer unions each distinct
+    // sequence once (duplicates across lists are removed there, in order).
+    const dataEvidence: EvidenceSource[] = [...evidence];
     const dataSubjects = new Set([origin.id, ...ids]);
     for (const id of subjects) dataSubjects.add(id);
     for (const id of dataSubjects) {
@@ -1921,18 +1970,18 @@ export class Renderer {
         references.add(type.type_id);
         for (const subject of [...type.association_ids, ...type.subject_ids])
           references.add(subject);
-        for (const evidenceId of type.evidence_ids) dataEvidence.add(evidenceId);
+        dataEvidence.push(type.evidence_ids);
       }
       const value = this.program.values.get(id);
       if (!value) continue;
       const data = this.sourceDataValue(value);
-      for (const evidenceId of data?.object?.evidence_ids ?? []) dataEvidence.add(evidenceId);
+      if (data?.object) dataEvidence.push(data.object.evidence_ids);
     }
     this.writer.map(
       { ...origin, id: subjects[0] ?? origin.id },
       start,
       references,
-      [...dataEvidence],
+      dataEvidence,
       end,
     );
   }
@@ -1958,7 +2007,8 @@ export class Renderer {
       this.context.checkpoint(1);
       if (seen.has(contributor.id)) continue;
       seen.add(contributor.id);
-      this.mapped(contributor, start, [...shared, ...this.semanticIds(contributor)], [], end);
+      const prefix = shared;
+      this.mapped(contributor, start, () => [...prefix, ...this.semanticIds(contributor)], [], end);
       shared = [];
       if (this.statements.has(contributor.id)) this.mappedStatements.add(contributor.id);
       if (this.controls.has(contributor.id)) this.mappedControls.add(contributor.id);
@@ -1979,7 +2029,7 @@ export class Renderer {
         site.node,
         start,
         proof ? [...proof.ids] : [],
-        [...site.node.contract_evidence, ...(proof?.evidence ?? [])],
+        proof ? [site.node.contract_evidence, proof.evidence] : [site.node.contract_evidence],
         end,
       );
       this.mapMemory(site.node, start, end);
@@ -2199,11 +2249,8 @@ export class Renderer {
     const item = this.sourceDataValue(value);
     if (item) return item.address;
     if (fact?.kind === 'constant') {
-      for (const address of this.program.source?.addresses ?? []) {
-        this.context.checkpoint(1);
-        if (address.address.space === 'va' && address.address.value === fact.bits)
-          return address.address;
-      }
+      this.context.checkpoint(1);
+      return this.vaAddresses.get(fact.bits);
     }
     return undefined;
   }
@@ -3465,7 +3512,7 @@ export class Renderer {
         continue;
       const start = this.writer.offset;
       this.writer.line(0, text);
-      this.mapped(node, start, [], signature.evidence_ids);
+      this.mapped(node, start, [], [signature.evidence_ids]);
     }
   }
 
@@ -3578,10 +3625,8 @@ export class Renderer {
         span.start,
         [],
         [
-          ...new Set([
-            ...span.object.object.evidence_ids,
-            ...(span.object.import?.evidence_ids ?? []),
-          ]),
+          span.object.object.evidence_ids,
+          ...(span.object.import ? [span.object.import.evidence_ids] : []),
         ],
         span.end,
       );
@@ -3668,7 +3713,7 @@ export class Renderer {
           'Image-backed indexed storage view at the declared VA; no allocation or invented extent. Index units are the declared scalar width. Reads retain original byte order, aliasing and faults; no Python sequence bounds or negative-index rebasing.',
         );
       }
-      this.mapped(node, start, [group.address], object.evidence_ids);
+      this.mapped(node, start, [group.address], [object.evidence_ids]);
     }
   }
 
@@ -4499,7 +4544,7 @@ export class Renderer {
           view.shape.type_id,
           ...(this.program.source?.field_subjects?.get(node.id) ?? []),
         ],
-        [...view.shape.evidence_ids, ...view.field.evidence_ids],
+        [view.shape.evidence_ids, view.field.evidence_ids],
         end,
       );
   }
@@ -4762,10 +4807,12 @@ export class Renderer {
     this.map(node, start);
     if (node.kind === 'call') {
       const proof = this.sourceEvidence.get(node.id);
-      this.mapped(node, start, proof ? [...proof.ids] : [], [
-        ...node.contract_evidence,
-        ...(proof?.evidence ?? []),
-      ]);
+      this.mapped(
+        node,
+        start,
+        proof ? [...proof.ids] : [],
+        proof ? [node.contract_evidence, proof.evidence] : [node.contract_evidence],
+      );
     }
     this.mapMemory(node, start);
   }
@@ -6317,10 +6364,10 @@ export class Renderer {
   /** Source view: coalesce phi copies, then lay out return tails and loop
    * syntax. Each step checks its side conditions on this reconstruction and
    * records one presentation rewrite; the checked view never calls this. */
-  private planSourceControl(): void {
+  private planSourceControl(plans: AttemptPlans): void {
     const subject = this.input.function.id,
       program = this.program;
-    this.indexedData = indexedDataAccesses(program, this.context);
+    this.indexedData = plans.indexedData ??= indexedDataAccesses(program, this.context);
     const indices = new Map(
       [...this.indexedData].map(([id, table]) => [id, table.terms.map((term) => term.index)]),
     );
@@ -7896,7 +7943,7 @@ export class Renderer {
           { ...this.dataOrigin(parameter.value.id), id: parameter.value.id },
           offset,
           [parameter.value.id],
-          signature?.evidence_ids ?? [],
+          signature ? [signature.evidence_ids] : [],
           offset + length,
         );
         this.inferenceSites.set(parameter.value.id, { start: offset, end: offset + length });
@@ -7919,7 +7966,7 @@ export class Renderer {
           { ...this.dataOrigin(parameter.value.id), id: parameter.value.id },
           start,
           source ? [parameter.value.id, source.id, source.type_id] : [parameter.value.id],
-          signature?.evidence_ids ?? [],
+          signature ? [signature.evidence_ids] : [],
         );
         this.inferenceSites.set(parameter.value.id, { start, end: w.offset });
       }
@@ -7932,9 +7979,12 @@ export class Renderer {
       );
     this.headerEnd = w.offset;
     const proof = this.sourceEvidence.get(this.input.function.id);
-    this.mapped(this.input.function, this.headerStart, proof ? [...proof.ids] : [], [
-      ...(proof?.evidence ?? []),
-    ]);
+    this.mapped(
+      this.input.function,
+      this.headerStart,
+      proof ? [...proof.ids] : [],
+      proof ? [proof.evidence] : [],
+    );
     if (noteSpan)
       for (const requirement of environment) mapSites(requirement, noteSpan.start, noteSpan.end);
     const formals = new Set(parameters.map((parameter) => parameter.value.id));
@@ -8048,6 +8098,7 @@ export class Renderer {
     if (this.language === 'python-like' && this.writer.codeLines === bodyLines)
       w.statement(1, 'pass');
     if (this.pendingCalls.size) throw new CallInliningRetry([...this.pendingCalls.keys()]);
+    this.publishMappings();
     if (this.language === 'c-like') w.line(0, '}');
     // Hidden subjects retain annotations without resurrecting dead declarations.
     for (const subject of this.notes.keys()) this.emitNotes(subject, 0);
@@ -8275,6 +8326,7 @@ export function renderSource(
 ): EmissionResult {
   // Reconstruction does not depend on the attempt (rejected calls, metadata).
   const program = reconstruct(input, context, options.view === 'checked' ? 'checked' : 'source');
+  const plans: AttemptPlans = {};
   let validated = false;
   const attempt = (metadata: 'full' | 'omitted'): EmissionResult => {
     const rejected = new Set<string>();
@@ -8291,6 +8343,7 @@ export function renderSource(
           !validated,
           retry < 4 ? rejected : null,
           metadata,
+          plans,
         );
         validated = true;
         return renderer.render();

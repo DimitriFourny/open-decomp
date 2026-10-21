@@ -8,7 +8,7 @@ Make source-view output as short and as structured as Ghidra's on the same funct
 - Copy Ghidra's exact transforms, not its guesses. Its stack alias boundary (`varmap.cc:754-757`), parameter fill-in (`fspec.cc:1100-1140`), return-value detection (`coreaction.cc:1991-2037`), constants-as-pointers (`coreaction.cc:1093-1176`) and "most specific type wins" lattice (`type.cc:229-235`) are heuristics: they belong in `inference: "likely"` behind the R5 precision gate, or nowhere.
 - Fix the owning shared layer (SSA, reconstruction, structuring, renderer); never repair emitted text with regexes or special-case fixtures or functions. Both dialects consume the same result.
 - Reuse the local validator (`src/reconstruction/local-validation.ts`), evidence/provenance and cache-version contracts. Bump component versions when output identity changes.
-- Never raise budgets. brotli `main` and SQLite `whereLoopAddBtreeIndex` finish only ~0.4M / ~0.3M work under the 10M limit; an item that adds work pays for it in the same change.
+- Never raise budgets. brotli `main` and SQLite `whereLoopAddBtreeIndex` finish ~0.55M / ~0.95M work under the 10M limit (after G9's lifts and their payback); an item that adds work pays for it in the same change.
 - Tune on the structure sample and the development loop; claims come from a new sealed suite (see Measurement).
 
 Ghidra citations are relative to `../ghidra/Ghidra/Features/Decompiler/src/decompile/cpp/`.
@@ -163,9 +163,11 @@ A 64-bit value assembled per arm from two 32-bit cells prints as `value6 | ((uin
 We print no text where Ghidra does. Third suite: stripped ELF 0 of 32 functions for us, 17 of 32 for Ghidra (stripped PE: neither harness produced text). Dev loop: all 88 failures are the stripped ELF/PE cells (`No function matches the selector` at `-O0`, `Function search is incomplete; uniqueness or absence cannot be established` at `-O2`). One unsupported instruction turns a function into whole-state `unknown_effect` plumbing: `sqlite3VdbeMemNumerify` prints 146 lines around `FCVTZS_64D_float2int`, Ghidra 37. The x86-64 lifter also ends the block there (ARM64 continues).
 
 - [ ] Stripped ELF/PE discovery and selection: resumable whole-image discovery so a selector can resolve a function, or prove its absence, on stripped images.
-- [ ] The x86-64 lifter continues past an unsupported instruction, like ARM64.
-- [ ] Lift the encodings seen: ARM64 `FCVTZS_64D_float2int`, `UCVTF_D64_float2fix`, `DUP_asimdins_DR_r`, `CMEQ_asimdsame_only`, `AND_asimdsame_only` (structure sample); x86-64 `bts`, `punpcklbw` (third suite). Each gets semantic tests against the trusted evaluator.
+- [x] The x86-64 lifter continues past an unsupported instruction, like ARM64.
+  - Evidence (wt/g9lift): `X86Lifter` emits the whole-state `unknown_effect` and continues when the flow is fallthrough/call (other flows still end the block); tests in `test/lifters/x86_64/semantics.test.ts` (same block keeps the following `mov`, conditional successors stay reachable, invalid encoding still terminates).
+- [x] Lift the encodings seen: ARM64 `FCVTZS_64D_float2int`, `UCVTF_D64_float2fix`, `DUP_asimdins_DR_r`, `CMEQ_asimdsame_only`, `AND_asimdsame_only` (structure sample); x86-64 `bts`, `punpcklbw` (third suite). Each gets semantic tests against the trusted evaluator.
   - Acceptance: stripped ELF/PE dev-loop and third-suite cells return text; the listed encodings leave no `__unknown_effect` in their functions.
+  - Evidence (wt/g9lift; the stripped-ELF/PE half belongs to the first checkbox): `sqlite3VdbeMemNumerify` 150 -> 71 non-blank lines, no `Unsupported ARM64 encoding`; brotli `PrintBytes` 54 -> 26 lines, no unknown effect; brotli `main` has none of DUP/CMEQ/AND left but its counted work rises 9.60M -> 11.15M, so at the default 10M limit it fails with `resource_limit` until that work is paid for (measure: `.local/g9-work/measure-main-work.sh`). Semantic tests: `test/lifters/arm64/conversions.test.ts` (FCVTZS/FCVTZU saturation/NaN/RZ for all four S/D x W/X pairs, SCVTF/UCVTF fixed-point incl. single rounding, DUP/CMEQ/AND lanes) and `test/lifters/x86_64/semantics.test.ts` (BTS register/immediate/memory incl. signed bit-string offsets against a byte-level model, PUNPCKLBW).
 
 ## Measurement
 

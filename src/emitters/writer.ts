@@ -9,6 +9,16 @@ import {
 import type { Origin } from '../ir/index.js';
 
 const NO_REFS: readonly number[] = Object.freeze([]);
+const NO_IDS: readonly string[] = Object.freeze([]);
+
+/** One immutable list of proof identities. A mapping's evidence is the ordered,
+ * duplicate-free union of its origin's provenance evidence and such lists. */
+export type EvidenceSource = readonly string[] | ReadonlySet<string>;
+/** A trie over evidence source identities; `refs` is the union of the path's sources. */
+interface EvidenceUnion {
+  refs?: readonly number[];
+  readonly next: Map<EvidenceSource, EvidenceUnion>;
+}
 
 /** A bound on provenance metadata (tables, mappings, refs, metadata bytes), never on the
  * pseudocode text. The renderer answers it by shedding metadata, not by failing. */
@@ -90,12 +100,21 @@ export class ReferenceUnions {
   begin() {
     const words = new Map<number, number>(),
       seen = new Set<readonly number[] | ReferenceEncoding>();
+    // Maintained by every merge (whose word visits are charged there): the number
+    // of distinct references and the occupied word-index range.
+    let count = 0,
+      low = Infinity,
+      high = -Infinity;
     const merge = (input: ReferenceEncoding): void => {
       if (seen.has(input)) return;
       seen.add(input);
       for (const [word, bits] of input) {
         this.context.checkpoint(1);
-        words.set(word, (words.get(word) ?? 0) | bits);
+        const before = words.get(word) ?? 0;
+        for (let added = bits & ~before; added !== 0; added &= added - 1) count++;
+        words.set(word, before | bits);
+        if (word < low) low = word;
+        if (word > high) high = word;
       }
     };
     return {
@@ -131,18 +150,25 @@ export class ReferenceUnions {
       },
       /** The number of distinct references, without materializing them. */
       size: (): number => {
-        let count = 0;
-        for (let bits of words.values()) {
-          this.context.checkpoint(1);
-          for (; bits !== 0; bits &= bits - 1) count++;
-        }
+        this.context.checkpoint(1);
         return count;
       },
       finish: (): readonly number[] => {
-        const ordered = [...words].sort(([a], [b]) => {
-          this.context.checkpoint(1);
-          return a - b;
-        });
+        // Words in index order: scan the occupied range when that visits fewer
+        // words than sorting compares.
+        let ordered: [number, number][];
+        if (words.size && high - low + 1 <= words.size * Math.log2(words.size)) {
+          ordered = [];
+          for (let word = low; word <= high; word++) {
+            this.context.checkpoint(1);
+            const bits = words.get(word);
+            if (bits !== undefined) ordered.push([word, bits]);
+          }
+        } else
+          ordered = [...words].sort(([a], [b]) => {
+            this.context.checkpoint(1);
+            return a - b;
+          });
         this.context.checkpoint(ordered.length);
         const key = ordered.map(([word, bits]) => `${word}:${bits}`).join(',');
         const cached = this.outputs.get(key);
@@ -180,7 +206,7 @@ export class Writer {
   readonly ranges = new InternTable<AddressRange>(this, 1_000_000, () => 160);
   private readonly helperNames = new Set<string>();
   private readonly idUnions = new WeakMap<readonly string[], readonly number[]>();
-  private readonly proofUnions = new WeakMap<readonly string[], readonly number[]>();
+  private readonly evidenceUnions: EvidenceUnion = { next: new Map() };
   private readonly idLists = new WeakMap<readonly string[], readonly number[]>();
   private readonly proofLists = new WeakMap<readonly string[], readonly number[]>();
   private readonly rangeLists = new WeakMap<readonly AddressRange[], readonly number[]>();
@@ -494,7 +520,7 @@ export class Writer {
     origin: Origin,
     start: number,
     semanticIds: readonly string[] | MappingReferences = [],
-    extraEvidence: readonly string[] = [],
+    extraEvidence: readonly EvidenceSource[] = [],
     end = this.offset,
   ): void {
     this.context.checkpoint(1);
@@ -517,7 +543,7 @@ export class Writer {
     )
       this.limitMetadata('Pseudocode mapping cardinality limit exceeded');
     const evidence = this.evidence
-      ? this.union(this.proofs, this.proofUnions, origin.provenance.evidence_ids, extraEvidence)
+      ? this.evidenceUnion(origin.provenance.evidence_ids, extraEvidence)
       : NO_REFS;
     if (evidence.length > 1000) this.limitMetadata('Pseudocode mapping evidence limit exceeded');
     const semantic = prepared
@@ -536,6 +562,48 @@ export class Writer {
       range_refs: ranges,
       evidence_refs: evidence,
     });
+  }
+
+  /** Proof references of `provenance` followed by the identities of `sources`, in
+   * first-occurrence order. Provenance and proof lists are immutable during one
+   * render, so each distinct sequence of list identities is unioned and interned
+   * once; a repeat visits its lists, not their identities. Empty extra lists
+   * contribute nothing and are not part of the key. */
+  private evidenceUnion(
+    provenance: readonly string[],
+    sources: readonly EvidenceSource[],
+  ): readonly number[] {
+    this.context.checkpoint(1);
+    let node: EvidenceUnion = this.evidenceUnions;
+    // The provenance list is always a key step, so it never aliases an extra list.
+    for (const [index, source] of [provenance.length ? provenance : NO_IDS, ...sources].entries()) {
+      this.context.checkpoint(1);
+      if (index > 0 && !('size' in source ? source.size : source.length)) continue;
+      let next: EvidenceUnion | undefined = node.next.get(source);
+      if (!next) node.next.set(source, (next = { next: new Map() }));
+      node = next;
+    }
+    if (node.refs) return node.refs;
+    // A bound violation aborts the full-metadata render, so interning before
+    // the bound is reached publishes nothing.
+    const refs = new Set<number>();
+    if (provenance.length > 10000)
+      this.limitMetadata('Pseudocode mapping reference limit exceeded');
+    for (const id of provenance) {
+      this.context.checkpoint(1);
+      refs.add(this.proofs.add(id, id));
+    }
+    const extra = new Set<string>();
+    for (const source of sources)
+      for (const id of source) {
+        this.context.checkpoint(1);
+        if (extra.has(id)) continue;
+        extra.add(id);
+        if (provenance.length + extra.size > 10000)
+          this.limitMetadata('Pseudocode mapping reference limit exceeded');
+        refs.add(this.proofs.add(id, id));
+      }
+    return (node.refs = Object.freeze([...refs]));
   }
 
   /** IDs/provenance are immutable during one render. Reuse empty-right unions

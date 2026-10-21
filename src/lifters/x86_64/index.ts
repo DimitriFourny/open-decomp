@@ -30,7 +30,9 @@ export interface X86LiftResult {
  * sign/zero extension, arithmetic and six arithmetic flags, ADC/SBB, MUL/IMUL,
  * DIV/IDIV with explicit #DE paths, count-masked shifts/rotates, conditions,
  * branches/loops, stack, calls, SSE scalar/packed FP and common packed integer
- * moves/add/sub/bitwise operations. Addresses use decoded RIP targets or explicit
+ * moves/add/sub/bitwise operations, legacy SSE PUNPCKLBW and BTS (the memory
+ * form with a register bit offset addresses the signed bit string; not under a
+ * 32-bit address size). Addresses use decoded RIP targets or explicit
  * address-size wrapping, scale and segment bases (FS/GS base is physical state).
  * Decoder access/flags metadata never defines these instruction semantics.
  *
@@ -48,18 +50,20 @@ export interface X86LiftResult {
  * MOVD/MOVQ, which clear bits through 127; bits above XMM remain preserved.
  *
  * Unsupported: x87/MMX, string/REP operations, atomic LOCK/memory XCHG, RCL/RCR,
- * SHLD/SHRD, bit-test/scan/BMI/ADX, saturating/shuffle/conversion SIMD, AVX and
- * later encodings, crypto, system/privileged/transactional instructions, CET
+ * SHLD/SHRD, BT/BTC/BTR, bit scan, BMI/ADX, other unpack/saturating/shuffle/
+ * conversion SIMD, AVX and later encodings, crypto, system/privileged/transactional instructions, CET
  * enforcement and precise memory-fault/exception delivery. ENDBR64 is a landing
  * marker abstraction, not CET enforcement. Unknown instructions emit an unknown
- * effect and terminate, never silently disappear or become invented traps.
+ * effect (whole modeled state and memory) and lifting continues with the next
+ * instruction when its flow is sequential or a returning call, like ARM64; other
+ * flows terminate. Instructions never silently disappear or become invented traps.
  * Explicit UD2/INT3/INT terminate as traps; malformed/reserved encodings remain
  * unknown. Memory alignment is carried by typed loads/stores. This module never
  * executes target code; interpreter use belongs exclusively to trusted tests.
  */
 export class X86Lifter implements Lifter<RegisterIR> {
   readonly name = 'x86-64 typed semantic lifter';
-  readonly version = '4';
+  readonly version = '5';
   readonly architecture = 'x86_64';
   lift(graph: FunctionGraph, abi: AbiProfile, context: OperationContext): X86LiftResult {
     if (abi.architecture !== this.architecture)
@@ -147,13 +151,12 @@ export class X86Lifter implements Lifter<RegisterIR> {
     const tablesByBranch = new Map((graph.jump_tables ?? []).map((table) => [table.branch, table]));
     const selectors = new Map<string, { block: BlockBuilder; value: Value }>();
     const fpSeen = new Set<string>();
-    const boundary = (
+    const unknownEffect = (
       block: BlockBuilder,
       reason: string,
       instruction?: DecodedInstruction,
     ): void => {
       block.unknown(reason, unknownClobbers);
-      block.terminate({ kind: 'unknown', reason });
       reasons.add(reason);
       diagnostics.push({
         code: 'unavailable_semantics',
@@ -161,6 +164,14 @@ export class X86Lifter implements Lifter<RegisterIR> {
         message: reason,
         evidence_ids: instruction?.evidence_ids ? [...instruction.evidence_ids] : [],
       });
+    };
+    const boundary = (
+      block: BlockBuilder,
+      reason: string,
+      instruction?: DecodedInstruction,
+    ): void => {
+      unknownEffect(block, reason, instruction);
+      block.terminate({ kind: 'unknown', reason });
     };
     for (const source of graph.blocks) {
       let block = blocks.get(source.id)!;
@@ -318,8 +329,15 @@ export class X86Lifter implements Lifter<RegisterIR> {
         } catch (error) {
           if (!(error instanceof Unsupported)) throw error;
           block = semantics.block;
-          boundary(block, error.message, instruction);
-          terminated = true;
+          // The whole modeled state and memory are unknown after the instruction. Only
+          // instructions whose flow is plain sequential execution (or a call that returns
+          // here) continue; any other transfer has no modeled successor.
+          if (instruction.flow.kind === 'fallthrough' || instruction.flow.kind === 'call')
+            unknownEffect(block, error.message, instruction);
+          else {
+            boundary(block, error.message, instruction);
+            terminated = true;
+          }
         }
         if (terminated) break;
       }
