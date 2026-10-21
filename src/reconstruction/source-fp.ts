@@ -9,6 +9,9 @@ export const SOURCE_FP_ENVIRONMENT =
 
 export interface SourceFpPresentation {
   readonly body: Region;
+  /** The same presentation of another layout of the same blocks (guard ownership
+   * is a CFG fact: the failure block is terminal and entered only by its guard). */
+  readonly rewrite: (body: Region) => Region;
   readonly guards: ReadonlySet<string>;
   /** Unsupported-environment failure blocks of `guards`, not printed. */
   readonly omitted: ReadonlySet<string>;
@@ -28,7 +31,14 @@ export function sourceFpPresentation(
     omitted = new Set<string>(),
     unobserved = new Set<string>(),
     expressions = new Set<Expression>();
-  const unchanged = { body: program.function.body, guards, omitted, unobserved, expressions };
+  const unchanged = {
+    body: program.function.body,
+    rewrite: (body: Region) => body,
+    guards,
+    omitted,
+    unobserved,
+    expressions,
+  };
   const validation = program.local_validation_session;
   if (program.view !== 'source' || !program.source || !validation) return unchanged;
   // Literals are the typed constants plus the integer-typed constants that join
@@ -168,18 +178,16 @@ export function sourceFpPresentation(
     )
   )
     return unchanged;
-  const failureOnly = (region: Region | undefined, id: string): boolean =>
-    !region ||
-    (region.kind === 'block'
-      ? region.id === id
-      : region.kind === 'sequence' && region.regions.every((child) => failureOnly(child, id)));
+  const terminal = (id: string): boolean => {
+    const kind = program.blocks.get(id)?.control.kind;
+    return kind !== undefined && kind !== 'jump' && kind !== 'if' && kind !== 'switch';
+  };
   for (const block of program.blocks.values()) {
     const control = block.control;
     const requirement = predicates.get(control.id);
     if (control.kind !== 'if' || !requirement) continue;
     const no = requirement.site.supported_predicate_value ? control.when_false : control.when_true;
-    if (predecessors.get(no.transfer.target) !== 1 || !failureOnly(no.body, no.transfer.target))
-      continue;
+    if (predecessors.get(no.transfer.target) !== 1 || !terminal(no.transfer.target)) continue;
     // Only the planner's exact MXCSR guard tests the unsupported state.
     if (
       !validation.presentation(
@@ -243,9 +251,9 @@ export function sourceFpPresentation(
     const control = region.control;
     const requirement = predicates.get(control.id);
     if (control.kind === 'if' && requirement && guards.has(control.id)) {
-      const yes = requirement.site.supported_predicate_value
-        ? control.when_true
-        : control.when_false;
+      const [yes, no] = requirement.site.supported_predicate_value
+        ? [control.when_true, control.when_false]
+        : [control.when_false, control.when_true];
       const block: Region = {
         ...region,
         control: {
@@ -256,7 +264,10 @@ export function sourceFpPresentation(
           transfer: yes.transfer,
         },
       };
-      return yes.body ? { kind: 'sequence', regions: [block, rewrite(yes.body)] } : block;
+      // Blocks laid out after the failure block in its arm are entered by labels only.
+      const regions = [block, ...[no.body, yes.body].flatMap((item) => (item ? [rewrite(item)] : []))]
+        .filter((child) => child.kind !== 'sequence' || child.regions.length > 0);
+      return regions.length === 1 ? block : { kind: 'sequence', regions };
     }
     const arm = (item: ControlArm): ControlArm =>
       item.body ? { ...item, body: rewrite(item.body) } : item;
@@ -412,5 +423,5 @@ export function sourceFpPresentation(
     );
     for (const [, expression] of candidates) expressions.add(expression);
   }
-  return { body, guards, omitted, unobserved, expressions };
+  return { body, rewrite, guards, omitted, unobserved, expressions };
 }

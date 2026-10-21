@@ -1,7 +1,7 @@
 import type { EntityId, OperationContext } from '../core/index.js';
 import { AnalysisBudget } from '../analysis/ssa/budget.js';
 import { computeDominance, successors } from '../ir/index.js';
-import type { BasicBlock, Edge, SSAForm } from '../ir/index.js';
+import type { BasicBlock, Edge, Terminator } from '../ir/index.js';
 import type {
   BlockRegion,
   Control,
@@ -9,6 +9,7 @@ import type {
   ParallelTransfer,
   Region,
   StructuredFunction,
+  StructuringInput,
   StructuringOptions,
   StructuringResult,
 } from './model.js';
@@ -164,7 +165,7 @@ const before = (a: readonly number[], b: readonly number[]): boolean => {
  * transactionally, never a truncated presentation.
  */
 export function structureControlFlow(
-  input: SSAForm,
+  input: StructuringInput,
   context: OperationContext,
   options: StructuringOptions = {},
 ): StructuringResult {
@@ -276,7 +277,14 @@ export function structureControlFlow(
     const labeled = new Set<string>();
     // Edge selection is bounded separately; past it, the remaining nodes of a
     // scope are laid out in dependency order without further search.
-    let selection = 64 * (blocks.size + edgeCount) + 20_000;
+    let selection = options.search === false ? -1 : 64 * (blocks.size + edgeCount) + 20_000;
+    /** Short-circuit exits to one clause (see collapseConditions), by edge key:
+     * `head` is the first operand's exit, which may own the clause as its arm;
+     * `any`: every exit is a true arm (`a || b`), else the `&&` of staying tests. */
+    type ExitGroup = { readonly head: string; readonly members: Set<string>; any: boolean };
+    const exitGroups = new Map<string, ExitGroup>();
+    /** Groups whose clause became the head's arm body: a shared arm. */
+    const sharedGroups = new Set<ExitGroup>();
 
     // Iterative Kosaraju avoids call-stack dependence on adversarial CFG size.
     const components = (ids: ReadonlySet<EntityId>, scopes: readonly LoopScope[]): EntityId[][] => {
@@ -690,6 +698,18 @@ export function structureControlFlow(
       }
       return true;
     };
+    /** `node` is entered by one edge, or only by the exits of one short-circuit
+     * condition to its clause, which then count as one edge. */
+    const joined = (node: CollapseNode): boolean => {
+      if (node.ins.length === 1) return true;
+      const group = exitGroups.get(node.ins[0]?.key ?? '');
+      budget.charge(node.ins.length);
+      return (
+        group !== undefined &&
+        node.ins.length === group.members.size &&
+        node.ins.every((item) => item.from === node.ins[0]!.from && group.members.has(item.key))
+      );
+    };
     const classify = (
       graph: Graph,
       node: CollapseNode,
@@ -742,7 +762,9 @@ export function structureControlFlow(
           edge.arm &&
           target.ins.every((item) => item.block === edge.block && item.slot >= edge.slot) &&
           blocks.get(edge.block)!.terminator.kind === 'switch';
-        if (!single && !shared) continue;
+        // A short-circuit condition's exits to its clause: the first operand owns it.
+        const grouped = !single && exitGroups.get(edge.key)?.head === edge.key && joined(target);
+        if (!single && !shared && !grouped) continue;
         // A labeled transfer into the target must stay a forward jump.
         const at = (): number[] => {
           const leaf = leaves.get(edge.block)!,
@@ -788,7 +810,7 @@ export function structureControlFlow(
           others.every(
             (item) =>
               item === join ||
-              (item.ins.length === 1 &&
+              (joined(item) &&
                 item.ins[0]!.from === node &&
                 [...targetsOf(item)].every((next) => next === join)),
           )
@@ -882,6 +904,7 @@ export function structureControlFlow(
       if (rule.kind === 'sequence') return sequence(graph, node, rule.target);
       const edge = rule.edge,
         target = edge.to;
+      const group = target.ins.length > 1 ? exitGroups.get(edge.key) : undefined;
       for (const item of [...target.ins]) detach(item);
       if (rule.kind === 'arm') {
         if (!graph.simulated) {
@@ -889,6 +912,7 @@ export function structureControlFlow(
           if (!arms) armBodies.set(edge.block, (arms = new Map()));
           arms.set(edge.slot, target.root);
           target.root.parent = { kind: 'arm', block: edge.block, slot: edge.slot };
+          if (group) sharedGroups.add(group);
         }
         node.depth = Math.max(node.depth, edge.level + target.depth);
         absorb(graph, node, target, edge.level, true);
@@ -1162,6 +1186,87 @@ export function structureControlFlow(
       }
       return false;
     };
+    /** Ghidra's `collapseConditions` (`ruleBlockOr`, blockaction.cc): before any
+     * other rule, a branch B entered only from node A, printing at most one
+     * statement its test can hold (silent jumps may lead to it), whose exits
+     * include A's other successor C, becomes A's arm: A and B are one
+     * short-circuit condition whose exits to C count as one edge (`joined`), so
+     * C can still be owned as an arm. Heads come first in reverse postorder, so
+     * chains grow flat. Operand edges and the exits to C print no copies. */
+    const collapseConditions = (graph: Graph): void => {
+      const facts = options.conditions;
+      if (!facts) return;
+      const order = graph.nodes.filter((node) => node.alive).sort((a, b) => a.rpo - b.rpo);
+      budget.charge(order.length);
+      /** The silent jump nodes from `start` to the branch they lead to, then that branch. */
+      const operand = (start: CollapseNode): CollapseNode[] | null => {
+        const chain: CollapseNode[] = [];
+        for (let node = start; ; ) {
+          budget.charge();
+          if (
+            !node.alive ||
+            node === graph.entry ||
+            node.root.kind !== 'leaf' ||
+            node.ins.length !== 1 ||
+            node.gotos.length ||
+            chain.includes(node) ||
+            chain.length > 8 ||
+            !facts.operand(node.entry)
+          )
+            return null;
+          chain.push(node);
+          if (blocks.get(node.entry)!.terminator.kind === 'branch')
+            return node.outs.length === 2 ? chain : null;
+          if (slotKind(node.entry) !== 'jump' || node.outs.length !== 1) return null;
+          if (facts.copies(node.entry, -1)) return null;
+          node = node.outs[0]!.to;
+        }
+      };
+      const step = (head: CollapseNode): boolean => {
+        for (const edge of head.outs) {
+          budget.charge();
+          if (!edge.arm || edge.to === head) continue;
+          const exit = head.outs.find((item) => item.block === edge.block && item.slot === 1 - edge.slot);
+          if (!exit || blocks.get(edge.block)!.terminator.kind !== 'branch') continue;
+          const clause = exit.to,
+            group = exitGroups.get(exit.key);
+          if (clause === head || clause === graph.entry || clause === edge.to) continue;
+          // The head is one condition: its only other edges are its exits to the clause.
+          if (
+            !head.outs.every(
+              (item) => item === edge || item === exit || (group?.members.has(item.key) ?? false),
+            )
+          )
+            continue;
+          const chain = operand(edge.to);
+          if (!chain) continue;
+          const last = chain.at(-1)!,
+            leave = last.outs.find((item) => item.to === clause),
+            stay = last.outs.find((item) => item !== leave);
+          if (!leave || !stay || stay.to === head || stay.to === clause || stay.to === last)
+            continue;
+          if (facts.copies(edge.block, edge.slot) || facts.copies(leave.block, leave.slot)) continue;
+          if (!group && facts.copies(exit.block, exit.slot)) continue;
+          const depth = chain.reduce((total, node) => total + node.depth, 0);
+          if (graph.base + Math.max(head.depth, edge.level + depth) >= maxDepth) continue;
+          for (const next of chain.slice(1)) sequence(graph, chain[0]!, next);
+          apply(graph, head, { kind: 'arm', edge });
+          const members = group ?? { head: exit.key, members: new Set([exit.key]), any: exit.slot === 0 };
+          members.members.add(leave.key);
+          members.any &&= leave.slot === 0;
+          exitGroups.set(exit.key, members);
+          exitGroups.set(leave.key, members);
+          return true;
+        }
+        return false;
+      };
+      for (const head of order) {
+        if (!head.alive || (head.root.kind !== 'leaf' && !conditionHeads.has(head))) continue;
+        while (head.alive && step(head)) conditionHeads.add(head);
+      }
+    };
+    /** Nodes holding a collapsed short-circuit condition. */
+    const conditionHeads = new Set<CollapseNode>();
     const collapse = (
       nodes: CollapseNode[],
       entry: CollapseNode,
@@ -1170,6 +1275,7 @@ export function structureControlFlow(
       loops: ReadonlyMap<EntityId, LoopPayload>,
     ): void => {
       const graph = graphOf(nodes, entry, base, loop, null, loops);
+      collapseConditions(graph);
       while (graph.alive > 1) {
         budget.charge();
         const found = pick(graph, 3);
@@ -1190,6 +1296,8 @@ export function structureControlFlow(
       slot: number,
       scopes: readonly LoopScope[],
     ): ParallelTransfer => {
+      const earlier = options.transfers?.(block, slot);
+      if (earlier) return earlier;
       const target = blocks.get(edge.target)!;
       let mode: ParallelTransfer['mode'] = labeled.has(edgeKey(block, slot)) ? 'goto' : 'next',
         loop: EntityId | undefined;
@@ -1238,9 +1346,16 @@ export function structureControlFlow(
       const arm = (edge: Edge, slot: number): ControlArm => {
         const body = bodies?.get(slot);
         const value = transfer(edge, id, slot, scopes);
-        return body
-          ? { transfer: { ...value, mode: 'next' }, body: region(body) }
-          : { transfer: value };
+        const key = edgeKey(id, slot),
+          group = exitGroups.get(key);
+        const shared = group && sharedGroups.has(group) ? group : undefined;
+        if (body)
+          return {
+            transfer: options.transfers?.(id, slot) ?? { ...value, mode: 'next' },
+            body: region(body),
+            ...(shared?.head === key ? { shared: shared.any ? ('any' as const) : ('all' as const) } : {}),
+          };
+        return shared ? { transfer: value, joins: true } : { transfer: value };
       };
       let control: Control;
       switch (term.kind) {
@@ -1303,9 +1418,85 @@ export function structureControlFlow(
       body,
       coverage,
     };
-    return { state: 'complete', value, diagnostics: [], work: budget.work };
+    return {
+      state: 'complete',
+      value,
+      diagnostics: [],
+      work: budget.work,
+      conditions: [...conditionHeads].map((node) => node.entry),
+    };
   } catch (error) {
     const result = budget.result(null, error);
     return { state: 'partial', value: null, diagnostics: result.diagnostics, work: result.work };
   }
+}
+
+/** The control-flow graph of a structured function, for structuring it again:
+ * its blocks in source order with their original statements, edges (the
+ * sources of each transfer's copies, in parameter order) and register rows.
+ * `blocks` holds every block the coverage lists. */
+export function structuredGraph(
+  fn: StructuredFunction,
+  blocks: ReadonlyMap<EntityId, BlockRegion>,
+  checkpoint: (work: number) => void,
+): StructuringInput {
+  const edge = (transfer: ParallelTransfer): Edge => ({
+    target: transfer.target,
+    arguments: transfer.copies.map((copy) => copy.source),
+    effect: transfer.effect.source,
+  });
+  const result: BasicBlock[] = [],
+    states: StructuringInput['register_states'][number][] = [];
+  for (const row of fn.coverage) {
+    const block = blocks.get(row.block_id)!,
+      control = block.control;
+    checkpoint(1 + block.statements.length);
+    const origin = { id: control.id, provenance: control.provenance };
+    let terminator: Terminator;
+    switch (control.kind) {
+      case 'jump':
+        terminator = { ...origin, effect: control.effect, kind: 'jump', edge: edge(control.transfer) };
+        break;
+      case 'if':
+        terminator = {
+          ...origin,
+          effect: control.effect,
+          kind: 'branch',
+          condition: control.condition,
+          when_true: edge(control.when_true.transfer),
+          when_false: edge(control.when_false.transfer),
+        };
+        break;
+      case 'switch':
+        terminator = {
+          ...origin,
+          effect: control.effect,
+          kind: 'switch',
+          value: control.value,
+          cases: control.cases.map((item) => ({ bits: item.bits, edge: edge(item.arm.transfer) })),
+          otherwise: edge(control.otherwise.transfer),
+          ...(control.jump_table ? { jump_table: control.jump_table } : {}),
+        };
+        break;
+      default:
+        terminator = control;
+    }
+    result.push({
+      id: block.id,
+      provenance: block.provenance,
+      parameters: block.parameters,
+      effect_parameter: block.effect_parameter,
+      instructions: block.statements,
+      terminator,
+    });
+    states.push({ block: block.id, entry: block.register_entry, exit: block.register_exit });
+  }
+  return {
+    id: fn.id,
+    provenance: fn.provenance,
+    entry: fn.entry,
+    returns: fn.returns,
+    blocks: result,
+    register_states: states,
+  };
 }

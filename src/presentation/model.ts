@@ -7,6 +7,7 @@ import type {
   Origin,
   RegisterBinding,
   Terminator,
+  SSAForm,
   Value,
 } from '../ir/index.js';
 
@@ -133,13 +134,44 @@ export interface StructuringOptions {
   readonly max_work?: number;
   /** Maximum nesting, 1..64. Deeper shapes retain explicit labeled transfers. */
   readonly max_depth?: number;
+  /** False skips the goto-selection search: when no rule applies, nodes are
+   * laid out in dependency order. Loops, their follows and bodies, and block
+   * ownership are unchanged (the source view structures again; see
+   * StructuringConditions). */
+  readonly search?: boolean;
+  /** Block contents known after reconstruction (source view): short-circuit
+   * conditions collapse first, Ghidra's `collapseConditions`. */
+  readonly conditions?: StructuringConditions;
+  /** The transfer object of edge (block, slot) of an earlier structuring of the
+   * same graph, kept so maps keyed by transfer stay valid. Loop scopes (hence
+   * break/continue modes) are the same in every structuring; `goto` and `next`
+   * differ only in a checked-view label, and only the source view passes this. */
+  readonly transfers?: (block: EntityId, slot: number) => ParallelTransfer | undefined;
 }
+/** What blocks print, from reconstruction and source planning. */
+export interface StructuringConditions {
+  /** The block may be a non-head short-circuit operand: a branch printing
+   * nothing or exactly one statement its test can hold (`(x = f(), x != 0)`),
+   * or a jump printing nothing that leads to one. */
+  readonly operand: (block: EntityId) => boolean;
+  /** Edge copies the edge (block, slot) prints; operand edges print none. */
+  readonly copies: (block: EntityId, slot: number) => number;
+}
+/** The control-flow graph structuring reads (an SSA function, or the blocks of
+ * a structured one; see structuredGraph). */
+export type StructuringInput = Pick<
+  SSAForm,
+  'id' | 'provenance' | 'entry' | 'returns' | 'blocks' | 'register_states'
+>;
 export type StructuringResult =
   | {
       readonly state: 'complete';
       readonly value: StructuredFunction;
       readonly diagnostics: readonly Diagnostic[];
       readonly work: number;
+      /** Head blocks of the short-circuit conditions collapsed first (see
+       * StructuringConditions). */
+      readonly conditions: readonly EntityId[];
     }
   | {
       readonly state: 'partial';

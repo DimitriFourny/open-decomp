@@ -37,6 +37,7 @@ import type {
   ParallelTransfer,
   Region,
 } from '../presentation/index.js';
+import { structureControlFlow, structuredGraph } from '../presentation/index.js';
 import type { SuppliedTypeRecord } from '../analysis/types/index.js';
 import { reconstruct } from '../reconstruction/index.js';
 import type { BoundaryProjection, Reconstruction } from '../reconstruction/model.js';
@@ -210,7 +211,8 @@ export class CallInliningRetry extends Error {
 /** Only syntax lives here: both dialects consume the same reconstructed program. */
 export class Renderer {
   private readonly writer: Writer;
-  private readonly program: Reconstruction;
+  /** Source view: replaced once structuring ran again with block contents. */
+  private program: Reconstruction;
   private readonly names = new Map<string, string | null>();
   private readonly identifiers = new Map<string, EmissionResult['identifiers'][number]>();
   private readonly diagnostics: Diagnostic[] = [];
@@ -295,6 +297,30 @@ export class Renderer {
         readonly terms: readonly ConditionTerm[];
       }
     | undefined;
+  /** Source view: blocks a short-circuit condition may hold as a later operand
+   * (see commaOperand): the one statement their test holds, null when they
+   * print nothing before it. */
+  private readonly commaOperands = new Map<string, Instruction | null>();
+  /** The statement of the operand whose test prints next, as an expression:
+   * `direct`, it replaces the test's one read of `value` (`(x = f()) != 0`,
+   * `(x := f()) != 0`); else the C comma operator precedes the test. */
+  private comma:
+    | {
+        readonly control: string;
+        readonly node: Instruction;
+        readonly value: Value;
+        readonly text: string;
+        readonly direct: boolean;
+      }
+    | undefined;
+  /** The statement of the operand block being printed, until its test takes it. */
+  private commaHeld: { readonly control: string; readonly node: Instruction } | undefined;
+  /** Statements and operand controls printed inside the next `if` head line. */
+  private readonly headed: Origin[] = [];
+  /** Operand exits a merged test before them performs (see joinedExit). */
+  private readonly joinedExits = new Set<ParallelTransfer>();
+  /** Operand controls of a joined exit, by id: the arm their merged test left by. */
+  private readonly joinedControls = new Map<string, ControlArm>();
   /** Flag-carried short-circuit tests by merge control id (planFlagTests). */
   private readonly flagTests = new Map<string, FlagTest>();
   /** Their stage controls (printed inside the merge test). */
@@ -764,6 +790,7 @@ export class Renderer {
   private local(value: Value): string {
     const pending = this.pendingCalls.get(value.id);
     if (pending !== undefined) return pending;
+    if (this.comma?.direct && this.comma.value.id === value.id) return `(${this.comma.text})`;
     const representative = this.variables.get(value.id);
     if (representative && representative.id !== value.id) {
       // One printed variable for a coalesced phi class; every member keeps its row.
@@ -5581,7 +5608,16 @@ export class Renderer {
     // Conjuncts of enclosing `if`s whose only content is this `if` (see nestedIf).
     const pending = this.conjunct;
     this.conjunct = undefined;
-    const term = (positive: boolean): ConditionTerm => ({
+    // A later operand's statement prints inside its test (see operandTerm).
+    const held = this.commaHeld?.control === control.id ? this.commaHeld.node : undefined;
+    this.commaHeld = undefined;
+    const comma = new Map<boolean, ConditionTerm>();
+    const term = (positive: boolean): ConditionTerm => {
+      if (!held) return plainTerm(positive);
+      if (!comma.has(positive)) comma.set(positive, this.operandTerm(control, positive, held));
+      return comma.get(positive)!;
+    };
+    const plainTerm = (positive: boolean): ConditionTerm => ({
       printed: positive
         ? condition
         : (complement ??
@@ -5906,6 +5942,151 @@ export class Renderer {
             !this.noMove(node)),
       )
     );
+  }
+
+  /** Source view: whether a later short-circuit operand prints its test alone
+   * (null) or one statement its test holds: the block's only printed
+   * statement, an assignment, load or single-result call that prints nothing
+   * else, defining a value the test reads. The C comma operator is a
+   * sequence point, so `(x = f(), x != 0)` runs the statement exactly when and
+   * before the test, as the block did. Python-like has no comma operator: its
+   * test must read the value once, unconditionally and before any other
+   * memory read or call, so `(x := f()) != 0` keeps the order. Undefined:
+   * anything else prints (a label is checked where the test prints). */
+  private commaOperand(block: BlockRegion): Instruction | null | undefined {
+    const control = block.control;
+    if (control.kind !== 'if' || this.requirementPredicates.has(control.id)) return undefined;
+    const definitions = this.program.source?.definitions;
+    const anchored = (anchor: string): boolean =>
+      this.notes.has(anchor) ||
+      !!this.deferred.get(anchor)?.length ||
+      (definitions?.get(anchor)?.some((definition) => !this.inlined.has(definition.result.id)) ??
+        false);
+    if (anchored(block.id) || anchored(control.id)) return undefined;
+    let found: Instruction | null = null;
+    for (const node of block.statements) {
+      this.context.checkpoint(1);
+      if (anchored(node.id)) return undefined;
+      if (
+        !this.program.retained.has(node.id) ||
+        this.flagAccesses.has(node.id) ||
+        ('result' in node && this.inlined.has(node.result.id)) ||
+        this.noMove(node)
+      )
+        continue;
+      if (found) return undefined;
+      found = node;
+    }
+    if (!found) return null;
+    const value = this.commaValue(found);
+    if (!value) return undefined;
+    const reads = this.commaReads(control.condition, value);
+    return reads.count > 0 && (this.language === 'c-like' || reads.direct) ? found : undefined;
+  }
+
+  /** The value a comma statement defines, when it prints `name = expression`. */
+  private commaValue(node: Instruction): Value | undefined {
+    if (node.kind === 'assign' || node.kind === 'load')
+      return this.program.live.has(node.result.id) &&
+        !(node.kind === 'load' && this.globals.import_loads.has(node.id))
+        ? node.result
+        : undefined;
+    if (node.kind !== 'call' || this.effectContract(node.clobbers) === null) return undefined;
+    const projection = this.program.calls.get(node.id);
+    const results = projection?.results.filter((value) => this.program.live.has(value.id)) ?? [];
+    if (results.length !== 1 || this.inlinedCalls.has(results[0]!.id)) return undefined;
+    const returned = new Set(projection!.results.map((value) => value.id));
+    // Live non-result clobbers print their own statements after the call.
+    return projection!.outputs.some(
+      (binding) =>
+        this.program.live.has(binding.value.id) &&
+        !this.fpPresentation.unobserved.has(binding.value.id) &&
+        !returned.has(binding.value.id) &&
+        !this.program.expressions.has(binding.value.id),
+    )
+      ? undefined
+      : results[0];
+  }
+
+  /** How often the printed test reads `value`, and whether it reads it exactly
+   * once, never under a conditional operator, with no other memory read or
+   * call in the test (`direct`: the read may be the assignment itself). */
+  private commaReads(
+    condition: Value,
+    value: Value,
+  ): { readonly count: number; readonly direct: boolean } {
+    let count = 0,
+      plain = true;
+    const pending: { value: Value; conditional: boolean }[] = [
+      { value: condition, conditional: false },
+    ];
+    for (let steps = 0; pending.length; steps++) {
+      this.context.checkpoint(1);
+      const { value: current, conditional } = pending.pop()!;
+      if (current.id === value.id) {
+        count++;
+        if (conditional) plain = false;
+        continue;
+      }
+      if (steps > 256) return { count, direct: false };
+      const expression =
+        this.synthetic.get(current.id) ??
+        (this.inline.has(current.id) && this.inlined.get(current.id)?.node.kind !== 'load'
+          ? this.program.expressions.get(current.id)
+          : undefined);
+      if (!expression) {
+        // An inline load or call reads memory in the test.
+        if (this.inline.has(current.id) || this.inlinedCalls.has(current.id)) plain = false;
+        continue;
+      }
+      const branching =
+        expression.kind === 'select' ||
+        (expression.kind === 'integer' &&
+          (expression.op === 'and' || expression.op === 'or') &&
+          bitWidth(current.type) === 1);
+      for (const operand of expressionOperands(expression))
+        pending.push({ value: operand, conditional: conditional || branching });
+    }
+    return { count, direct: plain && count === 1 };
+  }
+
+  /** The test of a later short-circuit operand leaving (`positive`: on its
+   * true arm) with the statement it holds (see commaOperand), printed where
+   * the merged `if` prints; the statement maps to that line. */
+  private operandTerm(
+    control: Extract<Control, { kind: 'if' }>,
+    positive: boolean,
+    node: Instruction | null,
+  ): ConditionTerm {
+    if (!node)
+      return { printed: this.testPrinted(control, positive), value: control.condition, positive };
+    const value = this.commaValue(node)!,
+      lines = this.writer.codeLines;
+    const text =
+      node.kind === 'call'
+        ? this.sourceCall(node, 0)
+        : this.assignmentText(node as Extract<Instruction, { kind: 'assign' | 'load' }>);
+    if (this.writer.codeLines !== lines) this.invalid('A comma statement printed a line');
+    const target = `${this.local(value)} = `;
+    if (!text.startsWith(target)) this.invalid('A comma statement lost its assignment');
+    const c = this.language === 'c-like',
+      direct = this.commaReads(control.condition, value).direct;
+    const expression = c ? text : `${this.local(value)} := ${text.slice(target.length)}`;
+    this.comma = { control: control.id, node, value, text: expression, direct };
+    const test = this.testPrinted(control, positive);
+    this.comma = undefined;
+    if (direct && test.text.split(`(${expression})`).length !== 2)
+      this.invalid('A comma operand test lost its single read');
+    if (!direct && !c) this.invalid('A Python-like operand statement has no single read');
+    this.headed.push(node);
+    return {
+      printed: direct
+        ? test
+        : { text: `(${expression}, ${test.text})`, precedence: PRIMARY, ctype: test.ctype },
+      value: control.condition,
+      positive,
+      opaque: true,
+    };
   }
 
   /** Source view: a retained zero extension or same-width alias of a member of
@@ -6314,12 +6495,95 @@ export class Renderer {
     }
   }
 
+  /** Source view: structure the reconstruction's CFG again now that block
+   * contents are known (Ghidra structures again after its merges): blocks that
+   * print their test alone or one statement it can hold (`commaOperands`) and
+   * copy-free edges let short-circuit conditions collapse first. Transfer
+   * objects are kept, so every map keyed by them stays valid; loops and block
+   * ownership are those of the first structuring. The facts never depend on
+   * the first layout (reconstruction reads only its blocks, transfers and loop
+   * membership, see docs/internals/structuring-emission.md). */
+  private restructure(silent: (block: BlockRegion) => boolean): void {
+    const program = this.program,
+      edges = new Map<string, ParallelTransfer>();
+    const slots = (control: Control): [number, ParallelTransfer][] =>
+      control.kind === 'jump'
+        ? [[-1, control.transfer]]
+        : control.kind === 'if'
+          ? [
+              [0, control.when_true.transfer],
+              [1, control.when_false.transfer],
+            ]
+          : control.kind === 'switch'
+            ? [
+                ...control.cases.map((item, index): [number, ParallelTransfer] => [
+                  index,
+                  item.arm.transfer,
+                ]),
+                [control.cases.length, control.otherwise.transfer],
+              ]
+            : [];
+    for (const block of program.blocks.values())
+      for (const [slot, transfer] of slots(block.control)) {
+        this.context.checkpoint(1);
+        edges.set(`${block.id}:${slot}`, transfer);
+      }
+    const conditions = {
+      operand: (id: string): boolean => {
+        const block = program.blocks.get(id)!;
+        return block.control.kind === 'jump'
+          ? silent(block) && !this.notes.has(block.id) && !this.notes.has(block.control.id)
+          : this.commaOperands.has(id);
+      },
+      copies: (block: string, slot: number): number =>
+        this.printedCopies(edges.get(`${block}:${slot}`)!).length,
+    };
+    const structure = (facts?: typeof conditions) =>
+      structureControlFlow(
+        structuredGraph(program.function, program.blocks, (work) => this.context.checkpoint(work)),
+        this.context,
+        {
+          max_work: this.context.budget.work,
+          transfers: (block, slot) => edges.get(`${block}:${slot}`),
+          ...(facts ? { conditions: facts } : {}),
+        },
+      );
+    let result = structure(conditions);
+    if (
+      result.value &&
+      result.conditions.length &&
+      !this.localValidation.presentation(
+        'short_circuit_structure',
+        this.input.function.id,
+        "structured again after reconstruction (the blocks, edges and loops of the first structuring): a branch entered only from one condition, printing its test alone or one statement the test reads, whose exits include that condition's other successor, joins it as a short-circuit operand before any other collapse (Ghidra collapseConditions); the operand's entry edge and the condition's exits to that successor print no copies, and the successor may become the head's arm, entered by every such exit",
+        result.conditions,
+      )
+    )
+      result = structure();
+    if (!result.value) return;
+    const blocks = new Map<string, BlockRegion>(),
+      pending: Region[] = [result.value.body];
+    while (pending.length) {
+      this.context.checkpoint(1);
+      const region = pending.pop()!;
+      if (region.kind === 'sequence') pending.push(...region.regions);
+      else if (region.kind === 'loop') pending.push(region.body);
+      else {
+        blocks.set(region.id, region);
+        this.controls.set(region.control.id, region.control);
+        for (const arm of controlArms(region.control)) if (arm.body) pending.push(arm.body);
+      }
+    }
+    this.program = { ...program, function: result.value, blocks };
+    this.body = this.fpPresentation.rewrite(result.value.body);
+  }
+
   /** Source view: coalesce phi copies, then lay out return tails and loop
    * syntax. Each step checks its side conditions on this reconstruction and
    * records one presentation rewrite; the checked view never calls this. */
   private planSourceControl(): void {
-    const subject = this.input.function.id,
-      program = this.program;
+    const subject = this.input.function.id;
+    let program = this.program;
     this.indexedData = indexedDataAccesses(program, this.context);
     const indices = new Map(
       [...this.indexedData].map(([id, table]) => [id, table.terms.map((term) => term.index)]),
@@ -6669,6 +6933,14 @@ export class Renderer {
             this.noMove(node)) &&
           !hasDefinitions(node.id),
       );
+    // Block contents are known now: structure again with them (Ghidra's
+    // post-merge pass), so short-circuit conditions collapse first.
+    for (const block of program.blocks.values()) {
+      const node = this.commaOperand(block);
+      if (node !== undefined) this.commaOperands.set(block.id, node);
+    }
+    this.restructure(silent);
+    program = this.program;
     // A proven jump table's exact range guard and its switch print as one switch.
     const quietAnchor = (id: string): boolean =>
       !this.notes.has(id) && !this.deferred.get(id)?.length;
@@ -7573,7 +7845,20 @@ export class Renderer {
             : `label ${this.identifier(region.id, 'label')}:`,
         );
       this.sourceDefinitions(region.id, depth);
+      // A later short-circuit operand printed inside a merged test: its one
+      // statement prints in that test (see operandTerm), not here.
+      const comma = this.sourceView ? this.commaOperands.get(region.id) : undefined;
+      const merged =
+        comma &&
+        (this.joinedControls.has(region.control.id) ||
+          this.conjunct !== undefined ||
+          (this.sharedPlan !== undefined && controlArms(region.control).some((arm) => arm.joins)))
+          ? comma
+          : undefined;
+      if (merged && !this.joinedControls.has(region.control.id))
+        this.commaHeld = { control: region.control.id, node: merged };
       for (const node of region.statements) {
+        if (node === merged) continue;
         this.context.checkpoint(1);
         const held =
           node.kind === 'call' && this.program.retained.has(node.id)
