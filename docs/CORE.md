@@ -63,7 +63,7 @@ register transfers establish the independent value input passed to the callback;
 the caller's subsequent 32-bit arithmetic establishes which result bits it
 consumes. Neither fact establishes a complete argument list or defined upper
 result bits. Both dialects retain the known argument, the consumed result and an
-explicit `...` open-argument marker (C `f(a, ...)`, Python-like `f(a, ...)` with the Ellipsis literal; the file header states its meaning once, and the `unknown_argument_remainder`/`unknown_arguments` helper entries stay in the emission metadata). Unknown callback memory effects
+explicit open-argument marker: an indirect call's function-pointer type spells it (C `((T (*)(A, ...))target)(a)`, Python-like `function_pointer(target, "T (*)(A, ...)")(a)`), and a direct callee without an established prototype is named once on the `open arity` comment line while its calls print only the proven arguments. An interface that proves no argument, a callee that also has a closed or guessed call, and a callee with an established prototype keep an inline `...` (the file header states its meaning once). The `unknown_argument_remainder`/`unknown_arguments` helper entries stay in the emission metadata and the checked view keeps the named helper. Unknown callback memory effects
 and potentially outgoing stack storage remain conservative. These observations
 do not follow or execute arbitrary callback targets.
 
@@ -1065,11 +1065,21 @@ operand resolution, offset-zero/same-width bitcasts and extracts reselected from
 contained slice, extension or extract relocate existing bits without arithmetic.
 Arithmetic, narrowing and folding candidates keep the retained-original fallback.
 
-The source C renderer emits declarations for direct calls from recovered source
-signatures (including library variadic tails), or marks a consistent observed
-interface `/* inferred */` (an open argument list already prints `...`, so it needs no mark). Conflicting call-site interfaces and exhausted
-`call_declaration` records retain the explicit fallback. Declarations never
-close an unknown argument remainder or manufacture an authored prototype.
+The source C renderer emits `extern` declarations only for direct calls with an
+established prototype (library, debug or recovered source signatures, including variadic
+tails). A call interface observed only at its call sites is not declared: the call prints
+it, and an open list is stated once per function on the `open arity (calls show proven args
+only): f, g` comment line (both dialects) while the calls print only their proven
+arguments. Declarations never close an unknown argument remainder or manufacture an
+authored prototype; exhausted `call_declaration` records leave the call undeclared.
+`options.structures: "external"` (the export's C-like mode) leaves the structure `typedef`
+lines and partial bodies out of the text, which then carries one `/* struct declarations:
+types.h */` line, and returns them in `emission.structures` (`{ name, declaration }`); the
+export writes each typedef once and each distinct body with the functions that print it
+after the merged image types in `types.h`. `decompile` and MCP keep them inline: the
+merged image types of `types`/`types.h` are a bounded whole-image pass and omit most
+structures a function names (SQLite 3.54 `btree` export, structure sample: 442 bytes of `types.h`,
+one structure, against 230 distinct structures printed by its 78 functions).
 `library_string_parameter` obtains C `char*` identity from the evidence-backed
 library contract, not a guessed symbol name or arbitrary byte pointer. A
 read-only parameter footprint permits `const char*`. Proven immutable string

@@ -170,6 +170,18 @@ export const emissionSchema = z
     inferences: z.array(inferenceSchema).max(10000).optional(),
     requirements: z.array(requirementSchema).max(1000).optional(),
     omitted: z.array(emissionOmissionSchema).max(3).optional(),
+    /** `options.structures: "external"`: the C declarations the text refers to by name (a
+     * `typedef struct N N;` or the partial body of `struct N`), for the caller to keep
+     * once per image. Absent when the text carries them (the default) or none are used. */
+    structures: z
+      .array(
+        z.strictObject({
+          name: z.string().min(1).max(512),
+          declaration: z.string().min(1).max(65_536),
+        }),
+      )
+      .max(10_000)
+      .optional(),
     helpers: z
       .array(z.strictObject({ name: z.string().min(1), explanation: z.string().min(1).max(8192) }))
       .max(1000),

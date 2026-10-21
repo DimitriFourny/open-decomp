@@ -30,6 +30,14 @@ for (const fixture of [
       assert.ok('data' in response.result);
       const full = p.payload(response.result).result;
       const emission = full.data.emission;
+      // The open arity is spelled by the function-pointer type; the call prints its one
+      // proven argument only.
+      assert.match(
+        emission.text,
+        emitter === 'c-like'
+          ? /\(\*\)\([^)]*, \.\.\.\)\)\w+\)\([^.\n]*\)/
+          : /function_pointer\(\w+, "[^"]*\(\*\)\([^"]*, \.\.\.\)"\)\([^.\n]*\)/,
+      );
       const declared = emittedFormals(emission);
       const formals = declared.filter((formal) => formal.name !== 'entry_sp');
       assert.equal(

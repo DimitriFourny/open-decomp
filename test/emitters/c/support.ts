@@ -11,12 +11,13 @@ export function emit(
   extra: Omit<EmissionInput, 'function'> = {},
   language: 'c-like' | 'python-like' = 'c-like',
   view: 'source' | 'checked' = 'source',
+  options: Partial<typeof DEFAULT_ANALYSIS_OPTIONS> = {},
 ): EmissionResult {
   const structured = structureControlFlow(input, createOperationContext());
   assert.ok(structured.value);
   return (language === 'python-like' ? emitPythonLike : emitC)(
     { function: structured.value, ...extra },
-    { ...DEFAULT_ANALYSIS_OPTIONS, emitter: language, view },
+    { ...DEFAULT_ANALYSIS_OPTIONS, emitter: language, view, ...options },
     createOperationContext(),
   );
 }
@@ -101,7 +102,7 @@ type Expr =
   | { kind: 'literal'; value: Data; ctype?: CType }
   | { kind: 'ref'; name: string }
   | { kind: 'call'; name: string; args: Expr[]; ctype?: CType }
-  | { kind: 'cast'; type: CType; value: Expr }
+  | { kind: 'cast'; type: CType; value: Expr; open?: true }
   | { kind: 'invoke'; target: Expr; args: Expr[] }
   | { kind: 'list'; values: Expr[] }
   | { kind: 'binary'; op: string; left: Expr; right: Expr }
@@ -291,6 +292,8 @@ class Parser {
   readonly structs = new Map<string, StructLayout>();
   /** Typedef-declared structure names whose bodies may follow. */
   private readonly structNames = new Set<string>();
+  /** Callees the `open arity` comment names: their calls print only the proven arguments. */
+  private readonly openCallees: ReadonlySet<string>;
   private readonly tables = new Map<string, { readonly address: bigint; readonly bits: number }>();
   /** Declared scalar globals (`extern T name;`): the name is the object, not a pointer. */
   private readonly scalars = new Set<string>();
@@ -308,6 +311,11 @@ class Parser {
   private readonly loops: { start: number; breaks: number[]; continues?: number[] }[] = [];
   constructor(text: string) {
     this.python = /^def /m.test(text);
+    this.openCallees = new Set(
+      (/^(?:\/\* |# )open arity \([^)]*\): ([^\n]*?)(?: \*\/)?$/m.exec(text)?.[1] ?? '')
+        .split(', ')
+        .filter(Boolean),
+    );
     this.voidResult = /^void [A-Za-z_]\w*\(/m.test(text) || /^def .*-> void:/m.test(text);
     // The VA comment is omitted where the printed `data_<hex>` name already states the address.
     const declarations = this.python
@@ -1160,6 +1168,11 @@ class Parser {
     return left;
   }
 
+  private endsOpen(args: readonly Expr[]): boolean {
+    const last = args.at(-1);
+    return last?.kind === 'call' && last.name === 'unknown_argument_remainder';
+  }
+
   private atom(): Expr {
     let expression = this.primary();
     for (;;) {
@@ -1174,6 +1187,16 @@ class Parser {
           }
         }
         this.take(')');
+        // The function-pointer type states an open arity: the remainder the call does not print.
+        const typed = expression.kind === 'cast' ? expression.open === true : false;
+        const spelled =
+          expression.kind === 'call' &&
+          expression.name === 'function_pointer' &&
+          expression.args[1]?.kind === 'literal' &&
+          typeof expression.args[1].value === 'string' &&
+          expression.args[1].value.includes('...');
+        if ((typed || spelled) && !this.endsOpen(args))
+          args.push({ kind: 'call', name: 'unknown_argument_remainder', args: [] });
         expression = { kind: 'invoke', target: expression, args };
       } else if (
         this.python &&
@@ -1428,14 +1451,22 @@ class Parser {
         // Function-pointer cast `(R (*)(T, ...))target`: only the address bits
         // reach the invocation; the prototype is presentation.
         this.position += 4;
+        let open = false;
         while (this.peek() !== ')') {
-          if (this.peek() === '...') this.take('...');
-          else assert.ok(this.bodyType(false), 'Unsupported function-pointer parameter');
+          if (this.peek() === '...') {
+            this.take('...');
+            open = true;
+          } else assert.ok(this.bodyType(false), 'Unsupported function-pointer parameter');
           if (this.peek() === ',') this.take(',');
         }
         this.take(')');
         this.take(')');
-        return { kind: 'cast', type: { kind: 'pointer', to: null }, value: this.atom() };
+        return {
+          kind: 'cast',
+          type: { kind: 'pointer', to: null },
+          value: this.atom(),
+          ...(open ? { open: true as const } : {}),
+        };
       }
       if (
         type &&
@@ -1531,6 +1562,8 @@ class Parser {
       }
       this.payload = payload;
       this.take(')');
+      if (this.openCallees.has(token) && !this.endsOpen(args))
+        args.push({ kind: 'call', name: 'unknown_argument_remainder', args: [] });
       return { kind: 'call', name: token, args };
     }
     if (this.scalars.has(token)) return this.dereference({ kind: 'ref', name: token });

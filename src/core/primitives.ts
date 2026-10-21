@@ -269,6 +269,11 @@ export const analysisOptionsSchema = z.strictObject({
    * close an open argument list on a guess; each guess is marked in the text and
    * recorded as a `guess` inference. Part of the cache identity. */
   inference: z.enum(['proven', 'likely']).default('proven'),
+  /** `inline` (default) prints the typedef and body of every structure the function
+   * uses in its text. `external` (C-like) leaves them out: the text names the structures
+   * and `emission.structures` returns the declarations for the caller to keep once per
+   * image (`open-decomp export` writes them to types.h). Part of the cache identity. */
+  structures: z.enum(['inline', 'external']).default('inline'),
 });
 export const DEFAULT_ANALYSIS_OPTIONS = Object.freeze(analysisOptionsSchema.parse({}));
 export type PresentationView = z.infer<typeof analysisOptionsSchema>['view'];

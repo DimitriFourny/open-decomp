@@ -123,16 +123,20 @@ for (const fixture of ['corpus-symbols.dll', 'libcorpus-elf-x86_64-symbols.so'])
       const response = await p.decompile(fn.id, { options: { emitter: 'c-like' } });
       assert.ok('data' in response.result);
       const text = p.payload(response.result).result.data.emission.text;
-      // fixture_float reads two doubles: its guarded body closes the interface.
-      assert.match(text, /extern double fixture_float\(double, double\);/);
+      // fixture_float reads two doubles: its guarded body closes the interface, so its
+      // call prints both arguments and the callee is not named as open.
+      assert.match(text, /fixture_float\(.+, .+\);/);
       assert.doesNotMatch(text, /fixture_float\([^;]*\.\.\./);
+      assert.doesNotMatch(text, /open arity[^\n]*fixture_float/);
       // fixture_variadic reads its spilled register arguments through a
-      // computed va_list address: no observed argument is dropped or closed.
+      // computed va_list address: no observed argument is dropped or closed. The
+      // call prints the proven arguments and the open arity is named once.
       assert.match(
         text,
         fixture.endsWith('.dll')
-          ? /fixture_variadic\(3, [^,()]+, [^,()]+, [^,()]+, \.\.\.\)/
-          : /fixture_variadic\(3, \.\.\.\)/,
+          ? /fixture_variadic\(3, [^,()]+, [^,()]+, [^,()]+\)/
+          : /fixture_variadic\(3\)/,
       );
+      assert.match(text, /open arity \([^)]*\): [^\n]*fixture_variadic/);
     },
   );

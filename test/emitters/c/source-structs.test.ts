@@ -289,6 +289,54 @@ test('exhausted presentation capacity retains opaque structures and scalar wrapp
   assert.equal(structs.scalar('scalar'), null);
 });
 
+test('external structures leave typedefs and bodies out of the text and return them once', () => {
+  const b = builder('source-external-struct'),
+    block = b.block('entry');
+  const pointer = block.readRegister(register('rdi', 64, 0, 'replace_root', 'x86_64:rdi'));
+  const first = block.cast(
+    'zero_extend',
+    integer(32),
+    block.load(integer(8), block.int('add', pointer, block.constant(integer(64), 4n))),
+  );
+  const second = block.load(
+    integer(32),
+    block.int('add', pointer, block.constant(integer(64), 24n)),
+  );
+  block.return([block.int('add', first, second)]);
+  const ssa = constructSSA(b.finish(block, [integer(32)])).value as SSAForm;
+  const types = recoverTypes(ssa, sysvAMD64Abi, createOperationContext(), {
+    slice_id: slice,
+    image_id: image,
+    revision: 1,
+  });
+  const extra = { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } };
+  const inline = emit(ssa, extra).emission;
+  const external = emit(ssa, extra, 'c-like', 'source', { structures: 'external' }).emission;
+  assert.equal(inline.structures, undefined);
+  const name = /^typedef struct (\w+) \1;$/m.exec(inline.text)?.[1];
+  assert.ok(name);
+  assert.match(inline.text, new RegExp(`^struct ${name} \\{`, 'm'));
+  // The text keeps its statements and names the structure; the declarations moved.
+  assert.doesNotMatch(external.text, /^typedef struct |^struct \w+ \{/m);
+  assert.match(external.text, /^\/\* struct declarations: types\.h \*\/$/m);
+  assert.match(external.text, new RegExp(`${name}\\* `));
+  const declarations = external.structures ?? [];
+  assert.deepEqual(
+    declarations.map((item) => item.name),
+    [name, name],
+  );
+  assert.equal(declarations[0]!.declaration, `typedef struct ${name} ${name};`);
+  // The declarations are exactly the lines the inline text carries.
+  for (const line of declarations[1]!.declaration.split('\n'))
+    assert.ok(inline.text.includes(line), line);
+  assert.match(declarations[1]!.declaration, /uint8_t field_0x4;/);
+  // Python-like has no structure preamble: the option changes nothing there.
+  assert.equal(
+    emit(ssa, extra, 'python-like', 'source', { structures: 'external' }).emission.structures,
+    undefined,
+  );
+});
+
 for (const indexed of [false, true, 'shared', 'array'] as const)
   test(`observed ${indexed === false ? 'fixed' : indexed === true ? 'strided' : indexed} members compile and execute with exact offsets and ordered loads`, () => {
     const b = builder('source-observed-struct'),

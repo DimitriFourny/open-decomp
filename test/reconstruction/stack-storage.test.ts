@@ -448,7 +448,10 @@ for (const { abi } of targets)
     );
     for (const language of ['c-like', 'python-like'] as const) {
       const output = emit(ir, { ...extra, source: sourceEvidence }, language);
-      assert.match(output.emission.text, /\w\(\w+, \.\.\.\)/);
+      // The call prints its one proven argument; the open arity is named once.
+      assert.match(output.emission.text, /\w\(\w+\)/);
+      assert.match(output.emission.text, /open arity \([^)]*\): \w+/);
+      assert.doesNotMatch(output.emission.text, /, \.\.\.\)/);
     }
   });
 
