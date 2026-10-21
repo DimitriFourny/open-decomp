@@ -6,6 +6,7 @@ import type {
 } from '../../core/index.js';
 import {
   bitWidth,
+  floatBits,
   floating,
   integer,
   vector,
@@ -83,7 +84,7 @@ export const fpEnvironmentGuard = Object.freeze({
   unsupported_exit: 'Unsupported FPCR environment',
 });
 export function needsFpGuard(payload: Arm64Payload): boolean {
-  return /^(FADD|FSUB|FMUL|FDIV|FSQRT|FCMP|FCMPE|FCCMP|FCCMPE|FCVT|SCVTF|UCVTF)(_|$)/.test(
+  return /^(FADD|FSUB|FMUL|FDIV|FSQRT|FCMP|FCMPE|FCCMP|FCCMPE|FCVT|FCVTZS|FCVTZU|SCVTF|UCVTF)(_|$)/.test(
     payload.canonical_encoding,
   );
 }
@@ -488,6 +489,20 @@ export class ArmSemantics {
     return this.simd();
   }
 
+  /** A canonical-field vector register: the full root, or its low 64 bits with the high half cleared. */
+  vectorRegister(index: number, width: 64 | 128): RegisterDescriptor {
+    return {
+      id: width === 128 ? `arm64:v${index}` : `arm64:v${index}[0:64]`,
+      root: `arm64:v${index}`,
+      bank: 'vector',
+      offset_bits: 0,
+      width_bits: width,
+      root_width_bits: 128,
+      role: 'general',
+      write_rule: width === 128 ? 'replace_root' : 'zero_extend_root',
+    };
+  }
+
   authentication(): void {
     this.report(
       'Pointer authentication is abstracted to logical pointers: PAC bits, key/modifier checks, failure poisoning and authentication traps are not modeled.',
@@ -557,7 +572,7 @@ export class ArmSemantics {
   }
 
   simd(): boolean {
-    const { b, p, name } = this;
+    const { b, p, name, bits } = this;
     // These decoder families retain canonical fields even when one displayed
     // operand is opaque. Do not parse that text or infer its register identity.
     if (/^FMOV_(S32|32S|D64|64D)_float2int$/.test(p.canonical_encoding)) {
@@ -621,31 +636,118 @@ export class ArmSemantics {
       this.fpStatus();
       return true;
     }
-    if (p.canonical_encoding === 'ORR_asimdsame_only') {
+    if ((name === 'FCVTZS' || name === 'FCVTZU') && p.canonical_encoding.endsWith('_float2int')) {
+      // Round toward zero regardless of FPCR.RMode; NaN converts to zero and
+      // out-of-range values saturate (unlike the IR's C-style float_to_* cast,
+      // which is undefined there, so that cast only feeds the in-range arm).
+      const ftype = this.field('ftype');
+      if (ftype > 1) throw new Unsupported('FP16 integer conversion is not modeled');
+      const from = ftype === 1 ? 64 : 32,
+        signed = name === 'FCVTZS';
+      const source = b.readRegister(fpRegister(this.field('Rn'), from), floating(from));
+      const limit = (value: number): Value => b.constant(floating(from), floatBits(value, from));
+      const high = 2 ** (signed ? bits - 1 : bits);
+      const top = this.constant(bits, signed ? mask(bits - 1) : mask(bits));
+      const converted = b.cast(
+        signed ? 'float_to_signed' : 'float_to_unsigned',
+        integer(bits),
+        source,
+      );
+      const inRange = signed
+        ? b.select(
+            b.fpCompare('lt', source, limit(-high)),
+            this.constant(bits, 1n << BigInt(bits - 1)),
+            b.select(b.fpCompare('unordered', source, source), this.constant(bits, 0), converted),
+          )
+        : b.select(b.fpCompare('gt', source, limit(0)), converted, this.constant(bits, 0));
+      this.put(b.select(b.fpCompare('ge', source, limit(high)), top, inRange));
+      this.fpStatus();
+      return true;
+    }
+    if ((name === 'SCVTF' || name === 'UCVTF') && p.canonical_encoding.endsWith('_float2fix')) {
+      // The integer rounds once (FPCR is guarded to nearest-even) and the power-of-two
+      // scale 2^-fbits is exact: no FP32/FP64 result of a 32/64-bit input is subnormal.
+      const ftype = this.field('ftype'),
+        fbits = 64 - this.field('scale');
+      if (ftype > 1) throw new Unsupported('FP16 fixed-point conversion is not modeled');
+      if (fbits < 1 || fbits > bits) throw new Unsupported('Reserved fixed-point fraction width');
+      const width = ftype === 1 ? 64 : 32;
+      const converted = b.cast(
+        name === 'SCVTF' ? 'signed_to_float' : 'unsigned_to_float',
+        floating(width),
+        this.read('Rn'),
+      );
+      b.writeRegister(
+        fpRegister(this.field('Rd'), width),
+        b.fp('mul', converted, b.constant(floating(width), floatBits(2 ** -fbits, width))),
+      );
+      this.fpStatus();
+      return true;
+    }
+    if (
+      p.canonical_encoding === 'ORR_asimdsame_only' ||
+      p.canonical_encoding === 'AND_asimdsame_only'
+    ) {
       // MOV is an ORR alias with Rn == Rm. Its displayed operands may be
       // opaque, but canonical fields still define the complete bitwise operation.
       const q = this.field('Q');
-      if (q > 1) throw new Unsupported('Invalid SIMD ORR register width');
+      if (q > 1) throw new Unsupported('Invalid SIMD logical register width');
       const width = q === 1 ? 128 : 64;
-      const registers = ['Rd', 'Rn', 'Rm'].map((field): RegisterDescriptor => {
-        const index = this.field(field);
-        return {
-          id: width === 128 ? `arm64:v${index}` : `arm64:v${index}[0:64]`,
-          root: `arm64:v${index}`,
-          bank: 'vector',
-          offset_bits: 0,
-          width_bits: width,
-          root_width_bits: 128,
-          role: 'general',
-          write_rule: width === 128 ? 'replace_root' : 'zero_extend_root',
-        };
-      });
-      const left = b.readRegister(registers[1]!, integer(width));
+      const destination = this.vectorRegister(this.field('Rd'), width),
+        first = this.vectorRegister(this.field('Rn'), width),
+        second = this.vectorRegister(this.field('Rm'), width);
+      const left = b.readRegister(first, integer(width));
       const value =
-        registers[1]!.root === registers[2]!.root
+        name === 'ORR' && first.root === second.root
           ? left
-          : b.int('or', left, b.readRegister(registers[2]!, integer(width)));
-      b.writeRegister(registers[0]!, value);
+          : b.int(name === 'ORR' ? 'or' : 'and', left, b.readRegister(second, integer(width)));
+      b.writeRegister(destination, value);
+      return true;
+    }
+    if (p.canonical_encoding === 'CMEQ_asimdsame_only') {
+      // Per-lane equality mask: all ones when the lanes are equal, else zero.
+      const q = this.field('Q'),
+        size = this.field('size');
+      if (q > 1 || size > 3 || (q === 0 && size === 3))
+        throw new Unsupported('Reserved SIMD CMEQ arrangement');
+      const width = q === 1 ? 128 : 64,
+        lane = 8 << size,
+        type = vector(integer(lane), width / lane);
+      const left = b.readRegister(this.vectorRegister(this.field('Rn'), width), type),
+        right = b.readRegister(this.vectorRegister(this.field('Rm'), width), type);
+      b.writeRegister(
+        this.vectorRegister(this.field('Rd'), width),
+        b.pack(
+          type,
+          Array.from({ length: type.lanes }, (_, index) =>
+            b.cast(
+              'sign_extend',
+              integer(lane),
+              b.compare('eq', b.lane(left, index), b.lane(right, index)),
+            ),
+          ),
+        ),
+      );
+      return true;
+    }
+    if (p.canonical_encoding === 'DUP_asimdins_DR_r') {
+      // Broadcast the low element-size bits of a general register. The element
+      // size is the position of the lowest set bit of imm5.
+      const q = this.field('Q'),
+        imm5 = this.field('imm5');
+      const size = imm5 & 15 ? 31 - Math.clz32(imm5 & -imm5) : -1;
+      if (q > 1 || size < 0 || size > 3 || (q === 0 && size === 3))
+        throw new Unsupported('Reserved SIMD DUP arrangement');
+      const width = q === 1 ? 128 : 64,
+        lane = 8 << size;
+      const source = this.resize(b.readRegister(gp(this.field('Rn'), lane === 64 ? 64 : 32)), lane);
+      b.writeRegister(
+        this.vectorRegister(this.field('Rd'), width),
+        b.pack(
+          vector(integer(lane), width / lane),
+          Array.from({ length: width / lane }, () => source),
+        ),
+      );
       return true;
     }
     const regs = p.operands.filter((o): o is RegisterOperand => o.kind === 'register');

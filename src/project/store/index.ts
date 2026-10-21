@@ -76,6 +76,7 @@ import {
   type Artifact,
   type CacheIdentity,
   type Diagnostic,
+  type DiscoveryFrontier,
   type Evidence,
   type Job,
   type LoadedImage,
@@ -106,7 +107,7 @@ import {
 } from './image-metadata.js';
 
 // Persistence migrations are independent of the public wire/artifact schema version.
-const STORE_SCHEMA_VERSION = 6;
+const STORE_SCHEMA_VERSION = 7;
 /** Per-project cap on persisted prepared-callee summaries (compressed payload bytes). Entries
  * of superseded revisions go first, then the oldest write; see `flushNativeSummaries`. */
 export const DEFAULT_NATIVE_SUMMARY_BYTES = 64 * 1024 * 1024;
@@ -119,6 +120,21 @@ const MAX_PENDING_SUMMARY_BYTES = 8 * 1024 * 1024;
 const MAX_NATIVE_SUMMARY_ROW_BYTES = 16 * 1024 * 1024;
 const NATIVE_SUMMARIES_TABLE = `CREATE TABLE native_summaries(scope TEXT NOT NULL, function_id TEXT NOT NULL, revision INTEGER NOT NULL, seq INTEGER NOT NULL, allowance INTEGER NOT NULL, work INTEGER NOT NULL, bytes INTEGER NOT NULL, digest TEXT NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(scope,function_id)) STRICT;
   CREATE INDEX native_summaries_order ON native_summaries(revision,seq,bytes);`;
+/** Resumable image-wide discovery state per image; a NULL payload records completion. */
+const DISCOVERY_FRONTIERS_TABLE =
+  'CREATE TABLE discovery_frontiers(image_id TEXT NOT NULL, revision INTEGER NOT NULL, payload BLOB, PRIMARY KEY(image_id,revision)) STRICT;';
+const discoveryFrontierSchema = z.strictObject({
+  pending: z
+    .array(
+      z.strictObject({
+        entry: z.bigint().min(0n).max(0xffffffffffffffffn),
+        established: z.boolean(),
+        evidence_ids: z.array(evidenceIdSchema).max(10_000),
+      }),
+    )
+    .max(1_000_000),
+  sweep: z.bigint().min(0n).max(0xffffffffffffffffn),
+});
 const annotationActorSchema = annotationSchema.pick({ author: true, origin: true });
 const MAX_IMAGE_BYTES = 512 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
@@ -370,6 +386,7 @@ export class SqliteProjectStore implements ProjectStore {
           CREATE TABLE analysis_artifacts(revision INTEGER NOT NULL, analysis_id TEXT NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(revision,analysis_id,artifact_id)) STRICT;
           CREATE TABLE analysis_reuse(scope TEXT NOT NULL, revision INTEGER NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(scope,revision DESC,artifact_id)) STRICT;
           ${NATIVE_SUMMARIES_TABLE}
+          ${DISCOVERY_FRONTIERS_TABLE}
           PRAGMA user_version=${STORE_SCHEMA_VERSION};`);
         db.prepare('INSERT INTO metadata VALUES (1,?,0)').run(newIdentity('project'));
         db.exec('COMMIT');
@@ -407,6 +424,11 @@ export class SqliteProjectStore implements ProjectStore {
               CREATE INDEX loaded_images_revision ON loaded_images(image_id,revision DESC);
               CREATE TABLE analysis_reuse(scope TEXT NOT NULL, revision INTEGER NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(scope,revision DESC,artifact_id)) STRICT;`);
           if (version < 6) db.exec(NATIVE_SUMMARIES_TABLE);
+          if (version < 7)
+            // Before whole-image enumeration a complete function index only meant that seeded
+            // traversal finished; it never proved that an unlisted address is no function.
+            db.exec(`${DISCOVERY_FRONTIERS_TABLE}
+              UPDATE indexes SET state='partial' WHERE kind='function' AND state='complete';`);
           db.exec(`PRAGMA user_version=${STORE_SCHEMA_VERSION}; COMMIT;`);
         } catch (error) {
           db.exec('ROLLBACK');
@@ -701,6 +723,16 @@ export class SqliteProjectStore implements ProjectStore {
     };
   }
 
+  readDiscoveryFrontier(imageId: string, revision: number): DiscoveryFrontier | null {
+    this.#revision(revision);
+    imageIdSchema.parse(imageId);
+    const row = this.#prepare(
+      'SELECT payload FROM discovery_frontiers WHERE image_id=? AND revision<=? ORDER BY revision DESC LIMIT 1',
+    ).get(imageId, revision);
+    if (!row || row['payload'] === null) return null;
+    return discoveryFrontierSchema.parse(decodeStored(row['payload']));
+  }
+
   transaction(
     expectedRevision: number,
     mutate: (transaction: StoreTransaction) => void,
@@ -821,6 +853,17 @@ export class SqliteProjectStore implements ProjectStore {
           kind,
           revision,
           state,
+        );
+      },
+      setDiscoveryFrontier: (imageId, frontier) => {
+        guard();
+        imageIdSchema.parse(imageId);
+        if (!this.#prepare('SELECT 1 FROM images WHERE image_id=?').get(imageId))
+          fail('not_found', 'Discovery image is not imported');
+        this.#prepare('INSERT OR REPLACE INTO discovery_frontiers VALUES (?,?,?)').run(
+          imageId,
+          revision,
+          frontier ? encodeStored(discoveryFrontierSchema.parse(frontier)) : null,
         );
       },
       setAnnotation: (annotation) => {

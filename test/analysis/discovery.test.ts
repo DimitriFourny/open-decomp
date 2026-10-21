@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { isDeepStrictEqual } from 'node:util';
 import {
   AddressMap,
   ImmutableBytes,
@@ -14,6 +15,7 @@ import {
   type AddressRange,
   type Decoder,
   type Evidence,
+  type FunctionGraph,
   type LoadedImage,
   type Loader,
 } from '../../src/core/index.js';
@@ -234,7 +236,8 @@ for (const file of ['macho-arm64-symbols', 'macho-arm64-stripped'])
   });
 
 test('zero-sized object symbols defeat export-only code guesses without overriding explicit assertions', () => {
-  const image = raw([0xc3, 0x90, 0xc3]),
+  // ret; nop; int3 — the object symbol names the nop; fill is never a function.
+  const image = raw([0xc3, 0x90, 0xcc]),
     target = address(image, 1);
   const named = {
     id: `entity_${fingerprint('object-symbol')}`,
@@ -936,11 +939,24 @@ test('split file backing is decoded at VA coordinates without assuming byte refe
   );
 });
 
-test('ungrounded prologue bytes never create functions and assertion extents retain their evidence', () => {
+test('unexplained executable bytes root only candidates; assertion extents retain their evidence', () => {
   const image = raw([0x55, 0x48, 0x89, 0xe5, 0xc3]);
+  // No loader root: the whole-image sweep roots the first unexplained instruction as a
+  // candidate (never established) and then has explained every executable byte.
   const empty = discover({ ...image, entry_points: [] });
-  assert.deepEqual(empty.graphs, []);
-  assert.equal(empty.coverage.state, 'partial');
+  assert.deepEqual(
+    empty.graphs.map((graph) => [graph.function.entry.value, graph.function.boundary]),
+    [[0x1000n, 'candidate']],
+  );
+  assert.equal(empty.enumeration, 'complete');
+  assert.ok(
+    empty.evidence.some(
+      (item) =>
+        empty.graphs[0]!.function.evidence_ids.includes(item.id) &&
+        item.origin.kind === 'analysis' &&
+        item.origin.rule === 'first instruction of unexplained executable bytes',
+    ),
+  );
   const claim = assertion(image, 0, 'asserted', [{ start: address(image, 0), size: 5n }]);
   const result = discover({ ...image, entry_points: [] }, { assertions: [claim] });
   assert.equal(result.graphs[0]!.function.boundary, 'candidate');
@@ -977,4 +993,124 @@ test('cancellation during real decode prevents publication', () => {
   } finally {
     decoder.dispose();
   }
+});
+
+/** entry calls f1 and f2; g1 and g2 are reached by nothing but the sweep; g2 calls g3. Each
+ * function sits in its own 16-byte slot padded with int3. */
+function strippedLayout(): LoadedImage {
+  const slots = [
+    [0xe8, 0x0b, 0, 0, 0, 0xe8, 0x16, 0, 0, 0, 0xc3], // 0x1000 entry: call 0x1010; call 0x1020
+    [0x31, 0xc0, 0xff, 0xc0, 0xc3], // 0x1010 f1
+    [0x31, 0xc0, 0xff, 0xc0, 0xff, 0xc0, 0xc3], // 0x1020 f2
+    [0x48, 0x89, 0xf8, 0xc3], // 0x1030 g1
+    [0xe8, 0x0b, 0, 0, 0, 0xc3], // 0x1040 g2: call 0x1050
+    [0x31, 0xc0, 0xc3], // 0x1050 g3
+  ];
+  return raw(slots.flatMap((slot) => [...slot, ...Array<number>(16 - slot.length).fill(0xcc)]));
+}
+/** Publish every graph of each step (later steps replace a root's record) and continue from
+ * each frontier until enumeration completes, as the service's continuation does. */
+function discoverResumed(image: LoadedImage, instructions: number) {
+  const published = new Map<bigint, FunctionGraph['function']>();
+  let result = discover(image, {}, { instructions });
+  let steps = 1;
+  for (;;) {
+    for (const graph of result.graphs) published.set(graph.function.entry.value, graph.function);
+    if (!result.frontier) break;
+    const frontier = result.frontier;
+    result = discover(
+      image,
+      { functions: [...published.values()], resume: frontier },
+      { instructions },
+    );
+    assert.notDeepEqual(result.frontier, frontier, 'every continuation makes progress');
+    assert.ok(++steps < 20);
+  }
+  return {
+    functions: [...published.values()].sort((a, b) => (a.entry.value < b.entry.value ? -1 : 1)),
+    steps,
+    last: result,
+  };
+}
+
+test('whole-image discovery resumes from its frontier to the one-shot enumeration', () => {
+  const image = strippedLayout();
+  const shape = (fn: FunctionGraph['function']) => [
+    fn.entry.value,
+    fn.boundary,
+    fn.analysis,
+    fn.ranges.map((range) => [range.start.value, range.size]),
+  ];
+  const once = discover(image);
+  assert.equal(once.enumeration, 'complete');
+  assert.equal(once.frontier, null);
+  assert.deepEqual(
+    once.graphs.map((graph) => [graph.function.entry.value, graph.function.boundary]),
+    [
+      [0x1000n, 'established'],
+      [0x1010n, 'established'],
+      [0x1020n, 'established'],
+      [0x1030n, 'candidate'],
+      [0x1040n, 'candidate'],
+      [0x1050n, 'candidate'],
+    ],
+  );
+  // Four instructions per step: the largest function just fits, so every step finishes a root.
+  const first = discover(image, {}, { instructions: 4 });
+  assert.equal(first.enumeration, 'partial');
+  assert.ok(first.frontier && first.frontier.pending.length > 0);
+  const resumed = discoverResumed(image, 4);
+  assert.ok(resumed.steps > 2);
+  assert.equal(resumed.last.enumeration, 'complete');
+  assert.deepEqual(
+    resumed.functions.map(shape),
+    once.graphs.map((graph) => shape(graph.function)),
+  );
+  // The continuation is a pure function of the image and the published frontier.
+  assert.deepEqual(discoverResumed(image, 4), resumed);
+});
+
+test('a root larger than one step makes no progress instead of looping or claiming completion', () => {
+  const image = strippedLayout();
+  let result = discover(image, {}, { instructions: 3 });
+  const published = new Map(
+    result.graphs.map((graph) => [graph.function.entry.value, graph.function]),
+  );
+  let stalled = false;
+  for (let step = 0; step < 10 && result.frontier && !stalled; step++) {
+    const frontier = result.frontier;
+    result = discover(
+      image,
+      { functions: [...published.values()], resume: frontier },
+      { instructions: 3 },
+    );
+    for (const graph of result.graphs) published.set(graph.function.entry.value, graph.function);
+    stalled = isDeepStrictEqual(result.frontier, frontier);
+  }
+  // f2 has four instructions: it stays pending, the continuation stalls on an unchanged
+  // frontier and the enumeration never claims completion.
+  assert.ok(stalled);
+  assert.equal(result.enumeration, 'partial');
+  assert.ok(result.frontier!.pending.some((root) => root.entry === 0x1020n));
+});
+
+test('complete enumeration explains fill and data, so addresses no function owns are proven absent', () => {
+  const image = strippedLayout();
+  const result = discover(image);
+  assert.equal(result.enumeration, 'complete');
+  const owner = (value: bigint) =>
+    result.graphs.filter((graph) =>
+      graph.function.ranges.some(
+        (range) => value >= range.start.value && value < range.start.value + range.size,
+      ),
+    );
+  // int3 fill after g1 belongs to no function; every instruction byte has exactly one owner.
+  assert.deepEqual(owner(0x1034n), []);
+  assert.deepEqual(
+    owner(0x1031n).map((graph) => graph.function.entry.value),
+    [0x1030n],
+  );
+  // Without the sweep's evidence the same bytes are not provably absent: a budget-limited
+  // discovery leaves enumeration partial.
+  assert.equal(discover(image, {}, { instructions: 4 }).enumeration, 'partial');
 });

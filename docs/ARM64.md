@@ -43,7 +43,19 @@ changed-state overlay is not a zero-argument call.
 
 The lifter models `ORR_asimdsame_only` from its canonical `Rd`, `Rn`, `Rm` and `Q` fields, including the compiler's `MOV` alias (`Rn == Rm`) when the decoder exposes only opaque display operands. It preserves the entire selected bit pattern without interpreting FP payloads or lane text. The 64-bit form clears the high half of the 128-bit root; the 128-bit form replaces the whole root. This is the specific register-move family exercised by mixed integer/FP call preservation, not general support for opaque SIMD operands or lane-indexed moves.
 
-Scalar SIMD `SCVTF_asisdmisc_R` / `UCVTF_asisdmisc_R` support same-width 32/64-bit integer-to-FP conversion from canonical register fields. The destination replaces its scalar and clears the rest of Vd, preserving NZCV. Existing FPCR guards and unknown exception-status effects remain. Packed, FP16 and fixed-point variants are not implied; the measured-family source/rounding evidence is recorded in `PERFORMANCE.md`.
+Scalar SIMD `SCVTF_asisdmisc_R` / `UCVTF_asisdmisc_R` support same-width 32/64-bit integer-to-FP conversion from canonical register fields. The destination replaces its scalar and clears the rest of Vd, preserving NZCV. Existing FPCR guards and unknown exception-status effects remain. Packed and FP16 variants are not implied; the measured-family source/rounding evidence is recorded in `PERFORMANCE.md`.
+
+## Float-to-integer, fixed-point and canonical-field vector operations
+
+These encodings expose some operands as opaque display text in the pinned decoder; the lifter reads their canonical fields (`sf`, `ftype`, `scale`, `Q`, `size`, `imm5`, `Rd`, `Rn`, `Rm`) and never the text.
+
+- `FCVTZS` / `FCVTZU` (`*_float2int`, W/X destination from S/D source): round toward zero regardless of `FPCR.RMode`, NaN becomes 0, out-of-range values saturate (INT/UINT minimum and maximum). The IR's `float_to_signed` / `float_to_unsigned` casts are undefined out of range, so the lift selects the saturated constant first and applies the cast only on the in-range arm. FP16 is not modeled. The conversion joins the existing FPCR guard (`FCVTZS|FCVTZU` in `needsFpGuard`) and writes `FPSR` as unknown.
+- `SCVTF` / `UCVTF` fixed-point (`*_float2fix`, `fbits = 64 - scale`, 1..32 for W sources): the integer converts once (round-to-nearest-even under the FPCR guard) and is multiplied by the exact power of two `2^-fbits`; no FP32/FP64 result of a 32/64-bit input is subnormal, so this equals one rounding of the real quotient (the tests include a case where rounding through binary64 first would be wrong).
+- `DUP` (general register, `DUP_asimdins_DR_r`): broadcasts the low 8/16/32/64 bits of Wn/Xn (element size from the lowest set bit of `imm5`) over 64 or 128 bits; `Q=0` with a 64-bit element and `imm5` without a set bit in 0..3 are reserved and stay unknown effects.
+- `CMEQ` register (`CMEQ_asimdsame_only`): per-lane all-ones/zero equality mask for 8/16/32/64-bit lanes (`Q=0` with 64-bit lanes is reserved).
+- `AND` register (`AND_asimdsame_only`) joins `ORR_asimdsame_only` in the canonical-field logical handler (64-bit forms clear the high half).
+
+Other encodings of the same mnemonic families (e.g. `FCVTZS` fixed-point, `FCVT{N,M,P,A}*`, FP16, lane-indexed `DUP`) remain unknown effects.
 
 ## Conformance evidence and integration commands
 

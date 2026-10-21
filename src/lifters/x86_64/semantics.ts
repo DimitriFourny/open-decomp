@@ -533,6 +533,47 @@ export class X86Semantics {
     }
   }
 
+  /**
+   * BTS: CF receives the selected bit, which is then set; OF/SF/AF/PF are undefined and ZF is
+   * unchanged. A register or immediate offset selects bit `offset mod width`. A memory operand with
+   * a register offset is a signed bit string: the access is the operand-width word at
+   * `address + floor(offset / width) * width / 8` (Intel SDM, BT), then bit `offset mod width`.
+   */
+  bitTestAndSet(): void {
+    const [dst, source] = this.p.operands,
+      b = this.block;
+    if (!dst || !source || (dst.kind !== 'register' && dst.kind !== 'memory'))
+      throw new Unsupported('BTS operands');
+    const width = this.width(dst);
+    if (width !== 16 && width !== 32 && width !== 64) throw new Unsupported('BTS operand width');
+    const offset = this.read(source, width),
+      bit = b.int('and', offset, this.c(width, BigInt(width - 1)));
+    let location: Value | undefined;
+    if (dst.kind === 'memory' && source.kind === 'register') {
+      if (dst.memory.address_bits !== 64)
+        throw new Unsupported('BTS register bit offset with a non-64-bit address size');
+      const words = this.resize(
+        b.int('ashr', offset, this.c(width, BigInt(Math.log2(width)))),
+        64,
+        true,
+      );
+      location = b.int(
+        'add',
+        this.address(dst.memory),
+        b.int('mul', words, this.c(64, BigInt(width / 8))),
+      );
+    }
+    const old = location
+      ? b.load(integer(width), location, { endian: 'little', alignment: 1, volatile: false })
+      : this.read(dst, width);
+    const selected = b.extract(b.int('lshr', old, bit), 0, 1),
+      value = b.int('or', old, b.int('shl', this.c(width, 1n), bit));
+    if (location) b.store(location, value, { endian: 'little', alignment: 1, volatile: false });
+    else this.write(dst, value);
+    this.setFlag('cf', selected);
+    this.undefinedFlags(['of', 'sf', 'af', 'pf']);
+  }
+
   stackPush(value: Value): void {
     const b = this.block,
       sp = b.readRegister(this.abi.stack_pointer),
@@ -721,6 +762,10 @@ export class X86Semantics {
       ['loop', 'loope', 'loopne', 'ud2', 'int3', 'int'].includes(m)
     )
       return;
+    if (m === 'bts') {
+      this.bitTestAndSet();
+      return;
+    }
     if (m === 'bswap') {
       const value = this.read(dst!),
         width = bitWidth(value.type);
@@ -801,6 +846,34 @@ export class X86Semantics {
           'bitcast',
           integer(128),
           b.vectorInt(packed[1] === 'padd' ? 'add' : 'sub', left, right),
+        ),
+      );
+      return;
+    }
+    if (m === 'punpcklbw') {
+      // Legacy SSE only (VEX/EVEX and MMX are rejected above): interleave the low
+      // eight bytes of the destination and source; upper vector bits are preserved.
+      if (
+        dst?.kind !== 'register' ||
+        dst.register.bank !== 'vector' ||
+        dst.register.width_bits !== 128 ||
+        (src?.kind !== 'register' && src?.kind !== 'memory')
+      )
+        throw new Unsupported('Only legacy SSE PUNPCKLBW xmm, xmm/m128 is modeled');
+      const type = vector(integer(8), 16),
+        left = b.cast('bitcast', type, this.read(dst, 128)),
+        right = b.cast('bitcast', type, this.read(src, 128, 16));
+      this.write(
+        dst,
+        b.cast(
+          'bitcast',
+          integer(128),
+          b.pack(
+            type,
+            Array.from({ length: 16 }, (_, index) =>
+              b.lane(index % 2 === 0 ? left : right, index >> 1),
+            ),
+          ),
         ),
       );
       return;

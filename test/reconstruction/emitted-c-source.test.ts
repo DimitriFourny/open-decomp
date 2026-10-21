@@ -21,6 +21,8 @@ interface Case {
   readonly driver: string;
   /** Patterns the emitted C text must contain. */
   readonly text?: readonly RegExp[];
+  /** Patterns the python-like text must contain. */
+  readonly python?: readonly RegExp[];
 }
 
 function compile(args: readonly string[]): void {
@@ -62,7 +64,11 @@ async function checkEmittedC(
         { emitter },
       );
       assert.ok('data' in result && result.data.delivery === 'inline', JSON.stringify(result));
-      if (emitter === 'python-like') continue;
+      if (emitter === 'python-like') {
+        for (const pattern of item.python ?? [])
+          assert.match(result.data.emission.text, pattern, result.data.emission.text);
+        continue;
+      }
       const emission: WireEmission = result.data.emission;
       assert.equal(emittedFormals(emission).length, item.formals, emission.text);
       for (const pattern of item.text ?? []) assert.match(emission.text, pattern);
@@ -368,6 +374,206 @@ __attribute__((noinline, used)) int64_t first(const int32_t *v, int64_t n, int32
       int64_t got = (int64_t)first((void *)v, (uint64_t)n, keys[k]);
       if (want != got) fail("first(n=%lld, key=%d): %lld vs %lld", (long long)n, keys[k], (long long)want, (long long)got);
     }`,
+        },
+      ],
+      t,
+    );
+  },
+);
+
+test(
+  'a bottom-tested loop prints as do/while with the code after it, and a side exit to a return stays a return',
+  { skip: nativeOracleSkip(), timeout: 120_000 },
+  async (t) => {
+    // brotli's ParseInt: the digit loop's bottom test (`i < 5`) is its exit to
+    // the code after it; a bad digit leaves for a return path from the middle.
+    const source = `#include <stdint.h>
+__attribute__((noinline, used)) int parse_int(const char *s, uint32_t low, uint32_t high, uint32_t *result) {
+  uint32_t value = 0;
+  int i;
+#pragma clang loop unroll(disable)
+  for (i = 0; i < 5; ++i) {
+    char c = s[i];
+    if (c == 0) break;
+    if (s[i] < '0' || s[i] > '9') return 0;
+    value = (10 * value) + (uint32_t)(c - '0');
+  }
+  if (i == 0) return 0;
+  if (i > 1 && s[0] == '0') return 0;
+  if (s[i] != 0) return 0;
+  if (value < low || value > high) return 0;
+  *result = value;
+  return 1;
+}
+`;
+    await checkEmittedC(
+      'open-decomp-bottom-test-',
+      source,
+      [
+        {
+          name: 'parse_int',
+          formals: 4,
+          text: [/\n {2}do \{\n[^]*\n {2}\} while \([^\n]*\);\n {2}\S/],
+          driver: `  const char *cases[] = {"", "0", "7", "07", "42", "123", "99999", "100000", "12a", "a1", "1:", "00", "3000", "65536"};
+  for (unsigned c = 0; c < sizeof cases / sizeof cases[0]; c++)
+    for (uint32_t low = 0; low < 2; low++) {
+      uint32_t expected = 77, observed = 77;
+      int want = source_parse_int(cases[c], low, 40000, &expected);
+      int got = (int)parse_int((void *)cases[c], low, 40000, (void *)&observed);
+      if (want != got || expected != observed)
+        fail("parse_int(%s, %u): %d/%u vs %d/%u", cases[c], low, want, expected, got, observed);
+    }`,
+        },
+      ],
+      t,
+    );
+  },
+);
+
+test(
+  'side exits into the else arm print as gotos to its label and run like their source',
+  { skip: nativeOracleSkip(), timeout: 120_000 },
+  async (t) => {
+    // sqlite3VdbeFindCompare's shape (inlined into sqlite3BtreeIndexMoveto):
+    // three side exits from the specialized arm reach the general fallback,
+    // which is the else arm; the specialized results fall through to the join.
+    const source = `#include <stdint.h>
+__attribute__((noinline, used)) int choose(const uint8_t *key, uint32_t n, uint32_t *out) {
+  int r;
+  if (n < 14) {
+    out[0] = n;
+    if (key[0] & 8) out[1] = key[1];
+    else if (key[0] & 1) goto general;
+    out[2] = n + 1;
+    if (key[1] & 2) {
+      r = 1;
+    } else {
+      out[3] = key[2];
+      if (key[1] & 4) goto general;
+      if (key[2] != 0 && key[3] == 7) goto general;
+      r = 2;
+    }
+  } else {
+  general:
+    r = 3;
+  }
+  out[4] = (uint32_t)r;
+  out[5] = n * (uint32_t)r;
+  out[6] = key[r];
+  return r * 10 + key[0];
+}
+`;
+    await checkEmittedC(
+      'open-decomp-else-label-',
+      source,
+      [
+        {
+          name: 'choose',
+          formals: 3,
+          // The fallback is the else arm: only the three side exits are gotos.
+          text: [/\n {2}\} else \{\n {4}label_\w+:;\n/],
+          driver: `  for (uint32_t n = 10; n < 16; n++)
+    for (unsigned k0 = 0; k0 < 16; k0++)
+      for (unsigned k1 = 0; k1 < 8; k1++)
+        for (unsigned k2 = 0; k2 < 2; k2++)
+          for (unsigned k3 = 6; k3 < 8; k3++) {
+            const uint8_t key[4] = {(uint8_t)k0, (uint8_t)k1, (uint8_t)k2, (uint8_t)k3};
+            uint32_t expected[7] = {9, 9, 9, 9, 9, 9, 9}, observed[7] = {9, 9, 9, 9, 9, 9, 9};
+            int want = source_choose(key, n, expected);
+            int got = (int)choose((void *)key, n, (void *)observed);
+            if (want != got) fail("choose(%u, %u%u%u%u): %d vs %d", n, k0, k1, k2, k3, want, got);
+            for (unsigned i = 0; i < 7; i++)
+              if (expected[i] != observed[i]) fail("choose(%u, %u%u%u%u): out[%u]", n, k0, k1, k2, k3, i);
+          }`,
+        },
+      ],
+      t,
+    );
+  },
+);
+
+test(
+  'rotated loops print one header test and run like their source, also for zero iterations',
+  { skip: nativeOracleSkip(), timeout: 120_000 },
+  async (t) => {
+    // Clang rotates both loops into a guard plus a bottom test of the same value.
+    // `list_sum`'s joined test prints once as the `while` header in both dialects;
+    // `walk`'s preheader computes `orr x8, xzr, x2`, which keeps it rotated, and
+    // both must still run like their source, including for zero iterations.
+    const source = `#include <stdint.h>
+struct node { struct node *next; uint32_t value; };
+__attribute__((noinline, used)) uint32_t list_sum(const struct node *p) {
+  uint32_t s = 0;
+  for (; p; p = p->next) s += p->value * 3 + 1;
+  return s;
+}
+__attribute__((noinline, used)) int64_t walk(const int64_t *p, const int64_t *end, int64_t k) {
+  int64_t s = k;
+  while (p != end) { s = s * 3 + *p; p++; }
+  return s - k;
+}
+`;
+    await checkEmittedC(
+      'open-decomp-rotated-loop-',
+      source,
+      [
+        {
+          name: 'list_sum',
+          formals: 1,
+          text: [/^\s*while \(\w+ != 0\) \{$/m],
+          python: [/^\s*while \w+ != 0:\n(?!\s*pass\n)/m],
+          driver: `  struct node n[4] = {{&n[1], 5}, {&n[2], 0}, {&n[3], 0xffffffffu}, {0, 9}};
+  const struct node *starts[] = {0, &n[3], &n[1], &n[0]};
+  for (unsigned i = 0; i < 4; i++)
+    if (source_list_sum(starts[i]) != list_sum((uint64_t)(uintptr_t)starts[i]))
+      fail("list_sum start %u", i);`,
+        },
+        {
+          name: 'walk',
+          formals: 3,
+          driver: `  const int64_t v[] = {4, -9, 1ll << 40, 0, 7};
+  for (unsigned a = 0; a <= 5; a++)
+    for (unsigned b = a; b <= 5; b++)
+      if (source_walk(v + a, v + b, 11) != (int64_t)walk((void *)(v + a), (void *)(v + b), 11))
+        fail("walk %u..%u", a, b);`,
+        },
+      ],
+      t,
+    );
+  },
+);
+
+test(
+  'a pointer-chasing loop whose body ends with its step prints as a for loop and runs like its source',
+  { skip: nativeOracleSkip(), timeout: 120_000 },
+  async (t) => {
+    // The step `p = p->next` is the body's last statement and the only write of
+    // the tested variable, so it moves into the `for` header (Python-like keeps
+    // `while`); the loop must still run like its source, also for an empty list.
+    const source = `#include <stdint.h>
+struct node { struct node *next; uint32_t value; };
+__attribute__((noinline, used)) void bump(struct node *p, uint32_t k) {
+  for (; p; p = p->next) p->value = p->value * 3 + k;
+}
+`;
+    await checkEmittedC(
+      'open-decomp-for-step-',
+      source,
+      [
+        {
+          name: 'bump',
+          formals: 2,
+          // The init is empty when the formal shares the loop variable (G1 partition).
+          text: [/^\s*for \((?:\w+ = [^;]+)?; \w+ != 0; \w+ = [^;]+\) \{$/m],
+          python: [/^\s*while \w+ != 0:$/m],
+          driver: `  for (unsigned start = 0; start <= 4; start++) {
+    struct node a[4] = {{&a[1], 5}, {&a[2], 0}, {&a[3], 0xffffffffu}, {0, 9}};
+    struct node b[4] = {{&b[1], 5}, {&b[2], 0}, {&b[3], 0xffffffffu}, {0, 9}};
+    source_bump(start < 4 ? &a[start] : 0, 7);
+    bump((uint64_t)(uintptr_t)(start < 4 ? &b[start] : 0), 7);
+    for (unsigned i = 0; i < 4; i++)
+      if (a[i].value != b[i].value) fail("bump start %u node %u: %u vs %u", start, i, a[i].value, b[i].value);
+  }`,
         },
       ],
       t,

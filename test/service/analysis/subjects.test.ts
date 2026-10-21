@@ -85,7 +85,8 @@ test(
   { timeout: 60000 },
   async (t) => {
     const p = await project(t, 'pe-x86_64-symbols.exe'),
-      fn = p.functions[0]!;
+      // Whole-image enumeration also publishes the unreached IAT thunks as import stubs.
+      fn = p.functions.find((item) => item.kind !== 'import_stub')!;
     const baseline = p.payload((await p.decompile(fn.id)).result),
       call = baseline.catalog.subjects.find((subject) => subject.kind === 'call');
     assert.ok(call);

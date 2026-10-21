@@ -441,6 +441,14 @@ export class ProjectWorker {
               };
             }
             result = mutation;
+          } else if (job.request.operation === 'functions_discover') {
+            const step = toolSchemas.functions_discover.output.parse(event.result);
+            if (event.job.state === 'completed' && step.state === 'complete' && this.#snapshot)
+              this.#snapshot = {
+                ...this.#snapshot,
+                revision: Math.max(this.#snapshot.revision, step.data.revision),
+              };
+            result = step;
           } else
             result = markSchemaValidated(
               toolSchemas[job.request.operation].output.parse(event.result),

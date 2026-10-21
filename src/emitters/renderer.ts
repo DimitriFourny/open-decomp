@@ -82,6 +82,7 @@ import {
   sourceGenericStems,
   sourceIdentifierStem,
   sourceRoleStems,
+  type SourceNamePlan,
 } from '../reconstruction/source-names.js';
 import {
   abiConformanceRequirements,
@@ -115,7 +116,7 @@ import {
   type Printed,
   type SimplificationRecorder,
 } from './expressions.js';
-import { MetadataLimitError, Writer } from './writer.js';
+import { MetadataLimitError, Writer, type EvidenceSource } from './writer.js';
 import type { EmissionInput, EmissionResult } from './model.js';
 import { collectInferences } from './inference.js';
 import {
@@ -169,6 +170,8 @@ type Nest =
       readonly follow: string | null;
     }
   | { readonly kind: 'switch'; readonly id: string };
+/** A statement a `for` header prints as its init or step. */
+type HeaderStatement = Extract<Instruction, { kind: 'assign' | 'load' }>;
 /** One test of a merged `if` chain: its printed form and the value it tests. */
 interface ConditionTerm {
   readonly printed: Printed;
@@ -206,6 +209,15 @@ export class CallInliningRetry extends Error {
   constructor(readonly results: readonly string[]) {
     super('call inlining retry');
   }
+}
+
+/** Plans of one reconstruction that no attempt's state (rejected calls, metadata
+ * mode, validation session) can change: the first attempt computes them and
+ * every retry reuses them. */
+interface AttemptPlans {
+  names?: SourceNamePlan;
+  characters?: ReadonlySet<string>;
+  indexedData?: ReadonlyMap<string, IndexedDataAccess>;
 }
 
 /** Only syntax lives here: both dialects consume the same reconstructed program. */
@@ -338,6 +350,18 @@ export class Renderer {
     string,
     { readonly init: ParallelTransfer; readonly step: ParallelTransfer }
   >();
+  /** `for` headers whose step (and init) are statements (Ghidra's
+   * BlockWhileDo::finalTransform), by loop test control; the init may instead
+   * be the entry edge's hoisted copy. Those statements are not printed in their blocks. */
+  private readonly forStatements = new Map<
+    string,
+    {
+      readonly init?: HeaderStatement;
+      readonly copies?: ParallelTransfer;
+      readonly step: HeaderStatement;
+    }
+  >();
+  private readonly headerStatements = new Set<string>();
   private readonly typeRecords = new Map<string, SuppliedTypeRecord | null>();
   private readonly libraryDeclarations = new Map<string, readonly CatalogEntry[]>();
   private readonly callParameterSpellings = new Map<string, string | null>();
@@ -358,6 +382,8 @@ export class Renderer {
   private readonly sourceNames = new Map<string, string>();
   private readonly usedSourceNames = new Set<string>();
   private readonly sourceAddresses = new Map<string, SourceAddress | null>();
+  /** First source address of each `va` value, in source order. */
+  private readonly vaAddresses = new Map<bigint, Address>();
   /** Source view: values holding one character code (see source-characters.ts). */
   private characters: ReadonlySet<string> = new Set();
   private readonly sourceDataValue: (value: Value) => SourceAddress | undefined;
@@ -399,6 +425,7 @@ export class Renderer {
     /** Call results never printed as their reader's operand; null: no call is. */
     private readonly rejectedCalls: ReadonlySet<string> | null = new Set(),
     private readonly metadata: 'full' | 'omitted' = 'full',
+    plans: AttemptPlans = {},
   ) {
     this.writer = new Writer(context, options.indent, options.include_evidence, language, metadata);
     // Rendering records presentation rewrites in the validation session; each
@@ -482,7 +509,13 @@ export class Renderer {
         else if (spelling !== name.source_name) this.linkageNames.set(name.entity_id, null);
       }
     }
-    const plan = planSourceNames(this.program, this.names, input.types, context, this.sourceView);
+    const plan = (plans.names ??= planSourceNames(
+      this.program,
+      this.names,
+      input.types,
+      context,
+      this.sourceView,
+    ));
     this.sourceRoleNames = plan.names;
     this.sourceCarried = plan.carried;
     this.sourceInitial = plan.initial;
@@ -530,6 +563,8 @@ export class Renderer {
       if (previous === undefined) this.sourceAddresses.set(key, item);
       else if (previous && (previous.name !== item.name || previous.string !== item.string))
         this.sourceAddresses.set(key, null);
+      if (item.address.space === 'va' && !this.vaAddresses.has(item.address.value))
+        this.vaAddresses.set(item.address.value, item.address);
     }
     this.globals = planGlobals(this.program, context, {
       data: this.sourceDataValue,
@@ -559,7 +594,7 @@ export class Renderer {
     }
     if (this.sourceView) {
       this.stridedPointerTypes();
-      this.characters = characterEvidence(this.program, context, {
+      this.characters = plans.characters ??= characterEvidence(this.program, context, {
         bytePointer: (id) => this.bytePointerType(id),
       }).values;
     }
@@ -585,7 +620,7 @@ export class Renderer {
     }
     if (!this.program.blocks.has(input.function.entry))
       this.invalid('Structured function has no entry block');
-    if (this.sourceView) this.planSourceControl();
+    if (this.sourceView) this.planSourceControl(plans);
     this.findLabels(this.body, [], 0);
     if (validate) validateReconstruction(this.program, context);
   }
@@ -1897,7 +1932,7 @@ export class Renderer {
         `note ${note.status}/${note.origin} id=${this.writer.quote(note.id)} subject=${this.writer.quote(id)} author=${this.writer.quote(note.author)}: ${this.writer.quote(note.value.value)}`,
       );
       this.inferenceSites.set(id, { start, end: this.writer.offset });
-      this.mapped(this.dataOrigin(id), start, [id], note.evidence_ids);
+      this.mapped(this.dataOrigin(id), start, [id], [note.evidence_ids]);
     }
   }
 
@@ -1924,22 +1959,50 @@ export class Renderer {
     return ids;
   }
 
+  /** Mappings of this attempt, published in order once its body can no longer be
+   * retried: a retried attempt's text and metadata are discarded, so it interns and
+   * unions nothing. Null once published; later mappings publish immediately. */
+  private pendingMappings: (() => void)[] | null = [];
+
+  /** Map `[start, end)` to `origin`; `ids` may be computed when the mapping is published. */
   private mapped(
     origin: Origin,
     start: number,
-    ids: readonly string[] = [],
-    evidence: readonly string[] = [],
+    ids: readonly string[] | (() => readonly string[]) = [],
+    evidence: readonly EvidenceSource[] = [],
     end = this.writer.offset,
   ): void {
     // Empty spans publish nothing; never intern identities for them.
     if (start === end) return;
+    const publish = (): void =>
+      this.publishMapping(origin, start, typeof ids === 'function' ? ids() : ids, evidence, end);
+    if (!this.pendingMappings) return publish();
+    this.context.checkpoint(1);
+    this.pendingMappings.push(publish);
+  }
+
+  private publishMappings(): void {
+    const pending = this.pendingMappings ?? [];
+    this.pendingMappings = null;
+    for (const publish of pending) publish();
+  }
+
+  private publishMapping(
+    origin: Origin,
+    start: number,
+    ids: readonly string[],
+    evidence: readonly EvidenceSource[],
+    end: number,
+  ): void {
     const contributors = this.program.source?.value_origins;
     const references = this.writer.references();
     for (const id of [origin.id, ...ids])
       for (const subject of contributors?.get(id) ?? [id]) references.add(subject);
     if (references.ids.length === 0) references.add(origin.id);
     const subjects = references.ids;
-    const dataEvidence = new Set(evidence);
+    // Evidence lists are passed by identity: the writer unions each distinct
+    // sequence once (duplicates across lists are removed there, in order).
+    const dataEvidence: EvidenceSource[] = [...evidence];
     const dataSubjects = new Set([origin.id, ...ids]);
     for (const id of subjects) dataSubjects.add(id);
     for (const id of dataSubjects) {
@@ -1948,18 +2011,18 @@ export class Renderer {
         references.add(type.type_id);
         for (const subject of [...type.association_ids, ...type.subject_ids])
           references.add(subject);
-        for (const evidenceId of type.evidence_ids) dataEvidence.add(evidenceId);
+        dataEvidence.push(type.evidence_ids);
       }
       const value = this.program.values.get(id);
       if (!value) continue;
       const data = this.sourceDataValue(value);
-      for (const evidenceId of data?.object?.evidence_ids ?? []) dataEvidence.add(evidenceId);
+      if (data?.object) dataEvidence.push(data.object.evidence_ids);
     }
     this.writer.map(
       { ...origin, id: subjects[0] ?? origin.id },
       start,
       references,
-      [...dataEvidence],
+      dataEvidence,
       end,
     );
   }
@@ -1985,7 +2048,8 @@ export class Renderer {
       this.context.checkpoint(1);
       if (seen.has(contributor.id)) continue;
       seen.add(contributor.id);
-      this.mapped(contributor, start, [...shared, ...this.semanticIds(contributor)], [], end);
+      const prefix = shared;
+      this.mapped(contributor, start, () => [...prefix, ...this.semanticIds(contributor)], [], end);
       shared = [];
       if (this.statements.has(contributor.id)) this.mappedStatements.add(contributor.id);
       if (this.controls.has(contributor.id)) this.mappedControls.add(contributor.id);
@@ -2006,7 +2070,7 @@ export class Renderer {
         site.node,
         start,
         proof ? [...proof.ids] : [],
-        [...site.node.contract_evidence, ...(proof?.evidence ?? [])],
+        proof ? [site.node.contract_evidence, proof.evidence] : [site.node.contract_evidence],
         end,
       );
       this.mapMemory(site.node, start, end);
@@ -2226,11 +2290,8 @@ export class Renderer {
     const item = this.sourceDataValue(value);
     if (item) return item.address;
     if (fact?.kind === 'constant') {
-      for (const address of this.program.source?.addresses ?? []) {
-        this.context.checkpoint(1);
-        if (address.address.space === 'va' && address.address.value === fact.bits)
-          return address.address;
-      }
+      this.context.checkpoint(1);
+      return this.vaAddresses.get(fact.bits);
     }
     return undefined;
   }
@@ -3492,7 +3553,7 @@ export class Renderer {
         continue;
       const start = this.writer.offset;
       this.writer.line(0, text);
-      this.mapped(node, start, [], signature.evidence_ids);
+      this.mapped(node, start, [], [signature.evidence_ids]);
     }
   }
 
@@ -3605,10 +3666,8 @@ export class Renderer {
         span.start,
         [],
         [
-          ...new Set([
-            ...span.object.object.evidence_ids,
-            ...(span.object.import?.evidence_ids ?? []),
-          ]),
+          span.object.object.evidence_ids,
+          ...(span.object.import ? [span.object.import.evidence_ids] : []),
         ],
         span.end,
       );
@@ -3695,7 +3754,7 @@ export class Renderer {
           'Image-backed indexed storage view at the declared VA; no allocation or invented extent. Index units are the declared scalar width. Reads retain original byte order, aliasing and faults; no Python sequence bounds or negative-index rebasing.',
         );
       }
-      this.mapped(node, start, [group.address], object.evidence_ids);
+      this.mapped(node, start, [group.address], [object.evidence_ids]);
     }
   }
 
@@ -4526,7 +4585,7 @@ export class Renderer {
           view.shape.type_id,
           ...(this.program.source?.field_subjects?.get(node.id) ?? []),
         ],
-        [...view.shape.evidence_ids, ...view.field.evidence_ids],
+        [view.shape.evidence_ids, view.field.evidence_ids],
         end,
       );
   }
@@ -4789,10 +4848,12 @@ export class Renderer {
     this.map(node, start);
     if (node.kind === 'call') {
       const proof = this.sourceEvidence.get(node.id);
-      this.mapped(node, start, proof ? [...proof.ids] : [], [
-        ...node.contract_evidence,
-        ...(proof?.evidence ?? []),
-      ]);
+      this.mapped(
+        node,
+        start,
+        proof ? [...proof.ids] : [],
+        proof ? [node.contract_evidence, proof.evidence] : [node.contract_evidence],
+      );
     }
     this.mapMemory(node, start);
   }
@@ -5189,7 +5250,8 @@ export class Renderer {
           .leaves(copy.source)
           .every((index) => !others.has(key(liveness.values[index]!)));
       });
-    if (!steps.length || !independent(steps) || !independent(inits)) return false;
+    if (!steps.length) return this.acceptStatementFor(loop);
+    if (!independent(steps) || !independent(inits)) return false;
     const induction = new Set<string>();
     for (const copy of steps) {
       const variable = key(copy.destination);
@@ -5233,6 +5295,107 @@ export class Renderer {
     this.hoisted.set(loop.step, induction);
     this.forLoops.set(loop.test.id, { init: loop.init, step: loop.step });
     return true;
+  }
+
+  /** A top-tested `for` whose step is the loop body's last statement and assigns
+   * a variable the test reads; its init, when the loop's entry block ends with
+   * one, is the statement assigning that variable just before the loop. The
+   * step still runs last in every iteration: the sole repeat edge prints
+   * nothing and follows it, and nothing else in the loop writes the variable. */
+  private acceptStatementFor(loop: Parameters<LoopFacts['induction']>[0]): boolean {
+    const liveness = this.liveness;
+    if (!liveness || loop.bottom) return false;
+    const step = this.trailingStatement(loop.step);
+    if (!step) return false;
+    const variable = this.variableKey(step.result);
+    const writes = (ids: readonly number[]): boolean =>
+      ids.some((index) => this.variableKey(liveness.values[index]!) === variable);
+    if (!writes(liveness.leaves(loop.test.condition))) return false;
+    let definitions = 0;
+    for (const id of loop.inside) {
+      const block = this.program.blocks.get(id);
+      if (!block) return false;
+      for (const event of liveness.events(block)) if (event.def && writes(event.ids)) definitions++;
+      for (const arm of [
+        ...(block.control.kind === 'jump' ? [{ transfer: block.control.transfer }] : []),
+        ...controlArms(block.control),
+      ])
+        if (
+          this.printedCopies(arm.transfer).some(
+            (copy) => this.variableKey(copy.destination) === variable,
+          )
+        )
+          return false;
+    }
+    if (definitions !== 1) return false;
+    const entry = this.trailingStatement(loop.init);
+    const init = entry && this.variableKey(entry.result) === variable ? entry : undefined;
+    // Otherwise the entry edge's copy into the variable, when it reads no other
+    // destination of that edge (it then runs after them, in the header).
+    const copies = this.printedCopies(loop.init);
+    const initial = copies.filter((copy) => this.variableKey(copy.destination) === variable);
+    const others = new Set(
+      copies
+        .filter((copy) => !initial.includes(copy))
+        .map((copy) => this.variableKey(copy.destination)),
+    );
+    const hoist =
+      !init &&
+      initial.length === 1 &&
+      liveness
+        .leaves(initial[0]!.source)
+        .every((index) => !others.has(this.variableKey(liveness.values[index]!)));
+    if (hoist) this.hoisted.set(loop.init, new Set([variable]));
+    this.forStatements.set(loop.test.id, {
+      ...(init ? { init } : hoist ? { copies: loop.init } : {}),
+      step,
+    });
+    this.headerStatements.add(step.id);
+    if (init) this.headerStatements.add(init.id);
+    return true;
+  }
+
+  /** The last statement of the block that ends by taking `transfer`, when that
+   * edge prints nothing and the statement prints exactly one plain assignment. */
+  private trailingStatement(transfer: ParallelTransfer): HeaderStatement | undefined {
+    if (this.printedCopies(transfer).length) return undefined;
+    for (const block of this.program.blocks.values()) {
+      if (block.control.kind !== 'jump' || block.control.transfer !== transfer) continue;
+      const node = block.statements.at(-1);
+      if (
+        !node ||
+        (node.kind !== 'assign' && node.kind !== 'load') ||
+        !this.program.retained.has(node.id) ||
+        !this.program.live.has(node.result.id) ||
+        this.inlined.has(node.result.id) ||
+        this.deferredStores.has(node.id) ||
+        this.flagAccesses.has(node.id) ||
+        this.deferred.get(node.id)?.length ||
+        this.notes.get(node.id)?.length ||
+        (node.kind === 'load' &&
+          (!this.program.source ||
+            this.globals.import_loads.has(node.id) ||
+            this.punnedLocal(node))) ||
+        (node.kind === 'assign' ? expressionOperands(node.expression) : [node.address]).some(
+          (value) => this.inlinedCalls.has(value.id),
+        ) ||
+        [node.id, block.control.id].some((anchor) =>
+          (this.program.source?.definitions?.get(anchor) ?? []).some(
+            (definition) => !this.inlined.has(definition.result.id),
+          ),
+        )
+      )
+        return undefined;
+      return node;
+    }
+    return undefined;
+  }
+
+  /** A header statement's text and mappings at `start` (the header line). */
+  private headerStatement(node: HeaderStatement): string {
+    return node.kind === 'assign'
+      ? this.assignmentText(node)
+      : this.assignmentText(node, this.storage(node));
   }
 
   /** A bottom test also runs before the first iteration of a `for`: an
@@ -5569,17 +5732,28 @@ export class Renderer {
     if (form?.kind === 'while' || (form?.kind === 'for' && !form.bottom)) {
       const enter = form.enter ? control.when_true : control.when_false,
         exit = form.enter ? control.when_false : control.when_true,
-        header = this.forLoops.get(control.id);
+        header = this.forLoops.get(control.id),
+        statements = form.kind === 'for' ? this.forStatements.get(control.id) : undefined;
+      const start = this.writer.offset;
       this.writer.line(
         depth - 1,
-        form.kind === 'for' && header
-          ? `for (${this.hoistedText(header.init)}; ${test(form.enter)}; ${this.hoistedText(header.step)}) {`
-          : c
-            ? `while (${test(form.enter)}) {`
-            : `while ${test(form.enter)}:`,
+        statements
+          ? `for (${statements.init ? this.headerStatement(statements.init) : statements.copies ? this.hoistedText(statements.copies) : ''}; ${test(form.enter)}; ${this.headerStatement(statements.step)}) {`
+          : form.kind === 'for' && header
+            ? `for (${this.hoistedText(header.init)}; ${test(form.enter)}; ${this.hoistedText(header.step)}) {`
+            : c
+              ? `while (${test(form.enter)}) {`
+              : `while ${test(form.enter)}:`,
       );
+      for (const node of statements ? [statements.init, statements.step] : [])
+        if (node) {
+          this.map(node, start);
+          this.mapMemory(node, start);
+        }
       this.loopExit(exit.transfer, depth, control);
-      this.arm(enter, depth, control);
+      // The loop prints `pass` itself when its whole body prints nothing.
+      this.transfer(enter.transfer, depth, control);
+      if (enter.body) this.region(enter.body, depth);
       return;
     }
     if (form?.kind === 'for') {
@@ -5730,17 +5904,40 @@ export class Renderer {
       this.arm(no, depth + 1, control);
       close();
     } else if (pending) this.invalid('A merged condition reached an if with an else');
-    else if (shaped) {
-      const first = this.terminates(yes) ? yes : no;
-      open(first === yes);
-      this.arm(first, depth + 1, control);
-      close();
-      this.arm(first === yes ? no : yes, depth, control);
-    } else {
-      open(true);
-      this.arm(yes, depth + 1, control);
-      this.elseArm(no, depth, control);
+    else {
+      // The arm a goto leaves prints before the arm holding its label.
+      const lead = this.leadingArm(yes, no),
+        first = this.terminates(yes) ? yes : no;
+      if (shaped && (lead === null || lead === first)) {
+        open(first === yes);
+        this.arm(first, depth + 1, control);
+        close();
+        this.arm(first === yes ? no : yes, depth, control);
+      } else {
+        const head =
+          lead === no &&
+          this.localValidation.presentation(
+            'branch_order',
+            this.input.function.id,
+            'an if whose false arm holds the label of a goto leaving its true arm prints the false arm first under the complemented exact test; both arms keep their code, edges and copies',
+          )
+            ? no
+            : yes;
+        open(head === yes);
+        this.arm(head, depth + 1, control);
+        this.elseArm(head === yes ? no : yes, depth, control);
+      }
     }
+  }
+
+  /** The arm of an `if` that prints first because a goto leaves it for a
+   * label in the other arm (the structurer lays labels out after their
+   * gotos); null when neither or both arms jump into the other. */
+  private leadingArm(yes: ControlArm, no: ControlArm): ControlArm | null {
+    if (!this.labels.size) return null;
+    const intoNo = this.jumpsInto(yes, no),
+      intoYes = this.jumpsInto(no, yes);
+    return intoNo === intoYes ? null : intoNo ? yes : no;
   }
 
   /** An inlined zero extension does not change which case matches when every
@@ -5912,6 +6109,37 @@ export class Renderer {
           this.silentTransfer(block.control.transfer),
       )
     );
+  }
+
+  /** A goto inside `from`'s body lands in `into`'s body: the structurer laid
+   * that label out after `from`, so `into` must print after it. */
+  private jumpsInto(from: ControlArm, into: ControlArm): boolean {
+    if (!from.body || !into.body) return false;
+    const targets = new Set<string>();
+    const collect = (region: Region): void => {
+      this.context.checkpoint(1);
+      if (region.kind === 'sequence') region.regions.forEach(collect);
+      else if (region.kind === 'loop') collect(region.body);
+      else {
+        targets.add(region.id);
+        for (const arm of controlArms(region.control)) if (arm.body) collect(arm.body);
+      }
+    };
+    collect(into.body);
+    const jumps = (region: Region): boolean => {
+      this.context.checkpoint(1);
+      if (region.kind === 'sequence') return region.regions.some(jumps);
+      if (region.kind === 'loop') return jumps(region.body);
+      const control = region.control;
+      const arms: { transfer: ParallelTransfer; body?: Region | null }[] =
+        control.kind === 'jump' ? [{ transfer: control.transfer }] : [...controlArms(control)];
+      return arms.some(
+        (arm) =>
+          (this.actions.get(arm.transfer) === 'goto' && targets.has(arm.transfer.target)) ||
+          (!!arm.body && jumps(arm.body)),
+      );
+    };
+    return jumps(from.body);
   }
 
   /** Print an empty arm: its edge and silent blocks record their mappings and edges. */
@@ -6187,7 +6415,9 @@ export class Renderer {
       )
         return this.printsOneIf(this.controls.get(inner)!);
     }
-    return this.emptyArm(no) || this.emptyArm(yes);
+    if (this.emptyArm(no) || this.emptyArm(yes)) return true;
+    const lead = this.leadingArm(yes, no);
+    return lead !== null && lead !== (this.terminates(yes) ? yes : no);
   }
 
   /** Print the `else` arm of an if whose first arm is printed, then close the
@@ -6581,10 +6811,10 @@ export class Renderer {
   /** Source view: coalesce phi copies, then lay out return tails and loop
    * syntax. Each step checks its side conditions on this reconstruction and
    * records one presentation rewrite; the checked view never calls this. */
-  private planSourceControl(): void {
+  private planSourceControl(plans: AttemptPlans): void {
     const subject = this.input.function.id;
     let program = this.program;
-    this.indexedData = indexedDataAccesses(program, this.context);
+    this.indexedData = plans.indexedData ??= indexedDataAccesses(program, this.context);
     const indices = new Map(
       [...this.indexedData].map(([id, table]) => [id, table.terms.map((term) => term.index)]),
     );
@@ -7122,7 +7352,7 @@ export class Renderer {
         this.localValidation.presentation(
           'for_loop',
           subject,
-          'a while/do-while prints as for (init; test; step) when its single entry and single repeat edges only initialize and step (x = x ± c) induction variables nothing else in the loop writes, and its test reads one; a bottom test must hold on entry',
+          'a while/do-while prints as for (init; test; step) when its single entry and single repeat edges only initialize and step (x = x ± c) induction variables nothing else in the loop writes, and its test reads one; a bottom test must hold on entry; a while whose sole repeat edge prints nothing may take as step the body’s last statement assigning a variable its test reads and nothing else in the loop writes, and as init the statement assigning it that ends the entry block',
           fors,
         )) &&
       (!exits.length ||
@@ -7138,6 +7368,8 @@ export class Renderer {
       this.rebased.clear();
       this.hoisted.clear();
       this.forLoops.clear();
+      this.forStatements.clear();
+      this.headerStatements.clear();
     }
     // Short-circuit tests sharing one arm print as if/else.
     const loopTests = new Set(this.body === body ? [] : tests);
@@ -7860,6 +8092,10 @@ export class Renderer {
       for (const node of region.statements) {
         if (node === merged) continue;
         this.context.checkpoint(1);
+        if (this.headerStatements.has(node.id)) {
+          this.sourceDefinitions(node.id, depth);
+          continue;
+        }
         const held =
           node.kind === 'call' && this.program.retained.has(node.id)
             ? this.program.calls
@@ -8181,7 +8417,7 @@ export class Renderer {
           { ...this.dataOrigin(parameter.value.id), id: parameter.value.id },
           offset,
           [parameter.value.id],
-          signature?.evidence_ids ?? [],
+          signature ? [signature.evidence_ids] : [],
           offset + length,
         );
         this.inferenceSites.set(parameter.value.id, { start: offset, end: offset + length });
@@ -8204,7 +8440,7 @@ export class Renderer {
           { ...this.dataOrigin(parameter.value.id), id: parameter.value.id },
           start,
           source ? [parameter.value.id, source.id, source.type_id] : [parameter.value.id],
-          signature?.evidence_ids ?? [],
+          signature ? [signature.evidence_ids] : [],
         );
         this.inferenceSites.set(parameter.value.id, { start, end: w.offset });
       }
@@ -8217,9 +8453,12 @@ export class Renderer {
       );
     this.headerEnd = w.offset;
     const proof = this.sourceEvidence.get(this.input.function.id);
-    this.mapped(this.input.function, this.headerStart, proof ? [...proof.ids] : [], [
-      ...(proof?.evidence ?? []),
-    ]);
+    this.mapped(
+      this.input.function,
+      this.headerStart,
+      proof ? [...proof.ids] : [],
+      proof ? [proof.evidence] : [],
+    );
     if (noteSpan)
       for (const requirement of environment) mapSites(requirement, noteSpan.start, noteSpan.end);
     const formals = new Set(parameters.map((parameter) => parameter.value.id));
@@ -8333,6 +8572,7 @@ export class Renderer {
     if (this.language === 'python-like' && this.writer.codeLines === bodyLines)
       w.statement(1, 'pass');
     if (this.pendingCalls.size) throw new CallInliningRetry([...this.pendingCalls.keys()]);
+    this.publishMappings();
     if (this.language === 'c-like') w.line(0, '}');
     // Hidden subjects retain annotations without resurrecting dead declarations.
     for (const subject of this.notes.keys()) this.emitNotes(subject, 0);
@@ -8560,6 +8800,7 @@ export function renderSource(
 ): EmissionResult {
   // Reconstruction does not depend on the attempt (rejected calls, metadata).
   const program = reconstruct(input, context, options.view === 'checked' ? 'checked' : 'source');
+  const plans: AttemptPlans = {};
   let validated = false;
   const attempt = (metadata: 'full' | 'omitted'): EmissionResult => {
     const rejected = new Set<string>();
@@ -8576,6 +8817,7 @@ export function renderSource(
           !validated,
           retry < 4 ? rejected : null,
           metadata,
+          plans,
         );
         validated = true;
         return renderer.render();

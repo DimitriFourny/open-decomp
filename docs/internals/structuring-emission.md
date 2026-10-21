@@ -19,7 +19,7 @@ Turns a function's validated SSA control-flow graph (CFG) into a region tree, th
 1. Compute reverse postorder (RPO), predecessors and dominators. RPO breaks every remaining tie.
 2. Structure each scope: first the function, then every loop body recursively. A scope's header backedges are hidden so that nested loops show up.
    1. **Loops.** Each cyclic strongly connected component becomes a loop, headed by its first entry in RPO. Its other entries (irreducible loops) stay labeled.
-   2. **Follow.** One exit becomes the loop's continuation. The choice prefers the fewest other non-tail exits, then a header exit, then a latch exit. Acyclic blocks entered only from the body are added to the body. Edges to the follow become `break`; any other exit becomes a pending label.
+   2. **Follow.** One exit becomes the loop's continuation. The choice prefers the fewest labeled exits (other non-tail exits, absorbed blocks where exit paths from different loop blocks meet, other exits flowing into a block the follow also flows into), then a follow that is not a small tail, then the exit of a single bottom test that only the loop enters (a `do-while` with the code after the loop following it, like Ghidra's `LoopBody::findExit` tail-first order), then fewer tail exits, a header exit, a latch exit. Acyclic blocks entered only from the body are added to the body. Edges to the follow become `break`; any other exit becomes a pending label.
    3. **Collapse** inner loops and blocks as nodes (diagram below).
 3. The collapse rules, highest priority first:
 
@@ -33,7 +33,7 @@ Turns a function's validated SSA control-flow graph (CFG) into a region tree, th
 
 - **Switches:** when several case arms are the only way into a target, the first of those cases owns it.
 - **Loop exits:** in a loop body, a branch whose other arm repeats the loop owns the exit path. This keeps the repeat edge last in the body, which bottom tests need.
-- **Forward-only labels:** a target with pending labels can be absorbed only after all their sources.
+- **Forward-only labels:** a target with pending labels can be absorbed only after all their sources. The two arms of an `if` count as ordered: the printer puts the arm a goto leaves before the arm holding its label (`branch_order` when that inverts the test), so a side exit into the other arm keeps the if/else (Ghidra's `else { LAB: … }`).
 - **Depth bound** (default 32, maximum 64): a collapse that would nest deeper is skipped, and its edge stays labeled.
 
 ```mermaid
@@ -70,14 +70,14 @@ flowchart LR
 
 Source-view planning starts after [variable recovery](reconstruction.md#variable-recovery). The steps below run in order, and each records a presentation rule:
 
-| step               | effect                                                                                                                                                       |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `foldSwitchGuards` | a proven jump-table range guard and its switch print as one switch                                                                                           |
-| `planLayout`       | a labeled edge into a small tail gets its own copy of the tail (at most 128 copied blocks). A copy is refused if its transfer would print two different ways |
-| `planFlagTests`    | an O0 flag-local chain prints as `&&`/`\|\|`                                                                                                                 |
-| `planLoopForms`    | `while (c)` when the header prints only its test; C only: `do-while` with one repeat edge and a re-proved test; `for` with induction init/step copies        |
-| `planSharedArms`   | `if (a && b) {F} else {X}`                                                                                                                                   |
-| `planLoopExits`    | a multi-level exit sets a flag that is re-tested after each scope                                                                                            |
+| step               | effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `foldSwitchGuards` | a proven jump-table range guard and its switch print as one switch                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `planLayout`       | a labeled edge into a small tail gets its own copy of the tail (at most 128 copied blocks). A copy is refused if its transfer would print two different ways                                                                                                                                                                                                                                                                                                                            |
+| `planFlagTests`    | an O0 flag-local chain prints as `&&`/`\|\|`                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `planLoopForms`    | `while (c)` when the header prints only its test; C only: `do-while` with one repeat edge and a re-proved test; `for` with induction init/step copies, or (Ghidra's `BlockWhileDo::finalTransform`) a top-tested loop whose copy-free sole repeat edge follows the body's last statement assigning a variable the test reads and nothing else in the loop writes: that statement is the step, the statement ending the entry block or the entry edge's copy into that variable the init |
+| `planSharedArms`   | `if (a && b) {F} else {X}`                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `planLoopExits`    | a multi-level exit sets a flag that is re-tested after each scope                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 Printing:
 
@@ -126,8 +126,8 @@ Attempts share one reconstruction, validated once; each forks the validation ses
 - **Content blindness.** Which blocks end up silent is known only after structuring. Which edge copies print is now a fact of the variable partition (`edgeCopies`), computed before source planning, but the region structurer still runs before reconstruction and does not read it. Lever: feed "prints nothing" facts and edge copy counts into collapse (G2).
 - **Narrow recognition.**
   - Switches come only from jump tables.
-  - The sample has only 3 `for` loops.
+  - The sample had only 3 `for` loops; on the 21-function G3 subset statement steps raised them 2 → 4 (`p = p->next` steps in `sqlite3BtreeTripAllCursors`, `btreeLockCarefully`). A step that is not the body's last statement keeps `while` (e.g. `list_sum`, where the accumulator update prints after `p = p->next`).
   - Python-like has no `do-while` or `for`.
   - Irreducible regions get no node splitting.
-- **Cost.** Each inlining retry re-runs all source planning, for up to 5 attempts, doubled when metadata is omitted. brotli `main` and SQLite `whereLoopAddBtreeIndex` finish within ~0.4M of the 10M work limit. `renderer.ts` is one ~7.9k-line class.
+- **Cost.** Each inlining retry re-runs the attempt-dependent source planning (inlining plan, liveness, coalescing), for up to 5 attempts, doubled when metadata is omitted; source-name, character and indexed-data plans are shared, and a retried attempt publishes no mappings. brotli `main` and SQLite `whereLoopAddBtreeIndex` finish ~0.55M / ~0.95M under the 10M work limit. `renderer.ts` is one ~7.9k-line class.
 - **Measurement gap.** The dev loop prints 0 gotos, so structuring is measured only on the sample.

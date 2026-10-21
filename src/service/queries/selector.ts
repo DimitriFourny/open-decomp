@@ -100,8 +100,19 @@ export async function selectFunction(
   if (found.data.page.next_cursor !== null)
     throw new FunctionSelectionError('incomplete', candidates);
   let selected: FunctionRecord | undefined = candidates[0];
-  if ('name' in selector && found.data.page.index_state !== 'complete')
-    selected = await selectByNativeName(service, scope, selector.name, candidates, find, call);
+  // Record names are not every native name (aliases, runtime-decorated method names): a name no
+  // record carries is settled by the symbol/export tables even when enumeration is complete.
+  const enumerated = found.data.page.index_state === 'complete';
+  if ('name' in selector && (!enumerated || !selected))
+    selected = await selectByNativeName(
+      service,
+      scope,
+      selector.name,
+      candidates,
+      find,
+      call,
+      enumerated,
+    );
   if (!selected)
     throw new FunctionSelectionError(found.state === 'partial' ? 'incomplete' : 'not_found', []);
   return selected;
@@ -118,6 +129,7 @@ async function selectByNativeName(
   indexed: readonly FunctionRecord[],
   find: (query: FunctionQuery, limit: number) => Promise<ToolResult<'functions_find'>>,
   call: QueryCallOptions,
+  enumerated: boolean,
 ): Promise<FunctionRecord> {
   const definitions = new Map<string, FunctionRecord['entry']>();
   let authoritative = true,
@@ -171,5 +183,8 @@ async function selectByNativeName(
     throw new FunctionSelectionError('ambiguous', candidates);
   const [only] = candidates;
   if (only && definitions.size === 1 && [...defined.values()][0] === 1) return only;
+  // Authoritative tables define no such function and every function is enumerated: absent.
+  if (enumerated && definitions.size === 0 && candidates.length === 0)
+    throw new FunctionSelectionError('not_found', []);
   throw new FunctionSelectionError('incomplete', candidates);
 }

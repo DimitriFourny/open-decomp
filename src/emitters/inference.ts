@@ -314,7 +314,8 @@ function gatherInferences(
   };
   interface Member {
     readonly subjects: readonly string[];
-    readonly evidence: readonly string[];
+    /** Proof lists by identity; each is interned once however many records cite it. */
+    readonly evidence: readonly (readonly string[] | undefined)[];
     readonly affectedSubjects: readonly string[];
   }
   const add = (
@@ -322,7 +323,7 @@ function gatherInferences(
     status: InferenceStatus,
     explanation: string,
     details: Details,
-    evidence: readonly string[] = [],
+    evidence: readonly (readonly string[] | undefined)[] = [],
     affectedSubjects: readonly string[] = subjects,
     members: readonly Member[] = [{ subjects, evidence, affectedSubjects }],
   ): void => {
@@ -336,12 +337,12 @@ function gatherInferences(
       const memberSubjects = new Set<string>();
       for (const id of member.subjects)
         for (const subject of originals(id)) memberSubjects.add(subject);
-      const links =
-        member.affectedSubjects.length === 1
-          ? linksFor(member.affectedSubjects[0]!)
-          : [...new Set(member.affectedSubjects.flatMap(linksFor))];
-      if (!links.length || !memberSubjects.size) continue;
-      if (writer.evidence) proofUnion.add(writer.proofRefs(member.evidence));
+      // One memoized summary per affected subject: their union is the summary of
+      // the subjects' combined mappings (spans keep first-occurrence order).
+      const linked = member.affectedSubjects.map(linksFor).filter((links) => links.length);
+      if (!linked.length || !memberSubjects.size) continue;
+      if (writer.evidence)
+        for (const proofs of member.evidence) if (proofs) proofUnion.add(writer.proofRefs(proofs));
       let hasInstructions = false,
         hasRanges = false,
         hasSites = false;
@@ -368,15 +369,16 @@ function gatherInferences(
       }
       // Fallback is per member, not per group: a field without an IR origin
       // keeps its mapping provenance even beside a value with its own origin.
-      const linked = summarize(links);
-      if (!hasSites)
-        for (const [key, span] of linked.spans) {
-          context.checkpoint(1);
-          spans.set(key, { start: span.start, end: span.end });
-        }
-      if (!hasInstructions) instructionUnion.merge(linked.instructions);
-      if (writer.evidence) proofUnion.merge(linked.proofs);
-      if (!hasRanges) rangeUnion.merge(linked.ranges);
+      for (const summary of linked.map(summarize)) {
+        if (!hasSites)
+          for (const [key, span] of summary.spans) {
+            context.checkpoint(1);
+            spans.set(key, { start: span.start, end: span.end });
+          }
+        if (!hasInstructions) instructionUnion.merge(summary.instructions);
+        if (writer.evidence) proofUnion.merge(summary.proofs);
+        if (!hasRanges) rangeUnion.merge(summary.ranges);
+      }
     }
     if (!subjectIds.size) return;
     if (result.length >= 10000) {
@@ -527,7 +529,7 @@ function gatherInferences(
         source_type_id:
           parameter?.type_id ?? program.source?.value_types?.get(value.id)?.type_id ?? null,
       },
-      program.signature?.evidence_ids,
+      [program.signature?.evidence_ids],
     );
   }
   const likelyTypes = program.source?.likely_types;
@@ -612,7 +614,7 @@ function gatherInferences(
     group.associationIds.push(association.id);
     group.members.push({
       subjects: [association.subject_id],
-      evidence: association.evidence_ids,
+      evidence: [association.evidence_ids],
       affectedSubjects: [association.subject_id],
     });
   }
@@ -653,7 +655,7 @@ function gatherInferences(
         bounds: 'unknown',
         call_target_ids: field.call_target_ids ?? [],
       },
-      [...view.shape.evidence_ids, ...field.evidence_ids],
+      [view.shape.evidence_ids, field.evidence_ids],
       [node],
     );
   }
@@ -682,7 +684,7 @@ function gatherInferences(
         bounds: 'unknown',
         call_target_ids: field.call_target_ids ?? [],
       },
-      [...shape.evidence_ids, ...field.evidence_ids],
+      [shape.evidence_ids, field.evidence_ids],
       [call],
     );
   const dataValue =
@@ -753,7 +755,7 @@ function gatherInferences(
             ? null
             : String(item.object.byte_length),
       },
-      item.object?.evidence_ids,
+      [item.object?.evidence_ids],
     );
   }
   for (const block of program.blocks.values())
@@ -813,11 +815,7 @@ function gatherInferences(
           signature_id: projection.signature?.id ?? null,
           ...(contextAssumptions ? { context_assumptions: contextAssumptions } : {}),
         },
-        [
-          ...node.contract_evidence,
-          ...(projection.signature?.evidence_ids ?? []),
-          ...(native?.evidence_ids ?? []),
-        ],
+        [node.contract_evidence, projection.signature?.evidence_ids, native?.evidence_ids],
         [node.id],
       );
       if (projection.likely)
@@ -832,7 +830,7 @@ function gatherInferences(
               : { kind: 'indirect', value_ids: originalValues(node.target.value) },
             projection.likely,
           ),
-          native?.evidence_ids,
+          [native?.evidence_ids],
           [node.id],
         );
     }
@@ -879,7 +877,7 @@ function gatherInferences(
         signature_id: projection.signature?.id ?? null,
         ...(contextAssumptions ? { context_assumptions: contextAssumptions } : {}),
       },
-      [...(projection.signature?.evidence_ids ?? []), ...(native?.evidence_ids ?? [])],
+      [projection.signature?.evidence_ids, native?.evidence_ids],
       [control],
     );
     if (projection.likely)
@@ -892,7 +890,7 @@ function gatherInferences(
           { kind: 'direct', identity: identity(tail.target) },
           projection.likely,
         ),
-        native?.evidence_ids,
+        [native?.evidence_ids],
         [control],
       );
   }
@@ -926,7 +924,7 @@ function gatherInferences(
       'conflicting',
       'Incompatible alternatives remain visible; no alternative is promoted to an established fact.',
       { kind: 'conflict', alternatives: conflict.alternatives, reason: conflict.reason },
-      conflict.evidence_ids,
+      [conflict.evidence_ids],
     );
   }
   for (const annotation of input.annotations ?? []) {
@@ -942,7 +940,7 @@ function gatherInferences(
         annotation_status: annotation.status,
         annotation_kind: annotation.value.kind,
       },
-      annotation.evidence_ids,
+      [annotation.evidence_ids],
     );
   }
 }
