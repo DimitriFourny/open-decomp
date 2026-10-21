@@ -5741,17 +5741,40 @@ export class Renderer {
       this.arm(no, depth + 1, control);
       close();
     } else if (pending) this.invalid('A merged condition reached an if with an else');
-    else if (shaped) {
-      const first = this.terminates(yes) ? yes : no;
-      open(first === yes);
-      this.arm(first, depth + 1, control);
-      close();
-      this.arm(first === yes ? no : yes, depth, control);
-    } else {
-      open(true);
-      this.arm(yes, depth + 1, control);
-      this.elseArm(no, depth, control);
+    else {
+      // The arm a goto leaves prints before the arm holding its label.
+      const lead = this.leadingArm(yes, no),
+        first = this.terminates(yes) ? yes : no;
+      if (shaped && (lead === null || lead === first)) {
+        open(first === yes);
+        this.arm(first, depth + 1, control);
+        close();
+        this.arm(first === yes ? no : yes, depth, control);
+      } else {
+        const head =
+          lead === no &&
+          this.localValidation.presentation(
+            'branch_order',
+            this.input.function.id,
+            'an if whose false arm holds the label of a goto leaving its true arm prints the false arm first under the complemented exact test; both arms keep their code, edges and copies',
+          )
+            ? no
+            : yes;
+        open(head === yes);
+        this.arm(head, depth + 1, control);
+        this.elseArm(head === yes ? no : yes, depth, control);
+      }
     }
+  }
+
+  /** The arm of an `if` that prints first because a goto leaves it for a
+   * label in the other arm (the structurer lays labels out after their
+   * gotos); null when neither or both arms jump into the other. */
+  private leadingArm(yes: ControlArm, no: ControlArm): ControlArm | null {
+    if (!this.labels.size) return null;
+    const intoNo = this.jumpsInto(yes, no),
+      intoYes = this.jumpsInto(no, yes);
+    return intoNo === intoYes ? null : intoNo ? yes : no;
   }
 
   /** An inlined zero extension does not change which case matches when every
@@ -5925,6 +5948,37 @@ export class Renderer {
     );
   }
 
+  /** A goto inside `from`'s body lands in `into`'s body: the structurer laid
+   * that label out after `from`, so `into` must print after it. */
+  private jumpsInto(from: ControlArm, into: ControlArm): boolean {
+    if (!from.body || !into.body) return false;
+    const targets = new Set<string>();
+    const collect = (region: Region): void => {
+      this.context.checkpoint(1);
+      if (region.kind === 'sequence') region.regions.forEach(collect);
+      else if (region.kind === 'loop') collect(region.body);
+      else {
+        targets.add(region.id);
+        for (const arm of controlArms(region.control)) if (arm.body) collect(arm.body);
+      }
+    };
+    collect(into.body);
+    const jumps = (region: Region): boolean => {
+      this.context.checkpoint(1);
+      if (region.kind === 'sequence') return region.regions.some(jumps);
+      if (region.kind === 'loop') return jumps(region.body);
+      const control = region.control;
+      const arms: { transfer: ParallelTransfer; body?: Region | null }[] =
+        control.kind === 'jump' ? [{ transfer: control.transfer }] : [...controlArms(control)];
+      return arms.some(
+        (arm) =>
+          (this.actions.get(arm.transfer) === 'goto' && targets.has(arm.transfer.target)) ||
+          (!!arm.body && jumps(arm.body)),
+      );
+    };
+    return jumps(from.body);
+  }
+
   /** Print an empty arm: its edge and silent blocks record their mappings and edges. */
   private silentArm(arm: ControlArm, depth: number, origin: Control): void {
     this.transfer(arm.transfer, depth, origin);
@@ -6053,7 +6107,9 @@ export class Renderer {
       )
         return this.printsOneIf(this.controls.get(inner)!);
     }
-    return this.emptyArm(no) || this.emptyArm(yes);
+    if (this.emptyArm(no) || this.emptyArm(yes)) return true;
+    const lead = this.leadingArm(yes, no);
+    return lead !== null && lead !== (this.terminates(yes) ? yes : no);
   }
 
   /** Print the `else` arm of an if whose first arm is printed, then close the

@@ -795,6 +795,25 @@ The jump, loop and cell counters reproduce the TODO.md table exactly. The deviat
 
 Per-function deltas, Open Decomp minus Ghidra over the 213 common functions: jump statements +347 (larger in 37 functions, equal in 159, smaller in 17), lines +5,230, bytes +368,155. The largest jump-statement excesses: `brotli/main` 211 vs 115, `whereLoopAddBtreeIndex` 104 vs 42, `btreeBeginTrans` 71 vs 37, `whereLoopAddBtree` 55 vs 24, `sqlite3BtreeOpen` 60 vs 33, `sqlite3BtreeInsert` 34 vs 13, `allocateBtreePage` 39 vs 20. Functions where Ghidra prints more: `exprCodeInlineFunction` 0 vs 5, `btreeComputeFreeSpace` 0 vs 4, `sqlite3VdbeMemZeroTerminateIfAble` and `sqlite3VdbeMemSetText` 0 vs 3. G6 (dropping breakable blocks) is measured against these figures; the coordinator's benchmark reruns `run`, `ghidra` and `metrics` on the whole sample.
 
+## Readability roadmap 2, G4 loop exits (2026-10-21, not held out)
+
+`structure/7`, emitters 72. Subset of the structure sample: 28 functions (every baseline function with a `while (true)`, plus `sqlite3BtreeTripAllCursors`, `sqlite3ExprCodeIN`), fresh `decompile` per function, C source view, before = `63647e7`; `structure-gotos.py metrics` paired with the 2026-10-20 Ghidra lane on the 27 functions both print:
+
+| metric            | before |  G4 | Ghidra |
+| ----------------- | -----: | --: | -----: |
+| `goto`            |    506 | 486 |    341 |
+| `break`           |     73 |  69 |     20 |
+| `continue`        |     13 |   8 |      0 |
+| jump statements   |    594 | 565 |    361 |
+| `while (true)`    |     47 |  43 |      8 |
+| loops with a test |     27 |  31 |     61 |
+
+- Per-function gotos: no increase in any of the 28 functions; `main` 188 → 177, `sqlite3BtreeIndexMoveto` 12 → 8, `whereLoopAddBtreeIndex` 70 → 68, `allocateBtreePage`, `sqlite3BtreeOpen`, `sqlite3BtreeTableMoveto` −1 each. Function states (partial reasons) are identical before and after in both dialects.
+- `ParseInt` prints Ghidra's form: `do { … } while (index != 5);` followed by the post-loop test (before: `while (true)` with `continue`, three `break`s and a goto). `sqlite3BtreeIndexMoveto`: the outer loop whose only back edge was `goto label_104` is `do { … } while (value41 == address->field_0x55);`; the comparator choice keeps Ghidra's `if (…) { … } else { label_94: … }` (5 → 3 gotos, the three side exits).
+- Rejected: ranking a single latch exit first, then the header exit, before the old key (Ghidra's order) raised gotos 506 → 534 on the subset (`whereLoopAddBtree` +7, `allocateBtreePage` +5, `sqlite3ExprCodeIN` +4, `sqlite3VdbeMemSetStr` +3): it absorbs post-loop code into the body when the latch exit is a small tail, and makes a follow that other exits also reach. The kept key counts those as labeled exits first and uses the bottom test only among equal costs.
+- Not reached: the classified edge-select cases in `whereLoopAddBtree` (rows 78, 80, 93) still print their gotos (35 → 35); `sqlite3VdbeMemTranslate` keeps `while (true)` where the latch exit carries an exit copy (G1).
+- Work (fresh `decompile`, 10k resolution, not the export numbers above): `whereLoopAddBtreeIndex` 9.65M → 9.65M, brotli `main` 8.01M → 8.05M.
+
 ## Readability roadmap 2, G7 frame object (2026-10-21, not held out)
 
 Escaped frame memory prints as one local frame object instead of `entry_sp` arithmetic (TODO.md G7, second item; `reconstruction/62`, emitters 69). Fresh `decompile --no-analysis-cache`, C source view, default budget, base `18575c1` vs the change; counted work read from the operation context (temporary instrumentation, not committed).

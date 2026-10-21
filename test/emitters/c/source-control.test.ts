@@ -1572,4 +1572,169 @@ for (const language of ['c-like', 'python-like'] as const)
         [5, 0, 7],
       );
     });
+
+    /** `do { w = *p; if (w == 0) return 99; acc += w; p++; } while (--n != 0)`
+     * and then code that runs once after the loop: a test choosing between a
+     * large continuation and `return acc + 1`. `shared`: that test fails into
+     * the side exit's return path instead (too large to copy). */
+    const bottomTested = (name: string, shared: boolean) => {
+      const b = program(name),
+        entry = b.block('entry', [i32]),
+        loop = b.block('loop', [i32, i64, i32]),
+        latch = b.block('latch'),
+        bad = b.block('bad'),
+        post = b.block('post', [i32]),
+        small = b.block('small', [i32]),
+        big = shared ? undefined : b.block('big', [i32]);
+      const count = entry.parameters[0]!;
+      entry.jump(loop, [count, entry.constant(i64, 0x1000n), entry.constant(i32, 0n)]);
+      const [remaining, pointer, acc] = loop.parameters as [Value, Value, Value];
+      const word = loop.load(i32, pointer);
+      // The side exit leaves for a return path.
+      loop.branch(
+        loop.compare('eq', word, loop.constant(i32, 0n)),
+        loop.edge(bad),
+        loop.edge(latch),
+      );
+      const sum = latch.int('add', acc, word),
+        left = latch.int('sub', remaining, latch.constant(i32, 1n));
+      latch.branch(
+        latch.compare('ne', left, latch.constant(i32, 0n)),
+        latch.edge(loop, [left, latch.int('add', pointer, latch.constant(i64, 4n)), sum]),
+        latch.edge(post, [sum]),
+      );
+      const total = post.parameters[0]!;
+      post.branch(
+        post.compare('ugt', total, post.constant(i32, 10n)),
+        big ? post.edge(big, [total]) : post.edge(bad),
+        post.edge(small, [total]),
+      );
+      if (shared)
+        for (let index = 0; index < 6; index++)
+          bad.store(bad.constant(i64, 0x1010n + BigInt(index * 4)), bad.constant(i32, 99n));
+      bad.return([bad.constant(i32, 99n)]);
+      if (big) continuation(big);
+      small.return([small.int('add', small.parameters[0]!, small.constant(i32, 1n))]);
+      return { input: b.finish(entry, [i32]), count };
+    };
+    const sums = (words: readonly number[], shared: boolean): bigint => {
+      let total = 0;
+      for (const word of words) {
+        if (word === 0) return 99n;
+        total += word;
+      }
+      return total <= 10 ? BigInt(total + 1) : shared ? 99n : BigInt(total);
+    };
+
+    test('a bottom test exit is the loop follow: the code after the loop prints after the do/while', () => {
+      const { input, count } = bottomTested('source-bottom-follow', false);
+      const source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      const text = source.emission.text;
+      if (c) {
+        assert.match(text, /\n {2}do \{\n[^]*\n {2}\} while \([^\n]*\);\n/);
+        assert.doesNotMatch(text, /while \(true\)|\bbreak\b|\bcontinue\b/);
+        // The test after the loop is at the function's depth, after the loop.
+        assert.ok(text.indexOf('} while (') < text.search(/\n {2}if \(+\w+ > (?:10|0xa)\b/), text);
+      }
+      assert.doesNotMatch(text, /\bgoto\b/);
+      for (const words of [[5], [3, 4], [5, 7, 11], [5, 0, 11], [0, 1]]) {
+        const observed = execute(
+          source.emission,
+          new Map([[count.id, BigInt(words.length)]]),
+          memory(words),
+        );
+        assert.deepEqual(observed.values, [sums(words, false)], words.join(','));
+      }
+      agree(
+        source,
+        checked,
+        [1n, 2n, 3n].map((n) => new Map([[count.id, n]])),
+        [5, 7, 0],
+      );
+    });
+
+    test('a side exit to a return path the code after the loop shares stays one exit', () => {
+      const { input, count } = bottomTested('source-shared-side-exit', true);
+      const source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      assert.doesNotMatch(source.emission.text, /\bgoto\b/);
+      for (const words of [[5], [3, 4], [5, 7, 11], [5, 0, 11], [0, 1]]) {
+        const observed = execute(
+          source.emission,
+          new Map([[count.id, BigInt(words.length)]]),
+          memory(words),
+        );
+        assert.deepEqual(observed.values, [sums(words, true)], words.join(','));
+      }
+      agree(
+        source,
+        checked,
+        [1n, 2n, 3n].map((n) => new Map([[count.id, n]])),
+        [5, 7, 0],
+      );
+    });
+
+    test('a goto from one arm into the other keeps the if/else, the jumping arm first', () => {
+      // The shape of sqlite3BtreeIndexMoveto's comparator choice:
+      // if (x < 14) { *p = x; if (x & 8) *q = x; else if (x & 1) goto L;
+      // *r = x; if (x & 2) v = 1; else { *s = x; if (x & 4) goto L; v = 2; } }
+      // else { L: v = 3; }. Labeling the two side exits keeps the if/else;
+      // labeling the arms' ends instead costs three gotos. The `x >= 14`
+      // arm holding L prints second.
+      const b = program('source-else-label'),
+        entry = b.block('entry', [i32]),
+        first = b.block('first'),
+        left = b.block('left'),
+        right = b.block('right'),
+        merge = b.block('merge'),
+        third = b.block('third'),
+        one = b.block('one'),
+        two = b.block('two'),
+        fallback = b.block('fallback'),
+        join = b.block('join', [i32]);
+      const x = entry.parameters[0]!;
+      const bit = (block: BlockBuilder, mask: bigint): Value =>
+        block.compare(
+          'ne',
+          block.int('and', x, block.constant(i32, mask)),
+          block.constant(i32, 0n),
+        );
+      const store = (block: BlockBuilder, address: bigint): void => {
+        block.store(block.constant(i64, address), x);
+      };
+      entry.branch(
+        entry.compare('uge', x, entry.constant(i32, 14n)),
+        entry.edge(fallback),
+        entry.edge(first),
+      );
+      store(first, 0x1000n);
+      first.branch(bit(first, 8n), first.edge(left), first.edge(right));
+      store(left, 0x1004n);
+      left.jump(merge);
+      right.branch(bit(right, 1n), right.edge(fallback), right.edge(merge));
+      store(merge, 0x1008n);
+      merge.branch(bit(merge, 2n), merge.edge(one), merge.edge(third));
+      store(third, 0x100cn);
+      third.branch(bit(third, 4n), third.edge(fallback), third.edge(two));
+      one.jump(join, [one.constant(i32, 1n)]);
+      two.jump(join, [two.constant(i32, 2n)]);
+      fallback.jump(join, [fallback.constant(i32, 3n)]);
+      continuation(join);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      const text = source.emission.text;
+      assert.equal(text.match(/\bgoto\b/g)?.length, 2, text);
+      assert.match(
+        text,
+        c ? /\} else \{\n {4}label_\d+:;\n/ : /\n {2}else:\n {4}label label_\d+:\n/,
+      );
+      assert.ok(rules(source).includes('branch_order'));
+      agree(
+        source,
+        checked,
+        Array.from({ length: 20 }, (_, value) => new Map([[x.id, BigInt(value)]])),
+      );
+    });
   });

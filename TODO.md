@@ -114,9 +114,10 @@ Bottom-tested loops become `while (true)` with breaks, and the code after the lo
 
 Ghidra's `LoopBody::findExit` takes exit candidates from the tails first, then the head, then middle nodes (`blockaction.cc:182-239`); `orderTails` puts the exiting tail first (`245-263`); body extension never adds the exit block (`150-176`).
 
-- [ ] Rank a latch (bottom-test) exit first when the loop has one repeat edge, then the header exit, then the current key. Compare body extension with Ghidra's `extend` and stop absorbing code that runs only after the loop has finished.
-- [ ] The 6 classified edge-choice cases in large functions: Ghidra labels a side exit (error or return path) so the enclosing if/else still collapses; we keep it as a `break` and pay a goto where the arms merge. Also the outer `while (true)` in `sqlite3BtreeIndexMoveto` (line 241 in the baseline) whose only back edge is `goto label_103`.
+- [x] Rank a latch (bottom-test) exit first when the loop has one repeat edge, then the header exit, then the current key. Compare body extension with Ghidra's `extend` and stop absorbing code that runs only after the loop has finished.
+- [x] The 6 classified edge-choice cases in large functions: Ghidra labels a side exit (error or return path) so the enclosing if/else still collapses; we keep it as a `break` and pay a goto where the arms merge. Also the outer `while (true)` in `sqlite3BtreeIndexMoveto` (line 241 in the baseline) whose only back edge is `goto label_103`.
   - Acceptance: `ParseInt` prints a do-while with the post-loop code after it; sample `while (true)` and `break` counts fall; every per-function goto increase is listed in docs/PERFORMANCE.md with its cause (totals hid `whereLoopAddBtree` 14 → 26 in the forward-label round).
+  - Evidence (structure/7, emitters 72; docs/PERFORMANCE.md "Readability roadmap 2, G4 loop exits"): 28-function subset gotos 506 → 486, `break` 73 → 69, `continue` 13 → 8, `while (true)` 47 → 43, no per-function goto increase; `ParseInt` prints `do { … } while (index != 5);` then the post-loop test; `sqlite3BtreeIndexMoveto` outer loop is a do-while (no `goto label_104`) and its comparator fallback is the else arm (`branch_order`, 12 → 8 gotos). Latch-first as Ghidra orders it was rejected (+28 gotos); the bottom test ranks after labeled-exit cost. `whereLoopAddBtree` rows 78/80/93 unchanged. Tests: source-control (do/while with post-loop code, shared side exit, arm order; both dialects, executed) and emitted-c-source native oracles (ParseInt, else-arm label).
 
 ## G5: `else if`
 

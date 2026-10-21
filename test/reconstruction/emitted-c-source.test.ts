@@ -374,3 +374,114 @@ __attribute__((noinline, used)) int64_t first(const int32_t *v, int64_t n, int32
     );
   },
 );
+
+test(
+  'a bottom-tested loop prints as do/while with the code after it, and a side exit to a return stays a return',
+  { skip: nativeOracleSkip(), timeout: 120_000 },
+  async (t) => {
+    // brotli's ParseInt: the digit loop's bottom test (`i < 5`) is its exit to
+    // the code after it; a bad digit leaves for a return path from the middle.
+    const source = `#include <stdint.h>
+__attribute__((noinline, used)) int parse_int(const char *s, uint32_t low, uint32_t high, uint32_t *result) {
+  uint32_t value = 0;
+  int i;
+#pragma clang loop unroll(disable)
+  for (i = 0; i < 5; ++i) {
+    char c = s[i];
+    if (c == 0) break;
+    if (s[i] < '0' || s[i] > '9') return 0;
+    value = (10 * value) + (uint32_t)(c - '0');
+  }
+  if (i == 0) return 0;
+  if (i > 1 && s[0] == '0') return 0;
+  if (s[i] != 0) return 0;
+  if (value < low || value > high) return 0;
+  *result = value;
+  return 1;
+}
+`;
+    await checkEmittedC(
+      'open-decomp-bottom-test-',
+      source,
+      [
+        {
+          name: 'parse_int',
+          formals: 4,
+          text: [/\n {2}do \{\n[^]*\n {2}\} while \([^\n]*\);\n {2}\S/],
+          driver: `  const char *cases[] = {"", "0", "7", "07", "42", "123", "99999", "100000", "12a", "a1", "1:", "00", "3000", "65536"};
+  for (unsigned c = 0; c < sizeof cases / sizeof cases[0]; c++)
+    for (uint32_t low = 0; low < 2; low++) {
+      uint32_t expected = 77, observed = 77;
+      int want = source_parse_int(cases[c], low, 40000, &expected);
+      int got = (int)parse_int((void *)cases[c], low, 40000, (void *)&observed);
+      if (want != got || expected != observed)
+        fail("parse_int(%s, %u): %d/%u vs %d/%u", cases[c], low, want, expected, got, observed);
+    }`,
+        },
+      ],
+      t,
+    );
+  },
+);
+
+test(
+  'side exits into the else arm print as gotos to its label and run like their source',
+  { skip: nativeOracleSkip(), timeout: 120_000 },
+  async (t) => {
+    // sqlite3VdbeFindCompare's shape (inlined into sqlite3BtreeIndexMoveto):
+    // three side exits from the specialized arm reach the general fallback,
+    // which is the else arm; the specialized results fall through to the join.
+    const source = `#include <stdint.h>
+__attribute__((noinline, used)) int choose(const uint8_t *key, uint32_t n, uint32_t *out) {
+  int r;
+  if (n < 14) {
+    out[0] = n;
+    if (key[0] & 8) out[1] = key[1];
+    else if (key[0] & 1) goto general;
+    out[2] = n + 1;
+    if (key[1] & 2) {
+      r = 1;
+    } else {
+      out[3] = key[2];
+      if (key[1] & 4) goto general;
+      if (key[2] != 0 && key[3] == 7) goto general;
+      r = 2;
+    }
+  } else {
+  general:
+    r = 3;
+  }
+  out[4] = (uint32_t)r;
+  out[5] = n * (uint32_t)r;
+  out[6] = key[r];
+  return r * 10 + key[0];
+}
+`;
+    await checkEmittedC(
+      'open-decomp-else-label-',
+      source,
+      [
+        {
+          name: 'choose',
+          formals: 3,
+          // The fallback is the else arm: only the three side exits are gotos.
+          text: [/\n {2}\} else \{\n {4}label_\w+:;\n/],
+          driver: `  for (uint32_t n = 10; n < 16; n++)
+    for (unsigned k0 = 0; k0 < 16; k0++)
+      for (unsigned k1 = 0; k1 < 8; k1++)
+        for (unsigned k2 = 0; k2 < 2; k2++)
+          for (unsigned k3 = 6; k3 < 8; k3++) {
+            const uint8_t key[4] = {(uint8_t)k0, (uint8_t)k1, (uint8_t)k2, (uint8_t)k3};
+            uint32_t expected[7] = {9, 9, 9, 9, 9, 9, 9}, observed[7] = {9, 9, 9, 9, 9, 9, 9};
+            int want = source_choose(key, n, expected);
+            int got = (int)choose((void *)key, n, (void *)observed);
+            if (want != got) fail("choose(%u, %u%u%u%u): %d vs %d", n, k0, k1, k2, k3, want, got);
+            for (unsigned i = 0; i < 7; i++)
+              if (expected[i] != observed[i]) fail("choose(%u, %u%u%u%u): out[%u]", n, k0, k1, k2, k3, i);
+          }`,
+        },
+      ],
+      t,
+    );
+  },
+);

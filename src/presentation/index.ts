@@ -130,10 +130,10 @@ const before = (a: readonly number[], b: readonly number[]): boolean => {
  * unique entry. A component with several entries (irreducible) is headed by
  * the entry first in reverse postorder; edges entering it elsewhere stay
  * labeled transfers into the loop body. Removing header backedges exposes
- * nested loops. A loop chooses one exit as its lexical follow (fewest other
- * exits; then the header's, then a latch's exit), and its body is extended by
- * acyclic blocks entered only from the body, so their edges to the follow
- * become breaks.
+ * nested loops. A loop chooses one exit as its lexical follow (fewest labeled
+ * exits; then not a small tail, then a single bottom test's exit, then the
+ * header's, then a latch's exit), and its body is extended by acyclic blocks
+ * entered only from the body, so their edges to the follow become breaks.
  *
  * Inside the function and every loop body, acyclic regions collapse
  * iteratively over the whole graph: a node whose structured successors are
@@ -407,14 +407,20 @@ export function structureControlFlow(
       const claimed = new Set<number>();
       // A loop's follow and its body extension: acyclic groups whose every
       // predecessor is already in the body (never the follow, the scope entry
-      // or another loop) join it.
+      // or another loop) join it. `joins` counts absorbed blocks where exit
+      // paths leaving the loop from different blocks meet: inside the body
+      // they merge after the loop's own code, which a labeled transfer pays.
       const extend = (
         members: ReadonlySet<EntityId>,
         follow: EntityId | undefined,
-      ): { body: Set<EntityId>; added: number[]; exits: Set<EntityId> } => {
+      ): { body: Set<EntityId>; added: number[]; exits: Set<EntityId>; joins: number } => {
         const body = new Set(members),
           added: number[] = [],
           pending: EntityId[] = [];
+        // The loop block every path into an absorbed block leaves from; null
+        // where paths from several meet.
+        const origin = new Map<EntityId, EntityId | null>();
+        let joins = 0;
         const visit = (id: EntityId): void => {
           for (const edge of edges.get(id)!) {
             budget.charge();
@@ -443,6 +449,21 @@ export function structureControlFlow(
           }
           body.add(id);
           added.push(index);
+          let from: EntityId | null | undefined;
+          for (const previous of predecessors.get(id)!) {
+            budget.charge();
+            const token = members.has(previous) ? previous : origin.get(previous)!;
+            if (from === undefined) from = token;
+            else if (from !== token) from = null;
+          }
+          // Small tails meeting cost nothing: labeled edges into them get copies.
+          if (
+            from === null &&
+            predecessors.get(id)!.some((previous) => origin.get(previous) !== null) &&
+            !tailBlock(id, 0)
+          )
+            joins++;
+          origin.set(id, from ?? null);
           visit(id);
           // A block refused earlier may now have every predecessor inside.
           for (const edge of edges.get(id)!)
@@ -455,7 +476,7 @@ export function structureControlFlow(
             if (ids.has(edge.target) && !body.has(edge.target) && edge.target !== entry)
               exits.add(edge.target);
           }
-        return { body, added, exits };
+        return { body, added, exits, joins };
       };
       const loopBodies = new Map<number, { body: Set<EntityId>; follow: EntityId | undefined }>();
       for (const group of loopGroups) {
@@ -463,10 +484,12 @@ export function structureControlFlow(
         const direct = new Map<EntityId, number>();
         const headerExits = new Set<EntityId>(),
           latchExits = new Set<EntityId>();
+        let repeats = 0;
         for (const id of group.members) {
           const latch = edges.get(id)!.some((edge) => edge.target === group.header);
           for (const edge of edges.get(id)!) {
             budget.charge();
+            if (edge.target === group.header) repeats++;
             if (!ids.has(edge.target) || group.members.has(edge.target) || edge.target === entry)
               continue;
             direct.set(edge.target, (direct.get(edge.target) ?? 0) + 1);
@@ -481,8 +504,41 @@ export function structureControlFlow(
           const result = extend(group.members, follow);
           const others = [...result.exits].filter((id) => id !== follow);
           const tails = others.filter((id) => tailBlock(id, 0)).length;
+          // Another exit flowing into a block the follow also flows into: only
+          // one of the two can fall into it after the loop.
+          const after = new Set<EntityId>();
+          for (const edge of edges.get(follow)!) {
+            budget.charge();
+            if (ids.has(edge.target) && edge.target !== entry && !tailBlock(edge.target, 0))
+              after.add(edge.target);
+          }
+          let rejoins = 0;
+          for (const other of others)
+            if (
+              edges.get(other)!.some((edge) => {
+                budget.charge();
+                return after.has(edge.target);
+              })
+            )
+              rejoins++;
+          const tail = tailBlock(follow, 0);
+          // A bottom test's exit continues the loop's code (a do-while) when
+          // the loop alone enters it and it is code, not a small tail (exits
+          // into small tails share one copy as breaks).
+          const bottom =
+            !tail &&
+            repeats === 1 &&
+            latchExits.has(follow) &&
+            predecessors.get(follow)!.every((previous) => result.body.has(previous));
+          // Fewest labeled exits (non-tail exits, meeting exit paths, rejoins);
+          // then a follow that is not a small tail (a tail exit is resolved
+          // by a copy, while the code after the loop would be absorbed);
+          // then a bottom test's exit (do-while, code after the loop follows
+          // it), fewer tails, the header's exit, a latch's exit.
           const key = [
-            others.length - tails,
+            others.length - tails + result.joins + rejoins,
+            tail ? 1 : 0,
+            bottom ? 0 : 1,
             tails,
             headerExits.has(follow) ? 0 : 1,
             latchExits.has(follow) ? 0 : 1,
@@ -645,29 +701,45 @@ export function structureControlFlow(
     };
     /** Lexical position of a payload below its node root: sequence indices
      * (>= 0) and, below a block, 0 for its own code and -(slot + 1) for an
-     * arm body. Arms of one block are unordered (the printer may invert). */
-    const pathOf = (item: Payload): { root: Payload; steps: number[] } => {
-      const steps: number[] = [];
+     * arm body; `owners` holds the block of each arm step. */
+    const pathOf = (
+      item: Payload,
+    ): { root: Payload; steps: number[]; owners: (EntityId | undefined)[] } => {
+      const steps: number[] = [],
+        owners: (EntityId | undefined)[] = [];
       for (;;) {
         budget.charge();
         const parent: Seq | ArmRef | null = item.parent;
         if (parent === null) break;
         if (parent.kind === 'seq') {
           steps.push(parent.items.indexOf(item));
+          owners.push(undefined);
           item = parent;
         } else {
           steps.push(-(parent.slot + 1));
+          owners.push(parent.block);
           item = leaves.get(parent.block)!;
         }
       }
-      return { root: item, steps: steps.reverse() };
+      return { root: item, steps: steps.reverse(), owners: owners.reverse() };
     };
-    /** `a` is printed before `b` whatever arm order the printer chooses. */
-    const precedes = (a: readonly number[], b: readonly number[]): boolean => {
+    /** `a` is printed before `b`. Switch arms are unordered (cases group).
+     * The printer puts the arm of an `if` that a goto leaves before the arm
+     * holding its label (gotos between two arms only ever go one way: a
+     * target is absorbed after all its sources). */
+    const precedes = (
+      a: readonly number[],
+      b: readonly number[],
+      owners: readonly (EntityId | undefined)[],
+    ): boolean => {
       for (let index = 0; index < Math.min(a.length, b.length); index++) {
         const x = a[index]!,
           y = b[index]!;
         if (x === y) continue;
+        if (x < 0 && y < 0) {
+          const owner = owners[index];
+          return owner !== undefined && blocks.get(owner)!.terminator.kind === 'branch';
+        }
         return x >= 0 && y >= 0 ? x < y : x === 0;
       }
       return false;
@@ -686,7 +758,8 @@ export function structureControlFlow(
         if (!at || graph.simulated) continue;
         const source = pathOf(graph.loops.get(pending.block) ?? leaves.get(pending.block)!);
         position ??= at();
-        if (source.root !== host.root || !precedes([...source.steps, 0], position)) return false;
+        if (source.root !== host.root || !precedes([...source.steps, 0], position, source.owners))
+          return false;
       }
       return true;
     };

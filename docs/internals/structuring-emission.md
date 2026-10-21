@@ -19,7 +19,7 @@ Turns a function's validated SSA control-flow graph (CFG) into a region tree, th
 1. Compute reverse postorder (RPO), predecessors and dominators. RPO breaks every remaining tie.
 2. Structure each scope: first the function, then every loop body recursively. A scope's header backedges are hidden so that nested loops show up.
    1. **Loops.** Each cyclic strongly connected component becomes a loop, headed by its first entry in RPO. Its other entries (irreducible loops) stay labeled.
-   2. **Follow.** One exit becomes the loop's continuation. The choice prefers the fewest other non-tail exits, then a header exit, then a latch exit. Acyclic blocks entered only from the body are added to the body. Edges to the follow become `break`; any other exit becomes a pending label.
+   2. **Follow.** One exit becomes the loop's continuation. The choice prefers the fewest labeled exits (other non-tail exits, absorbed blocks where exit paths from different loop blocks meet, other exits flowing into a block the follow also flows into), then a follow that is not a small tail, then the exit of a single bottom test that only the loop enters (a `do-while` with the code after the loop following it, like Ghidra's `LoopBody::findExit` tail-first order), then fewer tail exits, a header exit, a latch exit. Acyclic blocks entered only from the body are added to the body. Edges to the follow become `break`; any other exit becomes a pending label.
    3. **Collapse** inner loops and blocks as nodes (diagram below).
 3. The collapse rules, highest priority first:
 
@@ -33,7 +33,7 @@ Turns a function's validated SSA control-flow graph (CFG) into a region tree, th
 
 - **Switches:** when several case arms are the only way into a target, the first of those cases owns it.
 - **Loop exits:** in a loop body, a branch whose other arm repeats the loop owns the exit path. This keeps the repeat edge last in the body, which bottom tests need.
-- **Forward-only labels:** a target with pending labels can be absorbed only after all their sources.
+- **Forward-only labels:** a target with pending labels can be absorbed only after all their sources. The two arms of an `if` count as ordered: the printer puts the arm a goto leaves before the arm holding its label (`branch_order` when that inverts the test), so a side exit into the other arm keeps the if/else (Ghidra's `else { LAB: … }`).
 - **Depth bound** (default 32, maximum 64): a collapse that would nest deeper is skipped, and its edge stays labeled.
 
 ```mermaid
