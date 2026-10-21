@@ -1381,8 +1381,17 @@ for (const language of ['c-like', 'python-like'] as const)
         text = source.emission.text;
       assert.doesNotMatch(text, /\bgoto\b|\blabel\b|while \(0\)|while True/);
       assert.match(checked.emission.text, /\bgoto\b/);
-      assert.ok(rules(source).includes('shared_condition_arm'), text);
-      assert.ok(!rules(checked).includes('shared_condition_arm'));
+      assert.ok(
+        rules(source).some(
+          (rule) => rule === 'shared_condition_arm' || rule === 'short_circuit_structure',
+        ),
+        text,
+      );
+      assert.ok(
+        !rules(checked).some(
+          (rule) => rule === 'shared_condition_arm' || rule === 'short_circuit_structure',
+        ),
+      );
       assert.match(
         text,
         c ? /if \(.+ && .+\) \{\n[^]*\} else \{\n/ : /if .+ and .+:\n[^]*\n {2}else:\n/,
@@ -1418,7 +1427,12 @@ for (const language of ['c-like', 'python-like'] as const)
         checked = emit(input, language, 'checked'),
         text = source.emission.text;
       assert.doesNotMatch(text, /\bgoto\b|\blabel\b|while \(0\)|while True/);
-      assert.ok(rules(source).includes('shared_condition_arm'), text);
+      assert.ok(
+        rules(source).some(
+          (rule) => rule === 'shared_condition_arm' || rule === 'short_circuit_structure',
+        ),
+        text,
+      );
       assert.match(
         text,
         c ? /if \(.+ \|\| .+\) \{\n[^]*\} else \{\n/ : /if .+ or .+:\n[^]*\n {2}else:\n/,
@@ -1455,6 +1469,48 @@ for (const language of ['c-like', 'python-like'] as const)
       assert.doesNotMatch(text, /\bgoto\b|\blabel\b|while \(0\)|while True/);
       assert.equal(text.match(c ? /\} else \{/g : /\belse:/g)?.length, 2, text);
       agree(source, checked, grid([a, d, e], choices));
+    });
+
+    test('a condition in a loop body keeps its repeat path last', () => {
+      // `do { if (i != 0 && x == 1) { store; return } i--; } while (i > 0)`: the
+      // condition's shared clause is the latch, so its exit arm is owned first.
+      const b = program('source-shared-loop'),
+        entry = b.block('entry', [i32, i32]),
+        head = b.block('head', [i32]),
+        second = b.block('second'),
+        leave = b.block('leave'),
+        latch = b.block('latch'),
+        done = b.block('done', [i32]);
+      const [n, x] = entry.parameters as [Value, Value];
+      entry.jump(head, [n]);
+      const i = head.parameters[0]!;
+      head.branch(
+        head.compare('ne', i, head.constant(i32, 0n)),
+        head.edge(second),
+        head.edge(latch),
+      );
+      second.branch(
+        second.compare('eq', x, second.constant(i32, 1n)),
+        second.edge(leave),
+        second.edge(latch),
+      );
+      leave.store(leave.constant(i64, 0x1000n), i);
+      leave.return([i]);
+      const next = latch.int('sub', i, latch.constant(i32, 1n));
+      latch.store(latch.constant(i64, 0x1004n), next);
+      latch.branch(
+        latch.compare('sgt', next, latch.constant(i32, 0n)),
+        latch.edge(head, [next]),
+        latch.edge(done, [next]),
+      );
+      continuation(done);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked'),
+        text = source.emission.text;
+      assert.doesNotMatch(text, /\bgoto\b|\bcontinue\b/, text);
+      if (c) assert.match(text, /\} while \(/, text);
+      agree(source, checked, grid([n, x], [0n, 1n, 3n]));
     });
 
     test('a shared else arm may end in a return', () => {

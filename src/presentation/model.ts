@@ -129,6 +129,9 @@ export interface StructuredFunction extends Origin {
     readonly statement_ids: readonly EntityId[];
     readonly terminator_id: EntityId;
   }[];
+  /** Laid out without the goto search (`StructuringOptions.search` false): the
+   * source view structures it again once block contents are known. */
+  readonly provisional?: true;
 }
 export interface StructuringOptions {
   readonly max_work?: number;
@@ -156,6 +159,11 @@ export interface StructuringConditions {
   readonly operand: (block: EntityId) => boolean;
   /** Edge copies the edge (block, slot) prints; operand edges print none. */
   readonly copies: (block: EntityId, slot: number) => number;
+  /** The edge (block, slot) prints only constants its target, a return block,
+   * returns: an owned copy of that tail on the edge prints `return k` and no
+   * copy, so such a branch edge into a small tail with other entries is
+   * labeled before any collapse (the source view copies the tail onto it). */
+  readonly returnsConstants: (block: EntityId, slot: number) => boolean;
 }
 /** The control-flow graph structuring reads (an SSA function, or the blocks of
  * a structured one; see structuredGraph). */
@@ -172,6 +180,9 @@ export type StructuringResult =
       /** Head blocks of the short-circuit conditions collapsed first (see
        * StructuringConditions). */
       readonly conditions: readonly EntityId[];
+      /** Branch blocks whose constant-return edges were labeled first (see
+       * StructuringConditions.returnsConstants). */
+      readonly tails: readonly EntityId[];
     }
   | {
       readonly state: 'partial';

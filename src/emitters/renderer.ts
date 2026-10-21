@@ -36,6 +36,7 @@ import type {
   LoopForm,
   ParallelTransfer,
   Region,
+  StructuringConditions,
 } from '../presentation/index.js';
 import { structureControlFlow, structuredGraph } from '../presentation/index.js';
 import type { SuppliedTypeRecord } from '../analysis/types/index.js';
@@ -331,10 +332,19 @@ export class Renderer {
   private commaHeld: { readonly control: string; readonly node: Instruction } | undefined;
   /** Statements and operand controls printed inside the next `if` head line. */
   private readonly headed: Origin[] = [];
-  /** Operand exits a merged test before them performs (see joinedExit). */
+  /** Exits of a joined-exit test after its first: their jump statement is the
+   * first exit's (see joinedOperand); `transfer` records them without printing. */
   private readonly joinedExits = new Set<ParallelTransfer>();
-  /** Operand controls of a joined exit, by id: the arm their merged test left by. */
-  private readonly joinedControls = new Map<string, ControlArm>();
+  /** A test leaving by one jump statement whose later operands print next (see
+   * joinedOperand): the `||` terms so far and the arms they leave by. */
+  private joinedPlan:
+    | {
+        readonly target: string;
+        readonly action: TransferAction;
+        readonly terms: readonly ConditionTerm[];
+        readonly exits: readonly (readonly [ControlArm, Control])[];
+      }
+    | undefined;
   /** Flag-carried short-circuit tests by merge control id (planFlagTests). */
   private readonly flagTests = new Map<string, FlagTest>();
   /** Their stage controls (printed inside the merge test). */
@@ -5186,6 +5196,8 @@ export class Renderer {
       transfer,
       action === 'goto' ? { kind: 'goto', target: transfer.target } : { kind: action },
     );
+    // A joined exit leaves by the jump statement its merged test printed.
+    if (this.joinedExits.delete(transfer)) return;
     if (action === 'goto')
       this.writer.statement(depth, `goto ${this.identifier(transfer.target, 'label')}`);
     else if (action !== 'fallthrough' && !this.consumed.has(transfer))
@@ -5508,36 +5520,11 @@ export class Renderer {
       }
       if (copies.length !== list.length) continue;
       for (const result of projection.results) {
-        // The returned value is the carrier itself or an inline conversion of it.
-        const chain: Value[] = [result];
-        let carrier: Value | undefined;
-        while (chain.length <= 8) {
-          const value = chain[chain.length - 1]!;
-          if (tail.parameters.some((parameter) => parameter.id === value.id)) {
-            carrier = value;
-            break;
-          }
-          const expression = this.inline.has(value.id)
-            ? program.expressions.get(value.id)
-            : undefined;
-          if (
-            expression?.kind !== 'cast' ||
-            !['zero_extend', 'sign_extend', 'truncate', 'bitcast'].includes(expression.op)
-          )
-            break;
-          chain.push(expression.value);
-        }
-        if (!carrier || chain.some((value) => program.use_counts.get(value.id) !== 1)) continue;
-        const move = (program.transfers.get(transfer) ?? []).find(
-            (candidate) => candidate.destination.id === carrier.id,
-          ),
-          constant = move && program.expressions.get(move.source.id);
+        const carrier = this.returnedCarrier(tail, result),
+          move = carrier && this.constantMove(transfer, carrier);
         if (
+          !carrier ||
           !move ||
-          constant?.kind !== 'constant' ||
-          !this.inline.has(move.source.id) ||
-          bitWidth(move.source.type) !== bitWidth(carrier.type) ||
-          move.source.type.kind !== carrier.type.kind ||
           !this.localValidation.presentation(
             'return_constant',
             control.id,
@@ -5569,6 +5556,66 @@ export class Renderer {
         )
           this.vanished.add(parameter.id);
     }
+  }
+
+  /** The parameter of return tail `tail` that `result` returns: the carrier
+   * itself or an inline conversion of it, each value in the chain read once. */
+  private returnedCarrier(tail: BlockRegion, result: Value): Value | undefined {
+    const chain: Value[] = [result];
+    while (chain.length <= 8) {
+      const value = chain[chain.length - 1]!;
+      if (tail.parameters.some((parameter) => parameter.id === value.id))
+        return chain.every((item) => this.program.use_counts.get(item.id) === 1)
+          ? value
+          : undefined;
+      const expression = this.inline.has(value.id)
+        ? this.program.expressions.get(value.id)
+        : undefined;
+      if (
+        expression?.kind !== 'cast' ||
+        !['zero_extend', 'sign_extend', 'truncate', 'bitcast'].includes(expression.op)
+      )
+        return undefined;
+      chain.push(expression.value);
+    }
+    return undefined;
+  }
+
+  /** The copy of `transfer` writing an inline constant of the carrier's width
+   * and kind into `carrier`. */
+  private constantMove(
+    transfer: ParallelTransfer,
+    carrier: Value,
+  ): { readonly destination: Value; readonly source: Value } | undefined {
+    const move = (this.program.transfers.get(transfer) ?? []).find(
+      (candidate) => candidate.destination.id === carrier.id,
+    );
+    return move &&
+      this.program.expressions.get(move.source.id)?.kind === 'constant' &&
+      this.inline.has(move.source.id) &&
+      bitWidth(move.source.type) === bitWidth(carrier.type) &&
+      move.source.type.kind === carrier.type.kind
+      ? move
+      : undefined;
+  }
+
+  /** Every copy `transfer` prints writes a constant its target, a return
+   * tail, returns (see planReturnConstants): an owned copy of the tail on
+   * this edge prints no copy, only `return k`. */
+  private returnsConstants(transfer: ParallelTransfer): boolean {
+    const tail = this.program.blocks.get(transfer.target),
+      control = tail?.control;
+    if (!tail || control?.kind !== 'return') return false;
+    const projection = this.program.returns.get(control.id);
+    if (!projection || projection.kind === 'physical' || projection.outputs.length) return false;
+    const printed = this.printedCopies(transfer);
+    if (!printed.length) return false;
+    const carriers = new Set<string>();
+    for (const result of projection.results) {
+      const carrier = this.returnedCarrier(tail, result);
+      if (carrier && this.constantMove(transfer, carrier)) carriers.add(carrier.id);
+    }
+    return printed.every((copy) => carriers.has(copy.destination.id));
   }
 
   /** Edge copies actually printed: the variable partition's `edgeCopies`, less
@@ -5816,6 +5863,74 @@ export class Renderer {
     };
     const yes = control.when_true,
       no = control.when_false;
+    // `if (a) jump; if (b) jump;` leaving by one jump statement for one target
+    // (no edge copies; each later operand prints nothing but its test and at
+    // most the one statement the test holds) is one test: `if (a || b) jump;`.
+    const joining = this.joinedPlan;
+    this.joinedPlan = undefined;
+    if (joining) {
+      const exit = [yes, no].find((arm) => this.joinedExit(arm, joining.target, joining.action));
+      if (!exit || pending) this.invalid('A joined-exit operand lost its exit');
+      const stay = exit === yes ? no : yes,
+        terms = [...joining.terms, term(exit === yes)],
+        exits = [...joining.exits, [exit, control] as const];
+      if (this.joinedOperand(stay, joining.target, joining.action)) {
+        this.joinedPlan = { ...joining, terms, exits };
+        this.silentArm(stay, depth, control);
+        if (this.joinedPlan) this.invalid('A joined-exit condition was not printed');
+        return;
+      }
+      this.ifHead(
+        depth,
+        terms
+          .slice(1)
+          .reduce((all, item) => this.printer.logical('or', all, item.printed), terms[0]!.printed)
+          .text,
+      );
+      exits.forEach(([arm, origin], index) => {
+        if (index) this.joinedExits.add(arm.transfer);
+        this.transfer(arm.transfer, depth + 1, origin);
+      });
+      close();
+      this.silentArm(stay, depth, control);
+      return;
+    }
+    if (
+      !pending &&
+      !held &&
+      !complement &&
+      !yes.shared &&
+      !no.shared &&
+      !yes.joins &&
+      !no.joins &&
+      !this.requirementPredicates.has(control.id)
+    )
+      for (const exit of [yes, no]) {
+        if (!this.joinedExit(exit)) continue;
+        const target = exit.transfer.target,
+          action = this.actions.get(exit.transfer)!,
+          operands: string[] = [];
+        for (
+          let next = this.joinedOperand(exit === yes ? no : yes, target, action);
+          next;
+          next = this.joinedOperand(next.stay, target, action)
+        )
+          operands.push(next.block.control.id);
+        if (!operands.length) continue;
+        if (
+          !this.localValidation.presentation(
+            'joined_exit_condition',
+            control.id,
+            "a test leaving by a goto, break or continue with no edge copy, whose other arm starts with later tests (no label, note, definition or statement before them but the one statement each test holds, printed inside it as a comma condition) leaving the same way for the same target with no edge copy, prints as one if over the || of those exits' tests followed by that one jump statement; each test still runs only when the earlier ones stay, in the same order, and the code after the last one follows unchanged",
+            operands,
+          )
+        )
+          break;
+        this.joinedPlan = { target, action, terms: [term(exit === yes)], exits: [[exit, control]] };
+        this.silentArm(exit === yes ? no : yes, depth, control);
+        if (this.joinedPlan) this.invalid('A joined-exit condition was not printed');
+        return;
+      }
     // A short-circuit head or operand whose leaving edges share one arm body
     // (planSharedArms): the last operand prints the whole `if`/`else`.
     const own = [yes, no].find((arm) => arm.shared),
@@ -6361,6 +6476,71 @@ export class Renderer {
     );
   }
 
+  /** An arm leaving by a jump statement alone: no body, no edge copy, a goto,
+   * break or continue (for `target` by `action`, when given). */
+  private joinedExit(arm: ControlArm, target?: string, action?: TransferAction): boolean {
+    const kind = this.actions.get(arm.transfer);
+    return (
+      !arm.body &&
+      (kind === 'goto' || kind === 'break' || kind === 'continue') &&
+      !this.consumed.has(arm.transfer) &&
+      this.printedCopies(arm.transfer).length === 0 &&
+      (target === undefined || (arm.transfer.target === target && kind === action))
+    );
+  }
+
+  /** The later operand an arm starts with when a joined-exit test continues
+   * into it (see sourceIf): the arm enters it silently, and it is an unlabeled
+   * block printing nothing but its test and at most the one statement the test
+   * holds (commaOperands; that statement may end the unlabeled jump block the
+   * arm starts with, its carrier), whose plain test has an arm leaving for
+   * `target` by `action` (see joinedExit); `stay` is its other arm. */
+  private joinedOperand(
+    arm: ControlArm,
+    target: string,
+    action: TransferAction,
+  ): { readonly block: BlockRegion; readonly stay: ControlArm } | undefined {
+    if (!arm.body || !this.silentTransfer(arm.transfer)) return undefined;
+    // The first two blocks of the arm.
+    const leading: Region[] = [],
+      pending: Region[] = [arm.body];
+    while (pending.length && leading.length < 2) {
+      const region = pending.pop()!;
+      if (region.kind === 'sequence') pending.push(...[...region.regions].reverse());
+      else leading.push(region);
+    }
+    const unlabeled = (region: Region | undefined): region is BlockRegion =>
+      region?.kind === 'block' && !(this.labels.has(region.id) && !this.clones.has(region));
+    let first = leading[0];
+    if (!unlabeled(first)) return undefined;
+    if (first.control.kind === 'jump') {
+      const next = leading[1];
+      if (
+        !unlabeled(next) ||
+        this.commaCarriers.get(first.id) !== next.id ||
+        !this.silentTransfer(first.control.transfer)
+      )
+        return undefined;
+      first = next;
+    }
+    if (!this.commaOperands.has(first.id) || this.flagHeads.has(first.id)) return undefined;
+    const control = first.control;
+    if (
+      control.kind !== 'if' ||
+      this.loopTests.has(control.id) ||
+      this.requirementPredicates.has(control.id) ||
+      this.flagTests.has(control.id) ||
+      this.flagStages.has(control.id) ||
+      controlArms(control).some((item) => item.shared || item.joins)
+    )
+      return undefined;
+    const yes = control.when_true,
+      no = control.when_false;
+    if (this.joinedExit(yes, target, action)) return { block: first, stay: no };
+    if (this.joinedExit(no, target, action)) return { block: first, stay: yes };
+    return undefined;
+  }
+
   /** The control an arm consists of when nothing of the arm prints before it
    * (silent jump blocks and a flag short-circuit's silent heads aside);
    * `comma`: the control's block may print the one statement its test holds
@@ -6810,25 +6990,25 @@ export class Renderer {
         this.context.checkpoint(1);
         edges.set(`${block.id}:${slot}`, transfer);
       }
-    const conditions = {
-      operand: (id: string): boolean => {
+    const conditions: StructuringConditions = {
+      operand: (id) => {
         const block = program.blocks.get(id)!;
         return block.control.kind === 'jump'
           ? (silent(block) && !this.notes.has(block.id) && !this.notes.has(block.control.id)) ||
               this.commaCarriers.has(id)
           : this.commaOperands.has(id);
       },
-      copies: (block: string, slot: number): number =>
-        this.printedCopies(edges.get(`${block}:${slot}`)!).length,
+      copies: (block, slot) => this.printedCopies(edges.get(`${block}:${slot}`)!).length,
+      returnsConstants: (block, slot) => this.returnsConstants(edges.get(`${block}:${slot}`)!),
     };
-    const structure = (facts?: typeof conditions) =>
+    const structure = (facts: StructuringConditions) =>
       structureControlFlow(
         structuredGraph(program.function, program.blocks, (work) => this.context.checkpoint(work)),
         this.context,
         {
           max_work: this.context.budget.work,
           transfers: (block, slot) => edges.get(`${block}:${slot}`),
-          ...(facts ? { conditions: facts } : {}),
+          conditions: facts,
         },
       );
     let result = structure(conditions);
@@ -6842,8 +7022,14 @@ export class Renderer {
         result.conditions,
       )
     )
-      result = structure();
-    if (!result.value) return;
+      result = structure({ ...conditions, operand: () => false });
+    // Nothing collapsed or labeled first: the searched layout is the given one,
+    // kept (a provisional layout skipped the search and is replaced).
+    if (
+      !result.value ||
+      (!result.conditions.length && !result.tails.length && !program.function.provisional)
+    )
+      return;
     const blocks = new Map<string, BlockRegion>(),
       pending: Region[] = [result.value.body];
     while (pending.length) {
@@ -7239,6 +7425,21 @@ export class Renderer {
       if (!node) continue;
       this.commaOperands.set(next.id, node);
       this.commaCarriers.set(block.id, next.id);
+    }
+    const held = [...this.commaOperands].filter(
+      (entry): entry is [string, Instruction] => !!entry[1],
+    );
+    if (
+      held.length &&
+      !this.localValidation.presentation(
+        'comma_condition',
+        subject,
+        'a later short-circuit operand whose block prints exactly one statement before its test (an assignment, load or single-result call defining a value the test reads; a jump block alone entering the test may hold it) prints that statement inside the test: C `(x = f(), test)`, or `test` with its one direct read of x replaced by `(x = f())` when it reads x once, unconditionally, with no other memory read or call; Python-like only the direct `(x := f())`. The comma operator is a sequence point, so the statement runs exactly when the test runs and before it, as in the block; nothing is hoisted',
+        held.map(([, node]) => node.id),
+      )
+    ) {
+      for (const [id] of held) this.commaOperands.delete(id);
+      this.commaCarriers.clear();
     }
     this.restructure(silent);
     program = this.program;
@@ -8171,13 +8372,12 @@ export class Renderer {
       const comma = this.sourceView ? this.commaOperands.get(carried ?? region.id) : undefined;
       const merged =
         comma &&
-        (this.joinedControls.has(test.id) ||
+        (this.joinedPlan !== undefined ||
           this.conjunct !== undefined ||
           (this.sharedPlan !== undefined && controlArms(test).some((arm) => arm.joins)))
           ? comma
           : undefined;
-      if (merged && !this.joinedControls.has(test.id))
-        this.commaHeld = { control: test.id, node: merged };
+      if (merged) this.commaHeld = { control: test.id, node: merged };
       for (const node of region.statements) {
         if (node === merged) continue;
         this.context.checkpoint(1);

@@ -53,6 +53,56 @@ function shape(loaded: boolean): { input: SSAForm; pointer: Value } {
   return { input: b.finish(entry, [i32]), pointer };
 }
 
+/** `if (p[1] != 0) { if ((*p & 0xfd) != 0) goto out; rc = save(p); if (rc == 0)
+ * goto out; *(p + 4) = rc; } after(p); out: leave(p) five times; return 0;` — both exits
+ * jump over `after`, which the entry's other arm also reaches. `carried`: the call
+ * ends its own block, which jumps to the test. */
+function joinedExits(carried: boolean): { input: SSAForm; pointer: Value } {
+  const b = new IRBuilder(
+    slice,
+    entityIdentity(slice, 'function', `joined-exits-${carried}`),
+    provenance,
+    'ssa',
+  );
+  const entry = b.block('entry', [i64]),
+    check = b.block('check'),
+    save = b.block('save'),
+    store = b.block('store'),
+    after = b.block('after'),
+    out = b.block('out');
+  const [pointer] = entry.parameters as [Value];
+  entry.branch(
+    entry.compare(
+      'ne',
+      entry.load(i8, entry.int('add', pointer, entry.constant(i64, 1n))),
+      entry.constant(i8, 0n),
+    ),
+    entry.edge(check),
+    entry.edge(after),
+  );
+  check.branch(
+    check.compare(
+      'ne',
+      check.int('and', check.load(i8, pointer), check.constant(i8, 0xfdn)),
+      check.constant(i8, 0n),
+    ),
+    check.edge(out),
+    check.edge(save),
+  );
+  const [rc] = save.call(target(0x4000n), [pointer], [i32], writing);
+  const test = carried ? b.block('test') : save;
+  if (carried) save.jump(test);
+  test.branch(test.compare('eq', rc!, test.constant(i32, 0n)), test.edge(out), test.edge(store));
+  store.store(store.int('add', pointer, store.constant(i64, 4n)), rc!);
+  store.jump(after);
+  after.call(target(0x6000n), [pointer], [], writing);
+  after.jump(out);
+  // Five calls: too large a tail to copy onto the exits.
+  for (let index = 0; index < 5; index++) out.call(target(0x5000n), [pointer], [], writing);
+  out.return([out.constant(i32, 0n)]);
+  return { input: b.finish(entry, [i32]), pointer };
+}
+
 const rules = (records: readonly { readonly rule?: string | undefined }[] | undefined): string[] =>
   (records ?? []).flatMap((record) => (record.rule ? [record.rule] : []));
 
@@ -73,8 +123,10 @@ for (const language of ['c-like', 'python-like'] as const)
         else if (c) assert.match(text, /&& \(\w+ = sub_4000\(\w+\), \w+ != /, text);
         // Python-like has no comma operator: the call stays a statement.
         else assert.match(text, /^\s+\w+ = sub_4000\(\w+\)$/m, text);
-        if (c || !loaded)
+        if (c || !loaded) {
           assert.ok(rules(output.local_validation).includes('short_circuit_structure'));
+          assert.ok(rules(output.local_validation).includes('comma_condition'));
+        }
         for (const [flags, result, stored] of [
           [0, 0n, 0],
           [0, 7n, 0],
@@ -112,6 +164,65 @@ for (const language of ['c-like', 'python-like'] as const)
             text,
           );
           assert.deepEqual(observed.values, [failed ? result : 0n], text);
+        }
+      });
+
+    for (const carried of [false, true])
+      test(`exits leaving by one goto join || with a comma operand${carried ? ' (the call ends its own block)' : ''}; the call runs exactly when its test runs`, () => {
+        const { input, pointer } = joinedExits(carried);
+        const output = emit(input, { source }, language).emission;
+        const text = output.text;
+        assert.match(
+          text,
+          c
+            ? /if \(.+ \|\| \(\w+ = sub_4000\(\w+\)\) == 0\) \{\n\s+goto (\w+);\n/
+            : /if .+ or \(\w+ := sub_4000\(\w+\)\) == 0:\n\s+goto (\w+)\n/,
+          text,
+        );
+        assert.equal(text.match(/\bgoto\b/g)?.length, 1, text);
+        assert.ok(rules(output.local_validation).includes('joined_exit_condition'), text);
+        for (const [enter, flags, result] of [
+          [0, 0, 7n],
+          [1, 0, 7n],
+          [1, 0, 0n],
+          [1, 2, 7n],
+          [1, 1, 0n],
+        ] as const) {
+          const memory = new Map<bigint, number>([
+            [0x1000n, flags],
+            [0x1001n, enter],
+            [0x1004n, 0],
+            [0x1005n, 0],
+            [0x1006n, 0],
+            [0x1007n, 0],
+          ]);
+          const observed = execute(
+            output,
+            new Map([[pointer.id, 0x1000n]]),
+            memory,
+            0n,
+            new Map(),
+            new Map(),
+            new Map<string, SourceCallOracle>([
+              ['sub_4000', () => result],
+              ['sub_5000', () => []],
+              ['sub_6000', () => []],
+            ]),
+          );
+          // The source: save runs only when entered with the flags test clear,
+          // once, before its own test; a nonzero result is stored, then sub_6000.
+          const saved = enter !== 0 && (flags & 0xfd) === 0;
+          const stored = saved && result !== 0n;
+          assert.deepEqual(
+            observed.source_calls?.map((call) => call.name),
+            [
+              ...(saved ? ['sub_4000'] : []),
+              ...(enter === 0 || stored ? ['sub_6000'] : []),
+              ...Array<string>(5).fill('sub_5000'),
+            ],
+            text,
+          );
+          assert.equal(observed.memory.get(0x1004n), stored ? Number(result) : 0, text);
         }
       });
   });

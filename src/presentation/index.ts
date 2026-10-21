@@ -898,6 +898,15 @@ export function structureControlFlow(
         )
           priority = 3;
         else priority = 4;
+        // In a loop body a condition's shared clause that repeats the loop is
+        // owned last, so the repeat edge stays the lexical end of the body.
+        if (
+          grouped &&
+          graph.loop &&
+          target.root.kind === 'leaf' &&
+          slots(target.entry).some((slot) => slot.target === graph.entry.entry)
+        )
+          priority = 4;
         if (!best || priority < best.priority)
           best = { priority, rule: { kind: edge.arm ? 'arm' : 'append', edge } };
       }
@@ -1271,6 +1280,28 @@ export function structureControlFlow(
       if (!facts) return;
       const order = graph.nodes.filter((node) => node.alive).sort((a, b) => a.rpo - b.rpo);
       budget.charge(order.length);
+      // A branch edge copying only the constants its small return tail returns
+      // is labeled first when the tail has other entries: the source view
+      // copies the tail onto it (`return k`, no copy, no carrier), as the
+      // search does for any tail edge once stuck.
+      for (const node of order)
+        for (const edge of [...node.outs]) {
+          budget.charge();
+          const target = edge.to;
+          if (
+            edge.arm &&
+            target !== node &&
+            target !== graph.entry &&
+            target.ins.length > 1 &&
+            target.root.kind === 'leaf' &&
+            blocks.get(edge.block)!.terminator.kind === 'branch' &&
+            tailBlock(target.entry, 0) &&
+            facts.returnsConstants(edge.block, edge.slot)
+          ) {
+            label(graph, [edge]);
+            tailSources.add(edge.block);
+          }
+        }
       /** The silent jump nodes from `start` to the branch they lead to, then that branch. */
       const operand = (start: CollapseNode): CollapseNode[] | null => {
         const chain: CollapseNode[] = [];
@@ -1336,6 +1367,8 @@ export function structureControlFlow(
           members.any &&= leave.slot === 0;
           exitGroups.set(exit.key, members);
           exitGroups.set(leave.key, members);
+          // `apply` classified the head before its exits joined: classify again.
+          touched(graph, head);
           return true;
         }
         return false;
@@ -1347,6 +1380,8 @@ export function structureControlFlow(
     };
     /** Nodes holding a collapsed short-circuit condition. */
     const conditionHeads = new Set<CollapseNode>();
+    /** Blocks whose constant-return tail edges were labeled first. */
+    const tailSources = new Set<EntityId>();
     const collapse = (
       nodes: CollapseNode[],
       entry: CollapseNode,
@@ -1499,6 +1534,7 @@ export function structureControlFlow(
       returns: input.returns,
       body,
       coverage,
+      ...(options.search === false ? { provisional: true as const } : {}),
     };
     return {
       state: 'complete',
@@ -1506,6 +1542,7 @@ export function structureControlFlow(
       diagnostics: [],
       work: budget.work,
       conditions: [...conditionHeads].map((node) => node.entry),
+      tails: [...tailSources],
     };
   } catch (error) {
     const result = budget.result(null, error);
