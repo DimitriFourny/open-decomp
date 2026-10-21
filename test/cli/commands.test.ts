@@ -300,7 +300,7 @@ test(
 );
 
 test(
-  'partial indexes remain partial after exhausting available pages, including absent-name queries',
+  'partial indexes remain partial after exhausting available pages; an absent-name selection completes discovery and proves absence',
   { timeout: 120_000 },
   async (t) => {
     const root = await directory(t),
@@ -313,10 +313,14 @@ test(
     const pages = functionPages(output).result.pages;
     assert.equal(pages.at(-1)!.state, 'partial');
     assert.ok(pages.every((page) => 'data' in page && page.data.page.index_state !== 'complete'));
-    const incomplete = await run(['decompile', binary, '--cache', cache, '--function', 'absent']);
-    assert.equal(incomplete.code, 2, incomplete.stderr);
-    assert.equal(incomplete.stdout, '');
-    assert.ok(incomplete.stderr.includes(selectionMessage('incomplete')), incomplete.stderr);
+    // Selection cannot settle the name under the partial index: decompile runs whole-image
+    // discovery to completion and then reports a proven absence.
+    const absent = await run(['decompile', binary, '--cache', cache, '--function', 'absent']);
+    assert.equal(absent.code, 1, absent.stderr);
+    assert.equal(absent.stdout, '');
+    assert.ok(absent.stderr.includes(selectionMessage('not_found')), absent.stderr);
+    const listed = await run(['functions', binary, '--cache', cache, '--name', 'absent', '--json']);
+    assert.equal(listed.code, 0, listed.stderr);
   },
 );
 
@@ -339,8 +343,8 @@ test(
     assert.equal(ambiguous.stdout, '');
     assert.ok(ambiguous.stderr.includes(selectionMessage('ambiguous')), ambiguous.stderr);
     const absent = await run(['decompile', binary, '--cache', cache, '--function', 'task_absent']);
-    assert.equal(absent.code, 2, absent.stderr);
-    assert.ok(absent.stderr.includes(selectionMessage('incomplete')), absent.stderr);
+    assert.equal(absent.code, 1, absent.stderr);
+    assert.ok(absent.stderr.includes(selectionMessage('not_found')), absent.stderr);
   },
 );
 

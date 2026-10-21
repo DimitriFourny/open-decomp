@@ -35,6 +35,7 @@ import type { WorkerHandler } from '../../workers/runtime.js';
 import { wireValue } from '../../project/store/encoding.js';
 import { MAX_FRAME_BYTES } from '../../workers/protocol.js';
 import { prepareQueryImport } from './prepare.js';
+import { executeDiscoveryStep } from './discover.js';
 import { queryEnvelope, queryFailure } from './shared.js';
 import {
   loadImage,
@@ -388,6 +389,8 @@ async function dispatch(
     return executeDecompilation(parsed as ToolArgs<'function_decompile'>, suppliedScope);
   if (operation === 'annotations_apply')
     return executeAnnotations(parsed as ToolArgs<'annotations_apply'>, suppliedScope);
+  if (operation === 'functions_discover')
+    return executeDiscoveryStep(parsed as ToolArgs<'functions_discover'>, suppliedScope);
   const scope: Scope =
     'page' in parsed ? { ...suppliedScope, paging: pageState(operation, parsed) } : suppliedScope;
   scope.store.snapshot(common.revision);

@@ -358,6 +358,18 @@ export interface RecordQuery<K extends keyof StoredRecordKinds> {
   readonly limit: number;
   readonly cursor?: string;
 }
+/** One root of a budget-limited image-wide function discovery (`analysis/discovery`). */
+export interface DiscoveryRoot {
+  readonly entry: bigint;
+  readonly established: boolean;
+  readonly evidence_ids: readonly string[];
+}
+/** Where an image-wide function discovery stopped at the instruction limit: the roots it cut
+ * or never reached, and the first executable VA its whole-image sweep has not explained. */
+export interface DiscoveryFrontier {
+  readonly pending: readonly DiscoveryRoot[];
+  readonly sweep: bigint;
+}
 export interface StoreTransaction {
   /** Immutable facts never become annotations and cannot be overwritten by a rename. */
   putImage(image: LoadedImage): void;
@@ -375,6 +387,8 @@ export interface StoreTransaction {
     kind: keyof StoredRecordKinds,
     state: 'complete' | 'partial' | 'not_started',
   ): void;
+  /** The function index's resumable discovery state; null once enumeration is complete. */
+  setDiscoveryFrontier(imageId: string, frontier: DiscoveryFrontier | null): void;
   setAnnotation(annotation: Annotation): void;
   removeAnnotation(id: string, actor: AnnotationActor): void;
 }
@@ -409,6 +423,8 @@ export interface ProjectStore {
     readonly next_cursor: string | null;
     readonly index_state: 'complete' | 'partial' | 'not_started';
   };
+  /** Latest discovery frontier at or before `revision`; null when complete or never recorded. */
+  readDiscoveryFrontier(imageId: string, revision: number): DiscoveryFrontier | null;
   /** Roll back on throw; successful mutation advances exactly once. No await inside a transaction. */
   transaction(
     expectedRevision: number,

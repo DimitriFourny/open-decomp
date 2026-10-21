@@ -40,7 +40,17 @@ One gate; no ordering among sources, only merged evidence.
 | user assertion                              | no           | its ranges                       | assertion-origin evidence; retracted ignored  |
 | direct call target (found later)            | yes          | –                                | executable backing                            |
 
-Data regions (data hints, sized object symbols) veto _candidate_ seeds and stop decoding. No prologue scan, no linear sweep.
+Data regions (data hints, sized object symbols) veto _candidate_ seeds and stop decoding. No prologue scan.
+
+### 2b. Whole-image enumeration (image-wide mode)
+
+After the seeded worklist drains, a sweep walks every executable byte in VA order: executable sections when the loader names them (else executable mappings), minus linker import-trampoline sections (ELF `.plt`/`.plt.sec`/`.plt.got`/`.iplt`, Mach-O `__stubs`/`__auth_stubs`/`__objc_stubs`/`__stub_helper`). A byte is _explained_ by a decoded instruction, a boundary claim (sized symbol, loader function extent, asserted range), a final function's ranges (continuations), known data, an object-symbol address, fill (NOP, unconditional trap such as int3/ud2/brk/udf, zero bytes) or an undecodable encoding. The first valid non-fill instruction of any other run roots a **candidate** function (rule `first instruction of unexplained executable bytes`), traversed before the walk continues; calls from swept code root only candidates and never split code another root owns; sweep decode windows stop at decoded code and claims. Unwind regions explain nothing (one region may span functions).
+
+`enumeration` is `complete` only when the walk finished within the instruction limit; the import publishes it as the function index state, so an address no function owns is then provably padding, data or undecodable, and a selection miss is `not_found` (otherwise `incomplete`). Per-function `analysis` stays `partial` for unresolved flow; that no longer makes the index partial.
+
+### 2c. Resumable continuation
+
+When the limit stops image-wide discovery it returns a **frontier** (cut or unreached roots with their evidence and established flag, plus the first unexplained sweep VA), persisted per revision (`discovery_frontiers`, store schema 7). `functions_discover` continues it: published roots not pending are final (boundaries whose ranges are explained; a call into their interior roots nothing), pending roots are traversed one at a time with calls deferred, then the sweep resumes. Only traversed roots, their references and cited evidence are republished at the next revision. A step whose frontier is unchanged (a root larger than the instruction limit) reports no progress and commits nothing, so a driver stops instead of looping. Steps are deterministic in (image, published records, frontier, budget).
 
 ### 2. Global worklist
 
@@ -90,7 +100,7 @@ Leaders: entry; successors of any non-fallthrough instruction; addresses with in
 
 ## Design decisions
 
-- **Evidence-grounded roots.** A wrong function costs more than a missing one; incompleteness is reported (`partial`), never papered over.
+- **Evidence-grounded roots.** A wrong function costs more than a missing one; incompleteness is reported (`partial`), never papered over. Sweep roots are always `candidate`, never `established`.
 - **Gaps, not guesses**; invalid instructions end flow.
 - **Candidate ≠ fact.** Candidate seeds, jump-table inventory and loaded pointer values never create edges. Claims are checked against reachable code, never permission to decode.
 - **Observed vs claimed ranges** separate; conflicts recorded, not resolved.
@@ -100,11 +110,11 @@ Leaders: entry; successors of any non-fallthrough instruction; addresses with in
 
 ## Limits and improvement levers
 
-- **Nothing beyond seeds.** Stripped images without entry/unwind/symbol hints expose only call-reachable code. Levers: candidate seeds from gap/prologue scans; richer loader hints (CFI, unwind) [inference].
+- **Sweep roots are linear-sweep guesses.** Stripped images without entry/unwind/symbol hints get their unreached code as candidates (quality matrix stripped ELF `-O0`: the 25 `nm` functions exactly). Code reached only through an unresolved jump table is split into candidates too (stripped ELF `-O2` `matrix_switch`: relative `movslq`/`add` table unproven, entry tail-jumps into it, its 10 case blocks become candidates). x86 decoding can desynchronize in data inside text sections without a data hint.
 - **Tail calls need a seed.** A jump to an unseeded function is absorbed into the caller; a spurious candidate seed (export, unwind start) mid-function turns an internal jump into `tail_call`. No tail-call heuristic, no promotion of branch targets to seeds.
 - **Noreturn only from library contracts on imports.** Local `abort`-like wrappers fall through into the next function (conflict, or garbage absorbed). Lever: feed callee-summary noreturn ([calls-abi](calls-abi.md)) back into discovery — needs iteration.
 - **Jump tables:** unsigned bound on the exact index node, single-entry chain, ≤256 entries, immutable relocation-free bytes. Misses signed bounds, guards across merged paths, writable or relocated tables (absolute-pointer tables in PIE/dylib/DLL). Failure → `unknown` edge, `partial` function. Rangeless candidates are unusable by target recovery.
-- **Global instruction budget** (default 10,000) in import: late-queue roots starve to `budget` gaps and partial ranges. Lever: per-root resumable discovery (`CONTINUE.md`), persisted index.
+- **Global instruction budget** (default 10,000) in import: late-queue roots starve to `budget` gaps and partial ranges until `functions_discover` continues them (API/CLI selection runs it to completion when a selection is `incomplete`; MCP clients call it). A single root larger than the limit can never finish: the index stays `partial`. Strings referenced only by continuation-found code stay `candidate` (no promotion in continuation steps).
 - **Whole image stays `partial`** while any indirect flow is unresolved (observed on the SQLite/Node imports in `docs/PERFORMANCE.md`).
 - **Shared tails and overlapping encodings** are flagged, not canonicalised: each owner keeps its own blocks, so later stages likely repeat work [inference].
 - **Target recovery is block-local:** many indirect calls stay unresolved here; later [SSA](ssa-values.md#algorithm) and call resolution recover some.
