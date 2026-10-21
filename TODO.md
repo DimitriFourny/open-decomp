@@ -118,7 +118,8 @@ Ghidra's `LoopBody::findExit` takes exit candidates from the tails first, then t
 
 The renderer never prints `else if` (0 in the sample, Ghidra 37); 39 `} else { if (…) … }` sites have an else body that is exactly one if statement. Ghidra prints an else block that is itself an if with a pending brace, giving `else if` (`printc.cc:3036-3041`, `3071-3078`).
 
-- [ ] In the renderer's if printing (`renderer.ts`, around `5380-5490`): when an else arm prints exactly one `if` (no statement, definition, label, note or edge copy before or after it), print `} else if (…) {` (Python-like `elif`) at the outer depth. Mappings keep their spans.
+- [x] In the renderer's if printing (`renderer.ts`, around `5380-5490`): when an else arm prints exactly one `if` (no statement, definition, label, note or edge copy before or after it), print `} else if (…) {` (Python-like `elif`) at the outer depth. Mappings keep their spans.
+  - Done (emitters 70): `sourceIf` prints the `else` arm through `elseArm` (`soleControl`/`printsOneIf` decide from what the arm prints; `else_if` presentation record). Checked on 9 functions in both dialects (before/after exports at HEAD, `/tmp`): normalized token streams (braces and `else:` + `if` vs `elif` ignored) identical in all 18 files; the 19 sole-if `} else { if … }` sites in them (baseline sites by the same counter: 39 of 79 `else { if`) all print `else if` / `elif` (fixture_check 10, sqlite3VdbeMemTranslate 6, btreeBeginTrans 2, ParseBase64 1); the rest have a statement or sibling after the if and stay nested.
   - Acceptance: sample `else if` at least 39; the layout, validators and every other printed token unchanged; both dialects.
 
 ## G6: Drop `do { } while (0)`; fix emitter repair artifacts

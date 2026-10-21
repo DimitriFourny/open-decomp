@@ -1424,6 +1424,117 @@ for (const language of ['c-like', 'python-like'] as const)
       agree(source, checked, grid([a, d], choices));
     });
 
+    /** `if (a == 0) { 0x1000 = a } else if (a == 1) { 0x1004 = a } else if ...`: every
+     * arm stores its own word and falls to the large continuation. */
+    const ladder = (
+      name: string,
+      rungs: number,
+      before?: (block: BlockBuilder, a: Value) => void,
+    ) => {
+      const b = program(name),
+        entry = b.block('entry', [i32, i32]),
+        join = b.block('join', [i32]);
+      const [a, d] = entry.parameters as [Value, Value];
+      const tests = [
+        entry,
+        ...Array.from({ length: rungs - 1 }, (_, index) => b.block(`rung${index}`)),
+      ];
+      const arms = Array.from({ length: rungs + 1 }, (_, index) => b.block(`arm${index}`));
+      for (const [index, test] of tests.entries()) {
+        if (index > 0) before?.(test, a);
+        test.branch(
+          test.compare('eq', a, test.constant(i32, BigInt(index))),
+          test.edge(arms[index]!),
+          test.edge(index + 1 < rungs ? tests[index + 1]! : arms[rungs]!),
+        );
+      }
+      for (const [index, arm] of arms.entries()) {
+        arm.store(arm.constant(i64, 0x1000n + BigInt(index * 4)), d);
+        arm.jump(join, [d]);
+      }
+      continuation(join);
+      return { input: b.finish(entry, [i32]), a, d };
+    };
+
+    test('an else arm that prints exactly one if continues as else if', () => {
+      const { input, a, d } = ladder('source-else-if', 3);
+      const source = emit(input, language),
+        checked = emit(input, language, 'checked'),
+        text = source.emission.text;
+      assert.ok(rules(source).includes('else_if'), text);
+      assert.ok(!rules(checked).includes('else_if'));
+      assert.doesNotMatch(text, /\bgoto\b|\blabel\b/);
+      // Three tests chain at one depth: no nested if, one closing brace.
+      if (c) {
+        assert.equal(text.match(/\} else if \(/g)?.length, 2, text);
+        assert.doesNotMatch(text, /else \{\n\s+if /);
+        assert.equal(text.match(/^ {2}\}$/gm)?.length, 1, text);
+      } else {
+        assert.equal(text.match(/^ {2}elif /gm)?.length, 2, text);
+        assert.doesNotMatch(text, /else:\n\s+if /);
+      }
+      assert.doesNotMatch(checked.emission.text, /else if|elif/);
+      agree(source, checked, grid([a, d], choices));
+    });
+
+    test('an else arm with a statement before its if keeps the nested else block', () => {
+      const { input, a, d } = ladder('source-else-statement', 2, (block, a) =>
+        block.store(block.constant(i64, 0x1040n), a),
+      );
+      const source = emit(input, language),
+        checked = emit(input, language, 'checked'),
+        text = source.emission.text;
+      assert.doesNotMatch(text, /else if|elif/, text);
+      assert.match(
+        text,
+        c
+          ? /\} else \{\n\s+write_memory\(0x1040[^\n]*\n\s+if /
+          : /else:\n\s+write_memory\(0x1040[^\n]*\n\s+if /,
+        text,
+      );
+      agree(source, checked, grid([a, d], choices));
+    });
+
+    test('an else arm opened by an edge copy keeps the nested else block', () => {
+      const b = program('source-else-copy'),
+        entry = b.block('entry', [i32, i32]),
+        then = b.block('then'),
+        second = b.block('second', [i32]),
+        yes = b.block('yes'),
+        no = b.block('no'),
+        join = b.block('join', [i32]);
+      const [a, d] = entry.parameters as [Value, Value];
+      entry.branch(
+        entry.compare('eq', a, entry.constant(i32, 0n)),
+        entry.edge(then),
+        entry.edge(second, [entry.int('add', d, entry.constant(i32, 1n))]),
+      );
+      then.store(then.constant(i64, 0x1000n), a);
+      then.jump(join, [a]);
+      const [carried] = second.parameters as [Value];
+      second.branch(
+        second.compare('eq', carried, second.constant(i32, 5n)),
+        second.edge(yes),
+        second.edge(no),
+      );
+      yes.store(yes.constant(i64, 0x1004n), a);
+      yes.jump(join, [d]);
+      no.store(no.constant(i64, 0x1008n), a);
+      no.jump(join, [carried]);
+      continuation(join);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked'),
+        text = source.emission.text;
+      assert.doesNotMatch(text, /else if|elif/, text);
+      assert.match(
+        text,
+        c ? /\} else \{\n\s+\w+ = [^\n]*\n\s+if / : /else:\n\s+\w+ = [^\n]*\n\s+if /,
+        text,
+      );
+      agree(source, checked, grid([a, d], choices));
+    });
+
     test('a loop whose two exits each have one edge follows the exit that cannot move', () => {
       const b = program('source-exit-tie'),
         entry = b.block('entry', [i32]),

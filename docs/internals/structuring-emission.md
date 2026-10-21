@@ -82,7 +82,7 @@ Source-view planning starts after [variable recovery](reconstruction.md#variable
 Printing:
 
 - **Transfers.** `transferAction` gives each occurrence one action: fallthrough, `goto`, `break` or `continue`. The same transfer must get the same action everywhere; only `goto` targets get labels.
-- **`if`.** An empty arm is dropped and the test inverted. An arm that cannot fall through ends the `if`, with no `else`. A nested `if` with nothing else in either body merges into `&&`.
+- **`if`.** An empty arm is dropped and the test inverted. An arm that cannot fall through ends the `if`, with no `else`. A nested `if` with nothing else in either body merges into `&&`. An `else` arm that prints exactly one `if` statement continues as `else if` (`elif`) at the outer depth.
 - **`switch`.** Cases that share a body are grouped, and an empty `default` is dropped.
 - **Copies.** Dependency-ordered; a temporary breaks cycles.
 - **Checks.** After printing, validators re-derive every emitted edge, scope and exit flag. Every coverage entry must be mapped.

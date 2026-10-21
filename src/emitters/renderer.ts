@@ -281,6 +281,8 @@ export class Renderer {
   private readonly loopExitCopies = new Map<string, ParallelTransfer>();
   /** Tests of enclosing `if`s merged into the next printed `if` (nestedIf). */
   private conjunct: readonly ConditionTerm[] | undefined;
+  /** The next printed source-view `if` head continues an `else` (see elseArm). */
+  private elseIf = false;
   /** Operands of a shared-arm condition printed so far (see planSharedArms). */
   private sharedPlan:
     | {
@@ -5371,8 +5373,7 @@ export class Renderer {
       ...(complement ? { opaque: true as const } : {}),
     });
     const open = (positive: boolean): void => {
-      const text = pending ? this.conjunction([...pending, term(positive)]) : test(positive);
-      this.writer.line(depth, c ? `if (${text}) {` : `if ${text}:`);
+      this.ifHead(depth, pending ? this.conjunction([...pending, term(positive)]) : test(positive));
     };
     const close = (): void => {
       if (c) this.writer.line(depth, '}');
@@ -5417,7 +5418,7 @@ export class Renderer {
                 terms[0]!.printed,
               ).text
           : this.conjunction(terms);
-      this.writer.line(depth, c ? `if (${text}) {` : `if ${text}:`);
+      this.ifHead(depth, text);
       if (!own) this.transfer(exit.transfer, depth + 1, control);
       const branches: [ControlArm, Control][] = [
         [stay, control],
@@ -5425,9 +5426,7 @@ export class Renderer {
       ];
       if (plan.form === 'any') branches.reverse();
       this.arm(branches[0]![0], depth + 1, branches[0]![1]);
-      this.writer.line(depth, c ? '} else {' : 'else:');
-      this.arm(branches[1]![0], depth + 1, branches[1]![1]);
-      close();
+      this.elseArm(branches[1]![0], depth, branches[1]![1]);
       return;
     }
     const shaped =
@@ -5482,9 +5481,7 @@ export class Renderer {
     } else {
       open(true);
       this.arm(yes, depth + 1, control);
-      this.writer.line(depth, c ? '} else {' : 'else:');
-      this.arm(no, depth + 1, control);
-      close();
+      this.elseArm(no, depth, control);
     }
   }
 
@@ -5696,10 +5693,9 @@ export class Renderer {
     );
   }
 
-  /** The `if` control an arm consists of, when nothing of the arm prints before
-   * it (silent jump blocks aside) and it prints with exactly one non-empty arm
-   * and no `else`. */
-  private nestedIf(arm: ControlArm): string | null {
+  /** The control an arm consists of when nothing of the arm prints before it
+   * (silent jump blocks and a flag short-circuit's silent heads aside). */
+  private soleControl(arm: ControlArm): Control | null {
     if (!arm.body || !this.silentTransfer(arm.transfer)) return null;
     const blocks: BlockRegion[] = [];
     const flatten = (region: Region): boolean => {
@@ -5722,13 +5718,99 @@ export class Renderer {
       )
         return null;
     }
-    const control = blocks.at(-1)!.control;
-    return control.kind === 'if' &&
+    return blocks.at(-1)!.control;
+  }
+
+  /** The `if` control an arm consists of, when nothing of the arm prints before
+   * it (silent jump blocks aside) and it prints with exactly one non-empty arm
+   * and no `else`. */
+  private nestedIf(arm: ControlArm): string | null {
+    const control = this.soleControl(arm);
+    return control?.kind === 'if' &&
       !this.loopTests.has(control.id) &&
       !this.requirementPredicates.has(control.id) &&
       this.emptyArm(control.when_true) !== this.emptyArm(control.when_false)
       ? control.id
       : null;
+  }
+
+  /** Whether `sourceIf` prints this control as exactly one `if` statement: one
+   * `if` head, its arms and its own `else` chain, with nothing before or after
+   * it at the statement level. Mirrors the layout decisions of `sourceIf`; a
+   * layout that prints anything else (shared-arm conditions, an early-exit arm
+   * followed by its sibling, loop tests) answers false. */
+  private printsOneIf(control: Control): control is Extract<Control, { kind: 'if' }> {
+    if (
+      control.kind !== 'if' ||
+      this.loopTests.has(control.id) ||
+      this.flagStages.has(control.id) ||
+      [control.when_true, control.when_false].some((arm) => arm.shared || arm.joins)
+    )
+      return false;
+    const yes = control.when_true,
+      no = control.when_false;
+    const shaped =
+      (this.emptyArm(yes) || this.emptyArm(no) || this.terminates(yes) || this.terminates(no)) &&
+      this.localValidation.presentation(
+        'branch_layout',
+        this.input.function.id,
+        'an empty arm is dropped (inverting the exact integer test) and an arm that cannot fall through ends its if; the other arm follows unchanged',
+      );
+    if (!shaped) return true;
+    if (this.emptyArm(no) !== this.emptyArm(yes)) {
+      // `sourceIf` merges a nested else-less if into this one's conjunction.
+      const inner = this.nestedIf(this.emptyArm(no) ? yes : no);
+      if (
+        inner &&
+        this.localValidation.presentation(
+          'nested_condition_merge',
+          control.id,
+          'an if whose only printed content is another else-less if (no statements, definitions, labels, notes or edge copies between them) and whose other arm prints nothing becomes one if over the short-circuit conjunction; the inner test is still evaluated only when the outer one holds',
+          [inner],
+        )
+      )
+        return this.printsOneIf(this.controls.get(inner)!);
+    }
+    return this.emptyArm(no) || this.emptyArm(yes);
+  }
+
+  /** Print the `else` arm of an if whose first arm is printed, then close the
+   * if. An arm that prints exactly one `if` statement continues the chain as
+   * `else if` (`elif`) at the same depth instead of nesting in an `else` block. */
+  private elseArm(arm: ControlArm, depth: number, origin: Control): void {
+    const c = this.language === 'c-like',
+      inner = this.soleControl(arm);
+    if (
+      inner &&
+      this.printsOneIf(inner) &&
+      this.localValidation.presentation(
+        'else_if',
+        origin.id,
+        'an else arm that prints exactly one if statement (no statement, definition, label, note or edge copy before or after it) prints as else if; the same test is evaluated under the same condition',
+        [inner.id],
+      )
+    ) {
+      this.elseIf = true;
+      this.arm(arm, depth, origin);
+      if (this.elseIf) this.invalid('An else-if head was not printed');
+      return;
+    }
+    this.writer.line(depth, c ? '} else {' : 'else:');
+    this.arm(arm, depth + 1, origin);
+    if (c) this.writer.line(depth, '}');
+  }
+
+  /** The head line of a source-view `if`; the first one after `elseArm` chose
+   * `else if` continues the chain it closes. */
+  private ifHead(depth: number, text: string): void {
+    const chained = this.elseIf;
+    this.elseIf = false;
+    this.writer.line(
+      depth,
+      this.language === 'c-like'
+        ? `${chained ? '} else ' : ''}if (${text}) {`
+        : `${chained ? 'el' : ''}if ${text}:`,
+    );
   }
 
   /** The conjunction of merged `if` tests. When every test is an inline

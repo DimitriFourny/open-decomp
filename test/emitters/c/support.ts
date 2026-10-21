@@ -610,6 +610,29 @@ class Parser {
     this.take('DEDENT');
   }
 
+  /** After `if` or `elif`: the test, its suite, then any `elif` chain or `else`. */
+  private pythonIf(): void {
+    const condition = this.expression();
+    this.take(':');
+    this.take('\n');
+    const test: Op & { kind: 'test' } = { kind: 'test', condition, target: -1 };
+    this.ops.push(test);
+    this.pythonBlock();
+    const end: Op & { kind: 'jump' } = { kind: 'jump', target: -1 };
+    this.ops.push(end);
+    test.target = this.ops.length;
+    if (this.peek() === 'elif') {
+      this.take('elif');
+      this.pythonIf();
+    } else if (this.peek() === 'else') {
+      this.take('else');
+      this.take(':');
+      this.take('\n');
+      this.pythonBlock();
+    }
+    end.target = this.ops.length;
+  }
+
   /** Source type syntax carries no host allocation or pointee bounds. Only
    * machine-width casts below give values numeric interpretation. */
   private bodyType(python: boolean, depth = 0): { scalar: string; pointers: number } | null {
@@ -684,23 +707,9 @@ class Parser {
       this.take('\n');
       return;
     }
-    if (token === 'if') {
-      const condition = this.expression();
-      this.take(':');
-      this.take('\n');
-      const test: Op & { kind: 'test' } = { kind: 'test', condition, target: -1 };
-      this.ops.push(test);
-      this.pythonBlock();
-      const end: Op & { kind: 'jump' } = { kind: 'jump', target: -1 };
-      this.ops.push(end);
-      test.target = this.ops.length;
-      if (this.peek() === 'else') {
-        this.take('else');
-        this.take(':');
-        this.take('\n');
-        this.pythonBlock();
-      }
-      end.target = this.ops.length;
+    if (token === 'if' || token === 'elif') {
+      assert.equal(token, 'if', 'elif without a preceding if');
+      this.pythonIf();
       return;
     }
     if (token === 'while') {
@@ -884,7 +893,9 @@ class Parser {
       test.target = this.ops.length;
       if (this.peek() === 'else') {
         this.take('else');
-        this.block(breaks);
+        // `else if` is the nested if statement itself.
+        if (this.peek() === 'if') this.statement(breaks);
+        else this.block(breaks);
       }
       end.target = this.ops.length;
       return;

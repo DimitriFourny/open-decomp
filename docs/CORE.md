@@ -344,6 +344,14 @@ only when a scratch register name occurs in the text (`abi_scratch_note`), and
 the FP-environment assumption trails the signature with an unambiguous
 requirement ID prefix (`requirement_note`); full records stay in metadata.
 
+`else_if` prints an `else` arm that is exactly one `if` statement (no statement,
+definition, label, note or edge copy before or after it; the arm's own `else`
+chain included) as `} else if (B) {` (Python-like `elif B:`) at the outer depth,
+recursively for chains. The decision follows what the arm prints: an `if` whose
+layout also prints a sibling after it (an early-exit arm followed by the other
+arm), a loop test or a shared-arm condition keeps the nested `else` block. Only
+braces and indentation change; the checked view keeps the nested form.
+
 `short_circuit_flag` prints a condition that unoptimized code carries through a
 promoted private flag local (`flag = 0; if (a) { flag = 0; if (b) flag = c; }
 if (!(flag & 1)) ...`) as one test, `!(a && b && c)`: each stage writing 0
