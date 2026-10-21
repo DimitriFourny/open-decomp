@@ -23,6 +23,7 @@ const INTEGRATION = [
   'test/reconstruction/memory-shapes-source.test.ts',
   'test/reconstruction/source-names-executable.test.ts',
   'test/reconstruction/source-names.test.ts',
+  'test/reconstruction/sqlite-cell-constants.test.ts',
   'test/reconstruction/sqlite-interfaces.test.ts',
   'test/service/analysis/native-summary.test.ts',
   'test/service/analysis/request-determinism.test.ts',

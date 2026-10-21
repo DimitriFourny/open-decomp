@@ -147,8 +147,9 @@ Decision (2026-10-20): breakable blocks were a cheap goto reduction. Reviewers c
 
 A 64-bit value assembled per arm from two 32-bit cells prints as `value6 | ((uint64_t)value7 << 32)`. `sqlite3BtreeCommitPhaseTwo` builds the `getPageNormal` / `getPageMMap` function pointers this way (low cells `0x60ce8` / `0x60ae0`, high cell `1`, i.e. `0x100060ce8`); Ghidra prints `pcVar4 = _getPageNormal`. Baseline: 11 reassemblies in 6 functions. Ghidra's varnodes are whole registers, so this cannot arise there.
 
-- [ ] Cell recombination (source view, docs/internals/reconstruction.md, step 6) also merges a phi group whose cells are constants (or recombinable values) on every incoming edge into one whole-width parameter with one constant per edge; pointer and global naming then applies to each constant.
+- [x] Cell recombination (source view, docs/internals/reconstruction.md, step 6) also merges a phi group whose cells are constants (or recombinable values) on every incoming edge into one whole-width parameter with one constant per edge; pointer and global naming then applies to each constant.
   - Acceptance: `sqlite3BtreeCommitPhaseTwo` prints both symbols; the sample reassembly count falls; local validation proves each recombined constant.
+  - Evidence (types/15, reconstruction/62): `sqlite3BtreeCommitPhaseTwo` prints `value8 = (uintptr_t)getPageNormal;` / `getPageMMap` (python-like `function_address("getPageNormal")`) instead of `value6 | ((uint64_t)value7 << 32)`; the range-folded constant high cell no longer keeps the low cell split, and source facts offer the whole per-edge constants as candidate addresses. Each constant is proved by `validateConstantCells` (exact evaluation, no BDD allowance). Reassembly regex over the 6 baseline functions at the same base: 11 → 9 (`sqlite3BtreeCommitPhaseTwo` 1 → 0, `sqlite3BtreeOpen` 1 → 0); the 9 left are cells defined by call clobbers, `__unknown_effect` outputs (G9) or a group with an unknown-effect edge, not constant phi groups. Tests: `test/reconstruction/source-cells.test.ts` (constant cells), `test/reconstruction/sqlite-cell-constants.test.ts`.
 
 ## G9: Coverage
 

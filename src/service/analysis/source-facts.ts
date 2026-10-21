@@ -34,6 +34,7 @@ import {
   bitWidth,
   expressionOperands,
   type DataType,
+  type Edge,
   type Expression,
   type Instruction,
   type RegisterIR,
@@ -739,6 +740,70 @@ function sourceAddresses(
         candidates.set(addressKey(address), address);
       }
     }
+  // A pointer-width register assembled from block-parameter cells that are
+  // constants on every incoming edge holds one whole constant per edge: the
+  // same addresses cell recombination presents (`reconstruction/source-cells`).
+  const edgesInto = new Map<string, Edge[]>();
+  for (const block of input.ir.blocks) {
+    const { terminator } = block;
+    const outgoing =
+      terminator.kind === 'jump'
+        ? [terminator.edge]
+        : terminator.kind === 'branch'
+          ? [terminator.when_true, terminator.when_false]
+          : terminator.kind === 'switch'
+            ? [...terminator.cases.map(({ edge }) => edge), terminator.otherwise]
+            : [];
+    for (const edge of outgoing) {
+      const list = edgesInto.get(edge.target) ?? [];
+      list.push(edge);
+      edgesInto.set(edge.target, list);
+    }
+  }
+  const parameterSlots = new Map<string, { block: string; index: number }>();
+  for (const block of input.ir.blocks)
+    for (const [index, value] of block.parameters.entries())
+      parameterSlots.set(value.id, { block: block.id, index });
+  for (const expression of expressions.values()) {
+    context.checkpoint(1);
+    if (expression.kind !== 'concat') continue;
+    let block: string | undefined,
+      width = 0,
+      consistent = true;
+    const parts = expression.values.map((part) => {
+      width += bitWidth(part.type);
+      const fixed = constant(part);
+      if (fixed !== undefined) return { width: bitWidth(part.type), bits: [fixed] };
+      const slot = parameterSlots.get(part.id);
+      const incoming = slot && edgesInto.get(slot.block);
+      if (!slot || !incoming?.length || (block !== undefined && block !== slot.block)) {
+        consistent = false;
+        return { width: 0, bits: [] };
+      }
+      block = slot.block;
+      const bits = incoming.map((edge) => constant(edge.arguments[slot.index]!));
+      if (bits.some((value) => value === undefined)) consistent = false;
+      return { width: bitWidth(part.type), bits: bits as bigint[] };
+    });
+    if (!consistent || block === undefined || width !== image.target.address_bits) continue;
+    const count = edgesInto.get(block)!.length;
+    for (let edge = 0; edge < count; edge++) {
+      context.checkpoint(parts.length);
+      let whole = 0n,
+        offset = 0n;
+      for (const part of parts) {
+        const bits = part.bits.length === 1 ? part.bits[0]! : part.bits[edge]!;
+        whole |= BigInt.asUintN(part.width, bits) << offset;
+        offset += BigInt(part.width);
+      }
+      if (whole < U64_LIMIT)
+        candidates.set(addressKey({ image_id: image.id, space: 'va', value: whole }), {
+          image_id: image.id,
+          space: 'va',
+          value: whole,
+        });
+    }
+  }
   for (const fact of input.types.calls?.stack.values.values() ?? []) {
     context.checkpoint(1);
     const address: Address | undefined =

@@ -9,7 +9,7 @@ import {
 } from '../ir/index.js';
 import type { BlockRegion, ParallelTransfer } from '../presentation/index.js';
 import { identityOperand } from './expressions.js';
-import type { LocalValidationSession } from './local-validation.js';
+import { validateConstantCells, type LocalValidationSession } from './local-validation.js';
 type Copies = ParallelTransfer['copies'];
 
 interface CellPlan {
@@ -40,6 +40,9 @@ interface CellGroup {
   readonly width: number;
   /** Only corresponding slices of one value of exactly this width qualify. */
   readonly exact: boolean;
+  /** Some cell is a parameter that range analysis folded to a constant: the
+   * group is recombined only when every edge writes one whole constant. */
+  readonly folded: boolean;
   readonly edges: { readonly transfer: ParallelTransfer; readonly source: EdgeSource }[];
   recorded?: boolean;
 }
@@ -97,13 +100,21 @@ export function recombineSourceCells(
   // Phi cells carried unchanged from one block to another hold one source
   // variable; group them into webs. A concat of adjacent cells is a joint read
   // of the upper cell with the cell below it, anywhere in that cell's web.
+  // `cellRegisters` also holds the parameters range analysis already folded to a
+  // constant (every incoming copy is still there): `value7 = 1` on every edge
+  // must not keep `value6` from its other half, so such a cell may join a group
+  // but never forms a web.
   const phiCells = new Map<string, RegisterBinding['register']>();
+  const cellRegisters = new Map<string, RegisterBinding['register']>();
   for (const block of blocks.values()) {
     const parameters = new Set(block.parameters.map((value) => value.id));
     for (const binding of block.register_entry) {
       context.checkpoint(1);
-      if (parameters.has(binding.value.id) && !expressions.has(binding.value.id))
-        phiCells.set(binding.value.id, binding.register);
+      if (!parameters.has(binding.value.id)) continue;
+      const expression = expressions.get(binding.value.id);
+      if (!expression) phiCells.set(binding.value.id, binding.register);
+      if (!expression || expression.kind === 'constant')
+        cellRegisters.set(binding.value.id, binding.register);
     }
   }
   const webs = new Map<string, string>();
@@ -135,8 +146,8 @@ export function recombineSourceCells(
     context.checkpoint(1);
     if (expression.kind !== 'concat') continue;
     for (let index = 1; index < expression.values.length; index++) {
-      const lower = phiCells.get(expression.values[index - 1]!.id),
-        upper = phiCells.get(expression.values[index]!.id);
+      const lower = cellRegisters.get(expression.values[index - 1]!.id),
+        upper = cellRegisters.get(expression.values[index]!.id);
       if (
         lower &&
         upper &&
@@ -155,7 +166,7 @@ export function recombineSourceCells(
     const roots = new Map<string, RegisterBinding[]>();
     for (const binding of block.register_entry) {
       context.checkpoint(1);
-      if (!parameters.has(binding.value.id) || !phiCells.has(binding.value.id)) continue;
+      if (!parameters.has(binding.value.id) || !cellRegisters.has(binding.value.id)) continue;
       const list = roots.get(binding.register.root) ?? [];
       list.push(binding);
       roots.set(binding.register.root, list);
@@ -202,7 +213,8 @@ export function recombineSourceCells(
         })
       )
         continue;
-      const group: CellGroup = { block, root, bindings, width, exact, edges: [] };
+      const folded = bindings.some(({ value }) => expressions.has(value.id));
+      const group: CellGroup = { block, root, bindings, width, exact, folded, edges: [] };
       groups.push(group);
       byCells.set(bindings.map(({ value }) => value.id).join(','), group);
     }
@@ -303,7 +315,24 @@ export function recombineSourceCells(
         if (matches.length !== 1) break;
         pieces.push(matches[0]!.source);
       }
-      const source = pieces.length === bindings.length ? jointSource(group, pieces) : null;
+      let source = pieces.length === bindings.length ? jointSource(group, pieces) : null;
+      if (source && group.folded && source.kind !== 'constant') source = null;
+      // Each recombined constant is proved on its own edge: the cells'
+      // concatenation (low cell first) equals the whole constant.
+      if (source?.kind === 'constant') {
+        const subject = bindings[0]!.value.id,
+          bits = source.bits;
+        if (
+          validation.check(
+            'bitvector',
+            subject,
+            'register cells written as constants on one edge concatenate to the whole constant',
+            () => validateConstantCells(subject, pieces, bits, expressions, context),
+            pieces.map(({ id }) => id),
+          ).status !== 'verified'
+        )
+          source = null;
+      }
       if (!source) {
         rejected.add(group);
         break;

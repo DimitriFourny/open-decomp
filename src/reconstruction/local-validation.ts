@@ -2,10 +2,13 @@ import { OperationError, type OperationContext } from '../core/index.js';
 import { mapExpression } from '../analysis/effects/index.js';
 import {
   bitWidth,
+  evaluateExpression,
   expressionOperands,
+  integer,
   sameType,
   type Expression,
   type Origin,
+  type RuntimeValue,
   type Value,
 } from '../ir/index.js';
 
@@ -764,6 +767,52 @@ export function validateBitvectorCandidate(
     }
     throw new Unsupported('expression expansion bound or cycle');
   });
+}
+
+/** Exact evaluation, with the IR interpreter, of register cells that are
+ * constants on one edge: their concatenation (lowest cell first) must equal
+ * `whole`. This evaluates the cells' own definitions, so it neither shares the
+ * recombiner's slice folding nor spends the BDD allowance; a cell with no
+ * constant value (an input, an indeterminate, a cycle) is not proved. */
+export function validateConstantCells(
+  subject: string,
+  pieces: readonly Value[],
+  whole: bigint,
+  expressions: ReadonlyMap<string, Expression>,
+  context: OperationContext,
+): LocalValidationRecord {
+  const record = {
+    kind: 'bitvector' as const,
+    subject,
+    scope: 'register cells written as constants on one edge concatenate to the whole constant',
+  };
+  const unknown: RuntimeValue = { kind: 'unknown', reason: 'not a constant' };
+  const memo = new Map<string, RuntimeValue>(),
+    active = new Set<string>();
+  const get = (value: Value): RuntimeValue => {
+    context.checkpoint(1);
+    const known = memo.get(value.id);
+    if (known) return known;
+    const expression = expressions.get(value.id);
+    if (!expression || value.type.kind !== 'integer' || active.has(value.id) || active.size >= 64)
+      return unknown;
+    active.add(value.id);
+    const result = evaluateExpression(value.type, expression, get);
+    active.delete(value.id);
+    memo.set(value.id, result);
+    return result;
+  };
+  const width = pieces.reduce((total, piece) => total + bitWidth(piece.type), 0);
+  const actual = evaluateExpression(integer(width), { kind: 'concat', values: pieces }, get);
+  if (actual.kind !== 'bits')
+    return { ...record, status: 'unverified', reason: 'a cell is not a constant' };
+  return actual.bits === whole
+    ? { ...record, status: 'verified' }
+    : {
+        ...record,
+        status: 'rejected',
+        counterexample: { cells: actual.bits.toString(16), constant: whole.toString(16) },
+      };
 }
 
 /** Bounded search of the cones of `values` for an indeterminate definition;
