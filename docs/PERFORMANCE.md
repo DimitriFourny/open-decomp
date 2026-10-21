@@ -738,6 +738,63 @@ Losses. The total did drop against pre-R2 (214 → 200) but not per function, an
 
 Related per-item evidence recorded elsewhere in this document: likely-mode precision and the R5 type heuristics ("Likely-inference precision", including the dev-loop `r5-likely-c` comparison and byte-identical `proven` output), cache and latency work ("Persistent analysis cache" and "Per-function latency and cross-request callee reuse"), and the LLM task protocol ("LLM task success per token").
 
+## Readability roadmap 2 baseline: Ghidra lane in the structure sample (2026-10-21, roadmap item M1)
+
+The structure sample (`scripts/bench/structure-gotos.py`) now has a Ghidra lane and a paired metrics table. `ghidra` runs `analyzeHeadless` (Ghidra 12.1.4, default decompiler options after auto-analysis) on the sample binaries and decompiles the functions listed in an Open Decomp export's `index.tsv` (or `SAMPLE.list` files) by symbol name, because Ghidra rebases the ELF image; the SQLite filters share one analysis. Ghidra only loads the binaries; nothing is executed. The Java script is `scripts/bench/ghidra-decompile-list.java` (the class `DecompileList` is copied under that name into a temporary script path at run time). Both lanes write `OUT/LABEL/SAMPLE/functions/NAME@ADDR.c`; `metrics --label NAME=DIR` reads any existing directory, also the flat layout `DIR/SAMPLE/*.c`.
+
+```sh
+# Open Decomp lane (as before), then the Ghidra lane on the same functions
+python3 scripts/bench/structure-gotos.py run --entry dist/src/cli/entry.js --label head
+GHIDRA_INSTALL_DIR=/path/to/ghidra_12.1.4_PUBLIC JAVA_HOME=/path/to/jdk \
+  python3 scripts/bench/structure-gotos.py ghidra --label ghidra --from head
+python3 scripts/bench/structure-gotos.py metrics --label head --ghidra ghidra
+# the 2026-10-20 baseline outputs (local, gitignored): flag NAME=DIR takes existing directories
+python3 scripts/bench/structure-gotos.py metrics \
+  --label od=.local/ghidra-gap-2026-10-20/open-decomp --ghidra ghidra=.local/ghidra-gap-2026-10-20/ghidra
+```
+
+Smoke of the lane itself (not the 214-function run): 3 ELF fixture functions, 3 brotli functions and 2 + 2 SQLite functions (`allocateBtreePage`, `btreeBeginTrans`, `sqlite3VdbeMemCast`, `sqlite3VdbeMemClearAndResize`; 57 s including the SQLite auto-analysis) were decompiled with `--limit`; the ELF and brotli files are byte-identical to the 2026-10-20 raw outputs apart from the timing in the header comment.
+
+Baseline of readability roadmap 2: Open Decomp at `c07c94f` (`open-decomp export`, C source view, `proven`, default budget) against Ghidra 12.1.4, the 2026-10-20 raw outputs. Open Decomp prints 214 functions, Ghidra 213 (it was not asked for `sqlite3ExprCodeTarget`, whose Open Decomp output is not source text), so each counter is shown over the 213 functions both print and, for Open Decomp, over all 214. The last column is the TODO.md baseline.
+
+| counter                                                      | Open Decomp, 213 |    Ghidra, 213 | Open Decomp, 214 | TODO.md baseline (Open Decomp / Ghidra) |
+| ------------------------------------------------------------ | ---------------: | -------------: | ---------------: | --------------------------------------- |
+| `goto`                                                       |              372 |            405 |              385 | 372 / 405                               |
+| functions with a `goto`                                      |               31 |             48 |               32 | 31 / 48                                 |
+| `do { } while (0)`                                           |               95 |              0 |              100 | 95 / 0                                  |
+| `break`                                                      |              284 |             23 |              298 | 284 / 23                                |
+| `continue`                                                   |               12 |              0 |               12 | 12 / 0                                  |
+| exit-flag variables (`loop_exit_N`)                          |               12 |              0 |               12 | 12 / 0                                  |
+| jump statements (goto + break + continue + flags + run-once) |              775 |            428 |              807 | (sum of the rows above)                 |
+| `while (true)`                                               |               47 |              8 |               48 | 47 / 8                                  |
+| `for`                                                        |                3 |             12 |                3 | 3 / 12                                  |
+| loops with a test (`while (c)`, `do { } while (c)`, `for`)   |               56 |             89 |               56 | —                                       |
+| `else if`                                                    |                0 |             36 |                0 | 0 / 37                                  |
+| comma conditions (comma operator in an `if` / `while` test)  |                0 |            120 |                0 | 0 / 33                                  |
+| non-blank lines without comment lines                        |           16,546 |         11,316 |           17,146 | 16,614 / 11,377                         |
+| bytes                                                        |          745,628 |        377,473 |          769,028 | 749 KB / 380 KB                         |
+| bytes: preamble (before the signature)                       |   151,560 (20 %) |              0 |   154,324 (20 %) | 18 %                                    |
+| bytes: `entry_sp` lines                                      |    86,202 (12 %) |              0 |    90,792 (12 %) | 11 %                                    |
+| bytes: local declarations                                    |     56,602 (8 %) |   21,288 (6 %) |     58,749 (8 %) | 10 %                                    |
+| bytes: comments                                              |     37,903 (5 %) |   24,603 (7 %) |     38,230 (5 %) | 6 %                                     |
+| bytes: `unknown_*` / `requirement_predicate` / `physical_*`  |     14,487 (2 %) |              0 |     14,775 (2 %) | 2 %                                     |
+| bytes: statements and control flow (other)                   |   398,874 (53 %) | 331,582 (88 %) |   412,158 (54 %) | 53 %                                    |
+| local declarations                                           |            2,456 |          1,237 |            2,557 | 2,463 / 1,163                           |
+| lines with `entry_sp`                                        |            1,309 |              0 |            1,370 | 1,370 (38 functions) / 0                |
+| functions with `entry_sp`                                    |               37 |              0 |               38 | 38 / 0                                  |
+| body lines containing `, ...)` (open calls)                  |              725 |              0 |              769 | 774 / 0                                 |
+| 64-bit values rebuilt from two 32-bit cells                  |               11 |              0 |               11 | 11 / 0                                  |
+| functions with such a reassembly                             |                6 |              0 |                6 | 6 / 0                                   |
+
+The jump, loop and cell counters reproduce the TODO.md table exactly. The deviations are from how the first baseline script counted, not from the outputs:
+
+- **Duplicate functions and function sets.** `sqlite3VdbeMemFromBtree` and `sqlite3VdbeMemFromBtreeZeroOffset` match both the `btree` and the `vdbemem` filter, so the export directories hold 216 files for 214 functions. `metrics` counts each function once (keyed by sample and name). The baseline script counted the files: the goto and loop counters are unaffected (the two functions print no goto), but the other totals are file totals. Recounted per file, the same outputs give 2,463 declarations, 16,618 lines and 749,773 bytes over the 215 files without `sqlite3ExprCodeTarget`, and 774 open-call lines and 1,370 `entry_sp` lines over all 216 files. `lines with entry_sp` and `functions with entry_sp` in the 214 column are deduplicated and equal the baseline.
+- **Lines.** "Non-blank lines" here excludes comment lines (comments are one of the byte parts); that gives 16,546 deduplicated and 16,618 per file, against 16,614 in the baseline. Ghidra: 11,316 against 11,377, a 0.5 % difference whose exact rule is not recoverable.
+- **Ghidra `else if` 36 against 37, local declarations 1,237 against 1,163, comma conditions 120 against 33.** The first baseline script is not retained. Comma conditions now count every `if` / `while` test holding a comma operator (a `(` group not opened by a call whose top level has a `,`), e.g. `(uVar2 = _saveCursorPosition(pbVar3), (int)uVar2 != 0)`; 48 of the 120 have an operand assigning a call result. Declarations count every `type name;` / `type name [n];` line after the function's opening brace (12 are arrays).
+- **Byte parts.** A line goes to the first matching part in this order: comment line, preamble (before the signature: `#define`, `typedef`, `struct`, `extern` lines), `entry_sp`, uncertainty helpers, local declaration, other. The baseline shares were 18 / 11 / 10 / 6 / 2 / 53 %; this table gives 20 / 12 / 8 / 5 / 2 / 54 % on the same 214 functions, a definitional difference (for example every pre-signature line counts as preamble here).
+
+Per-function deltas, Open Decomp minus Ghidra over the 213 common functions: jump statements +347 (larger in 37 functions, equal in 159, smaller in 17), lines +5,230, bytes +368,155. The largest jump-statement excesses: `brotli/main` 211 vs 115, `whereLoopAddBtreeIndex` 104 vs 42, `btreeBeginTrans` 71 vs 37, `whereLoopAddBtree` 55 vs 24, `sqlite3BtreeOpen` 60 vs 33, `sqlite3BtreeInsert` 34 vs 13, `allocateBtreePage` 39 vs 20. Functions where Ghidra prints more: `exprCodeInlineFunction` 0 vs 5, `btreeComputeFreeSpace` 0 vs 4, `sqlite3VdbeMemZeroTerminateIfAble` and `sqlite3VdbeMemSetText` 0 vs 3. G6 (dropping breakable blocks) is measured against these figures; the coordinator's benchmark reruns `run`, `ghidra` and `metrics` on the whole sample.
+
 ## Normalized four-lane performance (2026-10-17, commit `901602b`)
 
 Exclusive serialized slot (`.local/performance/quality.measurement.lock`), `dist/` aggregate `dd0ea263…` unchanged before/after, Node **v26.11.1** (not the historical 24.22.0 host), Ghidra 12.1.4, bridge `73ea1c8e…`. Protocol `scripts/bench/quality-persistent.py` unchanged: same MCP client for all four lanes (Open Decomp unobserved/observed, pinned Ghidra MCP bridge, persistent Ghidra `DecompInterface`), 11 equal requests in 156/156 matched cells, 3 fresh runs, 10 warm, 30 pings, balanced order. 1,716/1,716 observer/control pairs and 6/6 import controls equivalent. Raw evidence: `~/Documents/open-decomp-perf-2026-10-17-final/p25-normalized/comparison.json`.
