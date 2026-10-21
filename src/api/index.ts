@@ -66,6 +66,9 @@ export interface DecompileOptions {
    * heuristics (marked in the text, recorded as `guess` inferences); its results are cached
    * separately and may be wrong. */
   readonly inference?: 'proven' | 'likely';
+  /** `inline` (default) prints structure typedefs and bodies in the text. `external` leaves
+   * them out and returns them in `emission.structures` (C-like). */
+  readonly structures?: 'inline' | 'external';
   readonly budget?: ToolInput<'function_decompile'>['budget'];
   readonly signal?: AbortSignal;
   readonly onProgress?: (job: WireJob) => void;
@@ -335,13 +338,15 @@ export class BinarySession {
         wait: true,
         ...(options.emitter === undefined &&
         options.view === undefined &&
-        options.inference === undefined
+        options.inference === undefined &&
+        options.structures === undefined
           ? {}
           : {
               options: {
                 ...(options.emitter === undefined ? {} : { emitter: options.emitter }),
                 ...(options.view === undefined ? {} : { view: options.view }),
                 ...(options.inference === undefined ? {} : { inference: options.inference }),
+                ...(options.structures === undefined ? {} : { structures: options.structures }),
               },
             }),
         ...(options.budget === undefined ? {} : { budget: options.budget }),

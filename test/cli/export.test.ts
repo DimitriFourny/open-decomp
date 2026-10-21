@@ -136,10 +136,12 @@ test(
         assert.ok(/\.c$/.test(row.file));
         assert.equal(row.state === 'partial', row.reason !== '');
         stateCounts[row.state]++;
-        // Pseudocode is exactly what decompile returns for the same function.
-        const result = await session.decompile({
-          address: { space: 'va', value: row.address },
-        });
+        // Pseudocode is exactly what decompile returns for the same function, structure
+        // declarations external (they are written once, to types.h).
+        const result = await session.decompile(
+          { address: { space: 'va', value: row.address } },
+          { structures: 'external' },
+        );
         assert.ok('data' in result && result.data.delivery === 'inline');
         const expected = result.data.emission.text;
         assert.equal(body.join('\n'), expected.endsWith('\n') ? expected : `${expected}\n`);

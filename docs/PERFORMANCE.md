@@ -804,6 +804,33 @@ Escaped frame memory prints as one local frame object instead of `entry_sp` arit
 - **Interfaces:** the six third-suite functions with the `entry_sp` interface mismatches (`h3_label`, `h3_rescale`, `h3_dispatch`, `h3_pack`, `h3_unescape`, `h3_pairsum`; symbol-bearing binaries of all 12 cells, seen suite) print `entry_sp` in 8 of 72 decompilations instead of 46 (lines 612 → 61). The remaining 8 are PE `h3_pairsum` (Win64 stack arguments 5 and 6 at `entry_sp + 40/48`) and PE `h3_unescape` (`entry_sp + 40`, a Win64 stack argument), both incoming arguments. Not re-scored with the third-suite evaluator.
 - Semantic regressions (`test/reconstruction/frame-object.test.ts`): layout boundaries (exact set → scalar, overlap / interior address / indexed base → byte array, gap → padding, stack-aligned start for arm64 and x86 entry SPs) and an escaped, indexed, overlapping frame executed in both dialects on three ABIs, with the indexed store aliasing each member in turn.
 
+## Readability roadmap 2, G7: preamble and open arity (2026-10-21, not held out)
+
+TODO.md G7, first and third items. Same build before (`7301f55`+`18575c1`, emitters 68) and after (emitters 69); brotli 1.2.0 CLI and SQLite 3.54.0 sample binaries; `open-decomp export` (C source view, `proven`) for 14 functions: brotli `main`, `NextFile`, `OpenFiles`, `CloseFiles`, `PrintFileProcessingProgress`, `ParseBase64`, `CheckAlias`, `FileSize`; SQLite `sqlite3BtreeTripAllCursors`, `allocateBtreePage`, `exprCodeTargetAndOr`, `sqlite3VdbeMemNumerify`, `whereLoopAddBtree`, `whereLoopAddBtreeIndex`. Preamble = the lines between the header comment and the signature (includes, typedefs, struct bodies, externs, comments):
+
+| function                                |   preamble before → after |      file bytes before → after |
+| --------------------------------------- | ------------------------: | -----------------------------: |
+| `main`                                  |             2,706 → 1,772 |                58,351 → 57,237 |
+| `NextFile`                              |                 963 → 362 |                  4,683 → 4,082 |
+| `OpenFiles`                             |                 658 → 370 |                  2,357 → 2,069 |
+| `CloseFiles`                            |                 793 → 505 |                  4,284 → 3,996 |
+| `PrintFileProcessingProgress`           |                 446 → 293 |                  1,732 → 1,569 |
+| `ParseBase64`, `CheckAlias`, `FileSize` |  unchanged (37, 141, 178) |                      unchanged |
+| `sqlite3BtreeTripAllCursors`            |                 993 → 210 |                  2,646 → 1,833 |
+| `exprCodeTargetAndOr`                   |               1,975 → 193 |                  5,004 → 3,152 |
+| `sqlite3VdbeMemNumerify`                |                  80 → 120 |                  8,851 → 8,416 |
+| `allocateBtreePage`                     |                 113 → 219 |                22,620 → 20,211 |
+| `whereLoopAddBtree`                     |                 141 → 407 |                30,698 → 26,536 |
+| `whereLoopAddBtreeIndex`                |                 202 → 678 |                76,797 → 71,170 |
+| **sum**                                 | **9,426 → 5,485 (−42 %)** | **222,116 → 204,364 (−8.0 %)** |
+
+The four functions whose preamble grows had no declaration for their open callees (call-site interfaces that disagree were never declared) and printed `, ...)` at every call; the comment line now names them once and the file shrinks 4.9–13.6 %. Whole 70-function exports (64 brotli functions plus the six SQLite ones): preamble 16,129 → 10,977 bytes (−32 %), function files 252,030 → 233,057 bytes (−7.5 %), `types.h` 3,961 → 21,729 bytes (the structure declarations moved there): the structure bytes are relocated, not removed (net −0.5 %); what falls is what an LLM reads per function.
+
+- **Open arity.** Call lines ending `, ...)` (excluding casts and prototypes) in the source-view texts of the 10 `decompile` functions, both dialects: 176 → 0. The checked view is byte-identical on all 20 texts (10 functions × 2 dialects). 36 `f(...)` calls keep the marker (no argument proven, or a library prototype with no proven argument such as `fprintf(...)`). Python-like grows 0.5 % (96,881 → 97,380 bytes over the 10 functions): it has no extern lines to drop, so the comment line is pure addition there; C-like shrinks 1.9 % (111,593 → 109,479).
+- **Externs.** Only callees with an established prototype (library, debug, recovered source signature) are declared. The inferred `(T*, ...)` and closed `/* inferred */` externs repeated their call sites and are gone (about 20 KB of the 773 KB structure-sample output, 2.6 %).
+- **Struct bodies.** The merged `types` pass is not a superset of what functions name: the SQLite `btree` export's `types.h` is 442 bytes and declares one structure while its 78 functions print 230 distinct ones (brotli's agrees with its functions). So `export` is the only surface that elides bodies: it asks for `options.structures: "external"`, the emission returns the `typedef`s and bodies in `emission.structures`, and `types.h` gets them after the merged types (one definition per name, other member sets in `#if 0` blocks with their functions, so the header stays valid C). `decompile` and MCP `function_decompile` keep them inline, since no complete image artifact accompanies a single function. Most names occur in one function (230 names, 259 bodies in the `btree` sample), so the bodies move to `types.h` rather than disappear.
+- **Not measured here:** the LLM task benchmark (`scripts/bench/llm-tasks/`): `export-file` answers about member layout now need `types.h`, MCP and CLI text differs only in the open-arity spelling. The coordinator must check for new wrong/unknown answers.
+
 ## Normalized four-lane performance (2026-10-17, commit `901602b`)
 
 Exclusive serialized slot (`.local/performance/quality.measurement.lock`), `dist/` aggregate `dd0ea263…` unchanged before/after, Node **v26.11.1** (not the historical 24.22.0 host), Ghidra 12.1.4, bridge `73ea1c8e…`. Protocol `scripts/bench/quality-persistent.py` unchanged: same MCP client for all four lanes (Open Decomp unobserved/observed, pinned Ghidra MCP bridge, persistent Ghidra `DecompInterface`), 11 equal requests in 156/156 matched cells, 3 fresh runs, 10 warm, 30 pings, balanced order. 1,716/1,716 observer/control pairs and 6/6 import controls equivalent. Raw evidence: `~/Documents/open-decomp-perf-2026-10-17-final/p25-normalized/comparison.json`.

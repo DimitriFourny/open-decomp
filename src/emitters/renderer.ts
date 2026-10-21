@@ -1675,14 +1675,70 @@ export class Renderer {
     return `${helper}(${this.writer.join(args)})`;
   }
 
-  /** Whether the file prints `...` for an open argument list (see openArguments). */
+  /** Whether the file prints an inline `...` for an open argument list (see inlineEllipsis). */
   private ellipsisUsed = false;
-  /** The open remainder of a call's argument list. The source view prints it as
-   * `...` in both dialects (the file header states its meaning once); the checked
-   * view keeps the named helper. Either way the helper stays in the metadata. */
-  private openArguments(helper: string, explanation: string): string {
+  /** Direct callees (printed names) whose call sites print only the proven arguments:
+   * the one `open arity` comment states that each may take more. */
+  private readonly openCallees = new Set<string>();
+  /** Address keys of callees with a call that is not an open list (a closed or guessed
+   * list, or an established prototype): one comment cannot tell their sites apart, so
+   * their open sites keep the inline marker. Computed once per rendering. */
+  private closedCallees: ReadonlySet<string> | undefined;
+
+  /** An open argument list: a call interface that proves only a prefix of its arguments. */
+  private openList(projection: BoundaryProjection): boolean {
+    return (
+      !this.likelyArgumentList(projection) &&
+      (projection.argument_list_complete === false || projection.kind === 'physical')
+    );
+  }
+
+  private closedCalleeKeys(): ReadonlySet<string> {
+    if (this.closedCallees) return this.closedCallees;
+    const closed = new Set<string>();
+    for (const [id, projection] of this.program.calls) {
+      const node = this.statements.get(id);
+      if (node?.kind !== 'call' || node.target.kind !== 'direct') continue;
+      if (projection.signature || !this.openList(projection))
+        closed.add(this.addressKey(node.target.address));
+    }
+    for (const tail of this.program.tails.values())
+      if (
+        tail.boundary.signature ||
+        tail.boundary.argument_list_complete !== false ||
+        this.likelyArgumentList(tail.boundary)
+      )
+        closed.add(this.addressKey(tail.target));
+    this.closedCallees = closed;
+    return closed;
+  }
+
+  /** Source view: whether a direct call to `key` prints only its proven arguments, the
+   * callee's open arity being stated once in the `open arity` comment. An interface that
+   * proves no argument keeps the marker (an empty list would read as zero arguments), as
+   * does any callee with an established prototype (its `...` means variadic, not open). */
+  private statesOpenArity(projection: BoundaryProjection, key: string | undefined): boolean {
+    return (
+      this.sourceView &&
+      key !== undefined &&
+      !projection.signature &&
+      projection.arguments.length > 0 &&
+      !this.closedCalleeKeys().has(key)
+    );
+  }
+
+  /** The open remainder of a call's argument list in the checked view: the named helper.
+   * The source view registers the helper in the metadata and prints `...` only where no
+   * declaration states the open arity (see inlineEllipsis). */
+  private openRemainder(helper: string, explanation: string): string | undefined {
     if (!this.sourceView) return this.call(helper, explanation, []);
     this.writer.helper(helper, explanation);
+    return undefined;
+  }
+
+  /** The inline marker of an open list that no declaration states; the file header
+   * states its meaning once. */
+  private inlineEllipsis(): string {
     this.ellipsisUsed = true;
     return '...';
   }
@@ -3064,12 +3120,12 @@ export class Renderer {
     this.structureSlot = { at: this.writer.offset, ids: structures };
   }
 
-  /** The declarations of the structures the finished text accesses: only the
-   * members it prints (byte gaps keep every offset), never the image-wide layout,
-   * which stays in the types view / types.h. A structure the text never indexes
-   * stays an incomplete type. */
-  private structureLines(): string[] {
-    const lines: string[] = [];
+  /** The declarations of the structures the finished text accesses, one entry per
+   * structure: only the members it prints (byte gaps keep every offset), never the
+   * image-wide layout, which stays in the types view / types.h. A structure the text
+   * never indexes stays an incomplete type. */
+  private structureBodies(): { readonly name: string; readonly lines: string[] }[] {
+    const bodies: { readonly name: string; readonly lines: string[] }[] = [];
     for (const id of this.structureSlot?.ids ?? []) {
       this.context.checkpoint(1);
       const members = this.partialLayout(id);
@@ -3077,7 +3133,8 @@ export class Renderer {
       const name = this.sourceStructs.name(id),
         used = this.usedMembers.get(name);
       if (!used) continue;
-      const parts: string[] = [];
+      const parts: string[] = [],
+        lines: string[] = [];
       let end = 0n,
         packed = false;
       const declare = (member: ObservedMember): string => {
@@ -3130,8 +3187,9 @@ export class Renderer {
             } */`,
         `struct ${name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
       );
+      bodies.push({ name, lines });
     }
-    return lines;
+    return bodies;
   }
 
   private unalignedRecorded = false;
@@ -3317,7 +3375,10 @@ export class Renderer {
     );
   }
 
-  /** Call-site declarations describe the recovered interface, not an authored prototype. */
+  /** Declarations of the callees with an established prototype (library, debug or
+   * recovered source signature). A call interface observed only at its call sites is
+   * not declared: the call already shows it, and an open one is stated by the
+   * `open arity` comment. */
   private declareSourceCallees(): void {
     if (!this.sourceView || this.language !== 'c-like') return;
     const declarations = new Map<string, { text: string; node: Instruction } | null>();
@@ -3327,26 +3388,13 @@ export class Renderer {
       const name = this.sourceCallee(node);
       if (name === this.identifiers.get(this.input.function.id)?.identifier) continue;
       const signature = projection.signature?.signature;
-      if (projection.results.length > 1) continue;
-      const result = signature
-        ? this.callReturnType(projection)
-        : projection.results.length === 1
-          ? this.valueType(projection.results[0]!)
-          : projection.kind !== 'physical'
-            ? 'void'
-            : null;
-      if (!result) continue;
-      const parameters = signature
-        ? signature.parameters.map((_, index) => this.callParameterType(projection, index))
-        : projection.arguments.map((value) => this.valueType(value));
-      const guessed = !signature && this.likelyArgumentList(projection);
-      const open = signature
-        ? signature.variadic
-        : !guessed &&
-          (projection.argument_list_complete === false || projection.kind === 'physical');
-      if (signature?.variadic && parameters.length === 0) continue;
-      if (open) parameters.push(parameters.length ? '...' : 'uintptr_t');
-      const text = `extern ${signature?.noreturn ? '_Noreturn ' : ''}${result} ${name}(${parameters.length ? this.writer.join(parameters) : 'void'});`;
+      if (!signature || projection.results.length > 1) continue;
+      const parameters = signature.parameters.map((_, index) =>
+        this.callParameterType(projection, index),
+      );
+      if (signature.variadic && parameters.length === 0) continue;
+      if (signature.variadic) parameters.push('...');
+      const text = `extern ${signature.noreturn ? '_Noreturn ' : ''}${this.callReturnType(projection)} ${name}(${parameters.length ? this.writer.join(parameters) : 'void'});`;
       const previous = declarations.get(name);
       declarations.set(
         name,
@@ -3357,33 +3405,18 @@ export class Renderer {
       if (!declaration) continue;
       this.declaredFunctions.add(name);
       const { text, node } = declaration;
-      const signature = this.program.calls.get(node.id)!.signature;
+      const signature = this.program.calls.get(node.id)!.signature!;
       if (
         !this.localValidation.presentation(
           'call_declaration',
           node.id,
-          signature
-            ? 'C declaration from the recovered source signature'
-            : 'unknown prototype: C declaration of the observed call interface only; open arguments retain their explicit remainder marker',
+          'C declaration from the recovered source signature',
         )
       )
         continue;
-      if (!signature)
-        this.localValidation.requireAbi(
-          'call_declaration',
-          [node.id],
-          'The declaration describes the observed native call interface under the target ABI, not a proven authored prototype; unresolved trailing arguments remain explicit.',
-        );
       const start = this.writer.offset;
-      // An open argument list already prints `...`; a closed observed one is marked inferred.
-      const guessedList = !signature && this.likelyArgumentList(this.program.calls.get(node.id)!);
-      this.writer.line(
-        0,
-        signature || text.includes('...')
-          ? text
-          : `${text} /* ${guessedList ? 'likely' : 'inferred'} */`,
-      );
-      this.mapped(node, start, [], signature?.evidence_ids ?? []);
+      this.writer.line(0, text);
+      this.mapped(node, start, [], signature.evidence_ids);
     }
   }
 
@@ -4142,15 +4175,15 @@ export class Renderer {
         this.writer.statement(depth, this.clobbers(node.clobbers));
     }
     const guessed = this.likelyArgumentList(projection);
-    const open =
-      !guessed && (projection.argument_list_complete === false || projection.kind === 'physical');
-    if (open)
-      args.push(
-        this.openArguments(
+    const open = this.openList(projection);
+    // Source view: the marker is printed after the callee's declaration is known.
+    const remainder = open
+      ? this.openRemainder(
           projection.arguments.length ? 'unknown_argument_remainder' : 'unknown_arguments',
           'Unresolved remainder of a call interface; not zero arguments or a purity claim.',
-        ),
-      );
+        )
+      : undefined;
+    if (remainder !== undefined) args.push(remainder);
     // Source view: a resolved selector prints the message instead of the dispatcher.
     const candidate = objcCandidate;
     const send =
@@ -4169,7 +4202,8 @@ export class Renderer {
         target,
         `${projection.kind === 'source' ? 'Established' : 'Inferred or incomplete'} source call. Original target: ${node.target.kind === 'direct' ? this.writer.quote(this.addressKey(node.target.address)) : 'indirect'}. Original memory effect: ${node.clobbers.memory}. Calls remain ordered; unused machine clobbers are not source results.`,
       );
-    if (
+    // A function-pointer cast spells the open arity (`T (*)(A, ...)`) at the call itself.
+    const pointerCast =
       !send &&
       this.sourceView &&
       node.target.kind === 'indirect' &&
@@ -4178,9 +4212,17 @@ export class Renderer {
         node.id,
         'indirect call target presented through a function-pointer type spelled from the projected argument and result types; an open arity keeps a trailing ellipsis and the remainder marker',
         [node.target.value.id],
-      )
-    )
-      target = this.functionPointer(node, projection, target, open);
+      );
+    if (pointerCast) target = this.functionPointer(node, projection, target, open);
+    if (open && this.sourceView) {
+      const stated = pointerCast
+        ? !projection.signature && projection.arguments.length > 0
+        : !send &&
+          node.target.kind === 'direct' &&
+          this.statesOpenArity(projection, this.addressKey(node.target.address));
+      if (!stated) args.push(this.inlineEllipsis());
+      else if (!pointerCast) this.openCallees.add(target);
+    }
     let operation: string;
     if (send) {
       const { message, skip, arity } = send;
@@ -7290,13 +7332,15 @@ export class Renderer {
             return this.valueLiteral(value)?.text ?? this.value(value);
           });
           const guessedTail = this.likelyArgumentList(tail.boundary);
-          if (tail.boundary.argument_list_complete === false && !guessedTail)
-            arguments_.push(
-              this.openArguments(
-                arguments_.length ? 'unknown_argument_remainder' : 'unknown_arguments',
-                'Unresolved trailing native tail-call arguments; observed prefix is retained, not a complete prototype.',
-              ),
+          if (tail.boundary.argument_list_complete === false && !guessedTail) {
+            const remainder = this.openRemainder(
+              arguments_.length ? 'unknown_argument_remainder' : 'unknown_arguments',
+              'Unresolved trailing native tail-call arguments; observed prefix is retained, not a complete prototype.',
             );
+            if (remainder !== undefined) arguments_.push(remainder);
+            else if (this.statesOpenArity(tail.boundary, key)) this.openCallees.add(name);
+            else arguments_.push(this.inlineEllipsis());
+          }
           this.writer.helper(
             name,
             `Native tail transfer to ${this.writer.quote(key)} using observed ${this.input.source!.abi.id} storage. Preserve unknown target effects and forward its actual results. An absent observed result layout is unknown, not void.`,
@@ -7944,7 +7988,14 @@ export class Renderer {
     };
     this.declareGlobals(globalsAt, insert);
     this.declareFunctionValues(globalsAt, insert);
-    if (this.structureSlot) insert(this.structureSlot.at, this.structureLines());
+    const bodies = this.structureSlot ? this.structureBodies() : [];
+    const external = supportAt !== undefined && this.options.structures === 'external';
+    if (this.structureSlot && !external)
+      insert(
+        this.structureSlot.at,
+        bodies.flatMap((body) => body.lines),
+      );
+    const externalStructures: { name: string; declaration: string }[] = [];
     let support = supportAt;
     if (this.likelyUsed) {
       const comment = 'likely_arity(call): argument list guessed closed, not proven';
@@ -7955,6 +8006,13 @@ export class Renderer {
     }
     if (this.likelyTypeUsed) {
       const comment = 'likely_type(T): type guessed from caller use, not proven';
+      const delta = insert(scratchAt, [
+        this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
+      ]);
+      if (support !== undefined) support += delta;
+    }
+    if (this.openCallees.size) {
+      const comment = `open arity (calls show proven args only): ${[...this.openCallees].join(', ')}`;
       const delta = insert(scratchAt, [
         this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
       ]);
@@ -7990,14 +8048,29 @@ export class Renderer {
       const mentions = (name: string, haystack: string): boolean =>
         new RegExp(`\\b${name}\\b`).test(haystack);
       const handles = [...this.handleTypedefs].filter(([name]) => mentions(name, text));
-      const scan = `${text}\n${handles.map(([, declaration]) => declaration).join('\n')}`;
+      // External structure bodies are not in the text, but their members mention names.
+      const scan = `${text}\n${external ? bodies.flatMap((body) => body.lines).join('\n') : ''}\n${handles.map(([, declaration]) => declaration).join('\n')}`;
       const used = this.deferredTypedefs.filter(
         (name) => !this.handleTypedefs.has(name) && mentions(name, scan),
       );
+      const structureNames = new Set(
+        (this.structureSlot?.ids ?? []).map((id) => this.sourceStructs.name(id)),
+      );
+      const moved = external ? used.filter((name) => structureNames.has(name)) : [];
+      for (const name of new Set(moved))
+        externalStructures.push({ name, declaration: `typedef struct ${name} ${name};` });
       insert(support, [
-        ...used.map((name) => `typedef struct ${name} ${name};`),
+        ...used
+          .filter((name) => !moved.includes(name))
+          .map((name) => `typedef struct ${name} ${name};`),
         ...handles.map(([, declaration]) => declaration),
       ]);
+    }
+    if (external) {
+      for (const body of bodies)
+        externalStructures.push({ name: body.name, declaration: body.lines.join('\n') });
+      if (externalStructures.length && support !== undefined)
+        insert(support, ['/* struct declarations: types.h */']);
     }
     if (support !== undefined) insert(support, cScalarSupport(w.text().slice(support)));
     for (const item of this.input.function.coverage) {
@@ -8101,6 +8174,7 @@ export class Renderer {
         inferences,
         requirements,
         ...(omitted.length ? { omitted } : {}),
+        ...(externalStructures.length ? { structures: externalStructures } : {}),
         review,
       },
       diagnostics: [...this.diagnostics, ...(summary ? [summary] : [])],

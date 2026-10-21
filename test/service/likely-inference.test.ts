@@ -51,10 +51,11 @@ test(
       return { result, text: emission.text, guesses, emission };
     };
 
-    // Default is proven: no marker, no guess, the open list is explicit, and an explicit
+    // Default is proven: no marker, no guess, the open list is stated (`open arity` comment), and an explicit
     // `proven` is byte-identical to omitting the option.
     const first = await run('caller_a');
-    assert.match(first.text, /hub\([^)]*\.\.\.\)/);
+    assert.match(first.text, /^\/\* open arity \([^)]*\): hub \*\/$/m);
+    assert.match(first.text, /hub\(arg0 \^ 3\)/);
     assert.doesNotMatch(first.text, /likely_arity/);
     assert.equal(first.guesses.length, 0);
     const proven = await run('caller_a', { inference: 'proven' });
@@ -69,6 +70,7 @@ test(
       const likely = await run('caller_a', { inference: 'likely', emitter });
       assert.match(likely.text, /likely_arity\(hub\([^)]*\)\)/, likely.text);
       assert.doesNotMatch(likely.text, /hub\([^)]*\.\.\./);
+      assert.doesNotMatch(likely.text, /open arity/);
       assert.equal(likely.guesses.length, 1);
       const [guess] = likely.guesses;
       assert.deepEqual(guess!.heuristics, ['callee_reads', 'caller_consensus']);
@@ -107,6 +109,8 @@ test(
     const split = await run('split_b', { inference: 'likely' });
     assert.equal(split.guesses.length, 0);
     assert.doesNotMatch(split.text, /likely_arity/);
-    assert.match(split.text, /hub2\([^)]*, \.\.\.\)/);
+    // The disagreeing guess stays open: the call prints its proven arguments and the callee is named open.
+    assert.match(split.text, /hub2\(arg0 \^ 3, arg1 \^ 1\)/);
+    assert.match(split.text, /^\/\* open arity \([^)]*\): hub2 \*\/$/m);
   },
 );

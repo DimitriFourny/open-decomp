@@ -72,7 +72,7 @@ macOS SDK → C/POSIX/Darwin/CoreFoundation; mingw-w64 → Windows families (fam
 - **Image types.** Per-function object views anchored at argument/return/stack/allocation identities. Bounded exploration (≤12 neighbor bodies, ≤4 callers per flow, ≤2 pointee hops), then Steensgaard-style union-find. A flow joins only once the callee _confirms_ it (dereferences it, passes it to a declared pointer parameter, or forwards it to a confirmed flow). Unions with incompatible overlapping members are refused and recorded. Name rank: argument > return > allocation > stack > pointee path.
 - **Pointer evidence.** Fixpoint over whole machine-width values: dereferenced, declared/observed pointer, `ptr ± int`, joined by copy/phi/select, or compared with a pointer ⇒ analysis-candidate `void *`; element-typed when derived by whole-element steps from one scalar pointee; a declared `T *` survives copies and joins. `ptr - ptr`, integer arithmetic, constants never qualify.
 - **Likely mode** (opt-in): pointer guesses for integer formals/results from caller evidence or carry-only use, recorded as hypotheses, printed only for heuristics that passed the precision gate.
-- **`types` query / `types.h`:** same machinery over every body (entry order, ¾ of remaining work), one solve.
+- **`types` query / `types.h`:** same machinery over every body (entry order, ¾ of remaining work), one solve. On a large image it names far fewer structures than the functions print (SQLite `btree` export: one against 230), so `export` appends the declarations of every structure its function files name (`options.structures: "external"`, `emission.structures`) and `decompile`/MCP keep them inline.
 
 ### Precedence at projection
 

@@ -321,7 +321,7 @@ test('untyped named image addresses compile without inventing an extern object t
 });
 
 for (const conflict of [false, true])
-  test(`call declarations ${conflict ? 'refuse conflicting interfaces' : 'deduplicate consistent interfaces'} without changing effects`, () => {
+  test(`call interfaces observed only at call sites (${conflict ? 'conflicting' : 'consistent'}) are not declared; their open arity is named once, effects unchanged`, () => {
     const b = builder(`c-prototype-${conflict}`),
       block = b.block('entry');
     const target = {
@@ -345,12 +345,14 @@ for (const conflict of [false, true])
     const ir = constructSSA(b.finish(block, [integer(64)])).value as SSAForm;
     const source = { abi: sysvAMD64Abi, callees: [], addresses: [] };
     const { emission } = emit(ir, { source }, 'c-like');
-    assert.equal((emission.text.match(/^extern /gm) ?? []).length, conflict ? 0 : 1);
-    assert.equal(
-      emission.local_validation?.some((record) => record.rule === 'call_declaration'),
-      !conflict,
-    );
-    assert.match(emission.text, /sub_4000\(7, \.\.\.\)/);
+    // No prototype is established: the call prints the interface, and the open arity
+    // is stated on one comment line, not by a declaration or a marker at each call.
+    assert.doesNotMatch(emission.text, /^extern /m);
+    assert.ok(!emission.local_validation?.some((record) => record.rule === 'call_declaration'));
+    assert.match(emission.text, /^\/\* open arity \([^)]*\): sub_4000 \*\/$/m);
+    assert.match(emission.text, /sub_4000\(7\)/);
+    assert.doesNotMatch(emission.text, /, \.\.\.\)/);
+    assert.ok(emission.helpers.some((helper) => helper.name === 'unknown_argument_remainder'));
     const observed = execute(
       emission,
       new Map(),
@@ -362,10 +364,34 @@ for (const conflict of [false, true])
     );
     assert.deepEqual(observed.values, [32n]);
     assert.deepEqual(observed.events, ['call', 'call']);
-    assert.doesNotMatch(
-      emit(ir, { source }, 'c-like', 'checked').emission.text,
-      /^extern |__od_bv_/m,
-    );
+    const checked = emit(ir, { source }, 'c-like', 'checked').emission.text;
+    assert.doesNotMatch(checked, /^extern |__od_bv_/m);
+    // The checked view keeps the named remainder helper at every open call.
+    assert.match(checked, /sub_4000\(7, unknown_argument_remainder\(\)\)/);
+    // Python-like states the open arity the same way.
+    const python = emit(ir, { source }, 'python-like').emission.text;
+    assert.match(python, /^# open arity \([^)]*\): sub_4000$/m);
+    assert.match(python, /sub_4000\(7\)/);
+    assert.doesNotMatch(python, /\.\.\./);
+  });
+
+for (const language of ['c-like', 'python-like'] as const)
+  test(`${language}: an open call that proves no argument keeps its marker and is not named as open`, () => {
+    const b = builder(`open-no-arguments-${language}`),
+      block = b.block('entry');
+    const target = {
+      kind: 'direct' as const,
+      address: { image_id: image, space: 'va' as const, value: 0x4000n },
+    };
+    const clobbers = { registers: [], flags: [], memory: 'unknown_read_write' as const };
+    const result = block.call(target, [], [integer(64)], clobbers)[0]!;
+    block.return([result]);
+    const ir = constructSSA(b.finish(block, [integer(64)])).value as SSAForm;
+    const source = { abi: sysvAMD64Abi, callees: [], addresses: [] };
+    const { text } = emit(ir, { source }, language).emission;
+    assert.match(text, /sub_4000\(\.\.\.\)/);
+    assert.match(text, /\.\.\.: more args possible/);
+    assert.doesNotMatch(text, /open arity/);
   });
 
 test('library C strings retain const char prototypes and bare proven literals', () => {

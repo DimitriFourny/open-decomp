@@ -227,6 +227,9 @@ class Exporter {
   readonly #stringIds = new Map<string, StringRecord>();
   readonly #stringRefs = new Map<string, Set<string>>();
   readonly #importRefs = new Map<string, Set<string>>();
+  /** Structure declarations the function texts refer to by name (C-like export): per
+   * structure name, whether a typedef was seen and each distinct body with its functions. */
+  readonly #structures = new Map<string, { typedef: boolean; bodies: Map<string, Set<string>> }>();
   readonly #importByEntity = new Map<string, ImportRecord>();
   readonly #importByAddress = new Map<string, ImportRecord>();
   readonly #used = new Set<string>();
@@ -461,12 +464,25 @@ class Exporter {
     const result = await session.decompileFunction(row.fn.id, {
       emitter: language,
       ...(this.#options.inference === undefined ? {} : { inference: this.#options.inference }),
+      // Structure declarations are written once, to types.h.
+      ...(language === 'c-like' ? { structures: 'external' as const } : {}),
       signal: this.#signal,
     });
     this.#signal.throwIfAborted();
     const pseudocode =
       'data' in result && result.data.delivery === 'inline' ? result.data.emission.text : undefined;
     if (pseudocode !== undefined) {
+      if ('data' in result && result.data.delivery === 'inline')
+        for (const { name, declaration } of result.data.emission.structures ?? []) {
+          let entry = this.#structures.get(name);
+          if (!entry) this.#structures.set(name, (entry = { typedef: false, bodies: new Map() }));
+          if (declaration.startsWith('typedef ')) entry.typedef = true;
+          else {
+            let functions = entry.bodies.get(declaration);
+            if (!functions) entry.bodies.set(declaration, (functions = new Set()));
+            functions.add(row.name);
+          }
+        }
       row.state = result.state;
       row.reason = 'reason' in result ? result.reason : '';
     } else {
@@ -501,6 +517,46 @@ class Exporter {
     }
     await writeFile(join(this.#functionsDirectory, row.file), text);
     row.fileBytes = Buffer.byteLength(text);
+  }
+
+  /** The structure declarations of the function texts (`structures: external`): every
+   * typedef once, then one definition per structure. Functions may access different
+   * member sets of one structure; the set most functions print is the definition and the
+   * others follow in `#if 0` blocks with their functions, so the header stays valid C. A
+   * structure the merged image types above already define keeps only those blocks. */
+  #structureLines(merged: string): string[] {
+    if (this.#structures.size === 0) return [];
+    const known = new Set(merged.split('\n'));
+    const names = [...this.#structures.keys()].sort(compare);
+    const lines = [
+      '',
+      '/* Structures the function files use, with the members each function accesses (the merged types above list the image-wide members of the same names). */',
+    ];
+    for (const name of names) {
+      const typedef = `typedef struct ${name} ${name};`;
+      if (this.#structures.get(name)!.typedef && !known.has(typedef)) lines.push(typedef);
+    }
+    const users = (functions: ReadonlySet<string>): string => {
+      const sorted = [...functions].sort(compare);
+      return escape(
+        sorted.length > 8
+          ? `${sorted.slice(0, 8).join(', ')}, +${sorted.length - 8} more`
+          : sorted.join(', '),
+      );
+    };
+    for (const name of names) {
+      const bodies = [...this.#structures.get(name)!.bodies].sort(
+        (left, right) => right[1].size - left[1].size || compare(left[0], right[0]),
+      );
+      let defined = merged.includes(`struct ${name} {`);
+      for (const [body, functions] of bodies) {
+        lines.push(`/* used by ${users(functions)} */`);
+        if (defined) lines.push('#if 0', body, '#endif');
+        else lines.push(body);
+        defined = true;
+      }
+    }
+    return lines;
   }
 
   async writeIndexes(
@@ -596,7 +652,7 @@ class Exporter {
       ),
     ]);
     const typesText = types.text.endsWith('\n') ? types.text.slice(0, -1) : types.text;
-    await write('types.h', [typesText]);
+    await write('types.h', [typesText, ...this.#structureLines(typesText)]);
     const extension = this.#options.language === 'python-like' ? 'py' : 'c';
     await write('README.txt', [
       `Open Decomp export (${this.#options.language}) of ${escape(basename(this.#input))}: ${summary.functions} functions (${summary.complete} complete, ${summary.partial} partial, ${summary.failed} failed).`,
@@ -606,7 +662,7 @@ class Exporter {
       `Names use the C spelling of the native symbol (Mach-O leading underscore removed); stripped functions are sub_<hex address>. Every name is a symbol fact, never a guess.`,
       `strings.tsv: address, escaped text (cut at 400 chars, marked), referenced_by (functions in this export; at most 24 listed, then +N).`,
       `imports.tsv: imported symbols with library, slot, stub address and called_by. exports.tsv: exported symbols and forwarders. ` +
-        `types.h: C declarations of the image-wide merged structure types; the pseudocode uses the same names (observed members only, sizes unknown)${types.complete ? '' : '; partial: not every function body was analyzed within the budget'}.`,
+        `types.h: C declarations of the image-wide merged structure types (observed members only, sizes unknown)${this.#structures.size === 0 ? '; the pseudocode uses the same names' : ', then the structure declarations the function files refer to by name (the members each function accesses; a structure whose functions access different member sets keeps one definition and lists the others in #if 0 blocks)'}${types.complete ? '' : '; the merged types are partial: not every function body was analyzed within the budget'}.`,
       `Grep examples: grep -rn "sqlite3_free" functions/ ; grep -l "partial" index.tsv ; awk -F'\\t' '$4=="failed"' index.tsv`,
       this.#options.name === undefined
         ? 'Whole binary: referenced_by and called_by cover every function.'
