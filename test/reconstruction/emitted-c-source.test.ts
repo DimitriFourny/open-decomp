@@ -354,3 +354,40 @@ __attribute__((noinline, used)) int64_t walk(const int64_t *p, const int64_t *en
     );
   },
 );
+
+test(
+  'a pointer-chasing loop whose body ends with its step prints as a for loop and runs like its source',
+  { skip: nativeOracleSkip(), timeout: 120_000 },
+  async (t) => {
+    // The step `p = p->next` is the body's last statement and the only write of
+    // the tested variable, so it moves into the `for` header (Python-like keeps
+    // `while`); the loop must still run like its source, also for an empty list.
+    const source = `#include <stdint.h>
+struct node { struct node *next; uint32_t value; };
+__attribute__((noinline, used)) void bump(struct node *p, uint32_t k) {
+  for (; p; p = p->next) p->value = p->value * 3 + k;
+}
+`;
+    await checkEmittedC(
+      'open-decomp-for-step-',
+      source,
+      [
+        {
+          name: 'bump',
+          formals: 2,
+          text: [/^\s*for \(\w+ = [^;]+; \w+ != 0; \w+ = [^;]+\) \{$/m],
+          python: [/^\s*while \w+ != 0:$/m],
+          driver: `  for (unsigned start = 0; start <= 4; start++) {
+    struct node a[4] = {{&a[1], 5}, {&a[2], 0}, {&a[3], 0xffffffffu}, {0, 9}};
+    struct node b[4] = {{&b[1], 5}, {&b[2], 0}, {&b[3], 0xffffffffu}, {0, 9}};
+    source_bump(start < 4 ? &a[start] : 0, 7);
+    bump((uint64_t)(uintptr_t)(start < 4 ? &b[start] : 0), 7);
+    for (unsigned i = 0; i < 4; i++)
+      if (a[i].value != b[i].value) fail("bump start %u node %u: %u vs %u", start, i, a[i].value, b[i].value);
+  }`,
+        },
+      ],
+      t,
+    );
+  },
+);
