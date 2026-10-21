@@ -850,6 +850,24 @@ The four functions whose preamble grows had no declaration for their open callee
 - **Struct bodies.** The merged `types` pass is not a superset of what functions name: the SQLite `btree` export's `types.h` is 442 bytes and declares one structure while its 78 functions print 230 distinct ones (brotli's agrees with its functions). So `export` is the only surface that elides bodies: it asks for `options.structures: "external"`, the emission returns the `typedef`s and bodies in `emission.structures`, and `types.h` gets them after the merged types (one definition per name, other member sets in `#if 0` blocks with their functions, so the header stays valid C). `decompile` and MCP `function_decompile` keep them inline, since no complete image artifact accompanies a single function. Most names occur in one function (230 names, 259 bodies in the `btree` sample), so the bodies move to `types.h` rather than disappear.
 - **Not measured here:** the LLM task benchmark (`scripts/bench/llm-tasks/`): `export-file` answers about member layout now need `types.h`, MCP and CLI text differs only in the open-arity spelling. The coordinator must check for new wrong/unknown answers.
 
+## Readability roadmap 2, G2: structure with block contents, comma conditions (2026-10-21, not held out)
+
+`structure/8`, emitters 76, against main `cd7be17` (`structure/7`, emitters 75). Subset: the 26 functions holding the 26 classified comma-condition constructs (`.local/ghidra-gap-2026-10-20/goto-classify-*.md`), fresh `decompile` per function (default budget), metrics by `structure-gotos.py metrics` paired with the Ghidra lane.
+
+| 26 functions, C-like source view |   main |     G2 | Ghidra |
+| -------------------------------- | -----: | -----: | -----: |
+| `goto`                           |    209 |    182 |    175 |
+| `break` / `continue`             | 25 / 3 | 26 / 3 |  9 / 0 |
+| jump statements                  |    237 |    211 |    184 |
+| comma conditions (regex)         |      0 |      4 |     56 |
+| `else if`                        |      3 |      5 |      7 |
+
+- Python-like: jump statements 254 → 232; 25 lines with a walrus condition (`(x := f()) != 0`), none before.
+- No function prints more jump statements. Largest drops: `whereLoopAddBtree` 42 → 32 (joined exits: chains of `if (…) goto L;` print as one `||` test), `btreeBeginTrans` 52 → 49, `sqlite3BtreeTripAllCursors` 3 → 1 goto (acceptance: at most one), `sqlite3BtreeSetPageSize`, `sqlite3ExprCodeGeneratedColumn`, `sqlite3VdbeMemGrow` 2 fewer each, `sqlite3BtreeRollback` 3 → 2 (`if (value0 == 0 || (uint32_t)(arg1 = saveCursorsOnList(value0, 0, 0)) == 0) goto L;`, Ghidra's form).
+- Share: the drop (26 jumps, 11 %) is about the comma-condition share of the classified constructs (26 of 180, 14 %). Not reached: void-call operands `(f(x), test)` (`sqlite3BtreeClose` #39, `sqlite3ExprCodeExprList` #83; C-only, Python-like cannot print them), operands whose call is inlined into the test, loop-condition comma tests (`sqlite3BtreeTableMoveto` #3), `sqlite3BtreeSavepoint` #19.
+- Work (counted, `measure-main-work.sh` copy with the binary as argument): brotli `main` 8.90M → 9.20M, SQLite `whereLoopAddBtreeIndex` 9.00M → 9.40M (limit 10M, margins 0.80M / 0.60M). The second structuring costs 1.04M / 0.38M; the provisional first structuring (no goto search) saves 0.75M / 0.35M, but `recoverSourceEvidence` gives optional callee summaries half of the work remaining at that point (`source-facts.ts`), which takes back about 0.3M of the saving on `whereLoopAddBtreeIndex`. Both functions complete with the same diagnostics as main.
+- Not measured here: the whole structure sample and the dev loop (coordinator).
+
 ## Normalized four-lane performance (2026-10-17, commit `901602b`)
 
 Exclusive serialized slot (`.local/performance/quality.measurement.lock`), `dist/` aggregate `dd0ea263…` unchanged before/after, Node **v26.11.1** (not the historical 24.22.0 host), Ghidra 12.1.4, bridge `73ea1c8e…`. Protocol `scripts/bench/quality-persistent.py` unchanged: same MCP client for all four lanes (Open Decomp unobserved/observed, pinned Ghidra MCP bridge, persistent Ghidra `DecompInterface`), 11 equal requests in 156/156 matched cells, 3 fresh runs, 10 warm, 30 pings, balanced order. 1,716/1,716 observer/control pairs and 6/6 import controls equivalent. Raw evidence: `~/Documents/open-decomp-perf-2026-10-17-final/p25-normalized/comparison.json`.
