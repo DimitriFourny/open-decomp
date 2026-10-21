@@ -77,7 +77,7 @@ Source-view planning starts after [variable recovery](reconstruction.md#variable
 | `planFlagTests`    | an O0 flag-local chain prints as `&&`/`\|\|`                                                                                                                 |
 | `planLoopForms`    | `while (c)` when the header prints only its test; C only: `do-while` with one repeat edge and a re-proved test; `for` with induction init/step copies        |
 | `planSharedArms`   | `if (a && b) {F} else {X}`                                                                                                                                   |
-| `planLoopExits`    | a multi-level exit sets a flag that is re-tested after each scope                                                                                            |
+| `planLoopExits`    | a multi-level exit sets a flag that is re-tested after each scope; no flag when a guard cannot be reached with it clear or is followed by the same `break`   |
 
 Printing:
 
