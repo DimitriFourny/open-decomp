@@ -325,6 +325,8 @@ export class Renderer {
         readonly direct: boolean;
       }
     | undefined;
+  /** Jump blocks holding the statement of the operand test they enter, by block id. */
+  private readonly commaCarriers = new Map<string, string>();
   /** The statement of the operand block being printed, until its test takes it. */
   private commaHeld: { readonly control: string; readonly node: Instruction } | undefined;
   /** Statements and operand controls printed inside the next `if` head line. */
@@ -5850,13 +5852,22 @@ export class Renderer {
                 terms[0]!.printed,
               ).text
           : this.conjunction(terms);
-      this.ifHead(depth, text);
-      if (!own) this.transfer(exit.transfer, depth + 1, control);
       const branches: [ControlArm, Control][] = [
         [stay, control],
         [plan.arm, plan.origin],
       ];
       if (plan.form === 'any') branches.reverse();
+      // An empty first branch: the complement opens the if, the other branch
+      // is its only arm, and the empty one falls through after it.
+      const empty = this.emptyArm(branches[0]![0]) && !this.emptyArm(branches[1]![0]);
+      this.ifHead(depth, empty ? (c ? `!(${text})` : `not (${text})`) : text);
+      if (!own) this.transfer(exit.transfer, depth + 1, control);
+      if (empty) {
+        this.arm(branches[1]![0], depth + 1, branches[1]![1]);
+        close();
+        this.silentArm(branches[0]![0], depth, branches[0]![1]);
+        return;
+      }
       this.arm(branches[0]![0], depth + 1, branches[0]![1]);
       this.elseArm(branches[1]![0], depth, branches[1]![1]);
       return;
@@ -6181,16 +6192,31 @@ export class Renderer {
    * test must read the value once, unconditionally and before any other
    * memory read or call, so `(x := f()) != 0` keeps the order. Undefined:
    * anything else prints (a label is checked where the test prints). */
-  private commaOperand(block: BlockRegion): Instruction | null | undefined {
+  private commaOperand(block: BlockRegion, carrier?: BlockRegion): Instruction | null | undefined {
     const control = block.control;
     if (control.kind !== 'if' || this.requirementPredicates.has(control.id)) return undefined;
+    const own = this.printedStatement(block);
+    if (own === undefined || (carrier && own)) return undefined;
+    const found = carrier ? this.printedStatement(carrier) : own;
+    if (found === undefined || (carrier && !found)) return undefined;
+    if (!found) return null;
+    const value = this.commaValue(found);
+    if (!value) return undefined;
+    const reads = this.commaReads(control.condition, value);
+    return reads.count > 0 && (this.language === 'c-like' || reads.direct) ? found : undefined;
+  }
+
+  /** The one statement a block prints before its control, null for none;
+   * undefined when it prints more (a note, definition, deferred store or a
+   * second statement). */
+  private printedStatement(block: BlockRegion): Instruction | null | undefined {
     const definitions = this.program.source?.definitions;
     const anchored = (anchor: string): boolean =>
       this.notes.has(anchor) ||
       !!this.deferred.get(anchor)?.length ||
       (definitions?.get(anchor)?.some((definition) => !this.inlined.has(definition.result.id)) ??
         false);
-    if (anchored(block.id) || anchored(control.id)) return undefined;
+    if (anchored(block.id) || anchored(block.control.id)) return undefined;
     let found: Instruction | null = null;
     for (const node of block.statements) {
       this.context.checkpoint(1);
@@ -6205,11 +6231,7 @@ export class Renderer {
       if (found) return undefined;
       found = node;
     }
-    if (!found) return null;
-    const value = this.commaValue(found);
-    if (!value) return undefined;
-    const reads = this.commaReads(control.condition, value);
-    return reads.count > 0 && (this.language === 'c-like' || reads.direct) ? found : undefined;
+    return found;
   }
 
   /** The value a comma statement defines, when it prints `name = expression`. */
@@ -6338,8 +6360,10 @@ export class Renderer {
   }
 
   /** The control an arm consists of when nothing of the arm prints before it
-   * (silent jump blocks and a flag short-circuit's silent heads aside). */
-  private soleControl(arm: ControlArm): Control | null {
+   * (silent jump blocks and a flag short-circuit's silent heads aside);
+   * `comma`: the control's block may print the one statement its test holds
+   * (see commaOperand), which then prints inside the merged test. */
+  private soleControl(arm: ControlArm, comma = false): Control | null {
     if (!arm.body || !this.silentTransfer(arm.transfer)) return null;
     const blocks: BlockRegion[] = [];
     const flatten = (region: Region): boolean => {
@@ -6354,8 +6378,17 @@ export class Renderer {
       // A flag short-circuit head prints nothing; its merge test follows.
       const flag = this.flagHeads.get(block.id),
         head = flag !== undefined && flag.merge === blocks[index + 1]?.id;
+      const last = index === blocks.length - 1;
       if (
-        !this.quietBlock(block) ||
+        (!this.quietBlock(block) &&
+          !(
+            comma &&
+            !(this.labels.has(block.id) && !this.clones.has(block)) &&
+            ((last && this.commaOperands.get(block.id)) ||
+              (index === blocks.length - 2 &&
+                this.commaCarriers.get(block.id) === blocks.at(-1)!.id &&
+                !this.labels.has(blocks.at(-1)!.id)))
+          )) ||
         (index < blocks.length - 1 &&
           !head &&
           (control.kind !== 'jump' || !this.silentTransfer(control.transfer)))
@@ -6369,7 +6402,7 @@ export class Renderer {
    * it (silent jump blocks aside) and it prints with exactly one non-empty arm
    * and no `else`. */
   private nestedIf(arm: ControlArm): string | null {
-    const control = this.soleControl(arm);
+    const control = this.soleControl(arm, true);
     return control?.kind === 'if' &&
       !this.loopTests.has(control.id) &&
       !this.requirementPredicates.has(control.id) &&
@@ -6451,12 +6484,29 @@ export class Renderer {
   private ifHead(depth: number, text: string): void {
     const chained = this.elseIf;
     this.elseIf = false;
+    const start = this.writer.offset;
     this.writer.line(
       depth,
       this.language === 'c-like'
         ? `${chained ? '} else ' : ''}if (${text}) {`
         : `${chained ? 'el' : ''}if ${text}:`,
     );
+    // Operand statements printed inside this test map to its line.
+    for (const origin of this.headed.splice(0)) {
+      const node = this.statements.get(origin.id);
+      this.inferenceSites.set(origin.id, { start, end: this.writer.offset });
+      this.map(origin, start);
+      if (node?.kind === 'call') {
+        const proof = this.sourceEvidence.get(node.id);
+        this.mapped(
+          node,
+          start,
+          proof ? [...proof.ids] : [],
+          proof ? [node.contract_evidence, proof.evidence] : [node.contract_evidence],
+        );
+      }
+      if (node) this.mapMemory(node, start);
+    }
   }
 
   /** The conjunction of merged `if` tests. When every test is an inline
@@ -6762,7 +6812,8 @@ export class Renderer {
       operand: (id: string): boolean => {
         const block = program.blocks.get(id)!;
         return block.control.kind === 'jump'
-          ? silent(block) && !this.notes.has(block.id) && !this.notes.has(block.control.id)
+          ? (silent(block) && !this.notes.has(block.id) && !this.notes.has(block.control.id)) ||
+              this.commaCarriers.has(id)
           : this.commaOperands.has(id);
       },
       copies: (block: string, slot: number): number =>
@@ -7165,9 +7216,27 @@ export class Renderer {
       );
     // Block contents are known now: structure again with them (Ghidra's
     // post-merge pass), so short-circuit conditions collapse first.
+    const entries = new Map<string, number>();
     for (const block of program.blocks.values()) {
       const node = this.commaOperand(block);
       if (node !== undefined) this.commaOperands.set(block.id, node);
+      const control = block.control;
+      for (const transfer of control.kind === 'jump'
+        ? [control.transfer]
+        : controlArms(control).map((arm) => arm.transfer))
+        entries.set(transfer.target, (entries.get(transfer.target) ?? 0) + 1);
+    }
+    // A block ending in a jump (often a call's block) may hold the statement
+    // of the test it alone enters.
+    for (const block of program.blocks.values()) {
+      const control = block.control;
+      if (control.kind !== 'jump' || this.printedCopies(control.transfer).length) continue;
+      const next = program.blocks.get(control.transfer.target)!;
+      if (entries.get(next.id) !== 1 || this.commaOperands.get(next.id) !== null) continue;
+      const node = this.commaOperand(next, block);
+      if (!node) continue;
+      this.commaOperands.set(next.id, node);
+      this.commaCarriers.set(block.id, next.id);
     }
     this.restructure(silent);
     program = this.program;
@@ -7389,6 +7458,9 @@ export class Renderer {
           return false;
         return (
           head ||
+          // A later operand may print one statement its test holds.
+          !!this.commaOperands.get(block.id) ||
+          this.commaCarriers.has(block.id) ||
           (silent(block) &&
             !this.notes.has(block.id) &&
             !anchored(control.id) &&
@@ -7403,7 +7475,7 @@ export class Renderer {
       this.localValidation.presentation(
         'shared_condition_arm',
         subject,
-        'a short-circuit test whose operands are copy-free tests printing nothing but their condition (with only silent copy-free jumps between them) and all leave for one statement, entered by those edges only, prints as if/else: that statement becomes the arm body every leaving operand enters (else of the && of staying tests, or then of the || of leaving tests), and the remaining branch falls into the statement after it; operands are still evaluated left to right only while the condition is undecided, and no statement, edge copy or effect moves',
+        'a short-circuit test whose operands are copy-free tests printing nothing but their condition, or later operands printing one statement their test holds inside it, as (x = f(), test) or (x = f()) op k (with only silent copy-free jumps between them) and all leave for one statement, entered by those edges only, prints as if/else: that statement becomes the arm body every leaving operand enters (else of the && of staying tests, or then of the || of leaving tests), and the remaining branch falls into the statement after it; operands, with their statement, are still evaluated left to right only while the condition is undecided, and no other statement, edge copy or effect moves',
         sharedArms.heads,
       )
     )
@@ -8079,16 +8151,19 @@ export class Renderer {
       this.sourceDefinitions(region.id, depth);
       // A later short-circuit operand printed inside a merged test: its one
       // statement prints in that test (see operandTerm), not here.
-      const comma = this.sourceView ? this.commaOperands.get(region.id) : undefined;
+      // A carrier jump block holds the statement of the test it enters.
+      const carried = this.sourceView ? this.commaCarriers.get(region.id) : undefined;
+      const test = carried ? this.program.blocks.get(carried)!.control : region.control;
+      const comma = this.sourceView ? this.commaOperands.get(carried ?? region.id) : undefined;
       const merged =
         comma &&
-        (this.joinedControls.has(region.control.id) ||
+        (this.joinedControls.has(test.id) ||
           this.conjunct !== undefined ||
-          (this.sharedPlan !== undefined && controlArms(region.control).some((arm) => arm.joins)))
+          (this.sharedPlan !== undefined && controlArms(test).some((arm) => arm.joins)))
           ? comma
           : undefined;
-      if (merged && !this.joinedControls.has(region.control.id))
-        this.commaHeld = { control: region.control.id, node: merged };
+      if (merged && !this.joinedControls.has(test.id))
+        this.commaHeld = { control: test.id, node: merged };
       for (const node of region.statements) {
         if (node === merged) continue;
         this.context.checkpoint(1);

@@ -107,7 +107,11 @@ type Expr =
   | { kind: 'list'; values: Expr[] }
   | { kind: 'binary'; op: string; left: Expr; right: Expr }
   | { kind: 'unary'; op: string; value: Expr }
-  | { kind: 'select'; condition: Expr; yes: Expr; no: Expr };
+  | { kind: 'select'; condition: Expr; yes: Expr; no: Expr }
+  /** C `(x = e)` / Python `(x := e)`: assigns the declared variable, yields its value. */
+  | { kind: 'assign'; name: string; value: Expr }
+  /** C comma operator: evaluated left to right, yields the last value. */
+  | { kind: 'comma'; values: Expr[] };
 type Op =
   | { kind: 'assign'; names: string[]; expression: Expr | null; tuple: boolean }
   | { kind: 'jump'; target: string | number }
@@ -1422,6 +1426,12 @@ class Parser {
         else type = usualArithmetic(left, right);
         break;
       }
+      case 'assign':
+        type = this.symbols.get(expression.name) ?? MATH;
+        break;
+      case 'comma':
+        type = this.typeOf(expression.values.at(-1)!);
+        break;
       case 'select': {
         const yes = this.typeOf(expression.yes),
           no = this.typeOf(expression.no);
@@ -1575,7 +1585,18 @@ class Parser {
         return { kind: 'cast', type: this.cType(type), value: this.atom() };
       }
       this.position = castStart;
-      const expression = this.expression();
+      let expression = this.expression();
+      // An assignment expression `(x = e)` (C) or `(x := e)` (Python).
+      if (
+        expression.kind === 'ref' &&
+        (this.python
+          ? this.peek() === ':' && this.tokens[this.position + 1] === '='
+          : this.peek() === '=')
+      ) {
+        if (this.python) this.take(':');
+        this.take('=');
+        expression = { kind: 'assign', name: expression.name, value: this.expression() };
+      }
       if (this.peek() !== ',') {
         this.take(')');
         return expression;
@@ -1586,7 +1607,8 @@ class Parser {
         if (this.peek() !== ')') values.push(this.expression());
       }
       this.take(')');
-      return { kind: 'list', values };
+      // In a C expression a parenthesized comma list is the comma operator.
+      return this.python ? { kind: 'list', values } : { kind: 'comma', values };
     }
     if (token === '{' || token === '[') {
       const close = token === '{' ? '}' : ']',
@@ -2426,6 +2448,16 @@ export function execute(
         return environment.get(expression.name)!;
       case 'list':
         return expression.values.map((value) => evaluate(value, math));
+      case 'assign': {
+        const value = evaluate(expression.value, math);
+        assign(expression.name, value, parser.typeOf(expression.value));
+        return environment.get(expression.name)!;
+      }
+      case 'comma': {
+        let value: Data = null;
+        for (const item of expression.values) value = evaluate(item, math);
+        return value;
+      }
       case 'cast': {
         const value = evaluate(expression.value, math);
         return typeof value === 'bigint'

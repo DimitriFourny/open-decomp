@@ -354,7 +354,13 @@ export async function executeDecompilation(
       );
       if (typeFailure) throw new OperationError(typeFailure);
       context.progress('structure', 5, 7);
-      const structured = structureControlFlow(ir, context, { max_work: context.budget.work });
+      // The source view structures again once block contents are known (the
+      // renderer's restructure); this first layout then only feeds
+      // reconstruction (blocks, edges, loops), so it skips the goto search.
+      const structured = structureControlFlow(ir, context, {
+        max_work: context.budget.work,
+        ...(args.options.view === 'checked' ? {} : { search: false }),
+      });
       requirePass(structured.state, structured.diagnostics, context);
       if (!structured.value)
         throw new OperationError({
