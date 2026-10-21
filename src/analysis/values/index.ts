@@ -27,6 +27,7 @@ import {
   terminatorOperands,
 } from '../effects/index.js';
 import { AnalysisBudget } from '../ssa/budget.js';
+import { complements, joinDuplicateTests } from './join.js';
 import { foldValueRule, type ValueRuleScope } from './rules.js';
 import type { AnalysisOptions, AnalysisResult } from '../ssa/budget.js';
 
@@ -231,18 +232,6 @@ function propagate(
 
 type Assignment = Extract<Instruction, { kind: 'assign' }>;
 
-const complements: Record<IntegerPredicate, IntegerPredicate> = {
-  eq: 'ne',
-  ne: 'eq',
-  ult: 'uge',
-  ule: 'ugt',
-  ugt: 'ule',
-  uge: 'ult',
-  slt: 'sge',
-  sle: 'sgt',
-  sgt: 'sle',
-  sge: 'slt',
-};
 const relations: Record<IntegerPredicate, { mask: number; signed: boolean | null }> = {
   eq: { mask: 2, signed: null },
   ne: { mask: 5, signed: null },
@@ -378,8 +367,9 @@ export function recoverComparison(
  * calls and unknown effects are retained even with dead results. No alias guess
  * or signature inference occurs. Block parameters whose incoming values are all
  * one dominating value (or the parameter itself) are replaced by that value;
- * their architectural entry bindings remain. On interruption the last complete
- * graph is returned.
+ * their architectural entry bindings remain. At each fixpoint, duplicated tests
+ * are joined (joinDuplicateTests) and the loop runs again. On interruption the
+ * last complete graph is returned.
  */
 export function simplifySSA(
   input: SSAForm,
@@ -408,6 +398,12 @@ export function simplifySSA(
       first = false;
       changed = rewritten.changed || copies.changed || trivial.changed;
       current = trivial.value;
+      if (!changed) {
+        // Joining at the fixpoint leaves dead cones and trivial parameters to the next round.
+        const joined = joinDuplicateTests(current, budget);
+        changed = joined.changed;
+        current = joined.value;
+      }
     }
     return budget.result(current);
   } catch (error) {

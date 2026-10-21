@@ -169,6 +169,8 @@ type Nest =
       readonly follow: string | null;
     }
   | { readonly kind: 'switch'; readonly id: string };
+/** A statement a `for` header prints as its init or step. */
+type HeaderStatement = Extract<Instruction, { kind: 'assign' | 'load' }>;
 /** One test of a merged `if` chain: its printed form and the value it tests. */
 interface ConditionTerm {
   readonly printed: Printed;
@@ -322,6 +324,18 @@ export class Renderer {
     string,
     { readonly init: ParallelTransfer; readonly step: ParallelTransfer }
   >();
+  /** `for` headers whose step (and init) are statements (Ghidra's
+   * BlockWhileDo::finalTransform), by loop test control; the init may instead
+   * be the entry edge's hoisted copy. Those statements are not printed in their blocks. */
+  private readonly forStatements = new Map<
+    string,
+    {
+      readonly init?: HeaderStatement;
+      readonly copies?: ParallelTransfer;
+      readonly step: HeaderStatement;
+    }
+  >();
+  private readonly headerStatements = new Set<string>();
   private readonly typeRecords = new Map<string, SuppliedTypeRecord | null>();
   private readonly libraryDeclarations = new Map<string, readonly CatalogEntry[]>();
   private readonly callParameterSpellings = new Map<string, string | null>();
@@ -5209,7 +5223,8 @@ export class Renderer {
           .leaves(copy.source)
           .every((index) => !others.has(key(liveness.values[index]!)));
       });
-    if (!steps.length || !independent(steps) || !independent(inits)) return false;
+    if (!steps.length) return this.acceptStatementFor(loop);
+    if (!independent(steps) || !independent(inits)) return false;
     const induction = new Set<string>();
     for (const copy of steps) {
       const variable = key(copy.destination);
@@ -5253,6 +5268,107 @@ export class Renderer {
     this.hoisted.set(loop.step, induction);
     this.forLoops.set(loop.test.id, { init: loop.init, step: loop.step });
     return true;
+  }
+
+  /** A top-tested `for` whose step is the loop body's last statement and assigns
+   * a variable the test reads; its init, when the loop's entry block ends with
+   * one, is the statement assigning that variable just before the loop. The
+   * step still runs last in every iteration: the sole repeat edge prints
+   * nothing and follows it, and nothing else in the loop writes the variable. */
+  private acceptStatementFor(loop: Parameters<LoopFacts['induction']>[0]): boolean {
+    const liveness = this.liveness;
+    if (!liveness || loop.bottom) return false;
+    const step = this.trailingStatement(loop.step);
+    if (!step) return false;
+    const variable = this.variableKey(step.result);
+    const writes = (ids: readonly number[]): boolean =>
+      ids.some((index) => this.variableKey(liveness.values[index]!) === variable);
+    if (!writes(liveness.leaves(loop.test.condition))) return false;
+    let definitions = 0;
+    for (const id of loop.inside) {
+      const block = this.program.blocks.get(id);
+      if (!block) return false;
+      for (const event of liveness.events(block)) if (event.def && writes(event.ids)) definitions++;
+      for (const arm of [
+        ...(block.control.kind === 'jump' ? [{ transfer: block.control.transfer }] : []),
+        ...controlArms(block.control),
+      ])
+        if (
+          this.printedCopies(arm.transfer).some(
+            (copy) => this.variableKey(copy.destination) === variable,
+          )
+        )
+          return false;
+    }
+    if (definitions !== 1) return false;
+    const entry = this.trailingStatement(loop.init);
+    const init = entry && this.variableKey(entry.result) === variable ? entry : undefined;
+    // Otherwise the entry edge's copy into the variable, when it reads no other
+    // destination of that edge (it then runs after them, in the header).
+    const copies = this.printedCopies(loop.init);
+    const initial = copies.filter((copy) => this.variableKey(copy.destination) === variable);
+    const others = new Set(
+      copies
+        .filter((copy) => !initial.includes(copy))
+        .map((copy) => this.variableKey(copy.destination)),
+    );
+    const hoist =
+      !init &&
+      initial.length === 1 &&
+      liveness
+        .leaves(initial[0]!.source)
+        .every((index) => !others.has(this.variableKey(liveness.values[index]!)));
+    if (hoist) this.hoisted.set(loop.init, new Set([variable]));
+    this.forStatements.set(loop.test.id, {
+      ...(init ? { init } : hoist ? { copies: loop.init } : {}),
+      step,
+    });
+    this.headerStatements.add(step.id);
+    if (init) this.headerStatements.add(init.id);
+    return true;
+  }
+
+  /** The last statement of the block that ends by taking `transfer`, when that
+   * edge prints nothing and the statement prints exactly one plain assignment. */
+  private trailingStatement(transfer: ParallelTransfer): HeaderStatement | undefined {
+    if (this.printedCopies(transfer).length) return undefined;
+    for (const block of this.program.blocks.values()) {
+      if (block.control.kind !== 'jump' || block.control.transfer !== transfer) continue;
+      const node = block.statements.at(-1);
+      if (
+        !node ||
+        (node.kind !== 'assign' && node.kind !== 'load') ||
+        !this.program.retained.has(node.id) ||
+        !this.program.live.has(node.result.id) ||
+        this.inlined.has(node.result.id) ||
+        this.deferredStores.has(node.id) ||
+        this.flagAccesses.has(node.id) ||
+        this.deferred.get(node.id)?.length ||
+        this.notes.get(node.id)?.length ||
+        (node.kind === 'load' &&
+          (!this.program.source ||
+            this.globals.import_loads.has(node.id) ||
+            this.punnedLocal(node))) ||
+        (node.kind === 'assign' ? expressionOperands(node.expression) : [node.address]).some(
+          (value) => this.inlinedCalls.has(value.id),
+        ) ||
+        [node.id, block.control.id].some((anchor) =>
+          (this.program.source?.definitions?.get(anchor) ?? []).some(
+            (definition) => !this.inlined.has(definition.result.id),
+          ),
+        )
+      )
+        return undefined;
+      return node;
+    }
+    return undefined;
+  }
+
+  /** A header statement's text and mappings at `start` (the header line). */
+  private headerStatement(node: HeaderStatement): string {
+    return node.kind === 'assign'
+      ? this.assignmentText(node)
+      : this.assignmentText(node, this.storage(node));
   }
 
   /** A bottom test also runs before the first iteration of a `for`: an
@@ -5589,17 +5705,28 @@ export class Renderer {
     if (form?.kind === 'while' || (form?.kind === 'for' && !form.bottom)) {
       const enter = form.enter ? control.when_true : control.when_false,
         exit = form.enter ? control.when_false : control.when_true,
-        header = this.forLoops.get(control.id);
+        header = this.forLoops.get(control.id),
+        statements = form.kind === 'for' ? this.forStatements.get(control.id) : undefined;
+      const start = this.writer.offset;
       this.writer.line(
         depth - 1,
-        form.kind === 'for' && header
-          ? `for (${this.hoistedText(header.init)}; ${test(form.enter)}; ${this.hoistedText(header.step)}) {`
-          : c
-            ? `while (${test(form.enter)}) {`
-            : `while ${test(form.enter)}:`,
+        statements
+          ? `for (${statements.init ? this.headerStatement(statements.init) : statements.copies ? this.hoistedText(statements.copies) : ''}; ${test(form.enter)}; ${this.headerStatement(statements.step)}) {`
+          : form.kind === 'for' && header
+            ? `for (${this.hoistedText(header.init)}; ${test(form.enter)}; ${this.hoistedText(header.step)}) {`
+            : c
+              ? `while (${test(form.enter)}) {`
+              : `while ${test(form.enter)}:`,
       );
+      for (const node of statements ? [statements.init, statements.step] : [])
+        if (node) {
+          this.map(node, start);
+          this.mapMemory(node, start);
+        }
       this.loopExit(exit.transfer, depth, control);
-      this.arm(enter, depth, control);
+      // The loop prints `pass` itself when its whole body prints nothing.
+      this.transfer(enter.transfer, depth, control);
+      if (enter.body) this.region(enter.body, depth);
       return;
     }
     if (form?.kind === 'for') {
@@ -6953,7 +7080,7 @@ export class Renderer {
         this.localValidation.presentation(
           'for_loop',
           subject,
-          'a while/do-while prints as for (init; test; step) when its single entry and single repeat edges only initialize and step (x = x ± c) induction variables nothing else in the loop writes, and its test reads one; a bottom test must hold on entry',
+          'a while/do-while prints as for (init; test; step) when its single entry and single repeat edges only initialize and step (x = x ± c) induction variables nothing else in the loop writes, and its test reads one; a bottom test must hold on entry; a while whose sole repeat edge prints nothing may take as step the body’s last statement assigning a variable its test reads and nothing else in the loop writes, and as init the statement assigning it that ends the entry block',
           fors,
         )) &&
       (!exits.length ||
@@ -6969,6 +7096,8 @@ export class Renderer {
       this.rebased.clear();
       this.hoisted.clear();
       this.forLoops.clear();
+      this.forStatements.clear();
+      this.headerStatements.clear();
     }
     // Short-circuit tests sharing one arm print as if/else.
     const loopTests = new Set(this.body === body ? [] : tests);
@@ -7678,6 +7807,10 @@ export class Renderer {
       this.sourceDefinitions(region.id, depth);
       for (const node of region.statements) {
         this.context.checkpoint(1);
+        if (this.headerStatements.has(node.id)) {
+          this.sourceDefinitions(node.id, depth);
+          continue;
+        }
         const held =
           node.kind === 'call' && this.program.retained.has(node.id)
             ? this.program.calls

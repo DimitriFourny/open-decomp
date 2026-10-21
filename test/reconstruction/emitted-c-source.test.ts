@@ -21,6 +21,8 @@ interface Case {
   readonly driver: string;
   /** Patterns the emitted C text must contain. */
   readonly text?: readonly RegExp[];
+  /** Patterns the python-like text must contain. */
+  readonly python?: readonly RegExp[];
 }
 
 function compile(args: readonly string[]): void {
@@ -62,7 +64,11 @@ async function checkEmittedC(
         { emitter },
       );
       assert.ok('data' in result && result.data.delivery === 'inline', JSON.stringify(result));
-      if (emitter === 'python-like') continue;
+      if (emitter === 'python-like') {
+        for (const pattern of item.python ?? [])
+          assert.match(result.data.emission.text, pattern, result.data.emission.text);
+        continue;
+      }
       const emission: WireEmission = result.data.emission;
       assert.equal(emittedFormals(emission).length, item.formals, emission.text);
       for (const pattern of item.text ?? []) assert.match(emission.text, pattern);
@@ -479,6 +485,94 @@ __attribute__((noinline, used)) int choose(const uint8_t *key, uint32_t n, uint3
             for (unsigned i = 0; i < 7; i++)
               if (expected[i] != observed[i]) fail("choose(%u, %u%u%u%u): out[%u]", n, k0, k1, k2, k3, i);
           }`,
+        },
+      ],
+      t,
+    );
+  },
+);
+
+test(
+  'rotated loops print one header test and run like their source, also for zero iterations',
+  { skip: nativeOracleSkip(), timeout: 120_000 },
+  async (t) => {
+    // Clang rotates both loops into a guard plus a bottom test of the same value.
+    // `list_sum`'s joined test prints once as the `while` header in both dialects;
+    // `walk`'s preheader computes `orr x8, xzr, x2`, which keeps it rotated, and
+    // both must still run like their source, including for zero iterations.
+    const source = `#include <stdint.h>
+struct node { struct node *next; uint32_t value; };
+__attribute__((noinline, used)) uint32_t list_sum(const struct node *p) {
+  uint32_t s = 0;
+  for (; p; p = p->next) s += p->value * 3 + 1;
+  return s;
+}
+__attribute__((noinline, used)) int64_t walk(const int64_t *p, const int64_t *end, int64_t k) {
+  int64_t s = k;
+  while (p != end) { s = s * 3 + *p; p++; }
+  return s - k;
+}
+`;
+    await checkEmittedC(
+      'open-decomp-rotated-loop-',
+      source,
+      [
+        {
+          name: 'list_sum',
+          formals: 1,
+          text: [/^\s*while \(\w+ != 0\) \{$/m],
+          python: [/^\s*while \w+ != 0:\n(?!\s*pass\n)/m],
+          driver: `  struct node n[4] = {{&n[1], 5}, {&n[2], 0}, {&n[3], 0xffffffffu}, {0, 9}};
+  const struct node *starts[] = {0, &n[3], &n[1], &n[0]};
+  for (unsigned i = 0; i < 4; i++)
+    if (source_list_sum(starts[i]) != list_sum((uint64_t)(uintptr_t)starts[i]))
+      fail("list_sum start %u", i);`,
+        },
+        {
+          name: 'walk',
+          formals: 3,
+          driver: `  const int64_t v[] = {4, -9, 1ll << 40, 0, 7};
+  for (unsigned a = 0; a <= 5; a++)
+    for (unsigned b = a; b <= 5; b++)
+      if (source_walk(v + a, v + b, 11) != (int64_t)walk((void *)(v + a), (void *)(v + b), 11))
+        fail("walk %u..%u", a, b);`,
+        },
+      ],
+      t,
+    );
+  },
+);
+
+test(
+  'a pointer-chasing loop whose body ends with its step prints as a for loop and runs like its source',
+  { skip: nativeOracleSkip(), timeout: 120_000 },
+  async (t) => {
+    // The step `p = p->next` is the body's last statement and the only write of
+    // the tested variable, so it moves into the `for` header (Python-like keeps
+    // `while`); the loop must still run like its source, also for an empty list.
+    const source = `#include <stdint.h>
+struct node { struct node *next; uint32_t value; };
+__attribute__((noinline, used)) void bump(struct node *p, uint32_t k) {
+  for (; p; p = p->next) p->value = p->value * 3 + k;
+}
+`;
+    await checkEmittedC(
+      'open-decomp-for-step-',
+      source,
+      [
+        {
+          name: 'bump',
+          formals: 2,
+          text: [/^\s*for \(\w+ = [^;]+; \w+ != 0; \w+ = [^;]+\) \{$/m],
+          python: [/^\s*while \w+ != 0:$/m],
+          driver: `  for (unsigned start = 0; start <= 4; start++) {
+    struct node a[4] = {{&a[1], 5}, {&a[2], 0}, {&a[3], 0xffffffffu}, {0, 9}};
+    struct node b[4] = {{&b[1], 5}, {&b[2], 0}, {&b[3], 0xffffffffu}, {0, 9}};
+    source_bump(start < 4 ? &a[start] : 0, 7);
+    bump((uint64_t)(uintptr_t)(start < 4 ? &b[start] : 0), 7);
+    for (unsigned i = 0; i < 4; i++)
+      if (a[i].value != b[i].value) fail("bump start %u node %u: %u vs %u", start, i, a[i].value, b[i].value);
+  }`,
         },
       ],
       t,

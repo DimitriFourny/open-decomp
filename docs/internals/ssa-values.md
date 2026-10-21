@@ -19,7 +19,7 @@ flowchart LR
 ## Data model
 
 - **Register cell.** Disjoint bit-slice of one architectural root (`x0[0..32)`, one flag), versioned independently. Wide roots are cut every 2048 bits.
-- **SSAForm.** Same blocks as the input, but: register effects are gone; blocks carry _parameters_ and edges carry _arguments_ (block-argument SSA, no phis); every cell reference is one dominating value. Loads, stores and calls carry a full register snapshot (the architectural state at that point); calls also carry clobber outputs (fresh values per clobbered cell). A sparse per-block row lists only cells bound at entry or rebound in the block; full state is derived along the dominator tree. Exits list every cell.
+- **SSAForm.** Same blocks as the input (simplification drops unreachable ones and adds one block per [joined duplicated test](#3-simplification)), but: register effects are gone; blocks carry _parameters_ and edges carry _arguments_ (block-argument SSA, no phis); every cell reference is one dominating value. Loads, stores and calls carry a full register snapshot (the architectural state at that point); calls also carry clobber outputs (fresh values per clobbered cell). A sparse per-block row lists only cells bound at entry or rebound in the block; full state is derived along the dominator tree. Exits list every cell.
 - **Effect token.** Memory is _not_ SSA. One token threads through loads, stores, calls, fences and unknown effects in original order; edges carry it.
 - **Value fact.** Three-point lattice per value: absent (bottom) / exact bit pattern / varying.
 - **Stack facts.** Entry-SP-relative world: _value_ (constant, absolute address, `SP+k`, a slice of `SP+k`, dynamic-stack, unknown, undefined) × _initialization_ (initialized / uninitialized / maybe / unknown), plus contributing value IDs, evidence and the entry registers it depends on. A snapshot = register facts + byte map + SP fact + `escaped` / `aliased` flags. Also per-access records (offset, size, region), a frame summary (min/max offset, dynamic, escaped, aliased) and a fact per SSA value.
@@ -39,7 +39,7 @@ Probe `classifyCall` on a catalogue of synthetic signatures (pointers, ints, flo
 
 ### 3. Simplification
 
-Loop until no change:
+Loop until no change; at each fixpoint, join duplicated tests and loop again:
 
 ```mermaid
 flowchart TD
@@ -47,12 +47,15 @@ flowchart TD
   B --> C["copy propagation"]
   C --> D["trivial-parameter elimination"]
   D -->|"changed"| A
+  D -->|"fixpoint"| E["join duplicated tests"]
+  E -->|"joined"| A
 ```
 
 - **SCCP.** Block worklist; results evaluated with the trusted bit-vector/FP evaluator. Parameters take facts only from _executable_ incoming edges; a second distinct constant → varying. Branch/switch on a constant selects one edge. Loads, call results, clobbers are varying.
 - **Rewrite**, in this order per assignment: unreachable blocks dropped; [flag → comparison](#4-comparison-recovery); constant fact → constant; `select` on constant condition → arm; identity with constant right operand (`x+0`, `x*1`, `x&~0`, shifts by 0…) → copy; value rules (`zext(trunc v)` → `v` when an upper-bound walk proves `v` fits; `x cmp x` → constant unless an unknown/undefined may reach `x`). Then constant branches/switches → jumps; global liveness DCE; jump threading through empty pass-through blocks. Every changed node merges provenance of the operands' definers.
 - **Copy propagation.** Same-type bitcasts become aliases.
 - **Trivial parameters** (Braun-style): a non-root parameter fed only by one value (or itself) is replaced; worklist over dependents.
+- **Duplicated tests** (`values/join.ts`, Ghidra's `ConditionalJoin`): two branch blocks with the same two destinations, same or swapped (a 1-bit `not` root or a complemented integer predicate), whose conditions match structurally over each block's own pure assignments become one new block: both jump to it, it holds a copy of the condition cone and the branch. A pair of differing leaves, a pair of differing destination arguments and a cell whose state differs between the two block ends each become one parameter (keyed by value; constants by their bits); the new block's entry row binds the differing cells. Loads, calls and unknown effects are leaves and stay in their block. Distinct constants are a different test unless a destination edge or cell already carries that pair (a loop's initial against its next value). A destination one side reaches through an effect-free forwarding block that only it enters (a loop preheader setting constants) is shared: the new block enters it on both sides and it takes a parameter per jump argument or state-row value the other side holds differently; a constant it computes is materialized on its own side for the edge. A rotated loop's guard and bottom test thus become one header test (`while (c)`). Before a join is applied, each incoming edge is checked: the joined condition with the parameters replaced by that edge's arguments expands, through both blocks' pure assignments, to the predecessor's own condition term (its negation for swapped destinations); any mismatch keeps both tests. Cones are bounded (32 copied nodes, 256 checked expansions).
 - Liveness roots: effectful nodes' operands _including their register snapshots_, terminators, edges, register-state rows. So dead loads stay (they may fault) and pin every cell live at them.
 
 ### 4. Comparison recovery
