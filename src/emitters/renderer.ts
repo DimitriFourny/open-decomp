@@ -168,7 +168,7 @@ type Nest =
       readonly header: string;
       readonly follow: string | null;
     }
-  | { readonly kind: 'switch'; readonly id: string };
+  | { readonly kind: 'switch'; readonly id: string; readonly follow: string | null };
 /** A statement a `for` header prints as its init or step. */
 type HeaderStatement = Extract<Instruction, { kind: 'assign' | 'load' }>;
 /** One test of a merged `if` chain: its printed form and the value it tests. */
@@ -4922,7 +4922,9 @@ export class Renderer {
     }
     if (control.kind === 'switch') {
       const nested: readonly Nest[] =
-        this.language === 'c-like' ? [...nesting, { kind: 'switch', id: control.id }] : nesting;
+        this.language === 'c-like'
+          ? [...nesting, { kind: 'switch', id: control.id, follow }]
+          : nesting;
       const landing = (item: ControlArm): string | null =>
         item.body ? this.firstBlock(item.body) : follow;
       if (this.sourceView) {
@@ -7046,7 +7048,8 @@ export class Renderer {
     );
     const tests: string[] = [],
       fors: string[] = [],
-      exits: string[] = [];
+      exits: string[] = [],
+      exitCopyLoops = new Set<string>();
     const forms = (region: Region): void => {
       if (region.kind === 'sequence') region.regions.forEach(forms);
       else if (region.kind === 'loop') {
@@ -7062,8 +7065,10 @@ export class Renderer {
           region.form &&
           control &&
           formArm(region.form, control).find((item) => item.action === 'break');
-        if (region.form && leave && this.printedCopies(leave.arm.transfer).length)
+        if (region.form && leave && this.printedCopies(leave.arm.transfer).length) {
           exits.push(region.form.test);
+          exitCopyLoops.add(region.header);
+        }
         forms(region.body);
       } else for (const arm of controlArms(region.control)) if (arm.body) forms(arm.body);
     };
@@ -7161,7 +7166,16 @@ export class Renderer {
         'break and continue select the nearest enclosing loop by exact lexical successor/header identity, not the structurer annotation; a C switch never captures a loop break',
         [...new Set(normalized)],
       );
-    const routes = planLoopExits(this.body, this.language, this.context);
+    const routes = planLoopExits(this.body, this.language, this.context, {
+      quiet: (block) =>
+        block.control.kind === 'jump' &&
+        silent(block) &&
+        !this.notes.has(block.id) &&
+        !anchored(block.control.id) &&
+        block.statements.every((node) => !anchored(node.id)) &&
+        !this.printedCopies(block.control.transfer).length,
+      exitCopies: exitCopyLoops,
+    });
     if (
       routes.size &&
       this.localValidation.presentation(

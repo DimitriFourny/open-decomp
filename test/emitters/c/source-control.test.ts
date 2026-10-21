@@ -12,7 +12,13 @@ import {
   type SSAForm,
   type Value,
 } from '../../../src/ir/index.js';
-import { structureControlFlow } from '../../../src/presentation/index.js';
+import {
+  structureControlFlow,
+  type BlockRegion,
+  type ControlArm,
+  type Region,
+  type StructuredFunction,
+} from '../../../src/presentation/index.js';
 import { emitC } from '../../../src/emitters/c/index.js';
 import { emitPythonLike } from '../../../src/emitters/python-like/index.js';
 import type { EmissionResult } from '../../../src/emitters/model.js';
@@ -31,22 +37,86 @@ const memory = (words: readonly number[] = []): Map<bigint, number> =>
       index % 4 === 0 ? (words[index / 4] ?? 0) & 255 : 0,
     ]),
   );
-const emit = (
-  input: SSAForm,
+const emitStructured = (
+  fn: StructuredFunction,
   language: 'c-like' | 'python-like',
   view: 'source' | 'checked' = 'source',
   source = false,
-): EmissionResult => {
-  const structured = structureControlFlow(input, createOperationContext());
-  assert.ok(structured.value);
-  return (language === 'python-like' ? emitPythonLike : emitC)(
+): EmissionResult =>
+  (language === 'python-like' ? emitPythonLike : emitC)(
     {
-      function: structured.value,
+      function: fn,
       ...(source ? { source: { abi: new DarwinArm64Abi(), callees: [], addresses: [] } } : {}),
     },
     { ...DEFAULT_ANALYSIS_OPTIONS, emitter: language, view },
     createOperationContext(),
   );
+const structure = (input: SSAForm): StructuredFunction => {
+  const structured = structureControlFlow(input, createOperationContext());
+  assert.ok(structured.value);
+  return structured.value;
+};
+const emit = (
+  input: SSAForm,
+  language: 'c-like' | 'python-like',
+  view: 'source' | 'checked' = 'source',
+  source = false,
+): EmissionResult => emitStructured(structure(input), language, view, source);
+/** The blocks of a structured function by id, without the arm bodies that
+ * nested them, to lay them out another way. */
+const blockRegions = (fn: StructuredFunction): Map<string, BlockRegion> => {
+  const found = new Map<string, BlockRegion>();
+  const flat = (arm: ControlArm): ControlArm => {
+    if (arm.body) walk(arm.body);
+    return { transfer: arm.transfer };
+  };
+  const walk = (region: Region): void => {
+    if (region.kind === 'loop') return walk(region.body);
+    if (region.kind === 'sequence') return region.regions.forEach(walk);
+    const control = region.control;
+    found.set(
+      region.id,
+      control.kind === 'if'
+        ? {
+            ...region,
+            control: {
+              ...control,
+              when_true: flat(control.when_true),
+              when_false: flat(control.when_false),
+            },
+          }
+        : control.kind === 'switch'
+          ? {
+              ...region,
+              control: {
+                ...control,
+                cases: control.cases.map((item) => ({ ...item, arm: flat(item.arm) })),
+                otherwise: flat(control.otherwise),
+              },
+            }
+          : region,
+    );
+  };
+  walk(fn.body);
+  return found;
+};
+/** The same blocks and edges in a different lexical order: `layout` names each
+ * block, and `loop` the blocks printed inside the loop headed by its first one. */
+const relayout = (
+  fn: StructuredFunction,
+  order: readonly string[],
+  loop: readonly string[],
+): StructuredFunction => {
+  const blocks = blockRegions(fn);
+  const at = (id: string): BlockRegion => blocks.get(id)!;
+  const inside = order.slice(order.indexOf(loop[0]!), order.indexOf(loop[0]!) + loop.length);
+  assert.deepEqual(inside, loop);
+  const body: Region[] = [
+    ...order.slice(0, order.indexOf(loop[0]!)).map(at),
+    { kind: 'loop', header: loop[0]!, body: { kind: 'sequence', regions: loop.map(at) } },
+    ...order.slice(order.indexOf(loop[0]!) + loop.length).map(at),
+  ];
+  return { ...fn, body: { kind: 'sequence', regions: body } };
 };
 const rules = (output: EmissionResult): string[] =>
   (output.emission.local_validation ?? []).flatMap((record) =>
@@ -732,6 +802,101 @@ for (const language of ['c-like', 'python-like'] as const)
         assert.deepEqual(actual.values, expected.values);
         assert.deepEqual(actual.memory, expected.memory);
         assert.deepEqual(actual.events, expected.events);
+      }
+    });
+
+    /** `head` counts in memory and switches on the count; `exits` lists what the
+     * count selects: `case 1` re-enters or leaves, `case 2` continues, otherwise
+     * leaves. The exit block prints six stores so it is never copied onto an edge. */
+    test('an exit flag is kept only where a path reaches its test with it clear', () => {
+      const b = program('source-exit-flag-clear'),
+        entry = b.block('entry'),
+        head = b.block('head'),
+        x = b.block('x'),
+        z = b.block('z'),
+        done = b.block('done');
+      entry.jump(head);
+      const count = head.load(i32, head.constant(i64, 0x1000n));
+      head.store(head.constant(i64, 0x1000n), head.int('add', count, head.constant(i32, 1n)));
+      head.terminate({
+        kind: 'switch',
+        value: count,
+        cases: [
+          { bits: 1n, edge: head.edge(x) },
+          { bits: 2n, edge: head.edge(done) },
+        ],
+        otherwise: head.edge(done),
+      });
+      x.store(x.constant(i64, 0x1020n), count);
+      x.branch(x.compare('ult', count, x.constant(i32, 3n)), x.edge(z), x.edge(head));
+      z.store(z.constant(i64, 0x1024n), count);
+      z.jump(head);
+      for (let index = 0; index < 6; index++)
+        done.store(done.constant(i64, 0x1030n + BigInt(index * 4)), done.constant(i32, 5n));
+      done.return([]);
+      const fn = structure(b.finish(entry, [])),
+        checked = emitStructured(fn, language, 'checked');
+      // The switch's case 1 edge is the one that reaches its guard in the first
+      // layout (x follows it); in the second z does, so it jumps over z by goto.
+      for (const [layout, flagged] of [
+        [[entry, head, x, z, done], true],
+        [[entry, head, z, x, done], false],
+      ] as const) {
+        const ids = layout.map((block) => block.id),
+          source = emitStructured(relayout(fn, ids, ids.slice(1, 4)), language);
+        assert.equal(source.emission.text.includes('loop_exit_'), flagged && c);
+        assert.equal(rules(source).includes('multi_level_loop_exit'), flagged && c);
+        assert.equal(/\bgoto\b/.test(source.emission.text), !flagged);
+        for (const start of [0, 1, 2, 3, 6]) {
+          const actual = execute(source.emission, new Map(), memory([start])),
+            expected = execute(checked.emission, new Map(), memory([start]));
+          assert.deepEqual(actual.events, expected.events);
+          assert.deepEqual(actual.memory, expected.memory);
+          assert.equal(actual.exit, expected.exit);
+        }
+      }
+    });
+
+    test('a flag test followed by a break leaving the same way prints neither', () => {
+      for (const quiet of [true, false]) {
+        const b = program(`source-exit-flag-same-${quiet}`),
+          entry = b.block('entry'),
+          head = b.block('head'),
+          tail = b.block('tail'),
+          done = b.block('done');
+        entry.jump(head);
+        const count = head.load(i32, head.constant(i64, 0x1000n));
+        head.store(head.constant(i64, 0x1000n), head.int('add', count, head.constant(i32, 1n)));
+        head.terminate({
+          kind: 'switch',
+          value: count,
+          cases: [
+            { bits: 1n, edge: head.edge(done) },
+            { bits: 2n, edge: head.edge(head) },
+          ],
+          otherwise: head.edge(tail),
+        });
+        if (!quiet) tail.store(tail.constant(i64, 0x1020n), count);
+        tail.jump(done);
+        for (let index = 0; index < 6; index++)
+          done.store(done.constant(i64, 0x1030n + BigInt(index * 4)), done.constant(i32, 5n));
+        done.return([]);
+        const fn = structure(b.finish(entry, [])),
+          checked = emitStructured(fn, language, 'checked'),
+          ids = [entry, head, tail, done].map((block) => block.id),
+          source = emitStructured(relayout(fn, ids, ids.slice(1, 3)), language);
+        // `tail` ends the loop body with a break to `done`, as the flag guard would.
+        // Silent, it makes the guard redundant; with a store of its own it does not.
+        assert.equal(source.emission.text.includes('loop_exit_'), c && !quiet);
+        assert.equal(rules(source).includes('multi_level_loop_exit'), c && !quiet);
+        assert.equal(/\bgoto\b/.test(source.emission.text), c && quiet);
+        for (const start of [0, 1, 2, 5]) {
+          const actual = execute(source.emission, new Map(), memory([start])),
+            expected = execute(checked.emission, new Map(), memory([start]));
+          assert.deepEqual(actual.events, expected.events);
+          assert.deepEqual(actual.memory, expected.memory);
+          assert.equal(actual.exit, expected.exit);
+        }
       }
     });
 

@@ -20,7 +20,7 @@ type Nest =
       readonly header: string;
       readonly follow: string | null;
     }
-  | { readonly kind: 'switch'; readonly id: string };
+  | { readonly kind: 'switch'; readonly id: string; readonly follow: string | null };
 
 /** A presentation search ran out of its share of the remaining work. */
 class OptionalWorkExhausted extends Error {}
@@ -702,6 +702,10 @@ export interface Occurrence {
   readonly nesting: readonly Nest[];
 }
 
+function firstBlockOf(region: Region | null): string | null {
+  return region ? firstBlock(region) : null;
+}
+
 function leaf(region: Region | null): Region | null {
   while (region?.kind === 'sequence') {
     const next = region.regions.find((child) => firstBlock(child) !== null);
@@ -747,7 +751,7 @@ export function visitTransfers(
         {
           kind: 'loop',
           header: region.header,
-          follow: after ? firstBlock(after) : null,
+          follow: firstBlockOf(after),
         },
       ]);
       return;
@@ -764,7 +768,7 @@ export function visitTransfers(
       });
     const nested: readonly Nest[] =
       control.kind === 'switch' && language === 'c-like'
-        ? [...nesting, { kind: 'switch', id: control.id }]
+        ? [...nesting, { kind: 'switch', id: control.id, follow: firstBlockOf(leaf(follow)) }]
         : nesting;
     const head = controlArms(control).find((arm) => arm.shared);
     for (const arm of controlArms(control)) {
@@ -827,15 +831,33 @@ export interface LoopExitRoute {
   readonly through: readonly string[];
 }
 
+/** What the renderer prints around a loop's exit: a guard `if (flag) break;`
+ * stands right after the scope it propagates out of. */
+export interface LoopExitPrinting {
+  /** The block prints nothing but its transfer. */
+  readonly quiet: (block: BlockRegion) => boolean;
+  /** Headers of loops printing exit edge copies right after the loop. */
+  readonly exitCopies: ReadonlySet<string>;
+}
+
 /** A boolean is needed only when a real edge bypasses two or more breakable
  * scopes to an enclosing loop's exact continuation. No arbitrary target, loop
  * entry, or irreducible edge is rewritten: a loop entered by a goto (at its
  * header or into its body) keeps its labeled exits, since the flag, declared
- * where it starts, would not be initialized on that entry. */
+ * where it starts, would not be initialized on that entry.
+ *
+ * The guard after a scope tells a path that left through the flag from one that
+ * left normally, so an edge keeps the flag only if every guard it passes
+ * decides something: (1) some printed edge reaches the guard with the flag
+ * clear (a scope that cannot be left but through flagged edges never tests it
+ * clear), and (2) the guard is not followed by an unconditional `break` that
+ * leaves the same scope (both outcomes would go the same way). Any other edge
+ * keeps its labeled goto to the loop's continuation. */
 export function planLoopExits(
   body: Region,
   language: 'c-like' | 'python-like',
   context: OperationContext,
+  printing: LoopExitPrinting,
 ): ReadonlyMap<ParallelTransfer, LoopExitRoute> {
   const routes = new Map<ParallelTransfer, LoopExitRoute>();
   const enclosing = new Map<string, readonly string[]>();
@@ -850,22 +872,49 @@ export function planLoopExits(
   };
   scan(body, []);
   const unsafe = new Set<string>();
+  const name = (scope: Nest): string => (scope.kind === 'loop' ? scope.header : scope.id);
+  const signature = (scopes: readonly Nest[]): string =>
+    scopes.map((scope) => `${scope.kind}:${name(scope)}`).join('|');
+  /** Per scope: its lexical successor and the nesting around it. */
+  const scopes = new Map<string, { follow: string | null; outer: string }>();
+  /** Scopes some printed edge leaves to their successor without a goto. */
+  const left = new Set<string>();
+  /** Per block, its jump occurrences: printed action and nesting. */
+  const jumps = new Map<
+    string,
+    { block: BlockRegion; action: TransferAction; nesting: string }[]
+  >();
   visitTransfers(body, language, context, (occurrence) => {
-    if (occurrenceAction(occurrence, language) !== 'goto') return;
-    const scopes = occurrence.nesting;
+    const action = occurrenceAction(occurrence, language);
+    const nesting = occurrence.nesting;
+    nesting.forEach((scope, index) => {
+      if (!scopes.has(name(scope)))
+        scopes.set(name(scope), {
+          follow: scope.follow,
+          outer: signature(nesting.slice(0, index)),
+        });
+      if (action !== 'goto' && scope.follow !== null && occurrence.transfer.target === scope.follow)
+        left.add(name(scope));
+    });
+    if (occurrence.control.kind === 'jump') {
+      const rows = jumps.get(occurrence.block) ?? [];
+      rows.push({ block: occurrence.owner, action, nesting: signature(nesting) });
+      jumps.set(occurrence.block, rows);
+    }
+    if (action !== 'goto') return;
     const inside = new Set(
-      scopes.flatMap((scope) => (scope.kind === 'loop' ? [scope.header] : [])),
+      nesting.flatMap((scope) => (scope.kind === 'loop' ? [scope.header] : [])),
     );
     if (!inside.has(occurrence.transfer.target)) unsafe.add(occurrence.transfer.target);
     for (const loop of enclosing.get(occurrence.transfer.target) ?? [])
       if (!inside.has(loop)) unsafe.add(loop);
-    for (let index = scopes.length - 1; index >= 0; index--) {
-      const scope = scopes[index]!;
+    for (let index = nesting.length - 1; index >= 0; index--) {
+      const scope = nesting[index]!;
       if (scope.kind !== 'loop' || scope.follow !== occurrence.transfer.target) continue;
-      if (index < scopes.length - 1)
+      if (index < nesting.length - 1)
         routes.set(occurrence.transfer, {
           loop: scope.header,
-          through: scopes
+          through: nesting
             .slice(index)
             .reverse()
             .map((item) => (item.kind === 'loop' ? item.header : item.id)),
@@ -873,7 +922,44 @@ export function planLoopExits(
       break;
     }
   });
-  for (const [transfer, route] of routes) if (unsafe.has(route.loop)) routes.delete(transfer);
+  /** Edges kept as flagged exits, by the loop whose continuation they reach. */
+  const reaching = new Map<string, ParallelTransfer[]>();
+  for (const [transfer, route] of routes)
+    reaching.set(route.loop, [...(reaching.get(route.loop) ?? []), transfer]);
+  const kept = new Map<ParallelTransfer, boolean>();
+  const decided = new Map<string, boolean>();
+  /** Some path reaches the guard after `scope` with the guard's flags clear: a
+   * printed edge to its successor, or a flagged edge to it when `scope` is a
+   * loop (that edge sets its own flag, not the guarded one), and the guard is
+   * not followed by the same `break`. Nested scopes only: no cycle. */
+  const decides = (scope: string): boolean => {
+    const known = decided.get(scope);
+    if (known !== undefined) return known;
+    const info = scopes.get(scope)!;
+    const next = info.follow === null ? undefined : jumps.get(info.follow);
+    const decision =
+      (left.has(scope) || (reaching.get(scope) ?? []).some((transfer) => keep(transfer))) &&
+      !(
+        next?.length &&
+        !printing.exitCopies.has(scope) &&
+        next.every(
+          (row) =>
+            row.action === 'break' && row.nesting === info.outer && printing.quiet(row.block),
+        )
+      );
+    decided.set(scope, decision);
+    return decision;
+  };
+  const keep = (transfer: ParallelTransfer): boolean => {
+    const known = kept.get(transfer);
+    if (known !== undefined) return known;
+    const route = routes.get(transfer)!;
+    const decision =
+      !unsafe.has(route.loop) && route.through.slice(0, -1).every((scope) => decides(scope));
+    kept.set(transfer, decision);
+    return decision;
+  };
+  for (const transfer of [...routes.keys()]) if (!keep(transfer)) routes.delete(transfer);
   return routes;
 }
 
@@ -1020,7 +1106,7 @@ export function planLayout(
     }
     const nested: readonly Nest[] =
       control.kind === 'switch' && language === 'c-like'
-        ? [...nesting, { kind: 'switch', id: control.id }]
+        ? [...nesting, { kind: 'switch', id: control.id, follow }]
         : nesting;
     return {
       ...region,

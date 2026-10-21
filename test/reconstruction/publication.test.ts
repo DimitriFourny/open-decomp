@@ -118,7 +118,10 @@ test('publication rejects exit flags without initialization, scope guards or the
   step.jump(loop, [step.int('sub', loop.parameters[0]!, step.constant(i32, 1n))]);
   done.return([]);
   const fn = plan(b.finish(entry, [])).function;
-  const routes = planLoopExits(fn.body, 'c-like', context());
+  const routes = planLoopExits(fn.body, 'c-like', context(), {
+    quiet: () => true,
+    exitCopies: new Set(),
+  });
   assert.equal(routes.size, 1);
   const emitted = new Map<ParallelTransfer, EmittedEdge>();
   visitTransfers(fn.body, 'c-like', context(), (occurrence) => {
