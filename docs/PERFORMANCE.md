@@ -868,6 +868,61 @@ The four functions whose preamble grows had no declaration for their open callee
 - Work (counted, `measure-main-work.sh` copy with the binary as argument): brotli `main` 8.90M → 9.20M, SQLite `whereLoopAddBtreeIndex` 9.00M → 9.40M (limit 10M, margins 0.80M / 0.60M). The second structuring costs 1.04M / 0.38M; the provisional first structuring (no goto search) saves 0.75M / 0.35M, but `recoverSourceEvidence` gives optional callee summaries half of the work remaining at that point (`source-facts.ts`), which takes back about 0.3M of the saving on `whereLoopAddBtreeIndex`. Both functions complete with the same diagnostics as main.
 - Not measured here: the whole structure sample and the dev loop (coordinator).
 
+## Readability roadmap 2: round result (2026-10-21, main `6ecd517`, not held out)
+
+All items M1 and G1–G9 merged (`structure/8`, emitters 76). Same 214-function structure sample as the baseline, `open-decomp export`, C source view, `proven`, default budget; Ghidra column is the archived 2026-10-20 lane. Builds: `pre` = `18575c1` (roadmap start; its output equals the 2026-10-20 baseline exactly), `g6a` = `082e03a` (only `do { } while (0)` dropped), `rm2` = `6ecd517`. Outputs in `/tmp/structure-gotos/{pre-18575c1,g6a-082e03a,rm2-6ecd517}`.
+
+```sh
+python3 scripts/bench/structure-gotos.py run --entry dist/src/cli/entry.js --label rm2-6ecd517 --jobs 4
+python3 scripts/bench/structure-gotos.py metrics --label pre=/tmp/structure-gotos/pre-18575c1 \
+  --label g6a=/tmp/structure-gotos/g6a-082e03a --label rm2=/tmp/structure-gotos/rm2-6ecd517 \
+  --ghidra ghidra=.local/ghidra-gap-2026-10-20/ghidra
+```
+
+| 213 common functions                 |     pre |     g6a |     rm2 |  Ghidra |
+| ------------------------------------ | ------: | ------: | ------: | ------: |
+| `goto`                               |     372 |     565 |     428 |     405 |
+| functions with a `goto`              |      31 |      36 |      34 |      48 |
+| `do { } while (0)`                   |      95 |       0 |       0 |       0 |
+| `break`                              |     284 |      78 |      79 |      23 |
+| `continue` / exit flags              | 12 / 12 |  13 / 2 |  10 / 2 |   0 / 0 |
+| jump statements                      |     775 |     658 |     519 |     428 |
+| `while (true)`                       |      47 |      47 |      42 |       8 |
+| `for`                                |       3 |       3 |       6 |      12 |
+| loops with a test                    |      56 |      56 |      61 |      89 |
+| `else if`                            |       0 |       0 |      30 |      36 |
+| comma conditions (regex)             |       0 |       0 |      12 |     120 |
+| non-blank lines, no comments         |  16,546 |  16,369 |  14,110 |  11,316 |
+| bytes                                | 745,628 | 724,889 | 574,915 | 377,473 |
+| bytes: preamble                      | 151,560 | 151,560 |  25,336 |       0 |
+| bytes: `entry_sp` lines              |  86,202 |  83,110 |   1,346 |       0 |
+| bytes: comments                      |  37,903 |  37,903 |  44,738 |  24,603 |
+| local declarations                   |   2,456 |   2,452 |   2,436 |   1,237 |
+| lines with `entry_sp` (functions)    | 1,309 (37) | 1,309 (37) | 26 (2) |       0 |
+| call lines ending `, ...)`           |     725 |     725 |      68 |       0 |
+| 64-bit cell reassemblies (functions) |  11 (6) |  11 (6) |   6 (3) |       0 |
+
+- **Against Ghidra, summed per function:** jump statements +347 → +91 (larger in 37 → 25 functions, smaller in 17 → 24), non-blank lines +5,230 → +2,794, bytes +368,155 → +197,442. Remaining largest jump excesses: brotli `main` 179 vs 115, `btreeBeginTrans` 49 vs 37, `whereLoopAddBtreeIndex` 52 vs 42, `whereLoopAddBtree` 32 vs 24.
+- **Every per-function goto increase `pre` → `rm2` comes from dropping run-once blocks (G6, decided 2026-10-20):** 22 functions print more gotos than at `pre` (largest `btreeBeginTrans` 32 → 47, `sqlite3ExprCodeTarget` 13 → 25, brotli `main` 151 → 160, `sqlite3BtreeCreateTable` 6 → 15, `sqlite3ExprCodeIN` 5 → 14, `sqlite3BtreeOpen` 31 → 36); in each, `rm2` ≤ `g6a`. From `g6a` to `rm2` (G1–G5, G6 flags, G7–G9) no function gains a goto; 24 lose some (`whereLoopAddBtreeIndex` 70 → 37, brotli `main` 188 → 160, `whereLoopAddBtree` 35 → 24, `sqlite3BtreeOpen` 46 → 36, `sqlite3BtreeInsert` 25 → 15, `allocateBtreePage` 28 → 21).
+- **Local declarations barely move** (2,456 → 2,436) although G1 removes copies: the 213 functions' frame objects (G7) print 475 member lines inside `struct { … } frame;`, which the counter sees as declarations.
+- **Comments grow** (37.9 → 44.7 KB): 111 `open arity` lines (14.5 KB) name open callees once per function, and 123 `/* struct declarations: types.h */` lines (4.3 KB) replace the struct bodies in the export.
+- **Work** (G2 measurement on the same code): brotli `main` 9.20M, `whereLoopAddBtreeIndex` 9.40M of 10M.
+
+**Dev loop** (`quality-dev-loop.py run --entry dist/src/cli/entry.js --label rm2-6ecd517 --jobs 4`, 288 (cell, function) pairs): 288 texts, 72 complete, 216 partial, **0 failed** (was 54 / 146 / 88 at `int-112527d` and `fixw-ea39b46`: the 88 stripped ELF/PE pairs now resolve, G9). On the 200 pairs both builds print (`metrics --label fixw-ea39b46 --label rm2-6ecd517`): est. tokens 69,776 → 65,583, lines 8,295 → 8,077, casts 1,901 → 1,308, `entry_sp` 329 → 233, open arity 132 → 36, local declarations 1,323 → 1,238, gotos 0 → 8 (8 labels; [inference] edges run-once blocks used to absorb).
+
+**LLM task benchmark** (`scripts/bench/llm-tasks/`, packets `.local/llm-tasks/rm2-proven` built from `6ecd517`, answers `.local/llm-tasks/answers-rm2`; Claude Haiku 5.5 blind subagents, 14 questions per agent, one run):
+
+| config        | correct / unknown / wrong | material tokens | tokens / correct | round 1 `proven` (2026-10-20) |
+| ------------- | ------------------------: | --------------: | ---------------: | ----------------------------- |
+| `mcp-default` |                41 / 1 / 0 |          97,312 |            2,373 | 39 / 3 / 0, 57,628, 1,478     |
+| `export-file` |                41 / 1 / 0 |          95,224 |            2,323 | 41 / 1 / 0, 100,909, 2,461    |
+
+- No wrong answer; the one `unknown` in both configs is `sq-incomplete-empty` (its state-transition table is data the packet does not carry). The `export-file` packets carry no `types.h`; no layout question was lost.
+- `mcp-default` material grew because brotli `main` now returns text over MCP (three 58 KB packets; at round 1 it failed with `resource_limit` and its packets were 0.9 KB envelopes). Excluding the three `bro-main-*` questions, packet bytes fall 234,719 → 205,989 (`mcp-default`, −12 %) and 237,241 → 196,918 (`export-file`, −17 %).
+- On Ghidra's 16 archived questions: `mcp-default` 16/16 at 6,499 tokens (406 per correct; round 1: 6,895, 431), `export-file` 16/16 at 6,394 (400; round 1: 7,323, 458). Ghidra: 13/16 at 2,518 (194). Open Decomp is about 2.1× Ghidra's tokens per correct answer (was 2.2×).
+
+**Not measured:** the third held-out suite (seen) was not re-scored; the 52 `entry_sp` interface mismatches and its 8 stripped ELF/PE cells are expected to change (G7 frame object, G9) but are unverified. The roadmap gate needs a new sealed suite.
+
 ## Normalized four-lane performance (2026-10-17, commit `901602b`)
 
 Exclusive serialized slot (`.local/performance/quality.measurement.lock`), `dist/` aggregate `dd0ea263…` unchanged before/after, Node **v26.11.1** (not the historical 24.22.0 host), Ghidra 12.1.4, bridge `73ea1c8e…`. Protocol `scripts/bench/quality-persistent.py` unchanged: same MCP client for all four lanes (Open Decomp unobserved/observed, pinned Ghidra MCP bridge, persistent Ghidra `DecompInterface`), 11 equal requests in 156/156 matched cells, 3 fresh runs, 10 warm, 30 pings, balanced order. 1,716/1,716 observer/control pairs and 6/6 import controls equivalent. Raw evidence: `~/Documents/open-decomp-perf-2026-10-17-final/p25-normalized/comparison.json`.

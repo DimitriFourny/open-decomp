@@ -183,6 +183,7 @@ We print no text where Ghidra does. Third suite: stripped ELF 0 of 32 functions 
 - After each item: `structure-gotos.py` with the Ghidra lane (M1) and `scripts/bench/quality-dev-loop.py`; record paired totals and per-function regressions.
 - After G1–G4: re-run the per-construct classification on the same 40 functions (protocol and categories in `.local/ghidra-gap-2026-10-20/goto-classify-*.md`).
 - The structure sample, the dev loop and the third suite are all seen. Claims need a new sealed suite built and measured under the sealing rule in docs/PERFORMANCE.md.
+- Round result (2026-10-21, main `6ecd517`; docs/PERFORMANCE.md "Readability roadmap 2: round result"): structure sample jump statements 775 → 519 (Ghidra 428), every per-function goto increase traced to the G6 run-once removal; dev loop 288/288 texts; LLM task benchmark 41/1/0 in both configs, no new wrong answer, tokens per correct 2,461 → 2,323 (`export-file`). Per-construct re-classification: `.local/ghidra-gap-2026-10-20/goto-classify-rm2.md`.
 - [ ] Gate: on the new sealed suite, blind preference is at least even with Ghidra on control flow, machine-state clutter and algorithm comprehension (the dimensions where Ghidra led in round 1); the executable-correctness subset does not regress; the LLM task benchmark's tokens per correct answer fall with no new wrong answer. Report counterexamples and losses next to wins.
 
 ## Definition of done for each item
