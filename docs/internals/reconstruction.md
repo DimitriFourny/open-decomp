@@ -2,7 +2,7 @@
 
 Turns one structured, immutable SSA function plus recovered types and native source evidence into a source-shaped model: which values are live and which print inline, what each call/return means as a C interface, which stack slots become locals, and under which proof or assumption each rewrite was applied. Runs after [structuring](structuring-emission.md#algorithm), before text emission; never restructures the CFG or mutates the IR. The renderer's variable decisions (cross-statement inlining, coalescing, names) are covered here too; control layout and printing belong to [structuring & emission](structuring-emission.md).
 
-**Code:** `src/reconstruction/`, `src/emitters/source-inlining.ts`, `src/emitters/source-control.ts` (coalescing)
+**Code:** `src/reconstruction/`, `src/emitters/source-inlining.ts`, `src/emitters/source-control.ts` (variable partition)
 
 ## Data model
 
@@ -60,7 +60,7 @@ flowchart TD
 
 - **names** (`planSourceNames`, also checked with fewer rules): supplied symbols/annotations > declared parameter names > field names > library interface names (only without a loop/shift/callback role, element or condition) > one role (`index`, `count`/`remaining`, `accumulator`, …) > generic stems; two roles give no name. Names never feed semantics.
 - **inlines across statements** (`planSourceInlining`): single-use pure integer expressions move to their dominated use; FP ones only with no call, unknown effect or register write between; loads only to an unconditional same-block use with no intervening store, call or independent load; same-type copies propagate; cheap single-reader ops repeat (≤4); a single-use call result may sit in the next test.
-- **coalesces**: `phi_copy_coalescing` greedily unions edge-copy and widening pairs using SSA live-range interference (simultaneous block parameters conflict) when storage type, presented type and name agree; formals stay representatives. `copy_coalescing` merges in-place updates (`y = f(x)`, `x` dead) under a bounded interference matrix.
+- **partitions** (`partitionVariables`, `variable_partition`): one variable partition from exact SSA live-range interference (simultaneous block parameters conflict; an equal source at a definition does not): block parameters join the variables their edge arguments read, then same-width aliases and unsigned widenings, then in-place updates (`y = f(x)`, same presented type), then same-type values one register holds at block boundaries. Members share machine storage and FP presentation; presented types may differ between scalar integer/pointer spellings (a rigid member such as a formal or call result fixes the type, else the most-read spelling of the widest members; a differing member converts once at its definition). Formals stay representatives; names are chosen per variable. An edge copy inside one variable prints nothing; `edgeCopies` gives every planner the printed copy count.
 
 Checked applies none of these beyond direct-copy naming.
 
@@ -86,5 +86,5 @@ Checked applies none of these beyond direct-copy naming.
 | First-match rule order, no cost model                               | Early rule may block a better one [inference]; ABI-implied sign extension missed     | Rule pool                                                |
 | BDD fragment (64 leaves, 12k ops, integer)                          | Candidates unverified or unapplied                                                   | Validator                                                |
 | Two inlining layers (fixed limits here, liveness-based in renderer) | Split ownership of temporaries [inference]                                           | One planner                                              |
-| Coalescing needs equal type and name                                | Pointer/integer and truncating copies stay separate                                  | Types first                                              |
+| Partition is speculative beyond phis                                | Register reuse may give unrelated same-type values one name                          | Role-aware representative naming                         |
 | Cost                                                                | ~780k work per brotli `main` reconstruction; normalization runs twice                | Incremental normalization                                |

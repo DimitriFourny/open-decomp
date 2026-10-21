@@ -204,8 +204,10 @@ for (const language of ['c-like', 'python-like'] as const)
       assert.equal(stem(name(output, fold)), 'accumulator');
       // The update itself prints inline or as the same variable.
       assert.ok([undefined, name(output, fold)].includes(name(output, folded)));
-      // The running value after the first unrolled step is not a second accumulator.
-      assert.match(name(output, running) ?? '', neutral);
+      // The running value after the first unrolled step is not a second
+      // accumulator: it is the accumulator itself (an in-place update) or neutral.
+      if (name(output, running) !== name(output, fold))
+        assert.match(name(output, running) ?? '', neutral);
     });
 
     test('a floating-point sum is an accumulator', () => {

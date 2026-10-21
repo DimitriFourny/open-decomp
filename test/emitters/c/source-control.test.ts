@@ -116,7 +116,7 @@ for (const language of ['c-like', 'python-like'] as const)
       // The phi and its loop-carried source are one printed variable.
       assert.equal(name(source, acc), name(source, next));
       assert.notEqual(name(checked, acc), name(checked, next));
-      assert.ok(rules(source).includes('phi_copy_coalescing'));
+      assert.ok(rules(source).includes('variable_partition'));
       if (c)
         for (const rule of ['loop_form', 'loop_test_restatement', 'for_loop', 'loop_entry_test'])
           assert.ok(rules(source).includes(rule), rule);
@@ -870,7 +870,7 @@ for (const language of ['c-like', 'python-like'] as const)
           source = emit(input, language);
         if (op === 'zero_extend') {
           assert.equal(name(source, byte), name(source, wide), source.emission.text);
-          assert.ok(rules(source).includes('phi_copy_coalescing'));
+          assert.ok(rules(source).includes('variable_partition'));
         } else assert.notEqual(name(source, byte), name(source, wide));
         for (const value of [0, 127, 128, 255]) {
           const observed = execute(source.emission, new Map(), memory([value]));

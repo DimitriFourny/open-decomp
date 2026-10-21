@@ -12,8 +12,11 @@ import { emitPythonLike } from '../../../src/emitters/python-like/index.js';
 import type { EmissionResult } from '../../../src/emitters/model.js';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
-import { builder, provenance, register, slice } from '../../ir/support.js';
-import { emittedFormals, execute } from './support.js';
+import { recoverTypes } from '../../../src/analysis/types/index.js';
+import { builder, image, provenance, register, slice } from '../../ir/support.js';
+import { emit as emitWith, emittedFormals, execute } from './support.js';
+
+const evidence = { abi: sysvAMD64Abi, callees: [], addresses: [] };
 
 const i8 = integer(8),
   i32 = integer(32),
@@ -103,8 +106,8 @@ for (const language of ['c-like', 'python-like'] as const)
         const { input, v0, v1, v2, v3 } = chain(interfere);
         const source = emit(input, language),
           checked = emit(input, language, 'checked');
-        assert.ok(rules(source).includes('copy_coalescing'), source.emission.text);
-        assert.ok(!rules(checked).includes('copy_coalescing'));
+        assert.ok(rules(source).includes('variable_partition'), source.emission.text);
+        assert.ok(!rules(checked).includes('variable_partition'));
         assert.equal(name(source, v1), name(source, v2));
         assert.equal(name(source, v2), name(source, v3));
         // v0 is read after v1 is defined: they are live together and stay apart.
@@ -130,7 +133,7 @@ for (const language of ['c-like', 'python-like'] as const)
         // `sum` is still read after `a` is defined: `a` cannot take its storage.
         if (interfere) assert.notEqual(name(source, a), name(source, sum));
         else assert.equal(name(source, a), name(source, sum));
-        assert.ok(rules(source).includes('copy_coalescing') === !interfere);
+        assert.ok(rules(source).includes('variable_partition'), source.emission.text);
         const expected = observe(checked),
           actual = observe(source);
         assert.deepEqual(actual.values, expected.values);
@@ -242,7 +245,7 @@ for (const language of ['c-like', 'python-like'] as const)
         if (read || bits === 16)
           assert.notEqual(name(source, v), name(source, merged), source.emission.text);
         else {
-          assert.ok(rules(source).includes('phi_copy_coalescing'), source.emission.text);
+          assert.ok(rules(source).includes('variable_partition'), source.emission.text);
           assert.equal(name(source, v), name(source, merged), source.emission.text);
           // The even edge only carried the dropped copy: no empty `else` arm prints.
           assert.doesNotMatch(source.emission.text, /\belse\b/, source.emission.text);
@@ -332,6 +335,138 @@ for (const language of ['c-like', 'python-like'] as const)
         // The peek observed the already updated slot on the last iteration.
         assert.equal(observed.memory.get(0x4000n), Number(count));
         assert.deepEqual(observed.values, [count]);
+      }
+    });
+  });
+
+/** `x = load; p = odd(x) ? x : x + 5; store p; return p`. With `interfere`, `x` is
+ * stored again after the join, so it is live where `p` is bound. */
+function joined(interfere: boolean) {
+  const b = program(`partition-join-${interfere}`),
+    entry = b.block('entry'),
+    odd = b.block('odd'),
+    even = b.block('even'),
+    join = b.block('join', [i32]);
+  const x = entry.load(i32, entry.constant(i64, 0x1000n));
+  entry.branch(
+    entry.compare('ne', entry.int('and', x, entry.constant(i32, 1n)), entry.constant(i32, 0n)),
+    entry.edge(odd),
+    entry.edge(even),
+  );
+  odd.jump(join, [x]);
+  const y = even.int('add', x, even.constant(i32, 5n));
+  even.store(even.constant(i64, 0x2008n), y);
+  even.jump(join, [y]);
+  const [p] = join.parameters as [Value];
+  join.store(join.constant(i64, 0x2000n), p);
+  if (interfere) join.store(join.constant(i64, 0x2004n), x);
+  join.return([p]);
+  return { input: b.finish(entry, [i32]), x, y, p };
+}
+
+const rsi = register('rsi', 64, 0, 'replace_root', 'x86_64:rsi');
+/** `if (n) { p = *(uint64_t *)0x3000; } return *p;` where `p` is a formal typed
+ * `uint32_t *` and the loaded address is a plain integer. With `interfere`, the
+ * formal is written through after the load, so both are live there. */
+function retyped(interfere: boolean) {
+  const b = builder(`partition-retyped-${interfere}`),
+    entry = b.block('entry'),
+    other = b.block('other'),
+    join = b.block('join');
+  entry.branch(
+    entry.compare('ne', entry.readRegister(rsi), entry.constant(i64, 0n)),
+    entry.edge(other),
+    entry.edge(join),
+  );
+  const loaded = other.load(i64, other.constant(i64, 0x3000n));
+  if (interfere) other.store(other.readRegister(rdi), other.constant(i32, 0x55n));
+  other.writeRegister(rdi, loaded);
+  other.jump(join);
+  join.return([join.cast('zero_extend', i64, join.load(i32, join.readRegister(rdi)))]);
+  const ssa = constructSSA(b.finish(entry, [i64])).value as SSAForm;
+  const formal = ssa.register_states
+    .find((state) => state.block === ssa.entry)!
+    .entry.find((binding) => binding.register.root === rdi.root)!.value;
+  const record = { source: 'debug', status: 'established', evidence_ids: [] } as const;
+  const types = recoverTypes(ssa, sysvAMD64Abi, createOperationContext(), {
+    slice_id: slice,
+    image_id: image,
+    revision: 1,
+    types: [
+      { id: 'word', definition: { kind: 'integer', bits: 32, signed: false }, ...record },
+      { id: 'word-pointer', definition: { kind: 'pointer', bits: 64, to: 'word' }, ...record },
+    ],
+    bindings: [{ subject_id: formal.id, type_id: 'word-pointer', ...record }],
+  });
+  return { ssa, types, loaded };
+}
+
+for (const language of ['c-like', 'python-like'] as const)
+  describe(`variable partition ${language}`, () => {
+    test('an incoming argument shares the parameter variable unless it is live at the join, where its edge copy stays', () => {
+      for (const interfere of [false, true]) {
+        const { input, x, y, p } = joined(interfere);
+        const source = emit(input, language),
+          checked = emit(input, language, 'checked');
+        const text = source.emission.text;
+        // The in-place update and its phi share one variable either way.
+        assert.equal(name(source, y), name(source, p), text);
+        if (interfere) {
+          assert.notEqual(name(source, x), name(source, p), text);
+          // The interfering pair keeps exactly one explicit copy on its edge.
+          const copy = new RegExp(`\\b${name(source, p)} = ${name(source, x)}\\b`, 'g');
+          assert.equal(text.match(copy)?.length, 1, text);
+        } else assert.equal(name(source, x), name(source, p), text);
+        for (const word of [0, 1, 6, 7, 0xfffffffe]) {
+          const bytes = memory([word]);
+          const expected = execute(checked.emission, new Map(), bytes),
+            actual = execute(source.emission, new Map(), bytes);
+          assert.deepEqual(actual.values, expected.values, `${interfere} ${word}`);
+          assert.deepEqual([...actual.memory], [...expected.memory]);
+        }
+      }
+    });
+
+    test('a member presented with another type defines the variable through one exact conversion', () => {
+      for (const interfere of [false, true]) {
+        const { ssa, types, loaded } = retyped(interfere);
+        const output = emitWith(ssa, { types, source: evidence }, language),
+          checked = emitWith(ssa, { types, source: evidence }, language, 'checked');
+        const text = output.emission.text;
+        const pointer = emittedFormals(output.emission)[0]!.name;
+        if (interfere) {
+          // Both live after the load: the loaded value keeps its own variable
+          // and the edge copies it into the formal's once.
+          assert.notEqual(name(output, loaded), pointer, text);
+          assert.equal(text.match(new RegExp(`^\\s*${pointer} = `, 'gm'))?.length, 1, text);
+        } else {
+          assert.equal(name(output, loaded), pointer, text);
+          // The load defines the pointer variable itself, converted once (C).
+          assert.match(
+            text,
+            language === 'c-like'
+              ? new RegExp(`\\b${pointer} = \\(uint32_t\\*\\)\\*\\(uint64_t \\*\\)`)
+              : new RegExp(`\\b${pointer} = memory\\.u64\\[`),
+          );
+        }
+        const run = (emitted: EmissionResult, taken: bigint) => {
+          // *(uint64_t *)0x3000 = 0x2010, *(uint32_t *)0x2010 = 0x11223344, formal 0x1008.
+          const bytes = memory([0x11111111, 0x22222222, 0x33333333]);
+          [0x10, 0x20, 0, 0, 0, 0, 0, 0].forEach((byte, i) => bytes.set(0x3000n + BigInt(i), byte));
+          [0x44, 0x33, 0x22, 0x11].forEach((byte, i) => bytes.set(0x2010n + BigInt(i), byte));
+          const inputs = new Map<string, bigint>();
+          emittedFormals(emitted.emission).forEach((row, position) => {
+            for (const id of row.semantic_ids) inputs.set(id, position === 0 ? 0x1008n : taken);
+          });
+          return execute(emitted.emission, inputs, bytes);
+        };
+        for (const taken of [0n, 1n]) {
+          const expected = run(checked, taken),
+            actual = run(output, taken);
+          assert.deepEqual(actual.values, expected.values, text);
+          assert.deepEqual([...actual.memory], [...expected.memory]);
+          assert.deepEqual(actual.values, [taken ? 0x11223344n : 0x33333333n]);
+        }
       }
     });
   });

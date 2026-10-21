@@ -297,3 +297,80 @@ fail:
     );
   },
 );
+
+test(
+  'phi copies merged into variables (swapped carriers, a pointer walked from a formal, an early-exit counter) run exactly like their source',
+  { skip: nativeOracleSkip(), timeout: 120_000 },
+  async (t) => {
+    // Parallel loop-carried copies that swap values, a pointer sharing a
+    // formal's variable, and values still live after their join (edge copies).
+    const source = `#include <stdint.h>
+__attribute__((noinline, used)) uint32_t swaps(uint32_t n, uint32_t *trace) {
+  uint32_t a = 0, b = 1;
+  for (uint32_t i = 0; i < n; i++) {
+    uint32_t t = a;
+    a = b;
+    b = t + b;
+    trace[i & 7] = a;
+  }
+  return a ^ (b << 1);
+}
+__attribute__((noinline, used)) uint64_t walk(const uint8_t *p, const uint8_t *end, const uint8_t **out) {
+  const uint8_t *q = p;
+  while (q < end && (*q == ' ' || *q == '\\t')) q++;
+  *out = q;
+  return (uint64_t)(q - p);
+}
+__attribute__((noinline, used)) int64_t first(const int32_t *v, int64_t n, int32_t key) {
+  int64_t i = 0, last = -1;
+  for (; i < n; i++) {
+    if (v[i] == key) return i;
+    if (v[i] > key) last = i;
+  }
+  return last * 2 + i;
+}
+`;
+    await checkEmittedC(
+      'open-decomp-variable-partition-',
+      source,
+      [
+        {
+          name: 'swaps',
+          formals: 2,
+          driver: `  for (uint32_t n = 0; n < 40; n += 3) {
+    uint32_t expected[8] = {0}, observed[8] = {0};
+    uint32_t want = source_swaps(n, expected), got = (uint32_t)swaps(n, (void *)observed);
+    if (want != got) fail("swaps(%u): %u vs %u", n, want, got);
+    for (unsigned k = 0; k < 8; k++)
+      if (expected[k] != observed[k]) fail("swaps(%u): trace[%u]", n, k);
+  }`,
+        },
+        {
+          name: 'walk',
+          formals: 3,
+          driver: `  const char *cases[] = {"", "x", " x", "\\t \\tx", "    ", " \\t\\n"};
+  for (unsigned c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+    const uint8_t *p = (const uint8_t *)cases[c], *end = p, *expected = 0, *observed = 0;
+    while (*end) end++;
+    uint64_t want = source_walk(p, end, &expected);
+    uint64_t got = (uint64_t)walk((void *)p, (void *)end, (void *)&observed);
+    if (want != got || expected != observed) fail("walk case %u", c);
+  }`,
+        },
+        {
+          name: 'first',
+          formals: 3,
+          driver: `  const int32_t v[] = {5, -3, 9, 9, 0, 12, -7, 4};
+  const int32_t keys[] = {9, 4, 100, -100, 0, 5, 12};
+  for (unsigned k = 0; k < sizeof keys / sizeof keys[0]; k++)
+    for (int64_t n = 0; n <= 8; n++) {
+      int64_t want = source_first(v, n, keys[k]);
+      int64_t got = (int64_t)first((void *)v, (uint64_t)n, keys[k]);
+      if (want != got) fail("first(n=%lld, key=%d): %lld vs %lld", (long long)n, keys[k], (long long)want, (long long)got);
+    }`,
+        },
+      ],
+      t,
+    );
+  },
+);
