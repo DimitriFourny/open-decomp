@@ -45,22 +45,24 @@ export interface Arm64LiftResult {
  * count/reverse, PC-relative addresses, direct/indirect transfers, ordinary
  * scalar/SIMD literal/offset/pre/post-index and pair memory, stack and calls.
  * SIMD supports common fixed-lane integer arithmetic/bitwise/MOVI, scalar
- * FP32/64 moves/arithmetic/compare/select/conversion and vector FP add/sub/
- * mul/div when structured operands exist. Runtime FPCR guards bound arithmetic
+ * FP32/64 moves/arithmetic/compare/select/conversion, FCVTZS/FCVTZU (saturating,
+ * NaN to zero), fixed-point SCVTF/UCVTF, and vector FP add/sub/mul/div when
+ * structured operands exist; DUP (general), CMEQ and AND/ORR (register) read
+ * canonical fields. Runtime FPCR guards bound arithmetic
  * to nearest-even, gradual underflow and masked exceptions. Arithmetic NaNs
  * are explicitly canonicalized and FPSR is unknown, never claimed exact.
  *
  * Pointer authentication retains logical addresses with explicit diagnostics,
  * not hardware authentication/security semantics. The observed DMB ISH orders
  * reads/writes in the inner-shareable domain. Other barriers, SVE/SME, atomics,
- * privileged/system state, fused FP, FP16, saturating/rounding conversions and
+ * privileged/system state, fused FP, FP16, other rounding conversions and
  * unimplemented SIMD remain unknown effect boundaries. Unsupported operations
  * clobber the entire modeled state and memory, never disappear or become
  * invented guaranteed traps. Decode gaps/unresolved exits remain boundaries.
  */
 export class Arm64Lifter implements Lifter<RegisterIR> {
   readonly name = 'ARM64 typed semantic lifter';
-  readonly version = '1.0.6';
+  readonly version = '1.0.7';
   readonly architecture = 'arm64' as const;
   lift(graph: FunctionGraph, abi: AbiProfile, context: OperationContext): Arm64LiftResult {
     if (abi.architecture !== 'arm64') throw new TypeError('ARM64 lifter requires an ARM64 ABI');

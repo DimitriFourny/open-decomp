@@ -255,3 +255,279 @@ test('SSE unordered compare sets CF/PF/ZF and clears OF/SF/AF', () => {
   for (const offset of [0, 2, 6]) assert.equal(register(result, 'rflags', 1, offset), 1n);
   for (const offset of [4, 7, 11]) assert.equal(register(result, 'rflags', 1, offset), 0n);
 });
+
+test('an unsupported instruction clobbers the modeled state, then lifting continues in the same block', () => {
+  // fld1 (x87) is unsupported; the following mov and ret are still lifted.
+  const { ir, coverage, graph } = liftBytes('d9 e8 b8 07 00 00 00 c3');
+  assert.equal(graph.blocks.length, 1);
+  const entry = ir.blocks.find((block) => block.id === ir.entry)!;
+  const kinds = entry.instructions.map((instruction) => instruction.kind);
+  const effect = kinds.indexOf('unknown_effect');
+  assert.ok(effect >= 0);
+  const write = entry.instructions.findIndex(
+    (instruction, index) =>
+      index > effect &&
+      instruction.kind === 'write_register' &&
+      instruction.register.root === 'x86_64:rax',
+  );
+  assert.ok(write > effect, 'the mov after the unsupported instruction is lifted');
+  assert.equal(entry.terminator.kind, 'return');
+  const unknown = entry.instructions[effect]!;
+  assert.ok(unknown.kind === 'unknown_effect' && unknown.clobbers.memory === 'unknown_read_write');
+  assert.equal(coverage.state, 'partial');
+  assert.equal(coverage.completed_units, graph.instructions.length - 1);
+  assert.equal(run(ir).status, 'unknown');
+  assert.deepEqual(verifyIR(ir), []);
+});
+
+test('lifting continues past an unsupported instruction into its conditional successors', () => {
+  // test eax,eax ; fld1 ; je +1 ; ret ; ret — both returns stay reachable.
+  const { ir } = liftBytes('85 c0 d9 e8 74 01 c3 c3');
+  const entry = ir.blocks.find((block) => block.id === ir.entry)!;
+  assert.ok(entry.instructions.some((instruction) => instruction.kind === 'unknown_effect'));
+  assert.equal(entry.terminator.kind, 'branch');
+  assert.equal(ir.blocks.filter((block) => block.terminator.kind === 'return').length, 2);
+});
+
+test('an unsupported instruction with a non-sequential flow still ends the block', () => {
+  // Invalid encoding (0x06 is not a long-mode opcode): no modeled successor.
+  const { ir, graph } = liftBytes('90 06 b8 07 00 00 00 c3');
+  const entry = ir.blocks.find((block) => block.id === ir.entry)!;
+  assert.equal(entry.terminator.kind, 'unknown');
+  assert.ok(entry.instructions.some((instruction) => instruction.kind === 'unknown_effect'));
+  assert.ok(
+    !entry.instructions.some(
+      (instruction) =>
+        instruction.kind === 'write_register' && instruction.register.root === 'x86_64:rax',
+    ),
+  );
+  assert.ok(graph.instructions.length >= 2);
+});
+
+const mask = (width: number): bigint => (1n << BigInt(width)) - 1n;
+const flagAt = (result: ReturnType<typeof run>, offset: number): bigint =>
+  register(result, 'rflags', 1, offset);
+
+test('BTS register forms: CF takes the old bit, the bit is set, offsets wrap at the operand width', () => {
+  // modrm c8 = bts eax/ax/rax, ecx/cx/rcx.
+  for (const [prefix, width] of [
+    ['66 ', 16],
+    ['', 32],
+    ['48 ', 64],
+  ] as const) {
+    const { ir, coverage } = liftBytes(`${prefix}0f ab c8 c3`);
+    assert.ok(!coverage.reasons.some((reason) => reason.includes('Instruction family')));
+    const initial = 0x8123456789abcdefn,
+      old = initial & mask(width);
+    for (const offset of [
+      0n,
+      1n,
+      5n,
+      BigInt(width - 1),
+      BigInt(width),
+      BigInt(width + 3),
+      0x1234567n,
+      -1n,
+    ]) {
+      const raw = BigInt.asUintN(width, offset),
+        bit = raw & BigInt(width - 1);
+      const result = run(ir, {
+        rax: initial,
+        rcx: (0xaaaaaaaaaaaaaaaan & ~mask(width)) | raw,
+        rflags: 0n,
+      });
+      const low = old | (1n << bit);
+      // 32-bit writes zero the upper half and 16-bit writes preserve it.
+      const expected = width === 16 ? (initial & ~mask(16)) | low : low;
+      assert.equal(register(result, 'rax'), expected, `${width}-bit offset ${offset}`);
+      assert.equal(cfBit(result), (old >> bit) & 1n, `${width}-bit offset ${offset} CF`);
+    }
+  }
+});
+
+function cfBit(result: ReturnType<typeof run>): bigint {
+  return flagAt(result, 0);
+}
+
+test('BTS immediate register forms use the offset modulo the operand width', () => {
+  for (const [prefix, width] of [
+    ['66 ', 16],
+    ['', 32],
+    ['48 ', 64],
+  ] as const) {
+    const initial = 0x0123456789abcdefn,
+      old = initial & mask(width);
+    for (const immediate of [0, 3, 15, 16, 31, 32, 63, 64, 200, 255]) {
+      const hex = immediate.toString(16).padStart(2, '0');
+      const { ir } = liftBytes(`${prefix}0f ba e8 ${hex} c3`); // bts eax/ax/rax, imm8
+      const result = run(ir, { rax: initial, rflags: 0n });
+      const bit = BigInt(immediate % width),
+        low = old | (1n << bit);
+      assert.equal(
+        register(result, 'rax'),
+        width === 16 ? (initial & ~mask(16)) | low : low,
+        `${width}-bit #${immediate}`,
+      );
+      assert.equal(cfBit(result), (old >> bit) & 1n);
+    }
+  }
+});
+
+test('BTS leaves ZF unchanged and makes OF/SF/AF/PF undefined', () => {
+  const { ir } = liftBytes('0f ab c8 c3');
+  for (const rflags of [0n, 1n << 6n]) {
+    const result = run(ir, { rax: 0n, rcx: 1n, rflags });
+    assert.equal(flagAt(result, 6), (rflags >> 6n) & 1n);
+    const state = result.registers.get('x86_64:rflags')!;
+    for (const offset of [2n, 4n, 7n, 11n]) assert.equal((state.undefined >> offset) & 1n, 1n);
+    for (const offset of [0n, 6n]) assert.equal((state.undefined >> offset) & 1n, 0n);
+  }
+});
+
+test('BTS on memory: an immediate offset stays inside the operand; a register offset addresses the signed bit string', () => {
+  const pattern = Uint8Array.from({ length: 0x200 }, (_, index) => (index * 37 + 11) & 255);
+  const region = (): { base: bigint; bytes: Uint8Array; writable: boolean } => ({
+    base: 0x2000n,
+    bytes: Uint8Array.from(pattern),
+    writable: true,
+  });
+  const middle = 0x2100n;
+  for (const [prefix, width] of [
+    ['66 ', 16],
+    ['', 32],
+    ['48 ', 64],
+  ] as const) {
+    // bts [rdx], rcx
+    const register_form = liftBytes(`${prefix}0f ab 0a c3`).ir;
+    for (const offset of [
+      0n,
+      1n,
+      7n,
+      8n,
+      BigInt(width - 1),
+      BigInt(width),
+      BigInt(width + 3),
+      2n * BigInt(width) + 5n,
+      -1n,
+      -8n,
+      -BigInt(width),
+      -BigInt(width) - 1n,
+      -BigInt(width) - 9n,
+      0x7ffn,
+      -0x800n,
+    ]) {
+      const result = run(
+        register_form,
+        {
+          rdx: middle,
+          rcx: (0x5555555555555555n & ~mask(width)) | BigInt.asUintN(width, offset),
+          rflags: 0n,
+        },
+        { memory: [region()] },
+      );
+      // Independent bit-string reference: byte floor(offset / 8), bit offset mod 8.
+      const expected = Uint8Array.from(pattern);
+      const index = Number(0x100n + (offset >> 3n)),
+        bit = Number(offset & 7n);
+      const old = (expected[index]! >> bit) & 1;
+      expected[index]! |= 1 << bit;
+      const output = result.memory.find((item) => item.base === 0x2000n)!;
+      assert.deepEqual(output.bytes, expected, `${width}-bit offset ${offset}`);
+      assert.equal(cfBit(result), BigInt(old), `${width}-bit offset ${offset} CF`);
+    }
+    // bts dword/word/qword [rdx], imm8: the offset wraps within the addressed operand.
+    for (const immediate of [0, 5, width - 1, width, width + 9, 255]) {
+      const hex = immediate.toString(16).padStart(2, '0');
+      const result = run(
+        liftBytes(`${prefix}0f ba 2a ${hex} c3`).ir,
+        { rdx: middle, rflags: 0n },
+        { memory: [region()] },
+      );
+      const expected = Uint8Array.from(pattern);
+      const bit = immediate % width,
+        index = 0x100 + (bit >> 3);
+      const old = (expected[index]! >> (bit & 7)) & 1;
+      expected[index]! |= 1 << (bit & 7);
+      assert.deepEqual(result.memory.find((item) => item.base === 0x2000n)!.bytes, expected);
+      assert.equal(cfBit(result), BigInt(old));
+    }
+  }
+});
+
+test('BTS sub-forms with unmodeled semantics remain explicit unknown effects', () => {
+  for (const code of [
+    'f0 0f ab 0a', // LOCK
+    '67 0f ab 0a', // register bit offset beyond a 32-bit-address operand
+  ]) {
+    const lifted = liftBytes(`${code} c3`);
+    assert.equal(lifted.coverage.state, 'partial');
+    assert.ok(
+      lifted.ir.blocks.some((block) =>
+        block.instructions.some((instruction) => instruction.kind === 'unknown_effect'),
+      ),
+      code,
+    );
+    assert.equal(run(lifted.ir, { rdx: 0x2100n, rcx: 1n }).status, 'unknown');
+  }
+  // The immediate form with a 32-bit address size is exact.
+  const exact = liftBytes('67 0f ba 2a 03 c3');
+  assert.ok(
+    !exact.ir.blocks.some((block) =>
+      block.instructions.some((instruction) => instruction.kind === 'unknown_effect'),
+    ),
+  );
+});
+
+test('PUNPCKLBW interleaves the low bytes of destination and source and preserves upper vector bits', () => {
+  const left = 0x0f0e0d0c0b0a0908_0706050403020100n,
+    right = 0x1f1e1d1c1b1a1918_1716151413121110n;
+  const high = 0xabcdn << 256n;
+  const interleave = (a: bigint, b: bigint): bigint => {
+    let result = 0n;
+    for (let index = 0n; index < 8n; index++) {
+      result |= ((a >> (8n * index)) & 255n) << (16n * index);
+      result |= ((b >> (8n * index)) & 255n) << (16n * index + 8n);
+    }
+    return result;
+  };
+  const registerForm = liftBytes('66 0f 60 c1 c3').ir; // punpcklbw xmm0, xmm1
+  let result = run(registerForm, { zmm0: high | left, zmm1: right });
+  assert.equal(register(result, 'zmm0', 128), interleave(left, right));
+  assert.equal(register(result, 'zmm0', 384, 128), high >> 128n);
+  assert.equal(register(result, 'zmm1', 128), right);
+  // Same register on both sides.
+  result = run(liftBytes('66 0f 60 c0 c3').ir, { zmm0: left });
+  assert.equal(register(result, 'zmm0', 128), interleave(left, left));
+  // Memory source: the full 128 bits are read and must be 16-byte aligned.
+  const bytes = Buffer.alloc(32);
+  bytes.writeBigUInt64LE(right & mask(64), 0);
+  bytes.writeBigUInt64LE(right >> 64n, 8);
+  const memoryForm = liftBytes('66 0f 60 01 c3').ir; // punpcklbw xmm0, [rcx]
+  result = run(
+    memoryForm,
+    { zmm0: high | left, rcx: 0x2000n },
+    { memory: [{ base: 0x2000n, bytes, writable: false }] },
+  );
+  assert.equal(register(result, 'zmm0', 128), interleave(left, right));
+  assert.equal(register(result, 'zmm0', 384, 128), high >> 128n);
+  assert.equal(
+    run(
+      memoryForm,
+      { zmm0: left, rcx: 0x2008n },
+      { memory: [{ base: 0x2000n, bytes, writable: false }] },
+    ).status,
+    'memory_fault',
+  );
+});
+
+test('only the legacy SSE PUNPCKLBW form is modeled', () => {
+  for (const code of ['0f 60 c1', 'c5 f9 60 c1']) {
+    const lifted = liftBytes(`${code} c3`);
+    assert.ok(
+      lifted.ir.blocks.some((block) =>
+        block.instructions.some((instruction) => instruction.kind === 'unknown_effect'),
+      ),
+      code,
+    );
+  }
+});

@@ -136,16 +136,16 @@ Seams are interfaces in `src/core/contracts.ts`: `Loader` (format), `Decoder` + 
 
 Measured state (docs/PERFORMANCE.md, TODO.md, CONTINUE.md): the R1–R5 readability roadmap landed; blind preference vs Ghidra is now favourable on reviewed pairs of the third held-out suite, but the correctness gate is not met and many cells produce no text (work limit, selector/discovery failures on stripped binaries). Where quality is lost, by pipeline position:
 
-| Lever                                                                                                            | Symptom                                                                          | Owning stage                                    |
-| ---------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Whole-image discovery is bounded/seeded                                                                          | Real images stay `partial (incomplete_index)`; stripped ELF/PE selector failures | [discovery](discovery.md)                       |
-| Unsupported instructions become whole-state `unknown_effect`; x86-64 also ends the block there (ARM64 continues) | Lost argument/return facts, `partial` functions                                  | [lifting-ir](lifting-ir.md)                     |
-| Escaped-object extent unknown                                                                                    | Optimized frames stay `*(T *)(entry_sp - N)`                                     | [reconstruction](reconstruction.md)             |
-| Open call arities (`...`) only closed by proof                                                                   | Indirect calls, hub functions keep `...`                                         | [calls-abi](calls-abi.md)                       |
-| Pointer-ness needs positive evidence; O0 callee spills not followed                                              | Integer-typed pointers, casts                                                    | [types-metadata](types-metadata.md)             |
-| Acyclic gotos need reaching-condition structuring                                                                | ~200 gotos on the SQLite/brotli sample                                           | [structuring-emission](structuring-emission.md) |
-| Work-limit margins are thin on large functions                                                                   | Large functions fail with no text                                                | [project-cache](project-cache.md)               |
-| Expensive callee summaries are not persisted                                                                     | Repeated cost across processes                                                   | [project-cache](project-cache.md)               |
+| Lever                                                                                         | Symptom                                                                          | Owning stage                                    |
+| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------- |
+| Whole-image discovery is bounded/seeded                                                       | Real images stay `partial (incomplete_index)`; stripped ELF/PE selector failures | [discovery](discovery.md)                       |
+| Unsupported instructions become whole-state `unknown_effect`; both lifters continue past them | Lost argument/return facts, `partial` functions                                  | [lifting-ir](lifting-ir.md)                     |
+| Escaped-object extent unknown                                                                 | Optimized frames stay `*(T *)(entry_sp - N)`                                     | [reconstruction](reconstruction.md)             |
+| Open call arities (`...`) only closed by proof                                                | Indirect calls, hub functions keep `...`                                         | [calls-abi](calls-abi.md)                       |
+| Pointer-ness needs positive evidence; O0 callee spills not followed                           | Integer-typed pointers, casts                                                    | [types-metadata](types-metadata.md)             |
+| Acyclic gotos need reaching-condition structuring                                             | ~200 gotos on the SQLite/brotli sample                                           | [structuring-emission](structuring-emission.md) |
+| Work-limit margins are thin on large functions                                                | Large functions fail with no text                                                | [project-cache](project-cache.md)               |
+| Expensive callee summaries are not persisted                                                  | Repeated cost across processes                                                   | [project-cache](project-cache.md)               |
 
 ## Glossary
 
