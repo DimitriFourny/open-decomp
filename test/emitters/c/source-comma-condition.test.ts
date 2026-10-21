@@ -73,7 +73,8 @@ for (const language of ['c-like', 'python-like'] as const)
         else if (c) assert.match(text, /&& \(\w+ = sub_4000\(\w+\), \w+ != /, text);
         // Python-like has no comma operator: the call stays a statement.
         else assert.match(text, /^\s+\w+ = sub_4000\(\w+\)$/m, text);
-        if (c || !loaded) assert.ok(rules(output.local_validation).includes('short_circuit_structure'));
+        if (c || !loaded)
+          assert.ok(rules(output.local_validation).includes('short_circuit_structure'));
         for (const [flags, result, stored] of [
           [0, 0n, 0],
           [0, 7n, 0],

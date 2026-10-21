@@ -1607,8 +1607,10 @@ class Parser {
         if (this.peek() !== ')') values.push(this.expression());
       }
       this.take(')');
-      // In a C expression a parenthesized comma list is the comma operator.
-      return this.python ? { kind: 'list', values } : { kind: 'comma', values };
+      // A C condition `(x = f(), test)`: the comma operator (other lists are tuples).
+      return !this.python && values[0]!.kind === 'assign'
+        ? { kind: 'comma', values }
+        : { kind: 'list', values };
     }
     if (token === '{' || token === '[') {
       const close = token === '{' ? '}' : ']',

@@ -368,13 +368,15 @@ for (const language of ['c-like', 'python-like'] as const)
           ),
         'resource_limit',
       );
+      // The source view structures the blocks again, so a hand-nested layout is
+      // printed as given only by the checked view.
       let body: Region = structured.value.body;
       for (let depth = 0; depth < 130; depth++) body = { kind: 'sequence', regions: [body] };
       bounded(
         () =>
           emitSelected(
             { function: { ...structured.value!, body } },
-            DEFAULT_ANALYSIS_OPTIONS,
+            { ...DEFAULT_ANALYSIS_OPTIONS, view: 'checked' },
             createOperationContext(),
           ),
         'resource_limit',

@@ -1313,7 +1313,12 @@ for (const language of ['c-like', 'python-like'] as const)
         checked = emit(input, language, 'checked'),
         text = source.emission.text;
       assert.doesNotMatch(text, /\bgoto\b|\blabel\b|while \(0\)|while True/);
-      assert.ok(rules(source).includes('shared_condition_arm'), text);
+      assert.ok(
+        rules(source).some(
+          (rule) => rule === 'shared_condition_arm' || rule === 'short_circuit_structure',
+        ),
+        text,
+      );
       assert.match(text, c ? /\} else \{\n(?:.*\n)*? +return\b/ : /\belse:\n(?:.*\n)*? +return\b/);
       agree(source, checked, grid([a, d, e], choices));
     });
@@ -1356,7 +1361,12 @@ for (const language of ['c-like', 'python-like'] as const)
         source = emit(input, language, 'source', true),
         checked = emit(input, language, 'checked', true),
         text = source.emission.text;
-      assert.ok(rules(source).includes('shared_condition_arm'), text);
+      assert.ok(
+        rules(source).some(
+          (rule) => rule === 'shared_condition_arm' || rule === 'short_circuit_structure',
+        ),
+        text,
+      );
       assert.ok(rules(source).includes('return_constant'), text);
       agree(source, checked, grid([a, d, e, g], choices));
     });

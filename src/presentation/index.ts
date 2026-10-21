@@ -1274,7 +1274,7 @@ export function structureControlFlow(
       /** The silent jump nodes from `start` to the branch they lead to, then that branch. */
       const operand = (start: CollapseNode): CollapseNode[] | null => {
         const chain: CollapseNode[] = [];
-        for (let node = start; ; ) {
+        for (let node = start; ;) {
           budget.charge();
           if (
             !node.alive ||
@@ -1299,7 +1299,9 @@ export function structureControlFlow(
         for (const edge of head.outs) {
           budget.charge();
           if (!edge.arm || edge.to === head) continue;
-          const exit = head.outs.find((item) => item.block === edge.block && item.slot === 1 - edge.slot);
+          const exit = head.outs.find(
+            (item) => item.block === edge.block && item.slot === 1 - edge.slot,
+          );
           if (!exit || blocks.get(edge.block)!.terminator.kind !== 'branch') continue;
           const clause = exit.to,
             group = exitGroups.get(exit.key);
@@ -1318,13 +1320,18 @@ export function structureControlFlow(
             stay = last.outs.find((item) => item !== leave);
           if (!leave || !stay || stay.to === head || stay.to === clause || stay.to === last)
             continue;
-          if (facts.copies(edge.block, edge.slot) || facts.copies(leave.block, leave.slot)) continue;
+          if (facts.copies(edge.block, edge.slot) || facts.copies(leave.block, leave.slot))
+            continue;
           if (!group && facts.copies(exit.block, exit.slot)) continue;
           const depth = chain.reduce((total, node) => total + node.depth, 0);
           if (graph.base + Math.max(head.depth, edge.level + depth) >= maxDepth) continue;
           for (const next of chain.slice(1)) sequence(graph, chain[0]!, next);
           apply(graph, head, { kind: 'arm', edge });
-          const members = group ?? { head: exit.key, members: new Set([exit.key]), any: exit.slot === 0 };
+          const members = group ?? {
+            head: exit.key,
+            members: new Set([exit.key]),
+            any: exit.slot === 0,
+          };
           members.members.add(leave.key);
           members.any &&= leave.slot === 0;
           exitGroups.set(exit.key, members);
@@ -1426,7 +1433,9 @@ export function structureControlFlow(
           return {
             transfer: options.transfers?.(id, slot) ?? { ...value, mode: 'next' },
             body: region(body),
-            ...(shared?.head === key ? { shared: shared.any ? ('any' as const) : ('all' as const) } : {}),
+            ...(shared?.head === key
+              ? { shared: shared.any ? ('any' as const) : ('all' as const) }
+              : {}),
           };
         return shared ? { transfer: value, joins: true } : { transfer: value };
       };
@@ -1528,7 +1537,12 @@ export function structuredGraph(
     let terminator: Terminator;
     switch (control.kind) {
       case 'jump':
-        terminator = { ...origin, effect: control.effect, kind: 'jump', edge: edge(control.transfer) };
+        terminator = {
+          ...origin,
+          effect: control.effect,
+          kind: 'jump',
+          edge: edge(control.transfer),
+        };
         break;
       case 'if':
         terminator = {

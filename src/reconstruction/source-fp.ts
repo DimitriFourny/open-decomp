@@ -265,8 +265,10 @@ export function sourceFpPresentation(
         },
       };
       // Blocks laid out after the failure block in its arm are entered by labels only.
-      const regions = [block, ...[no.body, yes.body].flatMap((item) => (item ? [rewrite(item)] : []))]
-        .filter((child) => child.kind !== 'sequence' || child.regions.length > 0);
+      const regions = [
+        block,
+        ...[no.body, yes.body].flatMap((item) => (item ? [rewrite(item)] : [])),
+      ].filter((child) => child.kind !== 'sequence' || child.regions.length > 0);
       return regions.length === 1 ? block : { kind: 'sequence', regions };
     }
     const arm = (item: ControlArm): ControlArm =>
