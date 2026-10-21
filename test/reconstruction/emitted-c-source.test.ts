@@ -563,7 +563,8 @@ __attribute__((noinline, used)) void bump(struct node *p, uint32_t k) {
         {
           name: 'bump',
           formals: 2,
-          text: [/^\s*for \(\w+ = [^;]+; \w+ != 0; \w+ = [^;]+\) \{$/m],
+          // The init is empty when the formal shares the loop variable (G1 partition).
+          text: [/^\s*for \((?:\w+ = [^;]+)?; \w+ != 0; \w+ = [^;]+\) \{$/m],
           python: [/^\s*while \w+ != 0:$/m],
           driver: `  for (unsigned start = 0; start <= 4; start++) {
     struct node a[4] = {{&a[1], 5}, {&a[2], 0}, {&a[3], 0xffffffffu}, {0, 9}};
