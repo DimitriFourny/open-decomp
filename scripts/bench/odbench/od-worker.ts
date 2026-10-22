@@ -82,12 +82,14 @@ const suffix =
 async function main(): Promise<void> {
   const started = performance.now();
   let session: Api.BinarySession;
+  let openFinished: number;
   try {
     // Runtime-selected module: the measured checkout is a parameter, so a static import cannot work.
     const api = (await import(request.api)) as typeof Api;
     const openStarted = performance.now();
     session = await api.openBinary(request.input, { cachePath: request.cachePath });
-    emit({ kind: 'open', import_ms: performance.now() - openStarted });
+    openFinished = performance.now();
+    emit({ kind: 'open', import_ms: openFinished - openStarted });
   } catch (error) {
     emit({ kind: 'open_error', message: message(error) });
     process.stderr.write(`od: ${request.binary} open failed: ${message(error)}\n`);
@@ -125,6 +127,7 @@ async function main(): Promise<void> {
         state: notFound ? 'not_found' : outcome.state,
         reason: outcome.reason,
         ms,
+        at_ms: performance.now() - openFinished,
         text: outcome.text,
         work: outcome.work,
         diagnostics: outcome.diagnostics,
@@ -142,6 +145,7 @@ async function main(): Promise<void> {
       kind: 'done',
       cold_ms: performance.now() - started,
       decompile_ms_total: decompileTotal,
+      worker_peak_rss_bytes: process.resourceUsage().maxRSS * 1024,
     });
   } finally {
     await session.close();
