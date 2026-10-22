@@ -117,7 +117,9 @@ export function prepareNativeContext(
     input.components.abi.layout,
   );
   const limit = Math.floor((context.remainingWork?.() ?? context.budget.work) / 4);
-  let used = 0;
+  let used = 0,
+    // As in `prepareNativeUnit`: set whenever the limit throws.
+    limited = baseline.limited;
   const local: OperationContext = {
     ...context,
     budget: { ...context.budget, work: limit },
@@ -126,6 +128,7 @@ export function prepareNativeContext(
     checkpoint(work) {
       if (used + work > limit) {
         context.checkpoint(0);
+        limited = true;
         throw new OperationError({
           code: 'resource_limit',
           severity: 'warning',
@@ -188,6 +191,7 @@ export function prepareNativeContext(
     )
       throw error;
     context.checkpoint(0);
+    limited = true;
     types = null;
     analysis = null;
     reasons.push(`native context optional type work limit (${limit})`);
@@ -279,6 +283,7 @@ export function prepareNativeContext(
     generic_result,
     dependencies,
     reasons,
+    limited,
     demand_index,
     interface_index,
     evidence: [...baseline.evidence, ...(types?.evidence ?? []), proof],

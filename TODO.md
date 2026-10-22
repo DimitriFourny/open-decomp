@@ -155,19 +155,20 @@ Files that several items touch:
 
 ## M2: Speed rows that match the D8 target
 
-- [ ] **Problem.** The scorecard's cold time adds opening and decompiling, but the target (D8) compares the decompile time after open with Ghidra's whole run (import, analysis and decompiles), and asks for quick first decompiles. The report has neither row, no worker memory figure and no parallel OD lane: the lane header always records `jobs: 1` (`scripts/bench/odbench/lane-od.ts:257`).
+- [x] **Problem.** The scorecard's cold time adds opening and decompiling, but the target (D8) compares the decompile time after open with Ghidra's whole run (import, analysis and decompiles), and asks for quick first decompiles. The report has neither row, no worker memory figure and no parallel OD lane: the lane header always records `jobs: 1` (`scripts/bench/odbench/lane-od.ts:257`).
   - **Change** (`scripts/bench/odbench/`):
     - `od-worker.ts`/`lane-od.ts`: record per binary `open_ms` (`openBinary`, including the T8 job once it exists, with the job's own time as `open_job_ms`), `first10_ms` (wall time from open to the 10th corpus function's result, in corpus order), the existing `decompile_ms_total`, and the peak RSS of every process.
     - `--jobs N`: decompile one binary's functions with N request workers over one opened project (needs T9; until T9 lands it accepts only 1). The lane header records N.
     - `report.ts`, scorecard and section 8: per binary and in total, OD decompile time after open against Ghidra's `cold_ms`, the ratio and the D8 threshold (1.25×); `first10_ms` against 5 s on SQLite; open time and peak RSS as reported values. Keep the existing cold-time row.
   - **Tests:** odbench unit tests in `test/bench/`: the ratio and threshold rows from a synthetic lane, and `--jobs 1` lanes re-render unchanged.
   - **Acceptance:** `bench report` on the existing lanes shows SQLite 121.4 s vs 38.7 s (3.13×) and the total 140 s vs 87 s (1.61×) without a model call; a new `od` run records `first10_ms` and peak RSS.
+  - **Done:** `bench report --lanes od-rm3-final,source --tier full` (from caches) shows SQLite 121.4 s vs 38.7 s (3.13×) and total 140.0 s vs 86.7 s (1.62×; 1.61× is the rounded 140/87); an `od` run (`od-rm4-m2`, loaded host) records `first10_ms`, `open_ms` and per-process peak RSS with texts byte-identical to `od-rm3-final`; `test/bench/odbench-speed.test.ts`.
 
 ## C: Coverage and failures
 
 ### C1: No edge copy into a proven stack-address phi
 
-- [ ] **Problem.** `sqlite3CodeRowTrigger` (`0x1000d41a8`) fails in both views with "Reconstruction invariant failed: a parallel edge copy has an invalid destination or width". `isDate` hits the same failure once A1 lands.
+- [x] **Problem.** `sqlite3CodeRowTrigger` (`0x1000d41a8`) fails in both views with "Reconstruction invariant failed: a parallel edge copy has an invalid destination or width". `isDate` hits the same failure once A1 lands. **Done:** `sqlite3CodeRowTrigger` now has text in both views (310 source lines, 5.85M work in lane `od-rm4-c1`); lane diff vs `od-rm3-final` is that one new text, every other text byte-identical (reconstruction 78 → 79).
   - **Root cause:**
     - `planSourceStack` proves that a loop phi is one frame address on every edge (`source-stack.ts:659-667`); here x28 carries `x29 − 0xb0`.
     - `reconstructView` therefore marks every `sourceStack.addresses` id inline (`src/reconstruction/index.ts:1043`).
@@ -185,7 +186,7 @@ Files that several items touch:
 
 ### C2: Exhausted validation never degrades the text
 
-- [ ] **Problem:**
+- [x] **Problem:** _(Done: lane `od-rm4-c2` at 10M: brotli `main` 55,953 → 46,419 B, `isDate` 112,543 → 81,332 B, `Incrmerge` 80,331 → 56,081 B, `boundary(` 9/27/23 → 0; every other text byte-identical to `od-rm3-final`; checked view identical; `sqlite3Select` at 40M renders in one attempt per metadata mode, then stops at the evidence catalog bound (C3).)_
   - 59 `boundary("unknown_read_write", {"arm64:x0:0:64", … 60 registers})` statements (67.7 KB) in brotli `main` (9), `isDate` (27) and `sqlite3Fts3Incrmerge` (23);
   - up to 5 full render attempts (5.3M work on `sqlite3Select` at 40M);
   - a latent "A comma statement printed a line" failure behind `sqlite3Select`/`sqlite3Pragma`.
@@ -506,7 +507,7 @@ Files that several items touch:
 
 ### F1: FP-environment epoch webs: coinductive acceptance and mark-based unobserved epochs
 
-- [ ] **Problem.** In functions with a call inside a loop, every FPCR guard, failure effect, `unknown_exit("Unsupported FPCR environment")` and `fp_*` helper stays printed. `rtreeInsertCell` has 19 `requirement_predicate` guards and 3 `unknown_value("uint32_t", "call clobbers fpcr")` (lexical tokens 6,360 vs Ghidra's 3,144). Undeclared `value0 = unknown_value("bits32_t", "FPCR environment");` assignments in `sqlite3_result_double` and `cume_distValueFunc` do not compile.
+- [x] **Problem.** In functions with a call inside a loop, every FPCR guard, failure effect, `unknown_exit("Unsupported FPCR environment")` and `fp_*` helper stays printed. `rtreeInsertCell` has 19 `requirement_predicate` guards and 3 `unknown_value("uint32_t", "call clobbers fpcr")` (lexical tokens 6,360 vs Ghidra's 3,144). Undeclared `value0 = unknown_value("bits32_t", "FPCR environment");` assignments in `sqlite3_result_double` and `cume_distValueFunc` do not compile. _Done (`wt/rm4-f1`): lane `od-rm4-f1` differs from `od-main-56a18f1` in exactly the three acceptance texts (`rtreeInsertCell` 6,336 → 5,311 lexical tokens with 0 guards/exits/placeholders/`fp_*`, 6,360 → 5,335 against `od-rm3-final`; `sqlite3_result_double` 123 → 114, `cume_distValueFunc` 182 → 173); checked view byte-identical on those three and three unchanged FP-note functions; states unchanged; `rtreeInsertCell` work 7,045,301 → 7,022,449._
   - **Root cause:**
     - `sourceFpPresentation` returns `unchanged` unless every guard's epoch is assumed. `assumedEpoch` is inductive and rejects cycles (`src/reconstruction/source-fp.ts:146-160`, `:149`), and a loop with a call makes the FPCR loop phi depend on itself.
     - `unobserved` (`:209-238`) is a reference count that never releases a cycle, and it marks only call outputs (`:234`).
@@ -702,7 +703,7 @@ Files that several items touch:
 
 ### E1: Rematerialize constant-offset derived pointers; print byte-pointer sums without `uintptr_t`
 
-- [ ] **Problem.** The texts contain 202 temporaries of the form `x = (T*)((uintptr_t)b ± k)` and 436 dereferences `*(T *)((uintptr_t)x + k)`. Example: `sqlite3_collation_needed16` prints `address_1 = (uint8_t*)((uintptr_t)address + 0x190); *(uint64_t *)address_1 = 0; *(uint64_t *)((uintptr_t)address_1 + 8) = arg2;` (an ARM64 `stp` with a computed base). Ghidra prints `*(undefined8 *)(param_1 + 400)`.
+- [x] **Problem.** The texts contain 202 temporaries of the form `x = (T*)((uintptr_t)b ± k)` and 436 dereferences `*(T *)((uintptr_t)x + k)`. Example: `sqlite3_collation_needed16` prints `address_1 = (uint8_t*)((uintptr_t)address + 0x190); *(uint64_t *)address_1 = 0; *(uint64_t *)((uintptr_t)address_1 + 8) = arg2;` (an ARM64 `stp` with a computed base). Ghidra prints `*(undefined8 *)(param_1 + 400)`. _Done (E1): OD lane vs `od-main-afb7691`: 58 texts changed, 57 shorter (−3.1k regex-lexer tokens); `sqlite3_collation_needed16` prints `address->field_0x190 = 0; address->field_0x198 = arg2;`, `sqlite3PagerSavepoint` `address_10->field_0x1e0 = 0;` (−437), `vdbePmaReaderClear` `+ 64`; states unchanged, checked view unchanged; brotli `main` needs C2 first (shared 256-record bound)._
   - **Root cause:**
     - The renderer repeats `x ± k` only inside one reader statement (`src/emitters/source-inlining.ts:585-616`, gate at `:616`).
     - `memberAccess` builds fields only through inline bases (`renderer.ts:3146`).
@@ -793,7 +794,7 @@ Files that several items touch:
 
 ### E5: Fold the bitfield-move aliases (SXTB/SXTH/SXTW, SBFIZ/UBFIZ, SBFX)
 
-- [ ] **Problem.** 25 sign-fill selects such as `((x >> 0x1f) & 1 ? 0xffffffffffffffff : 0) & 0xffffffff00000000) | (x & 0xffffffff)` and 5 rotate-as-shift idioms in 15 functions, each 15–35 tokens. Judges cite `btreeOverwriteContent`, `openStatTable` and `fts3MatchinfoLcsCb`.
+- [x] **Problem.** 25 sign-fill selects such as `((x >> 0x1f) & 1 ? 0xffffffffffffffff : 0) & 0xffffffff00000000) | (x & 0xffffffff)` and 5 rotate-as-shift idioms in 15 functions, each 15–35 tokens. Judges cite `btreeOverwriteContent`, `openStatTable` and `fts3MatchinfoLcsCb`. _Done (`wt/rm4-e5`): fields of 8/16/32 bits starting at bit 0 fold (SXTB/SXTH/SXTW, SBFIZ, UBFIZ); SBFX/UBFX and odd widths keep their lowering (the division and signed-shift recognizers read them, and odd widths print as xor/subtract pairs). Lane `od-rm4-e5` vs `od-main-afb7691`: 61 sign-fill selects and 7 rotate idioms fold in 28 functions (30 texts change, all of them by these folds; 14 selects and 10 rotates remain in other shapes); `btreeOverwriteContent` prints `(uint64_t)count` (`count` is an `int32_t` formal) and `size = (uint64_t)(int32_t)size`; `fts3MatchinfoLcsCb` prints `*(uint64_t *)((uintptr_t)arg2 + ((uint64_t)arg1 << 5))` with `int32_t arg1`; checked view byte-identical; reconstruction 80, fingerprints unchanged._
   - **Root cause:** the generic SBFM/UBFM lowering (`src/lifters/arm64/semantics.ts:332-353`). `foldShiftIdiom` (`src/reconstruction/source-shifts.ts:121-171`) folds only masks equal to the whole non-wrapped part.
   - **Change:** in `foldShiftIdiom` or a sibling rule in `EXPRESSION_RULES` (`source-rules.ts:632-652`), with masks equal to the field exactly:
     - (i) `(select(bit_s(x), ~0, 0) & ~mask(s+1)) | (x & mask(s+1))` → `sign_extend(trunc_{s+1}(x))`;
@@ -978,7 +979,7 @@ Files that several items touch:
 
 ### T2: Charge-exact reuse and an explicit `limited` flag
 
-- [ ] **Problem.** Charged work depends on history:
+- [x] **Problem.** Charged work depends on history: _(done: `PreparedNativeUnit.limited` set at every preparation limit and when the variadic footprint is cut; footprint limits no longer allowance-derived; context evidence scope content-derived instead of the random project ID (the real cause of run-to-run work noise); reused record index records its build's reads. Two full odbench runs of one build give identical per-function work; 45 functions' work and 1 text (`matrix_checksum` PE O0: open-arity note for a limited `adler32_z`) changed vs `od-main-afb7691`.)_
   - `_sqlite3Initialize` charges 275,857 at its first preparation and 278,384 in 46 later ones;
   - `_sqlite3_config` charges 333,203, 294,349 or 246,292 depending on the load;
   - about 21 SQLite functions differ in work between two runs of one build.

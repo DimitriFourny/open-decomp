@@ -97,15 +97,16 @@ Printing:
 
 ### 3. Retry and fallback under limits
 
-| limit                                    | behaviour                                                                                                          |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| structuring work or cancellation         | the operation fails; no partial text                                                                               |
-| selection allowance, depth               | more labels, still correct                                                                                         |
-| a held single-use call misses its reader | `CallInliningRetry`: render again with those calls as statements; the 5th attempt prints every call as a statement |
-| metadata bound                           | rerun without metadata, same text                                                                                  |
-| presentation record bound                | the rewrite is skipped                                                                                             |
-| optional searches                        | at most 1/16 of the remaining work each; keep the best found so far                                                |
-| text over `output_bytes`                 | `resource_limit`, never truncated text                                                                             |
+| limit                                    | behaviour                                                                                                           |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| structuring work or cancellation         | the operation fails; no partial text                                                                                |
+| selection allowance, depth               | more labels, still correct                                                                                          |
+| a held single-use call misses its reader | `CallInliningRetry`: render again with those calls as statements; the 5th attempt prints every call as a statement  |
+| metadata bound                           | rerun without metadata, same text                                                                                   |
+| presentation record bound                | the rewrite is skipped; a call becomes a comma operand only after its `call_effects` record is admitted at planning |
+| validation allowance exhausted           | later phi-copy checks fold into one `parallel-copy` limitation record, so the record bound stays available          |
+| optional searches                        | at most 1/16 of the remaining work each; keep the best found so far                                                 |
+| text over `output_bytes`                 | `resource_limit`, never truncated text                                                                              |
 
 Attempts share one reconstruction, validated once; each forks the validation session.
 

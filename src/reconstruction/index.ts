@@ -1027,7 +1027,10 @@ function reconstructView(
         copy.destination.id !== copy.source.id &&
         // Source aliases are immutable expressions, including aliases normalized
         // to constants. They are not phi storage assigned by an edge transfer.
-        !sourcePlan?.forcedInline.has(copy.destination.id)
+        !sourcePlan?.forcedInline.has(copy.destination.id) &&
+        // A proven stack-address parameter prints as its frame address, and
+        // every incoming value carries the same offset: no edge assigns it.
+        !sourceStack?.addresses.has(copy.destination.id)
       );
     });
     transfers.set(transfer, copies);
