@@ -178,6 +178,72 @@ function subtract(ranges: readonly ByteRange[], holes: readonly ByteRange[]): By
   return result;
 }
 
+/** Most instructions `pageOffsets` follows after an ADRP. */
+const PAGE_SCAN = 32;
+
+/** The page offsets an ADRP into `register` is added to before its page value dies: a
+ * linear scan of the following words (`from` up to `end`, byte offsets into `view`)
+ * tracking the registers that hold the page. A 64-bit ADD immediate of a tracked
+ * register lists its offset (the sum is a fully known address: further arithmetic on
+ * it stays inside the object it designates, C pointer provenance); register moves copy
+ * the page; unsigned-offset loads and stores may use it as a base; loads and MOVZ/MOVN
+ * overwrite it. Any other instruction naming a tracked register in an operand field,
+ * a branch, a store of the page, the scan bound or the end of the bytes with the page
+ * still tracked leaves its use unknown (undefined). */
+function pageOffsets(
+  view: DataView,
+  from: number,
+  end: number,
+  register: number,
+): number[] | undefined {
+  const offsets: number[] = [];
+  if (register === 31) return offsets;
+  const tracked = new Set<number>([register]);
+  for (let at = from, count = 0; tracked.size; at += 4, count++) {
+    if (count === PAGE_SCAN || at + 4 > end) return undefined;
+    const word = view.getUint32(at, true),
+      rd = word & 31,
+      rn = (word >>> 5) & 31;
+    if ((word & 0xffc00000) >>> 0 === 0x91000000) {
+      // ADD Xd, Xn, #imm12
+      if (tracked.has(rn)) offsets.push((word >>> 10) & 0xfff);
+      tracked.delete(rd);
+      continue;
+    }
+    if ((word & 0xffe0ffe0) >>> 0 === 0xaa0003e0) {
+      // MOV Xd, Xm (ORR Xd, XZR, Xm)
+      if (tracked.has((word >>> 16) & 31)) tracked.add(rd);
+      else tracked.delete(rd);
+      continue;
+    }
+    if ((word & 0x3b000000) >>> 0 === 0x39000000) {
+      // Load/store, unsigned immediate offset: a tracked base is a memory access. SIMD&FP
+      // transfers and PRFM name no general register in Rt.
+      if (word & 0x04000000 || (word >>> 30 === 3 && ((word >>> 22) & 3) === 2)) continue;
+      if ((word >>> 22) & 3) tracked.delete(rd);
+      else if (tracked.has(rd)) return undefined;
+      continue;
+    }
+    if ((word & 0x1f800000) >>> 0 === 0x12800000 && ((word >>> 29) & 3) !== 3) {
+      // MOVN / MOVZ
+      tracked.delete(rd);
+      continue;
+    }
+    const branch =
+      (word & 0x7c000000) >>> 0 === 0x14000000 ||
+      (word & 0x7e000000) >>> 0 === 0x34000000 ||
+      (word & 0x7e000000) >>> 0 === 0x36000000 ||
+      (word & 0xff000010) >>> 0 === 0x54000000 ||
+      word >>> 25 === 0x6b;
+    if (
+      branch ||
+      [rd, rn, (word >>> 10) & 31, (word >>> 16) & 31].some((field) => tracked.has(field))
+    )
+      return undefined;
+  }
+  return offsets;
+}
+
 function buildCallerSiteIndex(
   image: LoadedImage,
   functions: readonly FunctionRecord[],
@@ -256,11 +322,12 @@ function buildCallerSiteIndex(
   if (image.target.architecture === 'arm64') {
     // Linear 4-byte sweep: BL (100101) and B (000101) with a 26-bit word offset. The same
     // words also record every other way an instruction reaches or materializes an entry.
-    const adr = new Set<bigint>(),
-      pages = new Set<bigint>(),
+    const materialized = new Set<bigint>(),
+      unpaired = new Set<bigint>(),
       offsets = new Set<number>(),
       falls = new Set<bigint>(),
       conditional: { readonly address: bigint; readonly target: bigint }[] = [];
+    const entryPages = new Set(entryOrder.map((entry) => entry & ~0xfffn));
     for (const section of sections) {
       const base = section.virtual_range.start.value,
         size = section.virtual_range.size;
@@ -283,7 +350,7 @@ function buildCallerSiteIndex(
             opcode !== 0x25 &&
             opcode !== 0x05 &&
             !((word >>> 25) === 0x6b && ((word >>> 21) & 0xf) !== 1 && ((word >>> 21) & 0xf) !== 9) &&
-            (word & 0xff80001f) !== 0xd4000000 &&
+            (word & 0xff80001f) >>> 0 !== 0xd4000000 &&
             word >>> 16 !== 0
           )
             falls.add(address + 4n);
@@ -292,9 +359,17 @@ function buildCallerSiteIndex(
               // ADR / ADRP: a 21-bit immediate, immhi:immlo.
               let imm = (((word >>> 5) & 0x7ffff) << 2) | ((word >>> 29) & 3);
               if (imm & 0x100000) imm -= 0x200000;
-              if (word & 0x80000000) pages.add((address & ~0xfffn) + (BigInt(imm) << 12n));
-              else adr.add(address + BigInt(imm));
-            } else if ((word & 0xffc00000) === 0x91000000) offsets.add((word >>> 10) & 0xfff);
+              if (!(word & 0x80000000)) materialized.add(address + BigInt(imm));
+              else {
+                const page = (address & ~0xfffn) + (BigInt(imm) << 12n);
+                if (entryPages.has(page)) {
+                  const added = pageOffsets(view, offset + 4, last, word & 0x1f);
+                  if (added) for (const low of added) materialized.add(page + BigInt(low));
+                  else unpaired.add(page);
+                }
+              }
+            } else if ((word & 0xffc00000) >>> 0 === 0x91000000)
+              offsets.add((word >>> 10) & 0xfff);
             else if (
               (word & 0xff000010) === 0x54000000 ||
               (word & 0x7e000000) === 0x34000000 ||
@@ -320,9 +395,9 @@ function buildCallerSiteIndex(
     for (const entry of entryOrder) {
       const low = Number(entry & 0xfffn);
       if (falls.has(entry)) escaped.set(entry, 'the preceding instruction may fall through');
-      else if (adr.has(entry)) escaped.set(entry, 'an ADR materializes the entry');
-      else if (pages.has(entry & ~0xfffn) && (low === 0 || offsets.has(low)))
-        escaped.set(entry, 'an ADRP of the entry page may pair with an ADD of its offset');
+      else if (materialized.has(entry)) escaped.set(entry, 'an ADR or ADRP+ADD materializes it');
+      else if (unpaired.has(entry & ~0xfffn) && (low === 0 || offsets.has(low)))
+        escaped.set(entry, 'an unfollowed ADRP of the entry page may pair with an ADD of its offset');
     }
     for (const { address, target } of conditional) {
       // A loop back to a function's own entry stays inside it; only exact extents

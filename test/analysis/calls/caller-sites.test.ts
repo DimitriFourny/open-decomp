@@ -342,3 +342,81 @@ test('x86-64 sites come from the discovered reference index and are complete onl
     );
   }
 });
+
+test('the ARM64 sweep records entries reached other than by a listed BL/B', () => {
+  const { image, at } = arm64Fixture();
+  const adr = (from: number, to: number, rd: number) => {
+    const imm = (to - from) & 0x1fffff;
+    return (0x10000000 | ((imm & 3) << 29) | (((imm >> 2) & 0x7ffff) << 5) | rd) >>> 0;
+  };
+  const cbz = (from: number, to: number, rt: number) =>
+    (0xb4000000 | ((((to - from) / 4) & 0x7ffff) << 5) | rt) >>> 0;
+  // ADR materializes `adr_target`; ADRP of its page plus `add #4` may materialize
+  // `page_target` (VA 0x1004); a CBZ from `user` reaches `cond_target`; `fall_target`
+  // follows a `mov` that may fall through; `loop` branches back to its own entry.
+  const layout: readonly (readonly [string, number, readonly number[]])[] = [
+    ['adr_target', 0x00, [RET]],
+    ['page_target', 0x04, [RET]],
+    ['cond_target', 0x08, [RET]],
+    ['before_fall', 0x0c, [0x52800020 /* mov w0, #1 */]],
+    ['fall_target', 0x10, [RET]],
+    ['loop', 0x14, [0xb5000000 /* cbnz x0, loop */, RET]],
+    ['clean', 0x1c, [RET]],
+    [
+      'user',
+      0x20,
+      [adr(0x20, 0x00, 0), 0x90000001 /* adrp x1, page */, 0x91001021 /* add x1, x1, #4 */],
+    ],
+  ];
+  const end = 0x34;
+  const bytes = Buffer.alloc(end);
+  for (const [, offset, values] of layout)
+    values.forEach((word, index) => bytes.writeUInt32LE(word >>> 0, offset + index * 4));
+  bytes.writeUInt32LE(cbz(0x2c, 0x08, 2), 0x2c);
+  bytes.writeUInt32LE(RET, 0x30);
+  const functions = layout.map(
+    ([name, offset]): FunctionRecord => ({
+      id: entityIdentity(image.selected_slice_id, 'function', [BASE + BigInt(offset)]),
+      original_name: name,
+      display_name: null,
+      evidence_ids: [],
+      entry: at(offset),
+      ranges: [{ start: at(offset), size: 4n }],
+      boundary: 'established',
+      signature: null,
+      analysis: 'partial',
+    }),
+  );
+  const text = image.sections[0]!;
+  const built = (starts: boolean) => {
+    const variant: LoadedImage = {
+      ...image,
+      bytes: new ImmutableBytes(Uint8Array.from(bytes)),
+      sections: [
+        {
+          ...text,
+          virtual_range: { start: at(0), size: BigInt(end) },
+          file_range: { ...text.file_range!, size: BigInt(end) },
+        },
+      ],
+      hints: starts
+        ? layout.map(([, offset]) => ({
+            kind: 'function' as const,
+            address: at(offset),
+            size: null,
+            evidence_ids: [],
+          }))
+        : [],
+    };
+    return callerSiteIndex(variant, functions, [], false, createOperationContext());
+  };
+  const escaped = (starts: boolean) =>
+    [...built(starts).escaped.keys()].map((entry) => Number(entry - BASE)).sort((a, b) => a - b);
+  const complete = built(true);
+  assert.equal(complete.starts_complete, true);
+  assert.deepEqual(escaped(true), [0x00, 0x04, 0x08, 0x10]);
+  // Without complete function starts a branch to an entry may come from an
+  // undiscovered function, so the loop's own back edge also escapes.
+  assert.equal(built(false).starts_complete, false);
+  assert.deepEqual(escaped(false), [0x00, 0x04, 0x08, 0x10, 0x14]);
+});
