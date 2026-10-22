@@ -1,6 +1,6 @@
 import {
-  entityIdSchema,
-  evidenceIdSchema,
+  isEntityId,
+  isEvidenceId,
   machineAddressSchema,
   machineRangeSchema,
   registerSchema,
@@ -225,7 +225,7 @@ export function verifyIR(
   const identities = new Set<string>();
   const identify = (id: string): void => {
     checkpoint?.(1);
-    if (!entityIdSchema.safeParse(id).success || identities.has(id))
+    if (!isEntityId(id) || identities.has(id))
       report('identity', id, 'Malformed or duplicate entity identity');
     identities.add(id);
   };
@@ -250,8 +250,8 @@ export function verifyIR(
       facts = {
         missing: p.instruction_ids.length === 0 && p.synthetic.length === 0,
         invalid:
-          p.instruction_ids.some((id) => !entityIdSchema.safeParse(id).success) ||
-          p.evidence_ids.some((id) => !evidenceIdSchema.safeParse(id).success) ||
+          p.instruction_ids.some((id) => !isEntityId(id)) ||
+          p.evidence_ids.some((id) => !isEvidenceId(id)) ||
           p.synthetic.some((reason) => reason.trim().length === 0) ||
           p.ranges.some(
             (range) => !machineRangeSchema.safeParse(range).success || range.size === 0n,
@@ -579,7 +579,7 @@ export function verifyIR(
           for (const arg of instruction.arguments) reference(arg, instruction.id);
           for (const result of instruction.results) define(result);
           clobbers(instruction.clobbers, instruction.id);
-          if (instruction.contract_evidence.some((id) => !evidenceIdSchema.safeParse(id).success))
+          if (instruction.contract_evidence.some((id) => !isEvidenceId(id)))
             report('provenance', instruction.id, 'Invalid call contract evidence');
           if (
             instruction.contract_evidence.length === 0 &&
