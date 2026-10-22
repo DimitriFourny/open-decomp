@@ -83,7 +83,7 @@ export function nativeDependencies(
   const demand =
     ir.form === 'ssa'
       ? observeCallResultDemands(ir, input.components.abi, context, [], demandIndex)
-      : new Map();
+      : undefined;
   const result: NativeDependency[] = [];
   const definitions = new Map(
     ir.blocks.flatMap((block) =>
@@ -138,7 +138,8 @@ export function nativeDependencies(
         result.push({
           call_id: node.id,
           target: targets[0]!,
-          return_demand: demand.get(node.id) ?? [],
+          return_demand: demand?.all.get(node.id) ?? [],
+          return_demand_semantic: demand?.semantic.get(node.id) ?? [],
           evidence_ids: [...new Set([...callerProofs, ...node.provenance.evidence_ids])],
           original_subject_ids: [ir.id, node.id, ...node.provenance.instruction_ids],
           ...(assumptions ? { assumptions } : {}),
