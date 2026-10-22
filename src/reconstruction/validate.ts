@@ -41,6 +41,28 @@ function transfers(program: Reconstruction, id: string): readonly ParallelTransf
   }
 }
 
+/** A recombined whole register parameter that the edge carries unchanged: the target's
+ * parameters aliased to its slices cover every bit, and the original edge copies each of
+ * them to itself (the whole's own identity copy is not printed). */
+function carriedWhole(
+  program: Reconstruction,
+  parameters: readonly Value[],
+  transfer: ParallelTransfer,
+  whole: Value,
+  context: OperationContext,
+): boolean {
+  let covered = 0n;
+  for (const cell of parameters) {
+    context.checkpoint(1);
+    const expression = program.expressions.get(cell.id);
+    if (expression?.kind !== 'extract' || expression.value.id !== whole.id) continue;
+    if (transfer.copies.find((copy) => copy.destination.id === cell.id)?.source.id !== cell.id)
+      return false;
+    covered |= ((1n << BigInt(bitWidth(cell.type))) - 1n) << BigInt(expression.offset);
+  }
+  return covered === (1n << BigInt(bitWidth(whole.type))) - 1n;
+}
+
 /** Check the published projection, not merely the verified input SSA. Unknown
  * values are legitimate expressions; missing definitions and result bits are not. */
 export function validateReconstruction(program: Reconstruction, context: OperationContext): void {
@@ -142,7 +164,11 @@ export function validateReconstruction(program: Reconstruction, context: Operati
         context.checkpoint(1);
         if (!program.live.has(parameter.id) || program.inline.has(parameter.id)) continue;
         const original = transfer.copies.find((copy) => copy.destination.id === parameter.id);
-        if (!destinations.has(parameter.id) && original?.source.id !== parameter.id)
+        if (
+          !destinations.has(parameter.id) &&
+          original?.source.id !== parameter.id &&
+          !carriedWhole(program, target.parameters, transfer, parameter, context)
+        )
           invalid(block.control, 'a live successor value has no edge-specific assignment');
       }
     }

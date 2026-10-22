@@ -10,6 +10,7 @@ import { X86Decoder } from '../../decoders/x86_64/index.js';
 import { discoverFunctions, prepareDiscoveryIndex } from '../../analysis/discovery/index.js';
 import type { DiscoveryIndex } from '../../analysis/discovery/index.js';
 import { libraryNoreturnCalls } from '../../metadata/library-contracts/index.js';
+import { targetAbi } from '../analysis/versions.js';
 import { queryFailure } from './shared.js';
 
 const indexes = new WeakMap<
@@ -109,6 +110,7 @@ export function reconstructFunctionGraph(
         index: prepared.index,
         selected_entry: fn.entry,
         noreturn_calls: prepared.noreturn_calls,
+        preserved_registers: targetAbi(image.target)?.preserved ?? [],
       },
       measured,
     );
