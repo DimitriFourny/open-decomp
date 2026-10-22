@@ -5880,17 +5880,20 @@ export class Renderer {
   }
 
   /** Edge copies actually printed: the variable partition's `edgeCopies`, less
-   * copies forwarded into returned constants. */
+   * copies forwarded into returned constants and copies into FP-environment
+   * epochs that only omitted guards read (`fp_unobserved_epoch`). */
   private printedCopies(
     transfer: ParallelTransfer,
   ): readonly { readonly destination: Value; readonly source: Value }[] {
-    const all = this.program.transfers.get(transfer) ?? [];
-    const forwarded = this.forwardedCopies.get(transfer);
+    const forwarded = this.forwardedCopies.get(transfer),
+      unobserved = this.fpPresentation.unobserved;
     return edgeCopies(
       this.program,
       this.variables,
       this.inline,
-      forwarded ? all.filter((copy) => !forwarded.has(copy.destination.id)) : all,
+      (this.program.transfers.get(transfer) ?? []).filter(
+        (copy) => !forwarded?.has(copy.destination.id) && !unobserved.has(copy.destination.id),
+      ),
     );
   }
 

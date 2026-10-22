@@ -15,7 +15,9 @@ export interface SourceFpPresentation {
   readonly guards: ReadonlySet<string>;
   /** Unsupported-environment failure blocks of `guards`, not printed. */
   readonly omitted: ReadonlySet<string>;
-  /** Call-clobber outputs whose only demand was an omitted guard condition. */
+  /** Values (call clobbers, entry bindings, phi destinations and the pure
+   * definitions between them) that only omitted guard conditions demand:
+   * neither their placeholders nor the edge copies into them are printed. */
   readonly unobserved: ReadonlySet<string>;
   readonly expressions: ReadonlySet<Expression>;
 }
@@ -143,31 +145,76 @@ export function sourceFpPresentation(
       }
     }
   }
-  const assumedEpoch = (id: string, active = new Set<string>()): boolean => {
-    context.checkpoint(1);
-    if (epochs.has(id)) return true;
-    if (active.has(id) || active.size >= 128) return false;
-    active.add(id);
-    const expression = program.expressions.get(id);
-    const parents =
-      expression?.kind === 'cast' && expression.op === 'bitcast'
-        ? [expression.value.id]
-        : incoming.get(id);
-    const accepted = !!parents?.length && parents.every((parent) => assumedEpoch(parent, active));
-    active.delete(id);
-    if (accepted) epochs.add(id);
-    return accepted;
-  };
-  for (const { site } of predicates.values()) if (!assumedEpoch(site.state_epoch)) return unchanged;
+  // Coinductive acceptance (a greatest fixpoint) over the bitcast/phi transport
+  // web: a bitcast or phi only transports its inputs' values, so a member whose
+  // parents are all entry/call-clobber epochs or accepted members holds one of
+  // those epochs on every execution, around loop cycles too. A member with no
+  // parent or with any other parent is rejected, and so is every member it reaches.
+  const roots = [...predicates.values()].map(({ site }) => site.state_epoch);
   for (const block of program.blocks.values())
     for (const binding of block.register_exit)
       if (
         environment(binding.register) &&
-        !assumedEpoch(binding.value.id) &&
         !guardSubjects.has(block.control.id) &&
         !terminalBlocks.has(block.id)
       )
-        return unchanged;
+        roots.push(binding.value.id);
+  const parents = new Map<string, readonly string[]>(),
+    children = new Map<string, string[]>(),
+    rejected = new Set<string>(),
+    rejections: string[] = [],
+    stack = [...roots];
+  while (stack.length) {
+    context.checkpoint(1);
+    const id = stack.pop()!;
+    if (epochs.has(id) || parents.has(id)) continue;
+    const expression = program.expressions.get(id);
+    const row =
+      expression?.kind === 'cast' && expression.op === 'bitcast'
+        ? [expression.value.id]
+        : (incoming.get(id) ?? []);
+    parents.set(id, row);
+    if (!row.length) {
+      rejected.add(id);
+      rejections.push(id);
+    }
+    for (const parent of row) {
+      context.checkpoint(1);
+      if (epochs.has(parent)) continue;
+      const list = children.get(parent) ?? [];
+      list.push(id);
+      children.set(parent, list);
+      stack.push(parent);
+    }
+  }
+  for (let cursor = 0; cursor < rejections.length; cursor++)
+    for (const child of children.get(rejections[cursor]!) ?? []) {
+      context.checkpoint(1);
+      if (rejected.has(child)) continue;
+      rejected.add(child);
+      rejections.push(child);
+    }
+  // Every root is an epoch or an explored member.
+  if (roots.some((id) => rejected.has(id))) return unchanged;
+  // The accepted transports that carry an epoch to a guard, for its record.
+  const transports = new Map<string, readonly string[]>();
+  const transported = (epoch: string): readonly string[] => {
+    const known = transports.get(epoch);
+    if (known) return known;
+    const members: string[] = [],
+      seen = new Set<string>(),
+      stack = [epoch];
+    while (stack.length) {
+      context.checkpoint(1);
+      const id = stack.pop()!;
+      if (epochs.has(id) || seen.has(id)) continue;
+      seen.add(id);
+      members.push(id);
+      stack.push(...parents.get(id)!);
+    }
+    transports.set(epoch, members);
+    return members;
+  };
   if (
     terminalEffects.size &&
     !validation.presentation(
@@ -194,9 +241,9 @@ export function sourceFpPresentation(
         'fp_environment_guard',
         control.id,
         requirement.site.supported_predicate_value
-          ? 'exact lifter environment guard; unknown entry/call epoch, no explicit environment writer; unsupported arm is exclusively owned; supported edge and copies unchanged'
-          : 'exact lifter x86 MXCSR[6:16] guard (all exceptions masked, DAZ off, round to nearest, FTZ off); unknown entry/call epoch, no explicit MXCSR control writer (exception-status MXCSR[0:6] writes are disjoint); unsupported arm is exclusively owned; supported edge and copies unchanged',
-        requirement.site.subject_ids,
+          ? 'exact lifter environment guard; unknown entry/call epoch, directly or through the listed accepted phi/bitcast transports, no explicit environment writer; unsupported arm is exclusively owned; supported edge and copies unchanged'
+          : 'exact lifter x86 MXCSR[6:16] guard (all exceptions masked, DAZ off, round to nearest, FTZ off); unknown entry/call epoch, directly or through the listed accepted phi/bitcast transports, no explicit MXCSR control writer (exception-status MXCSR[0:6] writes are disjoint); unsupported arm is exclusively owned; supported edge and copies unchanged',
+        [...requirement.site.subject_ids, ...transported(requirement.site.state_epoch)],
         `Conditional on ${requirement.requirement.id} at ${requirement.site.id}, epoch ${requirement.site.state_epoch}; original guard and failure remain in checked view and requirement metadata`,
       )
     )
@@ -204,37 +251,78 @@ export function sourceFpPresentation(
     guards.add(control.id);
     omitted.add(no.transfer.target);
   }
-  // An omitted guard no longer reads its condition. Values whose every demand
-  // came through it are unobserved; a call clobber among them is not printed.
+  // An omitted guard no longer reads its condition. Mark pass over the web its
+  // conditions reach (operands, phi copy sources): a member with a demand from
+  // outside the web (its use count exceeds its uses inside the web) is observed,
+  // and so is everything an observed member reads. The rest is unobserved: its
+  // call-clobber placeholders, entry bindings and edge copies are not printed.
   if (guards.size) {
-    const remaining = new Map<string, number>(),
-      copies = new Map<string, Value[]>(),
-      outputs = new Set<string>(),
-      pending: Value[] = [];
+    const sources = new Map<string, Value[]>(),
+      web = new Map<string, Value>(),
+      inside = new Map<string, number>(),
+      members: Value[] = [];
     for (const row of program.transfers.values())
       for (const copy of row) {
-        const list = copies.get(copy.destination.id) ?? [];
+        const list = sources.get(copy.destination.id) ?? [];
         list.push(copy.source);
-        copies.set(copy.destination.id, list);
+        sources.set(copy.destination.id, list);
       }
-    for (const boundary of program.calls.values())
-      for (const binding of boundary.outputs) outputs.add(binding.value.id);
-    const release = (value: Value): void => {
-      const count = (remaining.get(value.id) ?? program.use_counts.get(value.id) ?? 0) - 1;
-      remaining.set(value.id, count);
-      if (count === 0) pending.push(value);
+    // Uses inside the web, as `use_counts` counts them: each operand occurrence
+    // of a pure definition, each live copy into a phi destination.
+    const reads = (value: Value): readonly Value[] => {
+      const expression = program.expressions.get(value.id);
+      return expression ? expressionOperands(expression) : (sources.get(value.id) ?? []);
+    };
+    const demand = (value: Value): void => {
+      inside.set(value.id, (inside.get(value.id) ?? 0) + 1);
+      if (web.has(value.id)) return;
+      web.set(value.id, value);
+      members.push(value);
     };
     for (const block of program.blocks.values())
       if (block.control.kind === 'if' && guards.has(block.control.id))
-        release(block.control.condition);
-    for (let cursor = 0; cursor < pending.length; cursor++) {
+        demand(block.control.condition);
+    for (let cursor = 0; cursor < members.length; cursor++) {
       context.checkpoint(1);
-      const value = pending[cursor]!,
-        expression = program.expressions.get(value.id);
-      if (outputs.has(value.id)) unobserved.add(value.id);
-      if (expression) for (const operand of expressionOperands(expression)) release(operand);
-      else for (const source of copies.get(value.id) ?? []) release(source);
+      reads(members[cursor]!).forEach(demand);
     }
+    const observed = new Set<string>(),
+      marks: Value[] = [];
+    const observe = (value: Value): void => {
+      if (!web.has(value.id) || observed.has(value.id)) return;
+      observed.add(value.id);
+      marks.push(value);
+    };
+    for (const value of members)
+      if ((program.use_counts.get(value.id) ?? 0) > inside.get(value.id)!) observe(value);
+    for (let cursor = 0; cursor < marks.length; cursor++) {
+      context.checkpoint(1);
+      reads(marks[cursor]!).forEach(observe);
+    }
+    const hidden = members.filter((value) => !observed.has(value.id));
+    // Recorded: the definitions whose placeholder, entry spelling or edge copy
+    // would print (call clobbers, entry bindings, phi destinations).
+    const outputs = new Set<string>();
+    for (const boundary of program.calls.values())
+      for (const binding of boundary.outputs) outputs.add(binding.value.id);
+    const listed = hidden
+      .filter(
+        (value) =>
+          outputs.has(value.id) ||
+          sources.has(value.id) ||
+          program.expressions.get(value.id)?.kind === 'indeterminate',
+      )
+      .map((value) => value.id);
+    if (
+      !listed.length ||
+      validation.presentation(
+        'fp_unobserved_epoch',
+        program.function.id,
+        'environment epochs (entry bindings, call clobbers and their phi transports) demanded only by omitted guard conditions, directly or through other unobserved values: their placeholders and the edge copies into the listed phi destinations are not printed; checked view and metadata keep them',
+        listed,
+      )
+    )
+      for (const value of hidden) unobserved.add(value.id);
   }
   // An omitted failure block prints nothing: it leaves its sequence, so the
   // lexical first/last statement of a list (a loop's test position) is real.
