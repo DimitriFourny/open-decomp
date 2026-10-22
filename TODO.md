@@ -373,7 +373,8 @@ A whole-image instrumented run on sqlite3-arm64 found 21 tables proved and 291 d
 
 ### J1: Re-prove jump tables on settled chains
 
-- [ ] **Problem.** `selectInnerLoop` (`0x1000bc1e4`) prints `if (value7 <= 12) return indirect_exit(0x1000bc594 + ((uint64_t)data_100132d3e[value7] << 2), …)`. Its graph holds 253 of the function's 639 instructions, so the case bodies are lost. Ghidra prints the `switch`.
+- [x] **Problem.** `selectInnerLoop` (`0x1000bc1e4`) prints `if (value7 <= 12) return indirect_exit(0x1000bc594 + ((uint64_t)data_100132d3e[value7] << 2), …)`. Its graph holds 253 of the function's 639 instructions, so the case bodies are lost. Ghidra prints the `switch`.
+  - **Done (J1):** `selectInnerLoop` proves the table at branch `0x1000bc590` (13 targets, guard exact), holds 639 instructions and prints `void selectInnerLoop(…)` with a `switch (value7)` (case 1 shares the out-of-range exit) and no `indirect_exit`; SQLite image-wide proved tables 21 → 22 (none lost); the full-tier OD lane changes only that text.
   - **Root cause:**
     - `proveJumpTable` (`src/analysis/discovery/jump-tables.ts:205-702`) runs once, when the branch is first decoded, on the predecessor map decoded so far (`discovery/index.ts:542-566`).
     - Per-graph validation (`:788-883`) only re-checks the recorded chain. When a chain member later gains predecessors, the table is rejected for good (`:877-880`).

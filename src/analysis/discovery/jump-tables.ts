@@ -183,6 +183,8 @@ export interface JumpTableProofInput {
   readonly is_entry: (address: bigint) => boolean;
   readonly executable: (address: bigint) => boolean;
   readonly max_entries: number;
+  /** `jumpTableChain` of this same input when the caller already walked it. */
+  readonly chain?: readonly DecodedInstruction[];
 }
 export type JumpTableProof = Omit<ResolvedJumpTable, 'evidence_ids'>;
 
@@ -233,7 +235,7 @@ export function proveJumpTable(
   context: OperationContext,
 ): JumpTableProof | undefined {
   const { image, branch } = input;
-  const chain = jumpTableChain(input, context);
+  const chain = input.chain ?? jumpTableChain(input, context);
   if (chain.length < 3) return undefined;
   const values = new Values();
   const registers = new Map<string, Node>();

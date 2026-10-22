@@ -463,6 +463,7 @@ export function discoverFunctions(
         is_entry: isEntry,
         executable: (value) => executableEnd(value) > value,
         max_entries: MAX_JUMP_TABLE_ENTRIES,
+        chain,
       },
       context,
     );
@@ -477,7 +478,6 @@ export function discoverFunctions(
     );
     tables.set(branch, { proof, evidence: evidenceId });
     for (const target of proof.targets) {
-      context.checkpoint(1);
       if (!incoming.get(target.value)?.includes(instruction))
         addIncoming(target.value, instruction);
       enqueue(target);
