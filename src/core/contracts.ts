@@ -98,6 +98,21 @@ export interface Decoder extends ComponentIdentity {
   };
   dispose(): void;
 }
+/** A register value known at a jump-table chain start: a constant, or a value that is
+ * zero-extended from its low `bits` bits (below 2^bits). */
+export type RegisterFact =
+  | { readonly kind: 'const'; readonly value: bigint }
+  | { readonly kind: 'zext'; readonly bits: number };
+/** A register fact that holds on every decoded path into a jump-table chain start. */
+export interface JumpTableEntryFact {
+  /** Full-width register root. */
+  readonly register: string;
+  readonly value: RegisterFact;
+  /** The instructions whose writes establish the value on some path. */
+  readonly definitions: readonly string[];
+  /** Calls the value survives in an ABI-preserved register on some path. */
+  readonly calls: readonly string[];
+}
 /** A proven multi-way transfer: one indirect branch whose complete target set is
  * established from immutable table bytes and a dominating unsigned bound guard. */
 export interface ResolvedJumpTable {
@@ -123,6 +138,8 @@ export interface ResolvedJumpTable {
   readonly guard_exact: boolean;
   /** Straight-line single-entry instructions from the evaluation start to `branch`. */
   readonly chain: readonly string[];
+  /** Register facts the evaluation starts from; absent when the chain alone proves the table. */
+  readonly entry_facts?: readonly JumpTableEntryFact[];
   readonly evidence_ids: readonly string[];
 }
 /** Discovery owns block boundaries. Calls are reference edges, not intraprocedural successors. */
