@@ -4,7 +4,14 @@ import { mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_BUDGET, toolSchemas, type WireJob } from '../../src/core/index.js';
+import { DatabaseSync } from 'node:sqlite';
+import {
+  DEFAULT_ANALYSIS_OPTIONS,
+  DEFAULT_BUDGET,
+  toolSchemas,
+  type WireJob,
+} from '../../src/core/index.js';
+import { SqliteProjectStore } from '../../src/project/store/index.js';
 import { ProjectWorkerPool, type WorkerPoolOptions } from '../../src/workers/index.js';
 import { resumeWorker, waitForWorkerPause } from './gate.js';
 
@@ -364,5 +371,81 @@ test(
     assert.equal((await ticket.result).job.state, 'completed');
     await release;
     await Promise.all(controls);
+  },
+);
+
+test(
+  'a worker killed after acknowledged decompiles keeps their jobs and artifacts, and writes callee summaries while idle',
+  { timeout: 300000, skip: !unix },
+  async (t) => {
+    const { root, pool } = await setup(t, { max_workers: 1 });
+    const path = join(root, 'project');
+    const project = await pool.open({ path, mode: 'create' });
+    const imported = await project.submit(
+      importRequest(join(fixtureRoot, 'libcorpus-arm64-symbols.dylib')),
+    );
+    assert.equal((await imported.result).job.state, 'completed');
+    const image = project.snapshot.images[0]!;
+    const context = {
+      project_id: project.snapshot.project_id,
+      revision: project.snapshot.revision,
+      budget: DEFAULT_BUDGET,
+    };
+    const listing = await (
+      await project.submit({
+        kind: 'execute',
+        operation: 'functions_find',
+        budget: DEFAULT_BUDGET,
+        args: toolSchemas.functions_find.input.parse({
+          ...context,
+          image_id: image.image_id,
+          page: { limit: 100 },
+        }),
+      })
+    ).result;
+    const found = toolSchemas.functions_find.output.parse(listing.result);
+    assert.ok('data' in found);
+    const ids = found.data.items.map((item) => item.id).slice(0, 40);
+    assert.ok(ids.length >= 10);
+    const acknowledged: string[] = [];
+    for (const id of ids) {
+      const ticket = await project.submit({
+        kind: 'execute',
+        operation: 'function_decompile',
+        budget: DEFAULT_BUDGET,
+        args: toolSchemas.function_decompile.input.parse({
+          ...context,
+          function_id: id,
+          wait: true,
+          options: DEFAULT_ANALYSIS_OPTIONS,
+        }),
+      });
+      const outcome = await ticket.result;
+      assert.equal(outcome.job.state, 'completed');
+      acknowledged.push(ticket.id);
+    }
+    // No command is waiting: the worker writes its queued callee summaries in idle slices.
+    await new Promise((resolve) => setTimeout(resolve, 4000));
+    process.kill(project.pid!, 'SIGKILL');
+    await project.close().catch(() => {});
+    const store = SqliteProjectStore.open(path, 'resume');
+    for (const id of acknowledged) {
+      const job = store.readJob(id);
+      assert.equal(job?.state, 'completed', id);
+      assert.equal(job.artifacts.length, 1);
+      assert.ok(store.readArtifactBytes(job.artifacts[0]!).length > 0);
+    }
+    await store.close();
+    const db = new DatabaseSync(join(path, 'project.sqlite'), { readOnly: true });
+    try {
+      const rows = db.prepare('SELECT count(*) AS n FROM native_summaries').get() as { n: number };
+      assert.ok(rows.n > 0, 'no callee summary was written while the worker was idle');
+      assert.deepEqual(
+        { ...db.prepare('PRAGMA integrity_check').get() },
+        { integrity_check: 'ok' },
+      );
+    } finally {
+      db.close();
+    }
   },
 );
