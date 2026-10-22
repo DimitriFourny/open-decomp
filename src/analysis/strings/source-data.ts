@@ -1,5 +1,11 @@
 import { buildOnce, useBuilt } from '../../core/index.js';
-import type { Address, LoadedImage, OperationContext, SymbolRecord } from '../../core/index.js';
+import type {
+  Address,
+  LoadedImage,
+  OperationContext,
+  Section,
+  SymbolRecord,
+} from '../../core/index.js';
 import { findVariable } from '../../metadata/library-contracts/catalog.js';
 import { cSourceName, libraryLookupName } from '../../metadata/symbols/c-names.js';
 import type { SourceAddress } from '../../reconstruction/source-model.js';
@@ -135,7 +141,8 @@ function nearestStart(pages: Pages, va: Address, end: bigint, context: Operation
 
 interface SymbolIndex {
   readonly objects: ReadonlyMap<string, IntervalNode<SymbolRecord> | undefined>;
-  readonly pages: Pages;
+  /** Every addressed symbol, bucketed by start page. */
+  readonly pages: Pages<{ readonly start: bigint; readonly symbol: SymbolRecord }>;
 }
 type DataHint = Extract<LoadedImage['hints'][number], { readonly kind: 'data' }>;
 interface ImageDataIndex {
@@ -161,14 +168,14 @@ function buildSymbolIndex(
   context: OperationContext,
 ): SymbolIndex {
   const objects = new Map<string, Interval<SymbolRecord>[]>(),
-    pages = new Map<string, { start: bigint }[]>();
+    pages = new Map<string, { start: bigint; symbol: SymbolRecord }[]>();
   symbols.forEach((symbol, order) => {
     context.checkpoint(1);
     if (!symbol.address) return;
     const page = pageKey(symbol.address),
       starts = pages.get(page);
-    if (starts) starts.push({ start: symbol.address.value });
-    else pages.set(page, [{ start: symbol.address.value }]);
+    if (starts) starts.push({ start: symbol.address.value, symbol });
+    else pages.set(page, [{ start: symbol.address.value, symbol }]);
     if (symbol.kind !== 'object') return;
     // Size-less objects identify exactly their own address: the unit range [a, a+1).
     const item: Interval<SymbolRecord> = {
@@ -236,6 +243,45 @@ function buildImageDataIndex(image: LoadedImage, context: OperationContext): Ima
   };
   imageIndexes.set(image, indexed);
   return indexed;
+}
+
+/** The object symbol a covered-by-nothing `va` is named relative to: the nearest
+ * symbol start before `va` (within one string window, inside `section`) belongs
+ * only to size-less object symbols of one name, and no data record starts in
+ * between. The symbol's extent stays unknown: this is naming, not ownership. */
+function precedingObject(
+  owned: SymbolIndex,
+  indexed: ImageDataIndex,
+  section: Section,
+  va: Address,
+  context: OperationContext,
+): { readonly symbol: SymbolRecord; readonly name: string; readonly start: bigint } | undefined {
+  const sectionStart = section.virtual_range.start.value;
+  const low =
+    va.value - sectionStart < STRING_WINDOW ? sectionStart : va.value - STRING_WINDOW + 1n;
+  let start: bigint | undefined,
+    found: SymbolRecord[] = [];
+  for (let page = low / STRING_WINDOW; page <= va.value / STRING_WINDOW; page++)
+    for (const entry of owned.pages.get(pageKey(va, page)) ?? []) {
+      context.checkpoint(1);
+      if (entry.start < low || entry.start > va.value) continue;
+      if (start === undefined || entry.start > start) {
+        start = entry.start;
+        found = [entry.symbol];
+      } else if (entry.start === start) found.push(entry.symbol);
+    }
+  if (start === undefined || start === va.value) return undefined;
+  const names = new Set(found.map((symbol) => symbol.display_name ?? symbol.original_name));
+  const name = names.size === 1 ? [...names][0] : undefined;
+  if (
+    !name ||
+    found.some(
+      (symbol) => symbol.kind !== 'object' || (symbol.size !== null && symbol.size !== 0n),
+    ) ||
+    nearestStart(indexed.hint_pages, { ...va, value: start }, va.value + 1n, context) <= va.value
+  )
+    return undefined;
+  return { symbol: found[0]!, name, start };
 }
 
 /** Exact scalar bytes from one immutable, file-backed section. Unlike string
@@ -387,6 +433,10 @@ export function recoverDataAddress(
     spanEnd = nearestStart(indexed.relocations, base, spanEnd, context);
     if (spanEnd > base.value) spanBound = spanEnd - base.value;
   }
+  const relative =
+    objects.length === 0 && hints.length === 0
+      ? precedingObject(owned, indexed, section, va, context)
+      : undefined;
   const object = {
     address: base,
     byte_length: size,
@@ -399,10 +449,24 @@ export function recoverDataAddress(
         ...section.evidence_ids,
         ...objects.flatMap((item) => item.evidence_ids),
         ...(hint?.evidence_ids ?? []),
+        ...(relative?.symbol.evidence_ids ?? []),
       ]),
     ],
   };
-  const result: SourceAddress = { address, ...(name === undefined ? {} : { name }), object };
+  const result: SourceAddress = {
+    address,
+    ...(name === undefined ? {} : { name }),
+    ...(relative
+      ? {
+          symbol_relative: {
+            symbol_id: relative.symbol.id,
+            name: relative.name,
+            offset: va.value - relative.start,
+          },
+        }
+      : {}),
+    object,
+  };
   if (
     mutable ||
     translated.kind !== 'mapped' ||
@@ -504,10 +568,70 @@ export function recoverDataAddress(
   }
 }
 
+/** Half-open VA range `[start, end)`. */
+interface LoaderWrittenRange {
+  readonly start: bigint;
+  readonly end: bigint;
+}
+/** Address ranges only the loader writes: Mach-O non-lazy pointer sections
+ * (`S_NON_LAZY_SYMBOL_POINTERS`, `__got`, `__auth_got`) and segments read-only after
+ * fixups (`__DATA_CONST`, `SG_READ_ONLY`), ELF `PT_GNU_RELRO`, and every mapping
+ * without write permission. PE import slots are IAT entries and need no range. */
+function loaderWrittenRanges(
+  image: LoadedImage,
+  context: OperationContext,
+): readonly LoaderWrittenRange[] {
+  const ranges: LoaderWrittenRange[] = [];
+  for (const mapping of image.mappings) {
+    context.checkpoint(1);
+    if (!mapping.permissions.includes('write'))
+      ranges.push({ start: mapping.va, end: mapping.va + mapping.memory_size });
+  }
+  if (image.target.format === 'macho') {
+    const segments = new Map<string, Section>();
+    for (const section of image.sections) {
+      context.checkpoint(1);
+      if (section.kind === 'segment') segments.set(section.id, section);
+    }
+    for (const section of image.sections) {
+      context.checkpoint(1);
+      const segment = section.segment_id === null ? undefined : segments.get(section.segment_id);
+      if (
+        section.kind === 'section' &&
+        ((section.flags & 255n) === 6n ||
+          section.name === '__got' ||
+          section.name === '__auth_got' ||
+          segment?.name === '__DATA_CONST' ||
+          (segment !== undefined && (segment.flags & 0x10n) !== 0n))
+      )
+        ranges.push({
+          start: section.virtual_range.start.value,
+          end: section.virtual_range.start.value + section.virtual_range.size,
+        });
+    }
+  } else if (image.target.format === 'elf')
+    for (const header of image.headers) {
+      context.checkpoint(1);
+      if (header.kind !== 'elf_program_header') continue;
+      const field = (name: string): bigint | undefined => {
+        const found = header.fields.find((item) => item.name === name);
+        return found?.kind === 'integer' ? found.value : undefined;
+      };
+      const start = field('p_vaddr'),
+        size = field('p_memsz');
+      if (field('p_type') === 0x6474e552n && start !== undefined && size !== undefined)
+        ranges.push({ start, end: start + size });
+    }
+  return ranges;
+}
+
 /** Loader-bound import slots among `candidates` (keyed `image:space:value`). A
  * slot bound to conflicting symbols, a lazily bound slot (its pointer changes
  * when first called) or a stub entry is no data binding. Asserted name
- * annotations rename the symbol; any other annotation leaves it unnamed. */
+ * annotations rename the symbol; any other annotation leaves it unnamed.
+ * `bindings` holds the slots in storage only the loader writes; a bind in
+ * writable program data stays plain storage and only states the symbol whose
+ * exact address it holds at load time (`initial`, C spelling). */
 export function recoverImportBindings(
   image: LoadedImage,
   candidates: ReadonlyMap<string, Address>,
@@ -516,7 +640,10 @@ export function recoverImportBindings(
     readonly annotated: boolean;
   },
   context: OperationContext,
-): ReadonlyMap<string, NonNullable<SourceAddress['import']>> {
+): {
+  readonly bindings: ReadonlyMap<string, NonNullable<SourceAddress['import']>>;
+  readonly initial: ReadonlyMap<string, string>;
+} {
   const key = (address: Address): string => `${address.image_id}:${address.space}:${address.value}`;
   const width = BigInt(image.target.address_bits / 8);
   const bound = new Map<string, LoadedImage['imports'][number][]>();
@@ -532,12 +659,17 @@ export function recoverImportBindings(
   // A relocation addend makes the slot hold the symbol's address plus an offset:
   // the header declaration then describes a different object than the slot reads.
   const adjusted = new Set<string>();
+  // A slot with an addend holds the symbol's address plus an offset at load time.
+  const offsetSlots = new Set<string>();
   for (const relocation of image.relocations) {
     context.checkpoint(1);
     if (relocation.symbol_id !== null && relocation.addend !== 0n)
       adjusted.add(relocation.symbol_id);
+    if (relocation.addend !== 0n) offsetSlots.add(key(relocation.address));
   }
-  const result = new Map<string, NonNullable<SourceAddress['import']>>();
+  const result = new Map<string, NonNullable<SourceAddress['import']>>(),
+    initial = new Map<string, string>();
+  let writers: readonly LoaderWrittenRange[] | undefined;
   for (const [slot, items] of bound) {
     context.checkpoint(1);
     const entries: { item: (typeof items)[number]; name: string; source: string }[] = [];
@@ -561,6 +693,14 @@ export function recoverImportBindings(
       entries.some((entry) => entry.name !== first.name || entry.source !== first.source)
     )
       continue;
+    const at = first.item.slot!.value;
+    if (image.target.format !== 'pe') {
+      writers ??= loaderWrittenRanges(image, context);
+      if (!writers.some((range) => at >= range.start && at < range.end)) {
+        if (!offsetSlots.has(slot)) initial.set(slot, first.source);
+        continue;
+      }
+    }
     const libraries = new Set(entries.map((entry) => entry.item.library));
     const library = libraries.size === 1 ? first.item.library : null;
     const declared =
@@ -588,5 +728,5 @@ export function recoverImportBindings(
         : {}),
     });
   }
-  return result;
+  return { bindings: result, initial };
 }
