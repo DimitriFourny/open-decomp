@@ -190,8 +190,8 @@ Store schema 6 adds `native_summaries(scope, function_id, revision, seq, allowan
 - **Identity.** `scope` is the digest of the format, the project **revision**, image SHA-256, selected slice, target, pipeline component versions, lifter, ABI and the supplied native type records; the row key is `(scope, function_id)`. The revision is part of the key because prepared evidence embeds it (evidence IDs and `revision` fields), so a unit prepared at another revision is not the unit preparing would return now; an annotation or any other revision change therefore invalidates every stored unit, and the next write drops the superseded rows. A row is authentic only for exactly its identity: `digest` is SHA-256 over scope, function, revision and the compressed payload, so a swapped, moved or damaged row is a miss (and replaced when the function is prepared again), never served.
 - **Validation.** Before use the payload envelope is schema-checked, its identity fields must equal the request's, dependency targets must resolve in the current function list, and `verifyTracedReads` re-reads every stored dependency read from the project at the current revision (selector well formed, key = digest of the selector, fingerprint equal to the store's value now). Any mismatch is a miss and the unit is prepared normally. Verification never charges the request (only preparing's charges are replayed) and memoizes verified reads per store/revision, so units sharing proof/type/function closures verify each read once. Callee units whose dependencies changed (or whose trace cannot be replayed) fall back to preparing, exactly as in process.
 - **Encoding and bound.** Payloads use the store encoding extended for analysis results (`encodeStoredGraph`: `Map`, bigint, object identity so aliased substructure such as `types.calls`/`analysis` and copy-on-write stack memory stays aliased, and string interning of identifiers), then Brotli quality 4, about 5× smaller than the raw JSON. A unit of prepared size above 8,192 (instructions + IR nodes + evidence + traced reads) is not stored: encoding it costs more on the first run than a later reuse returns (see `PERFORMANCE.md`). A unit that cannot be encoded exactly (non-plain values, over the 128 MiB / 12 M-node graph bound) or is larger than 16 MiB compressed is simply not stored. The per-project cap is 64 MiB of compressed payload (`DEFAULT_NATIVE_SUMMARY_BYTES`); past it the oldest revision, then the oldest write (`seq`), is evicted first, deterministically, in the same transaction.
-- **Writes.** Hits write nothing. Units prepared by a request are queued in memory (at most 8 MiB before an early flush) and written in the request's existing transaction (`publishArtifact`), or, when the request publishes nothing (`types`, `export` helpers, failures), in one batched transaction at the end of the request and at store close. A failed cache write never fails a request.
-- **Result-cache hits** validate each stored payload once: the payload bytes are verified against the stored artifact hash on every hit, parsed once (and memoized by that hash for the process, 16 MiB bound; damaged bytes are still rejected on every hit), and not re-parsed by `validateComputation`, the response wrapper, the handler, the worker runtime or the host (results that the producing code has already schema-validated are marked and not parsed again). Every store-dependent check (snapshot/image/target/function, type and proof closure, catalog trust, readset) still runs on each hit.
+- **Writes.** Hits write nothing. A unit a request prepares is queued as a live reference (`queueNativeSummary`: the value must not be mutated afterwards; its retained size, `weight`, bounds the queue at 65,536, a quarter of the process tier's 262,144) and is encoded, compressed and written **later**, never on the request's path and never in the artifact commit: by idle slices of the project worker (200 ms after the last command, 8 rows per slice, paused while a command waits), by the queue bound, or at store close. The write is one transaction per slice with `synchronous` lowered to NORMAL (WAL: no fsync; the frames reach disk with the next full commit, checkpoint or close), and a failed write drops those rows and never fails a request. A request's queued rows become readable at its end (`releaseNativeSummaries`: after the artifact commit, or at the end of a request that publishes nothing), served from the queue with the bytes the written row will have, so what a later request can reuse is exactly what it could when rows were written at publication. A row that cannot be encoded or exceeds the caps is dropped at the write. A crash loses at most queued rows (derived data); jobs and artifacts are committed before their response (`docs/internals/project-cache.md` §7).
+- **Result-cache hits** validate each stored payload once: the payload bytes are verified against the stored artifact hash on every hit, parsed once (and memoized by that hash for the process, 16 MiB bound; damaged bytes are still rejected on every hit), and not re-parsed by `validateComputation`, the response wrapper, the handler, the worker runtime or the host (a freshly computed result is schema-parsed once by `validateComputation` and wrapped without a second parse unless metadata shedding replaced it; a reuse candidate, already a parsed payload, is validated against the current snapshot without re-parsing) (results that the producing code has already schema-validated are marked and not parsed again). Every store-dependent check (snapshot/image/target/function, type and proof closure, catalog trust, readset) still runs on each hit.
 
 `--no-analysis-cache` (CLI `functions/decompile/export/types`, `mcp start`, `openBinary({ analysisCache: false })`, `WorkerPoolOptions.analysis_cache`) is a trusted host setting, not a tool-request field. It disables every read and write of derived analysis: `findArtifact`, reuse candidates, `publishArtifact`, `native_summaries` and the in-process unit cache. The dependency collector still runs so work charges, and therefore results, are identical. Imports, indexes, annotations and jobs persist. A response that has to be delivered by artifact is published as a **transient** artifact (`publishTransientArtifact`: held in the owning worker's memory, newest within 64 MiB, readable like a published one, never indexed or written). Annotation catalogs and the investigation view read only what earlier cache-enabled runs published.
 
@@ -554,6 +554,28 @@ Optional `emission.requirements` localize assumptions, unresolved values/effects
 
 Source-only `fp_native_operations` prints scalar IEEE arithmetic, negation, absolute value, square root, comparisons and compatible conversions under the FP requirement plus the target IEEE representation, no-excess-precision and disabled-contraction (`-ffp-contract=off`) contract. Every operation the recorded `fp_environment` requirement covers prints natively unless a rule below keeps it explicit: C uses `-x`, `__builtin_fabs[f]`/`__builtin_sqrt[f]` (no header, so no clash with an analyzed libm callee) and `(intN_t)x`/`(uintN_t)x`; Python-like prints `-x` and `abs(x)` for binary64. Backwards consumer tracing retains helpers for operations whose arithmetic NaN payload escapes through integer operations, memory, calls or physical boundaries; a promoted local slot is private storage, so a store to it is exactly as observable as the loads that read it back. Comparisons and float-to-integer conversions never observe a payload (a NaN converts to an undefined value, as in the IR), and negation/absolute value change only the sign bit, so none of them forces helpers on their operands or their own result. Float-to-integer conversion truncates toward zero and is undefined for NaN, infinities and out-of-range values, exactly as the IR specifies. Helpers remain for fused and vector operations, payload-escaping arithmetic and square roots, whole functions whose environment is not a recorded default epoch (explicit environment writes or unknown environment effects keep every guard and every FP helper), Python binary32 arithmetic, Python division, square root and float-to-integer conversion (Python raises where the IR yields a value). Finite floating literals retain exact target bits, including integer constants that join an established FP value as a bitcast operand, phi copy or select arm. FP/integer copies preserve representation bitcasts, never numeric assignment conversions. Exhausted presentation records retain the explicit form.
 
+Payload-escaping arithmetic still prints natively when it can never produce a
+NaN (`fp_nan_free`, subjects with their operand bounds; `source-fp.ts`): no
+canonical-NaN rule is then exercised. Integer-to-float conversions always
+qualify (an 8- to 128-bit integer converts to a finite value, or to infinity for
+2^128 in binary32). A bounded, memoized magnitude pass proves the other
+operations: literals give |c|, a W-bit conversion 2^(W-1) (signed) or 2^W
+(unsigned), add/sub/mul and division by a finite nonzero literal combine their
+operands' bounds with a rounding margin of 2^-20, phis and selects take the
+maximum, and cycles, entry values and every other definition are unbounded. A
+finite add, sub, mul, division by such a literal or format conversion of
+operands bounded below the format maximum rounds to a finite value or an
+infinity, never NaN. Division by a variable (0/0), square root and operands
+without a bound keep their helpers. So brotli `PrintBytes` prints
+`(double)arg0 * 9.313225746154785e-10` although the product is stored. A
+conversion depends only on the mathematical integer: when the IR operand
+zero-extends a narrower value (`zero_extend`, a mask of the low 8/16/32 bits, or
+a truncation/low extract of such an extension; either conversion) or
+sign-extends one (signed conversion only), both dialects convert the narrower
+operand that the printed cast collapses to: `(double)arg0 / (double)arg1`, not
+`(double)(int32_t)arg0 / (double)(int64_t)arg1` (recorded in
+`fp_native_operations`).
+
 Source-only `condition_flags` folds compare flags and their condition-code
 consumers into native relations (`src/reconstruction/source-conditions.ts`).
 NZCV/EFLAGS bit insertion and extraction, condition-code logic, conditional
@@ -857,17 +879,38 @@ with upper cells that slice `sign_extend(v)`/`zero_extend(v)`; low slices with
 literal-zero upper cells, i.e. a 32-bit or narrower write that zero-extends; all
 literal constants; cells that are each an unknown (unavailable) value of the same
 reason (for example non-argument entry registers), which jointly form one unknown
-value of the full width; or the unchanged cells of another recombined phi, which is
-resolved as a fixpoint. A cell that range analysis already folded to a constant
-(`value7 = 1` on every edge) still counts as a cell of the group, but then every
-edge must write one constant per cell: the group becomes one whole-width
-parameter with one whole constant per edge (`0x100060ce8`, not `value6 | value7 << 32`),
-and source-fact discovery also offers each such whole constant as a candidate address,
-so function-pointer and global naming applies to it. Each constant is proved on its
-own edge by exact interpreter evaluation (a `bitvector` record: the cells'
-concatenation equals the constant; no BDD allowance is spent); a non-constant cell
-on any edge keeps every cell separate. Other register banks keep the complete-root rule with
-identical whole values. Original SSA cells and transfers remain immutable;
+value of the full width; the unprojected register outputs of one call or unknown
+effect whose outputs of the root are integer cells that tile it from bit 0; or the
+unchanged cells of another recombined phi, which is resolved as a fixpoint. An
+instruction-output edge gives the instruction one whole output of the root and makes
+its original cells slices of it: a source call prints one
+`unknown_value("uint64_t", "call clobbers x0")` instead of the `x0_low32`/`x0_high32`
+pair, and a physical call or unknown effect lists one boundary key
+(`"arm64:x27:0:64"`). Adjacent cells of one such instruction that a concat reads
+together outside any phi get the same whole output. A projected call result is a
+definition, never an unprojected output: a callee result bound to `w0` stays the low
+half of `x0` (`call_result | (uint64_t)high << 32`). A cell that range analysis
+already folded to a constant (`value7 = 1` on every edge) still counts as a cell of
+the group. When every edge writes one constant per cell, the group becomes one
+whole-width parameter with one whole constant per edge (`0x100060ce8`, not
+`value6 | value7 << 32`), and source-fact discovery also offers each such whole
+constant as a candidate address, so function-pointer and global naming applies to it.
+Each constant is proved on its own
+edge by exact interpreter evaluation (a `bitvector` record: the cells' concatenation
+equals the constant; no BDD allowance is spent). Otherwise a folded group needs some
+edge that carries a wider value (corresponding slices of one value, or another
+recombined group), and its other edges may be zero extensions or carried groups. Each
+folded cell's slice on those edges must be a non-constant value, which the interval
+fixed point over the reachable incoming copies proves equal to the folded constant,
+or a constant equal to it. Unknown and instruction-output edges keep a folded group
+split. `matrix_multi_exit` `-O2` (ELF/PE) keeps its sum below 0x10000 inside the loop,
+and its accumulator prints as one `uint64_t` instead of `value0 | value1 << 32`;
+`isDate` names its `sqlite3UpperToLower` table address (0x100132f08) instead of
+reassembling it from `0x132f08` and an upper cell at each dereference; loops that
+only zero-extend a 32-bit counter keep their cells. Other register banks
+keep the complete-root rule with identical whole values or one instruction's whole
+output, so a phi covering only part of a vector root (`isDate`'s `v0` double) keeps
+its cells. Original SSA cells and transfers remain immutable;
 source aliases extract slices from the new whole phi, preserving parallel copies
 and full-width arithmetic carries. Independently written cells (for example a
 partial write that preserves the other half), missing cells, differing whole
@@ -877,10 +920,15 @@ copy: publication validation accepts that edge only when the original edge copie
 every cell aliased to a slice of the whole to itself and those cells cover all of its
 bits (`sqlite3PagerSavepoint`, and `jsonTranslateTextToBlob` once its table proves,
 were rejected before). The `register_cell_recombination` presentation record documents this
-exact bitvector identity without an ABI assumption; checked output does not
-apply it. `test/reconstruction/source-loop-cells.test.ts` executes both dialects
-against independent oracles for a 32-bit-immediate-entered 64-bit loop variable,
-CRC-style byte/24-bit lanes and an independently written-halves refusal.
+exact bitvector identity without an ABI assumption (its subjects include each
+instruction whose whole output an edge uses, and a second scope covers joint reads
+of one instruction's cells); checked output does not apply it.
+`test/reconstruction/source-loop-cells.test.ts` executes both dialects against
+independent oracles for a 32-bit-immediate-entered 64-bit loop variable, CRC-style
+byte/24-bit lanes, an independently written-halves refusal and the `multi_exit`
+loop (including its overflow path and a carry into the upper cell);
+`test/reconstruction/source-cells.test.ts` executes phis fed by a call's clobbered
+`x0` and `v0` cells and by a bound 32-bit result.
 
 The same source-only rule also follows straight-line integer bit wiring through
 identity casts, extracts, extensions, concatenations, inserts, constant shifts,

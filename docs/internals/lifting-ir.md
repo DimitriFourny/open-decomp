@@ -96,7 +96,7 @@ Conventions:
 ### Validation
 
 - Builder: expressions type-checked on creation, no append after a terminator, budget charged before allocation.
-- `assertValidIR` runs in `finish`, after lift, SSA construction and simplification (verified objects memoized). Failure throws `IRValidationError` with all problems: the function is refused, never repaired.
+- `assertValidIR` runs in `finish`, after lift, SSA construction and simplification (verified objects memoized). Failure throws `IRValidationError` with all problems: the function is refused, never repaired. Entity and evidence identities are tested with the precompiled `isEntityId` / `isEvidenceId` (`src/core/primitives.ts`), which accept exactly what `entityIdSchema` / `evidenceIdSchema` accept (`test/core/id-predicates.test.ts`) without a zod parse per id.
 
 | Class                  | Checks                                                                                                                                                       |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
