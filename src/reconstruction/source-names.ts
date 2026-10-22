@@ -4,7 +4,7 @@ import { bitWidth, expressionOperands, type IntegerPredicate, type Value } from 
 import type { ParallelTransfer, Region } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
 import { libraryCallNames, type LibraryResultName } from './library-names.js';
-import { stackEntry } from './source-model.js';
+import { stackEntry, variadicArea } from './source-model.js';
 
 type Role =
   'address' | 'callback' | 'count' | 'index' | 'accumulator' | 'shift_count' | 'limit' | 'operand';
@@ -955,7 +955,7 @@ export function planSourceNames(
   for (const value of program.values.values()) {
     if (!program.live.has(value.id) && !parameters.has(value.id)) continue;
     context.checkpoint(1);
-    if (program.source.variadic?.area.id === value.id) {
+    if (variadicArea(program.source.variadic)?.id === value.id) {
       preferred.set(value.id, 'va');
       continue;
     }
