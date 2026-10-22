@@ -1319,11 +1319,20 @@ slots (every stored value reaches each reload), constant byte steps and index
 terms (a constant-scaled or extended addend) to the retained accesses through a
 formal. One consistent 8/16/32/64-bit integer or 32/64-bit IEEE element kind
 yields `uintN_t*` / `float*` / `double*`; byte accesses use `uint8_t*`, never
-invented character types. Mixed widths or kinds remain explicit.
+invented character types. Mixed widths or kinds remain explicit. The lineage must
+also be array-shaped: an index term is added, a copy cycle steps the pointer, or
+the constant displacements of its accesses are exactly 0, w, 2w, ... for element
+width w. Constant offsets alone (`p + 0x10`, or `p`, `p + 0x10` with a gap) are
+fields of a record: the formal then keeps the analysis structure (or integer)
+and prints `p->field_0x10`; the `formal_pointer` record says which shape held.
 It adds C `const` only without writes through that formal, escape to a potentially
 writing call, or unknown effects; unrelated stores and known read-only calls do
 not remove the qualifier. Python annotations use `pointer[T]`; the presentation
 record retains the read-only/write-capable formal observation in both dialects.
+A declared pointer member whose pointee is an unsigned scalar of exactly the
+accessed width (or an IEEE element) is dereferenced as its lvalue,
+`*p->field_0x48`, under `typed_dereference`, instead of casting its address bits
+back to a pointer.
 C `typed_index` prints `p[i]` / `p[k]` / `p[i + k]` / `p[i - k]` for an access
 through a declared scalar pointer (integer or IEEE element) of exactly the
 accessed width and kind. The address is flattened through nested inline

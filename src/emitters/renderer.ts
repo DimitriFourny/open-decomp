@@ -3161,10 +3161,35 @@ export class Renderer {
   /** Name of a declared scalar pointer of exactly `bits` element width and
    * `kind` (C): a printed variable, or an inline reload of a typed slot. */
   private scalarPointerBase(value: Value, bits: number, kind: PointeeKind): string | null {
+    const member = this.language === 'c-like' ? this.scalarPointerMember(value, bits, kind) : null;
+    if (member !== null) return member;
     const pointer = this.scalarPointer(value);
     if (this.language !== 'c-like' || pointer?.bits !== bits || pointer.kind !== kind) return null;
     const load = this.inlined.get(value.id)?.node;
     return load?.kind === 'load' && this.slotType(load.id) ? this.storage(load) : this.local(value);
+  }
+
+  /** The lvalue `p->field` of an inline read of a declared pointer member
+   * whose pointee is an unsigned integer (or float) of exactly `bits`/`kind`:
+   * `*p->field` dereferences it without an integer round trip. */
+  private scalarPointerMember(value: Value, bits: number, kind: PointeeKind): string | null {
+    if (!this.inline.has(value.id) || value.type.kind !== 'integer' || value.type.bits !== 64)
+      return null;
+    const load = this.inlined.get(value.id)?.node;
+    if (load?.kind !== 'load' || this.slotType(load.id) || this.punnedLocal(load)) return null;
+    const text = this.storage(load),
+      id = this.memberPointers.get(load.id),
+      pointer = id ? this.typeRecords.get(id)?.definition : undefined;
+    if (pointer?.kind !== 'pointer') return null;
+    const pointee = this.typeRecords.get(this.naturalScalar(pointer.to) ?? pointer.to)?.definition;
+    const matches =
+      kind === 'integer'
+        ? pointee?.kind === 'integer' && !pointee.signed && pointee.bits === bits
+        : pointee?.kind === 'float' && pointee.bits === bits;
+    if (!matches) return null;
+    // The dereference reads the pointee's own unsigned integer type.
+    if (kind === 'integer') this.memberTypes.set(`*${text}`, { bits, signed: false });
+    return text;
   }
 
   /** A stored value converted to a declared pointer member's type: the same
