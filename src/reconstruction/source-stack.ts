@@ -7,6 +7,7 @@ import {
 } from '../core/index.js';
 import type { EmissionInput } from '../emitters/model.js';
 import { classifyStackRegion } from '../analysis/stack/index.js';
+import { instructionOperands, terminatorOperands } from '../analysis/effects/index.js';
 import {
   bitWidth,
   expressionOperands,
@@ -37,16 +38,23 @@ import { classifySysvVaStart, classifyVariadicArea } from './source-variadic.js'
 
 type MemoryNode = Extract<Instruction, { kind: 'load' | 'store' }>;
 const FRAME_OBJECT_SCOPE =
-  'frame bytes kept as memory print as one local frame object at their entry-SP offsets: one scalar member per exact (offset, width) access set, byte arrays where accesses overlap or a frame address is indexed or points inside, padding between; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
+  'frame bytes kept as memory print as one local frame object at their entry-SP offsets: one scalar member per exact (offset, width) access set, a transport access (copy, constant or zero initialization) wider than the members it covers printing as a cast at the member holding its first byte, byte arrays where other accesses overlap or a frame address is indexed or points inside, padding between; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
 const INCOMING_OBJECT_SCOPE =
-  'incoming stack-argument bytes kept as memory print as one by-value struct formal at their entry-SP offsets: one scalar member per exact (offset, width) access set, byte arrays where accesses overlap or an address points inside, padding between; no exposure can designate incoming bytes and no frame escape is unbounded; no retained access spans the first incoming byte; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
+  'incoming stack-argument bytes kept as memory print as one by-value struct formal at their entry-SP offsets: one scalar member per exact (offset, width) access set, a transport access (copy, constant or zero initialization) wider than the members it covers printing as a cast at the member holding its first byte, byte arrays where other accesses overlap or an address points inside, padding between; no exposure can designate incoming bytes and no frame escape is unbounded; no retained access spans the first incoming byte; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
 const SCALAR_BYTES = new Set([1n, 2n, 4n, 8n, 16n]);
 
 /** Member layout of a source-view stack object at its entry-SP offsets.
- * One scalar member per exact (offset, width) access set; overlapping
- * accesses, an address strictly inside a member and an indexed base (with the
- * accesses that continue it without a gap) form one byte array; a taken
- * address in a gap starts a byte array that runs to the next member.
+ * One scalar member per exact (offset, width) access set. Overlapping accesses
+ * keep the narrowest ones as scalar members when those are disjoint scalars
+ * and no wider access starts or ends strictly inside one, every wider access
+ * being a transport access (a copy or an initialization: a wide access over
+ * two u32 members, or over a u32 and padding): the uncovered bytes of the
+ * span are byte-array padding members, the wide access is spelled as a cast at
+ * the member holding its first byte and sits in no member's `access_ids`. Any
+ * other overlap, an address strictly inside a member or padding, and an
+ * indexed base (with the accesses that continue it without a gap) form one
+ * byte array; a taken address in a gap
+ * starts a byte array that runs to the next member.
  * `below` (the frame): the object ends at the entry SP and its bottom is
  * lowered to a stack-aligned address; offsets at or above the entry SP are not
  * frame bytes and are ignored. `above` (the incoming area, S4): the object
@@ -56,7 +64,14 @@ const SCALAR_BYTES = new Set([1n, 2n, 4n, 8n, 16n]);
  * `alignment` boundary. `va` (S7, `below` only): the entry-SP offset of the
  * SysV `va_list`, one 24-byte member that holds every access inside it. */
 export function frameLayout(
-  accesses: readonly { readonly offset: bigint; readonly end: bigint; readonly id: string }[],
+  accesses: readonly {
+    readonly offset: bigint;
+    readonly end: bigint;
+    readonly id: string;
+    /** A transport access: it only moves bytes (a load whose every use is the
+     * datum of a store, a store of a constant or a load result). */
+    readonly transport?: boolean;
+  }[],
   taken: readonly bigint[],
   indexed: ReadonlySet<bigint>,
   alignment: number,
@@ -66,23 +81,154 @@ export function frameLayout(
 ): { minimum_offset: bigint; size: bigint; members: FrameMember[] } {
   const unit = BigInt(alignment);
   const order = (left: bigint, right: bigint): number => (left < right ? -1 : left > right ? 1 : 0);
-  const clusters: { offset: bigint; end: bigint; scalar: boolean; access_ids: string[] }[] = [];
-  const reserved = va === undefined ? [] : [{ offset: va, end: va + 24n, id: '' }];
-  for (const access of [...accesses, ...reserved].sort(
-    (left, right) => order(left.offset, right.offset) || order(left.end, right.end),
-  )) {
-    const last = clusters.at(-1);
-    if (last && access.offset < last.end) {
-      if (access.offset !== last.offset || access.end !== last.end) last.scalar = false;
-      if (access.end > last.end) last.end = access.end;
-      if (access.id) last.access_ids.push(access.id);
-    } else
-      clusters.push({
-        offset: access.offset,
-        end: access.end,
-        scalar: SCALAR_BYTES.has(access.end - access.offset),
-        access_ids: access.id ? [access.id] : [],
+  type Cluster = { offset: bigint; end: bigint; scalar: boolean; access_ids: string[] };
+  const skipped = (offset: bigint): boolean =>
+    direction === 'below' ? offset >= 0n : offset < returnAddressBytes;
+  const takenSorted = taken.filter((offset) => !skipped(offset)).sort(order),
+    indexedSorted = [...indexed].filter((offset) => !skipped(offset)).sort(order);
+  // First position of `list` (sorted) at or above `offset`.
+  const lowerBound = (list: readonly bigint[], offset: bigint): number => {
+    let low = 0,
+      high = list.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (list[middle]! < offset) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  };
+  /** A group of overlapping accesses (sorted by offset, then end) that holds
+   * several distinct intervals keeps its narrowest ones as scalar members when
+   * those are disjoint scalars and no wider access starts or ends strictly
+   * inside one: padding members fill the uncovered bytes of the span, and the
+   * wide access is a cast at the member holding its first byte. Every wider
+   * access must be a transport access (a copy, a zero or constant
+   * initialization): a wide value that is computed on or dereferenced is a
+   * slot of its own width. Null keeps the group one byte array. */
+  const split = (
+    group: readonly { offset: bigint; end: bigint; id: string; transport?: boolean }[],
+  ): Cluster[] | null => {
+    const distinct = group.filter(
+      (access, index) =>
+        index === 0 ||
+        access.offset !== group[index - 1]!.offset ||
+        access.end !== group[index - 1]!.end,
+    );
+    if (distinct.length < 2) return null;
+    // Narrowest intervals: those containing no other distinct interval.
+    const narrow: { offset: bigint; end: bigint }[] = [],
+      wide: { offset: bigint; end: bigint }[] = [];
+    let smallestEnd: bigint | undefined;
+    for (let last = distinct.length - 1; last >= 0;) {
+      let first = last;
+      while (first > 0 && distinct[first - 1]!.offset === distinct[last]!.offset) first--;
+      const lowest = distinct[first]!;
+      if (smallestEnd === undefined || smallestEnd > lowest.end) narrow.push(lowest);
+      else wide.push(lowest);
+      for (let index = first + 1; index <= last; index++) wide.push(distinct[index]!);
+      if (smallestEnd === undefined || lowest.end < smallestEnd) smallestEnd = lowest.end;
+      last = first - 1;
+    }
+    narrow.reverse();
+    if (!wide.length) return null;
+    for (let index = 0; index < narrow.length; index++)
+      if (
+        !SCALAR_BYTES.has(narrow[index]!.end - narrow[index]!.offset) ||
+        (index > 0 && narrow[index]!.offset < narrow[index - 1]!.end)
+      )
+        return null;
+    // Whether a member strictly contains byte `offset` (so an access starting
+    // or ending there would cut it).
+    const cuts = (offset: bigint): boolean => {
+      let low = 0,
+        high = narrow.length - 1,
+        before = -1;
+      while (low <= high) {
+        const middle = (low + high) >> 1;
+        if (narrow[middle]!.offset < offset) {
+          before = middle;
+          low = middle + 1;
+        } else high = middle - 1;
+      }
+      return before >= 0 && narrow[before]!.end > offset;
+    };
+    const spanStart = group[0]!.offset;
+    let spanEnd = narrow.at(-1)!.end;
+    for (const interval of wide) {
+      if (
+        !SCALAR_BYTES.has(interval.end - interval.offset) ||
+        cuts(interval.offset) ||
+        cuts(interval.end)
+      )
+        return null;
+      if (interval.end > spanEnd) spanEnd = interval.end;
+    }
+    const narrowKeys = new Set(narrow.map((interval) => `${interval.offset}:${interval.end}`));
+    if (
+      group.some((access) => !narrowKeys.has(`${access.offset}:${access.end}`) && !access.transport)
+    )
+      return null;
+    // Members tile the span: the narrow scalars, padding between them.
+    const members: Cluster[] = [];
+    let cursor = spanStart;
+    const pad = (end: bigint) => {
+      if (end > cursor) members.push({ offset: cursor, end, scalar: false, access_ids: [] });
+    };
+    for (const interval of narrow) {
+      pad(interval.offset);
+      members.push({
+        offset: interval.offset,
+        end: interval.end,
+        scalar: true,
+        access_ids: group
+          .filter((access) => access.offset === interval.offset && access.end === interval.end)
+          .map((access) => access.id),
       });
+      cursor = interval.end;
+    }
+    pad(spanEnd);
+    // An address taken inside a member or padding (not at its start), or an
+    // indexed base inside the span, would need a byte array.
+    const starts = new Set(members.map((member) => member.offset));
+    for (
+      let index = lowerBound(takenSorted, spanStart);
+      index < takenSorted.length && takenSorted[index]! < spanEnd;
+      index++
+    )
+      if (!starts.has(takenSorted[index]!)) return null;
+    const indexedAt = lowerBound(indexedSorted, spanStart);
+    if (indexedAt < indexedSorted.length && indexedSorted[indexedAt]! < spanEnd) return null;
+    return members;
+  };
+  const clusters: Cluster[] = [];
+  // The `va_list` bytes (S7) are an access of their own (no id); the member
+  // merge below makes them one member.
+  const reserved = va === undefined ? [] : [{ offset: va, end: va + 24n, id: '' }];
+  const sorted = [...accesses, ...reserved].sort(
+    (left, right) => order(left.offset, right.offset) || order(left.end, right.end),
+  );
+  for (let first = 0; first < sorted.length;) {
+    let last = first + 1,
+      end = sorted[first]!.end;
+    while (last < sorted.length && sorted[last]!.offset < end) {
+      if (sorted[last]!.end > end) end = sorted[last]!.end;
+      last++;
+    }
+    const group = sorted.slice(first, last),
+      offset = group[0]!.offset;
+    clusters.push(
+      ...(split(group) ?? [
+        {
+          offset,
+          end,
+          scalar:
+            SCALAR_BYTES.has(end - offset) &&
+            group.every((access) => access.offset === offset && access.end === end),
+          access_ids: group.flatMap((access) => (access.id ? [access.id] : [])),
+        },
+      ]),
+    );
+    first = last;
   }
   // Index of the cluster holding byte `offset`, or -1.
   const containing = (offset: bigint): number => {
@@ -2196,6 +2342,79 @@ export function planSourceStack(
       access.end <= input.source!.abi.stack_return_address_bytes
     )
       returnAddressLoads.set(access.node.result.id, { node: access.node, block: access.block });
+  // Source view: whether an access only moves bytes. A store is transport when
+  // its datum is a constant or a load result, possibly rewrapped by bitcasts,
+  // extracts and concatenations; a load, when every use of its result is the
+  // datum of a store, directly or through such rewrapping. Uses are counted on
+  // the plan's own facts: expression operands, statement operands (the store
+  // datum and the register bindings of loads and stores aside), call arguments, control operands, return results and
+  // transfer copies.
+  let flow: { loads: Set<string>; other: Set<string>; wrapped: Map<string, string[]> } | undefined;
+  const rewrap = (expression: Expression): boolean =>
+    expression.kind === 'extract' ||
+    expression.kind === 'concat' ||
+    (expression.kind === 'cast' && expression.op === 'bitcast');
+  const transport = (node: MemoryNode): boolean => {
+    if (!flow) {
+      const loads = new Set<string>(),
+        other = new Set<string>(),
+        wrapped = new Map<string, string[]>();
+      const use = (values: readonly Value[]) => {
+        for (const value of values) other.add(value.id);
+      };
+      const flowing = (id: string, expression: Expression) => {
+        if (rewrap(expression))
+          for (const operand of expressionOperands(expression))
+            wrapped.set(operand.id, [...(wrapped.get(operand.id) ?? []), id]);
+        else use(expressionOperands(expression));
+      };
+      for (const [id, expression] of expressions) flowing(id, expression);
+      for (const { transfer } of transfers) use(transfer.copies.map((copy) => copy.source));
+      for (const block of blocks.values()) {
+        context.checkpoint(block.statements.length + 1);
+        for (const statement of block.statements) {
+          if (statement.kind === 'load') loads.add(statement.result.id);
+          // The register bindings of a load or store only record the register
+          // cells its operands came from; their values are the address and datum.
+          if (statement.kind === 'store') use([statement.address]);
+          else if (statement.kind === 'load') use([statement.address]);
+          else if (statement.kind === 'assign') flowing(statement.result.id, statement.expression);
+          else use(instructionOperands(statement));
+          if (statement.kind === 'call') use(calls.get(statement.id)?.arguments ?? []);
+        }
+        const control = block.control;
+        if (control.kind === 'if') use([control.condition]);
+        else if (control.kind === 'switch') use([control.value]);
+        else if (control.kind === 'return' || control.kind === 'indirect')
+          use(terminatorOperands(control));
+        if (control.kind === 'return') use(returns.get(control.id)?.results ?? []);
+      }
+      flow = { loads, other, wrapped };
+    }
+    const { loads, other, wrapped } = flow;
+    // Every use of `id` is a store datum or a rewrapping whose result is.
+    const moved = (id: string, depth = 0): boolean => {
+      context.checkpoint(1);
+      return (
+        !other.has(id) &&
+        (wrapped.get(id) ?? []).every((result) => depth < 16 && moved(result, depth + 1))
+      );
+    };
+    // `id` is a constant or a load result, possibly rewrapped.
+    const source = (id: string, depth = 0): boolean => {
+      context.checkpoint(1);
+      if (loads.has(id)) return true;
+      const expression = expressions.get(id);
+      return (
+        expression !== undefined &&
+        (expression.kind === 'constant' ||
+          (rewrap(expression) &&
+            depth < 16 &&
+            expressionOperands(expression).every((operand) => source(operand.id, depth + 1))))
+      );
+    };
+    return node.kind === 'load' ? moved(node.result.id) : source(node.value.id);
+  };
   const frame = (
     retained: ReadonlySet<string>,
     live: ReadonlySet<string>,
@@ -2257,7 +2476,12 @@ export function planSourceStack(
       if (live.has(id) && offset < 0n && outside(offset)) taken.push(offset);
     context.checkpoint(below.length + taken.length);
     const layout = frameLayout(
-      below.map((access) => ({ offset: access.offset, end: access.end, id: access.node.id })),
+      below.map((access) => ({
+        offset: access.offset,
+        end: access.end,
+        id: access.node.id,
+        transport: transport(access.node),
+      })),
       taken,
       saveArea ? new Set([...indexedBases].filter(outside)) : indexedBases,
       alignment,
@@ -2318,7 +2542,12 @@ export function planSourceStack(
       if (live.has(id) && offset >= incomingOrigin) taken.push(offset);
     context.checkpoint(kept.length + taken.length);
     const layout = frameLayout(
-      kept.map((access) => ({ offset: access.offset, end: access.end, id: access.node.id })),
+      kept.map((access) => ({
+        offset: access.offset,
+        end: access.end,
+        id: access.node.id,
+        transport: transport(access.node),
+      })),
       taken,
       new Set(),
       input.source!.abi.layout.stack_alignment,

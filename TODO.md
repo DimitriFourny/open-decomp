@@ -313,9 +313,10 @@ A prototype of S1–S3 (unsound, measurement only) gave these results:
 
 ### S5 (optional): `frameLayout` keeps scalar members under spanning accesses
 
-- [ ] A wide access that exactly covers whole narrower clusters plus padding merges them into a byte array today (`uint8_t local_d8[8]`, `arg_10[8]`). Keep the narrower members and spell the wide access as a cast at the first member (`source-stack.ts:35-112`).
+- [x] A wide access that exactly covers whole narrower clusters plus padding merges them into a byte array today (`uint8_t local_d8[8]`, `arg_10[8]`). Keep the narrower members and spell the wide access as a cast at the first member (`source-stack.ts:35-112`).
   - Acceptance: the SysV `-O2` `matrix_variadic` and the `matrix_aggregate` texts get `uint32_t` members. `frame-object.test.ts` layout expectations are updated.
   - Depends on: S4.
+  - **Done (S5):** `frameLayout` keeps the narrowest disjoint scalars of an overlap group as members when no wider access cuts one, with byte-array padding members over the uncovered span bytes and the wide access a cast at the member holding its first byte (a wide access may also start/end in padding: `uint8_t local_d8[4]; uint32_t local_d4;` under the 8-byte `va_list` init store). The full-tier OD lane changes only texts with such arrays (SysV `matrix_variadic`/`matrix_aggregate` and 20 SQLite/brotli/zlib functions), checked views and all coverage unchanged; layout, frame and incoming-object tests execute both dialects.
 
 ### S6: Darwin and Win64 variadic functions print `...` and `va_start`
 
