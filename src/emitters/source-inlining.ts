@@ -24,6 +24,9 @@ export interface InlineSite {
   readonly propagated?: boolean;
   /** A cheap pure operation printed at each of its occurrences in its one reader. */
   readonly repeated?: boolean;
+  /** A pointer-width `leaf ± k` printed at each of its load/store address
+   * occurrences, in every reader, instead of a temporary. */
+  readonly rematerialized?: boolean;
   /** A load of a private local that every reader prints as the local itself:
    * `shared` (the local's next write follows every reader) or `sunk` (that write
    * is printed right after the reader that follows it). */
@@ -119,12 +122,32 @@ export function planSourceInlining(
     alternative?: boolean;
     /** The edge copy a transfer use reads in. */
     copy?: object;
+    /** A load/store address, through inline `± constant` terms only. */
+    address?: boolean;
+    /** The variable term of a definition `x ± constant` (through inline
+     * `± constant` terms only). */
+    offset?: boolean;
+  };
+  const constant = (value: Value): boolean =>
+    program.inline.has(value.id) && program.expressions.get(value.id)?.kind === 'constant';
+  /** The variable term `x` of `x + k`, `k + x` or `x - k` (`k` constant). */
+  const displacedBase = (expression: Expression | undefined): Value | undefined => {
+    if (expression?.kind !== 'integer' || (expression.op !== 'add' && expression.op !== 'sub'))
+      return undefined;
+    const { left, right } = expression;
+    if (constant(right) && !constant(left)) return left;
+    return expression.op === 'add' && constant(left) && !constant(right) ? right : undefined;
   };
   /** The use of `operand` inside `expression`, evaluated at `at`. */
-  const operandAt = (expression: Expression, operand: Value, at: Use): Use =>
-    expression.kind === 'select' && operand.id !== expression.condition.id
-      ? { ...at, conditional: true }
-      : at;
+  const operandAt = (expression: Expression, operand: Value, at: Use): Use => {
+    const use =
+      expression.kind === 'select' && operand.id !== expression.condition.id
+        ? { ...at, conditional: true }
+        : at;
+    return (use.address || use.offset) && displacedBase(expression)?.id !== operand.id
+      ? { ...use, address: false, offset: false }
+      : use;
+  };
   type Candidate = {
     block: BlockRegion;
     position: number;
@@ -208,6 +231,7 @@ export function planSourceInlining(
           position,
           conditional: false,
           transfer: false,
+          offset: true,
         };
         for (const value of expressionOperands(definition.expression))
           use(value, operandAt(definition.expression, value, at));
@@ -231,9 +255,9 @@ export function planSourceInlining(
         if (node.kind === 'assign') {
           const expression = program.expressions.get(node.result.id) ?? node.expression;
           for (const value of expressionOperands(expression))
-            use(value, operandAt(expression, value, at));
+            use(value, operandAt(expression, value, { ...at, offset: true }));
         } else if (node.kind === 'load' || node.kind === 'store') {
-          if (!program.source?.locals.has(node.id)) use(node.address, at);
+          if (!program.source?.locals.has(node.id)) use(node.address, { ...at, address: true });
           if (node.kind === 'store') use(node.value, at);
           for (const index of alternateIndex(node) ?? []) use(index, { ...at, alternative: true });
         } else if (node.kind === 'write_register') use(node.value, at);
@@ -589,8 +613,6 @@ export function planSourceInlining(
   // where the reader reads them. An edge copy reads it only through one consumer
   // statement, so every occurrence lies in that one copy.
   const repeated = new Set<string>();
-  const constant = (value: Value): boolean =>
-    program.inline.has(value.id) && program.expressions.get(value.id)?.kind === 'constant';
   const leaf = (value: Value): boolean =>
     constant(value) ||
     (!program.inline.has(value.id) &&
@@ -631,6 +653,77 @@ export function planSourceInlining(
     result.set(node.result.id, { node, anchor, repeated: true, ...(origin ? { origin } : {}) });
     repeated.add(node.id);
   }
+  // A pointer-width `leaf ± k` (the leaf a printed variable) read at most eight
+  // times, each time as a load/store address (through inline `± k` terms, or
+  // through another such definition or an inlined `x ± k` whose own uses all
+  // are), is rematerialized at every occurrence instead of naming a temporary,
+  // so each access prints through the leaf (`p->field_0x198`). It is modular
+  // arithmetic on immutable SSA values; liveness treats each occurrence as a
+  // read of the leaf at its reader, so the leaf is never reassigned in between.
+  const displaced = new Map<string, InlineInstruction>(),
+    definer = new Map<string, string>(),
+    rematerialized = new Set<string>();
+  for (const { node } of repeatable) {
+    const row = uses.get(node.result.id)!;
+    if (
+      !result.has(node.result.id) &&
+      row.count <= 8 &&
+      row.all.length <= 8 &&
+      displacedBase(program.expressions.get(node.result.id))
+    )
+      rematerialized.add(node.id);
+  }
+  for (const [id, site] of result)
+    if (
+      site.node.kind === 'assign' &&
+      !site.local &&
+      !shared.has(id) &&
+      displacedBase(program.expressions.get(id))
+    )
+      displaced.set(site.node.id, site.node);
+  for (const id of rematerialized) displaced.set(id, anchors.get(id)!);
+  for (const [id, node] of displaced) definer.set(node.result.id, id);
+  const addressOnly = (id: string): boolean => {
+    const node = displaced.get(id)!,
+      base = displacedBase(program.expressions.get(node.result.id))!;
+    // The leaf is a printed variable, or another rematerialized definition.
+    if (
+      rematerialized.has(id) &&
+      (program.inline.has(base.id) ||
+        result.has(base.id) ||
+        program.source?.stack_addresses.has(base.id)) &&
+      !rematerialized.has(definer.get(base.id) ?? '')
+    )
+      return false;
+    return (uses.get(node.result.id)?.all ?? []).every(
+      (use) =>
+        !use.alternative &&
+        !use.transfer &&
+        (use.address || (use.offset === true && displaced.has(use.anchor))),
+    );
+  };
+  for (const pending = [...displaced.keys()]; pending.length; ) {
+    context.checkpoint(1);
+    const id = pending.pop()!;
+    if (!displaced.has(id) || addressOnly(id)) continue;
+    const node = displaced.get(id)!;
+    displaced.delete(id);
+    rematerialized.delete(id);
+    const upstream = definer.get(displacedBase(program.expressions.get(node.result.id))!.id);
+    if (upstream) pending.push(upstream);
+    for (const use of uses.get(node.result.id)?.all ?? [])
+      if (displaced.has(use.anchor)) pending.push(use.anchor);
+  }
+  for (const { node, origin } of repeatable)
+    if (rematerialized.has(node.id)) {
+      result.set(node.result.id, {
+        node,
+        anchor: uses.get(node.result.id)!.first.anchor,
+        rematerialized: true,
+        ...(origin ? { origin } : {}),
+      });
+      repeated.add(node.id);
+    }
   // Pure definitions were selected before loads, independent of block layout.
   // Resolve all mapping anchors to the final consuming statement/control.
   for (const [id, site] of result) {

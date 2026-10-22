@@ -203,6 +203,13 @@ interface ConditionTerm {
   /** `value` is not the printed test (a flag-carried short circuit): never fold it. */
   readonly opaque?: true;
 }
+/** `base ± k1 ± k2 …`: an address printed through inline constant
+ * displacements (`terms` of them) of one base, with their modular total. */
+interface Displacement {
+  readonly base: Value;
+  readonly offset: bigint;
+  readonly terms: number;
+}
 /** A table's contents print in full up to this many bytes; larger tables show
  * a prefix of TABLE_PREFIX_BYTES, and an unsized one with unbounded indices
  * its first TABLE_UNKNOWN_ELEMENTS elements. */
@@ -1176,6 +1183,8 @@ export class Renderer {
             assigned &&
             this.pointerStep(declared, this.declaredPointer(value), assigned, value.type.bits);
           if (step) return step;
+          const sum = this.bytePointerAssignment(declared, assigned, value.type.bits);
+          if (sum) return sum;
           const text = this.pointerValue(printed, declared);
           return {
             text,
@@ -1199,6 +1208,8 @@ export class Renderer {
         return printed.ctype && !printed.ctype.signed && printed.ctype.bits <= value.type.bits
           ? printed
           : this.printer.reduce(value.type.bits, printed);
+      const sum = this.bytePointerAssignment(spelled, assigned, value.type.bits);
+      if (sum) return sum;
       const text = this.pointerValue(printed, spelled);
       return {
         text,
@@ -1229,6 +1240,8 @@ export class Renderer {
       // inferred spelling (`char *`, `FILE *`) casts to that spelling.
       const declared = given === undefined ? this.declaredSpelling(value) : undefined;
       const spelling = declared?.endsWith('*') ? declared : this.sourceType(id!);
+      const sum = this.bytePointerAssignment(spelling, assigned, type.bits);
+      if (sum) return sum;
       const text = this.pointerValue(printed, spelling);
       return {
         text,
@@ -4208,6 +4221,121 @@ export class Renderer {
     };
   }
 
+  /** The expression `printed` expands for `value`, if any (not for a stack
+   * address or an inlined load, which print their own way). */
+  private printedExpression(value: Value): Expression | undefined {
+    value = this.substituted?.get(value.id) ?? value;
+    if (
+      this.program.source?.stack_addresses.has(value.id) ||
+      this.inlined.get(value.id)?.node.kind === 'load'
+    )
+      return undefined;
+    return (
+      this.synthetic.get(value.id) ??
+      (this.inline.has(value.id) ? this.program.expressions.get(value.id) : undefined)
+    );
+  }
+
+  /** `expression` as printed through inline constant displacements: its base
+   * and their total modulo 2^bits; null unless it displaces by a constant. */
+  private displacement(expression: Expression | undefined, bits: number): Displacement | null {
+    let base: Value | undefined,
+      offset = 0n,
+      terms = 0;
+    for (; terms < 16 && expression?.kind === 'integer'; terms++) {
+      const left = this.constantOf(expression.left),
+        right = this.constantOf(expression.right);
+      if (expression.op === 'add' && (left === undefined) !== (right === undefined)) {
+        base = left === undefined ? expression.left : expression.right;
+        offset += left ?? right!;
+      } else if (expression.op === 'sub' && left === undefined && right !== undefined) {
+        base = expression.left;
+        offset -= right;
+      } else break;
+      base = this.substituted?.get(base.id) ?? base;
+      expression = this.printedExpression(base);
+    }
+    return base ? { base, offset: BigInt.asUintN(bits, offset), terms } : null;
+  }
+
+  /** Source view: an address through two or more inline constant displacements
+   * of one base, `(b + k1) + k2`, prints as one sum `b + k` of the same modular
+   * address bits. */
+  private reassociated(value: Value, displaced: Displacement | null): Printed | undefined {
+    if (
+      !displaced ||
+      displaced.terms < 2 ||
+      !this.localValidation.presentation(
+        'displacement_reassociation',
+        this.input.function.id,
+        'an address through several constant displacements of one base is printed as that base plus their total modulo the address width: the same modular address bits',
+      )
+    )
+      return undefined;
+    if (displaced.offset === 0n) return this.printed(displaced.base);
+    const total: Value = { id: `${value.id}#displacement`, type: value.type };
+    this.synthetic.set(total.id, { kind: 'constant', bits: displaced.offset });
+    return this.expression(
+      { kind: 'integer', op: 'add', left: displaced.base, right: total },
+      value.type,
+    );
+  }
+
+  /** C source view: a declared byte-pointer variable displaced by a constant is
+   * C byte pointer arithmetic `p + k` (`p - k`) of the same address bits, with
+   * no integer round trip. */
+  private bytePointerSum(
+    displaced: Displacement | null,
+  ): { readonly printed: Printed; readonly spelling: string } | null {
+    if (!displaced || !this.sourceView || this.language !== 'c-like') return null;
+    const { base, offset } = displaced;
+    if (
+      base.type.kind !== 'integer' ||
+      this.inline.has(base.id) ||
+      this.program.source?.stack_addresses.has(base.id)
+    )
+      return null;
+    const spelling = this.declaredSpelling(base);
+    if (
+      !/^(?:const )?(?:u?int8_t|char)\s*\*$/.test(spelling) ||
+      !this.localValidation.presentation(
+        'byte_pointer_sum',
+        this.input.function.id,
+        'a declared byte-pointer variable displaced by a constant is printed as C byte pointer arithmetic: one-byte elements scale by one, so the sum has the same modular address bits (the premise typed_index subscripts rest on)',
+      )
+    )
+      return null;
+    const width = 1n << BigInt(base.type.bits);
+    const negative = offset > width >> 1n;
+    let printed = this.printer.primary(this.local(base));
+    if (offset !== 0n)
+      printed = this.printer.binary(
+        negative ? '-' : '+',
+        printed,
+        this.printer.literal(negative ? width - offset : offset, base.type.bits),
+        null,
+      );
+    return { printed, spelling };
+  }
+
+  /** C source view: `q = p + k` for a declared byte pointer `p`, through one
+   * pointer conversion when `q`'s spelling does not accept `p`'s. */
+  private bytePointerAssignment(
+    spelling: string,
+    assigned: Expression | undefined,
+    bits: number,
+  ): Printed | null {
+    const sum = this.bytePointerSum(this.displacement(assigned, bits));
+    if (!sum) return null;
+    return pointerAssignable(sum.spelling, spelling)
+      ? sum.printed
+      : {
+          text: `(${spelling})${this.printer.group(sum.printed, UNARY)}`,
+          precedence: UNARY,
+          ctype: null,
+        };
+  }
+
   /** Source-view memory access: `*p` through a declared scalar pointer of the
    * accessed width, otherwise one cast dereference of the actual address. The
    * memory-view annotation stays in mappings and inferences, not in the text. */
@@ -4277,7 +4405,14 @@ export class Renderer {
       );
       if (member && this.permitUnaligned(node)) return member;
     }
-    let address = this.stringBaseSum(node.address) ?? this.sourceAddressPrinted(node.address);
+    const displaced = this.displacement(
+      this.printedExpression(node.address),
+      bitWidth(node.address.type),
+    );
+    let address =
+      this.stringBaseSum(node.address) ??
+      this.reassociated(node.address, displaced) ??
+      this.sourceAddressPrinted(node.address);
     // A constant address inside a declared global is that object's own pointer.
     const pointer = this.language === 'c-like' ? this.globalPointer(node.address) : undefined;
     if (pointer !== undefined) address = this.printer.primary(pointer, { bits: 64, signed: false });
@@ -4313,7 +4448,9 @@ export class Renderer {
       this.inline.has(node.address.id) || this.program.source?.stack_addresses.has(node.address.id)
         ? ''
         : this.declaredSpelling(node.address);
-    if (spelling.endsWith('*')) address = this.printer.primary(this.local(node.address));
+    const sum = pointer === undefined ? this.bytePointerSum(displaced) : null;
+    if (sum) address = sum.printed;
+    else if (spelling.endsWith('*')) address = this.printer.primary(this.local(node.address));
     else if (pointer === undefined && (address.ctype?.bits !== 64 || address.ctype.signed))
       address = {
         text: `(uintptr_t)${this.printer.group(address, UNARY)}`,
@@ -7414,6 +7551,17 @@ export class Renderer {
       )
     )
       for (const site of repeated) candidates.delete(site.node.result.id);
+    const rematerialized = [...candidates.values()].filter((site) => site.rematerialized);
+    if (
+      rematerialized.length &&
+      !this.localValidation.presentation(
+        'address_rematerialization',
+        subject,
+        'a pointer-width sum of one printed variable (or another such sum) and a constant, read at most eight times and only as load/store addresses (directly, through inline constant displacements, or through other such sums), is printed at each of those addresses instead of a temporary; it is modular arithmetic on immutable values, and liveness treats each occurrence as a read of the variable at its reader, so the variable is never reassigned in between',
+        rematerialized.map(({ node }) => node.id),
+      )
+    )
+      for (const site of rematerialized) candidates.delete(site.node.result.id);
     if (
       candidates.size &&
       this.localValidation.presentation(
