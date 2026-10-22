@@ -9,7 +9,7 @@ type Make = (
 ) => Value;
 
 export const shiftIdiomScope =
-  "a constant rotation whose result is masked to exactly its non-wrapped bits is the plain shift (ror(x,k) & (ones>>k) = x>>k, ror(x,k) & (ones<<(w-k)) = x<<(w-k), rol by the complementary count), a logical shift OR-ed with the sign bit replicated into exactly the vacated top bits is the arithmetic shift, and a bit field lying entirely inside the non-wrapped or the wrapped part of a rotation is the same field of the rotated operand; 0<k<w and every mask must equal the vacated/retained bits exactly, so a true rotate keeps its rotate; the bitfield-move forms are the same exact field algebra: a rotation masked to one run of n bits that does not wrap (ror(x,w-k) & (mask(n)<<k), k>0, k+n<=w) is zero_extend(trunc_n(x)) << k, and a field of n bits at k OR-ed with the field's own top bit (a select of 1/0 on that very source bit) replicated into exactly the bits above it (k+n..w-1) is sign_extend(field) << k (SXTB/SXTH/SXTW, SBFIZ, SBFX); the masks must equal the field and the fill exactly";
+  "a constant rotation whose result is masked to exactly its non-wrapped bits is the plain shift (ror(x,k) & (ones>>k) = x>>k, ror(x,k) & (ones<<(w-k)) = x<<(w-k), rol by the complementary count), a logical shift OR-ed with the sign bit replicated into exactly the vacated top bits is the arithmetic shift, and a bit field lying entirely inside the non-wrapped or the wrapped part of a rotation is the same field of the rotated operand; 0<k<w and every mask must equal the vacated/retained bits exactly, so a true rotate keeps its rotate; the bitfield-move forms are the same exact field algebra, for a field of 8, 16 or 32 bits that starts at bit 0 of its source: a rotation masked to that one non-wrapping run (ror(x,w-k) & (mask(n)<<k), 0<k, k+n<w) is zero_extend(trunc_n(x)) << k, and a field of n bits at k OR-ed with its own top bit (a select of 1/0 on that very source bit) replicated into exactly the bits above it (k+n..w-1) is sign_extend(trunc_n(x)) << k (SXTB/SXTH/SXTW, SBFIZ); the masks must equal the field and the fill exactly";
 
 /** One contiguous run of set bits: [low, high), or null for no bits or a gap. */
 function contiguousRun(mask: bigint): { low: number; high: number } | null {
@@ -39,6 +39,11 @@ type Shape =
       /** Bits kept by the masks applied so far (bit j of the rotation). */
       readonly mask: bigint;
     };
+
+/** Field widths that have a native C integer type: the extension of any other
+ * width prints as masks and xor/subtract pairs, which is longer than the form it
+ * replaces. */
+const nativeWidth = (bits: number): boolean => bits === 8 || bits === 16 || bits === 32;
 
 /** Operands of rotations by a constant 0<k<w (w = 8/16/32/64): the source view
  * prints those as two shifts that each read the operand, so it must be a
@@ -320,9 +325,14 @@ export function foldShiftIdiom(
     // A rotation masked to one non-wrapping run of its bits is that field of
     // the operand, zero-extended and shifted into place.
     const shape = settle(shapeOfExpression(expression, value, 0));
-    if (!shape?.rotated || shape.offset !== 0 || shape.shift === 0) return null;
-    if (shape.shift + shape.bits === width)
-      return { kind: 'integer', op: 'shl', left: shape.base, right: count(shape.shift) };
+    if (
+      !shape?.rotated ||
+      shape.offset !== 0 ||
+      shape.shift === 0 ||
+      shape.shift + shape.bits >= width ||
+      !nativeWidth(shape.bits)
+    )
+      return null;
     return {
       kind: 'integer',
       op: 'shl',
@@ -365,6 +375,8 @@ export function foldShiftIdiom(
     if (!filler || !shape) continue;
     const top = shape.shift + shape.bits;
     if (
+      shape.offset !== 0 ||
+      !nativeWidth(shape.bits) ||
       top >= width ||
       filler.fill !== (ones & ~((1n << BigInt(top)) - 1n)) ||
       !signTest(filler.condition, shape.base, shape.offset + shape.bits - 1)
