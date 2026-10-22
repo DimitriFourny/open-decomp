@@ -966,7 +966,7 @@ Files that several items touch:
 
 ### T1: Incremental hash of the dependency ledger
 
-- [ ] **Problem.** `fingerprint(readset)` (`source-facts.ts:1817-1837`, inside the dependency loop at `:1786`) rebuilds and hashes the whole append-only ledger (about 10.9k reads) for every context-specialized dependency: 11.0 s of profile plus GC.
+- [x] **Problem.** `fingerprint(readset)` (`source-facts.ts:1817-1837`, inside the dependency loop at `:1786`) rebuilds and hashes the whole append-only ledger (about 10.9k reads) for every context-specialized dependency: 11.0 s of profile plus GC. _Done (`wt/rm4-t1`): all 237 lane texts and states identical to `od-rm3-final`; SQLite `decompile_ms_total` back-to-back at similar load: base 139.3 / 125.6 s → 117.2 / 106.9 s._
   - **Change:**
     - `src/core/identity.ts`: an append-only canonical hasher that produces exactly `fingerprint({version: 1, complete: true, reads})` for a growing array, with `canonicalIdentity` per element (no second format).
     - `src/project/cache/dependencies.ts`: `AnalysisDependencyCollector.readsetFingerprint(readset)` absorbs only new reads. `finish()` snapshots are prefixes (`:410-415`). Fall back to the full hash for foreign readsets.
