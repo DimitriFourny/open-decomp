@@ -457,7 +457,7 @@ function sourceOf(abi: AbiProfile, ir: SSAForm) {
  * cycle whose only inputs are epochs. `write` adds an explicit environment
  * write after the call. */
 function loopFixture(abi: AbiProfile, write: boolean) {
-  const fp = { kind: 'float' as const, bits: 64 };
+  const fp = { kind: 'float' as const, bits: 64 as const };
   const i32 = integer(32);
   const location = abi.classifyCall({
     returns: fp,
@@ -515,7 +515,7 @@ function loopFixture(abi: AbiProfile, write: boolean) {
  * guard reads a phi of the entry state and the call clobber, and nothing else
  * reads it. */
 function joinFixture(abi: AbiProfile) {
-  const fp = { kind: 'float' as const, bits: 64 };
+  const fp = { kind: 'float' as const, bits: 64 as const };
   const location = abi.classifyCall({
     returns: fp,
     parameters: [fp],
