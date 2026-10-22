@@ -425,7 +425,8 @@ export function planVariadicStackArguments(
         `Presenting outgoing stack stores as trailing arguments assumes the Darwin arm64 variadic convention (every unnamed argument in consecutive 8-byte stack slots from SP+${callee.variadic?.named_stack_bytes ?? 0n}) holds for this call.`,
       );
       const values: Value[] = taken.map(
-        ({ value, join }) => value ?? join!.shared ?? joinStackSlot(blocks, storage, node.id, join!),
+        ({ value, join }) =>
+          value ?? join!.shared ?? joinStackSlot(blocks, storage, node.id, join!),
       );
       for (const argument of taken)
         for (const store of argument.stores) consumed.set(store.id, node.id);
@@ -443,7 +444,10 @@ export function planVariadicStackArguments(
  * transfer's own, the phi sources by destination, and the planner's value
  * factory. */
 export interface StackJoinStorage {
-  readonly transfers: readonly { readonly transfer: ParallelTransfer; readonly block: BlockRegion }[];
+  readonly transfers: readonly {
+    readonly transfer: ParallelTransfer;
+    readonly block: BlockRegion;
+  }[];
   readonly copies: Map<ParallelTransfer, ParallelTransfer['copies']>;
   readonly incoming: Map<string, Value[]>;
   readonly make: (
