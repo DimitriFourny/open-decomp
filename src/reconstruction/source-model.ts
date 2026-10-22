@@ -287,10 +287,13 @@ export function variadicArea(variadic: SourceVariadic | undefined): Value | null
 export interface FrameMember {
   readonly offset: bigint;
   readonly size: bigint;
-  /** Every access to these bytes reads or writes exactly them: a scalar member.
-   * Otherwise (overlapping accesses, an interior or indexed address) a byte array. */
+  /** Every access to these bytes reads or writes exactly them: a scalar member
+   * (accesses wider than it, covering whole members, are casts at the member
+   * holding their first byte). Otherwise (partially overlapping accesses, an
+   * interior or indexed address, padding under a wider access) a byte array. */
   readonly scalar: boolean;
-  /** The known-offset frame accesses inside these bytes. */
+  /** The known-offset frame accesses inside these bytes (a scalar member lists
+   * those of exactly its bytes, not the wider accesses spanning it). */
   readonly access_ids: readonly string[];
   /** SysV `va_list` (S7): the 24-byte member `va`; every access inside it is
    * exactly one of its fields. */
