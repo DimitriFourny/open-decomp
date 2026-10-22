@@ -36,7 +36,9 @@ import type {
   LoopForm,
   ParallelTransfer,
   Region,
+  StructuredFunction,
   StructuringConditions,
+  StructuringResult,
 } from '../presentation/index.js';
 import { structureControlFlow, structuredGraph } from '../presentation/index.js';
 import type { SuppliedTypeRecord } from '../analysis/types/index.js';
@@ -241,13 +243,37 @@ export class CallInliningRetry extends Error {
   }
 }
 
-/** Plans of one reconstruction that no attempt's state (rejected calls, metadata
- * mode, validation session) can change: the first attempt computes them and
- * every retry reuses them. */
+/** One structuring condition (see StructuringConditions) asked and its answer. */
+type StructuringQuery =
+  | { readonly kind: 'operand'; readonly block: string; readonly answer: boolean }
+  | {
+      readonly kind: 'copies';
+      readonly block: string;
+      readonly slot: number;
+      readonly answer: number;
+    }
+  | {
+      readonly kind: 'returnsConstants';
+      readonly block: string;
+      readonly slot: number;
+      readonly answer: boolean;
+    };
+
+/** Plans of one reconstruction shared by its attempts. No attempt's state
+ * (rejected calls, metadata mode, validation session) changes the names,
+ * characters or indexed data: the first attempt computes them and every retry
+ * reuses them. A restructuring is reused only under the same conditions. */
 interface AttemptPlans {
   names?: SourceNamePlan;
   characters?: ReadonlySet<string>;
   indexedData?: ReadonlyMap<string, IndexedDataAccess>;
+  /** Source-view restructurings (see Renderer.restructure): the structured
+   * graph, the conditions asked in order with their answers, and the layout. */
+  structures?: {
+    readonly graph: StructuredFunction;
+    readonly queries: readonly StructuringQuery[];
+    readonly result: StructuringResult;
+  }[];
 }
 
 /** Only syntax lives here: both dialects consume the same reconstructed program. */
@@ -7470,7 +7496,7 @@ export class Renderer {
    * ownership are those of the first structuring. The facts never depend on
    * the first layout (reconstruction reads only its blocks, transfers and loop
    * membership, see docs/internals/structuring-emission.md). */
-  private restructure(silent: (block: BlockRegion) => boolean): void {
+  private restructure(silent: (block: BlockRegion) => boolean, plans: AttemptPlans): void {
     const program = this.program,
       edges = new Map<string, ParallelTransfer>();
     const slots = (control: Control): [number, ParallelTransfer][] =>
@@ -7506,16 +7532,51 @@ export class Renderer {
       copies: (block, slot) => this.printedCopies(edges.get(`${block}:${slot}`)!).length,
       returnsConstants: (block, slot) => this.returnsConstants(edges.get(`${block}:${slot}`)!),
     };
-    const structure = (facts: StructuringConditions) =>
-      structureControlFlow(
+    // An earlier attempt's structuring is reused when every condition it
+    // evaluated, asked again in the same order, answers the same: structuring
+    // is deterministic in its graph (the shared reconstruction's) and these
+    // answers, so it would ask the same questions and lay out the same body.
+    const structure = (facts: StructuringConditions): StructuringResult => {
+      const asked = (query: StructuringQuery): boolean | number =>
+        query.kind === 'operand'
+          ? facts.operand(query.block)
+          : facts[query.kind](query.block, query.slot);
+      for (const memo of (plans.structures ??= []))
+        if (
+          memo.graph === program.function &&
+          memo.queries.every((query) => asked(query) === query.answer)
+        )
+          return memo.result;
+      const queries: StructuringQuery[] = [];
+      const result = structureControlFlow(
         structuredGraph(program.function, program.blocks, (work) => this.context.checkpoint(work)),
         this.context,
         {
           max_work: this.context.budget.work,
           transfers: (block, slot) => edges.get(`${block}:${slot}`),
-          conditions: facts,
+          conditions: {
+            operand: (block) => {
+              const answer = facts.operand(block);
+              queries.push({ kind: 'operand', block, answer });
+              return answer;
+            },
+            copies: (block, slot) => {
+              const answer = facts.copies(block, slot);
+              queries.push({ kind: 'copies', block, slot, answer });
+              return answer;
+            },
+            returnsConstants: (block, slot) => {
+              const answer = facts.returnsConstants(block, slot);
+              queries.push({ kind: 'returnsConstants', block, slot, answer });
+              return answer;
+            },
+          },
         },
       );
+      // A partial result (exhausted work) is not a layout: it is never reused.
+      if (result.value) plans.structures.push({ graph: program.function, queries, result });
+      return result;
+    };
     let result = structure(conditions);
     if (
       result.value &&
@@ -7957,7 +8018,7 @@ export class Renderer {
       for (const [id] of held) this.commaOperands.delete(id);
       this.commaCarriers.clear();
     }
-    this.restructure(silent);
+    this.restructure(silent, plans);
     program = this.program;
     // A proven jump table's exact range guard and its switch print as one switch.
     const quietAnchor = (id: string): boolean =>

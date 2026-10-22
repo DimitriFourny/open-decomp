@@ -45,7 +45,7 @@ import type {
 } from '../../analysis/types/index.js';
 import { cSourceName } from '../../metadata/symbols/c-names.js';
 import { nativeCallIndex } from './calls.js';
-import { nativeArgumentValues } from './native-arguments.js';
+import { nativeArgumentIndex, nativeArgumentValues } from './native-arguments.js';
 import { parameterRegisters } from './native-abi.js';
 import {
   nativeDependencies,
@@ -261,7 +261,8 @@ export function functionTypeObjects(
     parameter_state: 'ambiguous' as const,
     argument_list_complete: false,
   };
-  for (const [index, value] of nativeArgumentValues(ir, types.calls, ir.id, observed, context))
+  const indexed = nativeArgumentIndex(ir, context);
+  for (const [index, value] of nativeArgumentValues(indexed, types.calls, ir.id, observed, context))
     anchor(value, { kind: 'argument', function_id: fn.id, index }, true);
   // A hidden-result pointer register outside the argument registers (AAPCS64
   // x8) read at entry and stored through is the incoming result location: its
@@ -320,7 +321,7 @@ export function functionTypeObjects(
       const callee = node.kind === 'call' ? callees.get(node.id) : undefined;
       if (node.kind !== 'call' || !callee) continue;
       for (const [index, value] of nativeArgumentValues(
-        ir,
+        indexed,
         types.calls,
         node.id,
         observed,
@@ -333,7 +334,7 @@ export function functionTypeObjects(
     const tail = callees.get(block.terminator.id);
     if (tail)
       for (const [index, value] of nativeArgumentValues(
-        ir,
+        indexed,
         types.calls,
         block.terminator.id,
         observed,

@@ -248,7 +248,7 @@ Files that several items touch:
 
 ### C4: Remove superlinear and repeated work on large bodies
 
-- [ ] **Problem.** The mandatory floor exceeds 10M for `sqlite3Select` (≈11.65M) and `sqlite3Pragma` (≈14.0M), measured with summaries off at a 40M measurement budget. Optional stages also blow up with body size.
+- [x] **Problem.** The mandatory floor exceeds 10M for `sqlite3Select` (≈11.65M) and `sqlite3Pragma` (≈14.0M), measured with summaries off at a 40M measurement budget. Optional stages also blow up with body size. _Done (C4): (a), (b), (d) as specified; (c) reuses the value analysis after fixpoint-keeping rounds, re-solves only the blocks reachable from comparison/rule/threading/join changes, skips rounds that only removed unreachable blocks, and skips the copy pass (2,031 lane `simplifySSA` calls identical to the full rounds; simplify 1.75M → 1.33M on `sqlite3Select`, 2.32M → 1.60M on `sqlite3Pragma` at 40M); rewrite and trivial-parameter elimination still read the whole graph. Lane: 8 texts change through budget-dependent optional stages; work −5.5%; `sqlite3Select`/`sqlite3Pragma` still exceed 10M._
   - **Change** (byte-identical by construction):
     - (a) `nativeArgumentValues` (`src/service/analysis/native-arguments.ts:29-39, 85-97`) scans the whole IR per call. Build one per-IR index (assignments, stores, call register inputs by call id, terminator exit bindings, concat by operand tuple) once per caller loop in `nativeShapeTransfers` (`source-facts.ts:1305-1328`) and `functionTypeObjects` (`image-types.ts:317-342`), and pass it in.
       - Measured: −0.56M on `Incrmerge`, −0.72M on `isDate`, up to −9M on `sqlite3Pragma` at 40M.
