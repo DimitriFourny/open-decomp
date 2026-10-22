@@ -201,6 +201,7 @@ export function reconstruct(
         localValidation,
         view,
         sourcePlan.presentation.requirements,
+        sourcePlan.variadic,
       )
     : null;
   // Source view: indirect exits proven to be tail calls become target-value tails.
@@ -1235,6 +1236,7 @@ export function reconstruct(
           stack_addresses: sourceStack.addresses,
           forwarded_reloads: sourceStack.forwardedReloads,
           ...(view === 'source' ? { frame_saves: sourceStack.saves } : {}),
+          ...(sourceStack.variadic ? { variadic: sourceStack.variadic } : {}),
         }
       : undefined;
   const program: Reconstruction = {

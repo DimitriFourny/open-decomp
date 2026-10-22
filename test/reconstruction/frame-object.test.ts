@@ -232,7 +232,8 @@ const clobbered = new (class extends Map<string, bigint> {
 
 /** Runs one view with the entry SP at `ENTRY_SP`, the 32 frame bytes below
  * it mapped (the checked view addresses them there) and `incoming` in the
- * first incoming stack slot; the callee leaves memory unchanged in both views. */
+ * first incoming stack slot; the callee leaves memory unchanged in both views.
+ * A Darwin `va_start` area starts at that slot (`va`, input `...`). */
 function run(emission: Emission, abi: AbiProfile, argument: bigint, incoming: bigint): Observation {
   const memory = new Map<bigint, number>();
   for (let offset = -32n; offset < abi.stack_return_address_bytes; offset++)
@@ -242,16 +243,18 @@ function run(emission: Emission, abi: AbiProfile, argument: bigint, incoming: bi
       ENTRY_SP + abi.stack_return_address_bytes + index,
       Number((incoming >> (8n * index)) & 0xffn),
     );
-  const formals = emittedFormals(emission);
-  assert.equal(formals.length, 2, emission.text);
+  const formals = emittedFormals(emission),
+    variadic = /\bva_start\(/.test(emission.text);
+  assert.equal(formals.length, variadic ? 1 : 2, emission.text);
   return execute(
     emission,
-    new Map(
-      formals.map((formal) => [
+    new Map([
+      ...formals.map((formal): [string, bigint] => [
         formal.statement_id,
         formal.name === 'entry_sp' ? ENTRY_SP : argument,
       ]),
-    ),
+      ...(variadic ? [['...', ENTRY_SP + abi.stack_return_address_bytes] as [string, bigint]] : []),
+    ]),
     memory,
     0n,
     new Map(),
@@ -261,13 +264,14 @@ function run(emission: Emission, abi: AbiProfile, argument: bigint, incoming: bi
 }
 
 /** The source view prints every negative entry-SP offset through the frame
- * object and the entry SP only in nonnegative expressions; its values and
- * event order equal the checked view's. */
+ * object and the entry SP (or, for a Darwin `va_start` area, `va`) only in
+ * nonnegative expressions; its values and event order equal the checked view's. */
 function assertBeside(
   fixture: Fixture,
   abi: AbiProfile,
   cases: readonly (readonly [argument: bigint, incoming: bigint, expected: bigint])[],
   events: readonly string[],
+  base: 'entry_sp' | 'va' = 'entry_sp',
 ): void {
   for (const language of ['c-like', 'python-like'] as const) {
     const output = emit(fixture.ir, fixture.extra, language).emission,
@@ -277,8 +281,11 @@ function assertBeside(
     assert.match(checked.text, /entry_sp - /, checked.text);
     assert.doesNotMatch(checked.text, /\bframe\b/, checked.text);
     assert.match(text, language === 'c-like' ? /\} frame;/ : /frame = stack_frame\(/, text);
-    assert.match(text, /\bentry_sp\b/, text);
-    assert.doesNotMatch(text, /\bentry_sp\s*-|-\s*\(?entry_sp\b/, text);
+    if (base === 'va') {
+      assert.match(text, /\bva_start\(/, text);
+      assert.doesNotMatch(text, /\bentry_sp\b/, text);
+    } else assert.match(text, /\bentry_sp\b/, text);
+    assert.doesNotMatch(text, /\b(?:entry_sp|va)\s*-|-\s*\(?(?:entry_sp|va)\b/, text);
     assert.ok(
       output.local_validation?.some((record) => record.rule === 'frame_object_beside_entry_sp'),
     );
@@ -358,7 +365,7 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
     );
   });
 
-  test(`${abi.id}: an incoming-argument address stored in a frame slot and dereferenced keeps entry_sp`, () => {
+  test(`${abi.id}: an incoming-argument address stored in a frame slot and dereferenced keeps its entry base`, () => {
     const f = entryFrame(abi, 'stored');
     const slot = f.at(-16n);
     f.block.store(slot, f.at(f.incoming));
@@ -375,6 +382,8 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
         [1n << 63n, 0x0123456789abcdefn, (1n << 63n) + 0x0123456789abcdefn],
       ],
       ['store', 'call', 'load', 'load'],
+      // Darwin: an escaping pointer to the first incoming slot is a `va_start` area.
+      abi.id === 'darwin-arm64' ? 'va' : 'entry_sp',
     );
   });
 
@@ -389,7 +398,8 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
     for (const language of ['c-like', 'python-like'] as const) {
       const output = emit(fixture.ir, fixture.extra, language).emission;
       assert.doesNotMatch(output.text, /\bframe\b/, output.text);
-      assert.doesNotMatch(output.text, /\bentry_sp\s*-/, output.text);
+      assert.doesNotMatch(output.text, /\b(?:entry_sp|va)\s*-/, output.text);
+      assert.equal(/\bva_start\(/.test(output.text), abi.id === 'darwin-arm64', output.text);
       for (const argument of [0n, mask64]) {
         const source = run(output, abi, argument, 0n),
           machine = run(

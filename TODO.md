@@ -318,7 +318,8 @@ A prototype of S1–S3 (unsound, measurement only) gave these results:
 
 ### S6: Darwin and Win64 variadic functions print `...` and `va_start`
 
-- [ ] **Problem.**
+- [x] **Problem.**
+  - **Done (S6):** `classifyVariadicArea` (`va_start` record, `variadic_convention` premise), `va` as the entry base, Win64 home stores hidden; full-tier OD lane changes only the six texts (0 `entry_sp`, `(uint32_t arg0, ...)` / `(uint32_t count, ...)`, PE `arg1..arg3` gone), checked views byte-identical; `test/reconstruction/variadic-source.test.ts` executes Mach-O and PE `fixture_variadic` (counts 0..9) and a Win64 IR fixture, with no rewrite for a missing home store or a direct use of `rdx`.
   - Win64 `matrix_variadic` (`-O0` `0x140001320`, `-O2` `0x140001170`, stripped `sub@0x140001160`) spills `rdx`/`r8`/`r9` into the home area (`*(uint64_t *)(entry_sp + 16) = arg1; …`) and walks it from +16. Its signature shows the spilled registers as formals.
   - Darwin (`-O0` `0x1000006b4`, `-O2` `0x1000004c4`, stripped `sub@0x1000004c4`) prints `double* entry_sp` as a formal and walks it.
   - **Root cause:**

@@ -1407,7 +1407,11 @@ export function planSource(
     definitions,
     formal_stack_offsets: formalStackOffsets,
   };
-  let entryParameter: Value | null = null;
+  let entryParameter: Value | null = null,
+    // Source view: the named formals before `...`, when they follow ABI
+    // argument positions (Win64); `variadicArea` alone for Darwin.
+    variadicNamed: readonly Value[] | null = null,
+    variadicArea: Value | null = null;
   return {
     calls,
     returns,
@@ -1456,6 +1460,37 @@ export function planSource(
         formalStackOffsets.set(value.id, offset);
       }
       return value;
+    },
+    /** Source view (S6/S7): the callee-side variadic interface, inferred from
+     * the code `va_start` lowers to; a validated declared signature keeps its
+     * own formals and is never rewritten. */
+    variadic: {
+      named(registers: readonly RegisterDescriptor[]): readonly Value[] | null {
+        if (functionSignature) return null;
+        const named: Value[] = [];
+        for (const register of registers) {
+          const value = parameters.find(
+            (parameter) => parameterRegisters.get(parameter.id)?.root === register.root,
+          );
+          if (!value) return null;
+          named.push(value);
+        }
+        return named;
+      },
+      area(offset: bigint, named: readonly Value[] | null): Value | null {
+        if (functionSignature) return null;
+        variadicNamed = named;
+        variadicArea ??= make(
+          `parameter:va:${offset}`,
+          integer(abi.layout.pointer_bits),
+          entry.id,
+          undefined,
+          entry.register_entry
+            .filter((binding) => binding.register.root === abi.stack_pointer.root)
+            .map((binding) => binding.value),
+        );
+        return variadicArea;
+      },
     },
     /** Source view: the projection of an indirect exit that `classifyIndirectTails`
      * accepted. The observed argument-register prefix at the exit, as for an
@@ -1524,6 +1559,17 @@ export function planSource(
         : [...parameters, ...incoming].filter(
             (value) => live.has(value.id) && !demotedParameters.has(value.id),
           );
+      // Named positions before `...` are formals even when unused: the last
+      // one fixes where `va_start` finds the first anonymous argument.
+      if (variadicNamed) {
+        const named = variadicNamed.filter((value) => !demotedParameters.has(value.id));
+        demanded.splice(
+          0,
+          demanded.length,
+          ...named,
+          ...demanded.filter((value) => !named.includes(value)),
+        );
+      }
       demanded.forEach((value, index) => {
         if (!parameterNames.has(value.id)) parameterNames.set(value.id, `arg${index}`);
       });
