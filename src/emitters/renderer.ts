@@ -203,12 +203,10 @@ interface ConditionTerm {
   /** `value` is not the printed test (a flag-carried short circuit): never fold it. */
   readonly opaque?: true;
 }
-/** A table's contents print in full up to this many bytes; larger tables show
- * a prefix of TABLE_PREFIX_BYTES, and an unsized one with unbounded indices
- * its first TABLE_UNKNOWN_ELEMENTS elements. */
-const TABLE_FULL_BYTES = 512n;
-const TABLE_PREFIX_BYTES = 256;
-const TABLE_UNKNOWN_ELEMENTS = 16;
+/** A table's contents print in full up to this many bytes; larger tables, and
+ * those of unestablished extent, show one row of TABLE_PREFIX_BYTES. */
+const TABLE_FULL_BYTES = 64n;
+const TABLE_PREFIX_BYTES = 16;
 const STRING_LITERAL_SCOPE =
   'pointer-width constants addressing an immutable NUL-terminated string with established encoding (an interior address denotes its suffix bytes), printed as that string literal where the constant is a value: argument, store, return, copy, select arm or identity comparison';
 
@@ -3833,7 +3831,9 @@ export class Renderer {
         object = table.data.object,
         node = this.statements.get(group.first)!;
       const start = this.writer.offset;
-      const contents = this.tableContents(group.name, table, group.reach);
+      const contents = this.tableContents(group.name, table, group.reach, group.first, [
+        group.address,
+      ]);
       if (contents) {
         for (const line of contents.lines) this.writer.line(0, line);
         this.writer.helper(
@@ -3864,15 +3864,18 @@ export class Renderer {
   }
 
   /** Declaration lines of a read-only table with its contents, or undefined when
-   * its bytes or extent are not established. The element count is the smaller of
-   * the accessed range (`reach`: the greatest index every access can take, plus
-   * one) and the object's extent (symbol size, else the distance to the next
-   * symbol, data record, relocation or section end); an unbounded index over an
-   * unsized object shows only the first elements, never an invented extent. */
+   * its bytes are not established. The element count is an established extent
+   * only when it comes from a symbol size (capped by the accessed range,
+   * `reach`: the greatest index every access can take, plus one) or from the
+   * accessed range itself, which must lie within the distance to the next
+   * symbol, data record, relocation or section end (`span_bound`, a bound and
+   * never a size). Otherwise the declaration is `name[]` with the first row. */
   private tableContents(
     name: string,
     table: IndexedDataAccess,
     reach: bigint,
+    subject: string,
+    subjectIds: readonly string[],
   ): { readonly lines: readonly string[] } | undefined {
     const object = table.data.object,
       bytes = table.data.object_bytes,
@@ -3884,24 +3887,37 @@ export class Renderer {
     )
       return undefined;
     const size = BigInt(width);
-    const extent = object.byte_length ?? object.span_bound;
-    const bySize = extent === undefined || extent === null ? undefined : extent / size;
-    const proven = bySize === undefined ? (reach <= 4096n ? reach : undefined) : undefined;
-    const total = bySize !== undefined ? (reach < bySize ? reach : bySize) : proven;
+    const { byte_length: symbolSize, span_bound: spanBound } = object;
+    const total =
+      symbolSize != null
+        ? reach < symbolSize / size
+          ? reach
+          : symbolSize / size
+        : spanBound != null
+          ? reach <= spanBound / size
+            ? reach
+            : undefined
+          : reach <= 4096n
+            ? reach
+            : undefined;
     const full = total !== undefined && total * size <= TABLE_FULL_BYTES;
-    let shown = full
-      ? total
-      : BigInt(
-          Math.min(
-            total === undefined ? TABLE_UNKNOWN_ELEMENTS : Number(total),
-            TABLE_PREFIX_BYTES / width,
-          ),
-        );
+    let shown = full ? total : BigInt(TABLE_PREFIX_BYTES / width);
+    if (total !== undefined && total < shown!) shown = total;
     shown =
       shown! < BigInt(Math.floor(bytes.length / width))
         ? shown!
         : BigInt(Math.floor(bytes.length / width));
     if (shown <= 0n || Number(shown) * width > this.tableBudget) return undefined;
+    if (
+      total !== undefined &&
+      !this.localValidation.presentation(
+        'table_extent',
+        subject,
+        'the declared element count is a symbol size or an accessed range inside the next-symbol bound; a neighbour distance is never an extent',
+        subjectIds,
+      )
+    )
+      return undefined;
     this.tableBudget -= Number(shown) * width;
     const values: string[] = [];
     for (let index = 0; index < Number(shown); index++) {
@@ -3911,19 +3927,11 @@ export class Renderer {
       values.push(value < 1n << 32n ? String(value) : `0x${value.toString(16)}`);
     }
     const hex = object.address.value.toString(16);
-    const basis =
-      object.byte_length != null && bySize !== undefined && total === bySize
-        ? 'symbol size'
-        : total === undefined
-          ? 'extent not established'
-          : bySize !== undefined && total === bySize
-            ? 'next symbol bound'
-            : 'accessed range';
     const rest = total === undefined ? undefined : total - shown;
     const more =
       rest === undefined ? 'further elements not shown' : rest > 0n ? `${rest} more` : undefined;
     const elements = `${total === undefined ? `first ${shown}` : `${total}`} ${this.language === 'c-like' ? '' : `uint${table.bits}_t `}elements`;
-    const note = `VA 0x${hex}, read-only; ${elements} (${basis})`;
+    const note = `VA 0x${hex}, read-only; ${elements}`;
     const per = Math.max(1, Math.floor(16 / width));
     const rows: string[] = [];
     for (let at = 0; at < values.length; at += per)

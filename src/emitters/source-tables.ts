@@ -76,14 +76,18 @@ export function indexedDataAccesses(
   for (const block of program.blocks.values())
     for (const arm of arms(block))
       predecessors.set(arm.transfer.target, (predecessors.get(arm.transfer.target) ?? 0) + 1);
-  const guards = new Map<string, ReadonlyMap<string, bigint>>();
-  const guardsAt = (id: string, depth = 0): ReadonlyMap<string, bigint> => {
+  interface Facts {
+    readonly upper: ReadonlyMap<string, bigint>;
+    readonly lower: ReadonlyMap<string, bigint>;
+  }
+  const guards = new Map<string, Facts>();
+  const guardsAt = (id: string, depth = 0): Facts => {
     const known = guards.get(id);
     if (known) return known;
     context.checkpoint(1);
     const block = program.blocks.get(id),
       parent = block?.dominator ? program.blocks.get(block.dominator) : undefined;
-    let facts: ReadonlyMap<string, bigint> = new Map();
+    let facts: Facts = { upper: new Map(), lower: new Map() };
     if (block && parent && depth < 256) {
       facts = guardsAt(parent.id, depth + 1);
       const control = parent.control;
@@ -123,15 +127,24 @@ export function indexedDataAccesses(
           } as const;
           const effective =
             op && op in flip ? (taken ? op : flip[op as keyof typeof flip]) : undefined;
-          let limit: bigint | undefined;
-          if (bound !== undefined && subject.type.kind === 'integer')
+          let limit: bigint | undefined, floor: bigint | undefined;
+          if (bound !== undefined && subject.type.kind === 'integer') {
             if (effective === 'ult' && bound > 0n) limit = bound - 1n;
             else if (effective === 'ule' || effective === 'eq') limit = bound;
+            if (effective === 'uge' || effective === 'eq') floor = bound;
+            else if (effective === 'ugt') floor = bound + 1n;
+          }
           if (limit !== undefined) {
-            const next = new Map(facts);
+            const next = new Map(facts.upper);
             const previous = next.get(subject.id);
             next.set(subject.id, previous === undefined || limit < previous ? limit : previous);
-            facts = next;
+            facts = { ...facts, upper: next };
+          }
+          if (floor !== undefined) {
+            const next = new Map(facts.lower);
+            const previous = next.get(subject.id);
+            next.set(subject.id, previous === undefined || floor > previous ? floor : previous);
+            facts = { ...facts, lower: next };
           }
         }
       }
@@ -139,20 +152,45 @@ export function indexedDataAccesses(
     guards.set(id, facts);
     return facts;
   };
-  /** Greatest value the guards bound `value` to, through zero extensions. */
-  const guarded = (value: Value, block: string): bigint | undefined => {
-    const facts = guardsAt(block);
+  /** Greatest (`upper`) or least (`lower`) value the guards bound `value` to,
+   * through zero extensions (which preserve the value). */
+  const guarded = (value: Value, block: string, side: 'upper' | 'lower' = 'upper'): bigint | undefined => {
+    const facts = guardsAt(block)[side];
     let best: bigint | undefined;
     const seen = new Set<string>();
     while (!seen.has(value.id)) {
       seen.add(value.id);
       const fact = facts.get(value.id);
-      if (fact !== undefined && (best === undefined || fact < best)) best = fact;
+      if (
+        fact !== undefined &&
+        (best === undefined || (side === 'upper' ? fact < best : fact > best))
+      )
+        best = fact;
       const expression = program.expressions.get(value.id);
       if (expression?.kind !== 'cast' || expression.op !== 'zero_extend') break;
       value = expression.value;
     }
     return best;
+  };
+  /** Greatest unsigned value `value` can take in `block`: its width, masks and
+   * extensions (`maximum`), the dominating guards, and a subtraction `x - c`
+   * whose `x >= c` is guarded, which does not wrap and is at most the greatest
+   * `x` minus `c`. */
+  const reachOf = (value: Value, block: string, depth = 0): bigint => {
+    context.checkpoint(1);
+    let limit = maximum(value);
+    const guard = guarded(value, block);
+    if (guard !== undefined && guard < limit) limit = guard;
+    const expression = program.expressions.get(value.id);
+    if (depth < 4 && expression?.kind === 'integer' && expression.op === 'sub') {
+      const amount = constant(expression.right),
+        floor = guarded(expression.left, block, 'lower');
+      if (amount !== undefined && floor !== undefined && floor >= amount) {
+        const top = reachOf(expression.left, block, depth + 1);
+        if (top >= amount && top - amount < limit) limit = top - amount;
+      }
+    }
+    return limit;
   };
   const candidate = (node: Extract<Instruction, { kind: 'load' }>, block: string): void => {
     const bits = bitWidth(node.result.type);
@@ -227,7 +265,7 @@ export function indexedDataAccesses(
       }
       const widest = index;
       index = narrow(index);
-      let limit = maximum(index);
+      let limit = reachOf(index, block);
       const guard = guarded(widest, block);
       if (guard !== undefined && guard < limit) limit = guard;
       if (index.type.kind !== 'integer' || scale === 0n || scale % size !== 0n) return;
