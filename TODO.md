@@ -580,7 +580,7 @@ Files that several items touch:
 
 ### F4: Native FP where NaN-freedom is provable; value-preserving conversion spelling
 
-- [ ] **Problem:**
+- [x] **Problem:** _Done (`wt/rm4-f4`): lane `od-rm4-f4` differs from `od-main-91c0552` in exactly the 13 acceptance texts (plus C1's new `sqlite3CodeRowTrigger`): `PrintBytes` 168 → 145 lexical tokens (`(double)arg0 * 9.313225746154785e-10`), `PrintFileProcessingProgress` `(double)(value2 - value1) / 1000000.0`, 9 `matrix_mixed` cells `(double)arg0 / (double)arg1`, `cume_distValueFunc`/`rtreeInsertCell` lose every `cast_signed_to_float` (`fp_div` by a variable stays); checked view byte-identical; records `fp_nan_free` (subjects + operand bounds) and extended `fp_native_operations`._
   - `fp_mul(64, cast_unsigned_to_float("ieee64_t", "bits64_t", arg0), 9.3e-10)` in brotli `PrintBytes` (×3);
   - `fp_div(…cast_unsigned_to_float…, 1000000.0)` in `PrintFileProcessingProgress`;
   - `cast_signed_to_float` in `cume_distValueFunc` and `rtreeInsertCell`;
