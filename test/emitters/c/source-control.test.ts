@@ -22,11 +22,12 @@ import {
 import { emitC } from '../../../src/emitters/c/index.js';
 import { emitPythonLike } from '../../../src/emitters/python-like/index.js';
 import type { EmissionResult } from '../../../src/emitters/model.js';
-import { provenance, slice } from '../../ir/support.js';
-import { execute } from './support.js';
+import { image, provenance, slice } from '../../ir/support.js';
+import { execute, type SourceCallOracle } from './support.js';
 import { DarwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
 
-const i32 = integer(32),
+const i8 = integer(8),
+  i32 = integer(32),
   i64 = integer(64);
 const program = (name: string): IRBuilder<'ssa'> =>
   new IRBuilder(slice, entityIdentity(slice, 'function', name), provenance, 'ssa');
@@ -1049,7 +1050,7 @@ for (const language of ['c-like', 'python-like'] as const)
       }
     });
 
-    test('multi-use values and exit copies retain explicit loop tests', () => {
+    test('a header printing two statements and exit copies retain explicit loop tests; one statement prints inside the first test', () => {
       for (const effect of [false, true]) {
         const b = program(`source-chain-${effect}`);
         const entry = b.block('entry', [i32]),
@@ -1084,7 +1085,15 @@ for (const language of ['c-like', 'python-like'] as const)
         const input = b.finish(entry, [i32]),
           source = emit(input, language, 'source', true),
           checked = emit(input, language, 'checked', true);
-        assert.doesNotMatch(source.emission.text, /while \(.+ && .+\)/);
+        // The store makes a second header statement; alone, the load prints
+        // inside the first stage of the chained test.
+        if (effect) assert.doesNotMatch(source.emission.text, /while \(.+ (&&|and) .+\)/);
+        else
+          assert.match(
+            source.emission.text,
+            c ? /while \(\(\(\w+ = .+\) != 0\) && \(/ : /while \(\(\w+ := .+\) != 0\) and \(/,
+            source.emission.text,
+          );
         for (const [left, right, n, result, loads] of [
           [0, 7, 2, 0, 1],
           [5, 7, 2, 5, 2],
@@ -2123,6 +2132,226 @@ for (const language of ['c-like', 'python-like'] as const)
           checked = emit(input, language, 'checked');
         assert.doesNotMatch(source.emission.text, /\belse\b/, source.emission.text);
         agree(source, checked, grid([x, y], choices));
+      }
+    });
+
+    // L1: a loop header printing one statement its test holds prints it inside
+    // the while test; the statement still runs once per header entry, right
+    // before the test.
+    const writing = { registers: [], flags: [], memory: 'unknown_read_write' as const };
+    const store = (memory: Map<bigint, number>, address: bigint, value: bigint, bytes: number) => {
+      for (let index = 0; index < bytes; index++)
+        memory.set(address + BigInt(index), Number((value >> BigInt(8 * index)) & 0xffn));
+    };
+
+    test('a pointer chase prints its load inside the while test; checked keeps while(true)', () => {
+      const b = program('source-loop-comma-chase'),
+        entry = b.block('entry', [i64]),
+        loop = b.block('loop', [i64]),
+        exit = b.block('exit', [i64]);
+      const [first] = entry.parameters as [Value];
+      entry.jump(loop, [first]);
+      const [node] = loop.parameters as [Value];
+      const next = loop.load(i64, loop.int('add', node, loop.constant(i64, 8n)));
+      loop.branch(
+        loop.compare('eq', next, loop.constant(i64, 0n)),
+        loop.edge(exit, [node]),
+        loop.edge(loop, [next]),
+      );
+      exit.return(exit.parameters);
+      const input = b.finish(entry, [i64]),
+        source = emit(input, language, 'source', true),
+        checked = emit(input, language, 'checked');
+      const text = source.emission.text;
+      assert.match(
+        text,
+        c ? /\n {2}while \(\(\w+ = .+\) != 0\) \{\n/ : /\n {2}while \(\w+ := .+\) != 0:\n/,
+        text,
+      );
+      assert.doesNotMatch(text, /while \(true\)|while True|\bbreak\b|\bdo \{/, text);
+      assert.ok(rules(source).includes('loop_comma_condition'), text);
+      assert.match(checked.emission.text, c ? /while \(true\) \{/ : /while True:/);
+      assert.ok(!rules(checked).includes('loop_comma_condition'));
+      for (const n of [0, 1, 3]) {
+        // n links: node k (at 0x1000 + 16k) points to node k + 1; the last holds 0.
+        const memory = new Map<bigint, number>();
+        for (let k = 0; k <= n; k++)
+          store(memory, 0x1008n + 16n * BigInt(k), k < n ? 0x1000n + 16n * BigInt(k + 1) : 0n, 8);
+        for (const output of [source, checked])
+          assert.deepEqual(
+            execute(output.emission, new Map([[first.id, 0x1000n]]), memory).values,
+            [0x1000n + 16n * BigInt(n)],
+            `${n}: ${output.emission.text}`,
+          );
+      }
+    });
+
+    test('a two-stage scan holds its load in the first stage of the chained test', () => {
+      const b = program('source-loop-comma-scan'),
+        entry = b.block('entry', [i64]),
+        head = b.block('head', [i64]),
+        check = b.block('check'),
+        step = b.block('step'),
+        exit = b.block('exit', [i64]);
+      const [string] = entry.parameters as [Value];
+      entry.jump(head, [entry.constant(i64, 0n)]);
+      const [index] = head.parameters as [Value];
+      const byte = head.load(i8, head.int('add', string, index));
+      head.branch(
+        head.compare('eq', byte, head.constant(i8, 0n)),
+        head.edge(exit, [index]),
+        head.edge(check),
+      );
+      check.branch(
+        check.compare('eq', byte, check.constant(i8, 0x2fn)),
+        check.edge(exit, [index]),
+        check.edge(step),
+      );
+      step.jump(head, [step.int('add', index, step.constant(i64, 1n))]);
+      exit.return(exit.parameters);
+      const input = b.finish(entry, [i64]),
+        source = emit(input, language, 'source', true),
+        checked = emit(input, language, 'checked');
+      const text = source.emission.text;
+      assert.match(
+        text,
+        c
+          ? /\n {2}while \(\(\(\w+ = .+\) != .+\) && \(\w+ != .+\)\) \{\n/
+          : /\n {2}while \(\(\w+ := .+\) != .+\) and \(\w+ != .+\):\n/,
+        text,
+      );
+      assert.doesNotMatch(text, /while \(true\)|while True|\bbreak\b/, text);
+      assert.ok(rules(source).includes('loop_comma_condition'), text);
+      for (const n of [0, 1, 3])
+        for (const end of [0, 0x2f]) {
+          const memory = new Map<bigint, number>();
+          for (let k = 0; k < n; k++) memory.set(0x1000n + BigInt(k), 0x61);
+          memory.set(0x1000n + BigInt(n), end);
+          memory.set(0x1001n + BigInt(n), 0x61);
+          for (const output of [source, checked])
+            assert.deepEqual(
+              execute(output.emission, new Map([[string.id, 0x1000n]]), memory).values,
+              [BigInt(n)],
+              `${n}/${end}: ${output.emission.text}`,
+            );
+        }
+    });
+
+    test('a carrier: the call ending the header block prints inside the while test', () => {
+      const b = program('source-loop-comma-carrier'),
+        entry = b.block('entry', [i64]),
+        head = b.block('head', [i32]),
+        tested = b.block('tested'),
+        body = b.block('body'),
+        exit = b.block('exit', [i32]);
+      const [pointer] = entry.parameters as [Value];
+      entry.jump(head, [entry.constant(i32, 0n)]);
+      const [count] = head.parameters as [Value];
+      const [rc] = head.call(
+        { kind: 'direct', address: { image_id: image, space: 'va', value: 0x4000n } },
+        [pointer],
+        [i32],
+        writing,
+      );
+      head.jump(tested);
+      tested.branch(
+        tested.compare('ne', rc!, tested.constant(i32, 0n)),
+        tested.edge(body),
+        tested.edge(exit, [count]),
+      );
+      // The body reads the result too, so the call stays a statement.
+      body.store(pointer, rc!);
+      body.jump(head, [body.int('add', count, body.constant(i32, 1n))]);
+      exit.return(exit.parameters);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language, 'source', true);
+      // The call's block stays a jump block entering the test block.
+      assert.equal(blockRegions(structure(input)).get(head.id)?.control.kind, 'jump');
+      const text = source.emission.text;
+      assert.match(
+        text,
+        c
+          ? /\n {2}while \(\(\w+ = sub_4000\(\w+\)\) != 0\) \{\n/
+          : /\n {2}while \(\w+ := sub_4000\(\w+\)\) != 0:\n/,
+        text,
+      );
+      assert.doesNotMatch(text, /while \(true\)|while True|\bbreak\b/, text);
+      assert.ok(rules(source).includes('loop_comma_condition'), text);
+      for (const n of [0, 1, 3]) {
+        let calls = 0;
+        const observed = execute(
+          source.emission,
+          new Map([[pointer.id, 0x1000n]]),
+          memory(),
+          0n,
+          new Map(),
+          new Map(),
+          new Map<string, SourceCallOracle>([
+            ['sub_4000', () => (calls < n ? BigInt(++calls) : 0n)],
+          ]),
+        );
+        assert.deepEqual(observed.values, [BigInt(n)], `${n}: ${observed.exit} ${text}`);
+        // The call runs once per header entry, before each test.
+        assert.equal(observed.source_calls?.length, n + 1, `${n}: ${text}`);
+        // The body stored the last nonzero result.
+        assert.equal(observed.memory.get(0x1000n) ?? 0, n, `${n}: ${text}`);
+      }
+    });
+
+    test('a header test with a valid bottom test stays do-while', () => {
+      const b = program('source-loop-comma-bottom'),
+        entry = b.block('entry', [i64, i64]),
+        loop = b.block('loop', [i32, i64]),
+        more = b.block('more'),
+        exit = b.block('exit', [i32]);
+      const [base, end] = entry.parameters as [Value, Value];
+      entry.jump(loop, [entry.constant(i32, 0n), base]);
+      const [acc, pointer] = loop.parameters as [Value, Value];
+      const word = loop.load(i32, pointer);
+      loop.branch(
+        loop.compare('eq', word, loop.constant(i32, 0n)),
+        loop.edge(exit, [acc]),
+        loop.edge(more),
+      );
+      const sum = more.int('add', acc, word),
+        advanced = more.int('add', pointer, more.constant(i64, 4n));
+      more.branch(
+        more.compare('ne', advanced, end),
+        more.edge(loop, [sum, advanced]),
+        more.edge(exit, [sum]),
+      );
+      exit.return(exit.parameters);
+      const source = emit(b.finish(entry, [i32]), language, 'source', true);
+      const text = source.emission.text;
+      if (c) {
+        assert.match(text, /\n {2}do \{\n/, text);
+        assert.match(text, /\n {2}\} while \(.+\);\n/, text);
+        assert.ok(!rules(source).includes('loop_comma_condition'), text);
+      }
+      // Python-like has no do-while: the header test prints the walrus form.
+      else assert.match(text, /\n {2}while \(\w+ := .+\) != 0:\n/, text);
+      const words = [5, 7, 11, 13];
+      for (const n of [0, 1, 3]) {
+        // n nonzero words then a zero word; or n nonzero words ending at `end`.
+        const cases: [number[], bigint][] = [
+          [[...words.slice(0, n), 0, 17], 0x1100n],
+          ...(n
+            ? [[[...words.slice(0, n), 17], 0x1000n + 4n * BigInt(n)] as [number[], bigint]]
+            : []),
+        ];
+        for (const [memoryWords, bound] of cases)
+          assert.deepEqual(
+            execute(
+              source.emission,
+              new Map([
+                [base.id, 0x1000n],
+                [end.id, bound],
+              ]),
+              memory(memoryWords),
+            ).values,
+            [BigInt(words.slice(0, n).reduce((total, item) => total + item, 0))],
+            `${n}/${bound}: ${text}`,
+          );
       }
     });
   });

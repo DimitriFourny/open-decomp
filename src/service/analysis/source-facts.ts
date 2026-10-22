@@ -47,10 +47,12 @@ import {
 import type { DebugRecovery } from '../../metadata/debug/index.js';
 import type { LibraryContracts } from '../../metadata/library-contracts/index.js';
 import type {
+  CallerResultDemand,
   InferredCallee,
   SourceAddress,
   SourceEvidence,
 } from '../../reconstruction/source-model.js';
+import { callerResultDemands } from './caller-result-use.js';
 import {
   createNativeUnitPersistence,
   preparedSize,
@@ -87,7 +89,11 @@ import {
   type NativeInterfaceIndex,
 } from './native-entry.js';
 import { pipelineVersions } from './versions.js';
-import { nativeArgumentValues } from './native-arguments.js';
+import {
+  nativeArgumentIndex,
+  nativeArgumentValues,
+  type NativeArgumentIndex,
+} from './native-arguments.js';
 import { parameterRegisters } from './native-abi.js';
 import { fpEnvironmentGuard } from '../../lifters/arm64/semantics.js';
 import { x86FpEnvironmentGuard } from '../../lifters/x86_64/semantics.js';
@@ -652,7 +658,7 @@ function wholeValue(value: Value, expressions: ReadonlyMap<string, Expression>):
 
 /** Most bytes of an indexed read-only table the source facts carry: enough for
  * the complete small tables and the printed prefix of larger ones. */
-const TABLE_BYTES_READ = 512n;
+const TABLE_BYTES_READ = 64n;
 
 function sourceAddresses(
   input: SourceFactsInput,
@@ -1312,16 +1318,20 @@ export function nativeUnitLoader(
   return (fn, boundedContext) => reuse(fn, boundedContext) ?? prepare(fn, boundedContext);
 }
 
+/** `indexed`: the unit IR's argument index when the caller already built it;
+ * otherwise it is built at the first call with parameter shapes. */
 function nativeShapeTransfers(
   unit: PreparedNativeUnit,
   interfaces: ReadonlyMap<string, NativeInterface>,
   context: OperationContext,
+  indexed?: NativeArgumentIndex,
 ): readonly MemoryShapeTransfer[] {
   if (!unit.ir) return [];
   const transfers: MemoryShapeTransfer[] = [];
   for (const [call_id, observed] of interfaces) {
     if (!observed.parameter_shapes?.length) continue;
-    const arguments_ = nativeArgumentValues(unit.ir, unit.analysis, call_id, observed, context);
+    indexed ??= nativeArgumentIndex(unit.ir, context);
+    const arguments_ = nativeArgumentValues(indexed, unit.analysis, call_id, observed, context);
     for (const shape of observed.parameter_shapes) {
       context.checkpoint(1);
       const argument = arguments_.get(shape.parameter_index);
@@ -1556,7 +1566,8 @@ function observeNativeUnit(
     };
   }
   if (!unit.types) return observed;
-  const transfers = nativeShapeTransfers(unit, interfaces, context);
+  const indexed = nativeArgumentIndex(unit.ir, context);
+  const transfers = nativeShapeTransfers(unit, interfaces, context, indexed);
   const types = transfers.length
     ? refineMemoryShapes(unit.ir, unit.types, context, {
         slice_id: input.image.selected_slice_id,
@@ -1566,7 +1577,7 @@ function observeNativeUnit(
       })
     : unit.types;
   const parameters = [
-    ...nativeArgumentValues(unit.ir, unit.analysis, unit.ir.id, observed, context),
+    ...nativeArgumentValues(indexed, unit.analysis, unit.ir.id, observed, context),
   ].map(([parameter_index, value]) => ({ parameter_index, value }));
   return {
     ...observed,
@@ -2059,12 +2070,13 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     }
   }
   // Positive result-use evidence only. Reuse units already prepared by native
-  // analysis; do not turn a presentation request into an incoming-caller scan.
+  // analysis; the incoming-caller scan below runs only on the planner's demand.
   // A self-call result that reaches only this function's own return exit is
   // circular: under the result-storage premise the self-call is one of the
   // callers, so this function's own unit contributes only semantic demand.
   const functionReturnDemands = new Map<string, RegisterDescriptor>();
-  for (const unit of new Set([...partialUnits.values(), ...requestUnits.values()])) {
+  const preparedUnits = new Set([...partialUnits.values(), ...requestUnits.values()]);
+  for (const unit of preparedUnits) {
     context.checkpoint(1);
     const own = unit.function.id === input.ir.id;
     for (const dependency of unit.dependencies) {
@@ -2081,6 +2093,10 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         scope.dependencies.replay(unit.dependency_readset);
     }
   }
+  // Incoming caller sites are scanned only when the planner asks for them.
+  let callerDemand: CallerResultDemand | null | undefined;
+  const callerDemands = (scanContext: OperationContext): CallerResultDemand | undefined =>
+    (callerDemand ??= callerResultDemands(input, preparedUnits, scanContext) ?? null) ?? undefined;
   const ruleCalls = variadicRuleCalls(input.ir, input.types.calls, input.library, context);
   const objc = objcSourceFacts({
     ir: input.ir,
@@ -2113,6 +2129,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     ...(objc.facts ? { objc: objc.facts } : {}),
     memory_transfers,
     function_return_demands: [...functionReturnDemands.values()],
+    caller_result_demands: callerDemands,
     ...(function_returns === undefined ? {} : { function_returns }),
     ...(likely_arity === undefined ? {} : { likely_arity }),
     ...(likely_types === undefined ? {} : { likely_types }),

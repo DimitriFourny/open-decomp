@@ -1,4 +1,4 @@
-import type { Annotation, Diagnostic, Emission } from '../core/index.js';
+import type { Address, Annotation, Diagnostic, Emission } from '../core/index.js';
 import type { TypeRecoveryResult } from '../analysis/types/index.js';
 import type { StructuredFunction } from '../presentation/index.js';
 import type { SourceEvidence } from '../reconstruction/source-model.js';
@@ -21,6 +21,10 @@ export interface EmissionInput {
   readonly annotations?: readonly Annotation[];
   /** Native ABI and bounded source observations; absent for synthetic IR callers. */
   readonly source?: SourceEvidence;
+  /** Address of the decoded instruction an IR node's provenance names (its
+   * `instruction_ids`); provenance ranges are file offsets. Absent for synthetic IR
+   * callers, which then print file offsets. */
+  readonly instruction_address?: (id: string) => Address | undefined;
 }
 export interface EmissionResult {
   readonly emission: Emission;

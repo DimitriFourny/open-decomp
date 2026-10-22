@@ -1,22 +1,23 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {
-  createOperationContext,
-  newIdentity,
-  type AbiProfile,
-  type Emission,
-  type RegisterDescriptor,
-} from '../../src/core/index.js';
+import { newIdentity, type AbiProfile, type Emission } from '../../src/core/index.js';
 import { darwinArm64Abi } from '../../src/abi/darwin-arm64/index.js';
 import { sysvAMD64Abi } from '../../src/abi/sysv-amd64/index.js';
 import { windowsX64Abi } from '../../src/abi/windows-x64/index.js';
-import { constructSSA } from '../../src/analysis/ssa/index.js';
-import { recoverTypes } from '../../src/analysis/types/index.js';
-import { integer, type RegisterIR, type SSAForm, type Value } from '../../src/ir/index.js';
-import type { EmissionInput } from '../../src/emitters/model.js';
+import { integer, type Value } from '../../src/ir/index.js';
 import { frameLayout } from '../../src/reconstruction/source-stack.js';
-import { builder, image, slice } from '../ir/support.js';
+import { builder, image } from '../ir/support.js';
 import { emit, emittedFormals, execute, type Observation } from '../emitters/c/support.js';
+import {
+  assertMatchesIR,
+  firstArgument,
+  prepare,
+  runSource,
+  savedFrame,
+  sourcePlan,
+  type Fixture,
+  WRITTEN,
+} from './frame-support.js';
 
 const u64 = integer(64),
   u32 = integer(32);
@@ -188,48 +189,6 @@ test('frame layout: a wide access over whole narrower clusters keeps them as sca
     },
   );
 });
-
-function firstArgument(abi: AbiProfile): RegisterDescriptor {
-  const location = abi.classifyCall({
-    returns: { kind: 'void' },
-    parameters: [{ kind: 'integer', bits: 64, signed: false }],
-    variadic: false,
-    fixed_parameter_count: 1,
-  }).parameters[0]!.locations[0]!;
-  if (location.kind !== 'register') throw new Error('Expected register argument');
-  return location.register;
-}
-
-interface Fixture {
-  readonly ir: SSAForm;
-  readonly extra: Omit<EmissionInput, 'function'>;
-}
-
-function prepare(input: RegisterIR, abi: AbiProfile): Fixture {
-  const ir = constructSSA(input).value as SSAForm;
-  const types = recoverTypes(ir, abi, createOperationContext(), {
-    image_id: image,
-    slice_id: slice,
-    revision: 0,
-  });
-  const callees = ir.blocks.flatMap((block) =>
-    block.instructions.flatMap((node) =>
-      node.kind === 'call'
-        ? [
-            {
-              call_id: node.id,
-              parameters: [firstArgument(abi)],
-              returns: [],
-              argument_list_complete: false,
-              argument_list_closure: 'callee_reads' as const,
-              evidence_ids: [],
-            },
-          ]
-        : [],
-    ),
-  );
-  return { ir, extra: { types, source: { abi, callees, addresses: [] } } };
-}
 
 for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi])
   test(`${abi.id}: an escaped, indexed and overlapping frame prints as one frame object with unchanged memory semantics`, () => {
@@ -655,4 +614,117 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
       }
     }
   });
+}
+
+/** A3 fixtures over a frame whose top 8 bytes save a preserved register: a
+ * u32 slot passed to `sub_2000`, which writes one byte through the pointer.
+ * - `below-save`: the slot is entry-SP `[-12, -8)`, directly below the save;
+ * - `array`: the slot `[-16, -8)` is indexed from its start (two u32 halves);
+ * - `gap`: the slot is `[-16, -12)`, the bytes up to the save untouched;
+ * - `two-members`: the escape at -16 reaches u32 slots at -16 and -12;
+ * - `interior`: the slot's address + 2 escapes too;
+ * - `indexed`: a byte store indexed from the slot's address + 1;
+ * - `entry-live`: the first incoming slot's address escapes (live entry SP). */
+type SlotShape =
+  'below-save' | 'array' | 'gap' | 'two-members' | 'interior' | 'indexed' | 'entry-live';
+function escapedSlot(abi: AbiProfile, shape: SlotShape) {
+  const f = savedFrame(abi, `slot-${shape}`);
+  const pair = shape === 'array' || shape === 'two-members',
+    base = f.at(pair || shape === 'gap' ? -16n : -12n);
+  f.block.store(base, f.block.constant(u32, 3n));
+  if (pair) f.block.store(f.at(-12n), f.block.constant(u32, 4n));
+  f.call(base);
+  if (shape === 'interior') f.call(f.at(-10n));
+  if (shape === 'entry-live') f.call(f.at(f.incoming));
+  if (shape === 'indexed' || shape === 'array') {
+    const index = f.block.int(
+      'and',
+      f.argument,
+      f.block.constant(u64, shape === 'array' ? 7n : 1n),
+    );
+    f.block.store(
+      f.block.int('add', shape === 'array' ? base : f.at(-11n), index),
+      f.block.constant(integer(8), 9n),
+    );
+  }
+  let sum = f.block.cast('zero_extend', u64, f.block.load(u32, base));
+  if (pair)
+    sum = f.block.int('add', sum, f.block.cast('zero_extend', u64, f.block.load(u32, f.at(-12n))));
+  return f.finish(sum);
+}
+
+const ARGUMENTS = [0n, 1n, 2n, 5n, 7n, mask64] as const;
+for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
+  test(`${abi.id}: an escaped slot directly below the save area is an independent local`, () => {
+    const fixture = escapedSlot(abi, 'below-save');
+    const plan = sourcePlan(fixture);
+    const stack = plan.source?.stack;
+    assert.equal(stack?.kind, 'object');
+    if (stack?.kind !== 'object') return;
+    assert.deepEqual(
+      stack.members.map((member) => [member.offset, member.size, !!member.independent]),
+      [[-12n, 4n, true]],
+    );
+    assert.ok(plan.local_validation?.some((record) => record.rule === 'escaped_slot_object'));
+    const premises = new Set(
+      plan.local_validation_session?.abiConformance.map((site) => site.rule),
+    );
+    assert.ok(premises.has('frame_object_base') && premises.has('frame_save'));
+    for (const language of ['c-like', 'python-like'] as const) {
+      const text = emit(fixture.ir, fixture.extra, language).emission.text;
+      assert.doesNotMatch(text, /\bframe\b|stack_frame|entry_sp/, text);
+      if (language === 'c-like') {
+        assert.match(text, /^ {2}uint32_t local_c;$/m, text);
+        assert.match(text, /sub_2000\(&local_c\b/, text);
+      } else {
+        assert.match(text, /^ {2}local_c: uint32_t$/m, text);
+        assert.match(text, /sub_2000\(address_of\(local_c\)/, text);
+      }
+    }
+    // The callee writes the slot's low byte through the pointer, and the
+    // independent local reads it back, as in the IR.
+    assertMatchesIR(fixture, abi, ARGUMENTS);
+    for (const language of ['c-like', 'python-like'] as const) {
+      const output = emit(fixture.ir, fixture.extra, language).emission;
+      const observed = runSource(output, abi, 0n);
+      assert.deepEqual(observed.values, [WRITTEN]);
+      assert.deepEqual(observed.events, ['store', 'call', 'load']);
+    }
+  });
+
+  test(`${abi.id}: an escaped byte array indexed from its start below the save area is an independent local`, () => {
+    const fixture = escapedSlot(abi, 'array');
+    const stack = sourcePlan(fixture).source?.stack;
+    assert.ok(stack?.kind === 'object');
+    assert.deepEqual(
+      stack.members.map((member) => [
+        member.offset,
+        member.size,
+        member.scalar,
+        !!member.independent,
+      ]),
+      [[-16n, 8n, false, true]],
+    );
+    const c = emit(fixture.ir, fixture.extra).emission.text,
+      python = emit(fixture.ir, fixture.extra, 'python-like').emission.text;
+    assert.match(c, /^ {2}uint8_t local_10\[8\];$/m, c);
+    assert.doesNotMatch(c, /\bframe\b/, c);
+    assert.match(python, /^ {2}local_10: array<uint8_t, 8>$/m, python);
+    assert.doesNotMatch(python, /\bframe\b|stack_frame/, python);
+    assertMatchesIR(fixture, abi, ARGUMENTS);
+  });
+
+  for (const shape of ['gap', 'two-members', 'interior', 'indexed', 'entry-live'] as const)
+    test(`${abi.id}: ${shape} keeps an escaped slot in the frame object`, () => {
+      const fixture = escapedSlot(abi, shape);
+      const plan = sourcePlan(fixture);
+      const stack = plan.source?.stack;
+      assert.ok(stack?.kind === 'object');
+      assert.ok(stack.members.length > 0);
+      assert.ok(stack.members.every((member) => !member.independent));
+      assert.ok(!plan.local_validation?.some((record) => record.rule === 'escaped_slot_object'));
+      const text = emit(fixture.ir, fixture.extra).emission.text;
+      assert.match(text, /\} frame;/, text);
+      assertMatchesIR(fixture, abi, ARGUMENTS);
+    });
 }

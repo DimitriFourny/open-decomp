@@ -2,57 +2,57 @@
   "schema": 1,
   "records": {
     "macho-arm64-symbols|c-like": {
-      "identity": "{\"abi\":\"darwin-arm64/1.3.0\",\"analysis\":\"pipeline/26;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/14;debug/3;library/9;types/16;annotations/1;structure/8;reconstruction/81\",\"backend\":\"open-decomp/1\",\"decoder\":\"aa0e547ca5313779c87e1e52d75687b12e985615+adapter.2\",\"emitter\":\"reconstructed-c-88\",\"lifter\":\"ARM64 typed semantic lifter/1.0.7\",\"loader\":\"open-decomp-macho/1.0.4\"}",
+      "identity": "{\"abi\":\"darwin-arm64/1.3.0\",\"analysis\":\"pipeline/27;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/14;debug/3;library/9;types/16;annotations/1;structure/8;reconstruction/85\",\"backend\":\"open-decomp/1\",\"decoder\":\"aa0e547ca5313779c87e1e52d75687b12e985615+adapter.2\",\"emitter\":\"reconstructed-c-92\",\"lifter\":\"ARM64 typed semantic lifter/1.0.7\",\"loader\":\"open-decomp-macho/1.0.4\"}",
       "functions": {
-        "fixture_arithmetic": "complete:c0698a633974a4ab22c8aaf0b3a6049903a644b5d8959d999b99e3d101486cb8",
-        "fixture_loop": "complete:c151e6ede48bc4f117da747051b5c4a9696ce56faf2a06d7d2ed334c3ce65f7c",
-        "fixture_direct": "partial:880cd44034d316be74a620ad0168ae92a06d4e2940d1fb006dfd3c7f92b92f83",
-        "fixture_float": "partial:56f4c87ddb2a3ea38bb8e20dad7d695a8a4c5d74967889e9230cd0ca0ed4b319"
+        "fixture_arithmetic": "complete:4a3dc33cd0cd0cb1bec911d44d4079ce656b8ca0662dc113e3a0e90e3816bcd0",
+        "fixture_loop": "complete:fa3f0859566ed01177ab4daf434bfa8ee566ff6f8258f49e2099ed52f279c304",
+        "fixture_direct": "partial:bcd2fc80bccf6207201f734f34782c777f68ddca80d2ffb10fb7aa8278ed70a3",
+        "fixture_float": "partial:6066b3992c9668b4e9b66918d5d182e400b6beb027589e97814f4b37dc2ad68d"
       }
     },
     "macho-arm64-symbols|python-like": {
-      "identity": "{\"abi\":\"darwin-arm64/1.3.0\",\"analysis\":\"pipeline/26;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/14;debug/3;library/9;types/16;annotations/1;structure/8;reconstruction/81\",\"backend\":\"open-decomp/1\",\"decoder\":\"aa0e547ca5313779c87e1e52d75687b12e985615+adapter.2\",\"emitter\":\"reconstructed-python-like-88\",\"lifter\":\"ARM64 typed semantic lifter/1.0.7\",\"loader\":\"open-decomp-macho/1.0.4\"}",
+      "identity": "{\"abi\":\"darwin-arm64/1.3.0\",\"analysis\":\"pipeline/27;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/14;debug/3;library/9;types/16;annotations/1;structure/8;reconstruction/85\",\"backend\":\"open-decomp/1\",\"decoder\":\"aa0e547ca5313779c87e1e52d75687b12e985615+adapter.2\",\"emitter\":\"reconstructed-python-like-92\",\"lifter\":\"ARM64 typed semantic lifter/1.0.7\",\"loader\":\"open-decomp-macho/1.0.4\"}",
       "functions": {
-        "fixture_arithmetic": "complete:85782e503582a50fb538103794cd7e67552d259892a1e57bfc03dc9493210217",
-        "fixture_loop": "complete:382f9a241bcfaa28a422b9fd0d4e4095355df267a2f4e141d93b0012d118e4de",
-        "fixture_direct": "partial:5bc58f4b0f82f5c32c65725905ac184554fffe7e3aae79086029ef7025a493ba",
-        "fixture_float": "partial:73fc945ea4d60612368e15b4742af57f503aa6f9c95610d2c1af76bbe0c5e937"
+        "fixture_arithmetic": "complete:fe7bef09d32bc5c8a5f2a24d454cbca44b9060f727bee322abfd987478219e83",
+        "fixture_loop": "complete:304ef746a2a76972288f26a65f87f308fef9f6b9f41f47928daa6a4fc33a06a7",
+        "fixture_direct": "partial:c0554330d943f45d610ae22c63bc726cfbe04ef60622b1e3e237079ede5b963e",
+        "fixture_float": "partial:8450cf2a8d930b0dcfa64b29dd9cd1e9c7b4b4af13a65d845be37405b40eaeb3"
       }
     },
     "corpus-symbols.dll|c-like": {
-      "identity": "{\"abi\":\"windows-x64/2\",\"analysis\":\"pipeline/26;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/14;debug/3;library/9;types/16;annotations/1;structure/8;reconstruction/81\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-c-88\",\"lifter\":\"x86-64 typed semantic lifter/5\",\"loader\":\"open-decomp-pe/1.0.1\"}",
+      "identity": "{\"abi\":\"windows-x64/2\",\"analysis\":\"pipeline/27;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/14;debug/3;library/9;types/16;annotations/1;structure/8;reconstruction/85\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-c-92\",\"lifter\":\"x86-64 typed semantic lifter/5\",\"loader\":\"open-decomp-pe/1.0.1\"}",
       "functions": {
-        "fixture_arithmetic": "complete:145c67abaa8e50cb212789603229a2aa47c02d46db4cb23becd61fcbe8af40ea",
-        "fixture_loop": "complete:97c7d379478a22eabb9d6da112c143fdc1e209787fd474848049808bce3e66e2",
-        "fixture_direct": "partial:ed4744052f9f3210dcf784c4b1be2002e10d86fc8c3cab89f5b632306844aab0",
-        "fixture_float": "partial:d38ce7ca15eb3a607887e0b602a7d135ff4ee7f044a69157671a49ae3fe81191"
+        "fixture_arithmetic": "complete:add43cbe2d44fe869144ba6b559eee2f094812652b6ff32f01a979e64aa1c6ae",
+        "fixture_loop": "complete:9b1c74ec813b3147457e986b0b9a8e7472970f41ca152deeb1102fcd5d13bfe5",
+        "fixture_direct": "partial:56dd2c349d71d25d16835b860e60965a15408f48932468b6fb5a1b41ed4fc254",
+        "fixture_float": "partial:557228f907da6441391b6213ad3009f443468a86453cff26a3f279ee759775e4"
       }
     },
     "corpus-symbols.dll|python-like": {
-      "identity": "{\"abi\":\"windows-x64/2\",\"analysis\":\"pipeline/26;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/14;debug/3;library/9;types/16;annotations/1;structure/8;reconstruction/81\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-python-like-88\",\"lifter\":\"x86-64 typed semantic lifter/5\",\"loader\":\"open-decomp-pe/1.0.1\"}",
+      "identity": "{\"abi\":\"windows-x64/2\",\"analysis\":\"pipeline/27;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/14;debug/3;library/9;types/16;annotations/1;structure/8;reconstruction/85\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-python-like-92\",\"lifter\":\"x86-64 typed semantic lifter/5\",\"loader\":\"open-decomp-pe/1.0.1\"}",
       "functions": {
-        "fixture_arithmetic": "complete:0eb52f539fb8f01ed457ae2fbf4fc8e0d614b23250e168fd16a26ef60d66d266",
-        "fixture_loop": "complete:ff80a50dfeb76170b20fef6d9721b893a76016620d998cb607d8aaa34afb7636",
-        "fixture_direct": "partial:e56326acbf74c653e6d916ead27d145c78dded69353bcabe2d18392fc06a5bef",
-        "fixture_float": "partial:498fe651377a0ce029e17774a157817cbbc2578c3103859c8b7604bafc341999"
+        "fixture_arithmetic": "complete:c3864c77ef20e2abeb1909931d7f8714f7f7a1aeeb228aa4e6a4a59c4459e751",
+        "fixture_loop": "complete:10d220ebbcce14ab6de5c76790f33ad01ce95652e21bfb715e5f889010eb6d59",
+        "fixture_direct": "partial:84fd7a6f4d0cb2505fa872920919ac780aa85975b644884fbe7a14eeef02087e",
+        "fixture_float": "partial:b452506f9384bdfc3e783b17d2edcea9dd7f2e5752723b555f58467f81551f19"
       }
     },
     "elf-x86_64-symbols|c-like": {
-      "identity": "{\"abi\":\"sysv-amd64/1\",\"analysis\":\"pipeline/26;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/14;debug/3;library/9;types/16;annotations/1;structure/8;reconstruction/81\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-c-88\",\"lifter\":\"x86-64 typed semantic lifter/5\",\"loader\":\"open-decomp-elf/1.0.0\"}",
+      "identity": "{\"abi\":\"sysv-amd64/1\",\"analysis\":\"pipeline/27;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/14;debug/3;library/9;types/16;annotations/1;structure/8;reconstruction/85\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-c-92\",\"lifter\":\"x86-64 typed semantic lifter/5\",\"loader\":\"open-decomp-elf/1.0.0\"}",
       "functions": {
-        "fixture_arithmetic": "partial:659c62041b38add9ca2e8639070bb13bc87e749c488f0ff4949077759b359f0d",
-        "fixture_loop": "partial:aa4df5da45b5def209a2587564b865a5c3fdf9c73dc20a69d5fabca43fdb2fd0",
-        "fixture_direct": "partial:e693728af701a822a4367fc6a452c81440e5158b0e9f0026c68ead427c1930b0",
-        "fixture_float": "partial:bba3e79902d62d5dfddfc7e50c6b1398dfc8600676cf1197edb924e8b5ea018c"
+        "fixture_arithmetic": "partial:0d1de1239f614923d72c5b64c4446752e7c77fa9be398ec621c240861c96e9c3",
+        "fixture_loop": "partial:d7136aac79e5ae272a95964741ee9ce65b74a1c292ac1b56d4a1f771200a74c2",
+        "fixture_direct": "partial:0e74ac91642278a4fb0daa1d1d7bdc079ffecd51ce05b427796dc417ac7ed38e",
+        "fixture_float": "partial:873988c56f34cfcc15b4cd66c17aaa1d4934fe6d9ff5a5b31b38cdbafc629d30"
       }
     },
     "elf-x86_64-symbols|python-like": {
-      "identity": "{\"abi\":\"sysv-amd64/1\",\"analysis\":\"pipeline/26;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/14;debug/3;library/9;types/16;annotations/1;structure/8;reconstruction/81\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-python-like-88\",\"lifter\":\"x86-64 typed semantic lifter/5\",\"loader\":\"open-decomp-elf/1.0.0\"}",
+      "identity": "{\"abi\":\"sysv-amd64/1\",\"analysis\":\"pipeline/27;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/14;debug/3;library/9;types/16;annotations/1;structure/8;reconstruction/85\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-python-like-92\",\"lifter\":\"x86-64 typed semantic lifter/5\",\"loader\":\"open-decomp-elf/1.0.0\"}",
       "functions": {
-        "fixture_arithmetic": "partial:e47d2b9fd937c131e03bfb70a9b17796ac2e1dc32e322b95b4fee627b33fd6fc",
-        "fixture_loop": "partial:4b2239ba01ac56f6287a367c9675da564bc554e71e4164fadfe6e5abecfac07c",
-        "fixture_direct": "partial:10842b5993d2d5e324d06c6d665d319c2fac0ac19d8346300331b8b35bfe109d",
-        "fixture_float": "partial:05ea89128768531489b1f4f97811fd9d4a163a75b6ab1ad756148096249e2938"
+        "fixture_arithmetic": "partial:edee7df2ed65abb8663c575ad62336c7124a2693dff5030d988cff356f4d7a47",
+        "fixture_loop": "partial:0f97e3a71bce430576f1e7d7f9723bdeba6c226f37b02cead28316ffa94cf3db",
+        "fixture_direct": "partial:d30a81bd02e169d9b32e0698a2ce6121d2047aebe4ab9292701477b832fef774",
+        "fixture_float": "partial:7cf8cebbbc36f4ddd9b30ac29cdd58a88da37c5e83cf139a17af4d32fdcedd1c"
       }
     }
   }
