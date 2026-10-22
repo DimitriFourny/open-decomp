@@ -836,6 +836,24 @@ on the replaced subject and on views that observed it; full-width expressions
 still preserve their ordered opaque dependencies.
 Checked-view normalization keeps its original rules and text.
 
+A return join of a narrow and a full-width write (`default: return a` sharing one
+`ret` with an arm that writes `eax`/`w0` and then a 64-bit conditional move) leaves
+the join exit with two phi cells of the result register. Without a declared
+signature, every integer exit is first harmonized to the function width W, the
+widest exit result. In the source view, an exit narrower than W that was bound from
+the integer return location, and whose remaining changed cells of that root cover
+exactly bits [narrow, W), returns the concatenation of its cells up to W instead of
+a zero extension plus a `physical_return` overlay. This is bit-exact (the
+concatenation is the register value) and needs no ABI premise; the
+`exit_result_width` presentation record names the exit, its narrow result and the
+dropped cells. W is never raised by this rule, so a function whose exits are all
+narrow keeps its narrow type. The concatenation is a joint read of the phi cells,
+so the register-cell recombination above merges the join's phi web (`matrix_switch` `-O2` ELF and
+PE: `case 9: arg1 = arg1 == arg2 ? 42 : 99; break; } return arg1;`). The checked
+view keeps the zero extension and the overlay. `source-loop-cells.test.ts` executes
+both dialects, SysV and AAPCS64, with `a = 0x123456789abcdef0` against an oracle,
+with an all-narrow negative that keeps `uint32_t`.
+
 Source-only exact integer simplification removes trivially reducible forms in
 both dialects. Reconstruction (`integer_identity`, `extension_fold`; both in
 `normalizeSourceExpressions`, not applied to checked normalization) rewrites a
