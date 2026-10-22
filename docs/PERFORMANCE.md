@@ -65,6 +65,34 @@ Full tier, same day, `head` against Ghidra (231 of 237 functions; `head` fails 6
 - Readability and comprehension disagree: Haiku prefers Open Decomp's listings overall (data 0.747) but not on noise (0.352), while explanations written from them are slightly less accurate than from Ghidra's (full tier −0.15). The top wrong claims in section 7 come from machine-level text (`physical_return` tails, `entry_sp` frame slots standing for a by-value struct, `indirect_exit` stubs for jump-table switches) and from offset-level descriptions; some are grader mistakes on inlined code (`btreeLeaveAll` inlines `sqlite3BtreeLeave`, `crc32_combine` inlines `crc32_combine64`).
 - Speed is one run per lane on a shared host (load average about 2.5): on the quick tier SQLite's cold time rose 37.1 s → 46.3 s from base to head.
 
+### Roadmap 3: round result (2026-10-22)
+
+Roadmap 3 (TODO.md: M1, R1–R6, S1–S9, J1–J4; every item merged) measured once, after the last merge: lane `od-rm3-final` = `main` `f919627`, full tier, against `od-head` (`0eaab0f`) and Ghidra 12.1.4. Judge Haiku via `omp`; only changed texts were judged (2.33 M input tokens, $0.48). Report: `.odbench/reports/2026-10-22-145217-od-rm3-final-full/report.md` (local).
+
+| measure (231 paired functions)             |                    head |              roadmap 3 |     Ghidra |
+| ------------------------------------------ | ----------------------: | ---------------------: | ---------: |
+| functions with text (of 237)               |                     231 |                    232 |        237 |
+| `physical_return(` calls                   |                      34 |                      0 |          — |
+| `entry_sp` lines / functions               |                163 / 13 |                  0 / 0 |          — |
+| `indirect_exit(` calls                     |                       6 |                      0 |          — |
+| artifact patterns (report section 5)       |                     766 |                    489 |      1,187 |
+| lexical tokens vs Ghidra (geomean, 95% CI) |    1.374 [1.293, 1.458] |   1.337 [1.278, 1.400] |          1 |
+| Claude tokens vs Ghidra                    |    1.515 [1.414, 1.616] |   1.477 [1.399, 1.560] |          1 |
+| readability vs Ghidra (overall)            |    0.659 [0.604, 0.710] |   0.726 [0.679, 0.772] |          — |
+| strict wins / ties / losses vs Ghidra      |           124 / 55 / 52 |          136 / 62 / 33 |          — |
+| comprehension coverage (0–4)               |                   2.570 |                  2.665 |      2.723 |
+| comprehension coverage − Ghidra (paired)   | −0.152 [−0.274, −0.030] | −0.057 [−0.157, 0.043] |          — |
+| wrong claims per function                  |                    2.87 |                   2.67 |       2.26 |
+| QA correct rate (126 samples)              |                     75% |                    78% |        67% |
+| QA Claude tokens per correct answer        |                   5,051 |                  4,785 |      3,528 |
+| cold time, 11 binaries                     |              2 min 35 s |             2 min 26 s | 1 min 27 s |
+
+- Readability dimensions against Ghidra, head → roadmap 3: control flow 0.538 → 0.570, data 0.747 → 0.798, expressions 0.618 → 0.683, noise 0.352 → 0.383. The comprehension gap to Ghidra is no longer significant (the CI now spans 0).
+- Roadmap 3 against head directly: 0.575 [0.552, 0.600], strict 36 wins / 192 ties / 2 losses (179 identical texts, 51 judged, 1 too large), sign test p < 0.001. 53 texts differ from head. The two losses: the stripped Darwin `matrix_variadic` (S6 prints `va` with byte-offset casts where head had a typed `double* entry_sp`) and `jsonTranslateTextToBlob` (J2 prints the whole 59-case `switch`, 1,023 lines, where head printed a 533-line partial graph ending in `indirect_exit`; the judge prefers the shorter, incomplete text).
+- One more function prints: `sqlite3PagerSavepoint` no longer fails (J2's validator fix for a recombined whole carried around a loop edge). The other 5 failures are unchanged; 4 of them stop at the work limit, as on head.
+- Counted work (M1), limit 10,000,000: brotli `main` 9,223,523 → 9,237,911; `whereLoopAddBtreeIndex` (not in the corpus; CLI, fresh cache) 9,429,670 → 9,450,352; closest partial functions `sqlite3Fts3Incrmerge` 9,857,187 → 9,869,464 and `isDate` 9,678,620 → 9,791,279. The same 8 functions are above 80% of the limit as before the roadmap. Lane total +4.5% (512.2 M → 535.2 M): the largest increases are functions whose own graph grew (`jsonTranslateTextToBlob` +2.61 M, `selectInnerLoop` +2.54 M) and about 20 SQLite functions at +0.7 M each whose callees now include their case bodies (J2); S8's gated callee `reconstruct` adds about 2 M across the lane.
+- Timings come from one run started at load average 7.0 on 12 cores, so they are inflated; compare them only roughly.
+
 ## Evidence archive setup
 
 The 15 retained `.tar.gz` bundles are external assets, not git content. `scripts/bench/evidence-assets.json` pins every original repo-relative path, byte size and SHA256. The canonical store is `$OPEN_DECOMP_EVIDENCE_DIR`, or `<repo>/.local/evidence` when unset, preserving those paths; `.local/` is gitignored, so back the store up yourself. `fetch-evidence.ts` populates it from another copy of the archives; exactly one of `--from DIR` or `--url-base URL` is required. No public download location is currently configured.
