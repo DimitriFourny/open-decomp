@@ -7601,6 +7601,14 @@ export class Renderer {
         this.context,
         {
           max_work: this.context.budget.work,
+          // The goto search runs from a sub-allowance that leaves the text
+          // render's reserve (`TEXT_RENDER_WORK`); past it stuck scopes keep
+          // dependency order, as past the search's own selection allowance.
+          search_work: Math.max(
+            0,
+            (this.context.remainingWork?.() ?? Infinity) -
+              TEXT_RENDER_WORK * renderUnits(this.input.function),
+          ),
           transfers: (block, slot) => edges.get(`${block}:${slot}`),
           conditions: {
             operand: (block) => {
@@ -9870,9 +9878,29 @@ export class Renderer {
   }
 }
 
+/** Render units of a structured body: three per block plus its statements (about
+ * 0.7 of the selected body's IR nodes), the measure the render's work grows with. */
+function renderUnits(fn: StructuredFunction): number {
+  return fn.coverage.reduce((count, block) => count + 3 + block.statement_ids.length, 0);
+}
+
+/** Work per render unit (`renderUnits`) the text-only (`omitted` metadata) render
+ * needs after the goto search: the rest of the attempt, the render, its validation
+ * and the publication that follows (74–75 per unit measured on
+ * `sqlite3WhereCodeOneLoopStart` and `sqlite3_str_vappendf`, with margin). The
+ * source view's goto search never reaches into it. */
+const TEXT_RENDER_WORK = 120;
+/** Work per render unit of a full-metadata attempt beyond the text reserve: a full
+ * attempt from reconstruction to publication measured 395–407 per unit (`isDate`,
+ * `sqlite3Fts3Incrmerge`); the largest bodies reach the metadata bound later still. */
+const FULL_RENDER_WORK = 330;
+
 /** Render with single-use call inlining; a held call that does not reach its
  * reader as laid out prints as a statement in the next attempt. After four
- * failed attempts every call prints as a statement. */
+ * failed attempts every call prints as a statement. When the request's remaining
+ * work cannot pay a full render plus the text-only render that replaces a failed
+ * one, the text renders first, without provenance metadata (omitted with reason
+ * `budget`): the text is the one the full render prints. */
 export function renderSource(
   input: EmissionInput,
   options: ConstructorParameters<typeof Renderer>[1],
@@ -9909,6 +9937,19 @@ export function renderSource(
       }
     }
   };
+  // A function of the request's own counters: deterministic under every budget.
+  const remaining = context.remainingWork?.();
+  if (
+    remaining !== undefined &&
+    remaining < (FULL_RENDER_WORK + TEXT_RENDER_WORK) * renderUnits(input.function)
+  ) {
+    const result = attempt('omitted');
+    const omitted = result.emission.omitted?.map((item) => ({
+      ...item,
+      reason: 'budget' as const,
+    }));
+    return { ...result, emission: { ...result.emission, ...(omitted ? { omitted } : {}) } };
+  }
   try {
     return attempt('full');
   } catch (error) {
