@@ -281,6 +281,17 @@ export function resolveCalls(
   return { resolutions, subjects: [...subjects], calls_by_subject: callsBySubject };
 }
 
+/** Whether the image imports an FP control-state writer: only calls of one carry
+ * `environment_writer_clobbers`. */
+export function imageEnvironmentWriters(
+  image: LoadedImage,
+  functions: readonly FunctionRecord[],
+  references: readonly ReferenceRecord[],
+  context: OperationContext,
+): boolean {
+  return nativeCallIndex(image, functions, references, context).environment_writers.size > 0;
+}
+
 /** Calls and indirect tail exits whose target is an FP control-state writer
  * import: a callable stub, an import-slot reference or a constant target. */
 export function environmentWriterCalls(

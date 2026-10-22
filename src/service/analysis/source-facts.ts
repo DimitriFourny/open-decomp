@@ -11,7 +11,14 @@ import type {
   ReferenceRecord,
   RegisterDescriptor,
 } from '../../core/index.js';
-import { fingerprint, OperationError, U64_LIMIT, type CanonicalValue } from '../../core/index.js';
+import {
+  buildOnce,
+  fingerprint,
+  OperationError,
+  U64_LIMIT,
+  useBuilt,
+  type CanonicalValue,
+} from '../../core/index.js';
 import type { CallAnalysisResult, SuppliedCallContract } from '../../analysis/calls/index.js';
 import {
   observePreparedCallInterfaces,
@@ -62,7 +69,7 @@ import {
 } from './native-summaries.js';
 import { records } from '../queries/scope.js';
 import type { AnalysisScope } from './index.js';
-import { environmentWriterCalls, type CallScope } from './calls.js';
+import { environmentWriterCalls, imageEnvironmentWriters, type CallScope } from './calls.js';
 import { fpEnvironmentRegister } from '../../reconstruction/source-fp.js';
 import {
   nativeDependencies,
@@ -1379,6 +1386,17 @@ function nativeArgumentReaching(
   );
 }
 
+/** Local writer evidence per prepared body (it depends only on the body and the
+ * image's call index), built once and charged once per operation. */
+const localEnvironmentWriters = new WeakMap<
+  SSAForm,
+  {
+    readonly functions: readonly FunctionRecord[];
+    readonly references: readonly ReferenceRecord[];
+    readonly writer: boolean;
+  }
+>();
+
 /** A prepared body that shows a changed FP control state at a return or tail
  * exit: a writer-import call in a block that reaches such an exit, a tail into
  * a writer import, a writer callee, or an exit binding that an explicit write
@@ -1392,61 +1410,95 @@ function environmentWriter(
   context: OperationContext,
 ): boolean {
   if ([...interfaces.values()].some((callee) => callee.fp_environment_writer)) return true;
-  const tails = environmentWriterCalls(ir, input.image, input.functions, input.references, context);
-  const predecessors = new Map<string, string[]>(),
-    incoming = new Map<string, (readonly Value[])[]>(),
-    parameters = new Map<string, { readonly block: string; readonly index: number }>(),
-    definitions = new Map<string, Instruction>(),
-    leaving: string[] = [];
+  const cached = localEnvironmentWriters.get(ir);
+  if (cached?.functions === input.functions && cached.references === input.references)
+    return useBuilt(context, cached).writer;
+  const built = buildOnce(context, (quiet) => ({
+    functions: input.functions,
+    references: input.references,
+    writer: localEnvironmentWriter(input, ir, quiet),
+  }));
+  localEnvironmentWriters.set(ir, built);
+  return built.writer;
+}
+
+function localEnvironmentWriter(
+  input: SourceFactsInput,
+  ir: SSAForm,
+  context: OperationContext,
+): boolean {
+  const states = new Map(ir.register_states.map((state) => [state.block, state]));
+  const entry = new Set<string>(),
+    leaving: string[] = [],
+    stack: string[] = [];
+  for (const binding of states.get(ir.entry)?.entry ?? [])
+    if (fpEnvironmentRegister(binding.register)) entry.add(binding.value.id);
   for (const block of ir.blocks) {
     context.checkpoint(1);
     const control = block.terminator;
-    if (tails.has(control.id)) return true;
-    if (control.kind === 'return' || (control.kind === 'indirect' && control.tail_call))
-      leaving.push(block.id);
+    if (control.kind !== 'return' && !(control.kind === 'indirect' && control.tail_call)) continue;
+    leaving.push(block.id);
+    for (const binding of states.get(block.id)?.exit ?? [])
+      if (fpEnvironmentRegister(binding.register) && !entry.has(binding.value.id))
+        stack.push(binding.value.id);
+  }
+  // Only calls of a writer import carry control-state clobbers (ordinary call
+  // clobbers exclude it), so an image without writer imports has none.
+  if (imageEnvironmentWriters(input.image, input.functions, input.references, context)) {
+    const tails = environmentWriterCalls(
+      ir,
+      input.image,
+      input.functions,
+      input.references,
+      context,
+    );
+    const predecessors = new Map<string, string[]>();
+    for (const block of ir.blocks) {
+      context.checkpoint(1);
+      if (tails.has(block.terminator.id)) return true;
+      for (const edge of successors(block.terminator)) {
+        const row = predecessors.get(edge.target) ?? [];
+        row.push(block.id);
+        predecessors.set(edge.target, row);
+      }
+    }
+    const reaching = new Set(leaving);
+    for (let cursor = 0; cursor < leaving.length; cursor++)
+      for (const parent of predecessors.get(leaving[cursor]!) ?? []) {
+        context.checkpoint(1);
+        if (reaching.has(parent)) continue;
+        reaching.add(parent);
+        leaving.push(parent);
+      }
+    for (const block of ir.blocks)
+      if (reaching.has(block.id))
+        for (const node of block.instructions) {
+          context.checkpoint(1);
+          if (node.kind === 'call' && node.clobbers.registers.some(fpEnvironmentRegister))
+            return true;
+        }
+  }
+  // Every exit keeps the entry state: no definition needs tracing.
+  if (!stack.length) return false;
+  const incoming = new Map<string, (readonly Value[])[]>(),
+    parameters = new Map<string, { readonly block: string; readonly index: number }>(),
+    definitions = new Map<string, Instruction>();
+  for (const block of ir.blocks) {
+    context.checkpoint(1);
     for (const [index, value] of block.parameters.entries())
       parameters.set(value.id, { block: block.id, index });
-    for (const edge of successors(control)) {
-      const row = predecessors.get(edge.target) ?? [];
-      row.push(block.id);
-      predecessors.set(edge.target, row);
+    for (const edge of successors(block.terminator)) {
       const args = incoming.get(edge.target) ?? [];
       args.push(edge.arguments);
       incoming.set(edge.target, args);
     }
-  }
-  const states = new Map(ir.register_states.map((state) => [state.block, state]));
-  const entry = new Set<string>(),
-    stack: string[] = [];
-  for (const binding of states.get(ir.entry)?.entry ?? [])
-    if (fpEnvironmentRegister(binding.register)) entry.add(binding.value.id);
-  for (const id of leaving)
-    for (const binding of states.get(id)?.exit ?? []) {
-      context.checkpoint(1);
-      if (fpEnvironmentRegister(binding.register)) stack.push(binding.value.id);
-    }
-  const reaching = new Set(leaving);
-  for (let cursor = 0; cursor < leaving.length; cursor++)
-    for (const parent of predecessors.get(leaving[cursor]!) ?? []) {
-      context.checkpoint(1);
-      if (reaching.has(parent)) continue;
-      reaching.add(parent);
-      leaving.push(parent);
-    }
-  for (const block of ir.blocks)
     for (const node of block.instructions) {
       context.checkpoint(1);
       if (node.kind === 'assign') definitions.set(node.result.id, node);
-      else if (node.kind === 'call' || node.kind === 'unknown_effect') {
-        if (
-          node.kind === 'call' &&
-          reaching.has(block.id) &&
-          node.clobbers.registers.some(fpEnvironmentRegister)
-        )
-          return true;
+      else if (node.kind === 'call' || node.kind === 'unknown_effect')
         for (const binding of node.register_outputs) definitions.set(binding.value.id, node);
-      }
     }
+  }
   const seen = new Set<string>();
   while (stack.length) {
     context.checkpoint(1);
