@@ -310,6 +310,51 @@ const independentOracle = (start: bigint, count: bigint): bigint => {
   return total;
 };
 
+/** shiftLoop counted by `rdx`, whose `skip` arm loops back without touching `rcx`: that
+ * edge carries the recombined 64-bit whole unchanged (its cells copied to themselves). */
+function carriedLoop(): SSAForm {
+  const b = builder('source-loop-cells-carried'),
+    entry = b.block('entry'),
+    loop = b.block('loop'),
+    body = b.block('body'),
+    shift = b.block('shift'),
+    skip = b.block('skip'),
+    exit = b.block('exit');
+  entry.writeRegister(rax, entry.constant(u64, 0n));
+  entry.writeRegister(ecx, entry.constant(u32, 0x80000000n));
+  entry.writeRegister(rdx, entry.readRegister(rsi));
+  entry.jump(loop);
+  const count = loop.readRegister(rdx);
+  loop.branch(loop.compare('eq', count, loop.constant(u64, 0n)), loop.edge(exit), loop.edge(body));
+  const bit = body.readRegister(rcx);
+  const total = body.int(
+    'add',
+    body.int('mul', body.readRegister(rax), body.constant(u64, 3n)),
+    body.int('and', bit, body.readRegister(rdi)),
+  );
+  body.writeRegister(rax, total);
+  body.writeRegister(rdx, body.int('sub', body.readRegister(rdx), body.constant(u64, 1n)));
+  body.branch(
+    body.compare('ne', body.int('and', total, body.constant(u64, 1n)), body.constant(u64, 0n)),
+    body.edge(skip),
+    body.edge(shift),
+  );
+  shift.writeRegister(rcx, shift.int('shl', shift.readRegister(rcx), shift.constant(u64, 1n)));
+  shift.jump(loop);
+  skip.jump(loop);
+  exit.return([exit.int('add', exit.readRegister(rax), exit.readRegister(rcx))]);
+  return ssa(b.finish(entry, [u64]));
+}
+const carriedOracle = (mask: bigint, count: bigint): bigint => {
+  let total = 0n,
+    bit = 0x80000000n;
+  for (let index = 0n; index < count; index++) {
+    total = (total * 3n + (bit & mask)) & mask64;
+    if (!(total & 1n)) bit = (bit << 1n) & mask64;
+  }
+  return (total + bit) & mask64;
+};
+
 for (const language of ['c-like', 'python-like'] as const) {
   test(`${language} loop-carried 64-bit cells entered by a 32-bit constant write print as one variable`, () => {
     const ir = shiftLoop();
@@ -350,6 +395,32 @@ for (const language of ['c-like', 'python-like'] as const) {
             ]),
           ),
           laneOracle(crc, count),
+          emission.text,
+        );
+  });
+
+  test(`${language} a recombined loop variable carried unchanged on one loop edge prints and runs`, () => {
+    const ir = carriedLoop();
+    const output = emit(ir, { source }, language).emission;
+    assert.ok(recombinations(output) > 0, output.text);
+    for (const [mask, count] of [
+      [0n, 0n],
+      [1n, 3n],
+      [0x80000000n, 2n],
+      [mask64, 40n],
+      [0x123456789abcdef1n, 70n],
+    ] as const)
+      for (const emission of [output, emit(ir, { source }, language, 'checked').emission])
+        assert.equal(
+          run(
+            ir,
+            emission,
+            new Map([
+              ['x86_64:rdi', mask],
+              ['x86_64:rsi', count],
+            ]),
+          ),
+          carriedOracle(mask, count),
           emission.text,
         );
   });

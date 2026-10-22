@@ -838,6 +838,10 @@ function gatherInferences(
     context.checkpoint(1);
     const projection = tail.boundary;
     const native = nativeCallees.get(control);
+    const target: Extract<Details, { readonly kind: 'call' }>['target'] =
+      tail.target === null
+        ? { kind: 'indirect', value_ids: originalValues(tail.target_value) }
+        : { kind: 'direct', identity: identity(tail.target) };
     const assumptions = native?.context_assumptions;
     const contextAssumptions = assumptions
       ? {
@@ -860,13 +864,17 @@ function gatherInferences(
         }
       : undefined;
     add(
-      [control, ...(native?.target_subject_id ? [native.target_subject_id] : [])],
+      [
+        control,
+        ...(native?.target_subject_id ? [native.target_subject_id] : []),
+        ...(tail.target === null ? [tail.target_value.id] : []),
+      ],
       projection.signature ? confidence(projection.signature.status) : 'inferred',
       'Terminal call target and observed ordered inputs. Result widths belong to the callee, not invented caller SSA results; unknown trailing arity remains open.',
       {
         kind: 'call',
         call_id: control,
-        target: { kind: 'direct', identity: identity(tail.target) },
+        target,
         ordered_arguments: projection.arguments.map(argumentDetails),
         result_width_bits: tail.result_types.map(bitWidth),
         arity_complete:
@@ -885,11 +893,7 @@ function gatherInferences(
         [control, ...(native?.target_subject_id ? [native.target_subject_id] : [])],
         'hypothesis',
         likelyExplanation(projection.likely.applied),
-        likelyDetails(
-          control,
-          { kind: 'direct', identity: identity(tail.target) },
-          projection.likely,
-        ),
+        likelyDetails(control, target, projection.likely),
         [native?.evidence_ids],
         [control],
       );

@@ -13,7 +13,10 @@ import type {
 } from '../../core/index.js';
 import { fingerprint, OperationError, U64_LIMIT, type CanonicalValue } from '../../core/index.js';
 import type { CallAnalysisResult, SuppliedCallContract } from '../../analysis/calls/index.js';
-import { observePreparedCallInterfaces } from '../../analysis/calls/observed.js';
+import {
+  observePreparedCallInterfaces,
+  observePreparedTailInterfaces,
+} from '../../analysis/calls/observed.js';
 import { createCallResultDemandIndex } from '../../analysis/calls/result-demands.js';
 import {
   recoverDataAddress,
@@ -1581,6 +1584,10 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       context,
     ).map((callee) => [callee.call_id, callee]),
   );
+  // Argument prefixes at unresolved indirect exits, for the exits the source
+  // reconstruction proves to be tail calls (`classifyIndirectTails`).
+  for (const tail of observePreparedTailInterfaces(input.ir, abi, context, demand_index))
+    sourceCallees.set(tail.call_id, tail);
   let dependencies = nativeDependencies(input, input.ir, context, undefined, false, demand_index);
   const targets = new Map<string, FunctionRecord>();
   for (const dependency of dependencies) targets.set(dependency.target.id, dependency.target);
@@ -2027,13 +2034,18 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   }
   // Positive result-use evidence only. Reuse units already prepared by native
   // analysis; do not turn a presentation request into an incoming-caller scan.
+  // A self-call result that reaches only this function's own return exit is
+  // circular: under the result-storage premise the self-call is one of the
+  // callers, so this function's own unit contributes only semantic demand.
   const functionReturnDemands = new Map<string, RegisterDescriptor>();
   for (const unit of new Set([...partialUnits.values(), ...requestUnits.values()])) {
     context.checkpoint(1);
+    const own = unit.function.id === input.ir.id;
     for (const dependency of unit.dependencies) {
       context.checkpoint(1);
       if (dependency.target.id !== input.ir.id) continue;
-      for (const register of dependency.return_demand ?? []) {
+      for (const register of (own ? dependency.return_demand_semantic : dependency.return_demand) ??
+        []) {
         functionReturnDemands.set(
           `${register.root}:${register.offset_bits}:${register.width_bits}`,
           register,
@@ -2069,6 +2081,9 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     diagnostics,
     evidence,
     addresses,
+    executable_ranges: image.mappings
+      .filter((mapping) => mapping.permissions.includes('execute'))
+      .map((mapping) => ({ start: mapping.va, end: mapping.va + mapping.memory_size })),
     ...(objc.facts ? { objc: objc.facts } : {}),
     memory_transfers,
     function_return_demands: [...functionReturnDemands.values()],

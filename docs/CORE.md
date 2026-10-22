@@ -571,7 +571,12 @@ result, projected result or tail interface), computed nonprimary slices may
 instead accompany a void-like `return;`. This is an explicit ABI assumption,
 not a recovered authored void prototype. Positive
 consumption evidence from already prepared native units keeps slices inline;
-callers are not exhaustively scanned. The inference explicitly records
+callers are not exhaustively scanned. A self-recursive call is one of those
+callers: its result demand counts only where it is _semantic_ (reached from a
+load, store, call argument, branch, switch, indirect target or explicit return
+value). Bits it only forwards to the function's own return-exit snapshot are
+circular and gather no evidence; demand from other prepared callers still
+counts in full, forwarded bits included. The inference explicitly records
 “no result-use evidence gathered; callers not scanned” and requires
 `abi_conformance`; it is an assumption, not proof of non-consumption. The existing
 `unavailable_semantics` diagnostic remains. These slices cease to be source
@@ -759,6 +764,25 @@ inference exhaustion retains the explicit form. Checked-view memory facts stay
 unchanged. Entry-SP return-address bytes are never save slots or promoted locals;
 observed return-address reads remain external entry storage.
 
+Source-only `indirect_tail_call`: an unresolved indirect branch (no proven table,
+no discovery `tail_call` marker) is a tail call of its runtime target when the
+exit SP is the entry SP, the target's expression cone (at most 128 values; loads
+are leaves) has a non-constant leaf and holds no constant inside an executable
+mapping (`adr` + table entry, or a destination that folds to a constant, stays
+`indirect_exit`), no frame address escapes (the frame is released before
+the transfer), and the return location holds the entry return address. With a
+link register (ARM64) that is its unmodified entry value, or a reload of a slot
+that qualifies as a `frame_save` with this exit included; the latter records an
+`abi_conformance` requirement (callees never write the saved slot). With a pushed
+return address (x86-64) no store may overlap those entry-SP bytes and no store may
+have an unknown address. Accepted exits count as tail exits for frame saves and
+print the indirect-call function-pointer spelling with the observed
+argument-register prefix and an open list: `((R (*)(uint64_t, ...))target)(a)`
+returned when the function has a result type R, else the call and a plain
+`return;` (`function_pointer_call` record). The runtime target is no result
+evidence, so a void-like interface stays void. The checked view keeps
+`indirect_exit`.
+
 Source pointer null tests use the declared pointer directly under an explicit
 zero-null-address ABI requirement. Scalar dereferences consult actual declarations
 (including const formals and coalesced representatives), stripping only unchanged
@@ -800,7 +824,11 @@ source aliases extract slices from the new whole phi, preserving parallel copies
 and full-width arithmetic carries. Independently written cells (for example a
 partial write that preserves the other half), missing cells, differing whole
 values, mismatched offsets and exhausted presentation-record capacity retain the
-split form. The `register_cell_recombination` presentation record documents this
+split form. A whole carried unchanged on an edge (its own loop edge, say) prints no
+copy: publication validation accepts that edge only when the original edge copies
+every cell aliased to a slice of the whole to itself and those cells cover all of its
+bits (`sqlite3PagerSavepoint`, and `jsonTranslateTextToBlob` once its table proves,
+were rejected before). The `register_cell_recombination` presentation record documents this
 exact bitvector identity without an ABI assumption; checked output does not
 apply it. `test/reconstruction/source-loop-cells.test.ts` executes both dialects
 against independent oracles for a 32-bit-immediate-entered 64-bit loop variable,

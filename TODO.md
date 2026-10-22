@@ -91,7 +91,7 @@ The renderer prints `physical_return` at `src/emitters/renderer.ts:8130-8199` wh
 
 ### R2: Forwarded result demand from a self-recursive call is not demand
 
-- [ ] **Problem.** `btreeOverwriteContent` (`static int`) prints 6 × `physical_return(explicit_values((uint32_t)comparison), physical_inputs("arm64:x0:32:32", value2))`. `fts3EvalAllocateReaders` and `fts3EvalNextRow` (both `static void`) print the same overlay. All three are self-recursive.
+- [x] **Problem.** `btreeOverwriteContent` (`static int`) prints 6 × `physical_return(explicit_values((uint32_t)comparison), physical_inputs("arm64:x0:32:32", value2))`. `fts3EvalAllocateReaders` and `fts3EvalNextRow` (both `static void`) print the same overlay. All three are self-recursive.
   - **Root cause:** `src/analysis/calls/result-demands.ts:94-105` pushes every changed exit cell of the primary result root as a full-width demand on the call that defines it. A callee's high half that only flows to this function's own exit therefore demands `x0[0:64]`. `source-facts.ts:2021-2036` folds dependencies of the function's own unit into `function_return_demands`, so the self-call demands the function's own result. That blocks `exit_scratch` (`reconstruction/index.ts:556-559, 686-689`) and `incidental_result` (`source-results.ts:695-698, 781-791`).
   - **Change:**
     - Tag demand roots from the return-exit snapshot as _forwarded_. Every other root is _semantic_: loads, stores, call arguments, branches, switch, indirect targets, explicit return values. A value reached from both is semantic.
@@ -109,6 +109,7 @@ The renderer prints `physical_return` at `src/emitters/renderer.ts:8130-8199` wh
     - `fts3EvalAllocateReaders` has no `physical_return`. Its leftover `uint32_t` result is a known residual: a stored constant 7 left in `w0` looks deliberate.
     - Expected side changes, both toward the source: `fts3EvalTestExpr` → `uint32_t`, `fts5ParseSetColset` → `void`. Nothing else changes.
   - **Not in this item:** using forwarded demand for non-self callers only when the caller's own exit is semantically demanded. It changes many callee summaries; measure it as a separate item if wanted.
+  - Evidence (2026-10-22): `CallResultDemands` tags return-exit-snapshot roots forwarded (semantic closure first); `NativeDependency.return_demand_semantic`; the selected function's own unit contributes only semantic demand to `function_return_demands`; `NATIVE_SUMMARY_FORMAT` 2. OD lane `od-rm3-r2` vs main texts: exactly the five listed texts differ (`physical_return` 6→0, 1→0, 6→0). A self-call whose result is returned whole (no 32-bit use joined with an `int` result) still takes the call site's full-width observed result; see `test/reconstruction/recursive-result-source.c` for the shapes that are covered.
 
 ### R3: A context-specialized callee summary keeps the callee's result root
 
@@ -396,7 +397,8 @@ A whole-image instrumented run on sqlite3-arm64 found 21 tables proved and 291 d
 
 ### J2: Register facts at the chain start
 
-- [ ] **Problem.** In `jsonTranslateTextToBlob` (`0x10008b404`), the table base `x24` is set before the parser loop and survives `bl` calls (callee-saved). The straight-line prover sees it as an opaque symbol. The same holds for `sqlite3ExprCodeTarget`, `sqlite3ExprDataType`, `strftimeFunc`, `re_sql_func` (whose case blocks become 14 spurious functions) and `sqlite3_str_vappendf`. `sqlite3Fts5ExprNew` needs a "known zero-extended" fact for an index guarded on `w8` and loaded through `x8`.
+- [x] **Problem.** In `jsonTranslateTextToBlob` (`0x10008b404`), the table base `x24` is set before the parser loop and survives `bl` calls (callee-saved). The straight-line prover sees it as an opaque symbol. The same holds for `sqlite3ExprCodeTarget`, `sqlite3ExprDataType`, `strftimeFunc`, `re_sql_func` (whose case blocks become 14 spurious functions) and `sqlite3_str_vappendf`. `sqlite3Fts5ExprNew` needs a "known zero-extended" fact for an index guarded on `w8` and loaded through `x8`.
+  - **Done (J2):** `jsonTranslateTextToBlob` proves table `0x100132882` (59 entries, fact `x24` = const across 2 `bl`s), holds 822 instructions and prints `switch ((uint8_t)value1)` with no `indirect_exit`; SQLite image-wide proved tables 22 → 29 (7 from facts: the six named plus `jsonTranslateTextToBlob`), 78 fewer swept candidates, no table target is a function entry, only `yy_reduce` unresolved; a reconstruction validator gap (self-carried recombined whole) fixed on the way, which also restores `sqlite3PagerSavepoint`.
   - **Change:**
     - Add an optional `entry_state` to the proof input, mapping a register to a constant or to "zero-extended from k bits". `read()` (`jump-tables.ts:233-242`) seeds roots from it.
     - When the straight-line proof fails, compute facts only for the roots it needs: a forward must-dataflow over the root's decoded members, including proved-table edges.
@@ -451,7 +453,7 @@ A whole-image instrumented run on sqlite3-arm64 found 21 tables proved and 291 d
 
 ### J4: Indirect tail calls in the source view
 
-- [ ] **Problem.**
+- [x] **Problem.** Done (J4): `sqlite3_result_pointer` prints `return ((… (*)(uint64_t, ...))arg3)(arg1);` and `pcache1Shrink` `((void (*)(uint64_t, ...))data_100168d80)(value0); return;` (frame-save route, `indirect_tail_call` abi_conformance), 0 `indirect_exit` in both; checked views and every other full-tier text unchanged; `test/reconstruction/indirect-tails.test.ts` executes both dialects with a stub target.
   - `sqlite3_result_pointer` (`0x100042080`, the inlined `invokeValueDestructor`) prints `return indirect_exit(arg3, "Indirect branch target is unresolved", …)` for `br x3` after a full epilogue. Ghidra prints `(*UNRECOVERED_JUMPTABLE)(param_2); return;`.
   - `pcache1Shrink` (`0x1000ecae0`) does the same with `br x1`, where `x1` is loaded from the global `xMutexLeave` slot `data_100168d80`.
   - About 282 of SQLite's unresolved `br` instructions are such tail calls, including frameless leaves like `memtraceRoundup`.

@@ -17,6 +17,7 @@ import {
   type LoadedImage,
   type OperationContext,
   type ReferenceRecord,
+  type RegisterDescriptor,
   type FunctionRecord,
   type ResolvedJumpTable,
 } from '../../core/index.js';
@@ -59,6 +60,9 @@ export interface DiscoveryInput {
    * call ends intraprocedural flow: its return address is never followed (it is
    * often the next function's entry, as after a final `bl ___stack_chk_fail`). */
   readonly noreturn_calls?: ReadonlyMap<bigint, readonly string[]>;
+  /** The image ABI's callee-saved registers (`AbiProfile.preserved`). A jump-table register
+   * fact survives a call only in these; without them a call forgets every fact. */
+  readonly preserved_registers?: readonly RegisterDescriptor[];
   /** Continue an earlier budget-limited image-wide discovery from its frontier. `functions`
    * must be everything it published: roots not pending are final (boundaries whose observed
    * ranges are explained bytes, never split or re-extracted); only the pending roots are
@@ -327,6 +331,32 @@ export function discoverFunctions(
     : [...index.boundary_claims];
   const va = (value: bigint): Address => ({ image_id: image.id, space: 'va', value });
   const derive = evidenceDeriver(image, revision, evidence);
+  // Full-width integer roots every call preserves under the image ABI.
+  const preserved = new Set(
+    (input.preserved_registers ?? [])
+      .filter(
+        (register) =>
+          register.bank === 'integer' &&
+          register.offset_bits === 0 &&
+          register.width_bits === register.root_width_bits,
+      )
+      .map((register) => register.root),
+  );
+  /** A table proof's evidence: its chain and, for chain-start register facts, every defining
+   * instruction and crossed call (the call contract is the image ABI's). */
+  const tableEvidence = (branch: DecodedInstruction, proof: JumpTableProof): string => {
+    const facts = proof.entry_facts ?? [];
+    const crossed = facts.some((fact) => fact.calls.length > 0);
+    return derive(
+      facts.length
+        ? `${JUMP_TABLE_RULE}, from chain-start register values that hold on every decoded path${crossed ? `, kept across calls only in registers the ${image.target.abi} ABI preserves` : ''}`
+        : JUMP_TABLE_RULE,
+      branch.address,
+      [...proof.chain, ...facts.flatMap((fact) => [...fact.definitions, ...fact.calls])].flatMap(
+        (id) => instructionEvidence.get(id) ?? [],
+      ),
+    );
+  };
   const enqueue = (address: Address): void => {
     if (selected && address.value !== selected.value && seedAt(address.value)) return;
     if (!queued.has(address.value)) {
@@ -468,6 +498,7 @@ export function discoverFunctions(
         executable: (value) => executableEnd(value) > value,
         max_entries: MAX_JUMP_TABLE_ENTRIES,
         chain,
+        preserved_registers: preserved,
       },
       context,
     );
@@ -475,12 +506,7 @@ export function discoverFunctions(
       tables.delete(branch);
       return;
     }
-    const evidenceId = derive(
-      JUMP_TABLE_RULE,
-      instruction.address,
-      proof.chain.flatMap((id) => instructionEvidence.get(id) ?? []),
-    );
-    tables.set(branch, { proof, evidence: evidenceId });
+    tables.set(branch, { proof, evidence: tableEvidence(instruction, proof) });
     for (const target of proof.targets) {
       if (!incoming.get(target.value)?.includes(instruction))
         addIncoming(target.value, instruction);
@@ -957,8 +983,10 @@ export function discoverFunctions(
     }
     let conflict = claimConflict;
     // A table proof holds for this graph only if its chain stays single-entry and every target
-    // decodes inside it. A failed chain is re-proved on the graph's own predecessors; the result
-    // replaces it only with a subset of its targets, so validation only removes edges and ends.
+    // decodes inside it. A failed chain, and every proof resting on chain-start register facts
+    // (re-derived on this graph's paths), is re-proved on the graph's own predecessors; the
+    // result replaces it only with a subset of its targets, so validation only removes edges
+    // and ends.
     const rejected = new Set<bigint>();
     const reproved = new Map<
       bigint,
@@ -1052,7 +1080,7 @@ export function discoverFunctions(
       let changed = false;
       for (const instruction of members) {
         const table = tableAt(instruction);
-        if (!table || valid(table.proof)) continue;
+        if (!table || (!table.proof.entry_facts && valid(table.proof))) continue;
         const proof = proveJumpTable(
           {
             image,
@@ -1061,6 +1089,7 @@ export function discoverFunctions(
             is_entry: (value) => value === item.entry.value || functionEntries.has(value),
             executable: (value) => executableEnd(value) > value,
             max_entries: MAX_JUMP_TABLE_ENTRIES,
+            preserved_registers: preserved,
           },
           context,
         );
@@ -1069,11 +1098,7 @@ export function discoverFunctions(
         if (proof && [...targets].every((target) => current.has(target)) && valid(proof)) {
           reproved.set(instruction.address.value, {
             proof,
-            evidence: derive(
-              JUMP_TABLE_RULE,
-              instruction.address,
-              proof.chain.flatMap((id) => instructionEvidence.get(id) ?? []),
-            ),
+            evidence: tableEvidence(instruction, proof),
           });
           // The same target set leaves the graph's edges as they are.
           if (targets.size < current.size) changed = true;

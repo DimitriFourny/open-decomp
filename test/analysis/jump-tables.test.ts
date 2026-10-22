@@ -13,6 +13,9 @@ import {
   type LoadedImage,
 } from '../../src/core/index.js';
 import { Arm64Decoder } from '../../src/decoders/arm64/index.js';
+import { X86Decoder } from '../../src/decoders/x86_64/index.js';
+import { DarwinArm64Abi } from '../../src/abi/darwin-arm64/index.js';
+import { SysVAMD64Abi } from '../../src/abi/sysv-amd64/index.js';
 import {
   discoverFunctions,
   prepareDiscoveryIndex,
@@ -42,16 +45,29 @@ const CODE = [
 const NOP = 0xd503201f;
 
 function image(
-  options: { words?: readonly number[]; table?: readonly number[]; writable?: boolean } = {},
+  options: {
+    words?: readonly number[];
+    table?: readonly number[];
+    writable?: boolean;
+    /** Raw x86-64 code bytes (an ELF SysV image) instead of ARM64 words. */
+    x86?: readonly number[];
+    /** Target decoder features, such as `FEAT_PAuth` for valid pointer-authentication hints. */
+    features?: readonly string[];
+  } = {},
 ): LoadedImage {
   const words = options.words ?? CODE;
-  const buffer = new Uint8Array(words.length * 4 + 4);
+  const code = options.x86 ?? [];
+  const table = BigInt(options.x86 ? code.length : words.length * 4);
+  const entries = options.table ?? [0, 2, 4, 0];
+  const buffer = new Uint8Array(Number(table) + entries.length);
   const view = new DataView(buffer.buffer);
-  words.forEach((word, index) => view.setUint32(index * 4, word, true));
-  buffer.set(options.table ?? [0, 2, 4, 0], words.length * 4);
+  if (options.x86) buffer.set(code);
+  else words.forEach((word, index) => view.setUint32(index * 4, word, true));
+  buffer.set(entries, Number(table));
+  const architecture = options.x86 ? 'x86_64' : 'arm64';
   const sha256 = contentHash(buffer);
   const id = imageIdentity(sha256);
-  const slice = sliceIdentity(id, 0n, BigInt(buffer.length), 'arm64');
+  const slice = sliceIdentity(id, 0n, BigInt(buffer.length), architecture);
   const mappings = [
     {
       id: 'test-code',
@@ -63,7 +79,6 @@ function image(
     },
   ];
   const va = (value: bigint) => ({ image_id: id, space: 'va' as const, value });
-  const table = BigInt(words.length * 4);
   return {
     id,
     sha256,
@@ -76,19 +91,28 @@ function image(
         image_id: id,
         offset: 0n,
         size: BigInt(buffer.length),
-        architecture: 'arm64',
+        architecture,
         subtype: 'all',
         supported: true,
       },
     ],
-    target: {
-      format: 'macho',
-      architecture: 'arm64',
-      abi: 'darwin-arm64',
-      endian: 'little',
-      address_bits: 64,
-      features: [],
-    },
+    target: options.x86
+      ? {
+          format: 'elf',
+          architecture: 'x86_64',
+          abi: 'sysv-amd64',
+          endian: 'little',
+          address_bits: 64,
+          features: [],
+        }
+      : {
+          format: 'macho',
+          architecture: 'arm64',
+          abi: 'darwin-arm64',
+          endian: 'little',
+          address_bits: 64,
+          features: [...(options.features ?? [])],
+        },
     mappings,
     address_map: new AddressMap({
       image_id: id,
@@ -104,7 +128,7 @@ function image(
     sections: [
       {
         id: 'section-text',
-        name: '__text',
+        name: options.x86 ? '.text' : '__text',
         segment_id: null,
         kind: 'section',
         virtual_range: { start: va(0x1000n), size: table },
@@ -115,11 +139,14 @@ function image(
       },
       {
         id: 'section-const',
-        name: '__const',
+        name: options.x86 ? '.rodata' : '__const',
         segment_id: null,
         kind: 'section',
-        virtual_range: { start: va(0x1000n + table), size: 4n },
-        file_range: { start: { image_id: id, space: 'file', value: table }, size: 4n },
+        virtual_range: { start: va(0x1000n + table), size: BigInt(entries.length) },
+        file_range: {
+          start: { image_id: id, space: 'file', value: table },
+          size: BigInt(entries.length),
+        },
         permissions: options.writable ? ['read', 'write'] : ['read'],
         flags: 0n,
         evidence_ids: [],
@@ -135,11 +162,28 @@ function image(
   };
 }
 
-function discover(loaded: LoadedImage, assertions: readonly FunctionAssertion[] = []) {
-  const decoder = new Arm64Decoder();
+/** The image ABI's callee-saved registers, as the service passes them to discovery. */
+const preserved = (loaded: LoadedImage) =>
+  (loaded.target.architecture === 'arm64' ? new DarwinArm64Abi() : new SysVAMD64Abi()).preserved;
+
+function discover(
+  loaded: LoadedImage,
+  assertions: readonly FunctionAssertion[] = [],
+  options: { readonly abi?: boolean } = {},
+) {
+  const decoder =
+    loaded.target.architecture === 'arm64'
+      ? new Arm64Decoder()
+      : new X86Decoder({ formatting: false });
   try {
     return discoverFunctions(
-      { image: loaded, decoder, revision: 0, assertions },
+      {
+        image: loaded,
+        decoder,
+        revision: 0,
+        assertions,
+        ...(options.abi ? { preserved_registers: preserved(loaded) } : {}),
+      },
       createOperationContext(),
     );
   } finally {
@@ -148,8 +192,11 @@ function discover(loaded: LoadedImage, assertions: readonly FunctionAssertion[] 
 }
 
 /** Selected-root discovery of 0x1000, as a decompile request runs it. */
-function discoverSelected(loaded: LoadedImage) {
-  const decoder = new Arm64Decoder();
+function discoverSelected(loaded: LoadedImage, options: { readonly abi?: boolean } = {}) {
+  const decoder =
+    loaded.target.architecture === 'arm64'
+      ? new Arm64Decoder()
+      : new X86Decoder({ formatting: false });
   try {
     const context = createOperationContext();
     const index = prepareDiscoveryIndex({ image: loaded, revision: 0 }, context);
@@ -160,6 +207,7 @@ function discoverSelected(loaded: LoadedImage) {
         revision: 0,
         index,
         selected_entry: { image_id: loaded.id, space: 'va', value: 0x1000n },
+        ...(options.abi ? { preserved_registers: preserved(loaded) } : {}),
       },
       context,
     );
@@ -376,4 +424,252 @@ test("a table whose chain fails in its graph is re-proved on the graph's own pre
     other.jump_tables?.[0]?.targets.map((target) => target.value),
     [0x1028n, 0x1030n, 0x1038n],
   );
+});
+
+/** `adr x19, table; L1: bl helper; cmp w0, #2; b.hi out; mov w8, w0; adr x10, cases;
+ * ldrb w11, [x19, x8]; add x10, x10, x11, lsl #2; br x10`, where case 2 branches back to L1.
+ * The table base lives in callee-saved x19, set once before the loop. The chain starts after
+ * the call, so only a fact on x19 that survives `bl` proves the table. */
+const CALL_LOOP = [
+  0x10000273, // 0x1000 adr x19, 0x104c (table)
+  0x94000010, // 0x1004 L1: bl 0x1044 (helper)
+  0x7100081f, // 0x1008 cmp w0, #2
+  0x54000188, // 0x100c b.hi 0x103c
+  0x2a0003e8, // 0x1010 mov w8, w0
+  0x1000008a, // 0x1014 adr x10, 0x1024
+  0x38686a6b, // 0x1018 ldrb w11, [x19, x8]
+  0x8b0b094a, // 0x101c add x10, x10, x11, lsl #2
+  0xd61f0140, // 0x1020 br x10
+  0xd2800020, // 0x1024 mov x0, #1
+  0xd65f03c0, // 0x1028 ret
+  0xd2800040, // 0x102c mov x0, #2
+  0xd65f03c0, // 0x1030 ret
+  0x17fffff4, // 0x1034 b 0x1004 (L1)
+  NOP, // 0x1038
+  0xd2800120, // 0x103c mov x0, #9
+  0xd65f03c0, // 0x1040 ret
+  0xd2800000, // 0x1044 helper: mov x0, #0
+  0xd65f03c0, // 0x1048 ret
+];
+/** CALL_LOOP whose case 2 runs `instruction` before branching back to L1. */
+const callLoopWith = (instruction: number) => {
+  const words = [...CALL_LOOP];
+  words.splice(13, 2, instruction, 0x17fffff3); // 0x1034 instruction; 0x1038 b 0x1004
+  return words;
+};
+
+const addressOf = (graph: FunctionGraph, id: string) =>
+  graph.instructions.find((instruction) => instruction.id === id)!.address.value;
+
+test('a callee-saved table base set before a loop with a call resolves under the ABI', () => {
+  const loaded = image({ words: CALL_LOOP });
+  for (const result of [
+    discover(loaded, [], { abi: true }),
+    discoverSelected(loaded, { abi: true }),
+  ]) {
+    const graph = root(result);
+    assert.equal(graph.jump_tables?.length, 1);
+    const table = graph.jump_tables![0]!;
+    assert.equal(table.table.start.value, 0x104cn);
+    assert.deepEqual(
+      table.targets.map((target) => target.value),
+      [0x1024n, 0x102cn, 0x1034n],
+    );
+    assert.equal(table.otherwise.value, 0x103cn);
+    // The fact holds on the entry path and on case 2's loop edge, across the call on both.
+    assert.deepEqual(
+      table.entry_facts?.map((fact) => ({
+        register: fact.register,
+        value: fact.value,
+        definitions: fact.definitions.map((id) => addressOf(graph, id)),
+        calls: fact.calls.map((id) => addressOf(graph, id)),
+      })),
+      [
+        {
+          register: 'arm64:x19',
+          value: { kind: 'const', value: 0x104cn },
+          definitions: [0x1000n],
+          calls: [0x1004n],
+        },
+      ],
+    );
+    assert.equal(graph.coverage.state, 'complete');
+    assert.ok(members(graph).has(0x1034n));
+    const evidence = result.evidence.find((item) => item.id === table.evidence_ids[0]);
+    assert.match(evidence?.claim ?? '', /darwin-arm64 ABI preserves/);
+  }
+});
+
+test('a table base redefined on one loop edge stays unresolved', () => {
+  // Case 2 adds 1 to x19 before looping: the base differs between L1's two predecessors.
+  const loaded = image({ words: callLoopWith(0x91000673) }); // add x19, x19, #1
+  for (const result of [
+    discover(loaded, [], { abi: true }),
+    discoverSelected(loaded, { abi: true }),
+  ]) {
+    const graph = root(result);
+    assert.equal(graph.jump_tables, undefined);
+    assert.ok(graph.coverage.reasons.includes('unresolved control flow'));
+    for (const address of [0x1024n, 0x102cn, 0x1034n])
+      assert.ok(!members(graph).has(address), `0x${address.toString(16)} is no member`);
+  }
+});
+
+test('without the ABI preserved registers a call forgets the table base', () => {
+  const loaded = image({ words: CALL_LOOP });
+  for (const result of [discover(loaded), discoverSelected(loaded)]) {
+    const graph = root(result);
+    assert.equal(graph.jump_tables, undefined);
+    assert.ok(graph.coverage.reasons.includes('unresolved control flow'));
+  }
+});
+
+/** `ldr w8, [x0]; cbz x1, L1; nop; L1: cmp w8, #2; b.hi out; adr x9, table; adr x10, cases;
+ * ldrb w11, [x9, x8]; add x10, x10, x11, lsl #2; br x10`. The guard reads w8, the load
+ * indexes with all of x8, and the chain starts at the join L1. */
+const JOINED_INDEX = [
+  0xb9400008, // 0x1000 ldr w8, [x0]
+  0xb4000041, // 0x1004 cbz x1, 0x100c
+  NOP, // 0x1008
+  0x7100091f, // 0x100c L1: cmp w8, #2
+  0x54000188, // 0x1010 b.hi 0x1040
+  0x100001a9, // 0x1014 adr x9, 0x1048 (table)
+  0x1000008a, // 0x1018 adr x10, 0x1028
+  0x3868692b, // 0x101c ldrb w11, [x9, x8]
+  0x8b0b094a, // 0x1020 add x10, x10, x11, lsl #2
+  0xd61f0140, // 0x1024 br x10
+  0xd2800020, // 0x1028 mov x0, #1
+  0xd65f03c0, // 0x102c ret
+  0xd2800040, // 0x1030 mov x0, #2
+  0xd65f03c0, // 0x1034 ret
+  0xd2800060, // 0x1038 mov x0, #3
+  0xd65f03c0, // 0x103c ret
+  0xd2800120, // 0x1040 mov x0, #9
+  0xd65f03c0, // 0x1044 ret
+];
+
+test('a w-guarded index loaded through x resolves only when its definition zero-extends', () => {
+  const loaded = image({ words: JOINED_INDEX });
+  for (const result of [discover(loaded), discoverSelected(loaded)]) {
+    const graph = root(result);
+    assert.equal(graph.jump_tables?.length, 1);
+    const table = graph.jump_tables![0]!;
+    assert.deepEqual(
+      table.targets.map((target) => target.value),
+      [0x1028n, 0x1030n, 0x1038n],
+    );
+    assert.equal(table.guard_exact, true);
+    assert.deepEqual(
+      table.entry_facts?.map((fact) => [
+        fact.register,
+        fact.value,
+        fact.definitions.map((id) => addressOf(graph, id)),
+      ]),
+      [['arm64:x8', { kind: 'zext', bits: 32 }, [0x1000n]]],
+    );
+  }
+  // A 64-bit load leaves the upper half of x8 unknown: the w8 guard does not bound x8.
+  const words = [...JOINED_INDEX];
+  words[0] = 0xf9400008; // ldr x8, [x0]
+  for (const result of [discover(image({ words })), discoverSelected(image({ words }))])
+    assert.equal(root(result).jump_tables, undefined);
+});
+
+test('a hoisted x86 `lea r14, [rip + table]` base resolves across a call under SysV', () => {
+  // lea r14, [rip+table]; L1: call helper; mov ecx, eax; cmp ecx, 2; ja out;
+  // movsxd rax, [r14 + rcx*4]; add rax, r14; jmp rax; case 2 jumps back to L1.
+  const x86 = [
+    0x4c,
+    0x8d,
+    0x35,
+    0x2c,
+    0x00,
+    0x00,
+    0x00, // 0x1000 lea r14, [rip + 0x2c] (0x1033)
+    0xe8,
+    0x24,
+    0x00,
+    0x00,
+    0x00, // 0x1007 L1: call 0x1030
+    0x89,
+    0xc1, // 0x100c mov ecx, eax
+    0x83,
+    0xf9,
+    0x02, // 0x100e cmp ecx, 2
+    0x77,
+    0x17, // 0x1011 ja 0x102a
+    0x49,
+    0x63,
+    0x04,
+    0x8e, // 0x1013 movsxd rax, dword [r14 + rcx*4]
+    0x4c,
+    0x01,
+    0xf0, // 0x1017 add rax, r14
+    0xff,
+    0xe0, // 0x101a jmp rax
+    0xb8,
+    0x01,
+    0x00,
+    0x00,
+    0x00,
+    0xc3, // 0x101c mov eax, 1; ret
+    0xb8,
+    0x02,
+    0x00,
+    0x00,
+    0x00,
+    0xc3, // 0x1022 mov eax, 2; ret
+    0xeb,
+    0xdd, // 0x1028 jmp 0x1007
+    0xb8,
+    0x09,
+    0x00,
+    0x00,
+    0x00,
+    0xc3, // 0x102a mov eax, 9; ret
+    0x31,
+    0xc0,
+    0xc3, // 0x1030 helper: xor eax, eax; ret
+  ];
+  // Signed offsets from the table (0x1033) to 0x101c, 0x1022 and 0x1028.
+  const table = [0xe9, 0xff, 0xff, 0xff, 0xef, 0xff, 0xff, 0xff, 0xf5, 0xff, 0xff, 0xff];
+  const loaded = image({ x86, table });
+  for (const result of [
+    discover(loaded, [], { abi: true }),
+    discoverSelected(loaded, { abi: true }),
+  ]) {
+    const graph = root(result);
+    assert.equal(graph.jump_tables?.length, 1);
+    const resolved = graph.jump_tables![0]!;
+    assert.deepEqual(
+      resolved.targets.map((target) => target.value),
+      [0x101cn, 0x1022n, 0x1028n],
+    );
+    assert.deepEqual(resolved.entry, { bytes: 4, signed: true, stride: 4 });
+    assert.deepEqual(
+      resolved.entry_facts?.map((fact) => [
+        fact.register,
+        fact.value,
+        fact.definitions.map((id) => addressOf(graph, id)),
+        fact.calls.map((id) => addressOf(graph, id)),
+      ]),
+      [['x86_64:r14', { kind: 'const', value: 0x1033n }, [0x1000n], [0x1007n]]],
+    );
+    assert.equal(graph.coverage.state, 'complete');
+  }
+  assert.equal(root(discover(loaded)).jump_tables, undefined);
+});
+
+test('pointer authentication or a supervisor call in the loop forgets every fact', () => {
+  // paciasp writes x30 and svc any register, neither through an operand; a nop keeps the fact.
+  const control = image({ words: callLoopWith(NOP), features: ['FEAT_PAuth'] });
+  assert.equal(root(discover(control, [], { abi: true })).jump_tables?.length, 1);
+  for (const instruction of [0xd503233f, 0xd4000001]) {
+    const loaded = image({ words: callLoopWith(instruction), features: ['FEAT_PAuth'] });
+    for (const result of [
+      discover(loaded, [], { abi: true }),
+      discoverSelected(loaded, { abi: true }),
+    ])
+      assert.equal(root(result).jump_tables, undefined);
+  }
 });
