@@ -1114,3 +1114,217 @@ test('complete enumeration explains fill and data, so addresses no function owns
   // discovery leaves enumeration partial.
   assert.equal(discover(image, {}, { instructions: 4 }).enumeration, 'partial');
 });
+
+const TAIL_TARGET_RULE = 'unconditional jump at entry stack depth to code outside the root body';
+/** Entry points of the graphs, and the targets promoted as tail-jump targets. */
+function promoted(result: ReturnType<typeof discover>) {
+  return result.graphs
+    .filter((graph) =>
+      result.evidence.some(
+        (item) =>
+          graph.function.evidence_ids.includes(item.id) &&
+          item.origin.kind === 'analysis' &&
+          item.origin.rule === TAIL_TARGET_RULE,
+      ),
+    )
+    .map((graph) => graph.function.entry.value);
+}
+/** `int3`-padded x86 code placed at offsets from the image base. */
+function x86Layout(parts: readonly (readonly [number, readonly number[]])[], size: number) {
+  const bytes = Array<number>(size).fill(0xcc);
+  for (const [offset, code] of parts) bytes.splice(offset, code.length, ...code);
+  return bytes;
+}
+function arm64Image(words: readonly number[], entry: number): LoadedImage {
+  const bytes = Buffer.alloc(words.length * 4);
+  words.forEach((word, i) => bytes.writeUInt32LE(word, i * 4));
+  const image = raw([...bytes], 'arm64');
+  return { ...image, entry_points: [address(image, entry)] };
+}
+
+test('a jump at entry stack depth to code before the root roots a candidate whose table then proves', () => {
+  // T (+0x00): switch (edi) over three cases through a rip-relative table of dword offsets at
+  // +0x30; the entry (+0x40) is `mov edi, 2; jmp T`. On the entry's chain the index is a
+  // constant, so only T as its own root proves the table.
+  const code = x86Layout(
+    [
+      [
+        0x00,
+        [
+          0x89, 0xf8, /* mov eax, edi */ 0x83, 0xff, 0x02, /* cmp edi, 2 */ 0x77, 0x1b,
+          /* ja +0x22 */ 0x89, 0xf9, /* mov ecx, edi */ 0x48, 0x8d, 0x35, 0x20, 0, 0, 0,
+          /* lea rsi, [rip+0x20] */ 0x48, 0x63, 0x0c, 0x8e, /* movsxd rcx, [rsi+rcx*4] */ 0x48,
+          0x01, 0xf1, /* add rcx, rsi */ 0xff, 0xe1, /* jmp rcx */ 0xff, 0xc0, 0xc3,
+          /* +0x19 inc eax; ret */ 0x01, 0xc0, 0xc3, /* +0x1c add eax, eax; ret */ 0x31, 0xc0, 0xc3,
+          /* +0x1f xor eax, eax; ret */ 0xc3 /* +0x22 ret */,
+        ],
+      ],
+      [0x30, [0xe9, 0xff, 0xff, 0xff, 0xec, 0xff, 0xff, 0xff, 0xef, 0xff, 0xff, 0xff]],
+      [0x40, [0xbf, 0x02, 0, 0, 0, /* mov edi, 2 */ 0xe9, 0xb6, 0xff, 0xff, 0xff /* jmp T */]],
+    ],
+    0x50,
+  );
+  const plain = raw(code);
+  const section = (name: string, start: number, end: number, execute: boolean) => ({
+    id: `section-${name}`,
+    name,
+    segment_id: null,
+    kind: 'section' as const,
+    virtual_range: { start: address(plain, start), size: BigInt(end - start) },
+    file_range: {
+      start: { image_id: plain.id, space: 'file' as const, value: BigInt(start) },
+      size: BigInt(end - start),
+    },
+    permissions: execute ? (['read', 'execute'] as const) : (['read'] as const),
+    flags: 0n,
+    evidence_ids: [],
+  });
+  const image: LoadedImage = {
+    ...plain,
+    sections: [
+      section('.text', 0, 0x30, true),
+      section('.rodata', 0x30, 0x40, false),
+      section('.text.entry', 0x40, 0x50, true),
+    ],
+  };
+  const rooted = { ...image, entry_points: [address(image, 0x40)] };
+  const result = discover(rooted);
+  assert.deepEqual(promoted(result), [0x1000n]);
+  const target = result.graphs.find((graph) => graph.function.entry.value === 0x1000n)!;
+  assert.equal(target.function.boundary, 'candidate');
+  assert.equal(target.function.analysis, 'complete');
+  assert.deepEqual(
+    target.jump_tables?.map((table) => table.targets.map((item) => item.value)),
+    [[0x1019n, 0x101cn, 0x101fn]],
+  );
+  // No case block is a function of its own.
+  assert.deepEqual(
+    result.graphs.map((graph) => graph.function.entry.value).filter((entry) => entry < 0x1030n),
+    [0x1000n],
+  );
+  const entry = result.graphs.find((graph) => graph.function.entry.value === 0x1040n)!;
+  assert.deepEqual(
+    entry.instructions.map((instruction) => instruction.address.value),
+    [0x1040n, 0x1045n],
+  );
+  const tail = result.references.find(
+    (reference) => reference.from_function === entry.function.id && reference.kind === 'tail_call',
+  );
+  assert.equal(tail?.to_entity, target.function.id);
+  // Selected discovery promotes nothing: without the published candidate, the entry's graph
+  // still owns T's instructions.
+  const selected = discover(rooted, { selected_entry: address(image, 0x40) });
+  assert.equal(selected.graphs.length, 1);
+  assert.ok(selected.graphs[0]!.instructions.some((item) => item.address.value === 0x1000n));
+});
+
+test('jumps inside the root body, or past the next root only, are promoted by body bounds', () => {
+  // +0: jmp +5; +2: xor eax, eax; ret; +5: inc eax; jmp +2. Both targets are reached only by
+  // jumps at entry depth, but lie inside the root's body (no root above it).
+  const inside = raw([0xeb, 0x03, 0x31, 0xc0, 0xc3, 0xff, 0xc0, 0xeb, 0xf9]);
+  const result = discover(inside);
+  assert.deepEqual(promoted(result), []);
+  assert.deepEqual(
+    result.graphs.map((graph) => graph.function.entry.value),
+    [0x1000n],
+  );
+  // The same jump past the next root (+0x10, asserted) leaves the body: promoted.
+  const past = raw(
+    x86Layout(
+      [
+        [0x00, [0xeb, 0x1e]],
+        [0x10, [0xc3]],
+        [0x20, [0x31, 0xc0, 0xc3]],
+      ],
+      0x30,
+    ),
+  );
+  const beyond = discover(past, { assertions: [assertion(past, 0x10)] });
+  assert.deepEqual(promoted(beyond), [0x1020n]);
+  assert.equal(
+    beyond.references.find((reference) => reference.kind === 'tail_call')?.to?.value,
+    0x1020n,
+  );
+});
+
+test('a jump below the entry stack depth, or at a depth that differs between paths, is no tail', () => {
+  const at = (entry: readonly number[]) => {
+    // T (+0): xor eax, eax; ret; the root at +0x10 ends with `jmp T`; +0x28: ret.
+    const rel = -(0x10 + entry.length + 5);
+    const jump = [0xe9, rel & 0xff, (rel >> 8) & 0xff, (rel >> 16) & 0xff, (rel >> 24) & 0xff];
+    const image = raw(
+      x86Layout(
+        [
+          [0x00, [0x31, 0xc0, 0xc3]],
+          [0x10, [...entry, ...jump]],
+          [0x28, [0xc3]],
+        ],
+        0x30,
+      ),
+    );
+    return discover({ ...image, entry_points: [address(image, 0x10)] });
+  };
+  // push rbp; jmp T: the return address is no longer on top.
+  const pushed = at([0x55]);
+  assert.deepEqual(promoted(pushed), []);
+  assert.ok(pushed.graphs[0]!.instructions.some((item) => item.address.value === 0x1000n));
+  assert.ok(pushed.graphs.every((graph) => graph.function.boundary !== 'conflicting'));
+  // test edi, edi; je +1; push rbx; jmp T: one path pushed, one did not.
+  assert.deepEqual(promoted(at([0x85, 0xff, 0x74, 0x01, 0x53])), []);
+  // push rbp; sub rsp, 8; call +0x28; add rsp, 8; pop rbp; jmp T: restored around a call.
+  assert.deepEqual(
+    promoted(at([0x55, 0x48, 0x83, 0xec, 0x08, 0xe8, 0x0e, 0, 0, 0, 0x48, 0x83, 0xc4, 0x08, 0x5d])),
+    [0x1000n],
+  );
+});
+
+test('a target also reached by a conditional branch stays inside its root without conflict', () => {
+  // T (+0): xor eax, eax; ret; root (+0x10): test edi, edi; je T; jmp T.
+  const image = raw(
+    x86Layout(
+      [
+        [0x00, [0x31, 0xc0, 0xc3]],
+        [0x10, [0x85, 0xff, 0x0f, 0x84, 0xe8, 0xff, 0xff, 0xff, 0xe9, 0xe3, 0xff, 0xff, 0xff]],
+      ],
+      0x30,
+    ),
+  );
+  const result = discover({ ...image, entry_points: [address(image, 0x10)] });
+  assert.deepEqual(promoted(result), []);
+  assert.deepEqual(
+    result.graphs.map((graph) => [graph.function.entry.value, graph.function.boundary]),
+    [[0x1010n, 'established']],
+  );
+  assert.ok(result.graphs[0]!.instructions.some((item) => item.address.value === 0x1000n));
+});
+
+test('an ARM64 frame popped by post-index writeback before `b` is a tail jump', () => {
+  const frame = [
+    0xd2800020, // +0x00 T: mov x0, #1
+    0xd65f03c0, // +0x04 ret
+    0xd503201f, // +0x08 nop
+    0xd503201f, // +0x0c nop
+    0xa9bf7bfd, // +0x10 stp x29, x30, [sp, #-16]!
+    0x910003fd, // +0x14 mov x29, sp
+    0x94000004, // +0x18 bl +0x28
+    0xa8c17bfd, // +0x1c ldp x29, x30, [sp], #16
+    0x17fffff8, // +0x20 b T
+    0xd503201f, // +0x24 nop
+    0xd65f03c0, // +0x28 ret
+  ];
+  const result = discover(arm64Image(frame, 0x10));
+  assert.deepEqual(promoted(result), [0x1000n]);
+  const entry = result.graphs.find((graph) => graph.function.entry.value === 0x1010n)!;
+  assert.equal(
+    result.references.find(
+      (reference) =>
+        reference.from_function === entry.function.id && reference.kind === 'tail_call',
+    )?.to?.value,
+    0x1000n,
+  );
+  // Without the pop, SP at the jump is 16 below the entry SP.
+  const unpopped = discover(
+    arm64Image([...frame.slice(0, 7), 0xd503201f, ...frame.slice(8)], 0x10),
+  );
+  assert.deepEqual(promoted(unpopped), []);
+});
