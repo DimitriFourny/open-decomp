@@ -76,6 +76,18 @@ test(
     const get = formalStruct((await decompile('context_get')).text);
     assert.equal(set.name, get.name);
     assert.deepEqual(set.members, ['field_0x0']);
+    // Class names never carry another function's name: function texts and the
+    // header print `struct_<hex>` in both dialects, and the header keeps the
+    // anchor as a comment.
+    assert.match(set.name, /^struct_[0-9a-f]{6}$/);
+    for (const emitter of ['c-like', 'python-like'] as const)
+      for (const name of ['context_set', 'context_get', 'context_drive'])
+        assert.doesNotMatch(
+          (await decompile(name, emitter)).text,
+          /\b\w+_(?:arg\d+|ret|local_[0-9a-f]+|alloc_0x[0-9a-f]+|obj\d+)\b/,
+          `${name} ${emitter}`,
+        );
+    assert.match((await decompile('context_drive', 'python-like')).text, new RegExp(`\\b${set.name}\\b`));
     assert.deepEqual(get.members, ['field_0x8', 'field_0x10']);
     assert.match(set.declaration, /pad_0x0\[|field_0x0;/);
     assert.match(get.declaration, /pad_0x0\[8\]/);
@@ -96,6 +108,11 @@ test(
     // ...and the whole-image header holds the complete merged layout.
     const merged = new RegExp(`^struct ${set.name} \\{.*\\};$`, 'm').exec(dump.text)?.[0];
     assert.ok(merged, dump.text);
+    assert.match(
+      dump.text,
+      new RegExp(`/\\* first seen: context_\\w+_arg0[^*]*\\*/\\nstruct ${set.name} \\{`),
+      dump.text,
+    );
     assert.deepEqual(
       [...merged.matchAll(/ (field_0x[0-9a-f]+)/g)].map((m) => m[1]),
       ['field_0x0', 'field_0x8', 'field_0x10'],
@@ -118,8 +135,16 @@ test(
     // malloc(sizeof(struct pair)) used locally: the allocator's header alloc_size
     // names the object by allocation site and size; members print as fields.
     const pair = (await decompile('pair_sum')).text;
-    assert.match(pair, /^struct pair_sum_alloc_0x18 \{/m, pair);
-    assert.match(pair, /pair_sum_alloc_0x18\* \w+;/, pair);
+    const pairName = /^struct (struct_[0-9a-f]{6}) \{/m.exec(pair)?.[1];
+    assert.ok(pairName, pair);
+    assert.match(pair, new RegExp(`${pairName}\\* \\w+;`), pair);
+    assert.doesNotMatch(pair, /pair_sum_alloc/, pair);
+    // The anchor stays metadata of the image-wide type, as a comment.
+    assert.match(
+      dump.text,
+      /\/\* first seen: (?:\w+_arg0|\w+_alloc_0x18)[^*]*\*\/\nstruct struct_[0-9a-f]{6} \{/,
+      dump.text,
+    );
     assert.doesNotMatch(pair, /\(uintptr_t\)/, pair);
 
     // A formal passed to strlen/strncmp is spelled as the library declares it,

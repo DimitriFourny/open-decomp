@@ -60,7 +60,13 @@ export interface ImageTypeFunction {
 export interface ImageTypeClass {
   /** Stable identity of the merged member set. */
   readonly id: string;
+  /** Metadata: the class's first anchor (`<function>_arg0`, ...). It names
+   * another function than the one a reader looks at, so it is never printed
+   * as an identifier: see `label`. */
   readonly name: string;
+  /** The printed identifier, `struct_<hex>`: a digest of `id` that is unique
+   * among the solution's classes (see `imageTypeLabels`). */
+  readonly label: string;
   readonly members: readonly string[];
   readonly functions: readonly string[];
   /** Union of compatible observed members, sorted by offset. */
@@ -450,6 +456,7 @@ export function solveImageTypes(
     item.name = `${functionName(object.function_id)}_obj${ordinals.get(object.key)}`;
     item.local = item.members.length === 1;
   }
+  const labels = imageTypeLabels(classes.map((item) => item.id));
   const result: ImageTypeClass[] = [];
   const class_of = new Map<string, string>();
   for (const item of classes) {
@@ -458,6 +465,7 @@ export function solveImageTypes(
     result.push({
       id: item.id,
       name: item.name!,
+      label: labels.get(item.id)!,
       members: [...item.members].sort(),
       functions: [...new Set(item.members.map((member) => byKey.get(member)!.function_id))].sort(),
       fields: root.fields,
@@ -497,4 +505,20 @@ export function solveImageTypes(
     if (count > 1) result[index] = { ...item, name: `${item.name}_${count}` };
   }
   return { classes: result, class_of };
+}
+
+/** `struct_<6 hex>` identifiers of image-type classes, a pure digest of the
+ * class ID so one class prints one name in every function. Classes whose
+ * digests collide (in IDs order) extend by two hex digits until unique. */
+export function imageTypeLabels(ids: readonly string[]): ReadonlyMap<string, string> {
+  const labels = new Map<string, string>();
+  const taken = new Set<string>();
+  for (const id of [...new Set(ids)].sort()) {
+    const digest = fingerprint(id);
+    let length = 6;
+    while (length < digest.length && taken.has(digest.slice(0, length))) length += 2;
+    taken.add(digest.slice(0, length));
+    labels.set(id, `struct_${digest.slice(0, length)}`);
+  }
+  return labels;
 }
