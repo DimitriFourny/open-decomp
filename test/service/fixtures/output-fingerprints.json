@@ -7,7 +7,7 @@
         "fixture_arithmetic": "complete:5f6b0fb41fc0d6d301f641d5f188a6218bf9a7035eb1b2e2d41d404ed5d6e245",
         "fixture_loop": "complete:cf7b06793c48dbec3f1a88906f34877cbda1f04a6b9b6c987b53892b042f2f0e",
         "fixture_direct": "partial:4d48efc24a18cffef7c87a7fda11740f7fd6b57a83aee8e1a5bab526a5a222dd",
-        "fixture_float": "partial:3b8a054418b13ccdeb09e07e6d99b6b1e015b58c828b06d9e031591c337bad74"
+        "fixture_float": "partial:05a42324555701685198dc65a8a34e2d7b22f5e7b74eecb56b570958b8b1a685"
       }
     },
     "macho-arm64-symbols|python-like": {
@@ -16,7 +16,7 @@
         "fixture_arithmetic": "complete:f4569c360df0a438a4ec7ad402f2de1b5f4a656238bc777556cb4f7cd453b7bb",
         "fixture_loop": "complete:c93d5bbf38376055617280579d6d02dda44f288b13775f6ae4bb60d05cdf6bbe",
         "fixture_direct": "partial:6d40e65a3e0966794d5a212dde31f1d65cd46a2aee57ab4f3f4a9ba60a3bc053",
-        "fixture_float": "partial:a069f76a13ad617ace5fa668fa26680a77b4051703b10c647f27f4a44eb4bc8a"
+        "fixture_float": "partial:9471d2dfab402215062e4d7b4067668afa9b1bd7dfe55d670a7abe8f15c60591"
       }
     },
     "corpus-symbols.dll|c-like": {
@@ -25,7 +25,7 @@
         "fixture_arithmetic": "complete:f1ab2d94e1af267585971e631c8a8bc1d7313892ebbc64f17a2a00cc488f498a",
         "fixture_loop": "complete:8caf8bdbe59567073a84f79e145d9aa9ae180a393d7425a529b34b8774f6f845",
         "fixture_direct": "partial:e58fae484192ef2f3b4895ce42fb982281580bc3adacfbaa2dccd920b5938d15",
-        "fixture_float": "partial:e3ca7eded473b8ad262731da646faead3743d22141089d76e9c13a00beaea355"
+        "fixture_float": "partial:944de50079e221384a8981e13c4c5e0de371849e7c180bf768858a2c05c6e491"
       }
     },
     "corpus-symbols.dll|python-like": {
@@ -34,7 +34,7 @@
         "fixture_arithmetic": "complete:8546749c2cf82df3122ed755ceb6f381250d032c4b6db26fef6cf40a892947bc",
         "fixture_loop": "complete:22051040d2386aecc696187b26fe9dd4b89c199563eef868bc0267c1a7805cda",
         "fixture_direct": "partial:994d7be4225e31275f56c265d6f96988b5434b8ddd7d04580665a0dad7383915",
-        "fixture_float": "partial:1effd842171a7ab69a3fdc256f79b4ce840fdb15c28a54700fed070f8cba9c42"
+        "fixture_float": "partial:f572df7c0552f3afe54faf78291198514f0dae9e3c74d3ef6b4f8569ab9e83b8"
       }
     },
     "elf-x86_64-symbols|c-like": {
@@ -43,7 +43,7 @@
         "fixture_arithmetic": "partial:4e478d5d3cfa05b9381c82017bbec1293ebbd7199aa0c6c582eda4eb79249a90",
         "fixture_loop": "partial:97aca237c4b385a5910d134e70cc7287fdf59d63e081df0f19aa65ae61a57e8d",
         "fixture_direct": "partial:7d6eaaf6a8c0707cd165982b7a845c7c5a5d81bccc904d8498413df6e95e36d4",
-        "fixture_float": "partial:2047462aec8dd7b3dee7897613069df20c277afda5b979889025f052c1c6a5ee"
+        "fixture_float": "partial:405f2922db20d10c58dcc1ce303da565eaefd26d3793431f7054c75c0450bd83"
       }
     },
     "elf-x86_64-symbols|python-like": {
@@ -52,7 +52,7 @@
         "fixture_arithmetic": "partial:372232ab9615414a7c175d4f75c9da575a12545e526d36dd76ed7309b4cf9431",
         "fixture_loop": "partial:2831862b7cc447e2289291f5d57bb4d4b2a4bd0a27f5917db13436732120560c",
         "fixture_direct": "partial:d8ec03aa82401aa34bbcd33a4e192beceee8cba9a914dc8fca6547f6f71e5b26",
-        "fixture_float": "partial:7c0cef8704453cdbfa0ca0b70fb285a0cb2faeea3b46b48c4b34057a28879c1c"
+        "fixture_float": "partial:76f7b71d7eab28f0e04f78ed2bc50efff89384117abb0f9bc591a95901eeda23"
       }
     }
   }
