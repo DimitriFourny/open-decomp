@@ -27,7 +27,7 @@ test('frame layout: exact access sets are scalars; partial overlap, interior and
     { offset: -80n, end: -72n, id: 'a' },
     { offset: -80n, end: -72n, id: 'b' },
     // A wide store and the narrow halves read from it: two scalar members.
-    { offset: -64n, end: -56n, id: 'c' },
+    { offset: -64n, end: -56n, id: 'c', transport: true },
     { offset: -64n, end: -60n, id: 'd' },
     { offset: -60n, end: -56n, id: 'e' },
     // Partially overlapping accesses: one byte array.
@@ -79,7 +79,12 @@ test('frame layout: a wide access over whole narrower clusters keeps them as sca
   ) => frameLayout(accesses, taken, new Set(indexed), 16, origin, direction);
   const shapes = (result: ReturnType<typeof frameLayout>) =>
     result.members.map((member) => [member.offset, member.size, member.scalar]);
-  const wide = (id: string, offset: bigint, end: bigint) => ({ offset, end, id });
+  const wide = (id: string, offset: bigint, end: bigint) => ({
+    offset,
+    end,
+    id,
+    transport: true,
+  });
   // Two u32 halves under a u64.
   assert.deepEqual(layout([wide('w', -32n, -24n), wide('a', -32n, -28n), wide('b', -28n, -24n)]), {
     minimum_offset: -32n,
@@ -127,6 +132,28 @@ test('frame layout: a wide access over whole narrower clusters keeps them as sca
         false,
       ],
     ]);
+  // A wide access that is computed on or dereferenced is a slot of its own
+  // width: one byte array, whichever way the narrow accesses go.
+  assert.deepEqual(
+    shapes(
+      layout([
+        { ...wide('w', -32n, -24n), transport: false },
+        wide('a', -32n, -28n),
+        wide('b', -28n, -24n),
+      ]),
+    ),
+    [[-32n, 8n, false]],
+  );
+  assert.deepEqual(
+    shapes(
+      layout([
+        wide('x', -32n, -24n),
+        { ...wide('w', -32n, -24n), transport: false },
+        wide('a', -32n, -28n),
+      ]),
+    ),
+    [[-32n, 8n, false]],
+  );
   const spanning = [wide('w', -32n, -24n), wide('a', -32n, -28n), wide('b', -28n, -24n)];
   // An address taken at a member start keeps the split; inside a member or
   // padding, or an indexed base inside the span, make one byte array.
@@ -440,33 +467,38 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
     );
   });
 
-  test(`${abi.id}: wide frame accesses over two u32 members and over a u32 plus padding keep the scalar members`, () => {
+  test(`${abi.id}: wide copies over two u32 members and over a u32 plus padding keep the scalar members`, () => {
     const f = entryFrame(abi, 'spanning');
     const pair = f.at(-16n),
       padded = f.at(-32n),
+      copies = [f.at(-24n), f.at(-8n)],
       incoming = f.at(f.incoming);
     const word = f.block.extract(f.argument, 0, 32);
     f.block.store(incoming, f.argument);
-    // Two u32 members, read back as one u64.
+    // Two u32 members, copied as one u64.
     f.block.store(pair, word);
     f.block.store(f.at(-12n), f.block.constant(u32, 7n));
-    // A u32 member over a u64 whose high half stays padding.
+    // A u32 member over a u64 whose high half stays padding: a constant
+    // initialization, a u32 update and a copy of the whole u64.
     f.block.store(padded, f.block.constant(u64, 0x1122334455667788n));
     f.block.store(padded, f.block.int('add', word, f.block.constant(u32, 1n)));
     f.call(pair);
     f.call(padded);
+    f.block.store(copies[0]!, f.block.load(u64, pair));
+    f.block.store(copies[1]!, f.block.load(u64, padded));
+    f.call(copies[0]!);
+    f.call(copies[1]!);
     const sum = f.block.int(
       'add',
-      f.block.int('add', f.block.load(u64, pair), f.block.load(u64, padded)),
+      f.block.int('add', f.block.load(u64, copies[0]!), f.block.load(u64, copies[1]!)),
       f.block.load(u64, incoming),
     );
     f.block.return([sum]);
     const fixture = f.finish();
     const text = emit(fixture.ir, fixture.extra, 'c-like').emission.text;
-    assert.match(text, /uint32_t local_20;/, text);
     assert.match(text, /uint32_t local_10;\s+uint32_t local_c;/, text);
     assert.match(text, /\*\(uint64_t \*\)&frame\.local_10\b/, text);
-    assert.match(text, /\*\(uint64_t \*\)&frame\.local_20\b/, text);
+    assert.match(text, /\*\(uint64_t \*\)&frame\.local_20 = /, text);
     // The padding under the u64 is an explicit byte-array member.
     assert.match(text, /uint32_t local_20;\s+uint8_t local_1c\[4\];/, text);
     const python = emit(fixture.ir, fixture.extra, 'python-like').emission.text;
@@ -486,7 +518,43 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
             mask64,
         ];
       }),
-      ['store', 'store', 'store', 'store', 'store', 'call', 'call', 'load', 'load', 'load'],
+      [
+        ...['store', 'store', 'store', 'store', 'store', 'call', 'call'],
+        ...['load', 'store', 'load', 'store', 'call', 'call', 'load', 'load', 'load'],
+      ],
+      'stack_args',
+    );
+  });
+
+  test(`${abi.id}: a pointer-width slot whose load is computed on keeps one byte array beside a narrow read`, () => {
+    const f = entryFrame(abi, 'pointer-slot');
+    const slot = f.at(-16n),
+      incoming = f.at(f.incoming);
+    f.block.store(incoming, f.argument);
+    // A u64 spill, read back whole (arithmetic) and as its low half.
+    f.block.store(slot, f.argument);
+    f.call(slot);
+    const sum = f.block.int(
+      'add',
+      f.block.int('add', f.block.load(u64, slot), f.block.load(u64, incoming)),
+      f.block.cast('zero_extend', u64, f.block.load(u32, slot)),
+    );
+    f.block.return([sum]);
+    const fixture = f.finish();
+    const text = emit(fixture.ir, fixture.extra, 'c-like').emission.text;
+    assert.match(text, /uint8_t local_10\[8\];/, text);
+    assert.doesNotMatch(text, /uint32_t local_10;/, text);
+    const python = emit(fixture.ir, fixture.extra, 'python-like').emission.text;
+    assert.match(python, /frame\.local_10: array<uint8_t, 8>/, python);
+    assertBeside(
+      fixture,
+      abi,
+      [0n, 5n, 0xffffffffn, mask64, 1n << 63n].map((argument) => [
+        argument,
+        0n,
+        (2n * argument + (argument & 0xffffffffn)) & mask64,
+      ]),
+      ['store', 'store', 'call', 'load', 'load', 'load'],
       'stack_args',
     );
   });
