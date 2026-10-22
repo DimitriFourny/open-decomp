@@ -10,11 +10,7 @@ import {
 } from '../ir/index.js';
 import type { BlockRegion, ParallelTransfer } from '../presentation/index.js';
 import { identityOperand } from './expressions.js';
-import {
-  validateBitvectorCandidate,
-  validateConstantCells,
-  type LocalValidationSession,
-} from './local-validation.js';
+import { validateConstantCells, type LocalValidationSession } from './local-validation.js';
 type Copies = ParallelTransfer['copies'];
 type Writer = Extract<Instruction, { readonly kind: 'call' | 'unknown_effect' }>;
 
@@ -111,62 +107,6 @@ export function recombineSourceCells(
     return expression?.kind === 'constant' && piece.type.kind === 'integer'
       ? BigInt.asUintN(bitWidth(piece.type), expression.bits >> BigInt(offset))
       : null;
-  };
-  // A narrowed operation is the low slice of the same operation on extended
-  // operands: `trunc_n(a op b) == trunc_n(ext(a) op ext(b))` for add, sub, mul,
-  // and, or, xor and shl. Operands match structurally (an extension or the
-  // value itself, or equal low constant bits); each instance is then proved
-  // with the bitvector BDD before `wide` stands for the narrow value.
-  const lowOperand = (narrow: Value, wide: Value): boolean => {
-    const low = slice(narrow),
-      high = slice(wide);
-    if (low.offset !== 0 || high.offset !== 0) return false;
-    if (low.value.id === high.value.id) return true;
-    const extension = expressions.get(high.value.id);
-    if (
-      extension?.kind === 'cast' &&
-      (extension.op === 'zero_extend' || extension.op === 'sign_extend')
-    ) {
-      const extended = slice(extension.value);
-      if (extended.offset === 0 && extended.value.id === low.value.id) return true;
-    }
-    const narrowBits = constantBits(narrow),
-      wideBits = constantBits(wide);
-    return (
-      narrowBits !== null &&
-      wideBits !== null &&
-      BigInt.asUintN(bitWidth(narrow.type), wideBits) === narrowBits
-    );
-  };
-  const narrowed = (low: Value, wide: Value): boolean => {
-    const original = expressions.get(low.id),
-      operation = expressions.get(wide.id);
-    if (
-      original?.kind !== 'integer' ||
-      operation?.kind !== 'integer' ||
-      original.op !== operation.op ||
-      !['add', 'sub', 'mul', 'and', 'or', 'xor', 'shl'].includes(original.op) ||
-      bitWidth(low.type) >= bitWidth(wide.type) ||
-      !lowOperand(original.left, operation.left) ||
-      !lowOperand(original.right, operation.right)
-    )
-      return false;
-    return (
-      validation.check(
-        'bitvector',
-        low.id,
-        'a narrowed integer operation is the low slice of the same operation on its extended operands',
-        () =>
-          validateBitvectorCandidate(
-            low,
-            original,
-            { kind: 'extract', value: wide, offset: 0 },
-            expressions,
-            validation.allowance,
-          ),
-        [low.id, wide.id],
-      ).status === 'verified'
-    );
   };
   // Phi cells carried unchanged from one block to another hold one source
   // variable; group them into webs. A concat of adjacent cells is a joint read
@@ -418,8 +358,7 @@ export function recombineSourceCells(
       return { kind: 'outputs', node: output.node, block: output.block };
     // Longest low prefix of corresponding slices of one value. Low slices of v
     // are also the low slices of an extension of v, so upper cells that slice
-    // sign_extend(v) or zero_extend(v) extend the same whole; a narrowed
-    // operation's slices are the low slices of its wide operation.
+    // sign_extend(v) or zero_extend(v) extend the same whole.
     let whole: Value | undefined,
       prefix = 0;
     for (const [index, piece] of pieces.entries()) {
@@ -443,12 +382,11 @@ export function recombineSourceCells(
         const operand = extended && slice(extended);
         if (
           exact ||
-          ((!extended ||
-            !operand ||
-            operand.value.id !== whole.id ||
-            operand.offset !== 0 ||
-            bitWidth(extended.type) < register.offset_bits) &&
-            !narrowed(whole, part.value))
+          !extended ||
+          !operand ||
+          operand.value.id !== whole.id ||
+          operand.offset !== 0 ||
+          bitWidth(extended.type) < register.offset_bits
         )
           break;
       }
@@ -573,7 +511,7 @@ export function recombineSourceCells(
       group.recorded = validation.presentation(
         'register_cell_recombination',
         group.bindings[0]!.value.id,
-        'complete contiguous integer root cells written jointly on every incoming edge: corresponding slices of one identical whole value (a narrowed operation as the low slice of its proved-equal wide operation), a zero extension of low slices of one value, one constant, unknown cells of one reason, the unprojected outputs of one call or unknown effect (then its one whole output of the root), or the unchanged cells of another recombined phi; range-folded cells only from constants, or beside a wider value from slices that carry their interval-proved constant; preserves simultaneous transfers and full-width carries',
+        'complete contiguous integer root cells written jointly on every incoming edge: corresponding slices of one identical whole value, a zero extension of low slices of one value, one constant, unknown cells of one reason, the unprojected outputs of one call or unknown effect (then its one whole output of the root), or the unchanged cells of another recombined phi; range-folded cells only from constants, or beside a wider value from slices that carry their interval-proved constant; preserves simultaneous transfers and full-width carries',
         [
           ...group.bindings.map(({ value }) => value.id),
           ...group.edges.flatMap(({ source }) =>
