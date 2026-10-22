@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createOperationContext, newIdentity, type AbiProfile } from '../../src/core/index.js';
+import {
+  createOperationContext,
+  newIdentity,
+  type AbiProfile,
+  type AbiType,
+} from '../../src/core/index.js';
 import { darwinArm64Abi } from '../../src/abi/darwin-arm64/index.js';
 import { sysvAMD64Abi } from '../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../src/analysis/ssa/index.js';
 import { recoverTypes } from '../../src/analysis/types/index.js';
-import { integer, type AbiType, type SSAForm, type Value } from '../../src/ir/index.js';
+import { integer, type SSAForm, type Value } from '../../src/ir/index.js';
 import { structureControlFlow } from '../../src/presentation/index.js';
 import { reconstruct } from '../../src/reconstruction/index.js';
 import type { StoredDecompilation } from '../../src/project/cache/index.js';
@@ -177,7 +182,7 @@ const weighted = (args: readonly bigint[]) =>
   );
 const pointer = 0xa000n;
 const pointee = () =>
-  new Map(Array.from({ length: 8 }, (_, index) => [pointer + BigInt(index), 0] as const));
+  new Map<bigint, number>(Array.from({ length: 8 }, (_, index) => [pointer + BigInt(index), 0]));
 
 for (const [abi, count] of [
   [darwinArm64Abi, 9],
