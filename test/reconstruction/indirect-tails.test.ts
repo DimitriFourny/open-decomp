@@ -162,10 +162,11 @@ function arm64(shape: Arm64Shape) {
   return prepare(b.finish(entry, [u64]), abi);
 }
 
-type X86Shape = 'valid' | 'return-slot-store';
+type X86Shape = 'valid' | 'return-slot-store' | 'pointer-argument';
 
 /** g(rdi, rsi, rdx): `push rdx; mov rdi, rdx; mov rax, rsi; add rsp, 8; jmp rax`,
- * optionally writing rdi over the return address at the entry SP first. */
+ * optionally writing rdi over the return address at the entry SP first, or (`pointer-argument`)
+ * first reading `[rdx]`, so that the forwarded argument is a declared pointer local. */
 function x86(shape: X86Shape) {
   const abi = sysvAMD64Abi;
   const [rdi, rsi, rdx] = argumentRegisters(abi, 3);
@@ -180,6 +181,8 @@ function x86(shape: X86Shape) {
   if (shape === 'return-slot-store') block.store(sp0, block.readRegister(rdi!));
   block.writeRegister(rdi!, block.readRegister(rdx!));
   block.writeRegister(rax, block.readRegister(rsi!));
+  if (shape === 'pointer-argument')
+    block.writeRegister(rsi!, block.load(u64, block.readRegister(rdx!)));
   block.writeRegister(sp, sp0);
   block.terminate({ kind: 'indirect', target: block.readRegister(rax), reason: REASON });
   return prepare(b.finish(block, []), abi);
@@ -322,4 +325,100 @@ test('sysv-amd64: `add rsp, 8; jmp rax` is a tail call; a store to the entry SP 
   const blocked = x86('return-slot-store');
   assert.ok(!accepted(blocked.source));
   assert.match(emit(blocked.ir, blocked.extra).emission.text, /indirect_exit/);
+});
+
+test('sysv-amd64: a declared pointer local forwarded to a tail call prints as itself, and the open cast names the printed arguments', () => {
+  const { ir, extra, source } = x86('pointer-argument');
+  assert.ok(accepted(source));
+  const tail = [...source.tails.values()].find((candidate) => candidate.target === null);
+  assert.ok(tail && tail.boundary.arguments.length === 2);
+  assert.equal(tail.boundary.argument_list_complete, false);
+  const c = emit(ir, extra, 'c-like').emission;
+  // `(void (*)(uint64_t*, uint64_t))arg0(address, *address)`: the pointer is passed as
+  // itself, the cast has no `...` (it would declare a variadic prototype), and the header
+  // note states that the call may take more arguments.
+  assert.match(c.text, /\(\w+ \(\*\)\(uint64_t\*, uint64_t\)\)\w+\)\(address, \*address\)/, c.text);
+  assert.doesNotMatch(c.text, /uintptr_t|\.\.\./, c.text);
+  assert.match(c.text, /open arity \([^)]*\): indirect call/, c.text);
+  const python = emit(ir, extra, 'python-like').emission;
+  assert.match(python.text, /open arity \([^)]*\): indirect call/, python.text);
+  assert.doesNotMatch(python.text, /function_pointer\([^\n]*\.\.\./, python.text);
+  for (const emitted of [c, python]) {
+    const received: { arguments: bigint[]; complete: boolean }[] = [];
+    const memory = new Map(
+      Array.from({ length: 8 }, (_, offset) => [0x5000n + BigInt(offset), 0x10 + offset]),
+    );
+    const result = execute(
+      emitted,
+      inputs(
+        emitted,
+        new Map([
+          ['arg0', TARGET],
+          ['address', 0x5000n],
+        ]),
+      ),
+      memory,
+      0n,
+      new Map(),
+      new Map(),
+      new Map([
+        [
+          `0x${TARGET.toString(16)}`,
+          (args: readonly bigint[], context: { readonly arguments_complete: boolean }) => {
+            received.push({ arguments: [...args], complete: context.arguments_complete });
+            return [];
+          },
+        ],
+      ]),
+      acknowledgeRequirements(emitted),
+    );
+    assert.deepEqual(result.values, [], emitted.text);
+    // The incoming rdx and the quadword it addresses, with the unresolved remainder marked.
+    assert.deepEqual(
+      received,
+      [{ arguments: [0x5000n, 0x1716151413121110n], complete: false }],
+      emitted.text,
+    );
+  }
+});
+
+test('sysv-amd64: a declared pointer local forwarded to a direct tail call prints as itself', () => {
+  const abi = sysvAMD64Abi;
+  const [rdi, rsi] = argumentRegisters(abi, 2);
+  const rax = named(abi.unknown_call_clobbers.registers, 'rax');
+  const b = builder('direct-tail-pointer-argument'),
+    block = b.block('entry');
+  // `mov rsi, [rdi]; jmp 0x9000`: rdi is a pointer local (it is dereferenced) and a tail argument.
+  block.writeRegister(rsi!, block.load(u64, block.readRegister(rdi!)));
+  block.terminate({
+    kind: 'indirect',
+    target: block.constant(u64, TARGET),
+    tail_call: true,
+    reason: 'trusted fixture tail',
+  });
+  const ir = constructSSA(b.finish(block, [])).value as SSAForm;
+  const control = ir.blocks
+    .map((candidate) => candidate.terminator)
+    .find((candidate) => candidate.kind === 'indirect')!;
+  const extra = {
+    source: {
+      abi,
+      callees: [
+        {
+          call_id: control.id,
+          target: { image_id: image, space: 'va' as const, value: TARGET },
+          parameters: [rdi!, rsi!],
+          returns: [rax],
+          argument_list_complete: false,
+          evidence_ids: [],
+        },
+      ],
+      addresses: [],
+    },
+  };
+  for (const language of ['c-like', 'python-like'] as const) {
+    const output = emit(ir, extra, language).emission;
+    assert.match(output.text, /return sub_9000\(address, /, output.text);
+    assert.doesNotMatch(output.text, /uintptr_t/, output.text);
+  }
 });
