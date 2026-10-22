@@ -314,8 +314,8 @@ export interface FrameMember {
   /** Source view (A3): the member is an object of its own (entity `id`),
    * declared and addressed outside the frame object: exactly the bytes every
    * escape reaching it can designate, bounded by a proven save slot or the
-   * entry SP, with no other access, taken address or indexed base inside it
-   * except at its start. */
+   * entry SP; no access crosses its bounds and no escaped or indexed address
+   * lies inside it except at its start. */
   readonly independent?: { readonly id: string };
 }
 /** Source view (S4): the incoming stack-argument bytes this activation keeps

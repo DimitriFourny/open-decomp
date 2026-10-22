@@ -44,7 +44,7 @@ const INCOMING_OBJECT_SCOPE =
 const FRAME_SAVE_PREMISE =
   'Frame save/restore elision assumes ABI conformance: callees preserve callee-saved registers and never write their caller’s frame outside outgoing argument storage, the saved slots are not stack arguments, and a frame address handed to a callee (or indexed from) designates its own object, never a save slot. Each hidden store and reload remains in the checked view and the original mappings.';
 const ESCAPED_SLOT_SCOPE =
-  'with no unbounded escape and no live entry SP, each escaped or indexed frame address reaches the bytes from the lowest offset it can take up to the lowest proven save slot above it (or the entry SP); overlapping reaches merge. A reach that is exactly one member, with no other access, taken address or indexed base inside it except at its start, is a local object of its own, declared outside the frame object and addressed as &local_N; the frame object keeps its other members and the reaches that hold them; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
+  'with no unbounded escape and no live entry SP, each escaped or indexed frame address reaches the bytes from the lowest offset it can take up to the lowest proven save slot above it (or the entry SP); overlapping reaches merge. A reach that is exactly one member, which no access crosses and inside which no escaped or indexed address lies except at its start, is a local object of its own, declared outside the frame object and addressed as &local_N; the frame object keeps its other members and the reaches that hold them; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
 const ESCAPED_SLOT_PREMISE =
   'An escaped frame address reaches only bytes at or above the lowest entry-SP offset it can take (callees, memory holding the address and code reached through it never step below the address they were given), and, with a frame save above it, never the save slot (frame_save): the object it designates ends below that slot. A local declared on its own holds exactly such a reach, so no address derived from another frame object designates it, and no address derived from it designates another. Every load and store keeps its address, width, order and aliasing; the checked view keeps the entry-SP form.';
 const SCALAR_BYTES = new Set([1n, 2n, 4n, 8n, 16n]);
@@ -1590,7 +1590,11 @@ export function planSourceStack(
       return true;
     });
     if (saveStores.size)
-      validation.requireAbi('frame_save', [exits[0]!.control.id, ...saveStores], FRAME_SAVE_PREMISE);
+      validation.requireAbi(
+        'frame_save',
+        [exits[0]!.control.id, ...saveStores],
+        FRAME_SAVE_PREMISE,
+      );
   }
   // Source view: a non-volatile frame load dominated by a store covering its
   // bytes cannot fault. If its result is dead, reconstruct() may drop it.
@@ -2560,7 +2564,7 @@ export function planSourceStack(
     }
     if (top < 0n) validation.requireAbi('frame_save', saveSubjects, FRAME_SAVE_PREMISE);
     if (!entryLive && !reachAll && !saveArea && escapeFloors.size)
-      layout = escapedSlots(layout, below, taken, indexed, top);
+      layout = escapedSlots(layout, below, indexed, top);
     if (sharedEntry) {
       validation.requireAbi(
         'frame_object',
@@ -2585,14 +2589,13 @@ export function planSourceStack(
   /** Source view (A3): each bounded escape reaches the bytes from its floor to
    * the lowest proven save slot above it (an exact escape, whose every address
    * lies in the object holding its one base) or to `top`; overlapping reaches
-   * merge. A reach that is exactly one member, with no other access, taken
-   * address or indexed base inside it except at its start, is an independent
+   * merge. A reach that is exactly one member, which no access crosses and
+   * inside which no escape or indexed base lies except at its start, is an independent
    * local. The frame object then spans its other members and the remaining
    * reaches (none: no object bytes). */
   const escapedSlots = (
     layout: { minimum_offset: bigint; size: bigint; members: FrameMember[] },
     below: readonly FrameAccess[],
-    taken: readonly bigint[],
     indexed: ReadonlySet<bigint>,
     top: bigint,
   ): { minimum_offset: bigint; size: bigint; members: FrameMember[] } => {
@@ -2625,7 +2628,10 @@ export function planSourceStack(
       candidates: { start: bigint; end: bigint; member: FrameMember; ok: boolean }[] = [];
     for (let index = 0, cursor = 0; index < merged.length; index++) {
       const reach = merged[index]!;
-      while (cursor < members.length && members[cursor]!.offset + members[cursor]!.size <= reach.start)
+      while (
+        cursor < members.length &&
+        members[cursor]!.offset + members[cursor]!.size <= reach.start
+      )
         cursor++;
       const member = members[cursor];
       if (
@@ -2637,7 +2643,7 @@ export function planSourceStack(
         candidates.push({ ...reach, member, ok: true });
     }
     const holding = (offset: bigint) => {
-      for (let low = 0, high = candidates.length - 1; low <= high; ) {
+      for (let low = 0, high = candidates.length - 1; low <= high;) {
         const middle = (low + high) >> 1,
           candidate = candidates[middle]!;
         if (offset < candidate.start) high = middle - 1;
@@ -2646,7 +2652,7 @@ export function planSourceStack(
       }
       return undefined;
     };
-    context.checkpoint(below.length + taken.length + indexed.size + escapeFloors.size);
+    context.checkpoint(below.length + indexed.size + escapeFloors.size);
     for (const access of below) {
       // An access overlapping a candidate lies inside it. None can span one:
       // a candidate ends at a save slot (which no access overlaps) or at `top`.
@@ -2657,7 +2663,10 @@ export function planSourceStack(
         if (last) last.ok = false;
       }
     }
-    for (const offset of [...taken, ...indexed, ...escapeFloors.keys()]) {
+    // An escape or indexed base inside a candidate starts it. (A live address
+    // inside it that neither escapes nor indexes only addresses the member's own
+    // accesses or is compared: it prints inside the member.)
+    for (const offset of [...indexed, ...escapeFloors.keys()]) {
       const candidate = holding(offset);
       if (candidate && offset !== candidate.start) candidate.ok = false;
     }
@@ -2668,7 +2677,12 @@ export function planSourceStack(
     ].slice(0, 64);
     if (
       !chosen.length ||
-      !validation.presentation('escaped_slot_object', input.function.id, ESCAPED_SLOT_SCOPE, subjects)
+      !validation.presentation(
+        'escaped_slot_object',
+        input.function.id,
+        ESCAPED_SLOT_SCOPE,
+        subjects,
+      )
     )
       return layout;
     validation.requireAbi('frame_object_base', subjects, ESCAPED_SLOT_PREMISE);

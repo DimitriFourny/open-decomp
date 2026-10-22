@@ -252,11 +252,7 @@ export function validateReconstruction(program: Reconstruction, context: Operati
       if (member.size <= 0n || member.offset < end)
         invalid(program.function, 'frame object members overlap or are out of order');
       end = member.offset + member.size;
-      if (
-        member.independent
-          ? end > 0n
-          : member.offset < storage.minimum_offset || end > objectEnd
-      )
+      if (member.independent ? end > 0n : member.offset < storage.minimum_offset || end > objectEnd)
         invalid(program.function, 'a frame member lies outside its frame object');
     }
     if (storage.size < 0n || objectEnd > 0n)
