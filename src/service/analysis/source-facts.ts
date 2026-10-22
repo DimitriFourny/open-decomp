@@ -71,6 +71,7 @@ import {
   type NativeSummaryCapacity,
 } from './native-worklist.js';
 import {
+  inheritGenericResult,
   nativeCallInputs,
   nativeIncomingStackEscapes,
   nativeReturnInterface,
@@ -1452,7 +1453,10 @@ function observeNativeUnit(
       input.components.abi,
       context,
     );
-    observed = { ...observed, context_assumptions: unit.context_assumptions };
+    observed = {
+      ...inheritGenericResult(observed, unit.generic_result),
+      context_assumptions: unit.context_assumptions,
+    };
   }
   if (unit.analysis && !unit.budget_truncated) {
     const libraryTails = nativeLibraryTails(
@@ -1498,7 +1502,12 @@ function observeNativeUnit(
         observed = {
           ...observed,
           source_interface: {
-            ...mergeNativeInterface(sourceObserved, observed, input.components.abi, context),
+            ...mergeNativeInterface(
+              inheritGenericResult(sourceObserved, unit.generic_result),
+              observed,
+              input.components.abi,
+              context,
+            ),
             argument_list_closure: [...sourceInterfaces.values()].some(
               (callee) => callee.argument_list_closure === 'library_contract',
             )
