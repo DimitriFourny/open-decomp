@@ -4,14 +4,17 @@ import { instructionOperands } from '../analysis/effects/index.js';
 import {
   bitWidth,
   expressionOperands,
+  type DataType,
   type Expression,
   type Instruction,
+  type RegisterBinding,
   type Value,
 } from '../ir/index.js';
 import type { BlockRegion } from '../presentation/index.js';
 import type { EmissionInput } from '../emitters/model.js';
 import type { BoundaryProjection } from './model.js';
 import type { LocalValidationSession } from './local-validation.js';
+import type { InferredCallee } from './source-model.js';
 type Store = Extract<Instruction, { kind: 'store' }>;
 
 /** Darwin arm64 passes every variadic argument in 8-byte outgoing stack slots
@@ -27,6 +30,7 @@ type Store = Extract<Instruction, { kind: 'store' }>;
 export function planVariadicStackArguments(
   input: EmissionInput,
   blocks: ReadonlyMap<string, BlockRegion>,
+  expressions: ReadonlyMap<string, Expression>,
   calls: Map<string, BoundaryProjection>,
   excluded: (store: string) => boolean,
   validation: LocalValidationSession,
@@ -43,8 +47,12 @@ export function planVariadicStackArguments(
       (callee) => [callee.call_id, callee] as const,
     ),
   );
-  const callees = new Map([...inferred].filter(([, callee]) => callee.variadic_stack));
+  const callees = new Map(
+    [...inferred].filter(([, callee]) => callee.variadic_stack || callee.variadic),
+  );
   if (!callees.size) return consumed;
+  const writes = createRegisterWrites(blocks, expressions, input.function.entry, context);
+  const integerArguments = argumentRegisters(source.abi, 'integer', 8);
   // The stack analysis treats a live frame pointer at any call as an escape.
   // Under ABI conformance (recorded with each rewrite) callees use preserved
   // registers and SP only as such; any other stack address leaving this body
@@ -55,15 +63,25 @@ export function planVariadicStackArguments(
     fact?.value.kind === 'stack_fragment' ||
     fact?.value.kind === 'dynamic_stack';
   const preserved = new Set(source.abi.preserved.map((register) => register.root));
-  const leaks = (id: string): boolean =>
-    stack.snapshots
-      .get(id)
-      ?.registers.some(
-        (row) =>
-          row.register.root !== source.abi.stack_pointer.root &&
-          !preserved.has(row.register.root) &&
-          stackKind(row.fact),
-      ) ?? true;
+  // A callee with a published `va_start` footprint (S8) reads, under the
+  // variadic convention recorded with each rewrite, its named registers (the
+  // observed prefix) and its anonymous stack slots only: a stack address in
+  // another register at its call reaches nothing.
+  const leaks = (id: string): boolean => {
+    const callee = inferred.get(id),
+      named = callee?.variadic && callee.parameters;
+    return (
+      stack.snapshots
+        .get(id)
+        ?.registers.some(
+          (row) =>
+            row.register.root !== source.abi.stack_pointer.root &&
+            !preserved.has(row.register.root) &&
+            (!named || named.some((register) => register.root === row.register.root)) &&
+            stackKind(row.fact),
+        ) ?? true
+    );
+  };
   const stores = new Map<string, Store>();
   for (const block of blocks.values()) {
     for (const node of block.statements) {
@@ -91,6 +109,35 @@ export function planVariadicStackArguments(
     if (store && access.offset !== null)
       owners.set(access.value, { store, offset: access.offset, size: access.size });
   }
+  // The stack analysis keeps the fact of a byte whose stored value is itself of
+  // unknown initialization across a clobbering barrier, so fact identity proves
+  // such a byte's store only when no barrier (a call, an unknown effect or a
+  // store at an unknown offset) lies between that store and the call, in one
+  // block.
+  const exact = new Set(
+    stack.accesses
+      .filter((access) => access.kind === 'write' && access.offset !== null)
+      .map((access) => access.node_id),
+  );
+  const positions = new Map<string, { readonly block: BlockRegion; readonly index: number }>();
+  for (const block of blocks.values())
+    block.statements.forEach((node, index) => positions.set(node.id, { block, index }));
+  const unbarred = (store: string, call: string): boolean => {
+    const from = positions.get(store),
+      to = positions.get(call);
+    if (!from || !to || from.block !== to.block || from.index > to.index) return false;
+    for (let index = from.index + 1; index < to.index; index++) {
+      context.checkpoint(1);
+      const node = from.block.statements[index]!;
+      if (
+        node.kind === 'call' ||
+        node.kind === 'unknown_effect' ||
+        (node.kind === 'store' && !exact.has(node.id))
+      )
+        return false;
+    }
+    return true;
+  };
   // Boundaries that may read their incoming stack (our outgoing area). A
   // consumed store must be visible at no such boundary but its own call. Only
   // an observed callee without stack inputs, or an established complete
@@ -115,6 +162,7 @@ export function planVariadicStackArguments(
       return (
         callee.parameter_state === 'observed' &&
         !callee.variadic_stack &&
+        !callee.variadic &&
         !callee.stack_parameters?.length
       );
     return (
@@ -141,10 +189,11 @@ export function planVariadicStackArguments(
       // Unnamed arguments follow every fixed one. An observed prefix fixes the
       // tail's position; an ambiguous callee keeps its fully bound caller-side
       // prefix, which the rendered note marks as possibly incomplete. Fixed
-      // stack parameters would precede the tail.
+      // stack parameters would precede the tail, unless a published `va_start`
+      // footprint (S8) names them: the tail then starts after its named bytes.
       if (
         !callee ||
-        callee.stack_parameters?.length ||
+        (callee.stack_parameters?.length && !callee.variadic) ||
         !(
           (projection?.kind === 'inferred' && projection.argument_list_complete === false) ||
           (projection?.kind === 'physical' &&
@@ -153,13 +202,24 @@ export function planVariadicStackArguments(
         )
       )
         continue;
+      // S8: a published footprint names no register itself on Darwin; the
+      // anonymous slots follow the bound prefix only when the call writes no
+      // integer argument register beyond it (else a named argument the
+      // callee's observed prefix misses would shift every slot).
+      if (
+        callee.variadic &&
+        integerArguments
+          .slice(callee.parameters.filter((register) => register.bank === 'integer').length)
+          .some((register) => writes(node.register_inputs, register))
+      )
+        continue;
       const snapshot = stack.snapshots.get(node.id),
         sp = snapshot?.stack_pointer.value;
       if (!snapshot || sp?.kind !== 'stack') continue;
       const taken: Store[] = [];
       for (let index = 0n; index < 32n; index++) {
         context.checkpoint(1);
-        const start = sp.offset + index * slot,
+        const start = sp.offset + (callee.variadic?.named_stack_bytes ?? 0n) + index * slot,
           cell = snapshot.memory.get(start),
           owner = cell && owners.get(cell.fact);
         if (
@@ -168,7 +228,7 @@ export function planVariadicStackArguments(
           owner.offset !== start ||
           owner.size > slot ||
           cell.value_offset_bits !== 0 ||
-          cell.fact.initialization !== 'initialized' ||
+          (cell.fact.initialization !== 'initialized' && !unbarred(owner.store.id, node.id)) ||
           owner.store.access.volatile ||
           BigInt(Math.ceil(bitWidth(owner.store.value.type) / 8)) !== owner.size ||
           excluded(owner.store.id) ||
@@ -209,7 +269,9 @@ export function planVariadicStackArguments(
         !validation.presentation(
           'variadic_stack_arguments',
           node.id,
-          'Darwin arm64 variadic outgoing stack slots presented as observed trailing call arguments; the callee lets an incoming-stack pointer escape and the source arity stays open',
+          callee.variadic
+            ? `Darwin arm64 variadic outgoing stack slots presented as the trailing anonymous call arguments after ${callee.variadic.named_stack_bytes} named stack bytes; the callee's va_start footprint is published and the source arity stays open`
+            : 'Darwin arm64 variadic outgoing stack slots presented as observed trailing call arguments; the callee lets an incoming-stack pointer escape and the source arity stays open',
           taken.map((store) => store.id),
         )
       )
@@ -217,7 +279,7 @@ export function planVariadicStackArguments(
       validation.requireAbi(
         'darwin_variadic_stack_arguments',
         [node.id],
-        'Presenting outgoing stack stores as trailing arguments assumes the Darwin arm64 variadic convention (every unnamed argument in consecutive 8-byte stack slots from SP+0) holds for this call.',
+        `Presenting outgoing stack stores as trailing arguments assumes the Darwin arm64 variadic convention (every unnamed argument in consecutive 8-byte stack slots from SP+${callee.variadic?.named_stack_bytes ?? 0n}) holds for this call.`,
       );
       const values: Value[] = taken.map((store) => store.value);
       for (const store of taken) consumed.set(store.id, node.id);
@@ -939,5 +1001,244 @@ export function classifySysvVaStart(
     stores: stores.map((node) => node.id),
     anchor: anchor.id,
     guard: guard?.control ?? null,
+  };
+}
+
+/** The argument values of a call or tail to a callee with a published
+ * `va_start` footprint (S8), or null when the named prefix cannot be bound. */
+export interface VariadicCallArguments {
+  readonly arguments: readonly Value[];
+  /** How many of `arguments` are anonymous (after the named prefix). */
+  readonly anonymous: number;
+}
+
+/** Source view, the caller side of a callee's `va_start` footprint (S8): the
+ * named prefix binds exactly to the callee's named registers and named stack
+ * slots; the remaining argument locations follow the ABI's variadic
+ * convention, and only those the caller provably sets up for this transfer
+ * print as anonymous arguments, in ABI order:
+ * - SysV AMD64: the integer argument registers after the named ones that this
+ *   body writes (a prefix: an untouched entry value or a call's clobber ends
+ *   it), then the vector argument registers after the named ones up to the
+ *   constant `al` (the vector-register upper bound), each as its low double;
+ *   the classes are assigned independently, so this order is one valid order;
+ * - Win64: the positions after the named ones whose integer register this
+ *   body writes (a prefix), each as the double of its FP register when that
+ *   holds the same bits (a variadic FP argument is passed in both), else the
+ *   integer;
+ * - Darwin arm64: none here; the outgoing stack slots from SP plus the named
+ *   stack bytes are `planVariadicStackArguments`'.
+ * The remaining argument list stays open: a forwarded entry value may still
+ * be an anonymous argument. */
+export function createVariadicCallBinder(
+  abi: AbiProfile,
+  blocks: ReadonlyMap<string, BlockRegion>,
+  expressions: ReadonlyMap<string, Expression>,
+  entry: string,
+  context: OperationContext,
+): (
+  callee: InferredCallee,
+  bindings: readonly RegisterBinding[],
+  bind: (key: string, register: RegisterDescriptor, type: DataType) => Value | null,
+  bindStack: (key: string, offset: bigint, type: DataType) => Value | null,
+) => VariadicCallArguments | null {
+  const writes = createRegisterWrites(blocks, expressions, entry, context);
+  // The bits a value re-presents unchanged: its base value and bit range.
+  const base = (value: Value): string => {
+    const width = bitWidth(value.type);
+    let offset = 0,
+      current = value;
+    for (let depth = 0; depth < 8; depth++) {
+      const expression = expressions.get(current.id);
+      if (expression?.kind === 'cast' && expression.op === 'bitcast') current = expression.value;
+      else if (expression?.kind === 'extract') {
+        offset += expression.offset;
+        current = expression.value;
+      } else if (expression?.kind === 'concat') {
+        // The one part (lowest first) holding every bit of the range.
+        let start = 0,
+          part: Value | undefined;
+        for (const piece of expression.values) {
+          const end = start + bitWidth(piece.type);
+          if (offset >= start && offset + width <= end) part = piece;
+          if (part) break;
+          start = end;
+        }
+        if (!part) break;
+        offset -= start;
+        current = part;
+      } else break;
+    }
+    return `${current.id}:${offset}:${width}`;
+  };
+  const constant = (value: Value, depth = 0): bigint | undefined => {
+    const expression = expressions.get(value.id),
+      width = bitWidth(value.type);
+    if (depth > 8 || !expression) return undefined;
+    if (expression.kind === 'constant') return BigInt.asUintN(width, expression.bits);
+    if (expression.kind === 'extract') {
+      const inner = constant(expression.value, depth + 1);
+      return inner === undefined
+        ? undefined
+        : BigInt.asUintN(width, inner >> BigInt(expression.offset));
+    }
+    if (
+      expression.kind === 'cast' &&
+      (expression.op === 'bitcast' ||
+        expression.op === 'zero_extend' ||
+        expression.op === 'truncate')
+    ) {
+      const inner = constant(expression.value, depth + 1);
+      return inner === undefined ? undefined : BigInt.asUintN(width, inner);
+    }
+    return undefined;
+  };
+  const sysv = abi.id === 'sysv-amd64',
+    windows = abi.id === 'windows-x64';
+  const integers = argumentRegisters(abi, 'integer', sysv ? 6 : 4),
+    vectors = argumentRegisters(abi, 'float', sysv ? 8 : 4);
+  const al = abi
+    .classifyCall({
+      returns: { kind: 'void' },
+      parameters: [],
+      variadic: true,
+      fixed_parameter_count: 0,
+    })
+    .implicit_register_inputs.find(
+      (input) => input.purpose === 'vector_argument_register_upper_bound',
+    )?.register;
+  const word: DataType = { kind: 'integer', bits: 64 },
+    double: DataType = { kind: 'float', bits: 64 };
+  return (callee, bindings, bind, bindStack) => {
+    const variadic = callee.variadic;
+    if (!variadic) return null;
+    const values: Value[] = [];
+    // Darwin arm64 passes no anonymous argument in a register: the named
+    // registers are the call's observed register prefix, as for any callee.
+    const namedRegisters = abi.id === 'darwin-arm64' ? callee.parameters : variadic.named;
+    for (const [index, named] of namedRegisters.entries()) {
+      // The observed cell width and type of the named register, when read.
+      const at = callee.parameters.findIndex((register) => register.root === named.root);
+      const register = at >= 0 ? callee.parameters[at]! : named;
+      const value = bind(
+        `named:${index}`,
+        register,
+        callee.parameter_types?.[at] ?? { kind: 'integer', bits: register.width_bits },
+      );
+      if (!value) return null;
+      values.push(value);
+    }
+    const first = abi.stack_return_address_bytes;
+    for (let offset = first; offset < first + variadic.named_stack_bytes; offset += 8n) {
+      const observed = callee.stack_parameters?.find((parameter) => parameter.offset === offset);
+      const value = bindStack(`named-stack:${offset}`, offset, observed?.type ?? word);
+      if (!value) return null;
+      values.push(value);
+    }
+    const named = values.length;
+    const set = (register: RegisterDescriptor): boolean => writes(bindings, register);
+    if (sysv) {
+      for (let index = variadic.named_integer; index < integers.length; index++) {
+        if (!set(integers[index]!)) break;
+        const value = bind(`anonymous:${index}`, integers[index]!, word);
+        if (!value) break;
+        values.push(value);
+      }
+      // `al` bounds the vector registers the call uses (named ones included).
+      const bound = al && bind('vector-count', al, { kind: 'integer', bits: al.width_bits });
+      const count = bound ? constant(bound) : undefined;
+      if (count !== undefined)
+        for (let index = variadic.named_vector; index < Math.min(Number(count), 8); index++) {
+          const value =
+            vectors[index] && bind(`anonymous-vector:${index}`, vectors[index]!, double);
+          if (!value) break;
+          values.push(value);
+        }
+    } else if (windows) {
+      for (let index = variadic.named.length; index < integers.length; index++) {
+        if (!set(integers[index]!)) break;
+        const integer = bind(`anonymous:${index}`, integers[index]!, word);
+        if (!integer) break;
+        const fp = bind(`anonymous-fp:${index}`, vectors[index]!, double);
+        values.push(fp && base(fp) === base(integer) ? fp : integer);
+      }
+    }
+    return { arguments: values, anonymous: values.length - named };
+  };
+}
+
+/** Whether this body writes every bit of an argument register at a transfer
+ * (`bindings`): every cell covering it was computed, loaded or moved into it
+ * on every path, and no part is the register's own entry value or a value a
+ * call or unknown effect left in it. */
+export function createRegisterWrites(
+  blocks: ReadonlyMap<string, BlockRegion>,
+  expressions: ReadonlyMap<string, Expression>,
+  entry: string,
+  context: OperationContext,
+): (bindings: readonly RegisterBinding[], register: RegisterDescriptor) => boolean {
+  // Values a register holds without this body writing it: its own entry
+  // cells and the cells a call or unknown effect left in it.
+  const kept = new Map<string, Set<string>>();
+  const keep = (bindings: readonly RegisterBinding[]): void => {
+    for (const binding of bindings) {
+      const roots = kept.get(binding.value.id) ?? new Set<string>();
+      roots.add(binding.register.root);
+      kept.set(binding.value.id, roots);
+    }
+  };
+  const sources = new Map<string, Value[]>();
+  keep(blocks.get(entry)?.register_entry ?? []);
+  for (const block of blocks.values()) {
+    for (const node of block.statements) {
+      context.checkpoint(1);
+      if (node.kind === 'call' || node.kind === 'unknown_effect') keep(node.register_outputs);
+    }
+    const control = block.control;
+    const transfers =
+      control.kind === 'jump'
+        ? [control.transfer]
+        : control.kind === 'if'
+          ? [control.when_true.transfer, control.when_false.transfer]
+          : control.kind === 'switch'
+            ? [...control.cases.map((item) => item.arm.transfer), control.otherwise.transfer]
+            : [];
+    for (const transfer of transfers)
+      for (const copy of transfer.copies) {
+        const list = sources.get(copy.destination.id) ?? [];
+        list.push(copy.source);
+        sources.set(copy.destination.id, list);
+      }
+  }
+  // Every bit of `value` was computed, loaded or moved into `root` by this
+  // body on every path: no part is `root`'s entry value or a clobber.
+  const written = (value: Value, root: string, seen = new Set<string>()): boolean => {
+    context.checkpoint(1);
+    if (seen.has(value.id)) return true;
+    seen.add(value.id);
+    if (seen.size > 64 || kept.get(value.id)?.has(root)) return false;
+    const expression = expressions.get(value.id);
+    if (!expression) {
+      const incoming = sources.get(value.id);
+      return !incoming || incoming.every((source) => written(source, root, seen));
+    }
+    if (expression.kind === 'indeterminate') return false;
+    if (
+      (expression.kind === 'cast' && expression.op === 'bitcast') ||
+      expression.kind === 'extract'
+    )
+      return written(expression.value, root, seen);
+    if (expression.kind === 'concat')
+      return expression.values.every((part) => written(part, root, seen));
+    return true;
+  };
+  return (bindings, register) => {
+    const cells = bindings.filter(
+      (binding) =>
+        binding.register.root === register.root &&
+        binding.register.offset_bits < register.offset_bits + register.width_bits &&
+        binding.register.offset_bits + binding.register.width_bits > register.offset_bits,
+    );
+    return cells.length > 0 && cells.every((cell) => written(cell.value, register.root));
   };
 }

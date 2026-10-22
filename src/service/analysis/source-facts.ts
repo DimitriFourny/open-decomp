@@ -103,6 +103,7 @@ import { variadicRuleCalls, variadicRuleFacts } from './source-variadic.js';
 import { nativeLibraryTails } from './native-library-tails.js';
 import { objcSourceFacts } from './objc-messages.js';
 import { calleeReadsGuess, likelyArities } from './likely-arity.js';
+import { nativeVariadicInterface } from './native-variadic.js';
 import { likelyTypes } from './likely-types.js';
 
 export interface SourceFactsInput {
@@ -1519,6 +1520,20 @@ function observeNativeUnit(
           },
         };
     }
+  }
+  // The body's `va_start` footprint (S8): callers bind its named prefix and
+  // treat every other location by the variadic convention (source view only).
+  // A context closure of the source interface keeps it too: the footprint
+  // states which arguments are named for every caller.
+  if (unit.variadic) {
+    const variadic = nativeVariadicInterface(unit.variadic, observed.parameters);
+    observed = {
+      ...observed,
+      variadic,
+      ...(observed.source_interface
+        ? { source_interface: { ...observed.source_interface, variadic } }
+        : {}),
+    };
   }
   if (unit.budget_truncated) {
     const { argument_list_closure: _closure, ...truncated } = observed;

@@ -11,6 +11,7 @@ import {
   type RegisterDescriptor,
 } from '../../../src/core/index.js';
 import { darwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
+import { windowsX64Abi } from '../../../src/abi/windows-x64/index.js';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { analyzeCalls } from '../../../src/analysis/calls/index.js';
 import { recoverTypes } from '../../../src/analysis/types/index.js';
@@ -19,6 +20,11 @@ import { simplifySSA } from '../../../src/analysis/values/index.js';
 import { floating, integer, vector } from '../../../src/ir/index.js';
 import type { SourceEvidence } from '../../../src/reconstruction/source-model.js';
 import { X86Lifter } from '../../../src/lifters/x86_64/index.js';
+import { Arm64Lifter } from '../../../src/lifters/arm64/index.js';
+import {
+  nativeVariadicFootprint,
+  nativeVariadicInterface,
+} from '../../../src/service/analysis/native-variadic.js';
 import {
   createNativeInterfaceIndex,
   nativeEntryRegisters,
@@ -41,6 +47,7 @@ const rdi = register('rdi', 64, 0, 'replace_root', 'x86_64:rdi');
 const rsi = register('rsi', 64, 0, 'replace_root', 'x86_64:rsi');
 const rdx = register('rdx', 64, 0, 'replace_root', 'x86_64:rdx');
 const rax = register('rax', 64, 0, 'replace_root', 'x86_64:rax');
+const x0 = register('x0', 64, 0, 'replace_root', 'arm64:x0');
 const xmm0 = {
   ...register('xmm0', 128, 0, 'replace_root', 'x86_64:xmm0', 128),
   bank: 'vector' as const,
@@ -517,3 +524,225 @@ for (const abi of [sysvAMD64Abi, darwinArm64Abi])
       }
     }
   });
+
+// S8: a variadic callee publishes its `va_start` footprint, the same
+// classification its own source view prints `...` from.
+for (const [fixture, entry, abi, named] of [
+  ['elf-x86_64-symbols', 0x4019c0n, sysvAMD64Abi, 'x86_64:rdi'],
+  ['corpus-symbols.dll', 0x1800011b0n, windowsX64Abi, 'x86_64:rcx'],
+  ['macho-arm64-symbols', 0x1000006d0n, darwinArm64Abi, null],
+] as const)
+  test(`${fixture}: fixture_variadic publishes one named integer register and no named stack bytes`, async (t) => {
+    const p = await project(t, fixture);
+    const scope = { store: p.state.store, context: createOperationContext() };
+    const footprint = (address: bigint) => {
+      const fn = p.functions.find((candidate) => candidate.entry.value === address);
+      assert.ok(fn);
+      const graph = loadFunctionGraph(scope, 2, loadFunctionScope(scope, 2, fn.id));
+      const lifter = abi === darwinArm64Abi ? new Arm64Lifter() : new X86Lifter();
+      const constructed = constructSSA(lifter.lift(graph, abi, scope.context).ir).value;
+      if (constructed.form !== 'ssa') throw new TypeError('Expected SSA');
+      const ir = simplifySSA(constructed).value;
+      const context = createOperationContext();
+      const types = recoverTypes(ir, abi, context, {
+        image_id: image,
+        slice_id: slice,
+        revision: 0,
+      });
+      return nativeVariadicFootprint(ir, types, abi, types.calls ?? null, context);
+    };
+    const found = footprint(entry);
+    assert.ok(found);
+    // Darwin leaves the named registers to the observed prefix.
+    assert.deepEqual(
+      found.named?.map((register) => register.root) ?? null,
+      named === null ? null : [named],
+    );
+    assert.equal(found.named_stack_bytes, 0n);
+    const published = nativeVariadicInterface(found, [{ ...x0, width_bits: 32 }]);
+    assert.deepEqual(
+      [published.named_integer, published.named_vector, published.named.length],
+      [1, 0, 1],
+    );
+    // Negative: no other function of the corpus has a footprint.
+    for (const other of p.functions)
+      if (other.entry.value !== entry && !/variadic/.test(other.original_name ?? ''))
+        assert.equal(footprint(other.entry.value), null, other.original_name ?? other.id);
+  });
+
+const variadicCallee = (named: RegisterDescriptor, result: RegisterDescriptor) => ({
+  parameters: [{ ...named, width_bits: 32 }],
+  parameter_types: [integer(32)],
+  returns: [result],
+  return_types: [f64],
+  parameter_state: 'ambiguous' as const,
+  argument_list_complete: false,
+  variadic: { named_integer: 1, named_vector: 0, named_stack_bytes: 0n, named: [named] },
+  evidence_ids: [],
+});
+
+/** `double caller(uint32_t count, double a, double b)` calling a variadic
+ * `double sum(uint32_t count, ...)` (a stub at 0x2000) the way each ABI's
+ * compiler sets it up:
+ * - SysV: rsi = 7 (written), rdx untouched (ends the integer prefix), rcx = 9
+ *   (written, but after the gap), al = 2: a and b forwarded in xmm0/xmm1;
+ * - Win64: rdx = the bits of a (forwarded in xmm1 as well: one double),
+ *   r8 = 5 (xmm2 holds b: not the same bits, so an integer), r9 untouched;
+ * - Darwin: the bits of a and the constant 11 stored to SP+0 and SP+8.
+ * `variant` 'clobbered' leaves a prior call's clobber in the first anonymous
+ * integer register and (SysV) a non-constant al. */
+function variadicCaller(abi: AbiProfile, variant: 'complete' | 'clobbered') {
+  const layout = abi.classifyCall({
+    returns: f64,
+    parameters: [word, f64, f64],
+    variadic: false,
+    fixed_parameter_count: 3,
+  });
+  const count = registerOf(layout.parameters[0]!.locations[0]),
+    a = lowLane(registerOf(layout.parameters[1]!.locations[0])),
+    b = lowLane(registerOf(layout.parameters[2]!.locations[0])),
+    result = lowLane(registerOf(layout.returns[0]));
+  const integers = abi
+    .classifyCall({
+      returns: { kind: 'void' },
+      parameters: Array.from({ length: 4 }, () => word),
+      variadic: false,
+      fixed_parameter_count: 4,
+    })
+    .parameters.map((parameter) => registerOf(parameter.locations[0]));
+  const target = {
+    kind: 'direct' as const,
+    address: { image_id: image, space: 'va' as const, value: 0x2000n },
+  };
+  const b_ = builder(`variadic-caller-${abi.id}-${variant}`),
+    entry = b_.block('entry');
+  const sp = entry.readRegister(abi.stack_pointer);
+  entry.readRegister(count);
+  entry.readRegister(a);
+  entry.readRegister(b);
+  const clobber = () =>
+    entry.call(
+      { kind: 'direct', address: { image_id: image, space: 'va', value: 0x3000n } },
+      [],
+      [],
+      { registers: [integers[1]!], flags: [], memory: 'unknown_read_write' },
+    );
+  if (variant === 'clobbered' && abi.id !== 'darwin-arm64') clobber();
+  if (abi.id === 'sysv-amd64') {
+    if (variant === 'complete') entry.writeRegister(integers[1]!, entry.constant(u64, 7n));
+    entry.writeRegister(integers[3]!, entry.constant(u64, 9n));
+    const al = abi
+      .classifyCall({
+        returns: { kind: 'void' },
+        parameters: [],
+        variadic: true,
+        fixed_parameter_count: 0,
+      })
+      .implicit_register_inputs.find(
+        (input) => input.purpose === 'vector_argument_register_upper_bound',
+      )!.register;
+    if (variant === 'complete') entry.writeRegister(al, entry.constant(integer(8), 2n));
+  } else if (abi.id === 'windows-x64') {
+    if (variant === 'complete') entry.writeRegister(integers[1]!, entry.readRegister(a));
+    entry.writeRegister(integers[2]!, entry.constant(u64, 5n));
+  } else {
+    const area = entry.int('sub', sp, entry.constant(u64, 16n));
+    entry.writeRegister(abi.stack_pointer, area);
+    entry.store(area, entry.readRegister(a));
+    entry.store(entry.int('add', area, entry.constant(u64, 8n)), entry.constant(u64, 11n));
+    // A barrier between the stores and the call: the slots are no arguments.
+    if (variant === 'clobbered') clobber();
+  }
+  entry.call(target, [], [], {
+    registers: [
+      result,
+      ...abi.unknown_call_clobbers.registers.filter(
+        (register) =>
+          register.root !== result.root &&
+          register.root !== abi.stack_pointer.root &&
+          register.bank === 'integer',
+      ),
+    ],
+    flags: [],
+    memory: 'unknown_read_write',
+  });
+  if (abi.id === 'darwin-arm64') entry.writeRegister(abi.stack_pointer, sp);
+  entry.return([]);
+  const ir = constructSSA(b_.finish(entry, [])).value;
+  if (ir.form !== 'ssa') throw new TypeError('Expected SSA');
+  const call = ir.blocks[0]!.instructions.filter((node) => node.kind === 'call').at(-1)!;
+  return { ir, call, count, result };
+}
+
+const sum = (args: readonly bigint[]) => args.reduce((total, bits) => total + bits, 0n);
+
+for (const abi of [sysvAMD64Abi, windowsX64Abi, darwinArm64Abi])
+  for (const variant of ['complete', 'clobbered'] as const)
+    test(`${abi.id} ${variant === 'complete' ? 'a caller of a published variadic callee prints and executes the anonymous arguments it sets up' : 'a clobbered or unbounded anonymous location is no argument'}`, () => {
+      const fixture = variadicCaller(abi, variant);
+      const types = recoverTypes(fixture.ir, abi, createOperationContext(), {
+        image_id: image,
+        slice_id: slice,
+        revision: 0,
+      });
+      const source: SourceEvidence = {
+        abi,
+        addresses: [],
+        callees: [{ call_id: fixture.call.id, ...variadicCallee(fixture.count, fixture.result) }],
+      };
+      const a = 1.25,
+        b = -6.5;
+      // The values each ABI's caller sets up (see variadicCaller).
+      const expected =
+        variant === 'clobbered'
+          ? [3n]
+          : abi.id === 'sysv-amd64'
+            ? [3n, 7n, bits64(a), bits64(b)]
+            : abi.id === 'windows-x64'
+              ? [3n, bits64(a), 5n]
+              : [3n, bits64(a), 11n];
+      for (const language of ['c-like', 'python-like'] as const) {
+        const { emission } = emit(fixture.ir, { source, types }, language);
+        const rules = emission.local_validation?.map((record) => record.rule) ?? [];
+        assert.ok(rules.includes('variadic_call_arguments'), emission.text);
+        // Every formal is a named or anonymous argument the call prints.
+        const formals = emittedFormals(emission);
+        // Darwin's clobbered variant still stores a to the (now ordinary) slot.
+        assert.equal(
+          formals.length,
+          abi.id === 'sysv-amd64' && variant === 'complete'
+            ? 3
+            : variant === 'complete' || abi.id === 'darwin-arm64'
+              ? 2
+              : 1,
+          emission.text,
+        );
+        const observed = execute(
+          emission,
+          new Map(
+            formals.map((formal, index) => [
+              formal.statement_id,
+              [3n, bits64(a), bits64(b)][index]!,
+            ]),
+          ),
+          new Map(),
+          0n,
+          new Map(),
+          new Map(),
+          new Map([
+            ['sub_2000', sum],
+            ['sub_3000', () => 0n],
+          ]),
+        );
+        assert.deepEqual(
+          (observed.source_calls ?? []).filter((call) => call.name === 'sub_2000'),
+          [{ name: 'sub_2000', arguments: expected }],
+          emission.text,
+        );
+      }
+      // The checked view keeps the physical call interface.
+      const checked = emit(fixture.ir, { source, types }, 'c-like', 'checked').emission;
+      assert.ok(
+        !checked.local_validation?.some((record) => record.rule === 'variadic_call_arguments'),
+      );
+    });

@@ -290,6 +290,7 @@ function reconstructView(
       ? planVariadicStackArguments(
           input,
           blocks,
+          expressions,
           sourcePlan.calls,
           (id) =>
             sourceStack.hidden.has(id) ||

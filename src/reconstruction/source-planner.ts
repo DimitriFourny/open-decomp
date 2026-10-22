@@ -37,6 +37,7 @@ import { possibleAbiReturnStorage } from '../analysis/calls/return-storage.js';
 import { LocalValidationSession } from './local-validation.js';
 import { selectSourcePrimaryResult, type SourcePrimaryResult } from './source-results.js';
 import { identityOperand } from './expressions.js';
+import { createVariadicCallBinder } from './source-variadic.js';
 
 /** Source ABI abstraction: architectural snapshots are retained in the input,
  * not treated as extra source arguments or memory-fault observables.
@@ -395,6 +396,49 @@ export function planSource(
     }
     return { arguments: arguments_, missing: false };
   };
+  // Source view (S8): a callee with a published `va_start` footprint binds its
+  // named prefix exactly and the anonymous arguments this body provably sets up
+  // under the ABI's variadic convention (`createVariadicCallBinder`).
+  const variadicBinder =
+    view === 'source' && evidence.callees.some((callee) => callee.variadic)
+      ? createVariadicCallBinder(abi, blocks, expressions, input.function.entry, context)
+      : null;
+  const variadicArguments = (
+    callee: InferredCallee,
+    bindings: readonly RegisterBinding[],
+    boundary: string,
+    block: string,
+  ): { readonly arguments: readonly Value[]; readonly missing: false } | null => {
+    if (!variadicBinder || !callee.variadic) return null;
+    const bound = variadicBinder(
+      callee,
+      bindings,
+      (key, register, type) =>
+        bind(`${boundary}:variadic:${key}`, bindings, locations(register), type, block),
+      (key, offset, type) =>
+        bindStack(`${boundary}:variadic:${key}`, boundary, offset, type, block),
+    );
+    if (
+      !bound ||
+      !validation.presentation(
+        'variadic_call_arguments',
+        boundary,
+        `call to a callee with a published va_start footprint: its ${callee.variadic.named.length} named register and ${callee.variadic.named_stack_bytes} named stack bytes bind exactly; the ${bound.anonymous} anonymous argument(s) are the locations after them that this body provably sets up for this transfer under the ${abi.id} variadic convention, in ABI order; the list stays open`,
+        [boundary],
+      )
+    )
+      return null;
+    validation.requireAbi(
+      'variadic_call_convention',
+      [boundary],
+      abi.id === 'sysv-amd64'
+        ? 'Presenting the arguments of a variadic callee assumes the SysV AMD64 variadic convention: the callee reads exactly its named argument registers as named, its anonymous integer arguments from the integer argument registers after them, and at most al vector registers (each anonymous one a double, by default argument promotion); integer and vector classes are assigned independently, so the printed order across classes is one valid order. Only argument registers this body writes, or the al-counted vector registers, print; a forwarded entry value may still be an argument (open list).'
+        : abi.id === 'windows-x64'
+          ? 'Presenting the arguments of a variadic callee assumes the Win64 variadic convention: positions after the named ones are anonymous, an anonymous floating-point argument is passed in both its FP and its integer register (printed as the double when both hold the same bits). Only positions whose integer register this body writes print; a forwarded entry value may still be an argument (open list).'
+          : 'Presenting the arguments of a variadic callee assumes the Darwin arm64 variadic convention: the named registers bind as named, and every anonymous argument is in consecutive 8-byte outgoing stack slots after the named stack bytes.',
+    );
+    return { arguments: bound.arguments, missing: false };
+  };
   const inferred = new Map(evidence.callees.map((callee) => [callee.call_id, callee]));
   if (view === 'source')
     for (const callee of evidence.source_callees ?? []) inferred.set(callee.call_id, callee);
@@ -593,12 +637,9 @@ export function planSource(
       }
       const callee = inferred.get(node.id);
       if (!projection && callee && node.arguments.length === 0 && node.results.length === 0) {
-        const { arguments: args, missing } = observedArguments(
-          callee,
-          node.register_inputs,
-          node.id,
-          block.id,
-        );
+        const variadic = variadicArguments(callee, node.register_inputs, node.id, block.id);
+        const { arguments: args, missing } =
+          variadic ?? observedArguments(callee, node.register_inputs, node.id, block.id);
         const returned = callee.returns
           .map((register, index) =>
             result(
@@ -614,21 +655,25 @@ export function planSource(
         // planSourceStack validates it before classifying caller-private storage.
         const closed =
           view === 'source' &&
+          !variadic &&
           !missing &&
           callee.parameter_state !== 'ambiguous' &&
           callee.argument_list_closure !== undefined &&
           !callee.variadic_stack;
         const guess =
-          view === 'source' && !closed && !missing
+          view === 'source' && !closed && !missing && !variadic
             ? evidence.likely_arity?.get(node.id)
             : undefined;
         projection = {
-          kind: callee.parameter_state === 'ambiguous' || missing ? 'physical' : 'inferred',
+          kind:
+            !variadic && (callee.parameter_state === 'ambiguous' || missing)
+              ? 'physical'
+              : 'inferred',
           signature: null,
           arguments: args,
           ...(closed
             ? { argument_list_complete: true }
-            : callee.argument_list_complete === false || missing
+            : variadic || callee.argument_list_complete === false || missing
               ? { argument_list_complete: false }
               : {}),
           ...(guess ? { likely: { ...guess, arity: args.length } } : {}),
@@ -652,9 +697,10 @@ export function planSource(
     const control = block.control,
       callee = inferred.get(control.id);
     if (control.kind !== 'indirect' || !control.tail_call || !callee?.target) continue;
-    const args = observedArguments(callee, block.register_exit, control.id, block.id);
+    const variadic = variadicArguments(callee, block.register_exit, control.id, block.id);
+    const args = variadic ?? observedArguments(callee, block.register_exit, control.id, block.id);
     const guess =
-      view === 'source' && !args.missing && callee.argument_list_closure === undefined
+      view === 'source' && !args.missing && !variadic && callee.argument_list_closure === undefined
         ? evidence.likely_arity?.get(control.id)
         : undefined;
     tails.set(control.id, {
@@ -668,13 +714,17 @@ export function planSource(
         ? { result_void: true as const }
         : {}),
       boundary: {
-        kind: callee.parameter_state === 'ambiguous' || args.missing ? 'physical' : 'inferred',
+        kind:
+          !variadic && (callee.parameter_state === 'ambiguous' || args.missing)
+            ? 'physical'
+            : 'inferred',
         signature: null,
         arguments: args.arguments,
         // A closed callee reads no stack, so no forwarded or newly written
         // stack bytes can be further arguments of this tail transfer.
         argument_list_complete:
           view === 'source' &&
+          !variadic &&
           !args.missing &&
           callee.parameter_state !== 'ambiguous' &&
           callee.argument_list_closure !== undefined &&
