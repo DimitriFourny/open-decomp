@@ -979,7 +979,7 @@ Files that several items touch:
 
 ### T2: Charge-exact reuse and an explicit `limited` flag
 
-- [ ] **Problem.** Charged work depends on history:
+- [x] **Problem.** Charged work depends on history: _(done: `PreparedNativeUnit.limited` set at every preparation limit and when the variadic footprint is cut; footprint limits no longer allowance-derived; context evidence scope content-derived instead of the random project ID (the real cause of run-to-run work noise); reused record index records its build's reads. Two full odbench runs of one build give identical per-function work; 45 functions' work and 1 text (`matrix_checksum` PE O0: open-arity note for a limited `adler32_z`) changed vs `od-main-afb7691`.)_
   - `_sqlite3Initialize` charges 275,857 at its first preparation and 278,384 in 46 later ones;
   - `_sqlite3_config` charges 333,203, 294,349 or 246,292 depending on the load;
   - about 21 SQLite functions differ in work between two runs of one build.
