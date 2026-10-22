@@ -24,12 +24,14 @@ import {
 import { buildCFG, instructionSuccessors } from '../cfg/index.js';
 import { jumpTableChain, proveJumpTable, type JumpTableProof } from './jump-tables.js';
 import { reconcileGraphs, type DiscoveryLineage } from './lineage.js';
+import { stackDeltas, type StackDelta } from './stack-delta.js';
 export type { DiscoveryLineage } from './lineage.js';
 
 /** Same entry cap as indirect-table target recovery; larger tables stay unresolved. */
 const MAX_JUMP_TABLE_ENTRIES = 256;
 const JUMP_TABLE_RULE =
   'indirect branch targets from immutable table entries under a dominating unsigned index bound';
+const TAIL_TARGET_RULE = 'unconditional jump at entry stack depth to code outside the root body';
 /** Linker-synthesized import trampoline sections (ELF PLT variants, Mach-O stub sections). */
 const STUB_SECTION = /(^|[.,])(plt|plt\.sec|plt\.got|iplt)$|__(auth_|objc_)?stubs$|__stub_helper$/;
 
@@ -274,6 +276,8 @@ export function discoverFunctions(
   const chains = new Map<bigint, readonly DecodedInstruction[]>();
   const watchers = new Map<bigint, Set<bigint>>();
   const stale = new Set<bigint>();
+  // Decoded unconditional direct jumps, in decode order: tail-target promotion's candidates.
+  const jumps: DecodedInstruction[] = [];
   const touch = (value: bigint): void => {
     for (const branch of watchers.get(value) ?? []) stale.add(branch);
   };
@@ -304,9 +308,9 @@ export function discoverFunctions(
     }
     finals = coalesce(ranges, context);
   }
-  // Explained extents for the sweep: boundary claims (sized symbols, loader function extents,
-  // asserted ranges) and final functions' ranges, built when the sweep starts. Unwind regions
-  // do not count: one region may span several functions.
+  // Explained extents for tail-target promotion and the sweep: boundary claims (sized symbols,
+  // loader function extents, asserted ranges) and final functions' ranges, built after the
+  // seeded drain. Unwind regions do not count: one region may span several functions.
   let claimed: Interval[] = [];
   const queue: Address[] = selected
     ? [selected]
@@ -640,6 +644,8 @@ export function discoverFunctions(
         addIncoming(successor.value, instruction);
         enqueue(successor);
       }
+      if (instruction.flow.kind === 'branch' && !instruction.flow.conditional)
+        jumps.push(instruction);
       if (instruction.flow.kind === 'indirect_branch' && !instruction.flow.conditional)
         prove(instruction);
       if (
@@ -739,16 +745,6 @@ export function discoverFunctions(
    * is explained; otherwise `sweepCursor` is the first unexplained byte. */
   let sweepCursor = resume?.sweep ?? 0n;
   const sweep = (): boolean => {
-    claimed = coalesce(
-      [
-        ...index.boundary_claims.map((claim) => ({
-          start: claim.range.start.value,
-          end: claim.range.start.value + claim.range.size,
-        })),
-        ...finals,
-      ],
-      context,
-    );
     const align = (value: bigint): bigint => (value + unit - 1n) & -unit;
     // Executable sections when the loader names them (else the executable mappings), minus
     // linker-synthesized import trampolines (PLT, Mach-O stubs): their callable entries are
@@ -811,11 +807,134 @@ export function discoverFunctions(
     }
     return true;
   };
+  /** One round of tail-jump target promotion. A decoded target T that is no root, object or
+   * explained extent becomes a candidate root when every decoded edge into it is an unconditional
+   * direct jump J and every root R whose traversal reaches J has SP at J equal to its entry SP
+   * (stack-delta must-dataflow) with T outside R's body: before R's entry, or at or after the next
+   * root above it, so R is not the greatest root at or below T. R's jump then reads as a direct
+   * tail call; the transfer is the same edge. True when a root was added. */
+  const promoteTailTargets = (): boolean => {
+    const entries = [...seeds.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const depths = new Map<bigint, Map<bigint, StackDelta>>();
+    const depth = (root: bigint): Map<bigint, StackDelta> => {
+      let known = depths.get(root);
+      if (!known) {
+        known = stackDeltas(
+          {
+            entry: root,
+            instruction: (value) => decoded.get(value),
+            successors: (instruction) =>
+              (
+                (instruction.flow.kind === 'indirect_branch'
+                  ? tables.get(instruction.address.value)?.proof.targets
+                  : undefined) ?? instructionSuccessors(instruction, input.noreturn_calls)
+              ).filter((successor) => successor.value === root || !seedAt(successor.value)),
+          },
+          context,
+        );
+        depths.set(root, known);
+      }
+      return known;
+    };
+    /** Roots whose traversal may reach `value` (backward over decoded edges, stopping at roots),
+     * or undefined once `home` is among them. */
+    const owners = (value: bigint, home: bigint | undefined): bigint[] | undefined => {
+      const roots: bigint[] = [];
+      const seen = new Set([value]);
+      const work = [value];
+      while (work.length) {
+        context.checkpoint(1);
+        const current = work.pop()!;
+        if (current === home) return undefined;
+        if (seedAt(current)) {
+          roots.push(current);
+          continue;
+        }
+        for (const source of incoming.get(current) ?? [])
+          if (!seen.has(source.address.value)) {
+            seen.add(source.address.value);
+            work.push(source.address.value);
+          }
+      }
+      return roots;
+    };
+    const promoted = new Map<bigint, string[]>();
+    const considered = new Set<bigint>();
+    for (const jump of jumps) {
+      context.checkpoint(1);
+      if (jump.flow.kind !== 'branch') continue;
+      const target = jump.flow.target.value;
+      if (considered.has(target)) continue;
+      considered.add(target);
+      if (
+        seedAt(target) ||
+        index.objects.has(target) ||
+        !decoded.has(target) ||
+        explanationEnd(target) !== null
+      )
+        continue;
+      const sources = incoming.get(target) ?? [];
+      if (
+        !sources.every(
+          (source) =>
+            source.validity === 'valid' &&
+            source.flow.kind === 'branch' &&
+            !source.flow.conditional &&
+            source.flow.target.value === target,
+        )
+      )
+        continue;
+      // T lies in the body span of the greatest root at or below it, and of no other root.
+      let low = 0,
+        high = entries.length;
+      while (low < high) {
+        context.checkpoint(1);
+        const mid = (low + high) >>> 1;
+        if (entries[mid]! <= target) low = mid + 1;
+        else high = mid;
+      }
+      const home = low > 0 ? entries[low - 1] : undefined;
+      const parents: string[] = [];
+      const qualified = sources.every((source) => {
+        // The home root's own traversal (shared by every jump into its span) rejects first.
+        if (home !== undefined && depth(home).has(source.address.value)) return false;
+        const roots = owners(source.address.value, home);
+        if (!roots) return false;
+        let owned = false;
+        for (const root of roots) {
+          const delta = depth(root).get(source.address.value);
+          if (delta === undefined) continue;
+          if (delta !== 0n) return false;
+          owned = true;
+          parents.push(...seedAt(root)!.evidence);
+        }
+        parents.push(...(instructionEvidence.get(source.id) ?? []));
+        return owned;
+      });
+      if (qualified) promoted.set(target, parents);
+    }
+    for (const target of [...promoted.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)))
+      seed(va(target), TAIL_TARGET_RULE, promoted.get(target)!, false);
+    return promoted.size > 0;
+  };
   drain();
   let enumerated = false;
   if (!selected && !exhausted) {
-    sweeping = true;
-    enumerated = sweep();
+    claimed = coalesce(
+      [
+        ...index.boundary_claims.map((claim) => ({
+          start: claim.range.start.value,
+          end: claim.range.start.value + claim.range.size,
+        })),
+        ...finals,
+      ],
+      context,
+    );
+    while (!exhausted && promoteTailTargets()) drain();
+    if (!exhausted) {
+      sweeping = true;
+      enumerated = sweep();
+    }
   }
   const functionEntries = { has: (value: bigint): boolean => seedAt(value) !== undefined };
   const graphs: FunctionGraph[] = [];
