@@ -172,6 +172,16 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi]) {
             ?.sites.filter((site) => site.predicate_value_id).length,
           1,
         );
+        // The source view prints no FP-environment note; the premise is recorded.
+        assert.doesNotMatch(emission.text, /nearest-even|FP traps|\) (\/\*|#) .*requirement_/);
+        if (!write) assert.doesNotMatch(emission.text, /requirement_/);
+        assert.ok(
+          emission.requirements?.some(
+            (item) =>
+              item.kind === 'abi_conformance' &&
+              item.sites.some((site) => site.state_epoch === 'fp_default_environment'),
+          ),
+        );
         const guard = emission.local_validation?.find(
           (item) => item.rule === 'fp_environment_guard',
         );
@@ -205,21 +215,38 @@ test('repeated guard epochs retain call effects and ignore MXCSR status-only wri
       assert.doesNotMatch(emission.text, /requirement_predicate\(/);
       // The call's FP-environment clobber only fed omitted guards: no placeholder local.
       assert.doesNotMatch(emission.text, /unknown_value|call clobbers/);
-      // One visible requirement reference, a prefix of the metadata ID.
-      const references = [...emission.text.matchAll(/\b(requirement_[0-9a-f]+)…?/g)];
-      assert.equal(references.length, 1);
+      // The source view prints no FP-environment note; the premise is recorded instead.
+      assert.doesNotMatch(emission.text, /requirement_|nearest-even|FP traps/);
       const environment = emission.requirements!.find((item) => item.kind === 'fp_environment')!;
-      assert.ok(environment.id.startsWith(references[0]![1]!));
       assert.ok(
-        environment.output_spans.some((span) =>
-          emission.text.slice(span.start, span.end).includes(references[0]![1]!),
+        emission.local_validation!.some(
+          (item) => item.rule === 'requirement_note' && item.kind === 'presentation',
         ),
       );
-      const sites = emission
-        .requirements!.find((item) => item.kind === 'fp_environment')!
-        .sites.filter((site) => site.predicate_value_id);
+      const premises = emission.requirements!.filter(
+        (item) =>
+          item.kind === 'abi_conformance' &&
+          item.sites.some((site) => site.state_epoch === 'fp_default_environment'),
+      );
+      assert.equal(premises.length, 1);
+      assert.equal(premises[0]!.status, 'assumption');
+      assert.match(premises[0]!.explanation, /C11 7\.6\.1p2/);
+      const sites = environment.sites.filter((site) => site.predicate_value_id);
       assert.equal(sites.length, 3);
       assert.equal(new Set(sites.map((site) => site.state_epoch)).size, call ? 2 : 1);
+      // Omitted guards map to the signature, which now carries nothing else.
+      const signature = emission.text.indexOf('\n', emission.text.indexOf('fn_function'));
+      assert.ok(
+        environment.output_spans.some(
+          (span) =>
+            emission.text.slice(span.start, span.end).includes('fn_function') &&
+            span.end <= signature + 1,
+        ),
+      );
+      // The checked view keeps its requirement line, without the premise record.
+      const checked = emit(f.ir, { source: f.source }, language, 'checked').emission;
+      assert.match(checked.text, /Requirement requirement_[0-9a-f]+ \(assumption\)/);
+      assert.ok(!checked.requirements!.some((item) => item.sites.some((site) => site.state_epoch === 'fp_default_environment')));
       const formal = emittedFormals(emission)[0]!;
       const result = execute(
         emission,

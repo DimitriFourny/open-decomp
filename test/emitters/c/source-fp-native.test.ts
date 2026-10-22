@@ -241,3 +241,43 @@ test('exact emitted native FP unary and conversion C executes under clang', () =
     rmSync(directory, { recursive: true, force: true });
   }
 });
+for (const language of LANGUAGES)
+  test(`${language}: the FP-environment premise is recorded, not printed, in the source view`, () => {
+    // Two dependent operations: every operation site stays listed in the requirement.
+    const f = build(64, 'environment', (block, input, fp) => {
+      const sum = block.assign(fp, { kind: 'float', op: 'add', left: input, right: input });
+      return block.assign(fp, { kind: 'float', op: 'mul', left: sum, right: input });
+    });
+    const { emission, identifiers } = emit(f.ir, { source: f.source }, language);
+    assert.doesNotMatch(emission.text, /requirement_|nearest-even|FP traps/);
+    const environment = emission.requirements!.filter((item) => item.kind === 'fp_environment');
+    assert.equal(environment.length, 1);
+    assert.equal(environment[0]!.sites.length, 2);
+    assert.ok(
+      emission.local_validation!.some(
+        (item) => item.kind === 'presentation' && item.rule === 'requirement_note',
+      ),
+    );
+    const premise = emission.requirements!.filter(
+      (item) =>
+        item.kind === 'abi_conformance' &&
+        item.sites.some((site) => site.state_epoch === 'fp_default_environment'),
+    );
+    assert.equal(premise.length, 1);
+    assert.equal(premise[0]!.sites.length, 1);
+    assert.match(premise[0]!.explanation, /C11 7\.6\.1p2/);
+    // The premise anchors at the signature.
+    const name = identifiers.find((item) => item.entity_id === f.ir.id)!.identifier;
+    for (const span of premise[0]!.output_spans) {
+      const line = emission.text.slice(span.start, span.end);
+      assert.ok(line.includes(name), line);
+    }
+    const checked = emit(f.ir, { source: f.source }, language, 'checked').emission;
+    assert.match(checked.text, /Requirement requirement_[0-9a-f]+ \(assumption\)/);
+    assert.ok(
+      !checked.requirements!.some((item) =>
+        item.sites.some((site) => site.state_epoch === 'fp_default_environment'),
+      ),
+    );
+    agree(f, language, 64);
+  });
