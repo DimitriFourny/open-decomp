@@ -53,7 +53,8 @@ for (const [fixture, entry] of [
       );
       assert.ok(
         emission.local_validation?.some(
-          (record) => record.kind === 'presentation' && record.rule === 'va_start',
+          (record: { kind: string; rule?: string }) =>
+            record.kind === 'presentation' && record.rule === 'va_start',
         ),
       );
       const formals = emittedFormals(emission);
