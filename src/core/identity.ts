@@ -69,6 +69,33 @@ export function canonicalIdentity(value: CanonicalValue): string {
 export function fingerprint(value: CanonicalValue): string {
   return hash('sha256', canonicalIdentity(value), 'hex');
 }
+/** The encoding of `{version: 1, complete: true, reads}` is `LEDGER_HEAD`, the elements
+ * joined by `,`, then `LEDGER_TAIL`. Both halves are cut out of the canonical encoding of an
+ * empty ledger, so the layout stays whatever `canonicalIdentity` says it is. */
+const EMPTY_LEDGER = canonicalIdentity({ version: 1, complete: true, reads: [] });
+const LEDGER_HEAD = EMPTY_LEDGER.slice(0, EMPTY_LEDGER.indexOf('[]') + 1);
+const LEDGER_TAIL = EMPTY_LEDGER.slice(LEDGER_HEAD.length);
+/** Append-only hash of a complete readset ledger. `fingerprint()` equals
+ * `fingerprint({version: 1, complete: true, reads})` for the elements appended so far
+ * (each element in its own `canonicalIdentity`), but costs only the new elements: the
+ * hash state over the canonical prefix is kept and copied to absorb the closing text. */
+export class LedgerHasher {
+  readonly #state = createHash('sha256').update(LEDGER_HEAD);
+  #length = 0;
+  /** Number of elements absorbed so far. */
+  get length(): number {
+    return this.#length;
+  }
+  append(element: CanonicalValue): void {
+    this.#state.update(
+      this.#length ? `,${canonicalIdentity(element)}` : canonicalIdentity(element),
+    );
+    this.#length++;
+  }
+  fingerprint(): string {
+    return this.#state.copy().update(LEDGER_TAIL).digest('hex');
+  }
+}
 export function contentHash(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
