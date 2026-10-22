@@ -493,7 +493,14 @@ function gatherInferences(
         offset = load && incomingOffsets.get(load);
       if (typeof offset === 'bigint') offsets.add(offset);
     }
-    const stack = offsets.size === 1 ? offsets.values().next().value : undefined;
+    const incoming = program.source?.incoming_object;
+    // The incoming object's struct formal (S4) designates the bytes from its start.
+    const stack =
+      offsets.size === 1
+        ? offsets.values().next().value
+        : incoming?.formal.id === value.id
+          ? incoming.minimum_offset
+          : undefined;
     const parameter = program.signature?.signature.parameters[ordinal];
     const role =
       register?.role === 'stack_pointer' || stackEntry(program.source?.stack)?.id === value.id

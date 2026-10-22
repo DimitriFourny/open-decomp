@@ -321,13 +321,15 @@ test('an explicit entry stack input keeps its identity when an ordinary source a
     u32 = integer(32);
   const rdi = register('rdi', 64, 0, 'replace_root', 'x86_64:rdi');
   const argument = entry.readRegister(rdi);
-  const incoming = entry.int(
+  // Bytes inside the pushed return address keep the entry SP as an input; an
+  // incoming argument byte would print through the S4 incoming object instead.
+  const returnBytes = entry.int(
     'add',
     entry.readRegister(sysvAMD64Abi.stack_pointer),
-    entry.constant(u64, 9n),
+    entry.constant(u64, 1n),
   );
   entry.return([
-    entry.int('add', argument, entry.cast('zero_extend', u64, entry.load(u32, incoming))),
+    entry.int('add', argument, entry.cast('zero_extend', u64, entry.load(u32, returnBytes))),
   ]);
   const constructed = constructSSA(b.finish(entry, [u64]));
   assert.equal(constructed.value.form, 'ssa');
@@ -357,10 +359,10 @@ test('an explicit entry stack input keeps its identity when an ordinary source a
     assert.ok(source);
     assert.notEqual(source.name, storage.name);
     const memory = new Map<bigint, number>([
-      [0x9009n, 0xef],
-      [0x900an, 0xcd],
-      [0x900bn, 0xab],
-      [0x900cn, 0x89],
+      [0x9001n, 0xef],
+      [0x9002n, 0xcd],
+      [0x9003n, 0xab],
+      [0x9004n, 0x89],
     ]);
     assert.deepEqual(
       execute(

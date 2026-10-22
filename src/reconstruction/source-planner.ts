@@ -1408,6 +1408,7 @@ export function planSource(
     formal_stack_offsets: formalStackOffsets,
   };
   let entryParameter: Value | null = null,
+    incomingObjectParameter: Value | null = null,
     // Source view: the named formals before `...`, when they follow ABI
     // argument positions (Win64); `variadicArea` alone for Darwin.
     variadicNamed: readonly Value[] | null = null,
@@ -1492,6 +1493,27 @@ export function planSource(
         return variadicArea;
       },
     },
+    /** Source view (S4): the struct formal naming the incoming bytes kept as
+     * memory, from entry-SP `offset` up. Inferred interfaces only: a declared
+     * signature states its own parameters. Its pointer-width type is a carrier;
+     * the renderer spells the struct. */
+    incomingObject(offset: bigint): Value | null {
+      if (functionSignature) return null;
+      if (!incomingObjectParameter) {
+        incomingObjectParameter = make(
+          'parameter:stack-args',
+          integer(abi.layout.pointer_bits),
+          entry.id,
+          undefined,
+          entry.register_entry
+            .filter((binding) => binding.register.root === abi.stack_pointer.root)
+            .map((binding) => binding.value),
+        );
+        parameterNames.set(incomingObjectParameter.id, 'stack_args');
+        formalStackOffsets.set(incomingObjectParameter.id, offset);
+      }
+      return incomingObjectParameter;
+    },
     /** Source view: the projection of an indirect exit that `classifyIndirectTails`
      * accepted. The observed argument-register prefix at the exit, as for an
      * indirect call, with the list open; no target identity and no result
@@ -1573,9 +1595,14 @@ export function planSource(
       demanded.forEach((value, index) => {
         if (!parameterNames.has(value.id)) parameterNames.set(value.id, `arg${index}`);
       });
-      return entryParameter && live.has(entryParameter.id)
-        ? [...demanded, entryParameter]
-        : demanded;
+      // Source-only formals follow the ABI ones: the incoming object (S4), then
+      // the entry SP when some address still needs it.
+      return [
+        ...demanded,
+        ...[incomingObjectParameter, entryParameter].filter(
+          (value): value is Value => value !== null && live.has(value.id),
+        ),
+      ];
     },
   };
 }

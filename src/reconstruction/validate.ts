@@ -90,7 +90,8 @@ export function validateReconstruction(program: Reconstruction, context: Operati
     if (!known || bitWidth(known.type) !== bitWidth(value.type))
       invalid(program.function, 'a projected use has no compatible value definition');
   };
-  const storage = program.source?.stack;
+  const storage = program.source?.stack,
+    incomingObject = program.source?.incoming_object;
   for (const id of reachable) {
     const block = program.blocks.get(id)!;
     const row = coverage.get(id);
@@ -118,11 +119,13 @@ export function validateReconstruction(program: Reconstruction, context: Operati
           Math.ceil(bitWidth(node.kind === 'load' ? node.result.type : node.value.type) / 8),
         );
         // Beside a frame object, bytes at or above the live entry SP stay
-        // entry-SP memory; no access spans the entry SP.
+        // entry-SP memory; no access spans the entry SP. Incoming bytes the
+        // incoming object holds are its members.
         if (
           offset !== undefined &&
           offset + bytes > 0n &&
-          (storage.kind !== 'object' || !storage.entry || offset < 0n)
+          (storage.kind !== 'object' || !storage.entry || offset < 0n) &&
+          !(incomingObject && offset >= incomingObject.minimum_offset)
         )
           invalid(
             node,
@@ -135,6 +138,23 @@ export function validateReconstruction(program: Reconstruction, context: Operati
           !program.source!.locals.has(node.id)
         )
           invalid(node, 'a frame access lies below its frame object');
+      }
+      if (
+        incomingObject &&
+        program.retained.has(node.id) &&
+        (node.kind === 'load' || node.kind === 'store')
+      ) {
+        const offset = program.source!.stack_addresses.get(node.address.id);
+        const bytes = BigInt(
+          Math.ceil(bitWidth(node.kind === 'load' ? node.result.type : node.value.type) / 8),
+        );
+        if (
+          offset !== undefined &&
+          offset + bytes > incomingObject.minimum_offset &&
+          (offset < incomingObject.minimum_offset ||
+            offset + bytes > incomingObject.minimum_offset + incomingObject.size)
+        )
+          invalid(node, 'an incoming access lies outside its incoming object');
       }
       if (program.retained.has(node.id)) {
         if ('result' in node) definitions.add(node.result.id);
@@ -223,6 +243,26 @@ export function validateReconstruction(program: Reconstruction, context: Operati
     }
     if (end > 0n || storage.minimum_offset + storage.size !== 0n)
       invalid(program.function, 'a frame object does not end at the entry SP');
+  }
+  if (incomingObject) {
+    if (
+      !program.parameters.some((value) => value.id === incomingObject.formal.id) ||
+      !program.live.has(incomingObject.formal.id)
+    )
+      invalid(program.function, 'an incoming object has no live explicit formal');
+    let end = incomingObject.minimum_offset;
+    for (const member of incomingObject.members) {
+      context.checkpoint(1);
+      if (member.size <= 0n || member.offset < end)
+        invalid(program.function, 'incoming object members overlap or are out of order');
+      end = member.offset + member.size;
+    }
+    if (
+      incomingObject.minimum_offset < 0n ||
+      !incomingObject.members.length ||
+      end !== incomingObject.minimum_offset + incomingObject.size
+    )
+      invalid(program.function, 'an incoming object does not end at its last member');
   }
   // Retained frame accesses of private and object storage are checked in the
   // statement scan above.

@@ -367,9 +367,25 @@ export class Parser {
       this.headerEnd = lines
         .slice(0, endHeader + 1)
         .reduce((length, line) => length + line.length + 1, 0);
-      for (const match of lines
-        .slice(header, endHeader + 1)
-        .join(' ')
+      const headerText = lines.slice(header, endHeader + 1).join(' ');
+      // A by-value struct formal `name: struct{m: T, pad_k: array<uint8_t, N>, ...}`
+      // designates its bytes like a frame object: members laid out in order.
+      for (const match of headerText.matchAll(/(\w+): struct\{([^}]*)\}/g)) {
+        const name = match[1]!;
+        let offset = 0n;
+        for (const part of match[2]!.split(/, (?=\w+: )/)) {
+          const member = /^(\w+): (?:array<uint8_t, (\d+)>|(\w+))$/.exec(part);
+          assert.ok(member, `Unsupported struct formal member ${part}`);
+          const parsed = member[3] ? this.cType({ scalar: member[3], pointers: 0 }) : null;
+          assert.ok(parsed === null || parsed.kind === 'int' || parsed.kind === 'float');
+          const scalar = parsed?.kind === 'int' || parsed?.kind === 'float' ? parsed : null;
+          this.frameMembers.set(`${name}.${member[1]}`, { offset, type: scalar });
+          offset += scalar ? BigInt(scalar.bits / 8) : BigInt(member[2]!);
+        }
+        this.objects.add(name);
+      }
+      for (const match of headerText
+        .replace(/struct\{[^}]*\}/g, 'struct')
         .matchAll(/(\w+): (float|double)\b/g))
         this.symbols.set(match[1]!, { kind: 'float', bits: match[2] === 'float' ? 32 : 64 });
       const result = /-> (float|double):(?:\s+#.*)?$/.exec(lines[endHeader]!);
@@ -578,6 +594,17 @@ export class Parser {
     if (result && this.position === open - 1) this.returnType = this.cType(result);
     this.position = open + 1;
     while (this.position < end && this.peek() !== ')') {
+      // A by-value struct formal designates its bytes like a frame object.
+      if (this.peek() === 'struct') {
+        this.take('struct');
+        const tag = this.take(),
+          name = this.take();
+        assert.ok(this.structs.has(tag), `Undeclared struct formal type ${tag}`);
+        this.symbols.set(name, { kind: 'pointer', to: { kind: 'struct', name: tag } });
+        this.objects.add(name);
+        if (this.peek() === ',') this.take(',');
+        continue;
+      }
       const type = this.bodyType(false);
       if (!type || this.peek() === ')' || this.peek() === ',') return;
       this.symbols.set(this.take(), this.cType(type));
@@ -587,7 +614,7 @@ export class Parser {
 
   private cType(type: { readonly scalar: string; readonly pointers: number }): CType {
     const name = type.scalar,
-      integer = /^(u?)int(\d+)_t$/.exec(name),
+      integer = /^(?:__)?(u?)int(\d+)_t$/.exec(name),
       bits = /^bits(\d+)_t$/.exec(name);
     const floating = /^(?:float|double|ieee(?:32|64)_t)$/.test(name)
       ? ({ kind: 'float', bits: name === 'float' || name === 'ieee32_t' ? 32 : 64 } as const)
@@ -673,7 +700,7 @@ export class Parser {
     if (this.peek() === 'const') this.take('const');
     const token = this.take();
     const scalar =
-      /^(?:bits\d+_t|u?int\d+_t|uintptr_t|bool|char|void|float|double|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t|type_\d+|va_list)$/;
+      /^(?:bits\d+_t|(?:__)?u?int\d+_t|uintptr_t|bool|char|void|float|double|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t|type_\d+|va_list)$/;
     let pointers = 0;
     if (python && token === 'pointer' && this.peek() === '[') {
       this.take('[');

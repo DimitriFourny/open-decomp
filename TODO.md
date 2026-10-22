@@ -293,7 +293,8 @@ A prototype of S1–S3 (unsound, measurement only) gave these results:
 
 ### S4: An incoming by-value aggregate becomes a struct formal
 
-- [ ] **Problem.** `matrix_aggregate(aggregate input, u64 delta, double scale)` passes a 24-byte struct, which is SysV MEMORY class: it sits at entry SP+8..+32 and is modified in place. OD prints `*(uint64_t *)(entry_sp + 8) = …` (ELF `-O0` `0x401c40`, `-O2` `0x401b30`, stripped `sub@0x401b30`). Ghidra prints `in_stack_*` locals.
+- [x] **Problem.** `matrix_aggregate(aggregate input, u64 delta, double scale)` passes a 24-byte struct, which is SysV MEMORY class: it sits at entry SP+8..+32 and is modified in place. OD prints `*(uint64_t *)(entry_sp + 8) = …` (ELF `-O0` `0x401c40`, `-O2` `0x401b30`, stripped `sub@0x401b30`). Ghidra prints `in_stack_*` locals.
+  - **Done (S4):** `incoming_object` presentation + ABI premise, `frameLayout(…, 'above')`, planner `incomingObject` formal `stack_args` (last, `formal_stack_offsets` at the first incoming byte); full-tier OD lane changes only the three ELF texts (`entry_sp` lines 8/6/6 → 0, one `struct stack_args_… stack_args` formal each), Mach-O/PE cells unchanged (by reference, not incoming bytes), checked views byte-identical; `test/reconstruction/incoming-stack.test.ts` executes SysV `-O2`/`-O0`/escaped fixtures in both dialects against an independent oracle.
   - **Root cause:**
     - Formal binding accepts only loads of pointer-width integers without overlaps (`source-stack.ts:1404-1407`, `source-planner.ts:1360`).
     - Slot promotion and the frame object are negative-only (`source-stack.ts:956-957`; `frameLayout` `:73, 79`).

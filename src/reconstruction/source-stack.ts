@@ -23,6 +23,7 @@ import type { BoundaryProjection } from './model.js';
 import type {
   FrameMember,
   FrameSaves,
+  IncomingObject,
   SourceLocal,
   SourceStackStorage,
   SourceVariadic,
@@ -37,22 +38,31 @@ import { classifyVariadicArea } from './source-variadic.js';
 type MemoryNode = Extract<Instruction, { kind: 'load' | 'store' }>;
 const FRAME_OBJECT_SCOPE =
   'frame bytes kept as memory print as one local frame object at their entry-SP offsets: one scalar member per exact (offset, width) access set, byte arrays where accesses overlap or a frame address is indexed or points inside, padding between; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
+const INCOMING_OBJECT_SCOPE =
+  'incoming stack-argument bytes kept as memory print as one by-value struct formal at their entry-SP offsets: one scalar member per exact (offset, width) access set, byte arrays where accesses overlap or an address points inside, padding between; no exposure can designate incoming bytes and no frame escape is unbounded; no retained access spans the first incoming byte; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
 const SCALAR_BYTES = new Set([1n, 2n, 4n, 8n, 16n]);
 
-/** Member layout of a source-view frame object that ends at the entry SP.
+/** Member layout of a source-view stack object at its entry-SP offsets.
  * One scalar member per exact (offset, width) access set; overlapping
  * accesses, an address strictly inside a member and an indexed base (with the
  * accesses that continue it without a gap) form one byte array; a taken
- * address in a gap starts a byte array that runs to the next member. The
- * bottom is lowered so the object starts at a stack-aligned address. Offsets
- * at or above the entry SP are not frame bytes and are ignored. */
+ * address in a gap starts a byte array that runs to the next member.
+ * `below` (the frame): the object ends at the entry SP and its bottom is
+ * lowered to a stack-aligned address; offsets at or above the entry SP are not
+ * frame bytes and are ignored. `above` (the incoming area, S4): the object
+ * starts at the first incoming byte (`returnAddressBytes`, stack-aligned by the
+ * call) and ends at its last member; offsets below that byte are ignored, and a
+ * taken address above every member starts a byte array to the next
+ * `alignment` boundary. */
 export function frameLayout(
   accesses: readonly { readonly offset: bigint; readonly end: bigint; readonly id: string }[],
   taken: readonly bigint[],
   indexed: ReadonlySet<bigint>,
   alignment: number,
   returnAddressBytes: bigint,
+  direction: 'below' | 'above' = 'below',
 ): { minimum_offset: bigint; size: bigint; members: FrameMember[] } {
+  const unit = BigInt(alignment);
   const order = (left: bigint, right: bigint): number => (left < right ? -1 : left > right ? 1 : 0);
   const clusters: { offset: bigint; end: bigint; scalar: boolean; access_ids: string[] }[] = [];
   for (const access of [...accesses].sort(
@@ -84,13 +94,13 @@ export function frameLayout(
   };
   const gaps = new Set<bigint>();
   for (const offset of taken) {
-    if (offset >= 0n) continue;
+    if (direction === 'below' ? offset >= 0n : offset < returnAddressBytes) continue;
     const index = containing(offset);
     if (index < 0) gaps.add(offset);
     else if (clusters[index]!.offset !== offset) clusters[index]!.scalar = false;
   }
   for (const offset of indexed) {
-    if (offset >= 0n) continue;
+    if (direction === 'below' ? offset >= 0n : offset < returnAddressBytes) continue;
     const index = containing(offset);
     if (index < 0) {
       gaps.add(offset);
@@ -114,13 +124,23 @@ export function frameLayout(
   for (let index = 0, next = 0; index < starts.length; index++) {
     const start = starts[index]!;
     while (next < clusters.length && clusters[next]!.offset <= start) next++;
-    let end = starts[index + 1] ?? 0n;
-    if (next < clusters.length && clusters[next]!.offset < end) end = clusters[next]!.offset;
+    let end = starts[index + 1];
+    if (next < clusters.length && (end === undefined || clusters[next]!.offset < end))
+      end = clusters[next]!.offset;
+    end ??= direction === 'below' ? 0n : start + unit - ((start - returnAddressBytes) % unit);
     members.push({ offset: start, size: end - start, scalar: false, access_ids: [] });
   }
   members.sort((left, right) => order(left.offset, right.offset));
+  if (direction === 'above') {
+    // Members are sorted and disjoint: the last one ends the object.
+    const last = members.at(-1);
+    return {
+      minimum_offset: returnAddressBytes,
+      size: last ? last.offset + last.size - returnAddressBytes : 0n,
+      members,
+    };
+  }
   const lowest = (members[0]?.offset ?? 0n) + returnAddressBytes,
-    unit = BigInt(alignment),
     minimum = lowest - (((lowest % unit) + unit) % unit) - returnAddressBytes;
   return { minimum_offset: minimum, size: -minimum, members };
 }
@@ -379,6 +399,9 @@ export function planSourceStack(
   context: OperationContext,
   incomingStack: (offset: bigint, type: DataType, contributors: readonly Value[]) => Value | null,
   entryStack: () => Value,
+  /** Source view (S4): the struct formal of the incoming object starting at
+   * entry-SP `offset`, or null when the interface cannot gain one. */
+  incomingObject: (offset: bigint) => Value | null,
   validation = new LocalValidationSession(context),
   view: PresentationView = 'checked',
   requirements?: readonly Requirement[],
@@ -2008,6 +2031,40 @@ export function planSourceStack(
     view === 'source' &&
     sharedEntry &&
     validation.presentation('frame_object', input.function.id, FRAME_OBJECT_SCOPE);
+  // Source view (S4): with no exposure that can designate incoming bytes
+  // (`incomingFloor` undefined) and no unbounded escape, the incoming bytes kept
+  // as memory (a by-value aggregate modified in place, slots S1 did not bind)
+  // are one object of their own: caller-supplied (the indirect-result pointer
+  // among them), global and loaded pointers and stores through unknown
+  // addresses never designate it, and no address this function derives from it
+  // escapes or indexes memory. It prints as one source-only struct formal whose
+  // members sit at their entry-SP offsets (`incoming`); every load and store
+  // keeps its address, width, order and aliasing, and nothing is forwarded.
+  // Offsets below the first incoming byte (the return address) keep their
+  // forms; an access spanning that byte keeps the whole function unchanged.
+  const incomingOrigin = abi.stack_return_address_bytes;
+  const incomingKept = accesses.filter(
+    (access) => !hidden.has(access.node.id) && access.end > incomingOrigin,
+  );
+  const incomingCandidate =
+    view === 'source' &&
+    !reachAll &&
+    !variadicArea &&
+    incomingFloor === undefined &&
+    facts?.state === 'complete' &&
+    (frameObject || !sharedEntry) &&
+    incomingKept.length > 0 &&
+    incomingKept.every((access) => access.offset >= incomingOrigin)
+      ? incomingObject(incomingOrigin)
+      : null;
+  const incomingFormal =
+    incomingCandidate &&
+    validation.presentation('incoming_object', input.function.id, INCOMING_OBJECT_SCOPE)
+      ? incomingCandidate
+      : null;
+  /** Source view (S4): a presented address inside the incoming object. */
+  const requiresIncoming = (id: string): boolean =>
+    incomingFormal !== null && (presented.get(id) ?? -1n) >= incomingOrigin;
   // A variadic area stands in for the entry SP: entry SP = va - offset.
   const entryStorage = variadicArea
     ? variadicArea.area
@@ -2015,9 +2072,10 @@ export function planSourceStack(
       ? entryStack()
       : null;
   const requiresEntry = (id: string): boolean =>
-    entryAddresses.has(id) ||
-    (view === 'source' && presented.get(id)! >= 0n) ||
-    (!frameObject && sharedEntry);
+    !requiresIncoming(id) &&
+    (entryAddresses.has(id) ||
+      (view === 'source' && presented.get(id)! >= 0n) ||
+      (!frameObject && sharedEntry));
   if (entryStorage)
     for (const binding of entry.register_entry)
       if (
@@ -2054,9 +2112,13 @@ export function planSourceStack(
     retained: ReadonlySet<string>,
     live: ReadonlySet<string>,
   ): SourceStackStorage | null => {
+    // The incoming object (S4) holds every incoming byte kept as memory.
     const remaining = accesses.filter(
       (access) =>
-        retained.has(access.node.id) && !hidden.has(access.node.id) && !locals.has(access.node.id),
+        retained.has(access.node.id) &&
+        !hidden.has(access.node.id) &&
+        !locals.has(access.node.id) &&
+        !(incomingFormal && access.offset >= incomingOrigin),
     );
     let minimum = 0n,
       maximum = 0n;
@@ -2067,7 +2129,7 @@ export function planSourceStack(
     // A pointer remains representable even after its private memory traffic dies.
     let addressLive = false;
     for (const [id, offset] of presented)
-      if (live.has(id)) {
+      if (live.has(id) && !requiresIncoming(id)) {
         addressLive = true;
         if (offset < minimum) minimum = offset;
         if (offset >= maximum) maximum = offset + 1n;
@@ -2142,6 +2204,42 @@ export function planSourceStack(
       ...layout,
     };
   };
+  /** Source view (S4): the incoming object when its formal is live, laid out
+   * from the retained incoming accesses and live incoming addresses. */
+  const incomingStorage = (
+    retained: ReadonlySet<string>,
+    live: ReadonlySet<string>,
+  ): IncomingObject | null => {
+    if (!incomingFormal || !live.has(incomingFormal.id)) return null;
+    const kept = accesses.filter(
+      (access) =>
+        retained.has(access.node.id) &&
+        !hidden.has(access.node.id) &&
+        access.offset >= incomingOrigin,
+    );
+    const taken: bigint[] = [];
+    for (const [id, offset] of presented)
+      if (live.has(id) && offset >= incomingOrigin) taken.push(offset);
+    context.checkpoint(kept.length + taken.length);
+    const layout = frameLayout(
+      kept.map((access) => ({ offset: access.offset, end: access.end, id: access.node.id })),
+      taken,
+      new Set(),
+      input.source!.abi.layout.stack_alignment,
+      incomingOrigin,
+      'above',
+    );
+    validation.requireAbi(
+      'incoming_object',
+      [input.function.id, ...kept.slice(0, 63).map((access) => access.node.id)],
+      'The incoming stack-argument bytes this function keeps as memory are one object of this activation, distinct from every other: under ABI conformance caller-supplied pointers (the indirect-result pointer among them), globals, loaded or returned pointers and stores through unknown addresses never designate them, and no address derived from them escapes or indexes memory here. Every load and store keeps its address, width, order and aliasing; nothing is forwarded; the checked view and the original mappings keep the entry-SP form.',
+    );
+    return {
+      formal: incomingFormal,
+      id: `entity_${fingerprint(['source-incoming', input.function.id])}`,
+      ...layout,
+    };
+  };
   return {
     hidden,
     privateLoads,
@@ -2149,8 +2247,12 @@ export function planSourceStack(
     addresses: presented,
     returnAddressLoads,
     frame,
+    incomingStorage,
     entryStorage,
     requiresEntry,
+    /** Source view (S4): the incoming object's formal, when one is presented. */
+    incomingFormal,
+    requiresIncoming,
     saves,
     deadReloadCandidates,
     forwardedReloads,
