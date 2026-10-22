@@ -260,6 +260,7 @@ export function reconstruct(
       ? planVariadicStackArguments(
           input,
           blocks,
+          expressions,
           sourcePlan.calls,
           (id) =>
             sourceStack.hidden.has(id) ||

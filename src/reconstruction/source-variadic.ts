@@ -30,6 +30,7 @@ type Store = Extract<Instruction, { kind: 'store' }>;
 export function planVariadicStackArguments(
   input: EmissionInput,
   blocks: ReadonlyMap<string, BlockRegion>,
+  expressions: ReadonlyMap<string, Expression>,
   calls: Map<string, BoundaryProjection>,
   excluded: (store: string) => boolean,
   validation: LocalValidationSession,
@@ -50,6 +51,8 @@ export function planVariadicStackArguments(
     [...inferred].filter(([, callee]) => callee.variadic_stack || callee.variadic),
   );
   if (!callees.size) return consumed;
+  const writes = createRegisterWrites(blocks, expressions, input.function.entry, context);
+  const integerArguments = argumentRegisters(source.abi, 'integer', 8);
   // The stack analysis treats a live frame pointer at any call as an escape.
   // Under ABI conformance (recorded with each rewrite) callees use preserved
   // registers and SP only as such; any other stack address leaving this body
@@ -197,6 +200,17 @@ export function planVariadicStackArguments(
             callee.parameter_state === 'ambiguous' &&
             projection.arguments.length === callee.parameters.length)
         )
+      )
+        continue;
+      // S8: a published footprint names no register itself on Darwin; the
+      // anonymous slots follow the bound prefix only when the call writes no
+      // integer argument register beyond it (else a named argument the
+      // callee's observed prefix misses would shift every slot).
+      if (
+        callee.variadic &&
+        integerArguments
+          .slice(callee.parameters.filter((register) => register.bank === 'integer').length)
+          .some((register) => writes(node.register_inputs, register))
       )
         continue;
       const snapshot = stack.snapshots.get(node.id),
@@ -1028,39 +1042,7 @@ export function createVariadicCallBinder(
   bind: (key: string, register: RegisterDescriptor, type: DataType) => Value | null,
   bindStack: (key: string, offset: bigint, type: DataType) => Value | null,
 ) => VariadicCallArguments | null {
-  // Values a register holds without this body writing it: its own entry
-  // cells and the cells a call or unknown effect left in it.
-  const kept = new Map<string, Set<string>>();
-  const keep = (bindings: readonly RegisterBinding[]): void => {
-    for (const binding of bindings) {
-      const roots = kept.get(binding.value.id) ?? new Set<string>();
-      roots.add(binding.register.root);
-      kept.set(binding.value.id, roots);
-    }
-  };
-  const sources = new Map<string, Value[]>();
-  keep(blocks.get(entry)?.register_entry ?? []);
-  for (const block of blocks.values()) {
-    for (const node of block.statements) {
-      context.checkpoint(1);
-      if (node.kind === 'call' || node.kind === 'unknown_effect') keep(node.register_outputs);
-    }
-    const control = block.control;
-    const transfers =
-      control.kind === 'jump'
-        ? [control.transfer]
-        : control.kind === 'if'
-          ? [control.when_true.transfer, control.when_false.transfer]
-          : control.kind === 'switch'
-            ? [...control.cases.map((item) => item.arm.transfer), control.otherwise.transfer]
-            : [];
-    for (const transfer of transfers)
-      for (const copy of transfer.copies) {
-        const list = sources.get(copy.destination.id) ?? [];
-        list.push(copy.source);
-        sources.set(copy.destination.id, list);
-      }
-  }
+  const writes = createRegisterWrites(blocks, expressions, entry, context);
   // The bits a value re-presents unchanged: its base value and bit range.
   const base = (value: Value): string => {
     const width = bitWidth(value.type);
@@ -1088,28 +1070,6 @@ export function createVariadicCallBinder(
       } else break;
     }
     return `${current.id}:${offset}:${width}`;
-  };
-  // Every bit of `value` was computed, loaded or moved into `root` by this
-  // body on every path: no part is `root`'s entry value or a clobber.
-  const written = (value: Value, root: string, seen = new Set<string>()): boolean => {
-    context.checkpoint(1);
-    if (seen.has(value.id)) return true;
-    seen.add(value.id);
-    if (seen.size > 64 || kept.get(value.id)?.has(root)) return false;
-    const expression = expressions.get(value.id);
-    if (!expression) {
-      const incoming = sources.get(value.id);
-      return !incoming || incoming.every((source) => written(source, root, seen));
-    }
-    if (expression.kind === 'indeterminate') return false;
-    if (
-      (expression.kind === 'cast' && expression.op === 'bitcast') ||
-      expression.kind === 'extract'
-    )
-      return written(expression.value, root, seen);
-    if (expression.kind === 'concat')
-      return expression.values.every((part) => written(part, root, seen));
-    return true;
   };
   const constant = (value: Value, depth = 0): bigint | undefined => {
     const expression = expressions.get(value.id),
@@ -1176,16 +1136,7 @@ export function createVariadicCallBinder(
       values.push(value);
     }
     const named = values.length;
-    // The register cells covering `register` at the transfer, all written.
-    const set = (register: RegisterDescriptor): boolean => {
-      const cells = bindings.filter(
-        (binding) =>
-          binding.register.root === register.root &&
-          binding.register.offset_bits < register.offset_bits + register.width_bits &&
-          binding.register.offset_bits + binding.register.width_bits > register.offset_bits,
-      );
-      return cells.length > 0 && cells.every((cell) => written(cell.value, register.root));
-    };
+    const set = (register: RegisterDescriptor): boolean => writes(bindings, register);
     if (sysv) {
       for (let index = variadic.named_integer; index < integers.length; index++) {
         if (!set(integers[index]!)) break;
@@ -1213,5 +1164,81 @@ export function createVariadicCallBinder(
       }
     }
     return { arguments: values, anonymous: values.length - named };
+  };
+}
+
+/** Whether this body writes every bit of an argument register at a transfer
+ * (`bindings`): every cell covering it was computed, loaded or moved into it
+ * on every path, and no part is the register's own entry value or a value a
+ * call or unknown effect left in it. */
+export function createRegisterWrites(
+  blocks: ReadonlyMap<string, BlockRegion>,
+  expressions: ReadonlyMap<string, Expression>,
+  entry: string,
+  context: OperationContext,
+): (bindings: readonly RegisterBinding[], register: RegisterDescriptor) => boolean {
+  // Values a register holds without this body writing it: its own entry
+  // cells and the cells a call or unknown effect left in it.
+  const kept = new Map<string, Set<string>>();
+  const keep = (bindings: readonly RegisterBinding[]): void => {
+    for (const binding of bindings) {
+      const roots = kept.get(binding.value.id) ?? new Set<string>();
+      roots.add(binding.register.root);
+      kept.set(binding.value.id, roots);
+    }
+  };
+  const sources = new Map<string, Value[]>();
+  keep(blocks.get(entry)?.register_entry ?? []);
+  for (const block of blocks.values()) {
+    for (const node of block.statements) {
+      context.checkpoint(1);
+      if (node.kind === 'call' || node.kind === 'unknown_effect') keep(node.register_outputs);
+    }
+    const control = block.control;
+    const transfers =
+      control.kind === 'jump'
+        ? [control.transfer]
+        : control.kind === 'if'
+          ? [control.when_true.transfer, control.when_false.transfer]
+          : control.kind === 'switch'
+            ? [...control.cases.map((item) => item.arm.transfer), control.otherwise.transfer]
+            : [];
+    for (const transfer of transfers)
+      for (const copy of transfer.copies) {
+        const list = sources.get(copy.destination.id) ?? [];
+        list.push(copy.source);
+        sources.set(copy.destination.id, list);
+      }
+  }
+  // Every bit of `value` was computed, loaded or moved into `root` by this
+  // body on every path: no part is `root`'s entry value or a clobber.
+  const written = (value: Value, root: string, seen = new Set<string>()): boolean => {
+    context.checkpoint(1);
+    if (seen.has(value.id)) return true;
+    seen.add(value.id);
+    if (seen.size > 64 || kept.get(value.id)?.has(root)) return false;
+    const expression = expressions.get(value.id);
+    if (!expression) {
+      const incoming = sources.get(value.id);
+      return !incoming || incoming.every((source) => written(source, root, seen));
+    }
+    if (expression.kind === 'indeterminate') return false;
+    if (
+      (expression.kind === 'cast' && expression.op === 'bitcast') ||
+      expression.kind === 'extract'
+    )
+      return written(expression.value, root, seen);
+    if (expression.kind === 'concat')
+      return expression.values.every((part) => written(part, root, seen));
+    return true;
+  };
+  return (bindings, register) => {
+    const cells = bindings.filter(
+      (binding) =>
+        binding.register.root === register.root &&
+        binding.register.offset_bits < register.offset_bits + register.width_bits &&
+        binding.register.offset_bits + binding.register.width_bits > register.offset_bits,
+    );
+    return cells.length > 0 && cells.every((cell) => written(cell.value, register.root));
   };
 }
