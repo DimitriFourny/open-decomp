@@ -258,11 +258,15 @@ for (const [abi, count] of [
     const entrySp = 0x8000n,
       slot = entrySp + fixture.offset,
       written = 0x0123456789abcdefn;
+    // Darwin: the escaping address of the first incoming slot makes it a
+    // `va_start` area, the same bytes spelled `va` after `...`.
+    const variadic = abi.id === 'darwin-arm64' && fixture.offset === 0n;
     for (const language of ['c-like', 'python-like'] as const) {
       const output = emit(fixture.ir, fixture.extra, language).emission;
       const formals = emittedFormals(output);
-      assert.equal(formals.length, count, output.text);
-      assert.equal(formals.at(-1)!.name, 'entry_sp', output.text);
+      assert.equal(formals.length, variadic ? count - 1 : count, output.text);
+      if (variadic) assert.match(output.text, /\.\.\.\s*\)/, output.text);
+      else assert.equal(formals.at(-1)!.name, 'entry_sp', output.text);
       for (const value of [0n, 0xffffffffffffffffn, 0x8000000000000000n]) {
         const args = Array.from({ length: count - 1 }, (_, index) =>
           index === 1 ? pointer : value,
@@ -272,12 +276,13 @@ for (const [abi, count] of [
         const received: bigint[][] = [];
         const observation = execute(
           output,
-          new Map(
-            formals.map((formal: EmittedFormal, index) => [
+          new Map([
+            ...formals.map((formal: EmittedFormal, index): [string, bigint] => [
               formal.statement_id,
               formal.name === 'entry_sp' ? entrySp : args[index]!,
             ]),
-          ),
+            ['...', slot],
+          ]),
           memory,
           0n,
           new Map(),

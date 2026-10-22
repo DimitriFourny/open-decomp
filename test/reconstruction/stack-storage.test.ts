@@ -308,10 +308,10 @@ test('Darwin stack varargs retain entry bytes across frame allocation and pointe
     assert.equal(result.coverage.find((coverage) => coverage.layer === 'lift')?.state, 'partial');
     const emission: StoredEmission = result.data.emission;
     const declared: readonly EmittedFormal[] = emittedFormals(emission);
-    const entry: EmittedFormal | undefined = declared.find((formal) => formal.name === 'entry_sp');
-    const count: EmittedFormal | undefined = declared.find((formal) => formal.name !== 'entry_sp');
-    assert.ok(entry, emission.text);
-    assert.ok(count, emission.text);
+    // The anonymous arguments are the `va_start` area `va`, not an entry-SP formal.
+    assert.doesNotMatch(emission.text, /\bentry_sp\b/, emission.text);
+    assert.equal(declared.length, 1, emission.text);
+    const count = declared[0]!;
     assert.doesNotMatch(emission.text, /\bstack_frame\b/);
     // Exactly representable finite IEEE binary64 values under the documented
     // default FP environment; fixture source sums count va_arg(double) values.
@@ -325,7 +325,7 @@ test('Darwin stack varargs retain entry bytes across frame allocation and pointe
       const observation = execute(
         emission,
         new Map([
-          [entry.statement_id, 0x9000n],
+          ['...', 0x9000n],
           [count.statement_id, BigInt(length)],
         ]),
         memory,
