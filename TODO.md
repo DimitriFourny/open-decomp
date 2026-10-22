@@ -186,7 +186,8 @@ The renderer prints `physical_return` at `src/emitters/renderer.ts:8130-8199` wh
 
 ### R6: An integer-built double in the FP register is a `double` result
 
-- [ ] **Problem.** `sqlite3Fp10Convert2` (`static double`) builds the double's bits in integer registers (`fmov d0, x8`; `movi v0.2d,#0` on early exits). There is no IEEE evidence, so OD prints `void` and 3 × `physical_return(… "arm64:v0:0:64", …)`.
+- [x] **Problem.** `sqlite3Fp10Convert2` (`static double`) builds the double's bits in integer registers (`fmov d0, x8`; `movi v0.2d,#0` on early exits). There is no IEEE evidence, so OD prints `void` and 3 × `physical_return(… "arm64:v0:0:64", …)`.
+  - **Done (R6, proven):** `untypedScalarFloating()` in `selectSourcePrimaryResult`; full-tier OD lane changes only `sqlite3Fp10Convert2` (`double sqlite3Fp10Convert2(…)`, 3 → 0 `physical_return`); precision: fires on 0 of 250 sampled SQLite and 16 brotli functions, and on 2 of the 6 remaining SQLite functions declared `double` (`sqlite3Fp10Convert2`, `vdbeSorterGetReal`), 0 false positives.
   - **Change:** in the branch that would return `explicit` (after R5's incidental check), choose `float` when all of the following hold:
     1. On every exit, the FP cell walks to leaves that are not call outputs, loads, observed elsewhere or vector data; literals are neutral.
     2. On every exit with a non-literal leaf, the upper FP cells are literal 0, i.e. a scalar `fmov`/`movq` write.
