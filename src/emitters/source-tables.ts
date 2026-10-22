@@ -154,7 +154,11 @@ export function indexedDataAccesses(
   };
   /** Greatest (`upper`) or least (`lower`) value the guards bound `value` to,
    * through zero extensions (which preserve the value). */
-  const guarded = (value: Value, block: string, side: 'upper' | 'lower' = 'upper'): bigint | undefined => {
+  const guarded = (
+    value: Value,
+    block: string,
+    side: 'upper' | 'lower' = 'upper',
+  ): bigint | undefined => {
     const facts = guardsAt(block)[side];
     let best: bigint | undefined;
     const seen = new Set<string>();

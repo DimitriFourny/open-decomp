@@ -118,7 +118,8 @@ function elementBytes(count: number, width: number): Buffer {
   const bytes = Buffer.alloc(count * width);
   for (let index = 0; index < count; index++) {
     let value = BigInt(index + 1);
-    for (let byte = 0; byte < width; byte++, value >>= 8n) bytes[index * width + byte] = Number(value & 0xffn);
+    for (let byte = 0; byte < width; byte++, value >>= 8n)
+      bytes[index * width + byte] = Number(value & 0xffn);
   }
   return bytes;
 }
@@ -133,12 +134,16 @@ for (const language of languages)
         const bytes = elementBytes(count, width),
           row = 16 / width,
           bits = (width * 8) as 8 | 32 | 64;
-        const f = tableFixture(bytes, { size: BigInt(bytes.length), mask: BigInt(count - 1), bits });
+        const f = tableFixture(bytes, {
+          size: BigInt(bytes.length),
+          mask: BigInt(count - 1),
+          bits,
+        });
         const text = emit(
           f.ssa,
           sourceOf([{ ...f.recovered, object_bytes: [...bytes.subarray(0, 64)] }]),
           language,
-        ).emission.text.replace(/,\s*\n\s*/g, ", ");
+        ).emission.text.replace(/,\s*\n\s*/g, ', ');
         const values = (from: number, to: number) =>
           Array.from({ length: to - from }, (_, index) => from + index + 1).join(', ');
         if (count * width <= 64) {
@@ -161,10 +166,8 @@ for (const language of languages)
 test('a symbol size is an extent: the declared length is the accessed range capped by it', () => {
   const bytes = Buffer.from(Array.from({ length: 1024 }, (_, index) => index & 255));
   const f = tableFixture(bytes, { size: 1024n, mask: 0x3ffn });
-  const text = emit(
-    f.ssa,
-    sourceOf([{ ...f.recovered, object_bytes: [...bytes.subarray(0, 64)] }]),
-  ).emission.text;
+  const text = emit(f.ssa, sourceOf([{ ...f.recovered, object_bytes: [...bytes.subarray(0, 64)] }]))
+    .emission.text;
   assert.match(text, /static const uint8_t \w+\[1024\] = \{/);
   assert.match(text, /\/\* \.\.\. 1008 more \*\//);
   assert.doesNotMatch(text, /15, 16/);
@@ -188,7 +191,10 @@ for (const language of languages)
     };
     // Unbounded reach: no extent is claimed, one 16-byte row, never the neighbour distance.
     const unbounded = show({ mask: 0xffffffffn });
-    assert.ok(unbounded.includes(Array.from({ length: 16 }, (_, i) => i + 1).join(', ')), unbounded);
+    assert.ok(
+      unbounded.includes(Array.from({ length: 16 }, (_, i) => i + 1).join(', ')),
+      unbounded,
+    );
     assert.doesNotMatch(unbounded, /17|\[64\]|\b64 /);
     assert.match(unbounded, /first 16 elements/);
     assert.doesNotMatch(unbounded, /\(extent|next symbol|symbol size|accessed range/);
@@ -231,10 +237,14 @@ for (const language of languages)
     };
     // Masked: the mask bounds the index, the table is the accessed range.
     for (const index of [0n, 5n, 31n, 0x25n, 0x1005n])
-      assert.deepEqual(read({ size: 64n, mask: 0x1fn }, index), [BigInt(bytes[Number(index & 0x1fn)]!)]);
+      assert.deepEqual(read({ size: 64n, mask: 0x1fn }, index), [
+        BigInt(bytes[Number(index & 0x1fn)]!),
+      ]);
     // Unmasked beyond the printed row: the declaration shows 16 elements, the read is exact.
     for (const index of [0n, 15n, 16n, 40n, 63n])
-      assert.deepEqual(read({ next: 0x2040n, mask: 0xffffffffn }, index), [BigInt(bytes[Number(index)]!)]);
+      assert.deepEqual(read({ next: 0x2040n, mask: 0xffffffffn }, index), [
+        BigInt(bytes[Number(index)]!),
+      ]);
   });
 
 for (const language of languages)
