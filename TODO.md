@@ -702,7 +702,7 @@ Files that several items touch:
 
 ### E1: Rematerialize constant-offset derived pointers; print byte-pointer sums without `uintptr_t`
 
-- [ ] **Problem.** The texts contain 202 temporaries of the form `x = (T*)((uintptr_t)b ± k)` and 436 dereferences `*(T *)((uintptr_t)x + k)`. Example: `sqlite3_collation_needed16` prints `address_1 = (uint8_t*)((uintptr_t)address + 0x190); *(uint64_t *)address_1 = 0; *(uint64_t *)((uintptr_t)address_1 + 8) = arg2;` (an ARM64 `stp` with a computed base). Ghidra prints `*(undefined8 *)(param_1 + 400)`.
+- [x] **Problem.** The texts contain 202 temporaries of the form `x = (T*)((uintptr_t)b ± k)` and 436 dereferences `*(T *)((uintptr_t)x + k)`. Example: `sqlite3_collation_needed16` prints `address_1 = (uint8_t*)((uintptr_t)address + 0x190); *(uint64_t *)address_1 = 0; *(uint64_t *)((uintptr_t)address_1 + 8) = arg2;` (an ARM64 `stp` with a computed base). Ghidra prints `*(undefined8 *)(param_1 + 400)`. _Done (E1): OD lane vs `od-main-afb7691`: 58 texts changed, 57 shorter (−3.1k regex-lexer tokens); `sqlite3_collation_needed16` prints `address->field_0x190 = 0; address->field_0x198 = arg2;`, `sqlite3PagerSavepoint` `address_10->field_0x1e0 = 0;` (−437), `vdbePmaReaderClear` `+ 64`; states unchanged, checked view unchanged; brotli `main` needs C2 first (shared 256-record bound)._
   - **Root cause:**
     - The renderer repeats `x ± k` only inside one reader statement (`src/emitters/source-inlining.ts:585-616`, gate at `:616`).
     - `memberAccess` builds fields only through inline bases (`renderer.ts:3146`).
