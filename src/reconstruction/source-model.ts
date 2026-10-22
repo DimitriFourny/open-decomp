@@ -370,6 +370,11 @@ export interface SourcePresentation {
   readonly formal_types?: ReadonlyMap<string, SourceFormalType>;
   /** Inferred incoming-stack formals by the callee-entry SP offset of their ABI slot. */
   readonly formal_stack_offsets?: ReadonlyMap<string, bigint>;
+  /** Source view (S9): the formal of a declared hidden result (sret) pointer,
+   * the first formal; the declaration's own parameters follow it. It points
+   * to the declared result type, and the function returns that pointer where
+   * its ABI does (SysV, Win64), otherwise nothing. */
+  readonly hidden_result?: Value;
   /** Promoted slot (local id) spellings proven by `slot_pointer_type`. */
   readonly local_types?: ReadonlyMap<string, SourceFormalType>;
   readonly return_scalar?: { readonly bits: number; readonly signed: boolean };

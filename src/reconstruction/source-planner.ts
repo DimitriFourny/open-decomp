@@ -40,7 +40,10 @@ import { identityOperand } from './expressions.js';
 import { createVariadicCallBinder } from './source-variadic.js';
 
 /** Source ABI abstraction: architectural snapshots are retained in the input,
- * not treated as extra source arguments or memory-fault observables. */
+ * not treated as extra source arguments or memory-fault observables.
+ * `extended` (source view, S9): a declared signature may also carry stack,
+ * variadic or hidden-result parameters; the stack plan must confirm them
+ * (`declaredExtension`), otherwise the caller plans again without it. */
 export function planSource(
   input: EmissionInput,
   blocks: ReadonlyMap<string, BlockRegion>,
@@ -50,6 +53,7 @@ export function planSource(
   context: OperationContext,
   view: PresentationView = 'checked',
   validation = new LocalValidationSession(context),
+  extended = false,
 ) {
   const evidence = input.source!,
     abi = evidence.abi,
@@ -440,7 +444,10 @@ export function planSource(
     for (const callee of evidence.source_callees ?? []) inferred.set(callee.call_id, callee);
   const facts = new Map(input.types?.calls?.calls.map((fact) => [fact.node_id, fact]) ?? []);
   const conflicts = new Set(input.types?.conflicts.map((conflict) => conflict.subject_id) ?? []);
-  const signatureFor = (subject: string) => {
+  /** `aggregates` (S9, the function's own declaration): a structure of known
+   * size and alignment resolves to its ABI aggregate (sret results, by-value
+   * parameters); call declarations keep scalar types only. */
+  const signatureFor = (subject: string, aggregates = false) => {
     const signatures =
       input.types?.state === 'complete'
         ? input.types.signatures.filter((signature) => signature.subject_id === subject)
@@ -452,13 +459,13 @@ export function planSource(
       signature.signature.abi !== abi.id
     )
       return null;
-    const resolve = (id: string): AbiType | null => {
+    const resolve = (id: string, depth = 0): AbiType | null => {
       if (conflicts.has(id)) return null;
       const type = input.types!.types.find((type) => type.id === id)?.definition;
       if (type?.kind === 'void' || type?.kind === 'integer' || type?.kind === 'float') return type;
       if (type?.kind === 'pointer') return { kind: 'pointer' };
       if (type?.kind === 'vector') {
-        const element = resolve(type.element);
+        const element = resolve(type.element, depth + 1);
         if (element?.kind === 'integer' || element?.kind === 'float')
           return {
             kind: 'vector',
@@ -466,6 +473,34 @@ export function planSource(
             element_bits: element.bits,
             lanes: type.lanes,
           };
+      }
+      if (
+        aggregates &&
+        type?.kind === 'structure' &&
+        type.size !== null &&
+        type.alignment !== null &&
+        depth < 8
+      ) {
+        const fields: { offset: bigint; type: AbiType }[] = [];
+        for (const field of type.fields) {
+          const resolved = resolve(field.type_id, depth + 1);
+          const size = !resolved
+            ? null
+            : resolved.kind === 'integer' || resolved.kind === 'float'
+              ? resolved.bits % 8 === 0 && resolved.bits !== 80
+                ? BigInt(resolved.bits / 8)
+                : null
+              : resolved.kind === 'pointer'
+                ? BigInt(abi.layout.pointer_bits / 8)
+                : resolved.kind === 'vector'
+                  ? BigInt((resolved.element_bits * resolved.lanes) / 8)
+                  : resolved.kind === 'aggregate'
+                    ? resolved.size
+                    : null;
+          if (!resolved || size === null || field.offset + size > type.size) return null;
+          fields.push({ offset: field.offset, type: resolved });
+        }
+        return { kind: 'aggregate', size: type.size, alignment: type.alignment, fields };
       }
       return null;
     };
@@ -874,25 +909,84 @@ export function planSource(
   }
   const physicalEntry = new Set(entry.register_entry.map((binding) => binding.value.id));
   parameters.push(...entry.parameters.filter((value) => !physicalEntry.has(value.id)));
-  const declaredFunction = signatureFor(input.function.id);
-  // An established void interface returns nothing on any path: a tail transfer
-  // forwards no result even when its callee's interface is unresolved.
-  if (view === 'source' && declaredFunction?.declaration.returns.kind === 'void')
-    for (const [id, tail] of tails) tails.set(id, { ...tail, result_void: true });
-  const declaredLayout = declaredFunction ? abi.classifyCall(declaredFunction.declaration) : null;
+  const plainDeclaration = signatureFor(input.function.id);
+  // Source view (S9): the function's own declaration may also place parameters
+  // on the stack, return through a hidden result pointer or end with `...`.
+  // Its named layout is that of a call passing no anonymous argument.
+  const declaredFunction = extended ? signatureFor(input.function.id, true) : plainDeclaration;
+  const declaredLayout = declaredFunction
+    ? abi.classifyCall(
+        extended && declaredFunction.declaration.variadic
+          ? { ...declaredFunction.declaration, argument_list_complete: true }
+          : declaredFunction.declaration,
+      )
+    : null;
   let functionSignature: { signature: SignatureAssociation; declaration: AbiSignature } | null =
     null;
+  /** Source view (S9): the declared parts only the stack plan can confirm.
+   * `stack`: scalar stack formals by entry-SP offset, bound when S1 binds
+   * their slot; `aggregate`: the by-value aggregate kept as incoming memory
+   * (S4); `variadic`: entry-SP offset of the first anonymous argument and the
+   * register of each named register formal; `hidden`: the sret formal. */
+  let declaredExtension: {
+    readonly stack: ReadonlyMap<bigint, Value>;
+    readonly aggregate: {
+      readonly value: Value;
+      readonly offset: bigint;
+      readonly end: bigint;
+    } | null;
+    readonly variadic: {
+      readonly anonymous: bigint;
+      readonly registers: ReadonlyMap<string, Value> | null;
+    } | null;
+    readonly hidden: Value | null;
+  } | null = null;
+  const declaredHidden = declaredLayout?.hidden_result;
+  const hiddenPointer =
+    declaredHidden?.kind === 'indirect' && 'root' in declaredHidden.pointer
+      ? { ...declaredHidden.pointer, width_bits: abi.layout.pointer_bits }
+      : null;
   if (
     declaredFunction &&
     declaredLayout?.state === 'complete' &&
-    !declaredLayout.hidden_result &&
-    !declaredFunction.declaration.variadic
+    (extended
+      ? !(declaredHidden && (!hiddenPointer || declaredFunction.declaration.variadic))
+      : !declaredHidden && !declaredFunction.declaration.variadic)
   ) {
-    const parameterTypes = declaredFunction.declaration.parameters!.map(machineType);
-    const resultType = machineType(declaredFunction.declaration.returns);
+    const declaration = declaredFunction.declaration;
+    const parameterTypes = declaration.parameters!.map(machineType);
+    // A hidden result returns its pointer where the ABI says (SysV, Win64) or nothing.
+    const resultType = declaredHidden
+      ? declaredLayout.returns.length
+        ? integer(abi.layout.pointer_bits)
+        : null
+      : machineType(declaration.returns);
+    // Stack-located parameters by index: a scalar of its slot's exact size, or
+    // (at most one) by-value aggregate, which only S4's incoming object can bind.
+    const stackSlots = new Map<number, { offset: bigint; end: bigint; aggregate: boolean }>();
     const valid =
-      parameterTypes.every(
-        (type, index) =>
+      (!hiddenPointer ||
+        bind(
+          'function:check:hidden',
+          entry.register_entry,
+          locations(hiddenPointer),
+          integer(abi.layout.pointer_bits),
+          entry.id,
+        ) !== null) &&
+      parameterTypes.every((type, index) => {
+        const [slot, ...rest] = declaredLayout.parameters[index]!.locations;
+        if (extended && slot?.kind === 'stack' && !rest.length && slot.value_offset_bits === 0) {
+          const aggregate = !type && declaration.parameters![index]!.kind === 'aggregate';
+          if (
+            aggregate
+              ? [...stackSlots.values()].some((other) => other.aggregate)
+              : !type || slot.size * 8n !== BigInt(bitWidth(type))
+          )
+            return false;
+          stackSlots.set(index, { offset: slot.offset, end: slot.offset + slot.size, aggregate });
+          return true;
+        }
+        return (
           type &&
           bind(
             `function:check:${index}`,
@@ -900,9 +994,11 @@ export function planSource(
             declaredLayout.parameters[index]!.locations,
             type,
             entry.id,
-          ),
-      ) &&
-      (declaredFunction.declaration.returns.kind === 'void' ||
+          )
+        );
+      }) &&
+      (declaration.returns.kind === 'void' ||
+        (declaredHidden && !resultType) ||
         (resultType &&
           [...blocks.values()]
             .filter((block) => block.control.kind === 'return')
@@ -915,16 +1011,59 @@ export function planSource(
                 block.id,
               ),
             )));
-    if (valid) {
-      parameters.length = 0;
+    // `...` (S9): the named formals are registers or stack slots of their own.
+    const namedRegisters = new Map<string, number>();
+    let anonymous = abi.stack_return_address_bytes;
+    if (valid && declaration.variadic)
       for (const parameter of declaredLayout.parameters) {
-        const value = result(
-          `function:parameter:${parameter.index}`,
-          entry.register_entry,
-          parameter.locations,
-          parameterTypes[parameter.index]!,
-          entry.id,
-        )!;
+        const [location, ...rest] = parameter.locations;
+        if (location?.kind === 'register' && !rest.length)
+          namedRegisters.set(location.register.root, parameter.index);
+        else if (location?.kind === 'stack' && !rest.length) {
+          const end = location.offset + location.size;
+          anonymous = end > anonymous ? end : anonymous;
+        } else namedRegisters.clear();
+      }
+    if (
+      valid &&
+      (!declaration.variadic || namedRegisters.size + stackSlots.size === parameterTypes.length)
+    ) {
+      parameters.length = 0;
+      const hiddenFormal = hiddenPointer
+        ? result(
+            'function:parameter:hidden',
+            entry.register_entry,
+            locations(hiddenPointer),
+            integer(abi.layout.pointer_bits),
+            entry.id,
+          )!
+        : null;
+      if (hiddenFormal) {
+        parameters.push(hiddenFormal);
+        parameterNames.set(hiddenFormal.id, 'result');
+      }
+      const stack = new Map<bigint, Value>();
+      let aggregate: { value: Value; offset: bigint; end: bigint } | null = null;
+      for (const parameter of declaredLayout.parameters) {
+        const slot = stackSlots.get(parameter.index);
+        const key = `function:parameter:${parameter.index}`;
+        // The aggregate's pointer-width carrier is the incoming object's
+        // formal; the renderer spells its struct.
+        const value = slot
+          ? make(
+              key,
+              slot.aggregate ? integer(abi.layout.pointer_bits) : parameterTypes[parameter.index]!,
+              entry.id,
+            )
+          : result(
+              key,
+              entry.register_entry,
+              parameter.locations,
+              parameterTypes[parameter.index]!,
+              entry.id,
+            )!;
+        if (slot?.aggregate) aggregate = { value, offset: slot.offset, end: slot.end };
+        else if (slot) stack.set(slot.offset, value);
         parameters.push(value);
         parameterNames.set(
           value.id,
@@ -933,8 +1072,36 @@ export function planSource(
         );
       }
       functionSignature = declaredFunction;
+      if (declaredHidden || stackSlots.size || declaration.variadic) {
+        const registers = new Map<string, Value>();
+        for (const [root, index] of namedRegisters) registers.set(root, parameters[index]!);
+        declaredExtension = {
+          stack,
+          aggregate,
+          variadic: declaration.variadic
+            ? {
+                // Win64 anonymous arguments follow the named ones in 8-byte
+                // positions (home slots first); elsewhere they start in the
+                // first 8-byte slot after the named stack arguments.
+                anonymous:
+                  abi.id === 'windows-x64'
+                    ? 8n + 8n * BigInt(parameterTypes.length)
+                    : (anonymous + 7n) & ~7n,
+                registers: namedRegisters.size ? registers : null,
+              }
+            : null,
+          hidden: hiddenFormal,
+        };
+      }
     }
   }
+  // An established void interface returns nothing on any path: a tail transfer
+  // forwards no result even when its callee's interface is unresolved.
+  if (
+    view === 'source' &&
+    (functionSignature ?? plainDeclaration)?.declaration.returns.kind === 'void'
+  )
+    for (const [id, tail] of tails) tails.set(id, { ...tail, result_void: true });
   for (const binding of entry.register_entry) {
     if (binding.register.root !== abi.stack_pointer.root && !expressions.has(binding.value.id))
       alias(binding.value, {
@@ -1095,7 +1262,12 @@ export function planSource(
       const control = block.control;
       let returned = [...control.values];
       if (functionSignature) {
-        const type = machineType(functionSignature.declaration.returns);
+        // A hidden result (S9) returns its pointer where the ABI places one.
+        const type = declaredExtension?.hidden
+          ? declaredLayout!.returns.length
+            ? integer(abi.layout.pointer_bits)
+            : null
+          : machineType(functionSignature.declaration.returns);
         returned = type
           ? [
               bind(
@@ -1456,6 +1628,7 @@ export function planSource(
     value_origins: valueOrigins,
     definitions,
     formal_stack_offsets: formalStackOffsets,
+    ...(declaredExtension?.hidden ? { hidden_result: declaredExtension.hidden } : {}),
   };
   let entryParameter: Value | null = null,
     incomingObjectParameter: Value | null = null,
@@ -1470,6 +1643,9 @@ export function planSource(
     parameters,
     parameterRegisters,
     signature: functionSignature?.signature ?? null,
+    /** Source view (S9): the declared parts the stack plan must confirm, or
+     * null when the signature (if any) needs no confirmation. */
+    declaredExtension,
     presentation,
     forcedInline,
     alias,
@@ -1491,11 +1667,20 @@ export function planSource(
       return entryParameter;
     },
     incomingStack(offset: bigint, type: DataType, contributors: readonly Value[]): Value | null {
+      // A declared stack formal (S9) binds the loads of exactly its slot.
+      if (functionSignature) {
+        const value = declaredExtension?.stack.get(offset);
+        if (!value || bitWidth(value.type) !== bitWidth(type)) return null;
+        valueOrigins.set(value.id, [
+          ...(valueOrigins.get(value.id) ?? []),
+          ...contributors.map((contributor) => contributor.id),
+        ]);
+        return value;
+      }
       // Without a declaration, infer only a whole scalar word in an actual ABI
       // parameter slot. Entry return addresses, home space and alignment padding
       // are not source inputs merely because their offsets are nonnegative.
-      if (functionSignature || type.kind !== 'integer' || type.bits !== abi.layout.pointer_bits)
-        return null;
+      if (type.kind !== 'integer' || type.bits !== abi.layout.pointer_bits) return null;
       const slot = layout.parameters.find(
         (parameter) =>
           parameter.locations.length === 1 &&
@@ -1513,11 +1698,24 @@ export function planSource(
       return value;
     },
     /** Source view (S6/S7): the callee-side variadic interface, inferred from
-     * the code `va_start` lowers to; a validated declared signature keeps its
-     * own formals and is never rewritten. */
+     * the code `va_start` lowers to. A declared `...` (S9) supplies the named
+     * formals instead: the footprint must name exactly their registers and
+     * place the first anonymous argument where they end; any other declared
+     * signature is never rewritten. */
     variadic: {
       named(registers: readonly RegisterDescriptor[]): readonly Value[] | null {
-        if (functionSignature) return null;
+        if (functionSignature) {
+          const declared = declaredExtension?.variadic?.registers;
+          if (
+            !declared ||
+            registers.length !== declared.size ||
+            registers.some((register) => !declared.has(register.root))
+          )
+            return null;
+          return parameters.filter((value) =>
+            registers.some((register) => declared.get(register.root) === value),
+          );
+        }
         const named: Value[] = [];
         for (const register of registers) {
           const value = parameters.find(
@@ -1529,7 +1727,8 @@ export function planSource(
         return named;
       },
       area(offset: bigint, named: readonly Value[] | null): Value | null {
-        if (functionSignature) return null;
+        // Win64 named positions were matched by `named`; Darwin names none.
+        if (functionSignature && declaredExtension?.variadic?.anonymous !== offset) return null;
         variadicNamed = named;
         variadicArea ??= make(
           `parameter:va:${offset}`,
@@ -1542,18 +1741,25 @@ export function planSource(
         );
         return variadicArea;
       },
-      list(named: readonly Value[]): boolean {
-        if (functionSignature) return false;
+      list(named: readonly Value[], overflow: bigint): boolean {
+        if (functionSignature && declaredExtension?.variadic?.anonymous !== overflow) return false;
         variadicNamed = named;
         return true;
       },
     },
     /** Source view (S4): the struct formal naming the incoming bytes kept as
-     * memory, from entry-SP `offset` up. Inferred interfaces only: a declared
-     * signature states its own parameters. Its pointer-width type is a carrier;
-     * the renderer spells the struct. */
-    incomingObject(offset: bigint): Value | null {
-      if (functionSignature) return null;
+     * memory, from entry-SP `offset` up to `end`. Inferred interfaces, or (S9)
+     * a declared by-value aggregate whose stack slot starts at `offset` and
+     * holds every kept byte; any other declared signature states its own
+     * parameters. Its pointer-width type is a carrier; the renderer spells
+     * the struct. */
+    incomingObject(offset: bigint, end: bigint): Value | null {
+      if (functionSignature) {
+        const aggregate = declaredExtension?.aggregate;
+        if (!aggregate || aggregate.offset !== offset || end > aggregate.end) return null;
+        incomingObjectParameter = aggregate.value;
+        return incomingObjectParameter;
+      }
       if (!incomingObjectParameter) {
         incomingObjectParameter = make(
           'parameter:stack-args',
@@ -1637,8 +1843,9 @@ export function planSource(
             (value) => live.has(value.id) && !demotedParameters.has(value.id),
           );
       // Named positions before `...` are formals even when unused: the last
-      // one fixes where `va_start` finds the first anonymous argument.
-      if (variadicNamed) {
+      // one fixes where `va_start` finds the first anonymous argument. A
+      // declaration (S9) already lists them in its own order.
+      if (variadicNamed && !functionSignature) {
         const named = variadicNamed.filter((value) => !demotedParameters.has(value.id));
         demanded.splice(
           0,
@@ -1651,10 +1858,11 @@ export function planSource(
         if (!parameterNames.has(value.id)) parameterNames.set(value.id, `arg${index}`);
       });
       // Source-only formals follow the ABI ones: the incoming object (S4), then
-      // the entry SP when some address still needs it.
+      // the entry SP when some address still needs it. A declared aggregate's
+      // incoming object (S9) is its own declared formal.
       return [
         ...demanded,
-        ...[incomingObjectParameter, entryParameter].filter(
+        ...[functionSignature ? null : incomingObjectParameter, entryParameter].filter(
           (value): value is Value => value !== null && live.has(value.id),
         ),
       ];

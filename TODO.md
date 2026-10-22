@@ -372,13 +372,14 @@ A prototype of S1–S3 (unsound, measurement only) gave these results:
 ### S8 (optional): Callers see a callee's variadic interface
 
 - [x] **Done (S8):** `nativeVariadicFootprint` (prepared unit, shared S6/S7 classification) publishes `NativeInterface.variadic`; source-view callers bind the named prefix and the anonymous arguments they provably set up (`variadic_call_arguments`, `variadic_call_convention`): all nine `matrix_variadic_call` texts print `matrix_variadic(2, …a, …b)` (ELF `-O2` regains `double arg1, arg2`, PE `-O0` loses the `rdx` formal); SQLite `sqlite3ParseUri` prints its `sqlite3_mprintf` actuals; executed SysV/Win64/Darwin caller fixtures in `native-interface.test.ts`; checked views unchanged.
-  Publish the S6/S7 footprint as a `NativeInterface` field: `variadic: {named_integer, named_vector, named_stack_bytes}` (`src/service/analysis/source-facts.ts:541-616`, native summaries). Bump `stack-calls` and `NATIVE_SUMMARY_FORMAT`.
+      Publish the S6/S7 footprint as a `NativeInterface` field: `variadic: {named_integer, named_vector, named_stack_bytes}` (`src/service/analysis/source-facts.ts:541-616`, native summaries). Bump `stack-calls` and `NATIVE_SUMMARY_FORMAT`.
   - Effect: call sites print the variadic arguments (`matrix_variadic(2, a, b)`), and `matrix_variadic_call` `-O2` keeps its double parameters `a`, `b`, which R3 does not restore.
   - Depends on: S6, S7, R3.
 
 ### S9 (optional): Declared signatures with stack, variadic or hidden-result parameters
 
-- [ ] `source-planner.ts:835-840` refuses variadic and `hidden_result` declarations, and `bind` refuses stack locations (`:142`). With S1, S4, S6 and S7, a declared stack parameter can bind to an incoming formal or object member, and a declared `...` can drive S6/S7. No corpus function needs it. Without it, a DWARF signature with stack parameters re-creates `entry_sp`, and `reconstruction/index.ts:1102` drops the signature.
+- [x] `source-planner.ts:835-840` refuses variadic and `hidden_result` declarations, and `bind` refuses stack locations (`:142`). With S1, S4, S6 and S7, a declared stack parameter can bind to an incoming formal or object member, and a declared `...` can drive S6/S7. No corpus function needs it. Without it, a DWARF signature with stack parameters re-creates `entry_sp`, and `reconstruction/index.ts:1102` drops the signature.
+  - **Done (S9):** source view only; `planSource(…, extended)` accepts the function's own declaration with scalar stack parameters (bound through S1's `incomingStack`), one by-value aggregate (the S4 incoming object, declared name and position), a hidden result (first formal `result`, `T* f(T* result, …)` on SysV/Win64, `void` on Darwin) and `...` (named registers and first anonymous offset must equal the S6/S7 footprint); `declared_signature` record; unconfirmed parts (live entry SP other than the declared `va`, no footprint) replan without them, byte-identical to the output without standing. IR tests execute both dialects: Darwin 10 parameters (2 on the stack), `f(n, ...)` on Darwin/Win64/SysV, SysV sret + aggregate and Darwin sret, and contradicting declarations (an undeclared slot, `f(n, m, ...)`) identical to the refused output. ELF cells carry no DWARF; full-tier OD lane: 0 of 232 texts changed vs main (`od-rm3-s5b`).
 
 ## J: `indirect_exit`
 

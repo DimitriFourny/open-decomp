@@ -6,6 +6,7 @@ import {
   type AbiProfile,
   type RegisterDescriptor,
 } from '../../src/core/index.js';
+import { darwinArm64Abi } from '../../src/abi/darwin-arm64/index.js';
 import { windowsX64Abi } from '../../src/abi/windows-x64/index.js';
 import { sysvAMD64Abi } from '../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../src/analysis/ssa/index.js';
@@ -17,6 +18,7 @@ import type { StoredDecompilation } from '../../src/project/cache/index.js';
 import { builder, image, slice } from '../ir/support.js';
 import { project } from '../service/analysis/support.js';
 import { acknowledgeRequirements, emit, emittedFormals, execute } from '../emitters/c/support.js';
+import { declaredTypes } from './declared-support.js';
 
 const storage = new DataView(new ArrayBuffer(8));
 const doubleBits = (value: number): bigint => {
@@ -472,3 +474,139 @@ for (const variant of ['missing_xmm', 'rsi_use', 'call_between'] as const)
       assert.match(output.text, /uint128_t/, output.text);
     }
   });
+
+/** Darwin arm64 `uint64_t f(uint64_t count, ...)` summing `count` anonymous
+ * words: every anonymous argument is on the stack, so `va_start` is the
+ * entry SP itself and a pointer from it walks the caller's slots. */
+function darwinFixture() {
+  const abi = darwinArm64Abi;
+  const x0 = location(abi, 0);
+  const [cursor, total] = ['arm64:x9', 'arm64:x10'].map((root) =>
+    abi.unknown_call_clobbers.registers.find(
+      (register) => register.root === root && register.width_bits === 64,
+    )!,
+  ) as [RegisterDescriptor, RegisterDescriptor];
+  const b = builder('darwin-variadic'),
+    entry = b.block('entry'),
+    loop = b.block('loop'),
+    done = b.block('done');
+  entry.writeRegister(cursor, entry.readRegister(abi.stack_pointer));
+  entry.writeRegister(total, entry.constant(u64, 0n));
+  entry.branch(
+    entry.compare('eq', entry.readRegister(x0), entry.constant(u64, 0n)),
+    entry.edge(done),
+    entry.edge(loop),
+  );
+  const pointer = loop.readRegister(cursor);
+  loop.writeRegister(total, loop.int('add', loop.readRegister(total), loop.load(u64, pointer)));
+  loop.writeRegister(cursor, loop.int('add', pointer, loop.constant(u64, 8n)));
+  const next = loop.int('sub', loop.readRegister(x0), loop.constant(u64, 1n));
+  loop.writeRegister(x0, next);
+  loop.branch(loop.compare('ne', next, loop.constant(u64, 0n)), loop.edge(loop), loop.edge(done));
+  const sum = done.readRegister(total);
+  done.writeRegister(x0, sum);
+  done.return([sum]);
+  return constructSSA(b.finish(entry, [u64])).value as SSAForm;
+}
+
+// S9: a DWARF-like `uint64_t f(uint64_t n, ...)` (or, contradicting the
+// footprint, `f(uint64_t n, uint64_t m, ...)`) of the function itself.
+const declaredVariadic = (
+  ir: SSAForm,
+  abi: AbiProfile,
+  names: readonly string[],
+  status?: 'hypothesis',
+) => ({
+  types: declaredTypes(ir, abi, {
+    types: { u64: { kind: 'integer', bits: 64, signed: false } },
+    returns: 'u64',
+    parameters: names.map((name) => [name, 'u64'] as const),
+    variadic: true,
+    ...(status ? { status } : {}),
+  }),
+  source: { abi, callees: [], addresses: [] },
+});
+
+const variadicCases = [
+  { abi: darwinArm64Abi, ir: () => darwinFixture() },
+  { abi: windowsX64Abi, ir: () => win64Fixture('complete').ir },
+  { abi: sysvAMD64Abi, ir: () => sysvFixture('complete').ir },
+] as const;
+
+for (const { abi, ir: build } of variadicCases) {
+  test(`${abi.id}: a declared int f(n, ...) drives va_start and prints the declared prototype`, () => {
+    const ir = build(),
+      extra = declaredVariadic(ir, abi, ['n']);
+    const sysv = abi.id === 'sysv-amd64';
+    for (const language of ['c-like', 'python-like'] as const) {
+      const output = emit(ir, extra, language).emission;
+      const text = output.text;
+      assert.doesNotMatch(text, /\bentry_sp\b|\barg\d\b/, text);
+      assert.match(
+        text,
+        language === 'c-like'
+          ? /\(uint64_t n, \.\.\.\) \{/
+          : /\(n: uint64_t, \.\.\.\) -> uint64_t:/,
+        text,
+      );
+      assert.match(
+        text,
+        sysv
+          ? /va_start\(frame\.va, n\)/
+          : language === 'c-like'
+            ? /va_start\(va, n\)/
+            : /va = va_start\(n\)/,
+        text,
+      );
+      for (const rule of ['declared_signature', 'va_start'])
+        assert.ok(
+          output.local_validation?.some((record) => record.rule === rule),
+          rule,
+        );
+      const formals = emittedFormals(output);
+      assert.deepEqual(
+        formals.map((formal) => formal.name),
+        ['n'],
+      );
+      for (let count = 1; count <= words.length; count++) {
+        const memory = new Map<bigint, number>();
+        let expected: bigint;
+        if (sysv) {
+          // The body reads integer slot n of the register save area.
+          for (let byte = 0n; byte < 176n; byte++) memory.set(0xa000n + byte, 0);
+          writeWord(memory, 0xa000n + 8n * BigInt(count % 6), words[count - 1]!);
+          expected = words[count - 1]!;
+        } else {
+          words.forEach((word, index) => writeWord(memory, area + 8n * BigInt(index), word));
+          expected = BigInt.asUintN(
+            64,
+            words.slice(0, count).reduce((sum, word) => sum + word, 0n),
+          );
+        }
+        const observation = execute(
+          output,
+          new Map([
+            [formals[0]!.statement_id, sysv ? BigInt(count % 6) : BigInt(count)],
+            ['...', area],
+            ['...registers', 0xa000n],
+          ]),
+          memory,
+        );
+        assert.deepEqual(observation.values, [expected], `${language} ${count}\n${text}`);
+      }
+    }
+  });
+
+  test(`${abi.id}: a declared ... naming more formals than the footprint keeps the inferred output`, () => {
+    const ir = build();
+    for (const language of ['c-like', 'python-like'] as const) {
+      const output = emit(ir, declaredVariadic(ir, abi, ['n', 'm']), language).emission;
+      assert.equal(
+        output.text,
+        emit(ir, declaredVariadic(ir, abi, ['n', 'm'], 'hypothesis'), language).emission.text,
+      );
+      assert.doesNotMatch(output.text, /\bm\b/, output.text);
+      assert.ok(!output.local_validation?.some((record) => record.rule === 'declared_signature'));
+    }
+  });
+}
