@@ -56,7 +56,7 @@ test('one structural index keeps independent 32/full64 and scalar/vector demand 
     context = createOperationContext();
   const index = createCallResultDemandIndex(f.program, sysvAMD64Abi, context);
   const query = (roots: readonly Value[]) =>
-    observeCallResultDemands(f.program, sysvAMD64Abi, context, roots, index);
+    observeCallResultDemands(f.program, sysvAMD64Abi, context, roots, index).all;
   assert.deepEqual(widths(query([f.firstLow, f.second, f.vectorLow]), f.calls), [
     [['integer', 32]],
     [['integer', 64]],
@@ -75,7 +75,7 @@ test('one structural index keeps independent 32/full64 and scalar/vector demand 
   assert.equal(query([]).size, 0);
   assert.deepEqual(
     query([f.firstLow]),
-    observeCallResultDemands(f.program, sysvAMD64Abi, createOperationContext(), [f.firstLow]),
+    observeCallResultDemands(f.program, sysvAMD64Abi, createOperationContext(), [f.firstLow]).all,
   );
   const controller = new AbortController();
   controller.abort();
@@ -106,7 +106,7 @@ test('context-specialized SSA identities require new indexes and do not reuse ea
     full = view(f.first);
   const context = createOperationContext();
   const index = createCallResultDemandIndex(narrow, sysvAMD64Abi, context);
-  assert.deepEqual(widths(index.query(narrow, sysvAMD64Abi, context), f.calls), [
+  assert.deepEqual(widths(index.query(narrow, sysvAMD64Abi, context).all, f.calls), [
     [['integer', 32]],
     [],
     [],
@@ -116,14 +116,77 @@ test('context-specialized SSA identities require new indexes and do not reuse ea
   assert.throws(() => index.preparation(full, sysvAMD64Abi, context), TypeError);
   assert.throws(() => preparedCallArguments(full, context, preparation), TypeError);
   const other = createCallResultDemandIndex(full, sysvAMD64Abi, context);
-  assert.deepEqual(widths(other.query(full, sysvAMD64Abi, context), f.calls), [
+  assert.deepEqual(widths(other.query(full, sysvAMD64Abi, context).all, f.calls), [
     [['integer', 64]],
     [],
     [],
   ]);
-  assert.deepEqual(widths(index.query(narrow, sysvAMD64Abi, context), f.calls), [
+  assert.deepEqual(widths(index.query(narrow, sysvAMD64Abi, context).all, f.calls), [
     [['integer', 32]],
     [],
     [],
   ]);
+});
+
+test('demand reached only through the implicit return-exit snapshot is forwarded, not semantic', () => {
+  const ir = builder('forwarded-result-demands');
+  const entry = ir.block('entry'),
+    left = ir.block('left'),
+    right = ir.block('right'),
+    tested = ir.block('tested'),
+    stored = ir.block('stored');
+  const rax = register('rax', 64, 0, 'replace_root', 'x86_64:rax');
+  const rdi = register('rdi', 64, 0, 'replace_root', 'x86_64:rdi');
+  const clobbers = { registers: [rax], flags: [], memory: 'unknown_read_write' as const };
+  const target = (offset: bigint) => ({
+    kind: 'direct' as const,
+    address: { image_id: image, space: 'va' as const, value: 0x2000n + offset },
+  });
+  const zero = (block: typeof entry, bits: number) => block.constant(integer(bits), 0n);
+  entry.call(target(0n), [], [], clobbers);
+  entry.branch(
+    entry.compare('ne', entry.readRegister(rdi), zero(entry, 64)),
+    entry.edge(left),
+    entry.edge(right),
+  );
+  // Forwarded only: the first result reaches nothing but this function's exit.
+  left.return();
+  right.call(target(4n), [], [], clobbers);
+  const second = right.extract(right.readRegister(rax), 0, 32);
+  // Reached from both: the branch consumes W0, the exit forwards all of X0.
+  right.branch(
+    right.compare('eq', second, zero(right, 32)),
+    right.edge(tested),
+    right.edge(stored),
+  );
+  tested.return();
+  stored.call(target(8n), [], [], clobbers);
+  // Reached from both at the same width: the store consumes all of X0.
+  stored.store(stored.constant(integer(64), 0x3000n), stored.readRegister(rax));
+  stored.return();
+  const result = constructSSA(ir.finish(entry));
+  if (result.value.form !== 'ssa') throw new TypeError('Expected SSA');
+  const program = result.value;
+  const calls = program.blocks.flatMap((block) =>
+    block.instructions.filter((node) => node.kind === 'call'),
+  );
+  assert.equal(calls.length, 3);
+  const demand = observeCallResultDemands(program, sysvAMD64Abi, createOperationContext());
+  assert.deepEqual(widths(demand.all, calls), [
+    [['integer', 64]],
+    [['integer', 64]],
+    [['integer', 64]],
+  ]);
+  assert.deepEqual(widths(demand.semantic, calls), [[], [['integer', 32]], [['integer', 64]]]);
+  // A supplied root is semantic.
+  const index = createCallResultDemandIndex(program, sysvAMD64Abi, createOperationContext());
+  const firstOutput = calls[0]!.kind === 'call' ? calls[0]!.register_outputs[0]!.value : undefined;
+  assert.ok(firstOutput);
+  assert.deepEqual(
+    widths(
+      index.query(program, sysvAMD64Abi, createOperationContext(), [firstOutput]).semantic,
+      calls,
+    ),
+    [[['integer', 64]], [['integer', 32]], [['integer', 64]]],
+  );
 });

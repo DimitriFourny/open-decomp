@@ -9,13 +9,15 @@ import { darwinArm64Abi } from '../../src/abi/darwin-arm64/index.js';
 import { sysvAMD64Abi } from '../../src/abi/sysv-amd64/index.js';
 import { windowsX64Abi } from '../../src/abi/windows-x64/index.js';
 import { constructSSA } from '../../src/analysis/ssa/index.js';
+import { simplifySSA } from '../../src/analysis/values/index.js';
 import { recoverTypes } from '../../src/analysis/types/index.js';
 import { bitWidth, integer, type DataType, type SSAForm } from '../../src/ir/index.js';
 import { structureControlFlow } from '../../src/presentation/index.js';
 import { reconstruct, type Reconstruction } from '../../src/reconstruction/index.js';
 import type { InferredCallee, SourceEvidence } from '../../src/reconstruction/source-model.js';
 import { builder, image, slice } from '../ir/support.js';
-import { emit, emittedFormals, execute } from '../emitters/c/support.js';
+import { emit, emittedFormals, execute, type SourceCallOracle } from '../emitters/c/support.js';
+import { fromWords, lift } from '../lifters/arm64/support.js';
 import type { EmissionResult } from '../../src/emitters/model.js';
 
 const u64 = integer(64),
@@ -617,4 +619,217 @@ test('x86 implicit division, multiplication, sign-extension and call RDX residue
         assert.match(emit(ir, { source }, language, 'checked').emission.text, /physical_return\(/);
       }
     }
+});
+
+/** clang -O1 -fno-optimize-sibling-calls AAPCS64 bodies of
+ * test/reconstruction/recursive-result-source.c, lifted at 0x1000:
+ * `recursive_compare` exits with `mov w0, #0`, its self-call result
+ * (`bl 0x1000`) and the library `int` result of memcmp (`bl 0x10b8`);
+ * `recursive_total` is void and keeps its self-call result in x0 while it
+ * stores the total. A self-call's forwarded result is not caller demand, so
+ * only an external caller supplies `function_return_demands`. */
+function recursiveFixture(words: readonly number[], arity: number) {
+  const graph = fromWords(words);
+  const ssa = simplifySSA(constructSSA(lift(graph).ir).value as SSAForm).value as SSAForm;
+  const types = recoverTypes(ssa, abi, createOperationContext(), {
+    image_id: graph.function.entry.image_id,
+    slice_id: slice,
+    revision: 0,
+  });
+  const w0: RegisterDescriptor = {
+    ...x(0),
+    id: 'arm64:w0',
+    width_bits: 32,
+    write_rule: 'zero_extend_root',
+  };
+  const callees = ssa.blocks.flatMap((block) =>
+    block.instructions.flatMap((node): InferredCallee[] => {
+      if (node.kind !== 'call' || node.target.kind !== 'direct') return [];
+      const self = node.target.address.value === graph.function.entry.value;
+      // The self-call keeps the full-width x0 observed at its call site; the
+      // library call has its `int` contract.
+      const returns = self ? [x(0)] : [w0];
+      return [
+        {
+          call_id: node.id,
+          parameters: [0, 1, 2, 3].slice(0, self ? arity : 3).map(x),
+          returns,
+          return_types: returns.map((register) => integer(register.width_bits)),
+          argument_list_complete: false,
+          evidence_ids: [],
+        },
+      ];
+    }),
+  );
+  const structured = structureControlFlow(ssa, createOperationContext()).value!;
+  return (demands: readonly RegisterDescriptor[]) => {
+    const source: SourceEvidence = {
+      abi,
+      callees,
+      addresses: [],
+      function_return_demands: demands,
+    };
+    return {
+      view: reconstruct(
+        { function: structured, types, source },
+        createOperationContext(),
+        'source',
+      ),
+      emit: (language: 'c-like' | 'python-like') => emit(ssa, { types, source }, language).emission,
+    };
+  };
+}
+const recursiveCompare = [
+  0x71000448, 0x5400020b, 0xa9be4ff4, 0xa9017bfd, 0x910043fd, 0xaa0303f3, 0x39400009, 0x3940002a,
+  0x6b0a013f, 0x54000141, 0x91000400, 0x91000421, 0xaa0803e2, 0xaa1303e3, 0x97fffff2, 0x35000140,
+  0x14000006, 0x52800000, 0xd65f03c0, 0x2a0203e2, 0x9400001a, 0x35000080, 0xf9400268, 0x91000508,
+  0xf9000268, 0xa9417bfd, 0xa8c24ff4, 0xd65f03c0,
+];
+const recursiveTotal = [
+  0xb40001e0, 0xa9be4ff4, 0xa9017bfd, 0x910043fd, 0xf9400008, 0xaa0003f4, 0xaa0803e0, 0xaa0103f3,
+  0x97fffff8, 0xf9400688, 0xf9400269, 0x8b080128, 0xf9000268, 0xa9417bfd, 0xa8c24ff4, 0xd65f03c0,
+];
+const physicalReturn = /physical_return|physical_inputs/;
+
+test('a recursive int function without caller demand keeps a 32-bit result; external x0 demand keeps the overlay', () => {
+  const fixture = recursiveFixture(recursiveCompare, 4);
+  const A = 0x5000n,
+    B = 0x6000n,
+    matched = 0x6800n;
+  const bytes = (memory: ReadonlyMap<bigint, number>, address: bigint) => memory.get(address) ?? 0;
+  const memcmp = (memory: ReadonlyMap<bigint, number>, a: bigint, b: bigint, n: bigint) => {
+    for (let index = 0n; index < n; index++) {
+      const difference = bytes(memory, a + index) - bytes(memory, b + index);
+      if (difference) return BigInt.asUintN(32, BigInt(difference));
+    }
+    return 0n;
+  };
+  // Source oracle: int recursive_compare(a, b, n, matched).
+  const oracle = (memory: ReadonlyMap<bigint, number>, a: bigint, b: bigint, n: number): bigint =>
+    n <= 0
+      ? 0n
+      : bytes(memory, a) !== bytes(memory, b)
+        ? memcmp(memory, a, b, BigInt(n))
+        : oracle(memory, a + 1n, b + 1n, n - 1);
+  for (const external of [false, true]) {
+    const { view, emit: emitted } = fixture(external ? [x(0)] : []);
+    const projections = [...view.returns.values()];
+    assert.equal(rules(view).includes('exit_scratch'), true);
+    assert.equal(
+      projections.some((projection) =>
+        projection.outputs.some(
+          (binding) =>
+            binding.register.root === x(0).root &&
+            binding.register.offset_bits + binding.register.width_bits > 32,
+        ),
+      ),
+      external,
+      'only external demand keeps the x0 high half a result output',
+    );
+    for (const language of ['c-like', 'python-like'] as const) {
+      const emission = emitted(language);
+      if (external) assert.match(emission.text, physicalReturn);
+      else {
+        assert.doesNotMatch(emission.text, physicalReturn);
+        assert.match(emission.text, language === 'c-like' ? /^uint32_t fn_/m : /-> uint32_t:/);
+      }
+      const formals = emittedFormals(emission);
+      assert.equal(formals.length, 4, emission.text);
+      for (const [left, right, count] of [
+        ['abc', 'abc', 3],
+        ['abd', 'abc', 3],
+        ['abc', 'abd', 3],
+        ['abc', 'abc', -1],
+      ] as const) {
+        const memory = new Map<bigint, number>();
+        Buffer.from(left).forEach((byte, index) => memory.set(A + BigInt(index), byte));
+        Buffer.from(right).forEach((byte, index) => memory.set(B + BigInt(index), byte));
+        for (let byte = 0n; byte < 8n; byte++) memory.set(matched + byte, 0);
+        const expected = oracle(memory, A, B, count);
+        const calls = new Map<string, SourceCallOracle>();
+        const run = (args: readonly bigint[]) => {
+          const observed = execute(
+            emission,
+            new Map(formals.map((formal, index) => [formal.statement_id, args[index]!])),
+            memory,
+            0n,
+            new Map(),
+            new Map([['call clobbers x0_high32', 0xdeadbeefn]]),
+            calls,
+          );
+          assert.equal(observed.exit, 'machine_return');
+          return BigInt.asUintN(32, observed.values[0]!);
+        };
+        calls.set('sub_10b8', (args) => memcmp(memory, args[0]!, args[1]!, args[2]!));
+        // The self-call runs the emitted function; its x0 high half is unknown.
+        calls.set('sub_1000', (args) => (0xdeadbeefn << 32n) | run(args));
+        assert.equal(run([A, B, BigInt.asUintN(32, BigInt(count)), matched]), expected);
+      }
+    }
+  }
+});
+
+test('a void-like recursive function becomes void without caller demand, not with external demand', () => {
+  const fixture = recursiveFixture(recursiveTotal, 2);
+  for (const external of [false, true]) {
+    const { view, emit: emitted } = fixture(external ? [x(0)] : []);
+    assert.equal(view.source?.return_type === null, !external);
+    assert.equal(rules(view).includes('incidental_result'), !external);
+    for (const language of ['c-like', 'python-like'] as const) {
+      const emission = emitted(language);
+      if (external) {
+        assert.doesNotMatch(emission.text, language === 'c-like' ? /^void fn_/m : /-> void:/);
+        continue;
+      }
+      assert.match(emission.text, language === 'c-like' ? /^void fn_/m : /-> void:/);
+      assert.doesNotMatch(emission.text, physicalReturn);
+      // Nodes {left, value} at 0x7000 -> 0x7100 -> 0x7200; *total += value innermost first.
+      const memory = new Map<bigint, number>();
+      const store = (address: bigint, value: bigint) => {
+        for (let byte = 0n; byte < 8n; byte++)
+          memory.set(address + byte, Number((value >> (byte * 8n)) & 255n));
+      };
+      const load = (address: bigint) => {
+        let value = 0n;
+        for (let byte = 0n; byte < 8n; byte++)
+          value |= BigInt(memory.get(address + byte)!) << (byte * 8n);
+        return value;
+      };
+      const nodes = [0x7000n, 0x7100n, 0x7200n],
+        values = [5n, 0xffffffffffffff00n, 7n],
+        total = 0x7800n;
+      nodes.forEach((node, index) => {
+        store(node, nodes[index + 1] ?? 0n);
+        store(node + 8n, values[index]!);
+      });
+      store(total, 100n);
+      const formals = emittedFormals(emission);
+      const calls = new Map<string, SourceCallOracle>();
+      const run = (args: readonly bigint[]) => {
+        const observed = execute(
+          emission,
+          new Map(formals.map((formal, index) => [formal.statement_id, args[index]!])),
+          memory,
+          0n,
+          new Map(),
+          new Map(),
+          calls,
+        );
+        assert.equal(observed.exit, 'machine_return');
+        assert.deepEqual(observed.values, []);
+      };
+      calls.set('sub_1000', (args) => {
+        run(args);
+        return [];
+      });
+      run([nodes[0]!, total]);
+      assert.equal(
+        load(total),
+        BigInt.asUintN(
+          64,
+          values.reduce((sum, value) => sum + value, 100n),
+        ),
+      );
+    }
+  }
 });

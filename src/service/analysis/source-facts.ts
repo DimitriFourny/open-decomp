@@ -2027,13 +2027,18 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   }
   // Positive result-use evidence only. Reuse units already prepared by native
   // analysis; do not turn a presentation request into an incoming-caller scan.
+  // A self-call result that reaches only this function's own return exit is
+  // circular: under the result-storage premise the self-call is one of the
+  // callers, so this function's own unit contributes only semantic demand.
   const functionReturnDemands = new Map<string, RegisterDescriptor>();
   for (const unit of new Set([...partialUnits.values(), ...requestUnits.values()])) {
     context.checkpoint(1);
+    const own = unit.function.id === input.ir.id;
     for (const dependency of unit.dependencies) {
       context.checkpoint(1);
       if (dependency.target.id !== input.ir.id) continue;
-      for (const register of dependency.return_demand ?? []) {
+      for (const register of (own ? dependency.return_demand_semantic : dependency.return_demand) ??
+        []) {
         functionReturnDemands.set(
           `${register.root}:${register.offset_bits}:${register.width_bits}`,
           register,
