@@ -1260,7 +1260,8 @@ export function planSource(
           .sort((left, right) => left.register.offset_bits - right.register.offset_bits);
         let cursor = register.offset_bits + narrow;
         for (const binding of upper)
-          cursor = binding.register.offset_bits === cursor ? cursor + binding.register.width_bits : -1;
+          cursor =
+            binding.register.offset_bits === cursor ? cursor + binding.register.width_bits : -1;
         const whole =
           upper.length && cursor === register.offset_bits + width
             ? bind(
