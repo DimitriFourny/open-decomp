@@ -6,6 +6,7 @@ import {
   decodeAddress,
   encodeAddress,
   fingerprint,
+  LedgerHasher,
   type Address,
   type Annotation,
   type AnnotationQuery,
@@ -187,6 +188,8 @@ export interface TracedRead {
 export class AnalysisDependencyCollector {
   readonly store: ProjectStore;
   readonly #reads = new Map<string, AnalysisReadset['reads'][number]>();
+  // Canonical hash over the leading reads of the (append-only) ledger; see readsetFingerprint.
+  readonly #ledgerHash = new LedgerHasher();
   #annotationDepth = 0;
   #trace: TracedRead[] | undefined;
   // Proof/type values already read at this revision; traced walks revisit captured
@@ -481,6 +484,19 @@ export class AnalysisDependencyCollector {
       : analysisReadsetSchema.parse({ version: 1, complete: true, reads: [] });
     finishedReadsets.set(readset, this);
     return readset;
+  }
+
+  /** `fingerprint(readset)` for a readset. A snapshot `finish()` took from this collector is
+   * a prefix of its append-only ledger, so only the reads after the last fingerprinted
+   * prefix are hashed; a snapshot shorter than that prefix, or any foreign readset, is
+   * hashed in full. */
+  readsetFingerprint(readset: AnalysisReadset): string {
+    const reads = readset.reads;
+    if (finishedReadsets.get(readset) !== this || reads.length < this.#ledgerHash.length)
+      return fingerprint(readset as unknown as CanonicalValue);
+    for (let index = this.#ledgerHash.length; index < reads.length; index++)
+      this.#ledgerHash.append(reads[index] as unknown as CanonicalValue);
+    return this.#ledgerHash.fingerprint();
   }
 }
 /** Readsets produced by `finish()` (already validated) and the collector that produced them. */
