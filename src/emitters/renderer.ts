@@ -7157,7 +7157,10 @@ export class Renderer {
     const bits = this.input.source?.abi.layout.pointer_bits ?? 64;
     const formals = new Set(program.parameters.map((value) => value.id));
     const signature = program.signature?.signature;
-    const resultId = signature?.return_type ?? source.return_source_type;
+    // A declared hidden result (S9) returns its pointer, not the declared type.
+    const resultId = source.hidden_result
+      ? undefined
+      : (signature?.return_type ?? source.return_source_type);
     const result: Fact | undefined = resultId
       ? this.typeRecords.get(resultId)?.definition.kind === 'pointer'
         ? { type_id: resultId, spelling: this.sourceType(resultId) }
@@ -8352,8 +8355,10 @@ export class Renderer {
               const returned = this.sourceInterpretation(
                 value,
                 this.printed(value),
-                this.program.signature?.signature.return_type ??
-                  this.program.source?.return_source_type,
+                this.program.source?.hidden_result
+                  ? undefined
+                  : (this.program.signature?.signature.return_type ??
+                      this.program.source?.return_source_type),
               );
               // `return` converts to the declared result type like assignment.
               const bits = bitWidth(value.type);
@@ -8898,10 +8903,22 @@ export class Renderer {
     // Source view (S4): the incoming object's by-value struct formal.
     const incomingObject = this.sourceView ? this.program.source?.incoming_object : undefined;
     const incomingStruct = incomingObject ? this.incomingStruct(incomingObject) : undefined;
+    // Source view (S9): a declared hidden result is a pointer formal to the
+    // declared result type, ahead of the declaration's own parameters.
+    const hiddenResult = this.sourceView ? this.program.source?.hidden_result : undefined;
+    const resultPointer =
+      hiddenResult && signature
+        ? this.language === 'c-like'
+          ? `${this.sourceType(signature.signature.return_type)}*`
+          : `pointer[${this.sourceType(signature.signature.return_type)}]`
+        : undefined;
     for (let i = 0; i < this.program.parameters.length; i++) {
       this.context.checkpoint(1);
       const value = this.program.parameters[i]!;
-      const source = signature?.signature.parameters[i];
+      const source =
+        value.id === hiddenResult?.id
+          ? undefined
+          : signature?.signature.parameters[hiddenResult ? i - 1 : i];
       const register = this.program.parameter_registers.get(value.id);
       if (!this.names.has(value.id) && source?.name) this.names.set(value.id, source.name);
       if (!this.names.has(value.id) && register && !this.program.source)
@@ -8919,7 +8936,10 @@ export class Renderer {
           : undefined;
       const incomingFormal = incomingObject?.formal.id === value.id;
       const name = incomingFormal
-        ? this.sourceIdentifier(value.id, 'stack_args')
+        ? this.sourceIdentifier(
+            value.id,
+            this.program.source?.parameter_names.get(value.id) ?? 'stack_args',
+          )
         : this.program.source
           ? this.sourceIdentifier(
               value.id,
@@ -8936,9 +8956,11 @@ export class Renderer {
           ? this.language === 'c-like'
             ? `struct ${incomingStruct.tag}`
             : `struct{${incomingStruct.members.join(', ')}}`
-          : source
-            ? this.sourceType(source.type_id)
-            : this.valueType(value);
+          : value.id === hiddenResult?.id && resultPointer
+            ? resultPointer
+            : source
+              ? this.sourceType(source.type_id)
+              : this.valueType(value);
       this.declaredTypes.set(value.id, type);
       parameters.push({
         value,
@@ -8960,7 +8982,11 @@ export class Renderer {
       for (const projection of this.program.returns.values())
         if (projection.results.length || projection.kind === 'physical') hasTailCall = true;
     let returnType = signature
-      ? this.sourceType(signature.signature.return_type)
+      ? resultPointer
+        ? [...this.program.returns.values()].some((projection) => projection.results.length)
+          ? resultPointer
+          : 'void'
+        : this.sourceType(signature.signature.return_type)
       : this.program.source
         ? this.program.source.return_source_type
           ? this.sourceType(this.program.source.return_source_type)
@@ -9067,7 +9093,10 @@ export class Renderer {
           1,
           `${w.declaration(parameter.type, parameter.name)}${i + 1 < parameters.length || ellipsis ? ',' : ''}`,
         );
-        const source = signature?.signature.parameters[i];
+        const source =
+          parameter.value.id === this.program.source?.hidden_result?.id
+            ? undefined
+            : signature?.signature.parameters[this.program.source?.hidden_result ? i - 1 : i];
         this.mapped(
           { ...this.dataOrigin(parameter.value.id), id: parameter.value.id },
           start,

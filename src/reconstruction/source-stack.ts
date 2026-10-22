@@ -424,20 +424,22 @@ export function planSourceStack(
   incomingStack: (offset: bigint, type: DataType, contributors: readonly Value[]) => Value | null,
   entryStack: () => Value,
   /** Source view (S4): the struct formal of the incoming object starting at
-   * entry-SP `offset`, or null when the interface cannot gain one. */
-  incomingObject: (offset: bigint) => Value | null,
+   * entry-SP `offset` whose kept bytes end at `end`, or null when the
+   * interface cannot gain one. */
+  incomingObject: (offset: bigint, end: bigint) => Value | null,
   validation = new LocalValidationSession(context),
   view: PresentationView = 'checked',
   requirements?: readonly Requirement[],
   /** Source view: the planner's callee-side variadic interface (`...`). */
   variadic?: {
     /** The named formals of these argument registers, in order; null when
-     * the interface is declared or a register has no formal. */
+     * a register has no formal or a declaration names other ones. */
     readonly named: (registers: readonly RegisterDescriptor[]) => readonly Value[] | null;
     /** Commits `...`: creates the `va` area value at entry-SP `offset`. */
     readonly area: (offset: bigint, named: readonly Value[] | null) => Value | null;
-    /** Commits `...` after exactly these named formals (SysV `va_list`). */
-    readonly list: (named: readonly Value[]) => boolean;
+    /** Commits `...` after exactly these named formals (SysV `va_list`), the
+     * first anonymous stack argument at entry-SP `overflow`. */
+    readonly list: (named: readonly Value[], overflow: bigint) => boolean;
   },
 ) {
   const addresses = new Map<string, bigint>(),
@@ -2084,7 +2086,7 @@ export function planSourceStack(
       ) &&
       (sharedEntry ||
         validation.presentation('frame_object', input.function.id, FRAME_OBJECT_SCOPE)) &&
-      variadic.list(named)
+      variadic.list(named, found.overflow)
     ) {
       validation.requireAbi(
         'variadic_convention',
@@ -2146,7 +2148,10 @@ export function planSourceStack(
     (frameObject || !sharedEntry) &&
     incomingKept.length > 0 &&
     incomingKept.every((access) => access.offset >= incomingOrigin)
-      ? incomingObject(incomingOrigin)
+      ? incomingObject(
+          incomingOrigin,
+          incomingKept.reduce((end, access) => (access.end > end ? access.end : end), 0n),
+        )
       : null;
   const incomingFormal =
     incomingCandidate &&

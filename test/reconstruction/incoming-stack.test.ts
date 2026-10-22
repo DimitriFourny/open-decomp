@@ -17,6 +17,7 @@ import type { StoredDecompilation } from '../../src/project/cache/index.js';
 import { builder, image, slice } from '../ir/support.js';
 import { project } from '../service/analysis/support.js';
 import { emit, emittedFormals, execute, type EmittedFormal } from '../emitters/c/support.js';
+import { declaredTypes, typeId } from './declared-support.js';
 
 type StoredEmission = StoredDecompilation['data']['emission'];
 
@@ -321,8 +322,9 @@ const u32 = integer(32),
 /** `o2`: accesses at entry-SP offsets, one 16-byte and one 8-byte copy;
  * `o0`: through a `lea`-computed base with a delta spill/reload and three
  * 8-byte copies; `escaped`: as `o2`, but the copy's address is handed to an
- * open call between the updates and the copy. */
-function aggregateFixture(variant: 'o2' | 'o0' | 'escaped') {
+ * open call between the updates and the copy. `rax`: the exit also writes
+ * the sret pointer to rax, as the ABI's result register requires. */
+function aggregateFixture(variant: 'o2' | 'o0' | 'escaped', rax = false) {
   const abi = sysvAMD64Abi;
   const layout = abi.classifyCall({
     returns: word,
@@ -380,6 +382,8 @@ function aggregateFixture(variant: 'o2' | 'o0' | 'escaped') {
     block.store(result, block.load(integer(128), at(0n)));
     block.store(block.int('add', result, block.constant(u64, 16n)), block.load(u64, at(16n)));
   }
+  const returned = layout.returns[0]!;
+  if (rax && returned.kind === 'register') block.writeRegister(returned.register, result);
   block.return([result]);
   const ir = constructSSA(b.finish(block, [u64])).value as SSAForm;
   const types = recoverTypes(ir, abi, createOperationContext(), {
@@ -575,5 +579,309 @@ test('sysv-amd64: an aggregate copy whose address escapes to a call keeps the en
         product(input.weight, doubleBits(2)),
       ]);
     }
+  }
+});
+
+// S9: DWARF-like declarations of the function itself.
+const declaredU64 = { u64: { kind: 'integer', bits: 64, signed: false } } as const;
+
+/** Darwin `u64 f(u64 w0, …, u64 w9)`: w8 and w9 on the caller's stack at
+ * entry SP + 0 and + 8; returns sum((i + 1) * w[i]) mod 2^64. `extraSlot`
+ * also reads entry SP + 16, which no ten-parameter declaration has. */
+function tenParameterFixture(extraSlot: boolean) {
+  const abi = darwinArm64Abi;
+  const layout = abi.classifyCall({
+    returns: word,
+    parameters: Array.from({ length: 10 }, () => word),
+    variadic: false,
+    fixed_parameter_count: 10,
+  });
+  const b = builder(`declared-stack-${extraSlot}`),
+    block = b.block('entry');
+  const entry = block.readRegister(abi.stack_pointer);
+  const parameters = layout.parameters.map((parameter) => {
+    const location = parameter.locations[0]!;
+    return location.kind === 'register'
+      ? block.readRegister(location.register)
+      : block.load(
+          u64,
+          block.int(
+            'add',
+            entry,
+            block.constant(u64, location.kind === 'stack' ? location.offset : 0n),
+          ),
+        );
+  });
+  assert.deepEqual(
+    layout.parameters.slice(8).map((parameter) => parameter.locations[0]),
+    [0n, 8n].map((offset) => ({
+      kind: 'stack',
+      offset,
+      size: 8n,
+      alignment: 8,
+      value_offset_bits: 0,
+    })),
+  );
+  if (extraSlot)
+    parameters.push(block.load(u64, block.int('add', entry, block.constant(u64, 16n))));
+  let sum = parameters[0]!;
+  for (const [index, parameter] of parameters.entries())
+    if (index)
+      sum = block.int(
+        'add',
+        sum,
+        block.int('mul', parameter, block.constant(u64, BigInt(index + 1))),
+      );
+  // The ABI result register x0 carries the sum, as the declaration says.
+  const x0 = layout.returns[0]!;
+  if (x0.kind === 'register') block.writeRegister(x0.register, sum);
+  block.return([sum]);
+  return constructSSA(b.finish(block, [u64])).value as SSAForm;
+}
+
+const tenNames = Array.from({ length: 10 }, (_, index) => `w${index}`);
+const tenDeclared = (ir: SSAForm, status?: 'hypothesis') => ({
+  types: declaredTypes(ir, darwinArm64Abi, {
+    types: declaredU64,
+    returns: 'u64',
+    parameters: tenNames.map((name) => [name, 'u64'] as const),
+    ...(status ? { status } : {}),
+  }),
+  source: { abi: darwinArm64Abi, callees: [], addresses: [] },
+});
+
+test('darwin-arm64: a declared ten-parameter signature binds its two stack parameters', () => {
+  const ir = tenParameterFixture(false),
+    extra = tenDeclared(ir);
+  for (const language of ['c-like', 'python-like'] as const) {
+    const output = emit(ir, extra, language).emission;
+    assert.doesNotMatch(output.text, /\bentry_sp\b/, output.text);
+    assert.match(output.text, language === 'c-like' ? /\buint64_t w9\n\)/ : /\bw9: uint64_t\n\)/);
+    const formals = emittedFormals(output);
+    assert.deepEqual(
+      formals.map((formal) => formal.name),
+      tenNames,
+      output.text,
+    );
+    for (const rule of ['declared_signature', 'incoming_formal'])
+      assert.ok(
+        output.local_validation?.some((record) => record.rule === rule),
+        rule,
+      );
+    for (const args of cases) {
+      const observation = execute(
+        output,
+        new Map(formals.map((formal, index) => [formal.statement_id, args[index]!])),
+      );
+      assert.deepEqual(observation.values, [weighted(args)], `${language} ${args}`);
+      // The stack parameters are formals: no incoming memory is read.
+      assert.deepEqual(observation.events, []);
+    }
+  }
+  // The checked view never takes the declared stack parameters.
+  assert.equal(
+    emit(ir, extra, 'c-like', 'checked').emission.text,
+    emit(ir, tenDeclared(ir, 'hypothesis'), 'c-like', 'checked').emission.text,
+  );
+});
+
+test('darwin-arm64: a declaration contradicting the incoming stack reads keeps the inferred output', () => {
+  // The body reads entry SP + 16, a slot the ten-parameter declaration lacks.
+  const ir = tenParameterFixture(true);
+  for (const language of ['c-like', 'python-like'] as const) {
+    const output = emit(ir, tenDeclared(ir), language).emission;
+    // Byte-identical to the same declaration without standing (never bound).
+    assert.equal(output.text, emit(ir, tenDeclared(ir, 'hypothesis'), language).emission.text);
+    assert.doesNotMatch(output.text, /\bw\d\b/, output.text);
+    assert.ok(!output.local_validation?.some((record) => record.rule === 'declared_signature'));
+    const formals = emittedFormals(output);
+    const args = Array.from({ length: 11 }, (_, index) => 0xfffffffffffffff0n + BigInt(index));
+    const observation = execute(
+      output,
+      new Map(
+        formals.map((formal, index) => [
+          formal.statement_id,
+          formal.name === 'entry_sp' ? 0x8000n : args[index]!,
+        ]),
+      ),
+      new Map(
+        [0n, 8n, 16n].flatMap((offset, index) => bytesOf(0x8000n + offset, args[8 + index]!, 8)),
+      ),
+    );
+    assert.deepEqual(observation.values, [weighted(args)], output.text);
+  }
+});
+
+// S9 + S4: the SysV aggregate fixture declared as `struct aggregate
+// f(struct aggregate input, uint64_t delta, double scale)`. The result is
+// returned through the hidden pointer in rdi (sret), which rax returns.
+const aggregateDeclaration = (ir: SSAForm, status?: 'hypothesis') => ({
+  types: {
+    ...declaredU64,
+    u32: { kind: 'integer', bits: 32, signed: false },
+    f64: { kind: 'float', bits: 64 },
+    aggregate: {
+      kind: 'structure',
+      size: 24n,
+      alignment: 8,
+      fields: [
+        ['total', 'u64', 0n],
+        ['count', 'u32', 8n],
+        ['weight', 'f64', 16n],
+      ].map(([name, type, offset]) => ({
+        id: typeId(`aggregate.${String(name)}`),
+        name: String(name),
+        offset: offset as bigint,
+        type_id: typeId(String(type)),
+      })),
+    },
+  } as const,
+  returns: 'aggregate',
+  parameters: [
+    ['input', 'aggregate'],
+    ['delta', 'u64'],
+    ['scale', 'f64'],
+  ] as const,
+  ...(status ? { status } : {}),
+});
+
+test('sysv-amd64: a declared sret result and by-value aggregate bind the hidden pointer and the incoming object', () => {
+  const fixture = aggregateFixture('o2', true);
+  const extra = {
+    ...fixture.extra,
+    types: declaredTypes(fixture.ir, sysvAMD64Abi, aggregateDeclaration(fixture.ir)),
+  };
+  for (const language of ['c-like', 'python-like'] as const) {
+    const output = emit(fixture.ir, extra, language).emission;
+    const text = output.text;
+    assert.doesNotMatch(text, /\bentry_sp\b|\bstack_args\b/, text);
+    assert.match(
+      text,
+      language === 'c-like'
+        ? /^(\w+)\* \w+\(\1\* result, struct stack_args_\w+ input, uint64_t delta, double scale\) \{/m
+        : /^def \w+\(result: pointer\[(\w+)\], input: struct\{[^}]*\}, delta: uint64_t, scale: double\) -> pointer\[\1\]:/m,
+      text,
+    );
+    for (const rule of ['declared_signature', 'incoming_object'])
+      assert.ok(
+        output.local_validation?.some((record) => record.rule === rule),
+        rule,
+      );
+    assert.deepEqual(
+      emittedFormals(output).map((formal) => formal.name),
+      ['result', 'input', 'delta', 'scale'],
+    );
+    for (const input of aggregateCases)
+      for (const scale of [doubleBits(2), doubleBits(-0.5)]) {
+        const memory = new Map<bigint, number>([
+          ...bytesOf(ENTRY + 8n, input.total, 8),
+          ...bytesOf(ENTRY + 16n, input.count | (PADDING << 32n), 8),
+          ...bytesOf(ENTRY + 24n, input.weight, 8),
+          ...bytesOf(RESULT, 0n, 24),
+        ]);
+        const values: Record<string, bigint> = {
+          result: RESULT,
+          input: ENTRY + 8n,
+          delta: input.delta,
+          scale,
+        };
+        const observation = execute(
+          output,
+          new Map(
+            emittedFormals(output).map((formal) => [formal.statement_id, values[formal.name]!]),
+          ),
+          memory,
+        );
+        assert.deepEqual(
+          [0n, 8n, 16n].map((offset) => wordAt(observation.memory, RESULT + offset, 8)),
+          [
+            BigInt.asUintN(64, input.total + input.delta),
+            ((input.count + 1n) & 0xffffffffn) | (PADDING << 32n),
+            product(input.weight, scale),
+          ],
+          `${language}\n${text}`,
+        );
+        // rax returns the hidden pointer.
+        assert.deepEqual(observation.values, [RESULT]);
+      }
+  }
+});
+
+test('darwin-arm64: a declared sret result binds x8 and returns nothing', () => {
+  const abi = darwinArm64Abi;
+  const hidden = abi.classifyCall({
+    returns: {
+      kind: 'aggregate',
+      size: 24n,
+      alignment: 8,
+      fields: [0n, 8n, 16n].map((offset) => ({ offset, type: word })),
+    },
+    parameters: [word, word],
+    variadic: false,
+    fixed_parameter_count: 2,
+  });
+  assert.ok(hidden.hidden_result?.kind === 'indirect' && 'root' in hidden.hidden_result.pointer);
+  const pointer = hidden.hidden_result.pointer;
+  const b = builder('declared-sret-darwin'),
+    block = b.block('entry');
+  const [left, right] = hidden.parameters.map((parameter) => {
+    const location = parameter.locations[0]!;
+    assert.equal(location.kind, 'register');
+    return block.readRegister(location.register);
+  }) as [Value, Value];
+  const out = block.readRegister(pointer);
+  block.store(out, block.int('add', left, right));
+  block.store(block.int('add', out, block.constant(u64, 8n)), block.int('mul', left, right));
+  block.store(block.int('add', out, block.constant(u64, 16n)), left);
+  block.return();
+  const ir = constructSSA(b.finish(block)).value as SSAForm;
+  const types = declaredTypes(ir, abi, {
+    types: {
+      ...declaredU64,
+      triple: {
+        kind: 'structure',
+        size: 24n,
+        alignment: 8,
+        fields: ['sum', 'product', 'first'].map((name, index) => ({
+          id: typeId(`triple.${name}`),
+          name,
+          offset: 8n * BigInt(index),
+          type_id: typeId('u64'),
+        })),
+      },
+    },
+    returns: 'triple',
+    parameters: [
+      ['left', 'u64'],
+      ['right', 'u64'],
+    ],
+  });
+  const extra = { types, source: { abi, callees: [], addresses: [] } };
+  for (const language of ['c-like', 'python-like'] as const) {
+    const output = emit(ir, extra, language).emission;
+    assert.match(
+      output.text,
+      language === 'c-like'
+        ? /^void \w+\(\w+\* result, uint64_t left, uint64_t right\) \{/m
+        : /^def \w+\(result: pointer\[\w+\], left: uint64_t, right: uint64_t\) -> void:/m,
+      output.text,
+    );
+    assert.ok(output.local_validation?.some((record) => record.rule === 'declared_signature'));
+    const values: Record<string, bigint> = {
+      result: RESULT,
+      left: 0xffffffffffffffffn,
+      right: 3n,
+    };
+    const observation = execute(
+      output,
+      new Map(emittedFormals(output).map((formal) => [formal.statement_id, values[formal.name]!])),
+      new Map(bytesOf(RESULT, 0n, 24)),
+    );
+    assert.deepEqual(
+      [0n, 8n, 16n].map((offset) => wordAt(observation.memory, RESULT + offset, 8)),
+      [2n, 0xfffffffffffffffdn, 0xffffffffffffffffn],
+      output.text,
+    );
+    assert.deepEqual(observation.events, ['store', 'store', 'store']);
   }
 });

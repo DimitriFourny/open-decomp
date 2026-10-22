@@ -501,7 +501,12 @@ function gatherInferences(
         : incoming?.formal.id === value.id
           ? incoming.minimum_offset
           : undefined;
-    const parameter = program.signature?.signature.parameters[ordinal];
+    // A declared hidden result (S9) is the first formal, ahead of the declared ones.
+    const hidden = program.source?.hidden_result;
+    const parameter =
+      value.id === hidden?.id
+        ? undefined
+        : program.signature?.signature.parameters[hidden ? ordinal - 1 : ordinal];
     const role =
       register?.role === 'stack_pointer' || stackEntry(program.source?.stack)?.id === value.id
         ? 'entry_storage'
