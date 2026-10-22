@@ -452,7 +452,7 @@ A whole-image instrumented run on sqlite3-arm64 found 21 tables proved and 291 d
 
 ### J4: Indirect tail calls in the source view
 
-- [ ] **Problem.**
+- [x] **Problem.** Done (J4): `sqlite3_result_pointer` prints `return ((… (*)(uint64_t, ...))arg3)(arg1);` and `pcache1Shrink` `((void (*)(uint64_t, ...))data_100168d80)(value0); return;` (frame-save route, `indirect_tail_call` abi_conformance), 0 `indirect_exit` in both; checked views and every other full-tier text unchanged; `test/reconstruction/indirect-tails.test.ts` executes both dialects with a stub target.
   - `sqlite3_result_pointer` (`0x100042080`, the inlined `invokeValueDestructor`) prints `return indirect_exit(arg3, "Indirect branch target is unresolved", …)` for `br x3` after a full epilogue. Ghidra prints `(*UNRECOVERED_JUMPTABLE)(param_2); return;`.
   - `pcache1Shrink` (`0x1000ecae0`) does the same with `br x1`, where `x1` is loaded from the global `xMutexLeave` slot `data_100168d80`.
   - About 282 of SQLite's unresolved `br` instructions are such tail calls, including frameless leaves like `memtraceRoundup`.
