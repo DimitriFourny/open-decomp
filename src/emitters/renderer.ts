@@ -179,11 +179,14 @@ type HeaderStatement = Extract<Instruction, { kind: 'assign' | 'load' }>;
 /** Source view: one stack object kept as memory (the frame object, or the
  * incoming object of S4) in entry-SP coordinates, with its member naming. */
 interface StackObjectView {
-  readonly name: string;
+  /** The object's identifier (named on first use: a frame whose every member
+   * is independent, A3, declares no object). */
+  readonly name: () => string;
   readonly minimum_offset: bigint;
   readonly members: readonly FrameMember[];
-  /** Field name of the member starting at entry-SP `offset`. */
-  readonly field: (offset: bigint) => string;
+  /** Spelling of a member: `frame.local_38`, `stack_args.arg_8`, or an
+   * independent local's own name (A3). */
+  readonly member: (member: FrameMember) => string;
 }
 /** SysV AMD64 `va_list` (`__va_list_tag[1]`) fields by byte offset (S7). */
 const VA_LIST_FIELDS: ReadonlyMap<
@@ -3987,25 +3990,42 @@ export class Renderer {
   /** Source view: the stack object that prints entry-SP `offset`. The incoming
    * object (S4) holds offsets from its start up; the frame object holds
    * offsets below the entry SP, and every offset when no entry SP is live
-   * beside it. Members are named by entry-SP offset. */
+   * beside it. Members are named by entry-SP offset; an independent member
+   * (A3) is a local of its own. */
   private stackObject(offset: bigint): StackObjectView | undefined {
     const incoming = this.program.source?.incoming_object,
       stack = this.program.source?.stack;
-    if (incoming && offset >= incoming.minimum_offset)
+    if (incoming && offset >= incoming.minimum_offset) {
+      const name = () => this.sourceIdentifier(incoming.formal.id, 'stack_args');
       return {
-        name: this.sourceIdentifier(incoming.formal.id, 'stack_args'),
+        name,
         minimum_offset: incoming.minimum_offset,
         members: incoming.members,
-        field: (start) => `arg_${start.toString(16)}`,
+        member: (member) => `${name()}.arg_${member.offset.toString(16)}`,
       };
-    if (stack?.kind === 'object' && (offset < 0n || !stack.entry))
+    }
+    if (stack?.kind === 'object' && (offset < 0n || !stack.entry)) {
+      const name = () => {
+        if (stack.members.every((member) => member.independent))
+          this.invalid('A frame address lies outside every independent frame local');
+        return this.sourceIdentifier(stack.id, 'frame');
+      };
       return {
-        name: this.sourceIdentifier(stack.id, 'frame'),
+        name,
         minimum_offset: stack.minimum_offset,
         members: stack.members,
-        field: (start) => `local_${(-start).toString(16)}`,
+        member: (member) =>
+          member.independent
+            ? this.frameLocal(member, member.independent)
+            : `${name()}.local_${(-member.offset).toString(16)}`,
       };
+    }
     return undefined;
+  }
+
+  /** Source view (A3): the name of an independent frame local. */
+  private frameLocal(member: FrameMember, local: { readonly id: string }): string {
+    return this.sourceIdentifier(local.id, `local_${(-member.offset).toString(16)}`);
   }
 
   /** The member of a stack object holding entry-SP byte `offset` and the offset within it. */
@@ -4056,12 +4076,11 @@ export class Renderer {
    * `&stack_args.arg_8`, an element of a byte-array member, else a byte offset
    * from the object. */
   private frameAddress(object: StackObjectView, offset: bigint): Printed {
-    const name = object.name,
-      found = this.frameMemberAt(object, offset),
+    const found = this.frameMemberAt(object, offset),
       address = { bits: 64, signed: false } as const;
     // SysV `va_list` (S7): `frame.va`, or one of its fields.
     if (found?.member.va) {
-      const va = `${name}.va`,
+      const va = `${object.name()}.va`,
         field = VA_LIST_FIELDS.get(found.delta);
       if (this.language === 'python-like') {
         const base = this.printer.primary(
@@ -4086,8 +4105,11 @@ export class Renderer {
     }
     const member =
       found && (found.delta === 0n || !found.member.scalar)
-        ? `${name}.${object.field(found.member.offset)}`
+        ? object.member(found.member)
         : undefined;
+    if (!member && found?.member.independent)
+      this.invalid('An address lies inside an independent scalar frame local');
+    const name = member ? '' : object.name();
     if (this.language === 'python-like') {
       const base = this.printer.primary(`address_of(${member ?? name})`, address),
         delta = member ? found!.delta : offset - object.minimum_offset;
@@ -4130,16 +4152,17 @@ export class Renderer {
       node.access.alignment !== 1
     )
       return undefined;
-    const name = object.name,
-      found = this.frameMemberAt(object, offset),
+    const found = this.frameMemberAt(object, offset),
       spelled = this.plainAccessSpelling(node);
-    const member = found && `${name}.${object.field(found.member.offset)}`;
+    const member = found && object.member(found.member);
+    if (found?.member.scalar && found.delta !== 0n && found.member.independent)
+      this.invalid('An access lies inside an independent scalar frame local');
     if (found?.member.va) {
       // SysV `va_list` (S7): exactly one field; its pointers read as address
       // bits and are written from `void *` (`vaPointerStores`).
       const field = VA_LIST_FIELDS.get(found.delta);
       if (field?.bytes !== bits / 8n || !this.permitUnaligned(node)) return undefined;
-      const text = `${name}.va[0].${field.name}`;
+      const text = `${object.name()}.va[0].${field.name}`;
       if (!field.pointer || this.language !== 'c-like') return text;
       if (node.kind === 'load') return `(uintptr_t)${text}`;
       this.vaPointerStores.add(node.id);
@@ -4161,7 +4184,8 @@ export class Renderer {
           ? `*(${spelled} *)${member}`
           : `*(${spelled} *)&${member}[${this.printer.literal(found.delta, 64).text}]`;
     else {
-      const delta = offset - object.minimum_offset;
+      const delta = offset - object.minimum_offset,
+        name = object.name();
       text =
         delta === 0n
           ? `*(${spelled} *)&${name}`
@@ -9146,13 +9170,18 @@ export class Renderer {
       );
     }
     if (stack?.kind === 'object') {
-      const name = this.sourceIdentifier(stack.id, 'frame');
-      if (this.language === 'c-like') {
+      // Independent members (A3) are locals of their own; the struct holds the
+      // others and is omitted when none is left. Its end is the entry SP or
+      // (A3) the hidden save area below it.
+      const kept = stack.members.filter((member) => !member.independent),
+        top = stack.minimum_offset + stack.size;
+      if (kept.length && this.language === 'c-like') {
+        const name = this.sourceIdentifier(stack.id, 'frame');
         // Members sit at their packed frame offsets; padding fills the gaps.
         let end = stack.minimum_offset,
           packed = false;
         w.line(1, `_Alignas(${stack.alignment}) struct {`);
-        for (const member of stack.members) {
+        for (const member of kept) {
           this.context.checkpoint(1);
           const field = `local_${(-member.offset).toString(16)}`;
           if (member.offset > end)
@@ -9168,14 +9197,15 @@ export class Renderer {
           packed ||= member.scalar && (member.offset - stack.minimum_offset) % member.size !== 0n;
           end = member.offset + member.size;
         }
-        if (end < 0n) w.statement(2, `uint8_t pad_${(-end).toString(16)}[${-end}]`);
+        if (end < top) w.statement(2, `uint8_t pad_${(-end).toString(16)}[${top - end}]`);
         w.statement(1, `}${packed ? ' __attribute__((packed))' : ''} ${name}`);
-      } else {
+      } else if (kept.length) {
+        const name = this.sourceIdentifier(stack.id, 'frame');
         w.statement(
           1,
-          `${name} = ${this.call('stack_frame', "This activation's stack frame kept as memory: SIZE bytes ending at the entry stack pointer, starting at an ALIGNMENT-aligned address, original contents unknown. Each annotated member local_N names the bytes at entry-SP offset -N with its type; members and all other frame bytes are ordinary aliasable memory.", [String(stack.size), String(stack.alignment)])}`,
+          `${name} = ${this.call('stack_frame', "This activation's stack frame kept as memory: SIZE bytes ending at the entry stack pointer (or, given END, at entry-SP offset END: the bytes from there to the entry SP are hidden register saves, locals of their own or untouched), starting at an ALIGNMENT-aligned address, original contents unknown. Each annotated member local_N names the bytes at entry-SP offset -N with its type; members and all other frame bytes are ordinary aliasable memory.", [String(stack.size), String(stack.alignment), ...(top < 0n ? [`-0x${(-top).toString(16)}`] : [])])}`,
         );
-        for (const member of stack.members) {
+        for (const member of kept) {
           this.context.checkpoint(1);
           // The SysV `va_list` (S7) states its offset beside its name.
           w.statement(
@@ -9185,6 +9215,19 @@ export class Renderer {
               : `${name}.local_${(-member.offset).toString(16)}: ${member.scalar ? this.frameMemberType(member) : `array<uint8_t, ${member.size}>`}`,
           );
         }
+      }
+      for (const member of stack.members) {
+        if (!member.independent) continue;
+        this.context.checkpoint(1);
+        const name = this.frameLocal(member, member.independent);
+        w.statement(
+          1,
+          member.scalar
+            ? w.declaration(this.frameMemberType(member), name)
+            : this.language === 'c-like'
+              ? `uint8_t ${name}[${member.size}]`
+              : `${name}: array<uint8_t, ${member.size}>`,
+        );
       }
     }
     const declaredLocals = new Set<string>();

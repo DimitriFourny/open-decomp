@@ -41,6 +41,12 @@ const FRAME_OBJECT_SCOPE =
   'frame bytes kept as memory print as one local frame object at their entry-SP offsets: one scalar member per exact (offset, width) access set, a transport access (copy, constant or zero initialization) wider than the members it covers printing as a cast at the member holding its first byte, byte arrays where other accesses overlap or a frame address is indexed or points inside, padding between; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
 const INCOMING_OBJECT_SCOPE =
   'incoming stack-argument bytes kept as memory print as one by-value struct formal at their entry-SP offsets: one scalar member per exact (offset, width) access set, a transport access (copy, constant or zero initialization) wider than the members it covers printing as a cast at the member holding its first byte, byte arrays where other accesses overlap or an address points inside, padding between; no exposure can designate incoming bytes and no frame escape is unbounded; no retained access spans the first incoming byte; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
+const FRAME_SAVE_PREMISE =
+  'Frame save/restore elision assumes ABI conformance: callees preserve callee-saved registers and never write their caller’s frame outside outgoing argument storage, the saved slots are not stack arguments, and a frame address handed to a callee (or indexed from) designates its own object, never a save slot. Each hidden store and reload remains in the checked view and the original mappings.';
+const ESCAPED_SLOT_SCOPE =
+  'with no unbounded escape and no live entry SP, each escaped or indexed frame address reaches the bytes from the lowest offset it can take up to the lowest proven save slot above it (or the entry SP); overlapping reaches merge. A reach that is exactly one member, with no other access, taken address or indexed base inside it except at its start, is a local object of its own, declared outside the frame object and addressed as &local_N; the frame object keeps its other members and the reaches that hold them; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
+const ESCAPED_SLOT_PREMISE =
+  'An escaped frame address reaches only bytes at or above the lowest entry-SP offset it can take (callees, memory holding the address and code reached through it never step below the address they were given), and, with a frame save above it, never the save slot (frame_save): the object it designates ends below that slot. A local declared on its own holds exactly such a reach, so no address derived from another frame object designates it, and no address derived from it designates another. Every load and store keeps its address, width, order and aliasing; the checked view keeps the entry-SP form.';
 const SCALAR_BYTES = new Set([1n, 2n, 4n, 8n, 16n]);
 
 /** Member layout of a source-view stack object at its entry-SP offsets.
@@ -55,9 +61,10 @@ const SCALAR_BYTES = new Set([1n, 2n, 4n, 8n, 16n]);
  * indexed base (with the accesses that continue it without a gap) form one
  * byte array; a taken address in a gap
  * starts a byte array that runs to the next member.
- * `below` (the frame): the object ends at the entry SP and its bottom is
- * lowered to a stack-aligned address; offsets at or above the entry SP are not
- * frame bytes and are ignored. `above` (the incoming area, S4): the object
+ * `below` (the frame): the object ends at `top` (the entry SP, or the
+ * lowest byte of a save area that is wholly hidden saves) and its bottom is
+ * lowered to a stack-aligned address; offsets at or above `top` are not
+ * frame-object bytes and are ignored. `above` (the incoming area, S4): the object
  * starts at the first incoming byte (`returnAddressBytes`, stack-aligned by the
  * call) and ends at its last member; offsets below that byte are ignored, and a
  * taken address above every member starts a byte array to the next
@@ -78,12 +85,13 @@ export function frameLayout(
   returnAddressBytes: bigint,
   direction: 'below' | 'above' = 'below',
   va?: bigint,
+  top = 0n,
 ): { minimum_offset: bigint; size: bigint; members: FrameMember[] } {
   const unit = BigInt(alignment);
   const order = (left: bigint, right: bigint): number => (left < right ? -1 : left > right ? 1 : 0);
   type Cluster = { offset: bigint; end: bigint; scalar: boolean; access_ids: string[] };
   const skipped = (offset: bigint): boolean =>
-    direction === 'below' ? offset >= 0n : offset < returnAddressBytes;
+    direction === 'below' ? offset >= top : offset < returnAddressBytes;
   const takenSorted = taken.filter((offset) => !skipped(offset)).sort(order),
     indexedSorted = [...indexed].filter((offset) => !skipped(offset)).sort(order);
   // First position of `list` (sorted) at or above `offset`.
@@ -243,13 +251,13 @@ export function frameLayout(
   };
   const gaps = new Set<bigint>();
   for (const offset of taken) {
-    if (direction === 'below' ? offset >= 0n : offset < returnAddressBytes) continue;
+    if (skipped(offset)) continue;
     const index = containing(offset);
     if (index < 0) gaps.add(offset);
     else if (clusters[index]!.offset !== offset) clusters[index]!.scalar = false;
   }
   for (const offset of indexed) {
-    if (direction === 'below' ? offset >= 0n : offset < returnAddressBytes) continue;
+    if (skipped(offset)) continue;
     const index = containing(offset);
     if (index < 0) {
       gaps.add(offset);
@@ -276,7 +284,7 @@ export function frameLayout(
     let end = starts[index + 1];
     if (next < clusters.length && (end === undefined || clusters[next]!.offset < end))
       end = clusters[next]!.offset;
-    end ??= direction === 'below' ? 0n : start + unit - ((start - returnAddressBytes) % unit);
+    end ??= direction === 'below' ? top : start + unit - ((start - returnAddressBytes) % unit);
     members.push({ offset: start, size: end - start, scalar: false, access_ids: [] });
   }
   members.sort((left, right) => order(left.offset, right.offset));
@@ -310,9 +318,9 @@ export function frameLayout(
       members,
     };
   }
-  const lowest = (members[0]?.offset ?? 0n) + returnAddressBytes,
+  const lowest = (members[0]?.offset ?? top) + returnAddressBytes,
     minimum = lowest - (((lowest % unit) + unit) % unit) - returnAddressBytes;
-  return { minimum_offset: minimum, size: -minimum, members };
+  return { minimum_offset: minimum, size: top - minimum, members };
 }
 
 /** A memory access at a known entry-SP offset; `key` is `offset:end`. */
@@ -788,7 +796,12 @@ export function planSourceStack(
     // Source view: floors of exposures derived from the incoming area alone:
     // every base is known and at or above the entry SP (a pointer into the
     // incoming arguments, stepped or indexed).
-    incomingBased = new Set<bigint>();
+    incomingBased = new Set<bigint>(),
+    // Source view (A3): the floor of every bounded exposure, true when the
+    // exposure's only base is the floor itself (an exact address, or one
+    // stepped by nonnegative index addends), so every address it can take
+    // lies in the object holding that base.
+    escapeFloors = new Map<bigint, boolean>();
   // Known frame offsets of every address a tainted value is derived from (cell
   // halves, indexed/phi'd pointers, pointers spilled to the frame and reloaded),
   // or null when some tainted leaf has no known origin.
@@ -989,6 +1002,10 @@ export function planSourceStack(
     if (floor === null) reachAll = true;
     else {
       if (reachFloor === undefined || floor < reachFloor) reachFloor = floor;
+      escapeFloors.set(
+        floor,
+        (escapeFloors.get(floor) ?? true) && bases?.length === 1 && bases[0] === floor,
+      );
       if (bases === null || floor >= 0n || bases.some((offset) => offset >= 0n)) {
         if (incomingFloor === undefined || floor < incomingFloor) incomingFloor = floor;
         if (bases?.length && bases.every((offset) => offset >= 0n)) incomingBased.add(floor);
@@ -1573,11 +1590,7 @@ export function planSourceStack(
       return true;
     });
     if (saveStores.size)
-      validation.requireAbi(
-        'frame_save',
-        [exits[0]!.control.id, ...saveStores],
-        'Frame save/restore elision assumes ABI conformance: callees preserve callee-saved registers and never write their caller’s frame outside outgoing argument storage, the saved slots are not stack arguments, and a frame address handed to a callee (or indexed from) designates its own object, never a save slot. Each hidden store and reload remains in the checked view and the original mappings.',
-      );
+      validation.requireAbi('frame_save', [exits[0]!.control.id, ...saveStores], FRAME_SAVE_PREMISE);
   }
   // Source view: a non-volatile frame load dominated by a store covering its
   // bytes cannot fault. If its result is dead, reconstruct() may drop it.
@@ -2480,20 +2493,44 @@ export function planSourceStack(
     for (const [id, offset] of presented)
       if (live.has(id) && offset < 0n && outside(offset)) taken.push(offset);
     context.checkpoint(below.length + taken.length);
-    const layout = frameLayout(
-      below.map((access) => ({
-        offset: access.offset,
-        end: access.end,
-        id: access.node.id,
-        transport: transport(access.node),
-      })),
-      taken,
-      saveArea ? new Set([...indexedBases].filter(outside)) : indexedBases,
-      alignment,
-      input.source!.abi.stack_return_address_bytes,
-      'below',
-      variadicArea?.kind === 'va_list' ? variadicArea.offset : undefined,
-    );
+    const indexed = saveArea ? new Set([...indexedBases].filter(outside)) : indexedBases,
+      va = variadicArea?.kind === 'va_list' ? variadicArea.offset : undefined;
+    // A3: with no unbounded escape and no live entry SP, a save area that is
+    // wholly hidden save bytes up to the entry SP ends the object at its lowest
+    // byte: no retained access, live address, indexed base, escape or `va`
+    // lies there, and no escaped object reaches a save slot (`frame_save`).
+    let top = 0n;
+    if (!entryLive && !reachAll && saveBytes.size) {
+      let lowest = 0n;
+      for (const byte of saveBytes) if (byte < lowest) lowest = byte;
+      const clear = (offset: bigint): boolean => offset < lowest || offset >= 0n;
+      if (
+        BigInt(saveBytes.size) === -lowest &&
+        below.every((access) => access.end <= lowest) &&
+        taken.every(clear) &&
+        [...indexed].every(clear) &&
+        [...escapeFloors.keys()].every(clear) &&
+        (va === undefined || va + 24n <= lowest)
+      )
+        top = lowest;
+    }
+    const lay = (end: bigint) =>
+      frameLayout(
+        below.map((access) => ({
+          offset: access.offset,
+          end: access.end,
+          id: access.node.id,
+          transport: transport(access.node),
+        })),
+        taken,
+        indexed,
+        alignment,
+        input.source!.abi.stack_return_address_bytes,
+        'below',
+        va,
+        end,
+      );
+    let layout = lay(top);
     // An object needs a member: no frame byte below the entry SP stays memory
     // and no address of one is live, so the entry-SP form alone remains.
     if (
@@ -2508,6 +2545,22 @@ export function planSourceStack(
         ))
     )
       return fallback();
+    const saveSubjects = [input.function.id, ...[...saveStores].slice(0, 63)];
+    if (
+      top < 0n &&
+      !validation.presentation(
+        'frame_object_save_area',
+        input.function.id,
+        'the frame object ends at the lowest frame save slot when every byte from it to the entry SP is a hidden save byte: no retained access, live address, indexed base or escape lies there and no escaped object reaches a save slot; every load and store keeps its address, width, order and aliasing, nothing is forwarded',
+        saveSubjects,
+      )
+    ) {
+      top = 0n;
+      layout = lay(top);
+    }
+    if (top < 0n) validation.requireAbi('frame_save', saveSubjects, FRAME_SAVE_PREMISE);
+    if (!entryLive && !reachAll && !saveArea && escapeFloors.size)
+      layout = escapedSlots(layout, below, taken, indexed, top);
     if (sharedEntry) {
       validation.requireAbi(
         'frame_object',
@@ -2527,6 +2580,127 @@ export function planSourceStack(
       alignment,
       entry: entryLive ? entryStorage : null,
       ...layout,
+    };
+  };
+  /** Source view (A3): each bounded escape reaches the bytes from its floor to
+   * the lowest proven save slot above it (an exact escape, whose every address
+   * lies in the object holding its one base) or to `top`; overlapping reaches
+   * merge. A reach that is exactly one member, with no other access, taken
+   * address or indexed base inside it except at its start, is an independent
+   * local. The frame object then spans its other members and the remaining
+   * reaches (none: no object bytes). */
+  const escapedSlots = (
+    layout: { minimum_offset: bigint; size: bigint; members: FrameMember[] },
+    below: readonly FrameAccess[],
+    taken: readonly bigint[],
+    indexed: ReadonlySet<bigint>,
+    top: bigint,
+  ): { minimum_offset: bigint; size: bigint; members: FrameMember[] } => {
+    const order = (left: bigint, right: bigint): number =>
+      left < right ? -1 : left > right ? 1 : 0;
+    const saveOffsets = [...saveBytes].sort(order);
+    const reaches: { start: bigint; end: bigint }[] = [];
+    for (const [floor, exact] of escapeFloors) {
+      context.checkpoint(1);
+      if (floor >= top) continue;
+      let end = top;
+      if (exact)
+        for (const byte of saveOffsets)
+          if (byte > floor) {
+            if (byte < end) end = byte;
+            break;
+          }
+      reaches.push({ start: floor, end });
+    }
+    reaches.sort((left, right) => order(left.start, right.start));
+    const merged: { start: bigint; end: bigint }[] = [];
+    for (const reach of reaches) {
+      const last = merged.at(-1);
+      if (last && reach.start < last.end) {
+        if (reach.end > last.end) last.end = reach.end;
+      } else merged.push({ ...reach });
+    }
+    // Reaches that are exactly one member; `ok` drops on a disqualifying offset.
+    const members = layout.members,
+      candidates: { start: bigint; end: bigint; member: FrameMember; ok: boolean }[] = [];
+    for (let index = 0, cursor = 0; index < merged.length; index++) {
+      const reach = merged[index]!;
+      while (cursor < members.length && members[cursor]!.offset + members[cursor]!.size <= reach.start)
+        cursor++;
+      const member = members[cursor];
+      if (
+        member &&
+        !member.va &&
+        member.offset === reach.start &&
+        member.offset + member.size === reach.end
+      )
+        candidates.push({ ...reach, member, ok: true });
+    }
+    const holding = (offset: bigint) => {
+      for (let low = 0, high = candidates.length - 1; low <= high; ) {
+        const middle = (low + high) >> 1,
+          candidate = candidates[middle]!;
+        if (offset < candidate.start) high = middle - 1;
+        else if (offset >= candidate.end) low = middle + 1;
+        else return candidate;
+      }
+      return undefined;
+    };
+    context.checkpoint(below.length + taken.length + indexed.size + escapeFloors.size);
+    for (const access of below) {
+      // An access overlapping a candidate lies inside it. None can span one:
+      // a candidate ends at a save slot (which no access overlaps) or at `top`.
+      const first = holding(access.offset),
+        last = holding(access.end - 1n);
+      if (first !== last) {
+        if (first) first.ok = false;
+        if (last) last.ok = false;
+      }
+    }
+    for (const offset of [...taken, ...indexed, ...escapeFloors.keys()]) {
+      const candidate = holding(offset);
+      if (candidate && offset !== candidate.start) candidate.ok = false;
+    }
+    const chosen = candidates.filter((candidate) => candidate.ok);
+    const subjects = [
+      input.function.id,
+      ...chosen.flatMap((candidate) => candidate.member.access_ids),
+    ].slice(0, 64);
+    if (
+      !chosen.length ||
+      !validation.presentation('escaped_slot_object', input.function.id, ESCAPED_SLOT_SCOPE, subjects)
+    )
+      return layout;
+    validation.requireAbi('frame_object_base', subjects, ESCAPED_SLOT_PREMISE);
+    if (chosen.some((candidate) => saveBytes.has(candidate.end)))
+      validation.requireAbi('frame_save', subjects, FRAME_SAVE_PREMISE);
+    const independent = new Set(chosen.map((candidate) => candidate.member)),
+      starts = new Set(chosen.map((candidate) => candidate.start));
+    let low: bigint | undefined, high: bigint | undefined;
+    const span = (start: bigint, end: bigint) => {
+      if (low === undefined || start < low) low = start;
+      if (high === undefined || end > high) high = end;
+    };
+    for (const member of members)
+      if (!independent.has(member)) span(member.offset, member.offset + member.size);
+    for (const reach of merged) if (!starts.has(reach.start)) span(reach.start, reach.end);
+    const returnAddress = input.source!.abi.stack_return_address_bytes,
+      unit = BigInt(input.source!.abi.layout.stack_alignment),
+      base = (low ?? top) + returnAddress,
+      minimum = base - (((base % unit) + unit) % unit) - returnAddress;
+    return {
+      minimum_offset: minimum,
+      size: (high ?? minimum) - minimum,
+      members: members.map((member) =>
+        independent.has(member)
+          ? {
+              ...member,
+              independent: {
+                id: `entity_${fingerprint(['source-frame-local', input.function.id, member.offset.toString()])}`,
+              },
+            }
+          : member,
+      ),
     };
   };
   /** Source view (S4): the incoming object when its formal is live, laid out
