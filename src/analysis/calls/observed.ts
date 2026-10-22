@@ -111,7 +111,7 @@ export function observePreparedCallInterfaces(
     }
     prefixes.set(call.id, prefix);
   }
-  const demanded = observeCallResultDemands(ir, abi, context, roots, demandIndex);
+  const demanded = observeCallResultDemands(ir, abi, context, roots, demandIndex).all;
   return calls.map((call): ObservedCall => {
     context.checkpoint(1);
     const parameters = prefixes.get(call.id)!;
