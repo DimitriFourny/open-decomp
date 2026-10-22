@@ -61,14 +61,19 @@ export function analyzeValues(
   }
 }
 
+/** Sparse conditional propagation. With `region` (a set of blocks closed under
+ * successors), `analysis` holds the fixpoint of an earlier graph whose blocks
+ * outside the region evaluate the same (see simplifySSA): only the region is
+ * solved again, entered by the executable edges of the blocks before it. Those
+ * blocks are closed under predecessors, and every operand of a value outside
+ * the region dominates it, so their facts are unchanged; inside, the region's
+ * dominators are processed first as in a full run, so the least fixpoint is the same.
+ * `executable_edges` then lists only the region's edges. */
 function propagate(
   input: SSAForm,
   budget: AnalysisBudget,
-  analysis: {
-    facts: Map<EntityId, ValueFact>;
-    reachable_blocks: Set<EntityId>;
-    executable_edges: Set<Edge>;
-  },
+  analysis: Analysis,
+  region?: ReadonlySet<EntityId>,
 ): void {
   const { facts, reachable_blocks: reachable, executable_edges: edges } = analysis;
   const blocks = new Map(input.blocks.map((block) => [block.id, block]));
@@ -83,10 +88,18 @@ function propagate(
     index.set(value.id, row);
   };
   for (const block of input.blocks) {
+    if (region && !region.has(block.id)) continue;
     budget.charge();
+    if (region) {
+      reachable.delete(block.id);
+      for (const parameter of block.parameters) facts.delete(parameter.id);
+    }
     for (const node of block.instructions) {
       budget.charge();
-      for (const result of instructionResults(node)) home.set(result.id, block.id);
+      for (const result of instructionResults(node)) {
+        home.set(result.id, block.id);
+        if (region) facts.delete(result.id);
+      }
       if (node.kind !== 'assign') continue;
       const values = expressionOperands(node.expression);
       operands.set(node.id, values);
@@ -139,9 +152,64 @@ function propagate(
     change(value, fact);
     flush();
   };
-  reachable.add(input.entry);
-  for (const parameter of blocks.get(input.entry)!.parameters) facts.set(parameter.id, varying);
-  enqueue(input.entry);
+  /** Executes the edges `block`'s terminator selects (into the region only). */
+  const activate = (block: BasicBlock): void => {
+    const terminator = block.terminator;
+    let selected: readonly Edge[];
+    if (terminator.kind === 'branch') {
+      const condition = facts.get(terminator.condition.id);
+      selected =
+        condition?.kind === 'constant'
+          ? [condition.bits === 0n ? terminator.when_false : terminator.when_true]
+          : condition
+            ? successors(terminator)
+            : [];
+    } else if (terminator.kind === 'switch') {
+      const selector = facts.get(terminator.value.id);
+      selected =
+        selector?.kind === 'constant'
+          ? [
+              terminator.cases.find((item) => item.bits === selector.bits)?.edge ??
+                terminator.otherwise,
+            ]
+          : selector
+            ? successors(terminator)
+            : [];
+    } else selected = successors(terminator);
+    for (const edge of selected) {
+      if (region && !region.has(edge.target)) continue;
+      budget.charge();
+      if (edges.has(edge)) continue;
+      edges.add(edge);
+      const newlyReachable = !reachable.has(edge.target);
+      reachable.add(edge.target);
+      let changed = false;
+      edge.arguments.forEach((argument, index) => {
+        budget.charge();
+        // Subscription and initial contribution share this executable-edge
+        // visit. Sources changed before activation contribute their latest fact;
+        // later changes notify only consumers that can actually execute.
+        const row = phiUsers.get(argument.id) ?? [];
+        row.push({ edge, index });
+        phiUsers.set(argument.id, row);
+        changed =
+          change(blocks.get(edge.target)!.parameters[index]!, facts.get(argument.id)) || changed;
+      });
+      flush();
+      if (changed || newlyReachable) enqueue(edge.target);
+    }
+  };
+  if (!region || region.has(input.entry)) {
+    reachable.add(input.entry);
+    for (const parameter of blocks.get(input.entry)!.parameters) facts.set(parameter.id, varying);
+    enqueue(input.entry);
+  }
+  if (region)
+    for (const block of input.blocks)
+      if (!region.has(block.id) && reachable.has(block.id)) {
+        budget.charge();
+        activate(block);
+      }
   for (let cursor = 0; cursor < queue.length; cursor++) {
     budget.charge();
     const block = queue[cursor]!;
@@ -184,49 +252,7 @@ function propagate(
         result.kind === 'bits' ? { kind: 'constant', bits: result.bits } : varying,
       );
     }
-    const terminator = block.terminator;
-    let selected: readonly Edge[];
-    if (terminator.kind === 'branch') {
-      const condition = facts.get(terminator.condition.id);
-      selected =
-        condition?.kind === 'constant'
-          ? [condition.bits === 0n ? terminator.when_false : terminator.when_true]
-          : condition
-            ? successors(terminator)
-            : [];
-    } else if (terminator.kind === 'switch') {
-      const selector = facts.get(terminator.value.id);
-      selected =
-        selector?.kind === 'constant'
-          ? [
-              terminator.cases.find((item) => item.bits === selector.bits)?.edge ??
-                terminator.otherwise,
-            ]
-          : selector
-            ? successors(terminator)
-            : [];
-    } else selected = successors(terminator);
-    for (const edge of selected) {
-      budget.charge();
-      if (edges.has(edge)) continue;
-      edges.add(edge);
-      const newlyReachable = !reachable.has(edge.target);
-      reachable.add(edge.target);
-      let changed = false;
-      edge.arguments.forEach((argument, index) => {
-        budget.charge();
-        // Subscription and initial contribution share this executable-edge
-        // visit. Sources changed before activation contribute their latest fact;
-        // later changes notify only consumers that can actually execute.
-        const row = phiUsers.get(argument.id) ?? [];
-        row.push({ edge, index });
-        phiUsers.set(argument.id, row);
-        changed =
-          change(blocks.get(edge.target)!.parameters[index]!, facts.get(argument.id)) || changed;
-      });
-      flush();
-      if (changed || newlyReachable) enqueue(edge.target);
-    }
+    activate(block);
   }
 }
 
@@ -370,38 +396,81 @@ export function recoverComparison(
  * their architectural entry bindings remain. At each fixpoint, duplicated tests
  * are joined (joinDuplicateTests) and the loop runs again. On interruption the
  * last complete graph is returned.
+ *
+ * After the first round, a round solves again only what the previous round's
+ * changes can have changed (`mode: 'full'` recomputes everything, the oracle
+ * of the tests); the result is the same graph:
+ * - Value analysis: its facts are the least fixpoint of a monotone system (a
+ *   value's operands are evaluated before it: they dominate it). Removing an
+ *   unreachable block or a dead assignment, folding a test on its constant
+ *   fact, replacing an expression by its constant fact, by the operand a
+ *   constant select chooses or by an identity's operand, aliasing a same-type
+ *   copy and replacing a trivial parameter by its one incoming value each keep
+ *   that fixpoint on every remaining value (the removed terms are bottom at it,
+ *   and each replacement evaluates to the same fact at and below it).
+ *   Comparison recovery and the value rules (their blocks), edge threading (the
+ *   old and new targets) and test joining (the blocks it replaced or added, and
+ *   their former successors) may add precision: the next analysis solves the
+ *   blocks reachable from those again (propagate's `region`) and keeps the
+ *   facts before them.
+ * - After a round whose only change removed unreachable blocks, every rewrite
+ *   input of every assignment, test and edge is unchanged except the incoming
+ *   values of parameters that lost those blocks' edges, which only the
+ *   determinacy scan of `x OP x` reads: the round is the fixpoint unless one of
+ *   those comparisons folds now.
+ * - Only rewrite creates same-type copies after the first round's copy pass, so
+ *   that pass runs only when it did.
  */
 export function simplifySSA(
   input: SSAForm,
   options: AnalysisOptions = {},
+  mode: 'incremental' | 'full' = 'incremental',
 ): AnalysisResult<SSAForm> {
   const budget = new AnalysisBudget(options);
   let current = input;
   try {
+    const incremental = mode === 'incremental';
     let changed = true,
-      first = true;
+      first = true,
+      // The last analysis, the fixpoint of `current` outside the blocks
+      // reachable from `dirty`.
+      previous: Analysis | undefined,
+      dirty = new Set<EntityId>(),
+      // The previous rewrite when it only removed unreachable blocks.
+      quiet: Rewrite | undefined;
     while (changed) {
       budget.charge();
-      const analysis = {
-        facts: new Map<EntityId, ValueFact>(),
-        reachable_blocks: new Set<EntityId>(),
-        executable_edges: new Set<Edge>(),
-      };
-      propagate(current, budget, analysis);
-      const rewritten = rewrite(current, analysis, budget);
-      const copies = propagateCopies(rewritten.value, budget);
-      // Parameters become trivial only when edges or values change.
-      const trivial =
-        first || rewritten.changed || copies.changed
-          ? eliminateTrivialParameters(copies.value, budget)
-          : { value: copies.value, changed: false };
-      first = false;
-      changed = rewritten.changed || copies.changed || trivial.changed;
-      current = trivial.value;
+      const analysis = incremental
+        ? reanalyze(current, previous, dirty, budget)
+        : analyze(current, budget);
+      if (quiet && steady(current, quiet, analysis, budget)) changed = false;
+      else {
+        const rewritten = rewrite(current, analysis, budget);
+        const copies =
+          first || rewritten.copies || !incremental
+            ? propagateCopies(rewritten.value, budget)
+            : { value: rewritten.value, changed: false };
+        // Parameters become trivial only when edges or values change.
+        const trivial =
+          first || rewritten.changed || copies.changed
+            ? eliminateTrivialParameters(copies.value, budget)
+            : { value: copies.value, changed: false };
+        first = false;
+        changed = rewritten.changed || copies.changed || trivial.changed;
+        current = trivial.value;
+        previous = analysis;
+        dirty = new Set(rewritten.dirty);
+        quiet =
+          rewritten.unreachable_only && !copies.changed && !trivial.changed ? rewritten : undefined;
+      }
       if (!changed) {
         // Joining at the fixpoint leaves dead cones and trivial parameters to the next round.
         const joined = joinDuplicateTests(current, budget);
         changed = joined.changed;
+        if (changed) {
+          joinedBlocks(current, joined.value, dirty, budget);
+          quiet = undefined;
+        }
         current = joined.value;
       }
     }
@@ -411,18 +480,107 @@ export function simplifySSA(
   }
 }
 
-function rewrite(
+/** A value analysis simplifySSA updates in place (see reanalyze). */
+interface Analysis {
+  readonly facts: Map<EntityId, ValueFact>;
+  readonly reachable_blocks: Set<EntityId>;
+  readonly executable_edges: Set<Edge>;
+}
+
+function analyze(input: SSAForm, budget: AnalysisBudget): Analysis {
+  const analysis = {
+    facts: new Map<EntityId, ValueFact>(),
+    reachable_blocks: new Set<EntityId>(),
+    executable_edges: new Set<Edge>(),
+  };
+  propagate(input, budget, analysis);
+  return analysis;
+}
+
+/** The analysis of `input` from `previous`, which holds outside the blocks
+ * reachable from `dirty` (see simplifySSA): reused when nothing is dirty,
+ * otherwise those blocks are solved again (in place). */
+function reanalyze(
   input: SSAForm,
+  previous: Analysis | undefined,
+  dirty: ReadonlySet<EntityId>,
+  budget: AnalysisBudget,
+): Analysis {
+  if (!previous) return analyze(input, budget);
+  if (!dirty.size) return previous;
+  const byId = new Map(input.blocks.map((block) => [block.id, block]));
+  const region = new Set<EntityId>(),
+    pending = [...dirty];
+  while (pending.length) {
+    const block = byId.get(pending.pop()!);
+    if (!block || region.has(block.id)) continue;
+    budget.charge();
+    region.add(block.id);
+    for (const edge of successors(block.terminator)) pending.push(edge.target);
+  }
+  if (region.size === input.blocks.length) return analyze(input, budget);
+  const analysis = { ...previous, executable_edges: new Set<Edge>() };
+  propagate(input, budget, analysis, region);
+  return analysis;
+}
+
+/** Adds to `dirty` the blocks a join replaced or added, and the former
+ * successors of the replaced ones. */
+function joinedBlocks(
+  before: SSAForm,
+  after: SSAForm,
+  dirty: Set<EntityId>,
+  budget: AnalysisBudget,
+): void {
+  const byId = new Map(before.blocks.map((block) => [block.id, block]));
+  for (const block of after.blocks) {
+    budget.charge();
+    const prior = byId.get(block.id);
+    if (prior === block) continue;
+    dirty.add(block.id);
+    if (prior) for (const edge of successors(prior.terminator)) dirty.add(edge.target);
+  }
+}
+
+/** After `previous` only removed unreachable blocks: no reflexive comparison
+ * folds with its parameters' remaining incoming values (see simplifySSA). */
+function steady(
+  input: SSAForm,
+  previous: Rewrite,
   analysis: ValueAnalysis,
   budget: AnalysisBudget,
-): { value: SSAForm; changed: boolean } {
-  let changed = false;
-  const definitions = new Map<EntityId, Assignment>();
-  for (const block of input.blocks)
-    for (const node of block.instructions)
-      if (node.kind === 'assign') definitions.set(node.result.id, node);
-  const states = new Map(input.register_states.map((state) => [state.block, state]));
-  // Block parameter -> incoming edge values, for the value rules' determinacy scan.
+): boolean {
+  if (!previous.reflexive.length) return true;
+  const scope = ruleScope(previous.definitions, incomingValues(input, budget), analysis, budget);
+  return previous.reflexive.every((node) => {
+    budget.charge();
+    return (
+      rewriteExpression(node, previous.definitions, analysis, scope).expression === node.expression
+    );
+  });
+}
+
+/** One rewrite of the graph, and what the next round may take over from it
+ * (see simplifySSA). */
+interface Rewrite {
+  readonly value: SSAForm;
+  readonly changed: boolean;
+  /** Blocks whose value analysis may have changed beyond the changes that keep
+   * its least fixpoint (see simplifySSA): those of rewritten expressions not
+   * replaced by their constant fact, a constant select's operand or an
+   * identity's operand, and the old and new targets of threaded edges. */
+  readonly dirty: ReadonlySet<EntityId>;
+  /** The only change removed unreachable blocks. */
+  readonly unreachable_only: boolean;
+  /** Some expression became a same-type bitcast (a copy). */
+  readonly copies: boolean;
+  /** Assignments by result as rewritten, and the kept `x OP x` comparisons. */
+  readonly definitions: ReadonlyMap<EntityId, Assignment>;
+  readonly reflexive: readonly Assignment[];
+}
+
+/** Block parameter -> incoming edge values, for the value rules' determinacy scan. */
+function incomingValues(input: SSAForm, budget: AnalysisBudget): Map<EntityId, Value[]> {
   const parameters = new Map<EntityId, Value[]>();
   const byBlock = new Map(input.blocks.map((block) => [block.id, block]));
   for (const block of input.blocks)
@@ -437,7 +595,16 @@ function rewrite(
         parameters.set(parameter.id, list);
       });
     }
-  const scope: ValueRuleScope = {
+  return parameters;
+}
+
+function ruleScope(
+  definitions: ReadonlyMap<EntityId, Assignment>,
+  parameters: ReadonlyMap<EntityId, readonly Value[]>,
+  analysis: ValueAnalysis,
+  budget: AnalysisBudget,
+): ValueRuleScope {
+  return {
     definition: (id) => definitions.get(id)?.expression,
     constant: (id) => {
       const fact = analysis.facts.get(id);
@@ -446,11 +613,69 @@ function rewrite(
     incoming: (id) => parameters.get(id) ?? [],
     charge: (work) => budget.charge(work),
   };
+}
+
+/** The rewritten expression of one assignment (the same object when nothing
+ * applies), and whether the change keeps the least fixpoint (see Rewrite):
+ * comparison recovery and the value rules may make the analysis more precise. */
+function rewriteExpression(
+  node: Assignment,
+  definitions: ReadonlyMap<EntityId, Assignment>,
+  analysis: ValueAnalysis,
+  scope: ValueRuleScope,
+): { readonly expression: Expression; readonly preserving: boolean } {
+  let expression = recoverComparison(node.expression, definitions, analysis.facts);
+  const fact = analysis.facts.get(node.result.id);
+  if (fact?.kind === 'constant' && expression.kind !== 'constant' && expression.kind !== 'address')
+    return { expression: { kind: 'constant', bits: fact.bits }, preserving: true };
+  let preserving = expression === node.expression;
+  if (expression.kind === 'select') {
+    const condition = analysis.facts.get(expression.condition.id);
+    if (condition?.kind === 'constant')
+      expression = {
+        kind: 'cast',
+        op: 'bitcast',
+        value: condition.bits === 0n ? expression.when_false : expression.when_true,
+      };
+  } else if (expression.kind === 'integer') {
+    const right = analysis.facts.get(expression.right.id);
+    // These identities preserve unknown/undefined state; x-x and x*0 deliberately do not.
+    if (
+      right?.kind === 'constant' &&
+      ((right.bits === 0n &&
+        ['add', 'sub', 'or', 'xor', 'shl', 'lshr', 'ashr', 'rol', 'ror'].includes(expression.op)) ||
+        (right.bits === 1n &&
+          (['mul', 'udiv'].includes(expression.op) ||
+            (expression.op === 'sdiv' && bitWidth(node.result.type) > 1))) ||
+        (right.bits === (1n << BigInt(bitWidth(node.result.type))) - 1n && expression.op === 'and'))
+    ) {
+      expression = { kind: 'cast', op: 'bitcast', value: expression.left };
+    }
+  }
+  const folded = foldValueRule(node.result.type, expression, scope);
+  if (folded) {
+    expression = folded;
+    preserving = false;
+  }
+  return { expression, preserving };
+}
+
+function rewrite(input: SSAForm, analysis: ValueAnalysis, budget: AnalysisBudget): Rewrite {
+  let changed = false,
+    unreachable = false,
+    copied = false;
+  const dirty = new Set<EntityId>();
+  const definitions = new Map<EntityId, Assignment>();
+  for (const block of input.blocks)
+    for (const node of block.instructions)
+      if (node.kind === 'assign') definitions.set(node.result.id, node);
+  const states = new Map(input.register_states.map((state) => [state.block, state]));
+  const scope = ruleScope(definitions, incomingValues(input, budget), analysis, budget);
   const rewritten: { block: BasicBlock; nodes: Instruction[]; terminator: Terminator }[] = [];
   for (const block of input.blocks) {
     budget.charge();
     if (!analysis.reachable_blocks.has(block.id)) {
-      changed = true;
+      unreachable = true;
       continue;
     }
     const nodes: Instruction[] = [];
@@ -460,43 +685,15 @@ function rewrite(
         nodes.push(node);
         continue;
       }
-      let expression = recoverComparison(node.expression, definitions, analysis.facts);
-      const fact = analysis.facts.get(node.result.id);
-      if (
-        fact?.kind === 'constant' &&
-        expression.kind !== 'constant' &&
-        expression.kind !== 'address'
-      )
-        expression = { kind: 'constant', bits: fact.bits };
-      else if (expression.kind === 'select') {
-        const condition = analysis.facts.get(expression.condition.id);
-        if (condition?.kind === 'constant')
-          expression = {
-            kind: 'cast',
-            op: 'bitcast',
-            value: condition.bits === 0n ? expression.when_false : expression.when_true,
-          };
-      } else if (expression.kind === 'integer') {
-        const right = analysis.facts.get(expression.right.id);
-        // These identities preserve unknown/undefined state; x-x and x*0 deliberately do not.
-        if (
-          right?.kind === 'constant' &&
-          ((right.bits === 0n &&
-            ['add', 'sub', 'or', 'xor', 'shl', 'lshr', 'ashr', 'rol', 'ror'].includes(
-              expression.op,
-            )) ||
-            (right.bits === 1n &&
-              (['mul', 'udiv'].includes(expression.op) ||
-                (expression.op === 'sdiv' && bitWidth(node.result.type) > 1))) ||
-            (right.bits === (1n << BigInt(bitWidth(node.result.type))) - 1n &&
-              expression.op === 'and'))
-        ) {
-          expression = { kind: 'cast', op: 'bitcast', value: expression.left };
-        }
-      }
-      expression = foldValueRule(node.result.type, expression, scope) ?? expression;
+      const rule = rewriteExpression(node, definitions, analysis, scope),
+        expression = rule.expression;
       if (expression !== node.expression) {
         changed = true;
+        if (!rule.preserving) dirty.add(block.id);
+        copied ||=
+          expression.kind === 'cast' &&
+          expression.op === 'bitcast' &&
+          sameType(node.result.type, expression.value.type);
         const origins = expressionOperands(node.expression).flatMap((value) => {
           const definition = definitions.get(value.id);
           return definition ? [definition.provenance] : [];
@@ -583,7 +780,8 @@ function rewrite(
     const owner = owners.get(value.id);
     if (owner !== undefined && owner !== terminatorOf) pinned.add(owner);
   };
-  const blocks: BasicBlock[] = [];
+  const blocks: BasicBlock[] = [],
+    reflexive: Assignment[] = [];
   for (const { block, nodes, terminator } of rewritten) {
     const kept: Instruction[] = [];
     const removed: Provenance[] = [];
@@ -596,6 +794,12 @@ function rewrite(
         continue;
       }
       kept.push(node);
+      if (
+        node.kind === 'assign' &&
+        node.expression.kind === 'compare' &&
+        node.expression.left.id === node.expression.right.id
+      )
+        reflexive.push(node);
       for (const value of instructionOperands(node)) pin(value);
     }
     kept.reverse();
@@ -663,6 +867,8 @@ function rewrite(
         edge.arguments.some((value, index) => value.id !== initial.arguments[index]?.id)
       ) {
         changed = true;
+        dirty.add(initial.target);
+        dirty.add(edge.target);
         return edge;
       }
       return initial;
@@ -695,7 +901,12 @@ function rewrite(
       blocks: threaded,
       register_states: input.register_states.filter((state) => byId.has(state.block)),
     },
-    changed,
+    changed: changed || unreachable,
+    dirty,
+    unreachable_only: unreachable && !changed,
+    copies: copied,
+    definitions,
+    reflexive,
   };
 }
 

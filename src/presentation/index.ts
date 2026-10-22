@@ -1105,6 +1105,8 @@ export function structureControlFlow(
      * lookahead, best first; `tails` restricts targets to small function
      * tails. Undefined without candidates or past the selection allowance. */
     const rank = (graph: Graph, tails: boolean): Candidate[] | undefined => {
+      // Past the allowance no scan can rank anything: `selection` only falls.
+      if (selection < 0) return undefined;
       const groups = new Map<string, CollapseEdge[]>();
       let cost = 0;
       for (const node of graph.nodes) {

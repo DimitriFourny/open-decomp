@@ -248,7 +248,7 @@ Files that several items touch:
 
 ### C4: Remove superlinear and repeated work on large bodies
 
-- [ ] **Problem.** The mandatory floor exceeds 10M for `sqlite3Select` (≈11.65M) and `sqlite3Pragma` (≈14.0M), measured with summaries off at a 40M measurement budget. Optional stages also blow up with body size.
+- [x] **Problem.** The mandatory floor exceeds 10M for `sqlite3Select` (≈11.65M) and `sqlite3Pragma` (≈14.0M), measured with summaries off at a 40M measurement budget. Optional stages also blow up with body size. _Done (C4): (a), (b), (d) as specified; (c) reuses the value analysis after fixpoint-keeping rounds, re-solves only the blocks reachable from comparison/rule/threading/join changes, skips rounds that only removed unreachable blocks, and skips the copy pass (2,031 lane `simplifySSA` calls identical to the full rounds; simplify 1.75M → 1.33M on `sqlite3Select`, 2.32M → 1.60M on `sqlite3Pragma` at 40M); rewrite and trivial-parameter elimination still read the whole graph. Lane: 8 texts change through budget-dependent optional stages; work −5.5%; `sqlite3Select`/`sqlite3Pragma` still exceed 10M._
   - **Change** (byte-identical by construction):
     - (a) `nativeArgumentValues` (`src/service/analysis/native-arguments.ts:29-39, 85-97`) scans the whole IR per call. Build one per-IR index (assignments, stores, call register inputs by call id, terminator exit bindings, concat by operand tuple) once per caller loop in `nativeShapeTransfers` (`source-facts.ts:1305-1328`) and `functionTypeObjects` (`image-types.ts:317-342`), and pass it in.
       - Measured: −0.56M on `Incrmerge`, −0.72M on `isDate`, up to −9M on `sqlite3Pragma` at 40M.
@@ -271,7 +271,7 @@ Files that several items touch:
 
 ### V1: Caller result-use evidence (correctness)
 
-- [ ] **Problem.** Four value-returning functions print `void` although callers in the image read the result:
+- [x] **Problem.** Four value-returning functions print `void` although callers in the image read the result: _(done: source-built fixture `test/service/analysis/caller-result-use.test.ts` (a `static noinline` void-like `post_call` kept non-void by its reading caller, `post_ignored`/`bump` stay `void`); OD lane `od-rm4-v1b` prints integer results for the five functions plus `sqlite3PagerSavepoint` (source `int`), no other text changes, checked view identical; about +340k work on the 38 SQLite functions where the scan runs, near-limit functions unchanged)_
   - `sqlite3GetToken` (17 of 18 BL sites read w0/x0; OD's own `getConstraintToken` text reads it);
   - `getConstraintToken` (11/11);
   - `sqlite3BtreeOpen` (5/5);
@@ -411,7 +411,7 @@ Files that several items touch:
 
 ### K3: Print the fixed prefix of an established variadic library contract
 
-- [ ] **Problem.** brotli `PrintBytes` and brotli `main` (5 sites) print `fprintf(...)` with no arguments at all, plus dead `__stderrp;` statements. Ghidra prints `_fprintf(pFVar2,pcVar3)`. These cause 3 wrong claims ("fprintf arguments are elided").
+- [x] **Problem.** brotli `PrintBytes` and brotli `main` (5 sites) print `fprintf(...)` with no arguments at all, plus dead `__stderrp;` statements. Ghidra prints `_fprintf(pFVar2,pcVar3)`. These cause 3 wrong claims ("fprintf arguments are elided").
   - **Root cause:**
     - A contract is rendered only when `layout.state === 'complete'` and the argument count equals the declared count (`source-planner.ts:544-557`).
     - The fallback needs an `InferredCallee`, but `observePreparedCallInterfaces` skips calls with an established contract (`src/analysis/calls/observed.ts:55-59`).
@@ -428,6 +428,7 @@ Files that several items touch:
     - `PrintBytes` prints `stream = __stderrp; … fprintf(stream, format)` with no dead `__stderrp;` statements (measured).
     - The 4 brotli `main` sites change the same way.
     - Everything else byte-identical. Checked view unchanged.
+  - **Done (K3):** `PrintBytes` prints `fprintf(stream, format)` with no dead `__stderrp;`; brotli `main` loses 15 dead `__stderrp;` statements and its 4 open sites print `fprintf(stream, format, ...)` / the literal format. Only those 2 lane texts change, checked view identical. The declared result stays unbound (binding it turned void `PrintBytes` into `uint64_t` with an `unknown_value` return). brotli `main` work 9.238M → 9.266M.
 
 ### K4: String literals from tail-exit arguments and partly constant phis
 
@@ -473,7 +474,7 @@ Files that several items touch:
 
 ### K6: Call spelling: no `...` in open-arity casts; tail arguments printed like ordinary arguments
 
-- [ ] **Problem:**
+- [x] **Done** (measured on the full OD lane `od-rm4-k6` vs `od-main-afb7691`: 51 texts changed, `, ...` casts 77 → 0, `(uintptr_t)` in `return f(` tail lines 46 → 0 in 21 functions, 30 `open arity` header lines gained `indirect call at 0x<VA>`, nothing else, states and work unchanged, checked view byte-identical; emitters 87). **Problem:**
   - 77 function-pointer casts spell open arity as `(T (*)(A, B, ...))`, which in C declares a variadic prototype. This caused 4 wrong claims (`matrix_callback` ×2, `sub@0x100000450`, `sub@0x1400010f0`).
   - 46 `(uintptr_t)` casts on tail-call arguments in 21 functions: `return sqlite3SrcListDelete((uintptr_t)address_2, (uintptr_t)address_1)`, where `address_1` is a declared pointer.
   - **Root cause:**
@@ -676,7 +677,7 @@ Files that several items touch:
 
 ### A3: Escaped slots bounded by a frame save print as independent locals
 
-- [ ] **Problem.** 67 texts declare a `_Alignas(16) struct { … } frame;`. That costs 3,420 declaration tokens, 155 pads and 2,292 `frame.` prefixes, and the judges cite the frame in 30 noise losses. Small functions that pass one local's address to a callee print a padded object: `getConstraintToken` prints `struct { uint8_t pad_40[12]; uint32_t local_34; uint8_t pad_30[48]; } frame;` for `&frame.local_34`.
+- [x] **Problem.** 67 texts declare a `_Alignas(16) struct { … } frame;`. That costs 3,420 declaration tokens, 155 pads and 2,292 `frame.` prefixes, and the judges cite the frame in 30 noise losses. Small functions that pass one local's address to a callee print a padded object: `getConstraintToken` prints `struct { uint8_t pad_40[12]; uint32_t local_34; uint8_t pad_30[48]; } frame;` for `&frame.local_34`. _Done (`wt/rm4-a3`, lane `od-rm4-a3` vs `od-main-56a18f1`): frame structs 66 → 59 (the 7 acceptance functions print none), `fts3DestroyMethod`/`unixSync` print `uint32_t local_24;` outside it, 42 more structs lose (26) or shrink (16) their tail pad, 50 texts changed, no state change; checked view identical on the acceptance set._
   - **Root cause:** `frame()`/`frameLayout` (`source-stack.ts:2423-2531`, `:66-316`) treat the whole escaped region up to the entry SP as one object. The existing `frame_save` premise (`:1579`) says that a frame address handed to a callee designates its own object and never a save slot, so an escaped object below a save slot ends at that slot. `frame()` does not use this.
   - **Change** (source view, `!reachAll`, entry SP not live):
     1. Each escaped or indexed base at or above `reachFloor` defines a region running to the lowest proven save slot above it (`saveBytes`), or to the entry SP. Overlapping regions merge.
@@ -703,7 +704,7 @@ Files that several items touch:
 
 ### E1: Rematerialize constant-offset derived pointers; print byte-pointer sums without `uintptr_t`
 
-- [ ] **Problem.** The texts contain 202 temporaries of the form `x = (T*)((uintptr_t)b ± k)` and 436 dereferences `*(T *)((uintptr_t)x + k)`. Example: `sqlite3_collation_needed16` prints `address_1 = (uint8_t*)((uintptr_t)address + 0x190); *(uint64_t *)address_1 = 0; *(uint64_t *)((uintptr_t)address_1 + 8) = arg2;` (an ARM64 `stp` with a computed base). Ghidra prints `*(undefined8 *)(param_1 + 400)`.
+- [x] **Problem.** The texts contain 202 temporaries of the form `x = (T*)((uintptr_t)b ± k)` and 436 dereferences `*(T *)((uintptr_t)x + k)`. Example: `sqlite3_collation_needed16` prints `address_1 = (uint8_t*)((uintptr_t)address + 0x190); *(uint64_t *)address_1 = 0; *(uint64_t *)((uintptr_t)address_1 + 8) = arg2;` (an ARM64 `stp` with a computed base). Ghidra prints `*(undefined8 *)(param_1 + 400)`. _Done (E1): OD lane vs `od-main-afb7691`: 58 texts changed, 57 shorter (−3.1k regex-lexer tokens); `sqlite3_collation_needed16` prints `address->field_0x190 = 0; address->field_0x198 = arg2;`, `sqlite3PagerSavepoint` `address_10->field_0x1e0 = 0;` (−437), `vdbePmaReaderClear` `+ 64`; states unchanged, checked view unchanged; brotli `main` needs C2 first (shared 256-record bound)._
   - **Root cause:**
     - The renderer repeats `x ± k` only inside one reader statement (`src/emitters/source-inlining.ts:585-616`, gate at `:616`).
     - `memberAccess` builds fields only through inline bases (`renderer.ts:3146`).
@@ -822,7 +823,7 @@ Files that several items touch:
 
 ### P1: Table contents policy and extent soundness
 
-- [ ] **Problem.** Inlined tables cost 15.6k lexical tokens, 7.6% of OD's total. 87% of that is six 256-byte maps repeated across 38 functions, which no judge asked for and which no QA answer uses: the four table-backed QA questions are 0/3 for OD today. One declaration is wrong: `unicodeNext` prints `static const uint8_t sqlite3Utf8Trans1[3979]` (source: 64 entries), followed by 192 bytes of neighbouring opcode-name strings.
+- [x] **Problem.** Inlined tables cost 15.6k lexical tokens, 7.6% of OD's total. 87% of that is six 256-byte maps repeated across 38 functions, which no judge asked for and which no QA answer uses: the four table-backed QA questions are 0/3 for OD today. One declaration is wrong: `unicodeNext` prints `static const uint8_t sqlite3Utf8Trans1[3979]` (source: 64 entries), followed by 192 bytes of neighbouring opcode-name strings.
   - **Root cause:**
     - `TABLE_FULL_BYTES = 512n` and `TABLE_PREFIX_BYTES = 256` (`renderer.ts:209-210`).
     - `tableContents` (`:3866-3956`) takes `span_bound` (the distance to the next symbol, "a bound, not a size", `source-model.ts:139-142`) as the extent (`:3887-3890`).
@@ -849,6 +850,7 @@ Files that several items touch:
     - No `[3979]`.
     - Checked view identical on all 232.
   - **Expected effect** (measured on the stored texts): lexical sum 205,686 → 192,009; geomean 1.337 → 1.272; Claude geomean about 1.42 [estimate]; QA tokens on `sqlite3_incomplete`, `sqlite3_stricmp`, `sqlite3_strnicmp` and `renameColumnFunc`.
+  - **Evidence (rm4-p1):** OD lane `od-rm4-p1` vs `od-rm3-final`: exactly the 38 texts that print a table changed (all other 194 byte-identical, no state/work change beyond noise), no `[3979]`; lexical sum 205,686 → 192,106 (1,087,232 → 1,052,948 bytes); checked view byte-identical on 6 changed functions. `maximum()` stayed as it was; `reachOf` (source-tables.ts) adds the guarded `x - c` and constant `x >> c` rules (so `Utf8Trans1` is `[64]` in full and `aAscii` `[4]`). Deviation: `statemap` (index is a loop-carried state with no provable range) and the tables whose index range is not provable (`UpperToLower`, `aEntry`, `CtypeMap`) now print `name[]` with the first row; the old `[10]`/`[274]` were neighbour distances (source: `statemap[8]`).
 
 ### P2: Struct bodies without pad members in the inline text
 
@@ -898,7 +900,7 @@ Files that several items touch:
 
 ### L1: A loop header's one statement prints inside the test
 
-- [ ] **Problem.** A loop header that prints any statement cannot become `while (c)`. 13 measured loops print `while (true) { x = e; if (!c) break; … }` where Ghidra prints a tested loop. Examples: the `sqlite3ParseUri` scan; the `sqlite3BtreeOpen` pointer chase.
+- [x] **Problem.** A loop header that prints any statement cannot become `while (c)`. 13 measured loops print `while (true) { x = e; if (!c) break; … }` where Ghidra prints a tested loop. Examples: the `sqlite3ParseUri` scan; the `sqlite3BtreeOpen` pointer chase. _Done (`wt/rm4-l1`): lane `od-rm4-l1` vs `od-rm3-final`: `while (true)` 217 → 203, tested loops 220 → 234, `break;` 379 → 360, `for` 18 → 19, gotos 759 unchanged; 14 loops in 10 texts print their header statement inside the test (`openDatabase` becomes a `for`), and 2 more texts (`fts3EvalNextRow`, `sqlite3Fts3Incrmerge`) only print chained negations as `x == 0`; every other text byte-identical; checked view identical; `loop_comma_condition`._
   - **Root cause:** `planLoopForms` accepts a chain stage only when `facts.silent(first)` (`src/emitters/source-control.ts:1436`), and a head test only when `facts.silent(head)` (`:1455`). The comma-operand machinery already exists for later short-circuit operands (`commaOperand` `renderer.ts:6574-6586`, `operandTerm` `:6685-6719`, carriers `:7686-7706`), and `commaOperands` is computed for every block.
   - **Change:**
     - `LoopFacts` gains `comma(block)` (a non-silent header whose `commaOperands` entry is one statement) and `carrier(block)`.
@@ -979,7 +981,7 @@ Files that several items touch:
 
 ### T2: Charge-exact reuse and an explicit `limited` flag
 
-- [ ] **Problem.** Charged work depends on history:
+- [x] **Problem.** Charged work depends on history: _(done: `PreparedNativeUnit.limited` set at every preparation limit and when the variadic footprint is cut; footprint limits no longer allowance-derived; context evidence scope content-derived instead of the random project ID (the real cause of run-to-run work noise); reused record index records its build's reads. Two full odbench runs of one build give identical per-function work; 45 functions' work and 1 text (`matrix_checksum` PE O0: open-arity note for a limited `adler32_z`) changed vs `od-main-afb7691`.)_
   - `_sqlite3Initialize` charges 275,857 at its first preparation and 278,384 in 46 later ones;
   - `_sqlite3_config` charges 333,203, 294,349 or 246,292 depending on the load;
   - about 21 SQLite functions differ in work between two runs of one build.

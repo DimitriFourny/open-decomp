@@ -80,7 +80,8 @@ export interface SequenceRegion {
  * A single-test form's exit edge may carry copies only when it is the sole
  * edge from inside the loop to its continuation; they print after the loop. */
 export type LoopForm =
-  /** Header block has no printed statements; its `if` is the loop test and the
+  /** Header block prints nothing but its test, or one statement that test holds
+   * (printed inside it); its `if` is the loop test and the
    * exit arm is the loop's lexical break. `enter` is the arm value staying inside. */
   | {
       readonly kind: 'while';

@@ -1258,3 +1258,99 @@ for (const variant of ['stored', 'call', 'literal', 'upper', 'demanded'] as cons
       else assert.match(emission.text, /physical_return\(/);
     }
   });
+
+/** Darwin `g(p) { if (!p) return 7; return h(p); }` where `h` is a tail whose callee
+ * interface has no result types. Caller demand on w0 types the tail result. */
+function demandedTail(demand: boolean) {
+  const abi = darwinArm64Abi;
+  const x0 = register(
+    abi.classifyCall({
+      returns: word,
+      parameters: [word],
+      variadic: false,
+      fixed_parameter_count: 1,
+    }).returns[0],
+  );
+  const b = builder(`demanded-tail-${demand}`),
+    entry = b.block('entry'),
+    literal = b.block('literal'),
+    tail = b.block('tail');
+  const p = entry.readRegister(x0);
+  entry.branch(
+    entry.compare('eq', p, entry.constant(u64, 0n)),
+    entry.edge(literal),
+    entry.edge(tail),
+  );
+  literal.writeRegister(x0, literal.constant(u64, 7n));
+  literal.return([]);
+  tail.terminate({
+    kind: 'indirect',
+    target: tail.address({ image_id: image, space: 'va', value: 0x2000n }),
+    tail_call: true,
+    reason: 'Discovered tail-call exit',
+  });
+  const ir = constructSSA(b.finish(entry, [])).value as SSAForm;
+  const control = ir.blocks.find((block) => block.terminator.kind === 'indirect')!.terminator;
+  const source: SourceEvidence = {
+    abi,
+    addresses: [],
+    callees: [
+      {
+        call_id: control.id,
+        target: { image_id: image, space: 'va', value: 0x2000n },
+        parameters: [x0],
+        returns: [],
+        argument_list_complete: true,
+        evidence_ids: [],
+      },
+    ],
+    ...(demand
+      ? {
+          caller_result_demands: () => ({
+            registers: [{ ...x0, width_bits: 32 }],
+            sites: [{ image_id: image, space: 'va' as const, value: 0x3000n }],
+          }),
+        }
+      : {}),
+  };
+  const view = (kind: 'source' | 'checked') =>
+    reconstruct(
+      { function: structureControlFlow(ir, createOperationContext()).value!, source },
+      createOperationContext(),
+      kind,
+    );
+  return { ir, source, view };
+}
+
+test('caller demand types a tail whose callee has no result types', () => {
+  const plain = demandedTail(false).view('source');
+  assert.equal(plain.source?.return_type ?? null, null);
+  const fixture = demandedTail(true);
+  const program = fixture.view('source');
+  assert.equal(program.source?.return_type?.kind, 'integer');
+  assert.ok(program.local_validation?.some((record) => record.rule === 'tail_result_width'));
+  assert.equal(fixture.view('checked').source?.caller_result_demands, undefined);
+  for (const language of ['c-like', 'python-like'] as const) {
+    const { emission } = emit(fixture.ir, { source: fixture.source }, language);
+    assert.doesNotMatch(emission.text, /unknown_result|^void /m);
+    const formals = emittedFormals(emission);
+    for (const [input, expected] of [
+      [0n, 7n],
+      [5n, 0x1234n],
+    ] as const) {
+      const observed = execute(
+        emission,
+        new Map([[formals[0]!.statement_id, input]]),
+        new Map(),
+        0n,
+        new Map(),
+        new Map(),
+        new Map([
+          ['sub_2000', (args: readonly bigint[]) => (assert.deepEqual(args, [input]), 0x1234n)],
+          ['0x2000', (args: readonly bigint[]) => (assert.deepEqual(args, [input]), 0x1234n)],
+        ]),
+      );
+      assert.deepEqual(observed.values, [expected]);
+    }
+  }
+});
