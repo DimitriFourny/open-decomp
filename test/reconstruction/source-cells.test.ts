@@ -1,11 +1,43 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createOperationContext } from '../../src/core/index.js';
-import { effectType, integer, type Expression, type Value } from '../../src/ir/index.js';
+import { darwinArm64Abi } from '../../src/abi/darwin-arm64/index.js';
+import { constructSSA } from '../../src/analysis/ssa/index.js';
+import { simplifySSA } from '../../src/analysis/values/index.js';
+import { createOperationContext, type RegisterDescriptor } from '../../src/core/index.js';
+import {
+  effectType,
+  integer,
+  type Expression,
+  type RegisterBinding,
+  type SSAForm,
+  type Value,
+} from '../../src/ir/index.js';
 import type { BlockRegion, ParallelTransfer } from '../../src/presentation/index.js';
 import { LocalValidationSession } from '../../src/reconstruction/local-validation.js';
 import { recombineSourceCells } from '../../src/reconstruction/source-cells.js';
-import { provenance, register } from '../ir/support.js';
+import type { InferredCallee } from '../../src/reconstruction/source-model.js';
+import { emit, execute, type SourceCallOracle } from '../emitters/c/support.js';
+import { builder, image, provenance, register } from '../ir/support.js';
+
+/** The source planner's cell interface over one test's definition map; whole
+ * instruction outputs are collected in `outputs`. */
+function cellPlan(
+  definitions: Map<string, Expression>,
+  outputs = new Map<string, readonly RegisterBinding[]>(),
+): Parameters<typeof recombineSourceCells>[5] {
+  return {
+    make: (key, type, _block, expression) => {
+      if (expression) definitions.set(key, expression);
+      return { id: key, type };
+    },
+    alias: (target, expression) => {
+      definitions.set(target.id, expression);
+    },
+    outputs: (node, bindings) => {
+      outputs.set(node.id, bindings);
+    },
+  };
+}
 
 const recombined = [
   'whole',
@@ -142,16 +174,9 @@ for (const scenario of [
         { transfer: second, block },
       ],
       definitions,
+      new Map(),
       incoming,
-      {
-        make: (key, type, _block, expression) => {
-          if (expression) definitions.set(key, expression);
-          return { id: key, type };
-        },
-        alias: (target, expression) => {
-          definitions.set(target.id, expression);
-        },
-      },
+      cellPlan(definitions),
       validation,
       context,
     );
@@ -260,16 +285,9 @@ for (const scenario of ['same-reason', 'different-reason', 'undefined-state', 'm
         { transfer: second, block },
       ],
       definitions,
+      new Map(),
       incoming,
-      {
-        make: (key, type, _block, expression) => {
-          if (expression) definitions.set(key, expression);
-          return { id: key, type };
-        },
-        alias: (target, expression) => {
-          definitions.set(target.id, expression);
-        },
-      },
+      cellPlan(definitions),
       validation,
       context,
     );
@@ -360,16 +378,9 @@ for (const scenario of [
         { transfer: second, block },
       ],
       definitions,
+      new Map(),
       incoming,
-      {
-        make: (key, type, _block, expression) => {
-          if (expression) definitions.set(key, expression);
-          return { id: key, type };
-        },
-        alias: (target, expression) => {
-          definitions.set(target.id, expression);
-        },
-      },
+      cellPlan(definitions),
       validation,
       context,
     );
@@ -409,3 +420,190 @@ for (const scenario of [
     assert.ok(validation.records.some((record) => record.rule === 'register_cell_recombination'));
     assert.equal(first.copies.length, 2, 'original machine transfer remains immutable');
   });
+
+// Calls on Darwin arm64 (analyzed IR, nothing native executes). `left` calls
+// sub_2000, which clobbers the integer result register x0 (or vector v0); `right`
+// writes the root, and the join reads it whole. The unprojected outputs of the
+// call are one whole value of the root in the source view, never a pair of
+// per-cell unknowns; a projected 32-bit result stays the low half of x0.
+const clobbers = darwinArm64Abi.unknown_call_clobbers;
+const x0 = clobbers.registers.find(
+  ({ root, width_bits }) => root === 'arm64:x0' && width_bits === 64,
+)!;
+const w0: RegisterDescriptor = {
+  ...x0,
+  id: 'arm64:w0',
+  width_bits: 32,
+  write_rule: 'zero_extend_root',
+};
+const v0 = clobbers.registers.find(({ root }) => root === 'arm64:v0')!;
+const s0: RegisterDescriptor = {
+  ...v0,
+  id: 'arm64:s0',
+  width_bits: 32,
+  write_rule: 'zero_extend_root',
+};
+const u128 = integer(128),
+  mask64 = (1n << 64n) - 1n;
+
+function callJoin(root: 'x0' | 'v0', returns: 'unprojected' | 'w0') {
+  const b = builder(`source-cells-call-${root}-${returns}`),
+    entry = b.block('entry'),
+    left = b.block('left'),
+    right = b.block('right'),
+    join = b.block('join');
+  const n = entry.readRegister(x0);
+  entry.branch(
+    entry.compare('eq', n, entry.constant(integer(64), 0n)),
+    entry.edge(left),
+    entry.edge(right),
+  );
+  left.call(
+    { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+    [],
+    [],
+    clobbers,
+  );
+  left.jump(join);
+  if (root === 'x0') {
+    // `add w0, w0, #1` clears the upper cell; the join reads x0 whole.
+    right.writeRegister(
+      w0,
+      right.int('add', right.cast('truncate', integer(32), n), right.constant(integer(32), 1n)),
+    );
+    right.jump(join);
+    join.return([join.int('add', join.readRegister(x0), join.constant(integer(64), 5n))]);
+  } else {
+    // `ldr q0, [x0]`; the join reads s0 and all of v0.
+    right.writeRegister(v0, right.load(u128, n));
+    right.jump(join);
+    const low = join.readRegister(s0),
+      whole = join.readRegister(v0, u128);
+    const high = join.cast(
+      'truncate',
+      integer(64),
+      join.int('lshr', whole, join.constant(u128, 64n)),
+    );
+    join.return([
+      join.int(
+        'add',
+        join.cast('zero_extend', integer(64), low),
+        join.int('xor', high, join.cast('truncate', integer(64), whole)),
+      ),
+    ]);
+  }
+  const constructed = constructSSA(b.finish(entry, [integer(64)]));
+  assert.equal(constructed.value.form, 'ssa');
+  const ir = simplifySSA(constructed.value as SSAForm).value;
+  const callees = ir.blocks.flatMap(({ instructions }) =>
+    instructions.flatMap((node): InferredCallee[] =>
+      node.kind === 'call'
+        ? [
+            {
+              call_id: node.id,
+              parameters: [],
+              returns: returns === 'w0' ? [w0] : [],
+              return_types: returns === 'w0' ? [integer(32)] : [],
+              argument_list_complete: true,
+              evidence_ids: [],
+            },
+          ]
+        : [],
+    ),
+  );
+  return { ir, source: { abi: darwinArm64Abi, callees, addresses: [] } };
+}
+
+/** What the call leaves in the root, named by every cell reason either view prints. */
+function clobbered(root: 'x0' | 'v0', bits: bigint): Map<string, bigint> {
+  const cells: [string, number, number][] =
+    root === 'x0'
+      ? [
+          ['', 0, 64],
+          ['_low32', 0, 32],
+          ['_high32', 32, 32],
+        ]
+      : [
+          ['', 0, 128],
+          ['_low32', 0, 32],
+          ['_bits32_63', 32, 32],
+          ['_high64', 64, 64],
+          ['_high96', 32, 96],
+        ];
+  return new Map(
+    cells.map(([suffix, offset, width]) => [
+      `call clobbers ${root}${suffix}`,
+      BigInt.asUintN(width, bits >> BigInt(offset)),
+    ]),
+  );
+}
+
+for (const language of ['c-like', 'python-like'] as const)
+  for (const [root, returns] of [
+    ['x0', 'unprojected'],
+    ['x0', 'w0'],
+    ['v0', 'unprojected'],
+  ] as const)
+    test(`${language} a phi fed by a call's ${returns === 'w0' ? '32-bit result and clobbered x0 high cell' : `clobbered ${root} cells`} runs as the source`, () => {
+      const { ir, source } = callJoin(root, returns);
+      const output = emit(ir, { source }, language).emission;
+      const checked = emit(ir, { source }, language, 'checked').emission;
+      const recombined = (output.local_validation ?? []).some(
+        (record) => record.rule === 'register_cell_recombination' && record.status === 'verified',
+      );
+      if (returns === 'unprojected') {
+        // One whole unknown of the root, not one per cell.
+        assert.ok(recombined, output.text);
+        assert.match(output.text, new RegExp(`"call clobbers ${root}"`), output.text);
+        assert.doesNotMatch(output.text, /call clobbers \w+_(?:low|high|bits)/, output.text);
+        assert.doesNotMatch(output.text, /<< 32/, output.text);
+      } else
+        // The bound result is never folded into a whole clobber of x0.
+        assert.doesNotMatch(output.text, /"call clobbers x0"/, output.text);
+      const entryValue = ir.register_states
+        .find((state) => state.block === ir.entry)!
+        .entry.find((binding) => binding.register.root === 'arm64:x0')!.value.id;
+      const table = 0x1000n,
+        loaded = 0x0123456789abcdeffedcba9876543210n;
+      const memory = new Map<bigint, number>();
+      for (let byte = 0n; byte < 16n; byte++)
+        memory.set(table + byte, Number((loaded >> (8n * byte)) & 0xffn));
+      for (const [n, bits, result] of [
+        [0n, 0xfedcba9876543210n, 0x89abcdefn],
+        [0n, 0x00000001ffffffffn, 0xffffffffn],
+        [0n, (1n << 128n) - 3n, 0n],
+        [table, 0n, 0n],
+        [0xffffffff00000000n | table, 0n, 0n],
+      ] as const) {
+        if (root === 'v0' && n !== 0n && n !== table) continue;
+        // The source: x0 after the call is the result in its low half (w0) or
+        // the clobbered register; v0 after the call is the clobbered register.
+        const value =
+          n === 0n
+            ? root === 'x0' && returns === 'w0'
+              ? (bits & ~0xffffffffn & mask64) | result
+              : bits
+            : root === 'x0'
+              ? BigInt.asUintN(32, n + 1n)
+              : loaded;
+        const expected =
+          root === 'x0'
+            ? (BigInt.asUintN(64, value) + 5n) & mask64
+            : (BigInt.asUintN(32, value) + ((value >> 64n) ^ (value & mask64))) & mask64;
+        for (const emission of [output, checked]) {
+          const observed = execute(
+            emission,
+            new Map([[entryValue, n]]),
+            new Map(memory),
+            0n,
+            new Map(),
+            clobbered(root, BigInt.asUintN(root === 'x0' ? 64 : 128, bits)),
+            new Map<string, SourceCallOracle>([
+              ['sub_2000', () => (returns === 'w0' ? result : [])],
+            ]),
+          );
+          assert.equal(observed.exit, 'machine_return', emission.text);
+          assert.equal(observed.values[0], expected, emission.text);
+        }
+      }
+    });
