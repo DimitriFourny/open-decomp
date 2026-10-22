@@ -86,12 +86,14 @@ export class LedgerHasher {
   get length(): number {
     return this.#length;
   }
+
   append(element: CanonicalValue): void {
     this.#state.update(
       this.#length ? `,${canonicalIdentity(element)}` : canonicalIdentity(element),
     );
     this.#length++;
   }
+
   fingerprint(): string {
     return this.#state.copy().update(LEDGER_TAIL).digest('hex');
   }
