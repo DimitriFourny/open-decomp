@@ -1342,6 +1342,20 @@ result, otherwise the void-like `incidental_result` rule applies. This records
 an `incidental_result` presentation inference and an `abi_conformance`
 requirement that callers read no FP result register; the FP register keeps its
 exact exit value in exit metadata and the checked view.
+Otherwise an untyped scalar FP value built in integer registers (`fmov d0, x8`
+after the integer register on every exit path) is the `double`/`float` result
+when, on every exit, the FP-root cells tile the register and every slice leaf is
+consumed only by exits: no call or register-read output, load, stored datum (of
+any width), vector-store constant, or value that also addresses memory or feeds
+calls or branches; unchanged entry bits, frame addresses and undefined cells
+disqualify. Exits whose cells are all literals (`movi v0.2d, #0`) are neutral;
+every other exit has literal-zero cells above a 32- or 64-bit scalar write and
+the widths agree (64 gives `double`, 32 `float`); at least one such exit exists.
+It records the `primary_result` inference ("… written before an untyped scalar
+FP value consumed only by exits on every exit path") and an `abi_conformance`
+requirement that a scalar FP-bank result is IEEE and callers read no integer
+result. Without type evidence the value prints through the exact bit
+reinterpretation helper, so NaN payloads, −0.0 and infinities keep their bits.
 When both qualify, positive caller demand decides; then the register written last
 on every path into every exit wins: a definition whose block is dominated by the
 other's definition (or follows it in the same block) is later, and merges compare
