@@ -85,7 +85,7 @@ test('views of one pointer flowing to two callees merge into one named layout', 
   assert.equal(first.name, 'first_arg0');
   // The printed identifier is a digest of the class, never another function's anchor.
   assert.match(first.label, /^struct_[0-9a-f]{6}$/);
-  assert.equal(first.label, imageTypeLabels([first.id]).get(first.id));
+  assert.equal(first.label, imageTypeLabels([first.name]).get(first.name));
   assert.equal(first.state, 'complete');
   assert.deepEqual(first.functions, ['caller', 'first', 'second']);
   // Input order never changes the identity or the name.
@@ -95,8 +95,8 @@ test('views of one pointer flowing to two callees merge into one named layout', 
   assert.equal(classOf(reversed, 'second|a0').label, first.label);
 });
 
-test('class labels are digests of the class ID, unique within a solution', () => {
-  // `image_type_890` and `image_type_5047` share their first six digest digits.
+test('class labels are digests of the class name, unique within a solution', () => {
+  // `image_type_890` and `image_type_5047` (any two names) share their first six digest digits.
   const labels = imageTypeLabels(['image_type_5047', 'image_type_890', 'image_type_5047']);
   assert.equal(labels.size, 2);
   const [short, extended] = ['image_type_5047', 'image_type_890'].map((id) => labels.get(id)!);
