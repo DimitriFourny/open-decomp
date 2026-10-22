@@ -635,6 +635,75 @@ export function planSource(
           }
         }
       }
+      // An established variadic library contract that no rule closed: the fixed
+      // parameters are exactly the ABI classification of the established
+      // signature, so they bind at their register locations; the anonymous
+      // tail is never claimed and the list stays open. The declared result is
+      // left unbound: nothing here reads it, and binding it would make a void
+      // caller's exit register an established integer result.
+      const fixedContract =
+        view === 'source' &&
+        !projection &&
+        fact?.status === 'established' &&
+        (contracts.length === 1 || repeatedContract)
+          ? contracts[0]!.contract.signature
+          : undefined;
+      if (fixedContract?.variadic && node.results.length === 0) {
+        const layout = abi.classifyCall({ ...fixedContract, argument_list_complete: false });
+        if (
+          layout.state !== 'unsupported' &&
+          !layout.hidden_result &&
+          fixedContract.parameters &&
+          fixedContract.fixed_parameter_count === fixedContract.parameters.length &&
+          layout.parameters.length === fixedContract.parameters.length
+        ) {
+          const args: Value[] = [];
+          let valid = true;
+          for (const parameter of layout.parameters) {
+            const type = machineType(fixedContract.parameters[parameter.index]!);
+            const value =
+              type &&
+              bind(
+                `${node.id}:arg:${parameter.index}`,
+                node.register_inputs,
+                parameter.locations,
+                type,
+                block.id,
+              );
+            if (!value) {
+              valid = false;
+              break;
+            }
+            args.push(value);
+          }
+          if (node.arguments.some((value) => !args.some((argument) => argument.id === value.id)))
+            valid = false;
+          if (
+            valid &&
+            validation.presentation(
+              'library_fixed_prefix',
+              node.id,
+              `library_variadic_prefix: the established, non-conflicting variadic library contract fixes its ${args.length} leading parameter(s) at their ${abi.id} register locations, each bound to the caller's value there; the anonymous arguments are not claimed and the argument list stays open`,
+              [node.id],
+            )
+          ) {
+            validation.requireAbi(
+              'library_fixed_prefix',
+              [node.id],
+              'Printing the fixed prefix of a variadic library call assumes the established contract and the ABI classification of its fixed parameters; the anonymous arguments stay unresolved.',
+            );
+            projection = {
+              kind: 'inferred',
+              signature: null,
+              arguments: args,
+              argument_list_complete: false,
+              results: [],
+              inputs: [],
+              outputs: node.register_outputs,
+            };
+          }
+        }
+      }
       const callee = inferred.get(node.id);
       if (!projection && callee && node.arguments.length === 0 && node.results.length === 0) {
         const variadic = variadicArguments(callee, node.register_inputs, node.id, block.id);

@@ -411,7 +411,7 @@ Files that several items touch:
 
 ### K3: Print the fixed prefix of an established variadic library contract
 
-- [ ] **Problem.** brotli `PrintBytes` and brotli `main` (5 sites) print `fprintf(...)` with no arguments at all, plus dead `__stderrp;` statements. Ghidra prints `_fprintf(pFVar2,pcVar3)`. These cause 3 wrong claims ("fprintf arguments are elided").
+- [x] **Problem.** brotli `PrintBytes` and brotli `main` (5 sites) print `fprintf(...)` with no arguments at all, plus dead `__stderrp;` statements. Ghidra prints `_fprintf(pFVar2,pcVar3)`. These cause 3 wrong claims ("fprintf arguments are elided").
   - **Root cause:**
     - A contract is rendered only when `layout.state === 'complete'` and the argument count equals the declared count (`source-planner.ts:544-557`).
     - The fallback needs an `InferredCallee`, but `observePreparedCallInterfaces` skips calls with an established contract (`src/analysis/calls/observed.ts:55-59`).
@@ -428,6 +428,7 @@ Files that several items touch:
     - `PrintBytes` prints `stream = __stderrp; … fprintf(stream, format)` with no dead `__stderrp;` statements (measured).
     - The 4 brotli `main` sites change the same way.
     - Everything else byte-identical. Checked view unchanged.
+  - **Done (K3):** `PrintBytes` prints `fprintf(stream, format)` with no dead `__stderrp;`; brotli `main` loses 15 dead `__stderrp;` statements and its 4 open sites print `fprintf(stream, format, ...)` / the literal format. Only those 2 lane texts change, checked view identical. The declared result stays unbound (binding it turned void `PrintBytes` into `uint64_t` with an `unknown_value` return). brotli `main` work 9.238M → 9.266M.
 
 ### K4: String literals from tail-exit arguments and partly constant phis
 
