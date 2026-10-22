@@ -220,6 +220,11 @@ export function nativeReturnInterface(
   demandedReturns: readonly RegisterDescriptor[] = [],
   assumedEntry = false,
   index?: NativeInterfaceIndex,
+  /** Accept an FP/vector exit whose proven write has no IEEE type of its own (a
+   * literal zero) as storage of the root, typed by the root's other exits. This
+   * classifies the storage of the whole body for context units; at least one
+   * exit must still type the root, and every typed exit must agree. */
+  untypedFloatWrites = false,
 ): Pick<NativeInterface, 'returns' | 'return_types' | 'written_result'> {
   const prepared = index ?? createNativeInterfaceIndex(ir, abi, context);
   const {
@@ -377,7 +382,7 @@ export function nativeReturnInterface(
         if (register.root === location.register.root)
           resultEnds.add(register.offset_bits + register.width_bits);
       }
-    const observations: { readonly register: RegisterDescriptor; readonly type: DataType }[] = [];
+    const observations: { readonly register: RegisterDescriptor; readonly type?: DataType }[] = [];
     for (const exit of exits) {
       const bindings = states.get(exit.id)?.exit ?? [];
       const cells = bindings
@@ -449,12 +454,12 @@ export function nativeReturnInterface(
           }
         }
       }
-      if (floating && !type) continue;
+      if (floating && !type && (!untypedFloatWrites || !width)) continue;
       if (type) width = Math.min(width, bitWidth(type));
       if (width)
         observations.push({
           register: { ...location.register, width_bits: width },
-          type: type ?? { kind: 'integer', bits: width },
+          ...(type || !floating ? { type: type ?? { kind: 'integer', bits: width } } : {}),
         });
     }
     for (const tail of tails) {
@@ -475,15 +480,21 @@ export function nativeReturnInterface(
     }
     if (!observations.length || (!seed && observations.length !== exits.length + tails.length))
       continue;
+    const first = observations.find((item) => item.type);
+    const firstType = first?.type;
+    if (!first || !firstType) continue;
     const width = Math.min(...observations.map((item) => item.register.width_bits));
-    const first = observations[0]!;
     if (
-      first.type.kind !== 'integer' &&
-      observations.some((item) => !sameType(item.type, first.type))
+      firstType.kind !== 'integer' &&
+      observations.some((item) =>
+        item.type
+          ? !sameType(item.type, firstType)
+          : item.register.width_bits < bitWidth(firstType),
+      )
     )
       continue;
     returns.push({ ...first.register, width_bits: width });
-    types.push(first.type.kind === 'integer' ? { kind: 'integer', bits: width } : first.type);
+    types.push(firstType.kind === 'integer' ? { kind: 'integer', bits: width } : firstType);
   }
   // The independently typed primary FP/vector view takes precedence over an
   // integer root demanded only by a conservative physical return snapshot.

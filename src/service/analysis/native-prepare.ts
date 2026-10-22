@@ -61,6 +61,10 @@ export interface PreparedNativeUnit extends NativeSummaryUnit {
   readonly observed_calls: readonly InferredCallee[];
   readonly entry_prefix?: NativeInterface;
   readonly context_assumptions?: NativeContext;
+  /** On a context unit: the context-free result of the baseline body, proven on
+   * every baseline exit. The context's exits are a subset, so its storage
+   * classification holds for them too (`observeNativeUnit`). */
+  readonly generic_result?: Pick<NativeInterface, 'returns' | 'return_types' | 'written_result'>;
   readonly dependency_readset?: AnalysisReadset;
   readonly demand_index?: CallResultDemandIndex;
   readonly interface_index?: NativeInterfaceIndex;

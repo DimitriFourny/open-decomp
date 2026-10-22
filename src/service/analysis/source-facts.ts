@@ -1352,6 +1352,40 @@ function nativeArgumentReaching(
   );
 }
 
+/** A context unit keeps its callee's result storage. The context's exits are a
+ * subset of the baseline exits, every one of which the generic result covers, so
+ * when both are non-empty but name different roots the generic roots hold here
+ * as well (a literal-zero FP exit has no IEEE type of its own). Widths and types
+ * on a root the context proves too stay the context's; an empty context result
+ * (a context that writes no result) never acquires one. */
+function inheritGenericResult(
+  observed: NativeInterface,
+  generic: PreparedNativeUnit['generic_result'],
+): NativeInterface {
+  if (!generic?.returns.length || !observed.returns.length) return observed;
+  const roots = new Set(observed.returns.map((register) => register.root));
+  if (
+    generic.returns.length === roots.size &&
+    generic.returns.every((register) => roots.has(register.root))
+  )
+    return observed;
+  const returns: RegisterDescriptor[] = [],
+    return_types: DataType[] = [];
+  for (const [index, register] of generic.returns.entries()) {
+    const local = observed.returns.findIndex((item) => item.root === register.root);
+    const type = local >= 0 ? observed.return_types?.[local] : generic.return_types?.[index];
+    const result = local >= 0 ? observed.returns[local]! : register;
+    returns.push(result);
+    return_types.push(type ?? { kind: 'integer', bits: result.width_bits });
+  }
+  return {
+    ...observed,
+    returns,
+    return_types,
+    written_result: { registers: returns, types: return_types },
+  };
+}
+
 function observeNativeUnit(
   input: SourceFactsInput,
   unit: PreparedNativeUnit,
@@ -1452,7 +1486,10 @@ function observeNativeUnit(
       input.components.abi,
       context,
     );
-    observed = { ...observed, context_assumptions: unit.context_assumptions };
+    observed = {
+      ...inheritGenericResult(observed, unit.generic_result),
+      context_assumptions: unit.context_assumptions,
+    };
   }
   if (unit.analysis && !unit.budget_truncated) {
     const libraryTails = nativeLibraryTails(
@@ -1498,7 +1535,12 @@ function observeNativeUnit(
         observed = {
           ...observed,
           source_interface: {
-            ...mergeNativeInterface(sourceObserved, observed, input.components.abi, context),
+            ...mergeNativeInterface(
+              inheritGenericResult(sourceObserved, unit.generic_result),
+              observed,
+              input.components.abi,
+              context,
+            ),
             argument_list_closure: [...sourceInterfaces.values()].some(
               (callee) => callee.argument_list_closure === 'library_contract',
             )
