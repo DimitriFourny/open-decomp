@@ -21,7 +21,7 @@ import {
   unknownClobbers,
 } from '../../src/lifters/arm64/semantics.js';
 import { builder, image, provenance, slice } from '../ir/support.js';
-import { emit, emittedFormals, execute } from '../emitters/c/support.js';
+import { emit, emittedFormals, execute, Parser } from '../emitters/c/support.js';
 
 const u64 = integer(64),
   u32 = integer(32),
@@ -820,3 +820,174 @@ test('darwin-arm64: an FP-guard failure arm is no frame escape under its require
       );
   }
 });
+
+/** va_arg-like walk: the entry block stores a stack address (`entry SP + 8`,
+ * or the frame array at `entry SP - 48` filled from arguments 1..3) into the
+ * frame slot at `entry SP - 16` and reads it back; the loop dereferences the
+ * reloaded pointer, sums `count` (>= 1) words and stores the advanced pointer
+ * back into the slot. A call after the loop receives `entry SP - 32`, so the
+ * slot is reachable through an escaped frame address and stays memory. */
+function reloadWalk(abi: AbiProfile, base: 'incoming' | 'frame') {
+  const registers = abi
+    .classifyCall({
+      returns: { kind: 'void' },
+      parameters: Array.from({ length: 4 }, () => ({
+        kind: 'integer' as const,
+        bits: 64,
+        signed: false,
+      })),
+      variadic: false,
+      fixed_parameter_count: 4,
+    })
+    .parameters.map((parameter) => {
+      const location = parameter.locations[0]!;
+      if (location.kind !== 'register') throw new Error('Expected register argument');
+      return location.register;
+    });
+  const [count, cursor, total] = registers as [
+    RegisterDescriptor,
+    RegisterDescriptor,
+    RegisterDescriptor,
+  ];
+  const b = builder(`stack-reload-${abi.id}-${base}`),
+    entry = b.block('entry'),
+    loop = b.block('loop'),
+    exit = b.block('exit');
+  const sp = entry.readRegister(abi.stack_pointer);
+  const frame = entry.int('sub', sp, entry.constant(u64, 64n));
+  entry.writeRegister(abi.stack_pointer, frame);
+  const at = (offset: bigint) => entry.int('add', frame, entry.constant(u64, 64n + offset));
+  const slot = at(-16n);
+  if (base === 'frame')
+    for (const [index, register] of registers.slice(1).entries())
+      entry.store(at(-48n + 8n * BigInt(index)), entry.readRegister(register));
+  entry.store(slot, base === 'incoming' ? entry.int('add', sp, entry.constant(u64, 8n)) : at(-48n));
+  const reloaded = entry.load(u64, slot);
+  entry.writeRegister(cursor, reloaded);
+  entry.writeRegister(total, entry.constant(u64, 0n));
+  entry.jump(loop);
+  const pointer = loop.readRegister(cursor);
+  loop.writeRegister(total, loop.int('add', loop.readRegister(total), loop.load(u64, pointer)));
+  const next = loop.int('add', pointer, loop.constant(u64, 8n));
+  loop.store(loop.int('add', loop.readRegister(abi.stack_pointer), loop.constant(u64, 48n)), next);
+  loop.writeRegister(cursor, next);
+  const remaining = loop.int('sub', loop.readRegister(count), loop.constant(u64, 1n));
+  loop.writeRegister(count, remaining);
+  loop.branch(
+    loop.compare('ne', remaining, loop.constant(u64, 0n)),
+    loop.edge(loop),
+    loop.edge(exit),
+  );
+  // Plus the bytes walked: 8 * count.
+  const result = exit.int(
+    'add',
+    exit.readRegister(total),
+    exit.int('sub', exit.readRegister(cursor), reloaded),
+  );
+  exit.writeRegister(
+    count,
+    exit.int('add', exit.readRegister(abi.stack_pointer), exit.constant(u64, 32n)),
+  );
+  exit.call(
+    { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+    [],
+    [],
+    abi.unknown_call_clobbers,
+    [newIdentity('evidence')],
+  );
+  exit.return([result]);
+  return prepare(b.finish(entry, [u64]), abi, true, [count]);
+}
+
+/** Lines of the first loop: its header through the last line indented deeper
+ * (and C's closing `} while (…);` at the header's indentation). */
+function loopLines(text: string): string[] {
+  const lines = text.split('\n'),
+    start = lines.findIndex((line) => /^\s*(?:do \{|while \(|while True:|for \()/.test(line));
+  assert.ok(start >= 0, text);
+  const indent = /^\s*/.exec(lines[start]!)![0].length;
+  let end = start + 1;
+  while (end < lines.length && /^\s*/.exec(lines[end]!)![0].length > indent) end++;
+  if (lines[end]?.trimStart().startsWith('}')) end++;
+  return lines.slice(start, end);
+}
+
+for (const abi of targets)
+  for (const base of ['incoming', 'frame'] as const)
+    test(`${abi.id}: a stack address read back from a frame slot (${base}) prints through its load`, () => {
+      const fixture = reloadWalk(abi, base);
+      const entrySp = 0x8000n,
+        words = [0x1111n, 0xffffffffffffffffn, 0x8000000000000000n];
+      // The stored address spelled as a constant: entry-SP arithmetic for the
+      // incoming area, the frame member for the negative frame address.
+      const constant = base === 'incoming' ? /entry_sp \+ 8\b/ : /frame\.local_30\b/;
+      for (const count of [1, 2, 3]) {
+        const oracle = BigInt.asUintN(
+          64,
+          words.slice(0, count).reduce((sum, word) => sum + word, 0n) + 8n * BigInt(count),
+        );
+        const observed = new Map<string, readonly string[]>();
+        for (const view of ['source', 'checked'] as const)
+          for (const language of ['c-like', 'python-like'] as const) {
+            const output = emit(fixture.ir, fixture.extra, language, view).emission;
+            const formals = emittedFormals(output);
+            if (view === 'source') {
+              // Every assignment target is a declared local or a formal (a
+              // Python-like frame object is declared by its constructor).
+              const parser = new Parser(output.text),
+                declared = new Set([...parser.symbols.keys(), ...formals.map(({ name }) => name)]);
+              for (const op of parser.ops)
+                if (
+                  op.kind === 'assign' &&
+                  !(op.expression?.kind === 'call' && op.expression.name.startsWith('stack_'))
+                )
+                  for (const name of op.names)
+                    if (!name.startsWith('$'))
+                      assert.ok(declared.has(name), `${name} undeclared\n${output.text}`);
+              // The loop and the result read the reloaded variable, never the
+              // stored address again.
+              const lines = output.text.split('\n');
+              for (const line of [
+                ...loopLines(output.text),
+                lines.find((line) => /^\s*return /.test(line))!,
+              ])
+                assert.doesNotMatch(line, constant, output.text);
+            }
+            // Formals in order: the count, the words (frame case), the entry SP.
+            const inputs = new Map(
+              formals.map((formal, index) => [
+                formal.statement_id,
+                formal.name === 'entry_sp' ? entrySp : index ? words[index - 1]! : BigInt(count),
+              ]),
+            );
+            const memory = new Map<bigint, number>();
+            for (let address = entrySp - 64n; address < entrySp + 32n; address++)
+              memory.set(address, 0);
+            if (base === 'incoming')
+              for (const [index, word] of words.entries())
+                for (let byte = 0n; byte < 8n; byte++)
+                  memory.set(
+                    entrySp + 8n + 8n * BigInt(index) + byte,
+                    Number((word >> (8n * byte)) & 0xffn),
+                  );
+            const received: bigint[] = [];
+            const observation = execute(
+              output,
+              inputs,
+              memory,
+              0n,
+              new Map(),
+              new Map(),
+              new Map([['sub_2000', (args: readonly bigint[]) => (received.push(args[0]!), [])]]),
+            );
+            assert.deepEqual(observation.values, [oracle], `${view} ${language}\n${output.text}`);
+            assert.equal(received.length, 1);
+            if (formals.some(({ name }) => name === 'entry_sp'))
+              assert.deepEqual(received, [entrySp - 32n]);
+            observed.set(`${view} ${language}`, observation.events);
+          }
+        // The same loads and stores in the same order in every view.
+        const events = [...observed.values()];
+        for (const row of events) assert.deepEqual(row, events[0]);
+      }
+    });

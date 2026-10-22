@@ -1442,6 +1442,13 @@ export class Renderer {
     return this.declaredTypes.get(holder.id) ?? this.valueType(holder);
   }
 
+  /** Whether the variable a value prints as (its partition representative)
+   * was declared, as a formal or by the declaration pass. Only such a name is
+   * an assignment target; any other live result prints through its value. */
+  private declaredVariable(value: Value): boolean {
+    return this.declaredTypes.has((this.variables.get(value.id) ?? value).id);
+  }
+
   /** Type record id of the variable a value prints as (its partition
    * representative's): reads through the variable see that type. */
   private variableTypeId(value: Value): string | undefined {
@@ -4550,14 +4557,17 @@ export class Renderer {
     return `((${signature})${enclosed || /^[A-Za-z_]\w*$/.test(target) ? target : `(${target})`})`;
   }
 
-  /** Shared assignment spelling for retained pure definitions and source loads. */
+  /** Shared assignment spelling for retained pure definitions and source loads.
+   * The target is always a declared variable: a pure definition of any other
+   * value prints nothing, and a load of one prints as a bare read. */
   private assignmentText(
     node: Extract<Instruction, { kind: 'assign' | 'load' }>,
     storage?: string,
   ): string {
+    const assigned = this.declaredVariable(node.result);
     if (node.kind === 'assign') {
       const expression = this.program.expressions.get(node.result.id) ?? node.expression;
-      if (this.noMove(node)) return '';
+      if (this.noMove(node) || !assigned) return '';
       const literal =
         expression.kind === 'constant' || expression.kind === 'address'
           ? this.valueLiteral(node.result, this.declaredSpelling(node.result), false)
@@ -4571,11 +4581,11 @@ export class Renderer {
     storage ??= this.storage(node);
     const punned = this.punnedLocal(node);
     if (punned)
-      return this.program.live.has(node.result.id)
+      return assigned
         ? `${this.local(node.result)} = ${this.reinterpret(storage, punned.type, node.result.type, node.id, true)!.text}`
         : storage;
     const member = this.memberPointers.get(node.id);
-    if (member && this.program.live.has(node.result.id)) {
+    if (member && assigned) {
       const spelling = this.declaredSpelling(node.result);
       return `${this.local(node.result)} = ${
         spelling === this.sourceType(member)
@@ -4586,7 +4596,7 @@ export class Renderer {
       }`;
     }
     const typed = this.language === 'c-like' ? this.slotType(node.id) : undefined;
-    if (typed && this.program.live.has(node.result.id)) {
+    if (typed && assigned) {
       const spelling = this.declaredSpelling(node.result);
       return `${this.local(node.result)} = ${
         spelling.replace(/^const /, '') === this.formalSpelling(typed).replace(/^const /, '')
@@ -4597,7 +4607,7 @@ export class Renderer {
       }`;
     }
     const global = this.typedPointerGlobal(node.id);
-    if (global && this.program.live.has(node.result.id)) {
+    if (global && assigned) {
       const spelling = this.declaredSpelling(node.result);
       return `${this.local(node.result)} = ${
         spelling === global.c
@@ -4607,7 +4617,7 @@ export class Renderer {
             : `(uintptr_t)${storage}`
       }`;
     }
-    return this.program.live.has(node.result.id)
+    return assigned
       ? `${this.local(node.result)} = ${
           this.sourceInterpretation(node.result, {
             text: storage,
