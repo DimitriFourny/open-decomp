@@ -9,7 +9,9 @@ import {
   signatureSchema,
   toolSchemas,
   type CacheIdentity,
+  type Address,
   type CanonicalValue,
+  type DecodedInstruction,
   type Diagnostic,
   type LoadedImage,
   type OperationContext,
@@ -81,6 +83,18 @@ export interface AnalysisScope {
   /** False disables every derived-analysis read and write (published results, reuse
    * candidates, persisted and in-process prepared units); default true. */
   readonly analysis_cache?: boolean;
+}
+
+/** Instruction id -> address of the function's decoded instructions, indexed on first use
+ * (only an emission that prints an instruction address asks). */
+function instructionAddresses(
+  instructions: readonly DecodedInstruction[],
+): (id: string) => Address | undefined {
+  let index: Map<string, Address> | undefined;
+  return (id) => {
+    index ??= new Map(instructions.map((instruction) => [instruction.id, instruction.address]));
+    return index.get(id);
+  };
 }
 
 export async function executeDecompilation(
@@ -578,7 +592,14 @@ export async function executeDecompilation(
       context.progress('emit', 6, 7);
       const emit = args.options.emitter === 'python-like' ? emitPythonLike : emitC;
       const emitted = emit(
-        { function: structured.value, types, names, annotations: active.annotations, source },
+        {
+          function: structured.value,
+          types,
+          names,
+          annotations: active.annotations,
+          source,
+          instruction_address: instructionAddresses(graph.instructions),
+        },
         args.options,
         fullContext,
       );

@@ -134,10 +134,18 @@ export function validateReconstruction(program: Reconstruction, context: Operati
         if (
           storage.kind === 'object' &&
           offset !== undefined &&
-          offset < storage.minimum_offset &&
-          !program.source!.locals.has(node.id)
+          offset < 0n &&
+          (offset < storage.minimum_offset ||
+            offset + bytes > storage.minimum_offset + storage.size) &&
+          !program.source!.locals.has(node.id) &&
+          !storage.members.some(
+            (member) =>
+              member.independent &&
+              offset >= member.offset &&
+              offset + bytes <= member.offset + member.size,
+          )
         )
-          invalid(node, 'a frame access lies below its frame object');
+          invalid(node, 'a frame access lies outside its frame object and independent members');
       }
       if (
         incomingObject &&
@@ -234,15 +242,21 @@ export function validateReconstruction(program: Reconstruction, context: Operati
   )
     invalid(program.function, 'entry-backed storage has no live explicit incoming base');
   if (storage?.kind === 'object') {
-    let end = storage.minimum_offset;
+    // Members are ordered and disjoint; the object (which may end below the
+    // entry SP, A3) holds every member but the independent ones (A3), which
+    // lie below the entry SP.
+    let end = -(1n << 64n);
+    const objectEnd = storage.minimum_offset + storage.size;
     for (const member of storage.members) {
       context.checkpoint(1);
       if (member.size <= 0n || member.offset < end)
         invalid(program.function, 'frame object members overlap or are out of order');
       end = member.offset + member.size;
+      if (member.independent ? end > 0n : member.offset < storage.minimum_offset || end > objectEnd)
+        invalid(program.function, 'a frame member lies outside its frame object');
     }
-    if (end > 0n || storage.minimum_offset + storage.size !== 0n)
-      invalid(program.function, 'a frame object does not end at the entry SP');
+    if (storage.size < 0n || objectEnd > 0n)
+      invalid(program.function, 'a frame object does not end at or below the entry SP');
   }
   if (incomingObject) {
     if (

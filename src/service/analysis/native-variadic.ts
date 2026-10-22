@@ -1,4 +1,9 @@
-import type { AbiProfile, OperationContext, RegisterDescriptor } from '../../core/index.js';
+import {
+  OperationError,
+  type AbiProfile,
+  type OperationContext,
+  type RegisterDescriptor,
+} from '../../core/index.js';
 import type { CallAnalysisResult } from '../../analysis/calls/index.js';
 import type { TypeRecoveryResult } from '../../analysis/types/index.js';
 import { expressionOperands, type Expression, type SSAForm, type Value } from '../../ir/index.js';
@@ -134,7 +139,9 @@ function variadicCandidate(
  * (`classifyVariadicArea` / `classifySysvVaStart` through `reconstruct`) that
  * prints its `...`. Its calls stay physical here, so every argument register
  * they may receive counts as a use: the classification is at most as
- * permissive as the function's own source view. Null: no footprint. */
+ * permissive as the function's own source view. Null: no footprint. A work
+ * limit or cancellation that cuts structuring short is thrown, never turned
+ * into "no footprint": the caller must know the result depends on its limits. */
 export function nativeVariadicFootprint(
   ir: SSAForm,
   types: TypeRecoveryResult | null,
@@ -145,9 +152,14 @@ export function nativeVariadicFootprint(
   if (!types?.calls || !analysis || types.state !== 'complete') return null;
   if (!variadicCandidate(ir, abi, analysis, context)) return null;
   const structured = structureControlFlow(ir, context, {
-    ...(context.remainingWork ? { max_work: context.remainingWork() } : {}),
+    // The context's own limits bound structuring.
+    max_work: context.remainingWork?.() ?? Number.MAX_SAFE_INTEGER,
     search: false,
   });
+  const cut = structured.diagnostics.find(
+    (diagnostic) => diagnostic.code === 'resource_limit' || diagnostic.code === 'cancelled',
+  );
+  if (cut) throw new OperationError(cut);
   if (structured.state !== 'complete' || !structured.value) return null;
   const program = reconstruct(
     { function: structured.value, types, source: { abi, callees: [], addresses: [] } },
