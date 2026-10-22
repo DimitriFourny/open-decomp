@@ -582,7 +582,7 @@ Files that several items touch:
 
 ### F4: Native FP where NaN-freedom is provable; value-preserving conversion spelling
 
-- [ ] **Problem:**
+- [x] **Problem:** _Done (`wt/rm4-f4`): lane `od-rm4-f4` differs from `od-main-91c0552` in exactly the 13 acceptance texts (plus C1's new `sqlite3CodeRowTrigger`): `PrintBytes` 168 → 145 lexical tokens (`(double)arg0 * 9.313225746154785e-10`), `PrintFileProcessingProgress` `(double)(value2 - value1) / 1000000.0`, 9 `matrix_mixed` cells `(double)arg0 / (double)arg1`, `cume_distValueFunc`/`rtreeInsertCell` lose every `cast_signed_to_float` (`fp_div` by a variable stays); checked view byte-identical; records `fp_nan_free` (subjects + operand bounds) and extended `fp_native_operations`._
   - `fp_mul(64, cast_unsigned_to_float("ieee64_t", "bits64_t", arg0), 9.3e-10)` in brotli `PrintBytes` (×3);
   - `fp_div(…cast_unsigned_to_float…, 1000000.0)` in `PrintFileProcessingProgress`;
   - `cast_signed_to_float` in `cume_distValueFunc` and `rtreeInsertCell`;
@@ -748,7 +748,7 @@ Files that several items touch:
 
 ### E3: Recombine 64-bit cells from call outputs, range-folded groups and narrowed halves
 
-- [ ] **Problem.** 259 reassemblies `x | ((uint64_t)y << 32)` and 56 split pairs in 17 functions: `isDate` alone has 166 lines (`value16 | ((uint64_t)value17 << 32)` for one pointer). `matrix_multi_exit` ELF/PE `-O2` returns `value0 | ((uint64_t)value1 << 32)`, which the grader read as a "packed low/high pair" (6 wrong claims). The source returns `sum ^ i`.
+- [x] **Problem.** 259 reassemblies `x | ((uint64_t)y << 32)` and 56 split pairs in 17 functions: `isDate` alone has 166 lines (`value16 | ((uint64_t)value17 << 32)` for one pointer). `matrix_multi_exit` ELF/PE `-O2` returns `value0 | ((uint64_t)value1 << 32)`, which the grader read as a "packed low/high pair" (6 wrong claims). The source returns `sum ^ i`. **Done:** (1) and (2) landed (range-folded groups beside a wider value; `outputs` edges giving a call or unknown effect one whole output per root). (3) was dropped: it never fired in the reconstruction/emitter suites or in sampled corpus functions. (4) was not done. In lane `od-rm4-e3`, `<< 32` reassemblies went from 260 to 75 and `>> 32` split lines from 68 to 18 against `od-main-91c0552`. `isDate` went from 173 to 10, with no pointer among the 10: 7 are entry-register saves and 3 are `v0` doubles, which are item (4). `matrix_multi_exit` ELF/PE `-O2` prints one `uint64_t` accumulator. `call clobbers` placeholders went from 13 to 12. The checked view is byte-identical (reconstruction 82, emitters 90).
   - **Root cause** (instrumented `recombineSourceCells`, `src/reconstruction/source-cells.ts`):
     - (1) a range-folded group accepts only constant edges (`:216`, `:319`): `multi_exit`'s high sum cell is folded inside the loop;
     - (2) the per-cell register outputs of one call or unknown effect never form a joint source (`:222-303`, reasons compared per cell `:243-256`): 58 + 52 + 76 `isDate` rejections;

@@ -21,6 +21,11 @@ const rcx = register('rcx', 64, 0, 'replace_root', 'x86_64:rcx');
 const ecx = register('ecx', 32, 0, 'zero_extend_root', 'x86_64:rcx');
 const cl = register('cl', 8, 0, 'preserve_other_bits', 'x86_64:rcx');
 const rdx = register('rdx', 64, 0, 'replace_root', 'x86_64:rdx');
+const r8 = register('r8', 64, 0, 'replace_root', 'x86_64:r8');
+const esi = register('esi', 32, 0, 'zero_extend_root', 'x86_64:rsi');
+const edx = register('edx', 32, 0, 'zero_extend_root', 'x86_64:rdx');
+const eax = register('eax', 32, 0, 'zero_extend_root', 'x86_64:rax');
+const r8d = register('r8d', 32, 0, 'zero_extend_root', 'x86_64:r8');
 
 function ssa(ir: Parameters<typeof constructSSA>[0]): SSAForm {
   const constructed = constructSSA(ir);
@@ -35,6 +40,7 @@ function run(
   ir: SSAForm,
   emission: Parameters<typeof execute>[0],
   roots: ReadonlyMap<string, bigint>,
+  memory = new Map<bigint, number>(),
 ): bigint {
   const entry = ir.blocks.find((block) => block.id === ir.entry)!;
   const bindings = ir.register_states.find((state) => state.block === ir.entry)!.entry;
@@ -47,7 +53,7 @@ function run(
         (roots.get(binding.register.root) ?? 0n) >> BigInt(binding.register.offset_bits),
       ),
     );
-  const observed = execute(emission, inputs);
+  const observed = execute(emission, inputs, memory);
   assert.equal(observed.exit, 'machine_return', emission.text);
   assert.equal(observed.values.length, 1, emission.text);
   return observed.values[0]!;
@@ -355,7 +361,122 @@ const carriedOracle = (mask: bigint, count: bigint): bigint => {
   return (total + bit) & mask64;
 };
 
+/** `matrix_multi_exit(values, count, stop)` as clang -O2 lowers it for x86-64:
+ * the 64-bit sum lives in `rax`, entered by `xor eax, eax` (which clears the
+ * upper cell), and the loop continues only while `sum <= 0xffff`, so range
+ * analysis folds the upper cell of the loop phi to 0. The overflow path
+ * returns `sum ^ i` from the whole register. */
+function multiExitLoop(): SSAForm {
+  const b = builder('source-loop-cells-multi-exit'),
+    entry = b.block('entry'),
+    init = b.block('init'),
+    loop = b.block('loop'),
+    nonzero = b.block('nonzero'),
+    add = b.block('add'),
+    overflow = b.block('overflow'),
+    next = b.block('next'),
+    done = b.block('done'),
+    empty = b.block('empty');
+  entry.branch(
+    entry.compare('eq', entry.readRegister(esi), entry.constant(u32, 0n)),
+    entry.edge(empty),
+    entry.edge(init),
+  );
+  init.writeRegister(esi, init.readRegister(esi));
+  init.writeRegister(ecx, init.constant(u32, 0n));
+  init.writeRegister(eax, init.constant(u32, 0n));
+  init.jump(loop);
+  const address = loop.int(
+    'add',
+    loop.readRegister(rdi),
+    loop.int('shl', loop.readRegister(rcx), loop.constant(u64, 2n)),
+  );
+  loop.writeRegister(r8d, loop.load(u32, address));
+  loop.branch(
+    loop.compare('eq', loop.readRegister(r8d), loop.readRegister(edx)),
+    loop.edge(done),
+    loop.edge(nonzero),
+  );
+  nonzero.branch(
+    nonzero.compare('eq', nonzero.readRegister(r8), nonzero.constant(u64, 0n)),
+    nonzero.edge(next),
+    nonzero.edge(add),
+  );
+  const sum = add.int('add', add.readRegister(rax), add.readRegister(r8));
+  add.writeRegister(rax, sum);
+  add.branch(
+    add.compare('ule', sum, add.constant(u64, 0xffffn)),
+    add.edge(next),
+    add.edge(overflow),
+  );
+  overflow.writeRegister(
+    rax,
+    overflow.int('xor', overflow.readRegister(rax), overflow.readRegister(rcx)),
+  );
+  overflow.jump(done);
+  const index = next.int('add', next.readRegister(rcx), next.constant(u64, 1n));
+  next.writeRegister(rcx, index);
+  next.branch(next.compare('eq', next.readRegister(rsi), index), next.edge(done), next.edge(loop));
+  done.return([done.readRegister(rax)]);
+  empty.writeRegister(eax, empty.constant(u32, 0n));
+  empty.return([empty.readRegister(rax)]);
+  return ssa(b.finish(entry, [u64]));
+}
+const multiExitOracle = (values: readonly bigint[], count: bigint, stop: bigint): bigint => {
+  let sum = 0n;
+  for (let index = 0n; index < (count & 0xffffffffn); index++) {
+    const value = values[Number(index)]!;
+    if (value === (stop & 0xffffffffn)) break;
+    if (value === 0n) continue;
+    sum = (sum + value) & mask64;
+    if (sum > 0xffffn) return sum ^ index;
+  }
+  return sum;
+};
+
 for (const language of ['c-like', 'python-like'] as const) {
+  test(`${language} a loop sum whose upper cell range analysis folds prints as one 64-bit accumulator`, () => {
+    const ir = multiExitLoop();
+    const output = emit(ir, { source }, language).emission;
+    // One accumulator: no reassembly of, and no separate upper cell for, the sum.
+    assert.doesNotMatch(output.text, /<< 32|>> 32/, output.text);
+    assert.ok(recombinations(output) > 0, output.text);
+    const checked = emit(ir, { source }, language, 'checked').emission;
+    const base = 0x1000n;
+    for (const [values, count, stop] of [
+      [[], 0n, 0n],
+      [[1n, 2n, 3n], 3n, 99n],
+      [[5n, 0n, 7n, 9n, 11n], 5n, 9n],
+      // The overflow path: `sum ^ i` once the sum passes 0xffff.
+      [[0x8000n, 0x8000n, 1n], 3n, 7n],
+      // ... with a carry into the upper cell: 0xffff + 0xffffffff.
+      [[0xffffn, 0xffffffffn, 4n], 3n, 0n],
+      // Upper bits of the 32-bit count and stop registers are ignored.
+      [[0n, 0xffffn, 1n], 0xdead00000003n, 0xbeef00000001n],
+    ] as const) {
+      const memory = new Map<bigint, number>();
+      values.forEach((value, index) => {
+        for (let byte = 0n; byte < 4n; byte++)
+          memory.set(base + 4n * BigInt(index) + byte, Number((value >> (8n * byte)) & 0xffn));
+      });
+      for (const emission of [output, checked])
+        assert.equal(
+          run(
+            ir,
+            emission,
+            new Map([
+              ['x86_64:rdi', base],
+              ['x86_64:rsi', count],
+              ['x86_64:rdx', stop],
+            ]),
+            memory,
+          ),
+          multiExitOracle(values, count, stop),
+          emission.text,
+        );
+    }
+  });
+
   test(`${language} loop-carried 64-bit cells entered by a 32-bit constant write print as one variable`, () => {
     const ir = shiftLoop();
     const output = emit(ir, { source }, language).emission;
