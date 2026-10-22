@@ -467,6 +467,11 @@ for (const variant of ['missing_xmm', 'rsi_use', 'call_between'] as const)
     for (const language of ['c-like', 'python-like'] as const) {
       const output = emit(fixture.ir, fixture.extra, language).emission;
       assert.doesNotMatch(output.text, /\.\.\.\)|va_start|\.va\b/, output.text);
-      assert.match(output.text, /\bentry_sp\b/, output.text);
+      // The al guard and the 128-bit vector saves still print.
+      assert.match(
+        output.text,
+        /unknown_value\("bits8_t"[\s\S]*uint128_t|uint128_t[\s\S]*unknown_value\("bits8_t"/,
+        output.text,
+      );
     }
   });
