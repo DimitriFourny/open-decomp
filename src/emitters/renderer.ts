@@ -162,7 +162,12 @@ import {
   type ObservedMember,
 } from './source-structs.js';
 import { planFlagTests, type FlagTest } from './source-flags.js';
-import { planLocalTypes, type Fact, type PointerFact } from './source-local-types.js';
+import {
+  planIntegerSpellings,
+  planLocalTypes,
+  type Fact,
+  type PointerFact,
+} from './source-local-types.js';
 
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
 /** Objective-C selector syntax: `name`, or keyword parts each ending in `:`. */
@@ -482,6 +487,11 @@ export class Renderer {
   private readonly callResults = new Map<string, BoundaryProjection>();
   /** Pointer spellings chosen for locals from their definitions and uses. */
   private readonly localSpellings = new Map<string, string>();
+  /** C integer types chosen for locals by conversion cost (see
+   * planIntegerSpellings): signed, or narrower than the value's machine width. */
+  private readonly localIntegers = new Map<string, IntegerCType>();
+  /** Each such local's set (its first member): a variable holds one set only. */
+  private readonly localIntegerSets = new Map<string, string>();
   /** Load/store nodes accessing a declared pointer member: that pointer type. */
   private readonly memberPointers = new Map<string, string>();
   /** Source view: the last named formal before `...` (`va_start`'s second argument). */
@@ -1137,7 +1147,9 @@ export class Renderer {
     if (spelling === 'bool') return value.type.bits === 1 ? { bits: 1, signed: false } : null;
     const match = /^(u?)int(\d+)_t$/.exec(spelling);
     return match &&
-      (Number(match[2]) === value.type.bits || this.program.source?.formal_types?.has(value.id))
+      (Number(match[2]) === value.type.bits ||
+        this.program.source?.formal_types?.has(value.id) ||
+        this.localIntegers.has(value.id))
       ? { bits: Number(match[2]), signed: !match[1] }
       : null;
   }
@@ -1233,7 +1245,12 @@ export class Renderer {
       this.program.source.value_types?.get(value.id)?.type_id;
     const type = id && this.typeRecords.get(id)?.definition;
     const spelled = given === undefined ? this.localSpellings.get(value.id) : undefined;
-    if (!type && spelled !== undefined && value.type.kind === 'integer') {
+    if (
+      !type &&
+      spelled !== undefined &&
+      value.type.kind === 'integer' &&
+      !this.localIntegers.has(value.id)
+    ) {
       // A local that only a pointer spelling types (no type record): same
       // conversion of the exact address bits.
       if (this.language === 'python-like')
@@ -1668,6 +1685,13 @@ export class Renderer {
 
   private assigned(destination: Value, value: Printed): string {
     const declared = this.declaredInteger(destination, this.declaredSpelling(destination));
+    // A local signed by conversion cost: C assignment converts to it, so the
+    // signed variable a same-width reinterpretation re-read passes unchanged.
+    if (
+      declared?.signed &&
+      this.localIntegers.has((this.variables.get(destination.id) ?? destination).id)
+    )
+      return this.signedContext(value, declared.bits);
     return this.converted(
       value,
       declared && !declared.signed && declared.bits === bitWidth(destination.type)
@@ -7534,6 +7558,68 @@ export class Renderer {
         else this.localSpellings.delete(id);
       }
     }
+    this.chooseLocalIntegers(formals);
+  }
+
+  /** The value has no source type, or the unsigned integer type of its width. */
+  private plainIntegerType(value: Value): boolean {
+    const id =
+      this.sourceValueTypes.get(value.id) ??
+      this.program.source?.value_types?.get(value.id)?.type_id;
+    const type = id === undefined ? undefined : this.typeRecords.get(id)?.definition;
+    return (
+      id === undefined ||
+      (type?.kind === 'integer' && !type.signed && type.bits === bitWidth(value.type))
+    );
+  }
+
+  /** C source view: give each set of integer locals connected by copies the
+   * signed or narrow C type that prints strictly fewer conversions (see
+   * planIntegerSpellings). Python-like values are unbounded integers: a signed
+   * or narrow declaration there needs a reduction at every definition and keeps
+   * `int32(uint32(x))` at signed reads, so it never saves one. */
+  private chooseLocalIntegers(formals: ReadonlySet<string>): void {
+    const program = this.program,
+      source = program.source;
+    if (!source || !this.sourceView || this.language !== 'c-like' || this.nativeIntegerStorage)
+      return;
+    const choices = planIntegerSpellings({
+      program,
+      context: this.context,
+      inline: this.inline,
+      constant: this.constantOf,
+      variable: (value) =>
+        value.type.kind === 'integer' &&
+        [8, 16, 32, 64].includes(value.type.bits) &&
+        program.live.has(value.id) &&
+        !this.inline.has(value.id) &&
+        !this.inlined.has(value.id) &&
+        !this.inlinedCalls.has(value.id) &&
+        !formals.has(value.id) &&
+        !source.stack_addresses.has(value.id) &&
+        !source.float_values?.has(value.id) &&
+        !this.fpPresentation.unobserved.has(value.id) &&
+        !this.localSpellings.has(value.id) &&
+        this.valueType(value) === this.dataType(value.type) &&
+        this.plainIntegerType(value),
+    });
+    for (const choice of choices.values()) {
+      const spelling = `${choice.signed ? 'int' : 'uint'}${choice.bits}_t`;
+      if (
+        !this.localValidation.presentation(
+          'local_integer_spelling',
+          choice.members[0]!,
+          `integer locals connected by copies are declared ${spelling}${choice.narrow ? ': every read, through same-width reinterpretations, reads only that low slice (a truncation or an extract inside it)' : ''}, because their reads print ${choice.after} conversions that way against ${choice.before} with the machine spelling (signed comparisons, sign extensions, arithmetic shifts and signed constant divisions read a signed local unconverted; every other read converts it to its unsigned type, so arithmetic stays unsigned and free of signed overflow); C assignment converts each definition to the declared type exactly as the explicit conversion at the read did, so values, widths and evaluation order are unchanged`,
+          choice.members.slice(0, 64),
+        )
+      )
+        continue;
+      for (const id of choice.members) {
+        this.localSpellings.set(id, spelling);
+        this.localIntegers.set(id, { bits: choice.bits, signed: choice.signed });
+        this.localIntegerSets.set(id, choice.members[0]!);
+      }
+    }
   }
 
   /** Source view: structure the reconstruction's CFG again now that block
@@ -7936,7 +8022,7 @@ export class Renderer {
         storage:
           formal && !program.source
             ? `formal ${value.id}`
-            : `${storageType(value)} ${floating ?? ''}`,
+            : `${storageType(value)} ${floating ?? ''}${this.localIntegerSets.get(value.id) ?? ''}`,
         flexible: flexible.has(value.id) && !formal,
         scalar,
         plain:

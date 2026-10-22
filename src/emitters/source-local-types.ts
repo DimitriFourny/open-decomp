@@ -1,5 +1,5 @@
 import type { OperationContext } from '../core/index.js';
-import { bitWidth, type Expression, type Value } from '../ir/index.js';
+import { bitWidth, expressionOperands, type Expression, type Value } from '../ir/index.js';
 import type { BoundaryProjection, Reconstruction } from '../reconstruction/model.js';
 import { controlArms } from './source-control.js';
 import type { InlineCallSite, InlineSite } from './source-inlining.js';
@@ -541,6 +541,331 @@ export function planLocalTypes(host: LocalTypeHost): Map<string, LocalTypeChoice
     chosen.set(assignable[0]!, {
       fact: { ...(typeId === undefined ? {} : { type_id: typeId }), spelling },
       members: assignable,
+    });
+  }
+  return chosen;
+}
+
+/** What the integer spelling planner needs from the renderer. */
+export interface IntegerSpellingHost {
+  readonly program: Reconstruction;
+  readonly context: OperationContext;
+  /** Values printed inside the expression that reads them. */
+  readonly inline: ReadonlySet<string>;
+  /** A printed integer local declared with its machine spelling (`uintN_t`)
+   * whose declared type this pass may choose. */
+  variable(value: Value): boolean;
+  /** Constant value of a value printed as a literal. */
+  constant(value: Value): bigint | undefined;
+}
+
+/** The C integer type chosen for one connected set of integer locals. */
+export interface IntegerSpelling {
+  readonly bits: 8 | 16 | 32;
+  readonly signed: boolean;
+  /** Present for a 64-bit set whose every read is a low-slice read. */
+  readonly narrow: boolean;
+  readonly members: readonly string[];
+  /** Printed conversions of the machine spelling, and of the chosen one. */
+  readonly before: number;
+  readonly after: number;
+}
+
+interface IntegerCost {
+  /** Conversions printed by the unsigned spelling of the set's width. */
+  unsigned: number;
+  /** Conversions printed by the signed spelling of the same width. */
+  signed: number;
+  /** A read whose cost the model does not capture: keep the machine spelling. */
+  veto: boolean;
+}
+
+/** C only: choose `intN_t` for a set of 8/16/32-bit integer locals connected by
+ * copies when it prints strictly fewer conversions than `uintN_t`, and declare a
+ * 64-bit set whose every read is a low-slice read (a truncation, or an extract
+ * inside the low 32 bits) at that narrow width (signed when that is strictly
+ * cheaper still). Costs count the conversions each read prints:
+ * - cheap when signed: signed comparison, sign extension, arithmetic shift and
+ *   signed division/remainder by a constant (the unsigned spelling prints
+ *   `(intN_t)x` there);
+ * - every other read of a signed local prints `(uintN_t)x`, so addition,
+ *   subtraction, multiplication and shifts stay in unsigned arithmetic (no
+ *   signed overflow) and unsigned comparisons, zero extension, logical shifts
+ *   and unsigned division keep their exact operand; equality of at least `int`
+ *   width and truncation print none either way.
+ * C assignment converts every definition to the declared type, exactly as the
+ * cast the unsigned spelling would print at the read (the modular conversion of
+ * the same bits), so definitions cost nothing. Presentation only: each read
+ * still prints its exact conversion, so values, widths and evaluation order are
+ * unchanged. */
+export function planIntegerSpellings(host: IntegerSpellingHost): Map<string, IntegerSpelling> {
+  const program = host.program,
+    context = host.context;
+  const parent = new Map<string, string>();
+  const find = (id: string): string => {
+    let root = id;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    let walk = id;
+    while (walk !== root) {
+      const next = parent.get(walk)!;
+      parent.set(walk, root);
+      walk = next;
+    }
+    return root;
+  };
+  const values = new Map<string, Value>();
+  const admit = (value: Value): boolean => {
+    if (!values.has(value.id)) {
+      if (!host.variable(value)) return false;
+      values.set(value.id, value);
+      parent.set(value.id, value.id);
+    }
+    return true;
+  };
+  /** The value a chain of inline same-width reinterpretations re-presents. */
+  const identity = (value: Value): Value | undefined => {
+    if (!host.inline.has(value.id) || value.type.kind !== 'integer') return undefined;
+    const expression = program.expressions.get(value.id);
+    if (
+      !expression ||
+      !(
+        (expression.kind === 'cast' &&
+          (expression.op === 'bitcast' || expression.op === 'zero_extend')) ||
+        (expression.kind === 'extract' && expression.offset === 0)
+      )
+    )
+      return undefined;
+    return expression.value.type.kind === 'integer' &&
+      bitWidth(expression.value.type) === bitWidth(value.type)
+      ? expression.value
+      : undefined;
+  };
+  const resolve = (value: Value): Value => {
+    for (let step = 0; step < 16; step++) {
+      const inner = identity(value);
+      if (!inner) return value;
+      value = inner;
+    }
+    return value;
+  };
+  // Users of each value among the live printed expressions, and the copies
+  // between printed variables (edge copies and pure same-width assignments).
+  const users = new Map<string, { readonly value: Value; readonly expression: Expression }[]>();
+  const occurrences = new Map<string, number>();
+  for (const [id, expression] of program.expressions) {
+    context.checkpoint(1);
+    const value = program.values.get(id);
+    if (!value || !program.live.has(id)) continue;
+    for (const operand of expressionOperands(expression)) {
+      occurrences.set(operand.id, (occurrences.get(operand.id) ?? 0) + 1);
+      const row = users.get(operand.id) ?? [];
+      row.push({ value, expression });
+      users.set(operand.id, row);
+    }
+  }
+  /** Copies whose source is a value, by destination: they read it once each. */
+  const copies = new Map<string, Value[]>();
+  const copySources = new Set<string>();
+  /** Members whose partition the renderer would join with a variable outside
+   * the set: a copy from or to another printed variable (a formal, a typed
+   * local), or a zero extension into shared unsigned storage. */
+  const fixed = new Set<string>();
+  const widened = (value: Value): boolean => {
+    const expression = host.inline.has(value.id) ? program.expressions.get(value.id) : undefined;
+    return (
+      expression?.kind === 'cast' &&
+      expression.op === 'zero_extend' &&
+      !host.inline.has(expression.value.id)
+    );
+  };
+  const join = (destination: Value, source: Value): void => {
+    const left = admit(destination),
+      right = admit(source);
+    if (left && right) {
+      const a = find(destination.id),
+        b = find(source.id);
+      if (a !== b) parent.set(a, b);
+    } else if (left && !host.inline.has(source.id)) fixed.add(destination.id);
+    else if (right && !host.inline.has(destination.id)) fixed.add(source.id);
+  };
+  for (const row of program.transfers.values())
+    for (const copy of row) {
+      context.checkpoint(1);
+      copySources.add(copy.source.id);
+      const list = copies.get(copy.source.id) ?? [];
+      list.push(copy.destination);
+      copies.set(copy.source.id, list);
+      if (widened(copy.source) && admit(copy.destination)) fixed.add(copy.destination.id);
+      join(copy.destination, resolve(copy.source));
+    }
+  for (const block of program.blocks.values())
+    for (const node of block.statements) {
+      context.checkpoint(1);
+      if (node.kind !== 'assign' || !program.retained.has(node.id)) continue;
+      const expression = program.expressions.get(node.result.id) ?? node.expression;
+      if (expression.kind !== 'cast') continue;
+      if (
+        expression.op === 'zero_extend' &&
+        !host.inline.has(expression.value.id) &&
+        admit(node.result)
+      )
+        fixed.add(node.result.id);
+      if (expression.op !== 'bitcast') continue;
+      const source = resolve(expression.value);
+      if (bitWidth(source.type) === bitWidth(node.result.type)) join(node.result, source);
+    }
+  for (const id of program.live) {
+    const value = program.values.get(id);
+    if (value) admit(value);
+  }
+  const groups = new Map<string, string[]>();
+  for (const id of values.keys()) {
+    const root = find(id);
+    const group = groups.get(root) ?? [];
+    group.push(id);
+    groups.set(root, group);
+  }
+  const weight = (value: Value): number =>
+    host.inline.has(value.id) ? Math.max(1, program.use_counts.get(value.id) ?? 1) : 1;
+  /** Reads of `value` that are neither a live printed expression nor a copy
+   * into the set: statements, call arguments, returns, other copies. */
+  const others = (value: Value, members: ReadonlySet<string>): number => {
+    const inside = (copies.get(value.id) ?? []).filter((destination) =>
+      members.has(destination.id),
+    ).length;
+    return Math.max(
+      0,
+      (program.use_counts.get(value.id) ?? 0) - (occurrences.get(value.id) ?? 0) - inside,
+    );
+  };
+  /** Conversions each spelling of an N-bit value prints at the reads of `value`. */
+  const score = (
+    value: Value,
+    scale: number,
+    bits: number,
+    members: ReadonlySet<string>,
+    cost: IntegerCost,
+    depth = 0,
+  ): void => {
+    context.checkpoint(1);
+    if (depth > 16) {
+      cost.veto = true;
+      return;
+    }
+    cost.signed += others(value, members) * scale;
+    for (const { value: user, expression } of users.get(value.id) ?? []) {
+      const times = scale * weight(user);
+      if (identity(user)?.id === value.id) {
+        score(user, times, bits, members, cost, depth + 1);
+        continue;
+      }
+      switch (expression.kind) {
+        case 'compare':
+          if (expression.op.startsWith('s')) cost.unsigned += times;
+          else if (expression.op.startsWith('u') || bits < 32) cost.signed += times;
+          break;
+        case 'cast':
+          if (expression.op === 'sign_extend' || expression.op === 'signed_to_float')
+            cost.unsigned += times;
+          else if (expression.op === 'zero_extend') {
+            // A zero extension into a variable may share its storage only
+            // while the narrow local keeps its plain unsigned spelling.
+            if (!host.inline.has(user.id) || copySources.has(user.id)) cost.veto = true;
+            cost.signed += times;
+          } else if (expression.op !== 'truncate') cost.signed += times;
+          break;
+        case 'extract':
+          if (expression.offset !== 0) cost.signed += times;
+          break;
+        case 'integer': {
+          const divisor = host.constant(expression.right);
+          if (
+            expression.left.id === value.id &&
+            expression.right.id !== value.id &&
+            divisor !== undefined &&
+            (expression.op === 'ashr' ||
+              ((expression.op === 'sdiv' || expression.op === 'srem') &&
+                divisor !== 0n &&
+                BigInt.asIntN(bits, divisor) !== -1n))
+          )
+            cost.unsigned += times;
+          else cost.signed += times;
+          break;
+        }
+        default:
+          cost.signed += times;
+      }
+    }
+  };
+  const chosen = new Map<string, IntegerSpelling>();
+  for (const members of groups.values()) {
+    context.checkpoint(members.length);
+    if (members.some((id) => fixed.has(id))) continue;
+    const set = new Set(members);
+    const widths = new Set(members.map((id) => bitWidth(values.get(id)!.type)));
+    if (widths.size !== 1) continue;
+    const [width] = widths;
+    if (width === 8 || width === 16 || width === 32) {
+      const cost: IntegerCost = { unsigned: 0, signed: 0, veto: false };
+      for (const id of members) score(values.get(id)!, 1, width, set, cost);
+      if (!cost.veto && cost.signed < cost.unsigned)
+        chosen.set(members[0]!, {
+          bits: width,
+          signed: true,
+          narrow: false,
+          members,
+          before: cost.unsigned,
+          after: cost.signed,
+        });
+      continue;
+    }
+    if (width !== 64) continue;
+    // Every read, through same-width reinterpretations, is a low-slice read.
+    const slices: { readonly value: Value; readonly bits: number; readonly scale: number }[] = [];
+    let valid = true,
+      low = 0;
+    const reads = (value: Value, scale: number, depth = 0): void => {
+      context.checkpoint(1);
+      if (depth > 16 || others(value, set) > 0) {
+        valid = false;
+        return;
+      }
+      for (const { value: user, expression } of users.get(value.id) ?? []) {
+        if (!valid) return;
+        const times = scale * weight(user);
+        if (identity(user)?.id === value.id) reads(user, times, depth + 1);
+        else if (
+          (expression.kind === 'cast' && expression.op === 'truncate') ||
+          (expression.kind === 'extract' && expression.offset + bitWidth(user.type) <= 32)
+        ) {
+          const offset = expression.kind === 'extract' ? expression.offset : 0;
+          low = Math.max(low, offset + bitWidth(user.type));
+          if (low > 32) valid = false;
+          else if (offset === 0)
+            slices.push({ value: user, bits: bitWidth(user.type), scale: times });
+        } else valid = false;
+      }
+    };
+    for (const id of members) reads(values.get(id)!, 1);
+    if (!valid || low === 0) continue;
+    const bits = low <= 8 ? 8 : low <= 16 ? 16 : 32;
+    // Each read of the presented width prints `(uintN_t)x` today and the
+    // narrow variable itself once declared narrow; its readers then price the
+    // signed spelling like those of an N-bit local.
+    const exact = slices.filter((slice) => slice.bits === bits);
+    const cost: IntegerCost = { unsigned: 0, signed: 0, veto: false };
+    const saved = exact.reduce((sum, slice) => sum + slice.scale, 0);
+    for (const slice of exact)
+      if (host.inline.has(slice.value.id)) score(slice.value, slice.scale, bits, new Set(), cost);
+    if (saved === 0) continue;
+    const signed = !cost.veto && cost.signed < cost.unsigned;
+    chosen.set(members[0]!, {
+      bits,
+      signed,
+      narrow: true,
+      members,
+      before: saved + cost.unsigned,
+      after: signed ? cost.signed : cost.unsigned,
     });
   }
   return chosen;
