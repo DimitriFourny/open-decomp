@@ -48,6 +48,8 @@ test('remaining work observes the cumulative counter through context wrappers', 
   assert.equal(wrapped.remainingWork?.(), 6);
   wrapped.checkpoint(5);
   assert.equal(original.remainingWork?.(), 1);
+  assert.equal(original.consumedWork?.(), 8);
+  assert.equal(wrapped.consumedWork?.(), 8);
 });
 
 test('a per-process build costs every operation that uses it the same, once, within its limit', () => {
