@@ -11,6 +11,10 @@ export interface SlotTypeInput {
   readonly expressions: ReadonlyMap<string, Expression>;
   readonly typed: ReadonlyMap<string, readonly RegisterTypeSlice[]>;
   readonly stack: StackRecoveryResult | undefined;
+  /** A load that may observe bytes written by effects the stack recovery does
+   * not record (the frame address reached a call or unresolved memory on a path
+   * to it) has no slot typing. Absent: every load is taken as private. */
+  readonly exposed?: (load: Value) => boolean;
   readonly context: OperationContext;
 }
 
@@ -31,12 +35,13 @@ export type SlotTyper = (load: Value) => DataType | null | undefined;
  * literals or cycle back-references); unknown slot contents are `undefined`.
  * The width of a slot is never a type. */
 export function createSlotTyper(input: SlotTypeInput): SlotTyper {
-  const { loads, stores, expressions, typed, stack, context } = input;
+  const { loads, stores, expressions, typed, stack, exposed, context } = input;
   // Values of every direct store to the exact loaded stack slot.
   const slotStores = (load: Value): Value[] | undefined => {
     const address = loads.get(load.id);
     const fact = address && stack?.state === 'complete' ? stack.values.get(address.id) : undefined;
-    if (fact?.value.kind !== 'stack' || bitWidth(load.type) % 8) return undefined;
+    if (fact?.value.kind !== 'stack' || bitWidth(load.type) % 8 || exposed?.(load))
+      return undefined;
     const offset = fact.value.offset,
       size = BigInt(bitWidth(load.type) / 8);
     const stored: Value[] = [];

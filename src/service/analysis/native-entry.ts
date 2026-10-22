@@ -36,6 +36,8 @@ interface NativeInterfaceStructure {
   readonly loaded_values: ReadonlySet<string>;
   /** Address of every load, by loaded value. */
   readonly load_addresses: ReadonlyMap<string, Value>;
+  /** Instruction of every load, by loaded value. */
+  readonly load_nodes: ReadonlyMap<string, string>;
   /** Stored value of every store, by store node. */
   readonly store_values: ReadonlyMap<string, Value>;
   readonly calls: readonly Extract<Instruction, { kind: 'call' }>[];
@@ -104,6 +106,7 @@ function prepareNativeInterfaceIndex(
   const loads = new Map<string, Extract<Instruction, { kind: 'load' }>>(),
     loadedValues = new Set<string>(),
     loadAddresses = new Map<string, Value>(),
+    loadNodes = new Map<string, string>(),
     storeValues = new Map<string, Value>();
   const calls: Extract<Instruction, { kind: 'call' }>[] = [],
     stores: Extract<Instruction, { kind: 'store' }>[] = [];
@@ -129,6 +132,7 @@ function prepareNativeInterfaceIndex(
         loads.set(node.id, node);
         loadedValues.add(node.result.id);
         loadAddresses.set(node.result.id, node.address);
+        loadNodes.set(node.result.id, node.id);
         root(node.address);
       } else if (node.kind === 'store') {
         stores.push(node);
@@ -217,6 +221,7 @@ function prepareNativeInterfaceIndex(
     loads,
     loaded_values: loadedValues,
     load_addresses: loadAddresses,
+    load_nodes: loadNodes,
     store_values: storeValues,
     calls,
     exits,

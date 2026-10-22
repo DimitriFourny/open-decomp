@@ -239,6 +239,7 @@ export function nativeReturnInterface(
     outputs,
     loaded_values: loads,
     load_addresses,
+    load_nodes,
     store_values,
     exits,
     tails,
@@ -377,17 +378,22 @@ export function nativeReturnInterface(
   let slotTyper: SlotTyper | undefined;
   // The IEEE type of the low `bits` of `start` when every leaf is a load of an
   // exact private local slot (through lossless transport, phis and lane
-  // projections) and the stores to that slot are typed alike. A frame whose
-  // address escapes may be written by callees unseen by the stack recovery.
+  // projections) and the stores to that slot are typed alike. A load that a
+  // frame address may have reached a call or unresolved memory before is not
+  // private: effects the stack recovery does not record may have written it.
   const reloadedSlotType = (start: Value, bits: number): DataType | undefined => {
     const stack = analysis?.stack;
-    if (!stack || stack.state !== 'complete' || stack.frame.escaped) return undefined;
+    if (!stack || stack.state !== 'complete') return undefined;
     slotTyper ??= createSlotTyper({
       loads: load_addresses,
       stores: store_values,
       expressions,
       typed,
       stack,
+      exposed: (load) => {
+        const snapshot = stack.snapshots.get(load_nodes.get(load.id) ?? '');
+        return !snapshot || snapshot.escaped;
+      },
       context,
     });
     const pending = [{ value: start, offset: 0, width: bits }],
