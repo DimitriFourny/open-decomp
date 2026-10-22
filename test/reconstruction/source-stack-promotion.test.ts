@@ -1020,11 +1020,7 @@ function rematerializedFrameAddress(abi: AbiProfile) {
     again = b.block('again'),
     redo = b.block('redo'),
     exit = b.block('exit');
-  const frame = entry.int(
-    'sub',
-    entry.readRegister(abi.stack_pointer),
-    entry.constant(u64, 0xc0n),
-  );
+  const frame = entry.int('sub', entry.readRegister(abi.stack_pointer), entry.constant(u64, 0xc0n));
   entry.writeRegister(abi.stack_pointer, frame);
   const address = entry.int('add', frame, entry.constant(u64, 0x10n));
   entry.store(address, entry.constant(u64, 5n));
