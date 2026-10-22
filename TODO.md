@@ -269,7 +269,7 @@ Files that several items touch:
 
 ### V1: Caller result-use evidence (correctness)
 
-- [ ] **Problem.** Four value-returning functions print `void` although callers in the image read the result:
+- [x] **Problem.** Four value-returning functions print `void` although callers in the image read the result: _(done: OD lane `od-rm4-v1` prints integer results for the five functions plus `sqlite3PagerSavepoint` (source `int`), no other text changes, checked view identical; about +340k work on the 38 SQLite functions where the scan runs, near-limit functions unchanged)_
   - `sqlite3GetToken` (17 of 18 BL sites read w0/x0; OD's own `getConstraintToken` text reads it);
   - `getConstraintToken` (11/11);
   - `sqlite3BtreeOpen` (5/5);
