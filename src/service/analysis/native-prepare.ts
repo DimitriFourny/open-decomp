@@ -41,6 +41,7 @@ import { nativeCallContext, type NativeContext } from './native-context.js';
 import { nativeAnnotations } from './native-annotations.js';
 import type { AnalysisReadset } from '../../project/cache/dependencies.js';
 import { createNativeInterfaceIndex, type NativeInterfaceIndex } from './native-entry.js';
+import { nativeVariadicFootprint, type NativeVariadic } from './native-variadic.js';
 
 export interface NativePreparationInput {
   readonly scope: AnalysisScope;
@@ -70,6 +71,8 @@ export interface PreparedNativeUnit extends NativeSummaryUnit {
   readonly dependency_readset?: AnalysisReadset;
   readonly demand_index?: CallResultDemandIndex;
   readonly interface_index?: NativeInterfaceIndex;
+  /** The body's `va_start` footprint (`nativeVariadicFootprint`), when classified. */
+  readonly variadic?: NativeVariadic;
 }
 
 /** Resolve exact direct calls and discovery-established direct tails only. The
@@ -424,6 +427,21 @@ export function prepareNativeUnit(
       analysis = null;
     }
   }
+  // Optional too: a footprint the local allowance (or a reconstruction bound)
+  // cannot afford stays unknown, and the body keeps its physical interface.
+  let variadic: NativeVariadic | null = null;
+  try {
+    if (!base.budget_truncated) variadic = nativeVariadicFootprint(ir, types, abi, analysis, local);
+  } catch (error) {
+    const details = error instanceof OperationError ? error.diagnostic.details : undefined;
+    if (
+      !(error instanceof OperationError) ||
+      error.code !== 'resource_limit' ||
+      (details?.kind === 'limit' && details.limit > workLimit)
+    )
+      throw error;
+    context.checkpoint(0);
+  }
   const demand_index = createCallResultDemandIndex(ir, abi, context);
   const interface_index = createNativeInterfaceIndex(ir, abi, context);
   const observed_calls = observePreparedCallInterfaces(ir, abi, analysis, context, demand_index);
@@ -451,5 +469,6 @@ export function prepareNativeUnit(
       analysis.stack.state === 'complete',
     demand_index,
     interface_index,
+    ...(variadic ? { variadic } : {}),
   };
 }

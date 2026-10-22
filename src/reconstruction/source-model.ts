@@ -82,6 +82,17 @@ export interface InferredCallee {
    * escaping `va_list`), so it may read caller-written stack bytes beyond any
    * observed stack parameter. Never a count of those bytes or arguments. */
   readonly variadic_stack?: true;
+  /** The callee's `va_start` footprint (S6/S7, published by its native unit):
+   * its named argument registers in position order (`named`; their counts per
+   * class) and the bytes of named stack arguments before the first anonymous
+   * one. Every other argument location is anonymous under the ABI's variadic
+   * convention. The physical interface fields above stay as observed. */
+  readonly variadic?: {
+    readonly named_integer: number;
+    readonly named_vector: number;
+    readonly named_stack_bytes: bigint;
+    readonly named: readonly RegisterDescriptor[];
+  };
   readonly returns: readonly RegisterDescriptor[];
   /** An established contract or method type encoding declares a void result:
    * empty `returns` is then proven no result, not an unknown result interface. */
