@@ -1517,8 +1517,15 @@ export class Renderer {
       ...(this.recorder ? { presentation: this.recorder } : {}),
       nativeFp: this.fpPresentation.expressions.has(expression),
       floatLiterals: this.fpPresentation.expressions.has(expression),
+      ...(this.sourceView ? { definition: this.definition } : {}),
     });
   }
+
+  /** The pure IR definition of the value `printed` prints for `value`. */
+  private definition = (value: Value): Expression | undefined => {
+    value = this.substituted?.get(value.id) ?? value;
+    return this.synthetic.get(value.id) ?? this.program.expressions.get(value.id);
+  };
 
   /** Declared spelling of the variable a value prints as (its partition
    * representative's). */

@@ -565,6 +565,28 @@ Optional `emission.requirements` localize assumptions, unresolved values/effects
 
 Source-only `fp_native_operations` prints scalar IEEE arithmetic, negation, absolute value, square root, comparisons and compatible conversions under the FP requirement plus the target IEEE representation, no-excess-precision and disabled-contraction (`-ffp-contract=off`) contract. Every operation the recorded `fp_environment` requirement covers prints natively unless a rule below keeps it explicit: C uses `-x`, `__builtin_fabs[f]`/`__builtin_sqrt[f]` (no header, so no clash with an analyzed libm callee) and `(intN_t)x`/`(uintN_t)x`; Python-like prints `-x` and `abs(x)` for binary64. Backwards consumer tracing retains helpers for operations whose arithmetic NaN payload escapes through integer operations, memory, calls or physical boundaries; a promoted local slot is private storage, so a store to it is exactly as observable as the loads that read it back. Comparisons and float-to-integer conversions never observe a payload (a NaN converts to an undefined value, as in the IR), and negation/absolute value change only the sign bit, so none of them forces helpers on their operands or their own result. Float-to-integer conversion truncates toward zero and is undefined for NaN, infinities and out-of-range values, exactly as the IR specifies. Helpers remain for fused and vector operations, payload-escaping arithmetic and square roots, whole functions whose environment is not a recorded default epoch (explicit environment writes or unknown environment effects keep every guard and every FP helper), Python binary32 arithmetic, Python division, square root and float-to-integer conversion (Python raises where the IR yields a value). Finite floating literals retain exact target bits, including integer constants that join an established FP value as a bitcast operand, phi copy or select arm. FP/integer copies preserve representation bitcasts, never numeric assignment conversions. Exhausted presentation records retain the explicit form.
 
+Payload-escaping arithmetic still prints natively when it can never produce a
+NaN (`fp_nan_free`, subjects with their operand bounds; `source-fp.ts`): no
+canonical-NaN rule is then exercised. Integer-to-float conversions always
+qualify (an 8- to 128-bit integer converts to a finite value, or to infinity for
+2^128 in binary32). A bounded, memoized magnitude pass proves the other
+operations: literals give |c|, a W-bit conversion 2^(W-1) (signed) or 2^W
+(unsigned), add/sub/mul and division by a finite nonzero literal combine their
+operands' bounds with a rounding margin of 2^-20, phis and selects take the
+maximum, and cycles, entry values and every other definition are unbounded. A
+finite add, sub, mul, division by such a literal or format conversion of
+operands bounded below the format maximum rounds to a finite value or an
+infinity, never NaN. Division by a variable (0/0), square root and operands
+without a bound keep their helpers. So brotli `PrintBytes` prints
+`(double)arg0 * 9.313225746154785e-10` although the product is stored. A
+conversion depends only on the mathematical integer: when the IR operand
+zero-extends a narrower value (`zero_extend`, a mask of the low 8/16/32 bits, or
+a truncation/low extract of such an extension; either conversion) or
+sign-extends one (signed conversion only), both dialects convert the narrower
+operand that the printed cast collapses to: `(double)arg0 / (double)arg1`, not
+`(double)(int32_t)arg0 / (double)(int64_t)arg1` (recorded in
+`fp_native_operations`).
+
 Source-only `condition_flags` folds compare flags and their condition-code
 consumers into native relations (`src/reconstruction/source-conditions.ts`).
 NZCV/EFLAGS bit insertion and extraction, condition-code logic, conditional
