@@ -10,10 +10,7 @@ import {
 } from '../../analysis/calls/caller-sites.js';
 import { Arm64Decoder } from '../../decoders/arm64/index.js';
 import { X86Decoder } from '../../decoders/x86_64/index.js';
-import type {
-  CallerResultDemand,
-  FunctionResultUse,
-} from '../../reconstruction/source-model.js';
+import type { CallerResultDemand, FunctionResultUse } from '../../reconstruction/source-model.js';
 import type { PreparedNativeUnit } from './native-prepare.js';
 import type { SourceFactsInput } from './source-facts.js';
 
@@ -72,7 +69,9 @@ function relocatable(image: LoadedImage, context: OperationContext): boolean {
     case 'macho': {
       const type = field('filetype'),
         flags = field('flags');
-      return type !== undefined && flags !== undefined && (type !== 2n || (flags & 0x200000n) !== 0n);
+      return (
+        type !== undefined && flags !== undefined && (type !== 2n || (flags & 0x200000n) !== 0n)
+      );
     }
     case 'elf':
       return field('e_type') === 3n;
@@ -240,8 +239,7 @@ export function callerResultConsensus(
   )
     return undefined;
   const named = new Set<bigint>();
-  for (const item of image.exports)
-    if (item.address?.space === 'va') named.add(item.address.value);
+  for (const item of image.exports) if (item.address?.space === 'va') named.add(item.address.value);
   for (const symbol of image.symbols)
     if (symbol.binding !== 'local' && symbol.address?.space === 'va')
       named.add(symbol.address.value);

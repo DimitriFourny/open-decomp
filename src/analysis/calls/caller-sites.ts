@@ -349,7 +349,7 @@ function buildCallerSiteIndex(
             entries.has(address + 4n) &&
             opcode !== 0x25 &&
             opcode !== 0x05 &&
-            !((word >>> 25) === 0x6b && ((word >>> 21) & 0xf) !== 1 && ((word >>> 21) & 0xf) !== 9) &&
+            !(word >>> 25 === 0x6b && ((word >>> 21) & 0xf) !== 1 && ((word >>> 21) & 0xf) !== 9) &&
             (word & 0xff80001f) >>> 0 !== 0xd4000000 &&
             word >>> 16 !== 0
           )
@@ -368,8 +368,7 @@ function buildCallerSiteIndex(
                   else unpaired.add(page);
                 }
               }
-            } else if ((word & 0xffc00000) >>> 0 === 0x91000000)
-              offsets.add((word >>> 10) & 0xfff);
+            } else if ((word & 0xffc00000) >>> 0 === 0x91000000) offsets.add((word >>> 10) & 0xfff);
             else if (
               (word & 0xff000010) === 0x54000000 ||
               (word & 0x7e000000) === 0x34000000 ||
@@ -397,7 +396,10 @@ function buildCallerSiteIndex(
       if (falls.has(entry)) escaped.set(entry, 'the preceding instruction may fall through');
       else if (materialized.has(entry)) escaped.set(entry, 'an ADR or ADRP+ADD materializes it');
       else if (unpaired.has(entry & ~0xfffn) && (low === 0 || offsets.has(low)))
-        escaped.set(entry, 'an unfollowed ADRP of the entry page may pair with an ADD of its offset');
+        escaped.set(
+          entry,
+          'an unfollowed ADRP of the entry page may pair with an ADD of its offset',
+        );
     }
     for (const { address, target } of conditional) {
       // A loop back to a function's own entry stays inside it; only exact extents

@@ -374,19 +374,17 @@ test('the ARM64 sweep records entries reached other than by a listed BL/B', () =
     values.forEach((word, index) => bytes.writeUInt32LE(word >>> 0, offset + index * 4));
   bytes.writeUInt32LE(cbz(0x2c, 0x08, 2), 0x2c);
   bytes.writeUInt32LE(RET, 0x30);
-  const functions = layout.map(
-    ([name, offset]): FunctionRecord => ({
-      id: entityIdentity(image.selected_slice_id, 'function', [BASE + BigInt(offset)]),
-      original_name: name,
-      display_name: null,
-      evidence_ids: [],
-      entry: at(offset),
-      ranges: [{ start: at(offset), size: 4n }],
-      boundary: 'established',
-      signature: null,
-      analysis: 'partial',
-    }),
-  );
+  const functions = layout.map(([name, offset]): FunctionRecord => ({
+    id: entityIdentity(image.selected_slice_id, 'function', [BASE + BigInt(offset)]),
+    original_name: name,
+    display_name: null,
+    evidence_ids: [],
+    entry: at(offset),
+    ranges: [{ start: at(offset), size: 4n }],
+    boundary: 'established',
+    signature: null,
+    analysis: 'partial',
+  }));
   const text = image.sections[0]!;
   const built = (starts: boolean) => {
     const variant: LoadedImage = {

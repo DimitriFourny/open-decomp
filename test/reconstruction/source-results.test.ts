@@ -1404,7 +1404,9 @@ function consensusTail(variant: 'ignored' | 'recursive' | 'table' | 'exported') 
   });
   const ir = constructSSA(b.finish(entry, [])).value as SSAForm;
   const control = ir.blocks.find((block) => block.terminator.kind === 'indirect')!.terminator;
-  const self = ir.blocks.flatMap((block) => block.instructions).find((node) => node.kind === 'call');
+  const self = ir.blocks
+    .flatMap((block) => block.instructions)
+    .find((node) => node.kind === 'call');
   const asked: boolean[] = [];
   const source: SourceEvidence = {
     abi,

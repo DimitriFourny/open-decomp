@@ -785,7 +785,7 @@ function reconstructView(
           exitScratch
             .map(
               ({ register, value, sources, entry, computed }) =>
-              `${register.root}[${register.offset_bits}:${register.width_bits}] = ${value.id} <- ${[...sources.slice(0, 2), ...(sources.length > 2 ? [`and ${sources.length - 2} more recorded sources`] : []), ...(entry ? ['entry'] : [])].join(', ')}${computed ? (voidLike === 'caller_consensus' ? '; every direct caller ignores it (caller_consensus)' : '; no result-use evidence gathered; callers not scanned') : ''}`,
+                `${register.root}[${register.offset_bits}:${register.width_bits}] = ${value.id} <- ${[...sources.slice(0, 2), ...(sources.length > 2 ? [`and ${sources.length - 2} more recorded sources`] : []), ...(entry ? ['entry'] : [])].join(', ')}${computed ? (voidLike === 'caller_consensus' ? '; every direct caller ignores it (caller_consensus)' : '; no result-use evidence gathered; callers not scanned') : ''}`,
             )
             .join('; '),
         )
